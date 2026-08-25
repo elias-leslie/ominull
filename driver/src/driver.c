@@ -297,15 +297,28 @@ WfpSentinelRegisterCallouts(
     session.displayData.description = L"WfpSentinel Kernel Enforcement Session";
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;
 
-    // 1. Open WFP filter engine
+    // 1. Register callout with WFP kernel runtime FIRST
+    sCallout.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
+    sCallout.classifyFn = WfpSentinelClassify;
+    sCallout.notifyFn = WfpSentinelNotify;
+    sCallout.flowDeleteFn = WfpSentinelFlowDelete;
+
+    status = FwpsCalloutRegister0(DeviceObject, &sCallout, &g_GlobalData.CalloutId);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("[wfpsentinel] ERROR: FwpsCalloutRegister0 failed: 0x%08X\n", (UINT32)status);
+        return status;
+    }
+    g_GlobalData.CalloutRegistered = TRUE;
+
+    // 2. Open WFP filter engine
     status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_DEFAULT, NULL, &session, &g_GlobalData.EngineHandle);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[wfpsentinel] ERROR: FwpmEngineOpen0 failed: 0x%08X\n", (UINT32)status);
-        return status;
+        goto ErrorCleanup;
     }
     g_GlobalData.EngineOpened = TRUE;
 
-    // 2. Begin transaction for atomic registration
+    // 3. Begin transaction for atomic registration
     status = FwpmTransactionBegin0(g_GlobalData.EngineHandle, 0);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[wfpsentinel] ERROR: FwpmTransactionBegin0 failed: 0x%08X\n", (UINT32)status);
@@ -313,7 +326,7 @@ WfpSentinelRegisterCallouts(
     }
     inTransaction = TRUE;
 
-    // 3. Add custom sublayer with highest priority (0xFFFF) to evaluate before all third-party sublayers
+    // 4. Add custom sublayer with highest priority (0xFFFF) to evaluate before all third-party sublayers
     subLayer.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
     subLayer.displayData.name = L"WfpSentinelSubLayer";
     subLayer.displayData.description = L"WfpSentinel Enforcement SubLayer";
@@ -325,19 +338,6 @@ WfpSentinelRegisterCallouts(
         goto ErrorCleanup;
     }
     g_GlobalData.SubLayerAdded = TRUE;
-
-    // 4. Register callout with WFP kernel runtime
-    sCallout.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
-    sCallout.classifyFn = WfpSentinelClassify;
-    sCallout.notifyFn = WfpSentinelNotify;
-    sCallout.flowDeleteFn = WfpSentinelFlowDelete;
-
-    status = FwpsCalloutRegister0(DeviceObject, &sCallout, &g_GlobalData.CalloutId);
-    if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: FwpsCalloutRegister0 failed: 0x%08X\n", (UINT32)status);
-        goto ErrorCleanup;
-    }
-    g_GlobalData.CalloutRegistered = TRUE;
 
     // 5. Add callout object to the WFP engine
     mCallout.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
@@ -352,7 +352,7 @@ WfpSentinelRegisterCallouts(
     }
     g_GlobalData.CalloutAdded = TRUE;
 
-    // 6. Add filter referencing the callout at FWPM_LAYER_ALE_AUTH_CONNECT_V4 with TERMINATING action
+    // 6. Add filter referencing the callout at FWPM_LAYER_ALE_AUTH_CONNECT_V4
     filter.filterKey = WFPSENTINEL_ALE_CONNECT_FILTER_GUID;
     filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
     filter.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
