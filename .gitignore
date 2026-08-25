@@ -1,4 +1,6 @@
 # Build output
+build/
+certs/
 bin/
 obj/
 x64/

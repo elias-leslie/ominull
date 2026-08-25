@@ -9,6 +9,13 @@ INC_DIR="$ROOT_DIR/driver/include"
 
 mkdir -p "$BUILD_DIR"
 
+echo "[*] Generating fwpkclnt import library (libfwpkclnt.a)..."
+x86_64-w64-mingw32-dlltool \
+  -d "$SRC_DIR/fwpkclnt.def" \
+  -l "$BUILD_DIR/libfwpkclnt.a" \
+  -m i386:x86-64 \
+  -D fwpkclnt.sys
+
 echo "[*] Compiling wfpsentinel.sys (x86_64 Windows Native Subsystem)..."
 
 x86_64-w64-mingw32-gcc \
@@ -24,9 +31,10 @@ x86_64-w64-mingw32-gcc \
   -nostartfiles -nodefaultlibs -nostdlib \
   -I"$INC_DIR" \
   -I/usr/x86_64-w64-mingw32/include/ddk \
+  -L"$BUILD_DIR" \
   -o "$BUILD_DIR/wfpsentinel.sys" \
   "$SRC_DIR/driver.c" \
-  -lntoskrnl -lhal
+  -lntoskrnl -lhal -lfwpkclnt -lndis
 
 echo "[+] Built: $BUILD_DIR/wfpsentinel.sys"
 file "$BUILD_DIR/wfpsentinel.sys"

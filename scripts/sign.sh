@@ -25,6 +25,7 @@ if [[ ! -f "$CERT_DIR/testcert.pfx" ]]; then
 fi
 
 echo "[*] Test-signing wfpsentinel.sys with osslsigncode..."
+rm -f "$BUILD_DIR/wfpsentinel_signed.sys"
 osslsigncode sign \
   -pkcs12 "$CERT_DIR/testcert.pfx" \
   -pass wfpsentinel \

@@ -1,0 +1,174 @@
+=== STARTING MILESTONE 1 WFP CALLOUT DRIVER VERIFICATION === 
+Date: Tue 08/25/2026 13:09:39.52 
+=== [0] Configuring DbgPrint output mask in registry === 
+The operation completed successfully.
+The operation completed successfully.
+=== [1] Importing test certificate into Root and TrustedPublisher stores === 
+Root "Trusted Root Certification Authorities"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 9:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+TrustedPublisher "Trusted Publishers"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 0:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+Root "Trusted Root Certification Authorities"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 0:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+TrustedPublisher "Trusted Publishers"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 0:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+=== [2] Capturing baseline WFP state (before driver load) === 
+Data collection successful; output = C:\drv\wfp_baseline.xml
+
+=== [3] Creating kernel service 'wfpsentinel' === 
+[SC] CreateService SUCCESS
+=== [4] Starting kernel service 'wfpsentinel' === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 4  RUNNING 
+                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+        PID                : 0
+        FLAGS              : 
+=== [5] Verifying service status and driver presence === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 4  RUNNING 
+                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+wfpsentinel  wfpsentinel            wfpsentinel            Kernel        Manual     Running    OK         TRUE        FALSE        0                 4,096       4,096      8/25/2026 1:08:52 PM   \??\C:\drv\wfpsentinel.sys                       0          
+=== [6] Capturing loaded WFP state (with active callout filter) === 
+Data collection successful; output = C:\drv\wfp_loaded.xml
+
+=== [7] Generating outbound network traffic across ALE layer === 
+[*] Triggering outbound HTTP connection to host 10.0.0.57:9998/traffic-1... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /traffic-1 HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Tue, 25 Aug 2026 20:09:41 GMT
+< Content-type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   1736      0 --:--:-- --:--:-- --:--:--  1750
+* Closing connection
+WfpSentinel Test Server: OK
+[*] Triggering outbound HTTP connection to host 10.0.0.57:9998/traffic-2... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /traffic-2 HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Tue, 25 Aug 2026 20:09:41 GMT
+< Content-type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   1159      0 --:--:-- --:--:-- --:--:--  1166
+* Closing connection
+WfpSentinel Test Server: OK
+[*] Triggering ICMP / ping traffic to host 10.0.0.57... 
+
+Pinging 10.0.0.57 with 32 bytes of data:
+Reply from 10.0.0.57: bytes=32 time=3ms TTL=64
+Reply from 10.0.0.57: bytes=32 time=3ms TTL=64
+Reply from 10.0.0.57: bytes=32 time=4ms TTL=64
+
+Ping statistics for 10.0.0.57:
+    Packets: Sent = 3, Received = 3, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 3ms, Maximum = 4ms, Average = 3ms
+=== [8] Stopping kernel service 'wfpsentinel' === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 1  STOPPED 
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+=== [9] Deleting kernel service 'wfpsentinel' === 
+[SC] DeleteService SUCCESS
+=== [10] Capturing post-unload WFP state (zero-leak verification) === 
+Data collection successful; output = C:\drv\wfp_post_unload.xml
+
+=== [11] Posting evidence files back to Linux host === 
