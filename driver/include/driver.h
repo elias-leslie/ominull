@@ -2,6 +2,7 @@
 #define WFP_SENTINEL_DRIVER_H
 
 #include "wfp_kernel.h"
+#include "wfpsentinel_ioctl.h"
 
 #define WFPSENTINEL_TAG 'STNW' // 'WNTS' pool tag
 
@@ -13,15 +14,21 @@
 
 // Global driver state tracking
 typedef struct _WFPSENTINEL_GLOBAL_DATA {
-    PDEVICE_OBJECT DeviceObject;
-    HANDLE         EngineHandle;
-    UINT32         CalloutId;
-    UINT64         FilterId;
-    BOOLEAN        EngineOpened;
-    BOOLEAN        SubLayerAdded;
-    BOOLEAN        CalloutRegistered;
-    BOOLEAN        CalloutAdded;
-    BOOLEAN        FilterAdded;
+    PDEVICE_OBJECT         DeviceObject;
+    HANDLE                 EngineHandle;
+    UINT32                 CalloutId;
+    UINT64                 FilterId;
+    BOOLEAN                EngineOpened;
+    BOOLEAN                SubLayerAdded;
+    BOOLEAN                CalloutRegistered;
+    BOOLEAN                CalloutAdded;
+    BOOLEAN                FilterAdded;
+
+    // Policy Engine & Statistics (Milestone 2)
+    KSPIN_LOCK             PolicyLock;
+    WFPSENTINEL_BLOCK_RULE Rules[WFPSENTINEL_MAX_RULES];
+    UINT32                 RuleCount;
+    WFPSENTINEL_STATS      Stats;
 } WFPSENTINEL_GLOBAL_DATA, *PWFPSENTINEL_GLOBAL_DATA;
 
 extern WFPSENTINEL_GLOBAL_DATA g_GlobalData;
@@ -29,6 +36,11 @@ extern WFPSENTINEL_GLOBAL_DATA g_GlobalData;
 // Driver lifecycle routines
 DRIVER_INITIALIZE DriverEntry;
 DRIVER_UNLOAD DriverUnload;
+
+// IRP Dispatch Handlers (Milestone 2 User-Mode Control Interface)
+DRIVER_DISPATCH WfpSentinelDispatchCreate;
+DRIVER_DISPATCH WfpSentinelDispatchClose;
+DRIVER_DISPATCH WfpSentinelDispatchDeviceControl;
 
 // WFP Callout Callbacks
 void NTAPI WfpSentinelClassify(

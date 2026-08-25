@@ -1,0 +1,167 @@
+=== STARTING MILESTONE 2 KERNEL POLICY ENFORCEMENT VERIFICATION === 
+Date: Tue 08/25/2026 13:36:38.14 
+=== [0] Configuring DbgPrint output mask in registry === 
+The operation completed successfully.
+The operation completed successfully.
+=== [1] Importing test certificate into Root and TrustedPublisher stores === 
+Root "Trusted Root Certification Authorities"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 9:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+TrustedPublisher "Trusted Publishers"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 0:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+=== [2] Capturing baseline WFP state (before driver load) === 
+Data collection successful; output = C:\drv\wfp_m2_baseline.xml
+
+=== [3] Creating kernel service 'wfpsentinel' === 
+[SC] CreateService SUCCESS
+=== [4] Starting kernel service 'wfpsentinel' === 
+[SC] StartService FAILED 2150760485:
+
+The filter weight is not valid.
+
+=== [5] Verifying service status and driver presence === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 1  STOPPED 
+        WIN32_EXIT_CODE    : 2150760485  (0x80320025)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+wfpsentinel  wfpsentinel            wfpsentinel            Kernel        Manual     Stopped    OK         FALSE       FALSE        0                 8,192       4,096      8/25/2026 1:32:08 PM   \??\C:\drv\wfpsentinel.sys                       0          
+=== [6] Capturing loaded WFP state (with active enforcement filter) === 
+Data collection successful; output = C:\drv\wfp_m2_loaded.xml
+
+=== [7] Initial Kernel Statistics === 
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+=== [8] Step 1: Baseline Connection Test (Expected: ALLOW) === 
+[*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-baseline... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /m2-baseline HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Tue, 25 Aug 2026 20:36:39 GMT
+< Content-type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   1861      0 --:--:-- --:--:-- --:--:--  2000
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] 
+=== [9] Step 2: Dynamically Pushing Kernel Block Rule via IOCTL === 
+[*] Adding rule to block 10.0.0.57:9998 (TCP)... 
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+=== [10] Step 3: Blocked Connection Test (Expected: BLOCKED BY KERNEL) === 
+[*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-blocked (should fail/timeout)... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /m2-blocked HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Tue, 25 Aug 2026 20:36:39 GMT
+< Content-type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   2610      0 --:--:-- --:--:-- --:--:--  2800
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] (Non-zero indicates connection blocked) 
+=== [11] Step 4: Selective Enforcement Test (Expected: ALLOW) === 
+[*] Testing ICMP ping to 10.0.0.57 to verify non-targeted traffic is permitted... 
+
+Pinging 10.0.0.57 with 32 bytes of data:
+Reply from 10.0.0.57: bytes=32 time=5ms TTL=64
+Reply from 10.0.0.57: bytes=32 time=4ms TTL=64
+
+Ping statistics for 10.0.0.57:
+    Packets: Sent = 2, Received = 2, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 4ms, Maximum = 5ms, Average = 4ms
+=== [12] Kernel Statistics after Block Attempt === 
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+=== [13] Step 5: Dynamically Clearing Kernel Block Rules via IOCTL === 
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+=== [14] Step 6: Unblocked Connection Test (Expected: ALLOW AGAIN) === 
+[*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-unblocked... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /m2-unblocked HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Tue, 25 Aug 2026 20:36:41 GMT
+< Content-type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   2404      0 --:--:-- --:--:-- --:--:--  2545
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] 
+=== [15] Final Kernel Statistics === 
+[-] Failed to open device \\.\WfpSentinel (Error 2)
+=== [16] Stopping kernel service 'wfpsentinel' === 
+[SC] ControlService FAILED 1062:
+
+The service has not been started.
+
+=== [17] Deleting kernel service 'wfpsentinel' === 
+[SC] DeleteService SUCCESS
+=== [18] Capturing post-unload WFP state (zero-leak verification) === 
+Data collection successful; output = C:\drv\wfp_m2_post_unload.xml
+
+=== [19] Posting Milestone 2 evidence files back to Linux host === 

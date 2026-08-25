@@ -6,6 +6,117 @@ WFPSENTINEL_GLOBAL_DATA g_GlobalData = { 0 };
 static UNICODE_STRING g_NtDeviceName;
 static UNICODE_STRING g_Win32DeviceName;
 
+// IRP Dispatch: Create / Open Handle
+NTSTATUS NTAPI
+WfpSentinelDispatchCreate(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp
+)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+// IRP Dispatch: Close Handle
+NTSTATUS NTAPI
+WfpSentinelDispatchClose(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp
+)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+// IRP Dispatch: Device Control (IOCTL Handler)
+NTSTATUS NTAPI
+WfpSentinelDispatchDeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp
+)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+    ULONG ioctl = irpSp->Parameters.DeviceIoControl.IoControlCode;
+    ULONG inLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG outLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    PVOID buf = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG bytesReturned = 0;
+    KIRQL oldIrql;
+
+    switch (ioctl) {
+    case IOCTL_WFPSENTINEL_ADD_BLOCK_RULE:
+        if (inLen < sizeof(WFPSENTINEL_BLOCK_RULE) || !buf) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+        if (g_GlobalData.RuleCount < WFPSENTINEL_MAX_RULES) {
+            PWFPSENTINEL_BLOCK_RULE newRule = (PWFPSENTINEL_BLOCK_RULE)buf;
+            RtlCopyMemory(&g_GlobalData.Rules[g_GlobalData.RuleCount], newRule, sizeof(WFPSENTINEL_BLOCK_RULE));
+            g_GlobalData.RuleCount++;
+            g_GlobalData.Stats.ActiveRuleCount = g_GlobalData.RuleCount;
+
+            UINT32 ip = newRule->RemoteIpV4;
+            DbgPrint("[wfpsentinel] IOCTL: Added Block Rule #%u -> Remote IP=%u.%u.%u.%u Port=%u Proto=%u PID=%llu\n",
+                g_GlobalData.RuleCount,
+                (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+                newRule->RemotePort,
+                newRule->Protocol,
+                newRule->ProcessId
+            );
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+        break;
+
+    case IOCTL_WFPSENTINEL_CLEAR_BLOCK_RULES:
+        KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+        RtlZeroMemory(g_GlobalData.Rules, sizeof(g_GlobalData.Rules));
+        g_GlobalData.RuleCount = 0;
+        g_GlobalData.Stats.ActiveRuleCount = 0;
+        KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+
+        DbgPrint("[wfpsentinel] IOCTL: Cleared all block rules\n");
+        status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_WFPSENTINEL_GET_STATS:
+        if (outLen < sizeof(WFPSENTINEL_STATS) || !buf) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+        RtlCopyMemory(buf, &g_GlobalData.Stats, sizeof(WFPSENTINEL_STATS));
+        bytesReturned = sizeof(WFPSENTINEL_STATS);
+        KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+
+        status = STATUS_SUCCESS;
+        break;
+
+    default:
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = bytesReturned;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
 // Classification callback invoked for every outbound IPv4 connection attempt
 void NTAPI
 WfpSentinelClassify(
@@ -21,6 +132,7 @@ WfpSentinelClassify(
     UNREFERENCED_PARAMETER(layerData);
     UNREFERENCED_PARAMETER(classifyContext);
     UNREFERENCED_PARAMETER(flowContext);
+    UNREFERENCED_PARAMETER(filter);
 
     if (!inFixedValues || !classifyOut) {
         return;
@@ -42,34 +154,87 @@ WfpSentinelClassify(
     // Extract application path if present
     FWP_BYTE_BLOB* appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_ALE_APP_ID].value.byteBlob;
 
-    // Format and emit telemetry log to kernel debugger
-    if (appBlob && appBlob->data && appBlob->size >= sizeof(wchar_t)) {
-        DbgPrint("[wfpsentinel] CLASSIFY: PID=%llu App=%ws Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
-            processId,
-            (wchar_t*)appBlob->data,
-            protocol,
-            (localIp >> 24) & 0xFF, (localIp >> 16) & 0xFF, (localIp >> 8) & 0xFF, localIp & 0xFF,
-            localPort,
-            (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
-            remotePort
-        );
-    } else {
-        DbgPrint("[wfpsentinel] CLASSIFY: PID=%llu Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
-            processId,
-            protocol,
-            (localIp >> 24) & 0xFF, (localIp >> 16) & 0xFF, (localIp >> 8) & 0xFF, localIp & 0xFF,
-            localPort,
-            (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
-            remotePort
-        );
+    // Evaluate connection against dynamic block policy
+    BOOLEAN matchedBlockRule = FALSE;
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+    g_GlobalData.Stats.TotalClassified++;
+
+    for (UINT32 i = 0; i < g_GlobalData.RuleCount; i++) {
+        PWFPSENTINEL_BLOCK_RULE r = &g_GlobalData.Rules[i];
+
+        if (r->Protocol != 0 && r->Protocol != protocol) {
+            continue;
+        }
+        if (r->RemotePort != 0 && r->RemotePort != remotePort) {
+            continue;
+        }
+        if (r->ProcessId != 0 && r->ProcessId != processId) {
+            continue;
+        }
+        if (r->RemoteIpV4 != 0) {
+            if ((remoteIp & r->RemoteIpMask) != (r->RemoteIpV4 & r->RemoteIpMask)) {
+                continue;
+            }
+        }
+
+        matchedBlockRule = TRUE;
+        break;
     }
 
-    // Set decision: Continue processing (Milestone 1 inspection callout)
-    classifyOut->actionType = FWP_ACTION_CONTINUE;
+    if (matchedBlockRule) {
+        g_GlobalData.Stats.TotalBlocked++;
+    } else {
+        g_GlobalData.Stats.TotalPermitted++;
+    }
+    KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-    // Clear write action right if filter specifies
-    if (filter && (filter->flags & FWPS_FILTER_FLAG_CLEAR_ACTION_RIGHT)) {
+    if (matchedBlockRule) {
+        // Enforce Block Verdict
+        if (appBlob && appBlob->data && appBlob->size >= sizeof(wchar_t)) {
+            DbgPrint("[wfpsentinel] BLOCKED: PID=%llu App=%ws Proto=%u -> Remote=%u.%u.%u.%u:%u (Policy Match)\n",
+                processId,
+                (wchar_t*)appBlob->data,
+                protocol,
+                (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
+                remotePort
+            );
+        } else {
+            DbgPrint("[wfpsentinel] BLOCKED: PID=%llu Proto=%u -> Remote=%u.%u.%u.%u:%u (Policy Match)\n",
+                processId,
+                protocol,
+                (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
+                remotePort
+            );
+        }
+
+        classifyOut->actionType = FWP_ACTION_BLOCK;
         classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
+    } else {
+        // Enforce Permit Verdict
+        if (appBlob && appBlob->data && appBlob->size >= sizeof(wchar_t)) {
+            DbgPrint("[wfpsentinel] PERMIT: PID=%llu App=%ws Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
+                processId,
+                (wchar_t*)appBlob->data,
+                protocol,
+                (localIp >> 24) & 0xFF, (localIp >> 16) & 0xFF, (localIp >> 8) & 0xFF, localIp & 0xFF,
+                localPort,
+                (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
+                remotePort
+            );
+        } else {
+            DbgPrint("[wfpsentinel] PERMIT: PID=%llu Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
+                processId,
+                protocol,
+                (localIp >> 24) & 0xFF, (localIp >> 16) & 0xFF, (localIp >> 8) & 0xFF, localIp & 0xFF,
+                localPort,
+                (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
+                remotePort
+            );
+        }
+
+        classifyOut->actionType = FWP_ACTION_PERMIT;
     }
 }
 
@@ -129,7 +294,7 @@ WfpSentinelRegisterCallouts(
 
     // Configure dynamic session (cleaned up automatically if process/driver dies)
     session.displayData.name = L"WfpSentinelSession";
-    session.displayData.description = L"WfpSentinel Kernel Inspection Session";
+    session.displayData.description = L"WfpSentinel Kernel Enforcement Session";
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;
 
     // 1. Open WFP filter engine
@@ -148,11 +313,11 @@ WfpSentinelRegisterCallouts(
     }
     inTransaction = TRUE;
 
-    // 3. Add custom sublayer
+    // 3. Add custom sublayer with highest priority (0xFFFF) to evaluate before all third-party sublayers
     subLayer.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
     subLayer.displayData.name = L"WfpSentinelSubLayer";
-    subLayer.displayData.description = L"WfpSentinel Inspection SubLayer";
-    subLayer.weight = 0x8000;
+    subLayer.displayData.description = L"WfpSentinel Enforcement SubLayer";
+    subLayer.weight = 0xFFFF;
 
     status = FwpmSubLayerAdd0(g_GlobalData.EngineHandle, &subLayer, NULL);
     if (!NT_SUCCESS(status)) {
@@ -187,15 +352,15 @@ WfpSentinelRegisterCallouts(
     }
     g_GlobalData.CalloutAdded = TRUE;
 
-    // 6. Add filter referencing the callout at FWPM_LAYER_ALE_AUTH_CONNECT_V4
+    // 6. Add filter referencing the callout at FWPM_LAYER_ALE_AUTH_CONNECT_V4 with TERMINATING action
     filter.filterKey = WFPSENTINEL_ALE_CONNECT_FILTER_GUID;
     filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
     filter.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
     filter.displayData.name = L"WfpSentinelAleConnectFilter";
-    filter.displayData.description = L"WfpSentinel Outbound IPv4 ALE Connect Inspection Filter";
-    filter.action.type = FWP_ACTION_CALLOUT_INSPECTION;
+    filter.displayData.description = L"WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter";
+    filter.action.type = FWP_ACTION_CALLOUT_TERMINATING;
     filter.action.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
-    filter.weight.type = FWP_EMPTY; // Auto-weight within our sublayer
+    filter.weight.type = FWP_EMPTY; // Auto-weight within our 0xFFFF sublayer
     filter.numFilterConditions = 0; // Classify all outbound connections
 
     status = FwpmFilterAdd0(g_GlobalData.EngineHandle, &filter, NULL, &g_GlobalData.FilterId);
@@ -296,20 +461,31 @@ DriverEntry(
     NTSTATUS status = STATUS_SUCCESS;
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    DbgPrint("[wfpsentinel] DriverEntry: initializing wfpsentinel.sys\n");
+    DbgPrint("[wfpsentinel] DriverEntry: initializing wfpsentinel.sys (Phase 2 Enforcement)\n");
 
-    // Set unload routine first
+    // Initialize spin lock for dynamic policy synchronization
+    KeInitializeSpinLock(&g_GlobalData.PolicyLock);
+    g_GlobalData.RuleCount = 0;
+    RtlZeroMemory(g_GlobalData.Rules, sizeof(g_GlobalData.Rules));
+    RtlZeroMemory(&g_GlobalData.Stats, sizeof(g_GlobalData.Stats));
+
+    // Set unload routine
     DriverObject->DriverUnload = DriverUnload;
 
+    // Register IRP dispatch routines for user-mode control
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = WfpSentinelDispatchCreate;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = WfpSentinelDispatchClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WfpSentinelDispatchDeviceControl;
+
     // Create device object
-    RtlInitUnicodeString(&g_NtDeviceName, L"\\Device\\WfpSentinel");
-    RtlInitUnicodeString(&g_Win32DeviceName, L"\\DosDevices\\WfpSentinel");
+    RtlInitUnicodeString(&g_NtDeviceName, WFPSENTINEL_DEVICE_NAME);
+    RtlInitUnicodeString(&g_Win32DeviceName, WFPSENTINEL_SYMBOLIC_NAME);
 
     status = IoCreateDevice(
         DriverObject,
         0,
         &g_NtDeviceName,
-        FILE_DEVICE_NETWORK,
+        WFPSENTINEL_DEVICE_TYPE,
         FILE_DEVICE_SECURE_OPEN,
         FALSE,
         &g_GlobalData.DeviceObject

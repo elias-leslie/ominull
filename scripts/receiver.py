@@ -23,9 +23,15 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
 
         filename = os.path.basename(self.path)
         if not filename or filename == "evidence":
-            filename = "m1_run.log"
+            filename = "upload.log"
 
-        filepath = os.path.join(OUTPUT_DIR, filename)
+        if "m2" in filename or "m2" in self.path:
+            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m2-enforcement"
+        else:
+            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"
+        os.makedirs(out_dir, exist_ok=True)
+
+        filepath = os.path.join(out_dir, filename)
         with open(filepath, "wb") as f:
             f.write(post_data)
         print(f"[+] Saved {content_length} bytes to {filepath}")
