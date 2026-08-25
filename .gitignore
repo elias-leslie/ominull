@@ -1,0 +1,29 @@
+# Build output
+bin/
+obj/
+x64/
+x86/
+ARM64/
+Debug/
+Release/
+*.sys
+*.cer
+*.cat
+*.inf
+*.pdb
+*.log
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Python / Tools
+__pycache__/
+*.pyc
+.venv/

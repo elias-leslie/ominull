@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify repository structure and documentation
+        run: |
+          test -f LICENSE
+          test -f NOTICE
+          test -f README.md
+          test -f TESTING.md
+          test -d evidence
