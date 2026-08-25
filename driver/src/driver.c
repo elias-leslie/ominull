@@ -360,7 +360,9 @@ WfpSentinelRegisterCallouts(
     filter.displayData.description = L"WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter";
     filter.action.type = FWP_ACTION_CALLOUT_TERMINATING;
     filter.action.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
-    filter.weight.type = FWP_EMPTY; // Auto-weight within our 0xFFFF sublayer
+    UINT64 filterWeight = 0xFFFFFFFFFFFFFFFFULL;
+    filter.weight.type = FWP_UINT64;
+    filter.weight.uint64 = &filterWeight; // Maximum explicit filter weight pointer
     filter.numFilterConditions = 0; // Classify all outbound connections
 
     status = FwpmFilterAdd0(g_GlobalData.EngineHandle, &filter, NULL, &g_GlobalData.FilterId);
