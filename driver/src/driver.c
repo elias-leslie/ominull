@@ -234,7 +234,7 @@ WfpSentinelClassify(
             );
         }
 
-        classifyOut->actionType = FWP_ACTION_PERMIT;
+        classifyOut->actionType = FWP_ACTION_CONTINUE;
     }
 }
 
@@ -358,11 +358,9 @@ WfpSentinelRegisterCallouts(
     filter.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
     filter.displayData.name = L"WfpSentinelAleConnectFilter";
     filter.displayData.description = L"WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter";
-    filter.action.type = FWP_ACTION_CALLOUT_TERMINATING;
+    filter.action.type = FWP_ACTION_CALLOUT_INSPECTION;
     filter.action.calloutKey = WFPSENTINEL_ALE_CONNECT_CALLOUT_GUID;
-    UINT64 filterWeight = 0xFFFFFFFFFFFFFFFFULL;
-    filter.weight.type = FWP_UINT64;
-    filter.weight.uint64 = &filterWeight; // Maximum explicit filter weight pointer
+    filter.weight.type = FWP_EMPTY;
     filter.numFilterConditions = 0; // Classify all outbound connections
 
     status = FwpmFilterAdd0(g_GlobalData.EngineHandle, &filter, NULL, &g_GlobalData.FilterId);
