@@ -1,14 +1,12 @@
-#ifndef WFPSENTINEL_DRIVER_H
-#define WFPSENTINEL_DRIVER_H
+#ifndef WFP_SENTINEL_DRIVER_H
+#define WFP_SENTINEL_DRIVER_H
 
 #include <ntddk.h>
-#include <wdf.h>
 
-#define WFPSENTINEL_POOL_TAG 'StnW'
+#define WFPSENTINEL_TAG 'STNW' // 'WNTS' pool tag
 
-// Function Declarations
+// Driver lifecycle routines
 DRIVER_INITIALIZE DriverEntry;
-EVT_WDF_DRIVER_DEVICE_ADD EchoEvtDeviceAdd;
-EVT_WDF_DRIVER_UNLOAD EchoEvtDriverUnload;
+DRIVER_UNLOAD DriverUnload;
 
-#endif // WFPSENTINEL_DRIVER_H
+#endif // WFP_SENTINEL_DRIVER_H

@@ -1,70 +1,29 @@
 #include "driver.h"
 
+VOID
+DriverUnload(
+    _In_ PDRIVER_OBJECT DriverObject
+)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+
+    DbgPrint("[wfpsentinel] DriverUnload: unloading driver cleanly\n");
+}
+
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT  DriverObject,
     _In_ PUNICODE_STRING RegistryPath
 )
 {
-    NTSTATUS status = STATUS_SUCCESS;
-    WDF_DRIVER_CONFIG config;
-    WDFDRIVER hDriver;
+    UNREFERENCED_PARAMETER(RegistryPath);
 
-    KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, 
-        "[wfpsentinel] DriverEntry: initializing KMDF driver\n"));
+    DbgPrint("[wfpsentinel] DriverEntry: initializing wfpsentinel.sys\n");
 
-    WDF_DRIVER_CONFIG_INIT(&config, EchoEvtDeviceAdd);
-    config.EvtDriverUnload = EchoEvtDriverUnload;
+    // Register driver unload callback for clean teardown via sc.exe stop
+    DriverObject->DriverUnload = DriverUnload;
 
-    status = WdfDriverCreate(
-        DriverObject,
-        RegistryPath,
-        WDF_NO_OBJECT_ATTRIBUTES,
-        &config,
-        &hDriver
-    );
+    DbgPrint("[wfpsentinel] DriverEntry: driver loaded successfully\n");
 
-    if (!NT_SUCCESS(status)) {
-        KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, 
-            "[wfpsentinel] WdfDriverCreate failed with status 0x%08X\n", status));
-        return status;
-    }
-
-    KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, 
-        "[wfpsentinel] DriverEntry: successfully created KMDF driver object\n"));
-
-    return status;
-}
-
-NTSTATUS
-EchoEvtDeviceAdd(
-    _In_    WDFDRIVER       Driver,
-    _Inout_ PWDFDEVICE_INIT DeviceInit
-)
-{
-    UNREFERENCED_PARAMETER(Driver);
-    NTSTATUS status = STATUS_SUCCESS;
-    WDFDEVICE device;
-
-    KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, 
-        "[wfpsentinel] EchoEvtDeviceAdd: creating device object\n"));
-
-    status = WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device);
-    if (!NT_SUCCESS(status)) {
-        KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, 
-            "[wfpsentinel] WdfDeviceCreate failed with status 0x%08X\n", status));
-        return status;
-    }
-
-    return status;
-}
-
-VOID
-EchoEvtDriverUnload(
-    _In_ WDFDRIVER Driver
-)
-{
-    UNREFERENCED_PARAMETER(Driver);
-    KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, 
-        "[wfpsentinel] EchoEvtDriverUnload: driver unloading cleanly\n"));
+    return STATUS_SUCCESS;
 }
