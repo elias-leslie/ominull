@@ -44,10 +44,16 @@ tar -czf "${DIST_DIR}/ominull-hub-v${VERSION}-linux-amd64.tar.gz" -C "${DIST_DIR
 # Linux Agent Bundle
 tar -czf "${DIST_DIR}/ominull-agent-v${VERSION}-linux-amd64.tar.gz" -C "${DIST_DIR}/bin" ominulld-linux-amd64
 
-# Windows Agent Bundle
+# Windows Agent Bundle (Includes both Kernel WFP Driver and Zero-Driver User-Mode WFP Engine)
 (
     cd "${PROJECT_ROOT}"
-    zip -q -j "${DIST_DIR}/ominull-agent-v${VERSION}-windows-x64.zip" build/ominull.sys build/ominullctl.exe certs/ominull_test.cer
+    zip -q -j "${DIST_DIR}/ominull-agent-v${VERSION}-windows-x64.zip" build/ominull.sys build/ominullctl.exe build/ominull_wfp_user.exe build/ominulld.exe certs/ominull_test.cer
+)
+
+# macOS Agent Bundle (Native BSD PF Engine)
+(
+    cd "${PROJECT_ROOT}/build"
+    tar -czf "${DIST_DIR}/ominull-agent-v${VERSION}-macos-universal.tar.gz" pf_engine.sh
 )
 
 # 5. Generate Checksums

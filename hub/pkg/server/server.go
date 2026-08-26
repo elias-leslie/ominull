@@ -18,6 +18,7 @@ import (
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
+	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	store      *storage.Store
 	ti         *threatintel.Manager
 	detector   *detector.Engine
+	pki        *pki.Manager
 	adminKey   string
 	binaryDir  string
 	hubURL     string
@@ -66,9 +68,15 @@ type CommandMessage struct {
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 	eventsChan := make(chan storage.Event, 1000)
+	pkiMgr, err := pki.New(filepath.Join(binaryDir, "certs"))
+	if err != nil {
+		log.Printf("[-] Warning: Failed to initialize Autonomous PKI Manager: %v", err)
+	}
+
 	s := &Server{
 		store:      store,
 		ti:         threatintel.New(store),
+		pki:        pkiMgr,
 		adminKey:   adminKey,
 		binaryDir:  binaryDir,
 		hubURL:     hubURL,
@@ -112,6 +120,7 @@ func (s *Server) Start(addr string) error {
 	// 1. Static Bootstrap & Binary Downloads
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
+	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
 	mux.HandleFunc("/download/", s.handleDownload)
 
 	// 2. Telemetry WebSocket
@@ -135,6 +144,10 @@ func (s *Server) Start(addr string) error {
 	// 5. RBAC Auth & Audit Logging API
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
+
+	// 6. Autonomous PKI & Mutual TLS
+	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
+	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
@@ -234,6 +247,64 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	script := bootstrap.GenerateBash(hubURL, key)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(script))
+}
+
+func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		key = s.adminKey
+	}
+	hubURL := s.hubURL
+	if hubURL == "" {
+		hubURL = "http://" + r.Host
+	}
+
+	script := bootstrap.GenerateMacOS(hubURL, key)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(script))
+}
+
+func (s *Server) handlePKICACert(w http.ResponseWriter, r *http.Request) {
+	if s.pki == nil {
+		http.Error(w, "PKI not initialized", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"ca.crt\"")
+	w.Write(s.pki.GetCAPEM())
+}
+
+func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.pki == nil {
+		http.Error(w, "PKI not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	var req struct {
+		Hostname string `json:"hostname"`
+		IP       string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Hostname == "" {
+		req.Hostname = "ominull-endpoint"
+	}
+
+	bundle, err := s.pki.IssueClientCert(req.Hostname, req.IP)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(bundle)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {

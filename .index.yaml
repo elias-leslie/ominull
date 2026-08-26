@@ -1,5 +1,5 @@
 project: ominull
-generated_at: 2026-08-26 14:20 UTC
+generated_at: 2026-08-26 16:16 UTC
 services:
   backend_port: 8000
   frontend_port: 3000
@@ -14,23 +14,22 @@ network:
   hostname: workstation-01
 explorer:
   scan_status: completed
-  last_completed_scan: '2026-08-26T12:38:48.734181+00:00'
-  last_scan_type: full
+  last_completed_scan: '2026-08-26T14:20:49.343110+00:00'
+  last_scan_type: file
   entry_counts:
     architecture: 1
-    file: 110
-  symbol_count: 83
+    file: 111
+  symbol_count: 50
   stale_metadata_count: 0
 folders:
-  (root): 19 files - tests
+  (root): 18 files - tests
   .github: 2 files
-  agent: 13 files - services
+  agent: 14 files - services
   certs: 6 files - tests
   cli: 1 files
   driver: 11 files
   ebpf: 1 files
   evidence: 21 files
-  hub: 17 files - tests
-  scratch: 6 files
-  scripts: 12 files - tests
+  hub: 23 files - tests
+  scripts: 13 files - tests
   tests: 1 files - tests

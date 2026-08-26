@@ -169,6 +169,27 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Zero-Friction Automated Fleet Enrollment Banner -->
+    <div style="background: #0d1527; border: 1px solid var(--border-color); border-radius: 10px; padding: 14px 20px; margin-bottom: 24px;">
+        <div style="font-size: 13px; font-weight: 700; color: var(--cyan); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+            <span>⚡ Zero-Friction 1-Line Endpoint Enrollment (Zero Vendor Certs Required)</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; font-size: 12px;">
+            <div style="background: #080d1a; padding: 10px 14px; border-radius: 6px; border: 1px solid #1e293b;">
+                <div style="font-weight: 700; color: #fff; margin-bottom: 4px;">🪟 Windows (Native User WFP):</div>
+                <code style="color: #38bdf8; font-size: 11px; word-break: break-all;">iwr -useb http://10.0.0.57:9999/bootstrap.ps1 | iex</code>
+            </div>
+            <div style="background: #080d1a; padding: 10px 14px; border-radius: 6px; border: 1px solid #1e293b;">
+                <div style="font-weight: 700; color: #fff; margin-bottom: 4px;">🐧 Linux (Native eBPF):</div>
+                <code style="color: #4ade80; font-size: 11px; word-break: break-all;">curl -sSL http://10.0.0.57:9999/bootstrap.sh | sudo bash</code>
+            </div>
+            <div style="background: #080d1a; padding: 10px 14px; border-radius: 6px; border: 1px solid #1e293b;">
+                <div style="font-weight: 700; color: #fff; margin-bottom: 4px;">🍎 macOS (Native BSD PF):</div>
+                <code style="color: #f472b6; font-size: 11px; word-break: break-all;">curl -sSL http://10.0.0.57:9999/bootstrap.mac.sh | sudo bash</code>
+            </div>
+        </div>
+    </div>
+
     <!-- Enrolled Endpoints Section -->
     <div class="section-header">
         <div class="section-title">
