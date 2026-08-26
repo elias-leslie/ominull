@@ -820,15 +820,17 @@ const dashboardHTML = `<!DOCTYPE html>
 
             <!-- Step 5: Generated One-Liner -->
             <div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                    <label class="form-label" style="margin-bottom: 0;">5. Run Command on Endpoint (Administrator / Root)</label>
-                    <span id="copy-toast" style="font-size: 11px; font-weight: 700; color: var(--green); opacity: 0; transition: opacity 0.2s ease;">✓ Command Copied to Clipboard!</span>
-                </div>
-                <div style="position: relative;">
-                    <textarea id="deploy-command-output" readonly style="width: 100%; height: 95px; background: #080c14; border: 1px solid var(--border-highlight); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; color: #34d399; resize: none; outline: none;"></textarea>
-                    <button class="btn btn-cyan" style="position: absolute; top: 8px; right: 8px; padding: 4px 10px; font-size: 11px; font-weight: 700;" onclick="copyDeployCommand()">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <label class="form-label" style="margin-bottom: 0;">5. Run Command on Endpoint (Administrator / Root)</label>
+                        <span id="copy-toast" style="font-size: 11px; font-weight: 700; color: var(--green); opacity: 0; transition: opacity 0.2s ease;">✓ Copied to Clipboard!</span>
+                    </div>
+                    <button class="btn btn-cyan" style="padding: 5px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;" onclick="copyDeployCommand()">
                         📋 Copy Command
                     </button>
+                </div>
+                <div>
+                    <textarea id="deploy-command-output" readonly style="width: 100%; height: 105px; background: #080c14; border: 1px solid var(--border-highlight); border-radius: 6px; padding: 12px 14px; font-family: monospace; font-size: 12px; line-height: 1.5; color: #34d399; resize: none; outline: none; word-break: break-all;"></textarea>
                 </div>
             </div>
 
