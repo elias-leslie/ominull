@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/storage"
@@ -131,6 +132,10 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
+	// 5. RBAC Auth & Audit Logging API
+	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
+
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -153,18 +158,37 @@ func (s *Server) Close() error {
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Check Bearer JWT Token
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			claims, err := auth.ValidateJWT(tokenStr, s.adminKey)
+			if err == nil && claims != nil {
+				r.Header.Set("X-Role", claims.Role)
+				r.Header.Set("X-User-ID", claims.UserID)
+				r.Header.Set("X-Username", claims.Username)
+				if claims.TenantID != "" {
+					r.Header.Set("X-Tenant-ID", claims.TenantID)
+				}
+				next(w, r)
+				return
+			}
+		}
+
+		// 2. Check X-API-Key Header or Query Param
 		key := r.Header.Get("X-API-Key")
 		if key == "" {
 			key = r.URL.Query().Get("api_key")
 		}
 
 		if key == "" {
-			http.Error(w, `{"error":"missing api key"}`, http.StatusUnauthorized)
+			http.Error(w, `{"error":"missing api key or authorization token"}`, http.StatusUnauthorized)
 			return
 		}
 
 		if key == s.adminKey {
 			r.Header.Set("X-Role", "admin")
+			r.Header.Set("X-Username", "admin")
 			next(w, r)
 			return
 		}
@@ -177,6 +201,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		r.Header.Set("X-Role", "tenant")
 		r.Header.Set("X-Tenant-ID", tenant.ID)
+		r.Header.Set("X-Username", tenant.Name)
 		next(w, r)
 	}
 }
@@ -432,6 +457,19 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 	_ = s.SendCommand(req.EndpointID, cmd)
 
 	s.store.SetEndpointIsolation(req.EndpointID, true)
+
+	_ = s.store.RecordAudit(storage.AuditEntry{
+		ID:        uuid.New().String(),
+		TenantID:  r.Header.Get("X-Tenant-ID"),
+		UserID:    r.Header.Get("X-User-ID"),
+		Username:  r.Header.Get("X-Username"),
+		Action:    "ISOLATE_HOST",
+		Resource:  req.EndpointID,
+		Details:   "Host network isolation enabled at ring-0",
+		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		Timestamp: time.Now().UTC(),
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"isolated","endpoint_id":"` + req.EndpointID + `"}`))
@@ -458,6 +496,19 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 	_ = s.SendCommand(req.EndpointID, cmd)
 
 	s.store.SetEndpointIsolation(req.EndpointID, false)
+
+	_ = s.store.RecordAudit(storage.AuditEntry{
+		ID:        uuid.New().String(),
+		TenantID:  r.Header.Get("X-Tenant-ID"),
+		UserID:    r.Header.Get("X-User-ID"),
+		Username:  r.Header.Get("X-Username"),
+		Action:    "UNISOLATE_HOST",
+		Resource:  req.EndpointID,
+		Details:   "Host network isolation lifted",
+		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		Timestamp: time.Now().UTC(),
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"unisolated","endpoint_id":"` + req.EndpointID + `"}`))
@@ -844,4 +895,77 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(alerts)
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Username == "admin" && req.Password == s.adminKey {
+		token, err := auth.GenerateJWT(auth.Claims{
+			UserID:   "usr-admin",
+			Username: "admin",
+			Role:     auth.RoleAdmin,
+			TenantID: "default",
+		}, s.adminKey, 24*time.Hour)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		_ = s.store.RecordAudit(storage.AuditEntry{
+			ID:        uuid.New().String(),
+			TenantID:  "default",
+			UserID:    "usr-admin",
+			Username:  "admin",
+			Action:    "LOGIN",
+			Resource:  "auth",
+			Details:   "Admin user logged in via master key",
+			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+			Timestamp: time.Now().UTC(),
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "authenticated",
+			"token":  token,
+			"role":   auth.RoleAdmin,
+		})
+		return
+	}
+
+	http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
+}
+
+func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	logs, err := s.store.ListAuditLogs(tenantID, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
 }

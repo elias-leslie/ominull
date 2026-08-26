@@ -84,6 +84,18 @@ type Alert struct {
 	Mitigated   bool      `json:"mitigated"`
 }
 
+type AuditEntry struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	UserID    string    `json:"user_id"`
+	Username  string    `json:"username"`
+	Action    string    `json:"action"` // ISOLATE_HOST, ADD_RULE, REVOKE_RULE, SYNC_TI
+	Resource  string    `json:"resource"`
+	Details   string    `json:"details"`
+	IPAddress string    `json:"ip_address"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 type Store struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -189,12 +201,25 @@ func (s *Store) initSchema() error {
 		mitigated INTEGER NOT NULL DEFAULT 0
 	);
 
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		username TEXT NOT NULL,
+		action TEXT NOT NULL,
+		resource TEXT NOT NULL,
+		details TEXT NOT NULL,
+		ip_address TEXT NOT NULL,
+		timestamp DATETIME NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
 	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_alerts_tenant_time ON alerts(tenant_id, timestamp DESC);
+	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -701,6 +726,58 @@ func (s *Store) ListAlerts(tenantID string, limit int) ([]Alert, error) {
 			return nil, err
 		}
 		a.Mitigated = mitInt != 0
+		list = append(list, a)
+	}
+	return list, nil
+}
+
+func (s *Store) RecordAudit(entry AuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT INTO audit_logs (id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		entry.ID, entry.TenantID, entry.UserID, entry.Username, entry.Action, entry.Resource, entry.Details, entry.IPAddress, entry.Timestamp,
+	)
+	return err
+}
+
+func (s *Store) ListAuditLogs(tenantID string, limit int) ([]AuditEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp FROM audit_logs WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			tenantID, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT ?",
+			limit,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []AuditEntry
+	for rows.Next() {
+		var a AuditEntry
+		if err := rows.Scan(
+			&a.ID, &a.TenantID, &a.UserID, &a.Username, &a.Action, &a.Resource, &a.Details, &a.IPAddress, &a.Timestamp,
+		); err != nil {
+			return nil, err
+		}
 		list = append(list, a)
 	}
 	return list, nil
