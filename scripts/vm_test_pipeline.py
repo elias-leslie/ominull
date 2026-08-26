@@ -117,7 +117,8 @@ def build_iso():
     # 2. runner.bat
     runner_bat = f"""@echo on
 set LOG_FILE=C:\\ominull_log.txt
-echo === STARTING OMINULL DUAL-STACK & DYNAMIC POLICY VERIFICATION === > %LOG_FILE%
+wpeutil.exe InitializeNetwork > %LOG_FILE% 2>&1
+echo === STARTING OMINULL DUAL-STACK & DYNAMIC POLICY VERIFICATION === >> %LOG_FILE%
 echo Date: %DATE% %TIME% >> %LOG_FILE%
 
 for %%d in (C D E F G H I) do (

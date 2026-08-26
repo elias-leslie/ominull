@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -437,9 +438,73 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Role")
-	tenantID := ""
+	tenantID := "default"
 	if role == "tenant" {
 		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	if r.Method == http.MethodPost {
+		var batch TelemetryBatchMessage
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := json.Unmarshal(bodyBytes, &batch); err == nil && batch.EndpointID != "" {
+			ip := strings.Split(r.RemoteAddr, ":")[0]
+			if batch.IP != "" {
+				ip = batch.IP
+			}
+			s.store.UpsertEndpoint(storage.Endpoint{
+				ID:            batch.EndpointID,
+				TenantID:      tenantID,
+				Hostname:      batch.Hostname,
+				OS:            batch.OS,
+				IP:            ip,
+				DriverVersion: batch.DriverVersion,
+				Status:        "online",
+				LastSeenAt:    time.Now().UTC(),
+				CreatedAt:     time.Now().UTC(),
+			})
+
+			for i := range batch.Events {
+				batch.Events[i].TenantID = tenantID
+				batch.Events[i].EndpointID = batch.EndpointID
+				if batch.Events[i].Timestamp.IsZero() {
+					batch.Events[i].Timestamp = time.Now().UTC()
+				}
+				select {
+				case s.eventsChan <- batch.Events[i]:
+				default:
+				}
+			}
+			s.store.InsertEventsBatch(batch.Events)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+
+		var rawEvents []storage.Event
+		if err := json.Unmarshal(bodyBytes, &rawEvents); err == nil {
+			for i := range rawEvents {
+				rawEvents[i].TenantID = tenantID
+				if rawEvents[i].Timestamp.IsZero() {
+					rawEvents[i].Timestamp = time.Now().UTC()
+				}
+				select {
+				case s.eventsChan <- rawEvents[i]:
+				default:
+				}
+			}
+			s.store.InsertEventsBatch(rawEvents)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
 	}
 
 	endpointID := r.URL.Query().Get("endpoint_id")

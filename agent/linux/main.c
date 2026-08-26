@@ -29,6 +29,63 @@ static void PrintUsage(const char* prog) {
     printf("  %s --hub <url> --key <api_key> [--id <endpoint_id>] [-v]\n", prog);
 }
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+
+static void SendHeartbeat(const LINUX_AGENT_CONFIG* config) {
+    char host[128] = "127.0.0.1";
+    int port = 9999;
+    const char* p = config->hub_url;
+    if (strncmp(p, "http://", 7) == 0) p += 7;
+    const char* colon = strchr(p, ':');
+    if (colon) {
+        size_t len = colon - p;
+        if (len >= sizeof(host)) len = sizeof(host) - 1;
+        strncpy(host, p, len);
+        host[len] = '\0';
+        port = atoi(colon + 1);
+    } else {
+        strncpy(host, p, sizeof(host) - 1);
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return;
+
+    struct sockaddr_in saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin_family = AF_INET;
+    saddr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &saddr.sin_addr);
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(sock, (struct sockaddr*)&saddr, sizeof(saddr)) == 0) {
+        char json[512];
+        snprintf(json, sizeof(json),
+            "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"hostname\":\"%s\",\"os\":\"Ubuntu 24.04 (Linux 6.8.0)\",\"driver_version\":\"1.0.0\",\"events\":[]}",
+            config->endpoint_id, config->hostname
+        );
+
+        char req[1024];
+        snprintf(req, sizeof(req),
+            "POST /api/v1/events HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
+            "X-API-Key: %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n\r\n%s",
+            host, port, config->api_key, strlen(json), json
+        );
+
+        send(sock, req, strlen(req), 0);
+    }
+    close(sock);
+}
+
 int main(int argc, char* argv[]) {
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
@@ -72,8 +129,16 @@ int main(int argc, char* argv[]) {
     printf("[+] Active eBPF maps: ominull_rules_v4, ominull_isolation\n");
     printf("[+] Connected and streaming telemetry to Hub: %s\n", config.hub_url);
 
+    // Initial heartbeat
+    SendHeartbeat(&config);
+
+    int count = 0;
     while (g_Running) {
         sleep(1);
+        if (++count >= 5) {
+            SendHeartbeat(&config);
+            count = 0;
+        }
     }
 
     printf("\n[*] Unloading eBPF programs and shutting down gracefully...\n");
