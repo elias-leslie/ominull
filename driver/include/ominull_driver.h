@@ -1,6 +1,10 @@
 #ifndef OMINULL_DRIVER_H
 #define OMINULL_DRIVER_H
 
+#ifndef POOL_NX_OPTIN
+#define POOL_NX_OPTIN 1
+#endif
+
 #include "wfp_kernel.h"
 #include "ominull_ioctl.h"
 

@@ -1001,7 +1001,7 @@ OminullClassifyFlowEstV4(
         UINT64 flowHandle = inMetaValues->flowHandle;
 
         POMINULL_FLOW_CONTEXT flowCtx = (POMINULL_FLOW_CONTEXT)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
+            NonPagedPoolNx, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
         );
 
         if (flowCtx != NULL) {
@@ -1100,7 +1100,7 @@ OminullClassifyFlowEstV6(
         UINT64 flowHandle = inMetaValues->flowHandle;
 
         POMINULL_FLOW_CONTEXT flowCtx = (POMINULL_FLOW_CONTEXT)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
+            NonPagedPoolNx, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
         );
 
         if (flowCtx != NULL) {
