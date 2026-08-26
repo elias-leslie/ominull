@@ -72,8 +72,20 @@ func (s *Server) Events() <-chan storage.Event {
 	return s.eventsChan
 }
 
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(dashboardHTML))
+}
+
 func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
+
+	// 0. Embedded Web Dashboard
+	mux.HandleFunc("/", s.handleDashboard)
 
 	// 1. Static Bootstrap & Binary Downloads
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)

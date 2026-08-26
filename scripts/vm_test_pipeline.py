@@ -71,7 +71,6 @@ def send_qemu_keys(command_str):
         '.': 'dot', '&': 'shift-7', '(': 'shift-9', ')': 'shift-0',
         '"': 'shift-apostrophe', '=': 'equal'
     }
-    cmds = []
     for c in command_str:
         if c in keymap:
             k = keymap[c]
@@ -79,13 +78,8 @@ def send_qemu_keys(command_str):
             k = f'shift-{c.lower()}'
         else:
             k = c
-        cmds.append(f'sendkey {k}')
-    
-    payload = '\n'.join(cmds) + '\n'
-    subprocess.run(
-        ['ssh', '-o', 'BatchMode=yes', PROXMOX_HOST, f'qm monitor {VM_ID}'],
-        input=payload, text=True, capture_output=True
-    )
+        subprocess.run(["st", "vm", "sendkey", str(VM_ID), k], capture_output=True)
+        time.sleep(0.02)
 
 def trigger_vm_execution():
     time.sleep(22)
