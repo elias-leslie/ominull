@@ -39,7 +39,7 @@ const dashboardHTML = `<!DOCTYPE html>
         @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.3); } 100% { opacity: 1; transform: scale(1); } }
 
         /* Metrics Row */
-        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 28px; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
         .metric-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 10px; padding: 18px 20px; position: relative; overflow: hidden; }
         .metric-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--cyan); opacity: 0.8; }
         .metric-card.red::before { background: var(--red); }
@@ -49,8 +49,13 @@ const dashboardHTML = `<!DOCTYPE html>
         .metric-val { font-size: 32px; font-weight: 800; color: #fff; line-height: 1.1; }
         .metric-sub { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 
+        /* Bulk Command Center Bar */
+        .bulk-bar { background: #131c2e; border: 1px solid #1e293b; border-left: 4px solid var(--red); border-radius: 10px; padding: 14px 20px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3); }
+        .bulk-title { font-size: 13px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .bulk-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
         /* Section Containers */
-        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; margin-top: 24px; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; margin-top: 20px; }
         .section-title { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; color: #fff; display: flex; align-items: center; gap: 8px; }
         .section-actions { display: flex; gap: 8px; align-items: center; }
 
@@ -65,6 +70,10 @@ const dashboardHTML = `<!DOCTYPE html>
         .btn-isolate:hover { background: rgba(239, 68, 68, 0.35); box-shadow: 0 0 10px var(--red-glow); }
         .btn-unisolate { background: rgba(16, 185, 129, 0.15); border-color: var(--green); color: #34d399; }
         .btn-unisolate:hover { background: rgba(16, 185, 129, 0.35); box-shadow: 0 0 10px var(--green-glow); }
+        .btn-bulk-red { background: #7f1d1d; border-color: var(--red); color: #fecaca; font-weight: 700; }
+        .btn-bulk-red:hover { background: #991b1b; }
+        .btn-bulk-green { background: #064e3b; border-color: var(--green); color: #a7f3d0; font-weight: 700; }
+        .btn-bulk-green:hover { background: #065f46; }
 
         /* Tables */
         .table-wrap { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2); }
@@ -124,7 +133,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="metric-card">
             <div class="metric-title">Monitored Endpoints</div>
             <div class="metric-val" id="metric-endpoints">0</div>
-            <div class="metric-sub">Active Windows, Linux & macOS nodes</div>
+            <div class="metric-sub">Deterministic fleet ordering (Never Shifts)</div>
         </div>
         <div class="metric-card red">
             <div class="metric-title">Isolated Hosts (Quarantine)</div>
@@ -143,6 +152,21 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Bulk Threat Nullification Command Bar -->
+    <div class="bulk-bar">
+        <div class="bulk-title">
+            <span style="color: var(--red); font-size: 16px;">🛡️</span>
+            <span>Bulk Threat Nullification & Fleet Quarantine</span>
+        </div>
+        <div class="bulk-actions">
+            <button class="btn btn-bulk-red" onclick="executeBulkAction('all', '', true)">🔴 ISOLATE ALL FLEET</button>
+            <button class="btn btn-isolate" onclick="executeBulkAction('platform', 'windows', true)">Isolate Windows</button>
+            <button class="btn btn-isolate" onclick="executeBulkAction('platform', 'linux', true)">Isolate Linux</button>
+            <button class="btn btn-isolate" onclick="executeBulkAction('platform', 'darwin', true)">Isolate macOS</button>
+            <button class="btn btn-bulk-green" onclick="executeBulkAction('all', '', false)">🟢 UNISOLATE ALL</button>
+        </div>
+    </div>
+
     <!-- Enrolled Endpoints Section -->
     <div class="section-header">
         <div class="section-title">
@@ -150,7 +174,7 @@ const dashboardHTML = `<!DOCTYPE html>
             <span id="endpoint-count-badge" class="badge badge-online">3 ACTIVE</span>
         </div>
         <div class="section-actions">
-            <input type="text" id="ep-search" placeholder="Filter by host or IP..." oninput="renderEndpoints()">
+            <input type="text" id="ep-search" placeholder="Filter by host, IP or OS..." oninput="renderEndpoints()">
             <button class="btn btn-cyan" onclick="refreshData()">Sync Fleet</button>
         </div>
     </div>
@@ -159,6 +183,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <table>
             <thead>
                 <tr>
+                    <th style="width: 36px;"><input type="checkbox" id="select-all-ep" onchange="toggleSelectAll(this)"></th>
                     <th>Status</th>
                     <th>Hostname</th>
                     <th>Platform / Kernel Engine</th>
@@ -170,9 +195,18 @@ const dashboardHTML = `<!DOCTYPE html>
                 </tr>
             </thead>
             <tbody id="endpoints-body">
-                <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Syncing endpoint fleet...</td></tr>
+                <tr><td colspan="9" style="text-align: center; color: var(--text-muted);">Syncing endpoint fleet...</td></tr>
             </tbody>
         </table>
+    </div>
+
+    <!-- Floating Batch Action Bar for Selected Endpoints -->
+    <div id="batch-action-bar" style="display: none; background: #1f2937; border: 1px solid var(--cyan); border-radius: 8px; padding: 10px 16px; margin-top: 12px; justify-content: space-between; align-items: center;">
+        <span id="batch-selected-count" style="font-weight: 700; color: #fff; font-size: 13px;">0 endpoints selected</span>
+        <div style="display: flex; gap: 8px;">
+            <button class="btn btn-isolate" onclick="isolateSelected(true)">Isolate Selected</button>
+            <button class="btn btn-unisolate" onclick="isolateSelected(false)">Unisolate Selected</button>
+        </div>
     </div>
 
     <!-- Live Telemetry Stream Section -->
@@ -254,6 +288,7 @@ const dashboardHTML = `<!DOCTYPE html>
         var ADMIN_KEY = "ominull-master-admin-key";
         var rawEndpoints = [];
         var rawEvents = [];
+        var selectedIDs = {};
 
         function fetchAPI(endpoint, method, body) {
             method = method || "GET";
@@ -271,7 +306,13 @@ const dashboardHTML = `<!DOCTYPE html>
                 fetchAPI("/api/v1/events"),
                 fetchAPI("/api/v1/tenants")
             ]).then(function(results) {
-                rawEndpoints = results[0] || [];
+                var newEndpoints = results[0] || [];
+                // Sort deterministically by Hostname ASC, then ID ASC
+                newEndpoints.sort(function(a, b) {
+                    return a.hostname.localeCompare(b.hostname) || a.id.localeCompare(b.id);
+                });
+
+                rawEndpoints = newEndpoints;
                 rawEvents = results[1] || [];
                 var tenants = results[2] || [];
 
@@ -296,7 +337,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
             var tbody = document.getElementById("endpoints-body");
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No endpoints matching search query.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No endpoints matching search query.</td></tr>';
                 return;
             }
 
@@ -309,7 +350,10 @@ const dashboardHTML = `<!DOCTYPE html>
                     ? '<button class="btn btn-unisolate" onclick="unisolateTarget(\'' + ep.id + '\')">UNISOLATE</button>'
                     : '<button class="btn btn-isolate" onclick="isolateTarget(\'' + ep.id + '\')">ISOLATE HOST</button>';
 
-                return '<tr>' +
+                var isChecked = selectedIDs[ep.id] ? "checked" : "";
+
+                return '<tr id="ep-row-' + ep.id + '">' +
+                    '<td><input type="checkbox" ' + isChecked + ' onchange="toggleSelectEp(\'' + ep.id + '\', this)"></td>' +
                     '<td>' + statusBadge + '</td>' +
                     '<td><strong style="color:#fff;">' + ep.hostname + '</strong></td>' +
                     '<td><span class="os-tag">' + ep.os + '</span></td>' +
@@ -320,6 +364,61 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<td>' + isoBtn + '</td>' +
                 '</tr>';
             }).join("");
+
+            updateBatchActionBar();
+        }
+
+        function toggleSelectEp(id, cb) {
+            if (cb.checked) {
+                selectedIDs[id] = true;
+            } else {
+                delete selectedIDs[id];
+            }
+            updateBatchActionBar();
+        }
+
+        function toggleSelectAll(cb) {
+            rawEndpoints.forEach(function(ep) {
+                if (cb.checked) {
+                    selectedIDs[ep.id] = true;
+                } else {
+                    delete selectedIDs[ep.id];
+                }
+            });
+            renderEndpoints();
+        }
+
+        function updateBatchActionBar() {
+            var count = Object.keys(selectedIDs).length;
+            var bar = document.getElementById("batch-action-bar");
+            if (count > 0) {
+                bar.style.display = "flex";
+                document.getElementById("batch-selected-count").innerText = count + " endpoint" + (count > 1 ? "s" : "") + " selected";
+            } else {
+                bar.style.display = "none";
+            }
+        }
+
+        function isolateSelected(enable) {
+            var ids = Object.keys(selectedIDs);
+            if (ids.length === 0) return;
+            var actionText = enable ? "ISOLATE" : "UNISOLATE";
+            if (confirm("Are you sure you want to " + actionText + " " + ids.length + " selected endpoint(s)?")) {
+                var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
+                fetchAPI(url, "POST", { scope: "ids", ids: ids, allow_ips: ["10.0.0.57"] }).then(function() {
+                    selectedIDs = {};
+                    refreshData();
+                });
+            }
+        }
+
+        function executeBulkAction(scope, value, enable) {
+            var actionText = enable ? "ISOLATE (Default-Deny Quarantine)" : "UNISOLATE (Normal)";
+            var targetDesc = scope === "all" ? "the ENTIRE fleet" : "all " + value + " endpoints";
+            if (confirm("CRITICAL ACTION: Are you sure you want to " + actionText + " " + targetDesc + "?")) {
+                var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
+                fetchAPI(url, "POST", { scope: scope, value: value, allow_ips: ["10.0.0.57"] }).then(refreshData);
+            }
         }
 
         function renderEvents() {

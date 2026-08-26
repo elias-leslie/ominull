@@ -207,6 +207,62 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool) error {
 	return err
 }
 
+func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, isIsolated bool) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val := 0
+	if isIsolated {
+		val = 1
+	}
+
+	var (
+		res sql.Result
+		err error
+	)
+
+	baseQuery := "UPDATE endpoints SET is_isolated = ?"
+	var args []interface{}
+	args = append(args, val)
+
+	switch scope {
+	case "all":
+		if tenantID != "" {
+			baseQuery += " WHERE tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	case "platform":
+		baseQuery += " WHERE os LIKE ?"
+		args = append(args, "%"+value+"%")
+		if tenantID != "" {
+			baseQuery += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	case "department":
+		baseQuery += " WHERE department = ?"
+		args = append(args, value)
+		if tenantID != "" {
+			baseQuery += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	case "location":
+		baseQuery += " WHERE location = ?"
+		args = append(args, value)
+		if tenantID != "" {
+			baseQuery += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	default:
+		return 0, fmt.Errorf("unknown bulk scope: %s", scope)
+	}
+
+	res, err = s.db.Exec(baseQuery, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -217,12 +273,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, hostname, os, ip, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY last_seen_at DESC",
+			"SELECT id, tenant_id, hostname, os, ip, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, hostname, os, ip, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY last_seen_at DESC",
+			"SELECT id, tenant_id, hostname, os, ip, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {

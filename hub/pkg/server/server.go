@@ -101,6 +101,8 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
+	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
+	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
 
 	s.httpServer = &http.Server{
@@ -431,6 +433,133 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"unisolated","endpoint_id":"` + req.EndpointID + `"}`))
+}
+
+func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	var req struct {
+		Scope    string   `json:"scope"`
+		Value    string   `json:"value"`
+		IDs      []string `json:"ids"`
+		AllowIPs []string `json:"allow_ips"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Scope == "" {
+		req.Scope = "all"
+	}
+
+	var count int64
+	if req.Scope == "ids" && len(req.IDs) > 0 {
+		for _, id := range req.IDs {
+			s.store.SetEndpointIsolation(id, true)
+			cmd := CommandMessage{
+				Type: "ISOLATE",
+				Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
+			}
+			_ = s.SendCommand(id, cmd)
+			count++
+		}
+	} else {
+		var err error
+		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		cmd := CommandMessage{
+			Type: "ISOLATE",
+			Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
+		}
+		s.clientsMu.RLock()
+		for id := range s.clients {
+			_ = s.SendCommand(id, cmd)
+		}
+		s.clientsMu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":             "isolated",
+		"affected_endpoints": count,
+		"scope":              req.Scope,
+		"value":              req.Value,
+	})
+}
+
+func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	var req struct {
+		Scope string   `json:"scope"`
+		Value string   `json:"value"`
+		IDs   []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Scope == "" {
+		req.Scope = "all"
+	}
+
+	var count int64
+	if req.Scope == "ids" && len(req.IDs) > 0 {
+		for _, id := range req.IDs {
+			s.store.SetEndpointIsolation(id, false)
+			cmd := CommandMessage{Type: "UNISOLATE"}
+			_ = s.SendCommand(id, cmd)
+			count++
+		}
+	} else {
+		var err error
+		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, false)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		cmd := CommandMessage{Type: "UNISOLATE"}
+		s.clientsMu.RLock()
+		for id := range s.clients {
+			_ = s.SendCommand(id, cmd)
+		}
+		s.clientsMu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":             "unisolated",
+		"affected_endpoints": count,
+		"scope":              req.Scope,
+		"value":              req.Value,
+	})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
