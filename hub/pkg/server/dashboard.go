@@ -728,6 +728,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 <button class="btn btn-cyan" onclick="submitLocation()">Create Location</button>
             </div>
         </div>
+    </div>
+
     <!-- DEPLOY AGENT INTERACTIVE WIZARD MODAL (WAZUH-STYLE) -->
     <div id="deploy-modal" class="modal-overlay">
         <div class="modal-content" style="width: 780px;">
@@ -791,19 +793,27 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
 
             <!-- Step 4: Cloudflare Zero Trust Authentication (Optional / Pre-fill) -->
-            <div style="background: rgba(6, 182, 212, 0.05); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-size: 11px; font-weight: 700; color: var(--cyan); text-transform: uppercase;">4. Cloudflare Zero Trust Edge Service Tokens (Optional for WAN)</span>
-                    <label style="font-size: 11px; color: var(--text-muted); cursor: pointer;">
-                        <input type="checkbox" id="deploy-save-tokens" checked onchange="saveTokensPreference()"> Remember in this browser
+            <div style="background: rgba(6, 182, 212, 0.05); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div>
+                        <span style="font-size: 11px; font-weight: 700; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.5px;">4. Cloudflare Zero Trust Edge Service Tokens</span>
+                        <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Required for WAN endpoints connecting over the Internet via Cloudflare Tunnel.</div>
+                    </div>
+                    <label style="font-size: 11px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                        <input type="checkbox" id="deploy-save-tokens" checked onchange="saveTokensPreference()"> Remember in browser
                     </label>
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <div>
-                        <input type="text" id="deploy-cf-id" class="form-control" placeholder="CF-Access-Client-Id (e.g. xxxx.access)" oninput="generateDeployCommand();">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client ID (e.g. xxxxx.access)</label>
+                        <input type="text" id="deploy-cf-id" class="form-control" placeholder="9cfabb152a7bd00bfd1355139039d084.access" oninput="generateDeployCommand();">
                     </div>
-                    <div>
-                        <input type="password" id="deploy-cf-secret" class="form-control" placeholder="CF-Access-Client-Secret (e.g. 630b91...)" oninput="generateDeployCommand();">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client Secret</label>
+                        <div style="display: flex; gap: 6px;">
+                            <input type="password" id="deploy-cf-secret" class="form-control" placeholder="Paste Cloudflare Client Secret..." oninput="generateDeployCommand();" style="flex: 1;">
+                            <button id="toggle-secret-btn" class="btn" style="padding: 6px 12px; font-size: 13px;" onclick="toggleSecretVisibility()" title="Toggle secret visibility">👁️</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1611,6 +1621,18 @@ const dashboardHTML = `<!DOCTYPE html>
                 }).join("");
             } else {
                 locSelect.innerHTML = '<option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>';
+            }
+        }
+
+        function toggleSecretVisibility() {
+            var inp = document.getElementById("deploy-cf-secret");
+            var btn = document.getElementById("toggle-secret-btn");
+            if (inp.type === "password") {
+                inp.type = "text";
+                btn.innerText = "🙈";
+            } else {
+                inp.type = "password";
+                btn.innerText = "👁️";
             }
         }
 
