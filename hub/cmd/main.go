@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/storage"
@@ -26,9 +25,9 @@ const banner = `
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
 	dbPath := flag.String("db", "ominull.db", "Path to SQLite database file")
-	adminKey := flag.String("admin-key", "ominull-master-admin-key", "Master Admin API Key")
+	adminKey := flag.String("admin-key", "", "Master Admin API Key (defaults to auto-generated key in DB)")
 	binaryDir := flag.String("binary-dir", "./build", "Path to directory containing driver and agent binaries")
-	hubURL := flag.String("hub-url", "", "Public Hub URL for bootstrap scripts (e.g. http://10.0.0.57:9999)")
+	hubURL := flag.String("hub-url", "", "Public Hub URL for bootstrap scripts (e.g. https://omi.example.com)")
 	flag.Parse()
 
 	fmt.Print(banner)
@@ -45,21 +44,18 @@ func main() {
 	}
 	defer store.Close()
 
-	// Seed default MSP tenant if no tenants exist
-	tenants, _ := store.ListTenants()
-	if len(tenants) == 0 {
-		defaultTenant := storage.Tenant{
-			ID:        "tenant-default",
-			Name:      "Default IR Operations",
-			APIKey:    "ominull-default-api-key",
-			CreatedAt: time.Now().UTC(),
-		}
-		if err := store.CreateTenant(defaultTenant); err == nil {
-			log.Printf("[+] Initialized Default Tenant: %s (API Key: %s)", defaultTenant.Name, defaultTenant.APIKey)
+	resolvedAdminKey := *adminKey
+	if resolvedAdminKey == "" {
+		if t, err := store.GetTenant("default"); err == nil && t != nil {
+			resolvedAdminKey = t.APIKey
 		}
 	}
+	if resolvedAdminKey == "" {
+		resolvedAdminKey = os.Getenv("OMINULL_ADMIN_KEY")
+	}
+	log.Printf("[+] Cryptographic Master API Key Active: %s", resolvedAdminKey)
 
-	srv := server.New(store, *adminKey, absBinDir, *hubURL)
+	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL)
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
 			log.Fatalf("[-] Hub server error: %v", err)

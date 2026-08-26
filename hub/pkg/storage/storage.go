@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -467,19 +470,25 @@ func (s *Store) seedDefaults() {
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	// Single Real Default Home Tenant
-	masterKey := os.Getenv("OMINULL_MASTER_KEY")
-	if masterKey == "" {
-		masterKey = "omi_live_master"
+	// Single Real Default Home Tenant with automatic 256-bit CSPRNG key generation
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM tenants WHERE id = 'default'").Scan(&count)
+	if count == 0 {
+		masterKey := os.Getenv("OMINULL_MASTER_KEY")
+		if masterKey == "" {
+			var tokenBytes [32]byte
+			_, _ = rand.Read(tokenBytes[:])
+			masterKey = "omi_live_" + hex.EncodeToString(tokenBytes[:])
+		}
+		defaultTenant := Tenant{
+			ID:        "default",
+			Name:      "Home Network",
+			APIKey:    masterKey,
+			CreatedAt: now,
+		}
+		_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
+			defaultTenant.ID, defaultTenant.Name, defaultTenant.APIKey, defaultTenant.CreatedAt)
 	}
-	defaultTenant := Tenant{
-		ID:        "default",
-		Name:      "Home Network",
-		APIKey:    masterKey,
-		CreatedAt: now,
-	}
-	_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
-		defaultTenant.ID, defaultTenant.Name, defaultTenant.APIKey, defaultTenant.CreatedAt)
 
 	// Single Real Home Location
 	homeLocation := Location{
@@ -514,6 +523,24 @@ func (s *Store) GetTenantByAPIKey(apiKey string) (*Tenant, error) {
 	err := s.db.QueryRow(
 		"SELECT id, name, api_key, created_at FROM tenants WHERE api_key = ?",
 		apiKey,
+	).Scan(&t.ID, &t.Name, &t.APIKey, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *Store) GetTenant(id string) (*Tenant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var t Tenant
+	err := s.db.QueryRow(
+		"SELECT id, name, api_key, created_at FROM tenants WHERE id = ?",
+		id,
 	).Scan(&t.ID, &t.Name, &t.APIKey, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
