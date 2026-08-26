@@ -364,7 +364,8 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 
 	s.clientsMu.RLock()
 	for i := range list {
-		if _, online := s.clients[list[i].ID]; online {
+		_, wsOnline := s.clients[list[i].ID]
+		if wsOnline || time.Since(list[i].LastSeenAt) < 30*time.Second {
 			list[i].Status = "online"
 		} else {
 			list[i].Status = "offline"
@@ -398,14 +399,12 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	if err := s.SendCommand(req.EndpointID, cmd); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
+	_ = s.SendCommand(req.EndpointID, cmd)
 
 	s.store.SetEndpointIsolation(req.EndpointID, true)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"isolated"}`))
+	w.Write([]byte(`{"status":"isolated","endpoint_id":"` + req.EndpointID + `"}`))
 }
 
 func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
@@ -426,14 +425,12 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 		Type: "UNISOLATE",
 	}
 
-	if err := s.SendCommand(req.EndpointID, cmd); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
+	_ = s.SendCommand(req.EndpointID, cmd)
 
 	s.store.SetEndpointIsolation(req.EndpointID, false)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"unisolated"}`))
+	w.Write([]byte(`{"status":"unisolated","endpoint_id":"` + req.EndpointID + `"}`))
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
