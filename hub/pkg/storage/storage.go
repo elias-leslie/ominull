@@ -241,6 +241,11 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			return nil, err
 		}
 		ep.IsIsolated = isoInt != 0
+		if time.Since(ep.LastSeenAt) < 30*time.Second {
+			ep.Status = "online"
+		} else {
+			ep.Status = "offline"
+		}
 		list = append(list, ep)
 	}
 	return list, nil

@@ -162,7 +162,9 @@ const dashboardHTML = `<!DOCTYPE html>
                     epBody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #8b949e;">No active endpoints enrolled yet. Run a 1-line bootstrap script above to enroll an endpoint.</td></tr>';
                 } else {
                     epBody.innerHTML = endpoints.map(function(ep) {
-                        var statusBadge = ep.status === "online" ? '<span class="badge badge-online">ONLINE</span>' : '<span class="badge badge-offline">OFFLINE</span>';
+                        var diff = Math.abs(Date.now() - new Date(ep.last_seen_at).getTime());
+                        var isOnline = diff < 60000;
+                        var statusBadge = isOnline ? '<span class="badge badge-online">ONLINE</span>' : '<span class="badge badge-offline">OFFLINE</span>';
                         var isoBadge = ep.is_isolated ? '<span class="badge badge-isolated">QUARANTINED</span>' : '<span class="badge badge-online">NORMAL</span>';
                         var isoBtn = ep.is_isolated
                             ? '<button class="btn btn-unisolate" onclick="unisolateTarget(\'' + ep.id + '\')">UNISOLATE</button>'
