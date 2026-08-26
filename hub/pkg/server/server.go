@@ -234,10 +234,21 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
-		hubURL = "http://" + r.Host
+		hubURL = "https://" + r.Host
 	}
 
-	script := bootstrap.GeneratePowerShell(hubURL, key)
+	cfID := r.URL.Query().Get("cf_id")
+	if cfID == "" {
+		cfID = r.Header.Get("CF-Access-Client-Id")
+	}
+	cfSecret := r.URL.Query().Get("cf_secret")
+	if cfSecret == "" {
+		cfSecret = r.Header.Get("CF-Access-Client-Secret")
+	}
+	locationID := r.URL.Query().Get("location")
+	roleTag := r.URL.Query().Get("role")
+
+	script := bootstrap.GeneratePowerShell(hubURL, key, cfID, cfSecret, locationID, roleTag)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(script))
 }
@@ -249,10 +260,21 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
-		hubURL = "http://" + r.Host
+		hubURL = "https://" + r.Host
 	}
 
-	script := bootstrap.GenerateBash(hubURL, key)
+	cfID := r.URL.Query().Get("cf_id")
+	if cfID == "" {
+		cfID = r.Header.Get("CF-Access-Client-Id")
+	}
+	cfSecret := r.URL.Query().Get("cf_secret")
+	if cfSecret == "" {
+		cfSecret = r.Header.Get("CF-Access-Client-Secret")
+	}
+	locationID := r.URL.Query().Get("location")
+	roleTag := r.URL.Query().Get("role")
+
+	script := bootstrap.GenerateBash(hubURL, key, cfID, cfSecret, locationID, roleTag)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(script))
 }
@@ -264,10 +286,21 @@ func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
-		hubURL = "http://" + r.Host
+		hubURL = "https://" + r.Host
 	}
 
-	script := bootstrap.GenerateMacOS(hubURL, key)
+	cfID := r.URL.Query().Get("cf_id")
+	if cfID == "" {
+		cfID = r.Header.Get("CF-Access-Client-Id")
+	}
+	cfSecret := r.URL.Query().Get("cf_secret")
+	if cfSecret == "" {
+		cfSecret = r.Header.Get("CF-Access-Client-Secret")
+	}
+	locationID := r.URL.Query().Get("location")
+	roleTag := r.URL.Query().Get("role")
+
+	script := bootstrap.GenerateMacOS(hubURL, key, cfID, cfSecret, locationID, roleTag)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(script))
 }

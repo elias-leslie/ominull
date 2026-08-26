@@ -187,8 +187,9 @@ const dashboardHTML = `<!DOCTYPE html>
                 <div style="font-size: 11px; color: var(--text-muted);">Kernel-Native Cross-Platform Threat Nullification & Fleet Mesh</div>
             </div>
         </div>
-        <div style="display: flex; align-items: center; gap: 16px;">
-            <div class="live-tag"><div class="pulse-dot"></div> TI & TELEMETRY STREAM ACTIVE</div>
+        <div style="display: flex; align-items: center; gap: 14px;">
+            <button class="btn btn-cyan" style="font-weight: 800; padding: 7px 16px; font-size: 12px; box-shadow: 0 0 12px var(--cyan-glow);" onclick="openDeployModal()">🚀 Deploy New Agent</button>
+            <div class="live-tag"><div class="pulse-dot"></div> TI & TELEMETRY LIVE</div>
             <div style="background: var(--bg-surface); border: 1px solid var(--border-color); padding: 6px 14px; border-radius: 6px; font-size: 12px;">
                 <span style="color: var(--text-muted); margin-right: 6px;">Master Key:</span>
                 <code style="color: var(--cyan);">ominull-master-admin-key</code>
@@ -727,9 +728,105 @@ const dashboardHTML = `<!DOCTYPE html>
                 <button class="btn btn-cyan" onclick="submitLocation()">Create Location</button>
             </div>
         </div>
-    </div>
+    <!-- DEPLOY AGENT INTERACTIVE WIZARD MODAL (WAZUH-STYLE) -->
+    <div id="deploy-modal" class="modal-overlay">
+        <div class="modal-content" style="width: 780px;">
+            <div class="modal-title">
+                <span style="display: flex; align-items: center; gap: 8px;">🚀 Deploy New Endpoint Agent</span>
+                <button class="btn" style="padding: 2px 8px;" onclick="closeDeployModal()">✕</button>
+            </div>
+            
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">
+                Generate an unattended 1-liner deployment command pre-configured with your organization, location, and zero-trust edge tokens.
+            </div>
 
-    <script>
+            <!-- Step 1: Platform Selection -->
+            <div style="margin-bottom: 16px;">
+                <label class="form-label">1. Select Target Operating System</label>
+                <div style="display: flex; gap: 10px;">
+                    <button id="plat-btn-windows" class="btn btn-cyan" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('windows')">
+                        🪟 Windows (WFP / Ring-0)
+                    </button>
+                    <button id="plat-btn-linux" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('linux')">
+                        🐧 Linux (eBPF / TC)
+                    </button>
+                    <button id="plat-btn-macos" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('macos')">
+                        🍏 macOS (PF Anchor)
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 2: Tenant & Location Selection -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label">2. Target Client Organization</label>
+                    <select id="deploy-tenant" class="form-control" onchange="updateDeployLocationOptions(); generateDeployCommand();">
+                        <option value="default">Home Network</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label">Location / Site Subnet</label>
+                    <select id="deploy-location" class="form-control" onchange="generateDeployCommand();">
+                        <option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Step 3: Endpoint Role & Server URL -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label">3. Endpoint Role / Function</label>
+                    <select id="deploy-role" class="form-control" onchange="generateDeployCommand();">
+                        <option value="workstation">Workstation (Standard PC / Laptop)</option>
+                        <option value="db-server">Database Server (Postgres / MySQL / SQLite)</option>
+                        <option value="web-server">Web / Application Server</option>
+                        <option value="incident-response">🚨 Incident Response Target (Live IR)</option>
+                        <option value="executive-laptop">Executive / High-Value Laptop</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label">Hub Server Address (WAN / LAN)</label>
+                    <input type="text" id="deploy-hub-url" class="form-control" value="https://omi.example.com" oninput="generateDeployCommand();">
+                </div>
+            </div>
+
+            <!-- Step 4: Cloudflare Zero Trust Authentication (Optional / Pre-fill) -->
+            <div style="background: rgba(6, 182, 212, 0.05); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 11px; font-weight: 700; color: var(--cyan); text-transform: uppercase;">4. Cloudflare Zero Trust Edge Service Tokens (Optional for WAN)</span>
+                    <label style="font-size: 11px; color: var(--text-muted); cursor: pointer;">
+                        <input type="checkbox" id="deploy-save-tokens" checked onchange="saveTokensPreference()"> Remember in this browser
+                    </label>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div>
+                        <input type="text" id="deploy-cf-id" class="form-control" placeholder="CF-Access-Client-Id (e.g. xxxx.access)" oninput="generateDeployCommand();">
+                    </div>
+                    <div>
+                        <input type="password" id="deploy-cf-secret" class="form-control" placeholder="CF-Access-Client-Secret (e.g. 630b91...)" oninput="generateDeployCommand();">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 5: Generated One-Liner -->
+            <div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <label class="form-label" style="margin-bottom: 0;">5. Run Command on Endpoint (Administrator / Root)</label>
+                    <span id="copy-toast" style="font-size: 11px; font-weight: 700; color: var(--green); opacity: 0; transition: opacity 0.2s ease;">✓ Command Copied to Clipboard!</span>
+                </div>
+                <div style="position: relative;">
+                    <textarea id="deploy-command-output" readonly style="width: 100%; height: 95px; background: #080c14; border: 1px solid var(--border-highlight); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; color: #34d399; resize: none; outline: none;"></textarea>
+                    <button class="btn btn-cyan" style="position: absolute; top: 8px; right: 8px; padding: 4px 10px; font-size: 11px; font-weight: 700;" onclick="copyDeployCommand()">
+                        📋 Copy Command
+                    </button>
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; border-top: 1px solid var(--border-color); padding-top: 14px;">
+                <button class="btn" onclick="closeDeployModal()">Close</button>
+            </div>
+        </div>
+    </div>
         var API_KEY = "ominull-master-admin-key";
         var rawHierarchy = [];
         var rawPolicyGroups = [];
@@ -1455,6 +1552,123 @@ const dashboardHTML = `<!DOCTYPE html>
                 a.href = url;
                 a.download = "ominull-security-events.csv";
                 a.click();
+            });
+        }
+
+        /* DEPLOY AGENT MODAL (WAZUH-STYLE) */
+        var currentDeployPlatform = "windows";
+
+        function openDeployModal() {
+            // Load remembered tokens from localStorage
+            if (localStorage.getItem("ominull_save_cf_tokens") !== "false") {
+                document.getElementById("deploy-cf-id").value = localStorage.getItem("ominull_cf_id") || "";
+                document.getElementById("deploy-cf-secret").value = localStorage.getItem("ominull_cf_secret") || "";
+                document.getElementById("deploy-save-tokens").checked = true;
+            }
+            populateDeployDropdowns();
+            selectDeployPlatform(currentDeployPlatform);
+            document.getElementById("deploy-modal").style.display = "flex";
+        }
+
+        function closeDeployModal() {
+            document.getElementById("deploy-modal").style.display = "none";
+        }
+
+        function selectDeployPlatform(plat) {
+            currentDeployPlatform = plat;
+            ["windows", "linux", "macos"].forEach(function(p) {
+                var btn = document.getElementById("plat-btn-" + p);
+                if (p === plat) {
+                    btn.className = "btn btn-cyan";
+                } else {
+                    btn.className = "btn";
+                }
+            });
+            generateDeployCommand();
+        }
+
+        function populateDeployDropdowns() {
+            var tenantSelect = document.getElementById("deploy-tenant");
+            if (rawHierarchy && rawHierarchy.length > 0) {
+                tenantSelect.innerHTML = rawHierarchy.map(function(t) {
+                    return '<option value="' + t.tenant.id + '" data-key="' + t.tenant.api_key + '">' + t.tenant.name + '</option>';
+                }).join("");
+            }
+            updateDeployLocationOptions();
+        }
+
+        function updateDeployLocationOptions() {
+            var tenantSelect = document.getElementById("deploy-tenant");
+            var locSelect = document.getElementById("deploy-location");
+            var tenantId = tenantSelect.value;
+            
+            var selectedTenant = (rawHierarchy || []).find(function(t) { return t.tenant.id === tenantId; });
+            if (selectedTenant && selectedTenant.locations && selectedTenant.locations.length > 0) {
+                locSelect.innerHTML = selectedTenant.locations.map(function(l) {
+                    return '<option value="' + l.location.id + '">' + l.location.name + ' (' + l.location.subnet_cidr + ')</option>';
+                }).join("");
+            } else {
+                locSelect.innerHTML = '<option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>';
+            }
+        }
+
+        function saveTokensPreference() {
+            var save = document.getElementById("deploy-save-tokens").checked;
+            localStorage.setItem("ominull_save_cf_tokens", save ? "true" : "false");
+            if (save) {
+                localStorage.setItem("ominull_cf_id", document.getElementById("deploy-cf-id").value);
+                localStorage.setItem("ominull_cf_secret", document.getElementById("deploy-cf-secret").value);
+            } else {
+                localStorage.removeItem("ominull_cf_id");
+                localStorage.removeItem("ominull_cf_secret");
+            }
+        }
+
+        function generateDeployCommand() {
+            saveTokensPreference();
+            var hubUrl = document.getElementById("deploy-hub-url").value.trim() || "https://omi.example.com";
+            var tenantSelect = document.getElementById("deploy-tenant");
+            var opt = tenantSelect.options[tenantSelect.selectedIndex];
+            var apiKey = (opt && opt.getAttribute("data-key")) || API_KEY;
+            var locId = document.getElementById("deploy-location").value;
+            var role = document.getElementById("deploy-role").value;
+            var cfId = document.getElementById("deploy-cf-id").value.trim();
+            var cfSecret = document.getElementById("deploy-cf-secret").value.trim();
+
+            var out = "";
+            if (currentDeployPlatform === "windows") {
+                if (cfId && cfSecret) {
+                    out = "$h=@{'CF-Access-Client-Id'='" + cfId + "';'CF-Access-Client-Secret'='" + cfSecret + "'}; " +
+                          "&([scriptblock]::Create((iwr -UseBasicParsing '" + hubUrl + "/bootstrap.ps1?cf_id=" + encodeURIComponent(cfId) + "&cf_secret=" + encodeURIComponent(cfSecret) + "&role=" + role + "&location=" + locId + "' -Headers $h).Content)) " +
+                          "-HubURL '" + hubUrl + "' -APIKey '" + apiKey + "' -RoleTag '" + role + "' -LocationID '" + locId + "'";
+                } else {
+                    out = "iwr -UseBasicParsing '" + hubUrl + "/bootstrap.ps1?role=" + role + "&location=" + locId + "' | iex";
+                }
+            } else if (currentDeployPlatform === "linux") {
+                if (cfId && cfSecret) {
+                    out = "curl -sSL -H \"CF-Access-Client-Id: " + cfId + "\" -H \"CF-Access-Client-Secret: " + cfSecret + "\" \"" + hubUrl + "/bootstrap.sh?cf_id=" + encodeURIComponent(cfId) + "&cf_secret=" + encodeURIComponent(cfSecret) + "&role=" + role + "&location=" + locId + "\" | sudo bash";
+                } else {
+                    out = "curl -sSL \"" + hubUrl + "/bootstrap.sh?role=" + role + "&location=" + locId + "\" | sudo bash";
+                }
+            } else if (currentDeployPlatform === "macos") {
+                if (cfId && cfSecret) {
+                    out = "curl -sSL -H \"CF-Access-Client-Id: " + cfId + "\" -H \"CF-Access-Client-Secret: " + cfSecret + "\" \"" + hubUrl + "/bootstrap.mac.sh?cf_id=" + encodeURIComponent(cfId) + "&cf_secret=" + encodeURIComponent(cfSecret) + "&role=" + role + "&location=" + locId + "\" | sudo bash";
+                } else {
+                    out = "curl -sSL \"" + hubUrl + "/bootstrap.mac.sh?role=" + role + "&location=" + locId + "\" | sudo bash";
+                }
+            }
+
+            document.getElementById("deploy-command-output").value = out;
+        }
+
+        function copyDeployCommand() {
+            var txt = document.getElementById("deploy-command-output");
+            txt.select();
+            txt.setSelectionRange(0, 99999);
+            navigator.clipboard.writeText(txt.value).then(function() {
+                var toast = document.getElementById("copy-toast");
+                toast.style.opacity = "1";
+                setTimeout(function() { toast.style.opacity = "0"; }, 2500);
             });
         }
 
