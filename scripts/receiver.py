@@ -25,7 +25,9 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
         if not filename or filename == "evidence":
             filename = "upload.log"
 
-        if "m2" in filename or "m2" in self.path:
+        if "m3" in filename or "m3" in self.path:
+            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack"
+        elif "m2" in filename or "m2" in self.path:
             out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m2-enforcement"
         else:
             out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"

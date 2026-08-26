@@ -1,0 +1,320 @@
+Date: Tue 08/25/2026 18:04:14.92 
+=== [0] Configuring DbgPrint output mask in registry === 
+The operation completed successfully.
+The operation completed successfully.
+=== [1] Capturing baseline WFP state (before driver load) === 
+Data collection successful; output = C:\wfp_baseline.xml
+
+=== [2] Downloading latest test-signed driver and CLI === 
+A subdirectory or file C:\drv already exists.
+=== [3] Importing test certificate into Root and TrustedPublisher stores === 
+Root "Trusted Root Certification Authorities"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 9:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+TrustedPublisher "Trusted Publishers"
+Signature matches Public Key
+Related Certificates:
+
+Exact match:
+Element 0:
+Serial Number: 3b416608612479fff897a77b276450fc02515075
+Issuer: CN=WfpSentinelTest
+ NotBefore: 8/25/2026 10:50 AM
+ NotAfter: 8/22/2036 10:50 AM
+Subject: CN=WfpSentinelTest
+Signature matches Public Key
+Root Certificate: Subject matches Issuer
+Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
+
+Certificate "WfpSentinelTest" already in store.
+CertUtil: -addstore command completed successfully.
+=== [4] Creating kernel service 'wfpsentinel' === 
+[SC] OpenService FAILED 1060:
+
+The specified service does not exist as an installed service.
+
+[SC] CreateService SUCCESS
+=== [5] Starting kernel service 'wfpsentinel' === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 4  RUNNING 
+                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+        PID                : 0
+        FLAGS              : 
+=== [6] Verifying service status and driver presence === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 4  RUNNING 
+                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+wfpsentinel  wfpsentinel            wfpsentinel            Kernel        Manual     Running    OK         TRUE        FALSE        0                 20,480      376,832    8/25/2026 5:52:09 PM   \??\C:\drv\wfpsentinel.sys                       0          
+=== [7] Capturing loaded WFP state (all 6 dual-stack layers active) === 
+Data collection successful; output = C:\wfp_loaded.xml
+
+=== [8] Initial Kernel Statistics === 
+===============================================================================
+                     WFPSENTINEL KERNEL STATISTICS
+===============================================================================
+  Policy Engine:
+    Active Dynamic Rules:             0
+  Classification & Enforcement:
+    Total Connections Classified:     0
+    Total Permitted Connections:      0
+    Total Blocked Connections:        0
+  Dual-Stack Parity:
+    IPv4 Connections:                 0
+    IPv6 Connections:                 0
+  Traffic Directions:
+    Outbound Connections:             0
+    Inbound Connections:              0
+  Flow Context Engine:
+    Total Flows Established:          0
+    Currently Active Flows:           0
+  Real-Time Telemetry Streaming:
+    Total Events Streamed:            0
+    Pending Streaming IRPs:           0
+===============================================================================
+=== [9] Step 1: Baseline Outbound HTTP Connection (Expected: PERMIT) === 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /traffic-baseline HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Wed, 26 Aug 2026 01:04:18 GMT
+< Content-Type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   1039      0 --:--:-- --:--:-- --:--:--  1076
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] 
+[*] Adding IPv4 block rule for 10.0.0.57:9998 (TCP)... 
+[+] Successfully added BLOCK rule in kernel (Rule ID: 1):
+    Direction:   ANY
+    IP Version:  IPv4
+    Remote IP:   10.0.0.57
+    Remote Port: 9998 (exact)
+    Protocol:    6 (TCP)
+    PID:         0 (any)
+[*] Adding IPv6 block rule for ::1 (any port)... 
+[+] Successfully added BLOCK rule in kernel (Rule ID: 2):
+    Direction:   ANY
+    IP Version:  IPv6
+    Remote IP:   ::1/128
+    Remote Port: 0 (any)
+    Protocol:    0 (ANY)
+    PID:         0 (any)
+[*] Adding App-path block rule for test_blocked_app.exe... 
+[+] Successfully added BLOCK rule for process path: 'test_blocked_app.exe' (Rule ID: 3)
+=== [11] Listing Active Kernel Filtering Rules Table === 
+=== ACTIVE KERNEL FILTERING RULES (3 rules) ===
+ID   ACTION  DIR      VER   REMOTE TARGET                    PORT   PROTO  PID    APP PATH
+----------------------------------------------------------------------------------------------------
+1    BLOCK   ANY      IPv4  10.0.0.57                    9998   TCP    *      *
+2    BLOCK   ANY      IPv6  ::1/128                          *      ANY    *      *
+3    BLOCK   ANY      ANY   *                                *      ANY    *      test_blocked_app.exe
+===============================================================================
+                     WFPSENTINEL KERNEL STATISTICS
+===============================================================================
+  Policy Engine:
+    Active Dynamic Rules:             3
+  Classification & Enforcement:
+    Total Connections Classified:     0
+    Total Permitted Connections:      0
+    Total Blocked Connections:        0
+  Dual-Stack Parity:
+    IPv4 Connections:                 0
+    IPv6 Connections:                 0
+  Traffic Directions:
+    Outbound Connections:             0
+    Inbound Connections:              0
+  Flow Context Engine:
+    Total Flows Established:          0
+    Currently Active Flows:           0
+  Real-Time Telemetry Streaming:
+    Total Events Streamed:            0
+    Pending Streaming IRPs:           0
+===============================================================================
+=== [12] Step 3: Blocked Connection Verification (Expected: BLOCKED BY KERNEL) === 
+[*] Triggering outbound HTTP to blocked endpoint 10.0.0.57:9998/traffic-blocked (should fail/timeout)... 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /traffic-blocked HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Wed, 26 Aug 2026 01:04:18 GMT
+< Content-Type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   2955      0 --:--:-- --:--:-- --:--:--  3111
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] (Non-zero indicates connection blocked) 
+=== [13] Step 4: Selective Traffic Verification (Expected: PERMIT) === 
+[*] Testing ICMP ping to verify non-targeted traffic is permitted... 
+
+Pinging 10.0.0.57 with 32 bytes of data:
+Reply from 10.0.0.57: bytes=32 time=6ms TTL=64
+Reply from 10.0.0.57: bytes=32 time=4ms TTL=64
+
+Ping statistics for 10.0.0.57:
+    Packets: Sent = 2, Received = 2, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 4ms, Maximum = 6ms, Average = 5ms
+=== [14] Kernel Statistics After Enforcement Test === 
+===============================================================================
+                     WFPSENTINEL KERNEL STATISTICS
+===============================================================================
+  Policy Engine:
+    Active Dynamic Rules:             3
+  Classification & Enforcement:
+    Total Connections Classified:     0
+    Total Permitted Connections:      0
+    Total Blocked Connections:        0
+  Dual-Stack Parity:
+    IPv4 Connections:                 0
+    IPv6 Connections:                 0
+  Traffic Directions:
+    Outbound Connections:             0
+    Inbound Connections:              0
+  Flow Context Engine:
+    Total Flows Established:          0
+    Currently Active Flows:           0
+  Real-Time Telemetry Streaming:
+    Total Events Streamed:            0
+    Pending Streaming IRPs:           0
+===============================================================================
+=== [15] Step 5: Rule Deletion and Clearing via IOCTL === 
+[*] Deleting rule ID 3 (App block)... 
+[+] Successfully deleted kernel rule ID 3
+=== ACTIVE KERNEL FILTERING RULES (2 rules) ===
+ID   ACTION  DIR      VER   REMOTE TARGET                    PORT   PROTO  PID    APP PATH
+----------------------------------------------------------------------------------------------------
+1    BLOCK   ANY      IPv4  10.0.0.57                    9998   TCP    *      *
+2    BLOCK   ANY      IPv6  ::1/128                          *      ANY    *      *
+[*] Clearing all remaining rules... 
+[+] Successfully cleared all kernel rules
+=== ACTIVE KERNEL FILTERING RULES (0 rules) ===
+ID   ACTION  DIR      VER   REMOTE TARGET                    PORT   PROTO  PID    APP PATH
+----------------------------------------------------------------------------------------------------
+===============================================================================
+                     WFPSENTINEL KERNEL STATISTICS
+===============================================================================
+  Policy Engine:
+    Active Dynamic Rules:             0
+  Classification & Enforcement:
+    Total Connections Classified:     0
+    Total Permitted Connections:      0
+    Total Blocked Connections:        0
+  Dual-Stack Parity:
+    IPv4 Connections:                 0
+    IPv6 Connections:                 0
+  Traffic Directions:
+    Outbound Connections:             0
+    Inbound Connections:              0
+  Flow Context Engine:
+    Total Flows Established:          0
+    Currently Active Flows:           0
+  Real-Time Telemetry Streaming:
+    Total Events Streamed:            0
+    Pending Streaming IRPs:           0
+===============================================================================
+=== [16] Step 6: Post-Clear Unblocked Connection (Expected: PERMIT AGAIN) === 
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+* Connected to 10.0.0.57 (10.0.0.57) port 9998
+> GET /traffic-unblocked HTTP/1.1
+> Host: 10.0.0.57:9998
+> User-Agent: curl/8.8.0
+> Accept: */*
+> 
+* Request completely sent off
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: BaseHTTP/0.6 Python/3.12.3
+< Date: Wed, 26 Aug 2026 01:04:19 GMT
+< Content-Type: text/plain
+< 
+{ [28 bytes data]
+100    28    0    28    0     0   2162      0 --:--:-- --:--:-- --:--:--  2333
+* Closing connection
+WfpSentinel Test Server: OK
+[Result Code: 0] 
+=== [17] Final Kernel Statistics === 
+===============================================================================
+                     WFPSENTINEL KERNEL STATISTICS
+===============================================================================
+  Policy Engine:
+    Active Dynamic Rules:             0
+  Classification & Enforcement:
+    Total Connections Classified:     0
+    Total Permitted Connections:      0
+    Total Blocked Connections:        0
+  Dual-Stack Parity:
+    IPv4 Connections:                 0
+    IPv6 Connections:                 0
+  Traffic Directions:
+    Outbound Connections:             0
+    Inbound Connections:              0
+  Flow Context Engine:
+    Total Flows Established:          0
+    Currently Active Flows:           0
+  Real-Time Telemetry Streaming:
+    Total Events Streamed:            0
+    Pending Streaming IRPs:           0
+===============================================================================
+=== [18] Stopping kernel service 'wfpsentinel' === 
+
+SERVICE_NAME: wfpsentinel 
+        TYPE               : 1  KERNEL_DRIVER  
+        STATE              : 1  STOPPED 
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+=== [19] Deleting kernel service 'wfpsentinel' === 
+[SC] DeleteService SUCCESS
+=== [20] Capturing post-unload WFP state (zero-leak verification across all layers) === 
+Data collection successful; output = C:\wfp_post_unload.xml
+
+=== [21] Posting Milestone 3 evidence files back to Linux host === 

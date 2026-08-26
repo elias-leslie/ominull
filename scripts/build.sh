@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 SRC_DIR="$ROOT_DIR/driver/src"
 INC_DIR="$ROOT_DIR/driver/include"
+CLI_DIR="$ROOT_DIR/cli"
 
 mkdir -p "$BUILD_DIR"
 
@@ -38,3 +39,17 @@ x86_64-w64-mingw32-gcc \
 
 echo "[+] Built: $BUILD_DIR/wfpsentinel.sys"
 file "$BUILD_DIR/wfpsentinel.sys"
+
+echo "[*] Compiling user-mode control CLI (wfpsentinel_ctl.exe / wfpctl.exe)..."
+x86_64-w64-mingw32-gcc \
+  -Wall -Wextra -O2 \
+  -I"$INC_DIR" \
+  -o "$BUILD_DIR/wfpsentinel_ctl.exe" \
+  "$CLI_DIR/wfpsentinel_ctl.c" \
+  -lws2_32
+
+cp -f "$BUILD_DIR/wfpsentinel_ctl.exe" "$BUILD_DIR/wfpctl.exe"
+
+echo "[+] Built: $BUILD_DIR/wfpsentinel_ctl.exe & $BUILD_DIR/wfpctl.exe"
+file "$BUILD_DIR/wfpsentinel_ctl.exe"
+
