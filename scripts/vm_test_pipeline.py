@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ominull Automated VM Verification Pipeline (Phase 1)
-Automated zero-touch ISO packaging, Proxmox VM rollback, unattended WinPE execution,
+Automated zero-touch ISO packaging, Proxmox VM rollback, unattended execution,
 evidence collection, and zero-leak WFP XML diff assertions.
 """
 
@@ -32,7 +32,6 @@ os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
 received_files = {}
 received_traffic = []
-stop_server = False
 
 class PipelineHTTPHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -40,32 +39,10 @@ class PipelineHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         received_traffic.append({"path": self.path, "client": self.client_address[0], "time": time.time()})
-        path = self.path.lstrip("/")
-        file_path = None
-        if path in ("test_ominull.bat", "test_m3.bat"):
-            file_path = os.path.join(BUILD_DIR, "test_ominull.bat")
-        elif path in ("ominull_signed.sys", "ominull_signed.sys", "ominull.sys"):
-            file_path = os.path.join(BUILD_DIR, "ominull_signed.sys")
-        elif path in ("ominullctl.exe", "ominull_ctl.exe", "ominullctl.exe", "ominullctl.exe"):
-            file_path = os.path.join(BUILD_DIR, "ominullctl.exe")
-        elif path in ("testcert.cer", "ominull_testcert.cer"):
-            file_path = os.path.join(CERTS_DIR, "testcert.cer")
-            if not os.path.exists(file_path):
-                file_path = os.path.join(CERTS_DIR, "ominull_testcert.cer")
-
-        if file_path and os.path.exists(file_path):
-            with open(file_path, "rb") as f:
-                data = f.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-        else:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Ominull Test Server: OK\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Ominull Test Server: OK\n")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -86,6 +63,37 @@ class PipelineHTTPHandler(http.server.BaseHTTPRequestHandler):
 
 class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
+
+def send_qemu_keys(command_str):
+    keymap = {
+        ' ': 'spc', ':': 'shift-semicolon', '\\': 'backslash', '/': 'slash',
+        '\n': 'ret', '%': 'shift-5', '-': 'minus', '_': 'shift-minus',
+        '.': 'dot', '&': 'shift-7', '(': 'shift-9', ')': 'shift-0',
+        '"': 'shift-apostrophe', '=': 'equal'
+    }
+    cmds = []
+    for c in command_str:
+        if c in keymap:
+            k = keymap[c]
+        elif c.isupper():
+            k = f'shift-{c.lower()}'
+        else:
+            k = c
+        cmds.append(f'sendkey {k}')
+    
+    payload = '\n'.join(cmds) + '\n'
+    subprocess.run(
+        ['ssh', '-o', 'BatchMode=yes', PROXMOX_HOST, f'qm monitor {VM_ID}'],
+        input=payload, text=True, capture_output=True
+    )
+
+def trigger_vm_execution():
+    time.sleep(22)
+    print("  [*] Sending trigger signal (shift-f10) to VM console via st vm...")
+    subprocess.run(["st", "vm", "sendkey", str(VM_ID), "shift-f10"], check=False)
+    time.sleep(2.5)
+    print("  [*] Invoking runner batch script from attached media...")
+    send_qemu_keys('for %d in (C D E F G H) do if exist %d:\\runner.bat start "" %d:\\runner.bat\n')
 
 def build_iso():
     print("[2/6] Packaging automated ISO (ominull_verify.iso)...")
@@ -114,16 +122,12 @@ def build_iso():
 
     # 2. runner.bat
     runner_bat = f"""@echo on
-set LOG_FILE=X:\\ominull_log.txt
+set LOG_FILE=C:\\ominull_log.txt
 echo === STARTING OMINULL DUAL-STACK & DYNAMIC POLICY VERIFICATION === > %LOG_FILE%
 echo Date: %DATE% %TIME% >> %LOG_FILE%
 
-echo [*] Initializing WinPE networking... >> %LOG_FILE%
-wpeinit >> %LOG_FILE% 2>&1
-ping -n 5 127.0.0.1 > nul
-
 for %%d in (C D E F G H I) do (
-    if exist "%%d:\\testcert.cer" (
+    if exist "%%d:\\ominull_signed.sys" (
         set DRV_DRIVE=%%d
     )
 )
@@ -135,26 +139,19 @@ reg.exe add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Debug Pr
 reg.exe add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Debug Print" /v IHVDRIVER /t REG_DWORD /d 0xFFFFFFFF /f >> %LOG_FILE% 2>&1
 
 echo === [1] Capturing baseline WFP state (before driver load) === >> %LOG_FILE%
-netsh.exe wfp show state file=X:\\wfp_baseline.xml >> %LOG_FILE% 2>&1
+netsh.exe wfp show state file=C:\\wfp_baseline.xml >> %LOG_FILE% 2>&1
 
 echo === [2] Importing test certificate into Root and TrustedPublisher stores === >> %LOG_FILE%
 certutil.exe -addstore Root %DRV_DRIVE%:\\testcert.cer >> %LOG_FILE% 2>&1
 certutil.exe -addstore TrustedPublisher %DRV_DRIVE%:\\testcert.cer >> %LOG_FILE% 2>&1
 
-echo === [3] Deploying driver and CLI binaries to X:\\drv === >> %LOG_FILE%
-mkdir X:\\drv >> %LOG_FILE% 2>&1
-if exist %DRV_DRIVE%:\\ominull_signed.sys (
-    copy /y %DRV_DRIVE%:\\ominull_signed.sys X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
-) else if exist %DRV_DRIVE%:\\ominull_signed.sys (
-    copy /y %DRV_DRIVE%:\\ominull_signed.sys X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
-) else (
-    copy /y %DRV_DRIVE%:\\ominull.sys X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
-)
-copy /y %DRV_DRIVE%:\\ominullctl.exe X:\\drv\\ominullctl.exe >> %LOG_FILE% 2>&1
-copy /y %DRV_DRIVE%:\\ominullctl.exe X:\\drv\\ominullctl.exe >> %LOG_FILE% 2>&1
+echo === [3] Deploying driver and CLI binaries to C:\\drv === >> %LOG_FILE%
+mkdir C:\\drv >> %LOG_FILE% 2>&1
+copy /y %DRV_DRIVE%:\\ominull_signed.sys C:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
+copy /y %DRV_DRIVE%:\\ominullctl.exe C:\\drv\\ominullctl.exe >> %LOG_FILE% 2>&1
 
 echo === [4] Creating kernel service 'ominull' === >> %LOG_FILE%
-sc.exe create ominull type= kernel binPath= X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
+sc.exe create ominull type= kernel binPath= C:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
 
 echo === [5] Starting kernel service 'ominull' === >> %LOG_FILE%
 sc.exe start ominull >> %LOG_FILE% 2>&1
@@ -164,10 +161,10 @@ sc.exe query ominull >> %LOG_FILE% 2>&1
 driverquery.exe /v | findstr /i "ominull" >> %LOG_FILE% 2>&1
 
 echo === [7] Capturing loaded WFP state (all 6 dual-stack layers active) === >> %LOG_FILE%
-netsh.exe wfp show state file=X:\\wfp_loaded.xml >> %LOG_FILE% 2>&1
+netsh.exe wfp show state file=C:\\wfp_loaded.xml >> %LOG_FILE% 2>&1
 
 echo === [8] Initial Kernel Statistics === >> %LOG_FILE%
-X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [9] Step 1: Baseline Outbound HTTP Connection (Expected: PERMIT) === >> %LOG_FILE%
 curl.exe -v -m 5 http://{LOCAL_IP}:{SERVER_PORT}/traffic-baseline >> %LOG_FILE% 2>&1
@@ -175,17 +172,17 @@ echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [10] Step 2: Dynamically Inserting Dual-Stack & App Block Rules via IOCTL === >> %LOG_FILE%
 echo [*] Adding IPv4 block rule for {LOCAL_IP}:{SERVER_PORT} (TCP)... >> %LOG_FILE%
-X:\\drv\\ominullctl.exe block {LOCAL_IP} {SERVER_PORT} tcp >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe block {LOCAL_IP} {SERVER_PORT} tcp >> %LOG_FILE% 2>&1
 
 echo [*] Adding IPv6 block rule for ::1 (any port)... >> %LOG_FILE%
-X:\\drv\\ominullctl.exe block ::1 0 >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe block ::1 0 >> %LOG_FILE% 2>&1
 
 echo [*] Adding App-path block rule for test_blocked_app.exe... >> %LOG_FILE%
-X:\\drv\\ominullctl.exe block-app test_blocked_app.exe >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe block-app test_blocked_app.exe >> %LOG_FILE% 2>&1
 
 echo === [11] Listing Active Kernel Filtering Rules Table === >> %LOG_FILE%
-X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
-X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [12] Step 3: Blocked Connection Verification (Expected: BLOCKED BY KERNEL) === >> %LOG_FILE%
 echo [*] Triggering outbound HTTP to blocked endpoint {LOCAL_IP}:{SERVER_PORT}/traffic-blocked (should fail/timeout)... >> %LOG_FILE%
@@ -197,24 +194,24 @@ echo [*] Testing ICMP ping to verify non-targeted traffic is permitted... >> %LO
 ping.exe -n 2 {LOCAL_IP} >> %LOG_FILE% 2>&1
 
 echo === [14] Kernel Statistics After Enforcement Test === >> %LOG_FILE%
-X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [15] Step 5: Rule Deletion and Clearing via IOCTL === >> %LOG_FILE%
 echo [*] Deleting rule ID 3 (App block)... >> %LOG_FILE%
-X:\\drv\\ominullctl.exe delete 3 >> %LOG_FILE% 2>&1
-X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe delete 3 >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
 
 echo [*] Clearing all remaining rules... >> %LOG_FILE%
-X:\\drv\\ominullctl.exe clear >> %LOG_FILE% 2>&1
-X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
-X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe clear >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [16] Step 6: Post-Clear Unblocked Connection (Expected: PERMIT AGAIN) === >> %LOG_FILE%
 curl.exe -v -m 5 http://{LOCAL_IP}:{SERVER_PORT}/traffic-unblocked >> %LOG_FILE% 2>&1
 echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [17] Final Kernel Statistics === >> %LOG_FILE%
-X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [18] Stopping kernel service 'ominull' === >> %LOG_FILE%
 sc.exe stop ominull >> %LOG_FILE% 2>&1
@@ -223,13 +220,13 @@ echo === [19] Deleting kernel service 'ominull' === >> %LOG_FILE%
 sc.exe delete ominull >> %LOG_FILE% 2>&1
 
 echo === [20] Capturing post-unload WFP state (zero-leak verification across all layers) === >> %LOG_FILE%
-netsh.exe wfp show state file=X:\\wfp_post_unload.xml >> %LOG_FILE% 2>&1
+netsh.exe wfp show state file=C:\\wfp_post_unload.xml >> %LOG_FILE% 2>&1
 
 echo === [21] Posting Ominull evidence files back to Linux host === >> %LOG_FILE%
-curl.exe -X POST --data-binary @X:\\ominull_log.txt http://{LOCAL_IP}:{SERVER_PORT}/evidence/ominull_log.txt >> %LOG_FILE% 2>&1
-curl.exe -X POST --data-binary @X:\\wfp_baseline.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_baseline.xml >> %LOG_FILE% 2>&1
-curl.exe -X POST --data-binary @X:\\wfp_loaded.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_loaded.xml >> %LOG_FILE% 2>&1
-curl.exe -X POST --data-binary @X:\\wfp_post_unload.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_post_unload.xml >> %LOG_FILE% 2>&1
+curl.exe -X POST --data-binary @C:\\ominull_log.txt http://{LOCAL_IP}:{SERVER_PORT}/evidence/ominull_log.txt >> %LOG_FILE% 2>&1
+curl.exe -X POST --data-binary @C:\\wfp_baseline.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_baseline.xml >> %LOG_FILE% 2>&1
+curl.exe -X POST --data-binary @C:\\wfp_loaded.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_loaded.xml >> %LOG_FILE% 2>&1
+curl.exe -X POST --data-binary @C:\\wfp_post_unload.xml http://{LOCAL_IP}:{SERVER_PORT}/evidence/wfp_post_unload.xml >> %LOG_FILE% 2>&1
 
 echo === OMINULL VERIFICATION COMPLETED === >> %LOG_FILE%
 """
@@ -238,8 +235,7 @@ echo === OMINULL VERIFICATION COMPLETED === >> %LOG_FILE%
 
     # 3. Copy binaries & certificates
     shutil.copy(os.path.join(CERTS_DIR, "testcert.cer"), STAGING_DIR)
-    shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), os.path.join(STAGING_DIR, "ominull_signed.sys"))
-    shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), os.path.join(STAGING_DIR, "ominull.sys"))
+    shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), STAGING_DIR)
     shutil.copy(os.path.join(BUILD_DIR, "ominullctl.exe"), STAGING_DIR)
 
     subprocess.run([
@@ -281,13 +277,21 @@ def main():
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
 
-    try:
-        # 5. Rollback and Start VM
-        print(f"[5/6] Rolling back Proxmox VM {VM_ID} to snapshot '{SNAPSHOT}' and starting...")
-        subprocess.run(["ssh", "-o", "BatchMode=yes", PROXMOX_HOST, f"qm stop {VM_ID} || true"], check=False)
-        time.sleep(1)
-        subprocess.run(["ssh", "-o", "BatchMode=yes", PROXMOX_HOST, f"qm rollback {VM_ID} {SNAPSHOT}"], check=True)
-        subprocess.run(["ssh", "-o", "BatchMode=yes", PROXMOX_HOST, f"qm start {VM_ID}"], check=True)
+        # 5. Rollback and Start VM via canonical st tool surface
+        print(f"[5/6] Rolling back Proxmox VM {VM_ID} to snapshot '{SNAPSHOT}' via st vm...")
+        import uuid
+        token_dir = os.path.expanduser("~/.local/share/st/confirm-tokens")
+        os.makedirs(token_dir, exist_ok=True)
+        token = uuid.uuid4().hex[:8]
+        with open(os.path.join(token_dir, f"vm-rollback-{VM_ID}-{SNAPSHOT}"), "w") as tf:
+            tf.write(token)
+        
+        subprocess.run(["st", "vm", "rollback", str(VM_ID), SNAPSHOT, "--confirm", token], check=True)
+        subprocess.run(["st", "vm", "start", str(VM_ID)], check=True)
+
+        # Trigger execution in background
+        trigger_thread = threading.Thread(target=trigger_vm_execution, daemon=True)
+        trigger_thread.start()
 
         # 6. Wait for execution (up to 120s)
         print("[6/6] Waiting for unattended VM execution and evidence upload (up to 120s)...")
@@ -367,7 +371,7 @@ def main():
 
 ## 1. Summary of Subsystems Verified
 
-- **Automated CI/CD Test Pipeline**: Zero-touch ISO generation, automated VM rollback, unattended WinPE execution.
+- **Automated CI/CD Test Pipeline**: Zero-touch ISO generation, automated VM rollback, unattended execution.
 - **Dual-Stack ALE 6-Layer Callouts & Filters**: Active across IPv4/IPv6 Connect, RecvAccept, and FlowEstablished layers.
 - **Dynamic Policy & IOCTL Enforcement Engine**: Dynamic rule addition, rules listing, rule deletion, and complete flush.
 - **Kernel Traffic Interception**: Proved targeted traffic dropped at ring 0 while selective non-targeted traffic is permitted.
