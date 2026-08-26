@@ -210,6 +210,23 @@ echo === [16] Step 6: Post-Clear Unblocked Connection (Expected: PERMIT AGAIN) =
 curl.exe -v -m 5 http://{LOCAL_IP}:{SERVER_PORT}/traffic-unblocked >> %LOG_FILE% 2>&1
 echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
+echo === [16a] Step 7: Testing Microsecond Kernel Host Isolation Mode === >> %LOG_FILE%
+echo [*] Activating Host Isolation with Hole-Punched Hub at {LOCAL_IP}:{SERVER_PORT}... >> %LOG_FILE%
+C:\\drv\\ominullctl.exe isolate {LOCAL_IP} {SERVER_PORT} >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+
+echo [*] Testing hole-punched Hub communication during isolation (Expected: PERMIT)... >> %LOG_FILE%
+curl.exe -v -m 5 http://{LOCAL_IP}:{SERVER_PORT}/traffic-isolation-hub >> %LOG_FILE% 2>&1
+echo [Hub Result Code: %ERRORLEVEL%] (0 indicates permitted) >> %LOG_FILE%
+
+echo [*] Testing unauthorized external traffic during isolation (Expected: BLOCKED BY DEFAULT-DENY)... >> %LOG_FILE%
+curl.exe -v --connect-timeout 3 http://1.1.1.1:80/ >> %LOG_FILE% 2>&1
+echo [External Result Code: %ERRORLEVEL%] (Non-zero indicates blocked) >> %LOG_FILE%
+
+echo [*] Deactivating Host Isolation (Restoring full network access)... >> %LOG_FILE%
+C:\\drv\\ominullctl.exe unisolate >> %LOG_FILE% 2>&1
+C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
+
 echo === [17] Final Kernel Statistics === >> %LOG_FILE%
 C:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
@@ -237,6 +254,9 @@ echo === OMINULL VERIFICATION COMPLETED === >> %LOG_FILE%
     shutil.copy(os.path.join(CERTS_DIR, "testcert.cer"), STAGING_DIR)
     shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), STAGING_DIR)
     shutil.copy(os.path.join(BUILD_DIR, "ominullctl.exe"), STAGING_DIR)
+    if os.path.exists(os.path.join(BUILD_DIR, "ominulld.exe")):
+        shutil.copy(os.path.join(BUILD_DIR, "ominulld.exe"), STAGING_DIR)
+
 
     subprocess.run([
         "genisoimage",

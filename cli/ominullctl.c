@@ -106,6 +106,8 @@ static void PrintUsage(const char* prog) {
     printf("  %s stats\n", prog);
     printf("  %s monitor\n", prog);
     printf("  %s stream\n", prog);
+    printf("  %s isolate <hub_ip> [hub_port]\n", prog);
+    printf("  %s unisolate\n", prog);
     printf("\nExamples:\n");
     printf("  %s block 10.0.0.57 9998 tcp\n", prog);
     printf("  %s block 10.0.0.0/8 443 tcp\n", prog);
@@ -566,8 +568,72 @@ int main(int argc, char* argv[]) {
             printf("[-] DeviceIoControl failed: %lu\n", GetLastError());
         }
 
-    } else if (_stricmp(argv[1], "monitor") == 0 || _stricmp(argv[1], "stream") == 0) {
-        RunStreamMonitor(hDevice);
+    } else if (_stricmp(argv[1], "isolate") == 0) {
+        if (argc < 3) {
+            printf("Usage: %s isolate <hub_ip> [hub_port]\n", argv[0]);
+            CloseHandle(hDevice);
+            return 1;
+        }
+
+        struct in_addr addr4;
+        if (inet_pton(AF_INET, argv[2], &addr4) != 1) {
+            printf("[-] Invalid Hub IPv4 address: %s\n", argv[2]);
+            CloseHandle(hDevice);
+            return 1;
+        }
+        UINT32 hubIp = ntohl(addr4.s_addr);
+
+        UINT16 hubPort = 9999;
+        if (argc >= 4 && isdigit(argv[3][0])) {
+            hubPort = (UINT16)atoi(argv[3]);
+        }
+
+        OMINULL_ISOLATION_CONFIG isoCfg;
+        ZeroMemory(&isoCfg, sizeof(isoCfg));
+        isoCfg.ManagementServerIpV4 = hubIp;
+        isoCfg.ManagementServerPort = hubPort;
+        isoCfg.AllowDhcp = 1;
+        isoCfg.AllowDns = 1;
+
+        DWORD bytesReturned = 0;
+        BOOL ok = DeviceIoControl(
+            hDevice,
+            IOCTL_OMINULL_SET_ISOLATION_MODE,
+            &isoCfg,
+            sizeof(isoCfg),
+            NULL,
+            0,
+            &bytesReturned,
+            NULL
+        );
+
+        if (ok) {
+            printf("[+] HOST ISOLATION ACTIVATED (Microsecond Kernel Default-Deny)\n");
+            printf("    Hole-Punched Hub: %s:%u\n", argv[2], hubPort);
+            printf("    DHCP Allowed:     YES\n");
+            printf("    DNS Allowed:      YES\n");
+        } else {
+            printf("[-] Failed to activate host isolation: %lu\n", GetLastError());
+        }
+
+    } else if (_stricmp(argv[1], "unisolate") == 0) {
+        DWORD bytesReturned = 0;
+        BOOL ok = DeviceIoControl(
+            hDevice,
+            IOCTL_OMINULL_CLEAR_ISOLATION_MODE,
+            NULL,
+            0,
+            NULL,
+            0,
+            &bytesReturned,
+            NULL
+        );
+
+        if (ok) {
+            printf("[+] HOST ISOLATION CLEARED (Normal network traffic restored)\n");
+        } else {
+            printf("[-] Failed to clear host isolation: %lu\n", GetLastError());
+        }
 
     } else {
         PrintUsage(argv[0]);

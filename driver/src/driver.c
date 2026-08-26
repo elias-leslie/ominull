@@ -113,6 +113,14 @@ OminullIpv6PrefixMatch(
     return TRUE;
 }
 
+static BOOLEAN OminullIsLoopbackV6(const UINT8* ip6) {
+    if (!ip6) return FALSE;
+    for (int i = 0; i < 15; i++) {
+        if (ip6[i] != 0) return FALSE;
+    }
+    return (ip6[15] == 1);
+}
+
 // Policy Engine: Evaluates connection parameters against dynamic rule table
 UINT8
 OminullEvaluatePolicy(
@@ -131,6 +139,48 @@ OminullEvaluatePolicy(
     KIRQL oldIrql;
 
     KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+
+    // Active IR Control: Kernel Host Isolation Check
+    if (g_GlobalData.IsolationActive) {
+        BOOLEAN allow = FALSE;
+
+        // 1. Always allow loopback
+        if (IpVersion == 4 && (RemoteIpV4 & 0xFF000000) == 0x7F000000) {
+            allow = TRUE;
+        } else if (IpVersion == 6 && OminullIsLoopbackV6(RemoteIpV6)) {
+            allow = TRUE;
+        }
+
+        // 2. Hole-Punch: Management Hub Server (Outbound & Inbound)
+        if (IpVersion == 4 && g_GlobalData.IsolationConfig.ManagementServerIpV4 != 0) {
+            if (RemoteIpV4 == g_GlobalData.IsolationConfig.ManagementServerIpV4) {
+                if (g_GlobalData.IsolationConfig.ManagementServerPort == 0 ||
+                    RemotePort == g_GlobalData.IsolationConfig.ManagementServerPort ||
+                    LocalPort == g_GlobalData.IsolationConfig.ManagementServerPort) {
+                    allow = TRUE;
+                }
+            }
+        }
+
+        // 3. Hole-Punch: DHCP (UDP 67/68) if enabled
+        if (g_GlobalData.IsolationConfig.AllowDhcp && Protocol == 17) {
+            if ((LocalPort == 68 && RemotePort == 67) || (LocalPort == 67 && RemotePort == 68)) {
+                allow = TRUE;
+            }
+        }
+
+        // 4. Hole-Punch: DNS (UDP/TCP 53) if enabled
+        if (g_GlobalData.IsolationConfig.AllowDns && (Protocol == 17 || Protocol == 6)) {
+            if (RemotePort == 53 || LocalPort == 53) {
+                allow = TRUE;
+            }
+        }
+
+        if (!allow) {
+            KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+            return OMINULL_ACTION_BLOCK;
+        }
+    }
 
     for (UINT32 i = 0; i < g_GlobalData.RuleCount; i++) {
         POMINULL_RULE r = &g_GlobalData.Rules[i];
@@ -508,6 +558,41 @@ OminullDispatchDeviceControl(
             KeReleaseSpinLock(&g_GlobalData.TelemetryLock, oldIrql);
             return STATUS_PENDING;
         }
+        break;
+
+    case IOCTL_OMINULL_SET_ISOLATION_MODE:
+        if (inLen < sizeof(OMINULL_ISOLATION_CONFIG) || !buf) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+        POMINULL_ISOLATION_CONFIG isoCfg = (POMINULL_ISOLATION_CONFIG)buf;
+        RtlCopyMemory(&g_GlobalData.IsolationConfig, isoCfg, sizeof(OMINULL_ISOLATION_CONFIG));
+        g_GlobalData.IsolationActive = TRUE;
+        g_GlobalData.Stats.IsolationActive = 1;
+        KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+
+        DbgPrint("[ominull] IOCTL: Host Isolation ENABLED (Hub IP=%u.%u.%u.%u Port=%u DHCP=%u DNS=%u)\n",
+            (isoCfg->ManagementServerIpV4 >> 24) & 0xFF,
+            (isoCfg->ManagementServerIpV4 >> 16) & 0xFF,
+            (isoCfg->ManagementServerIpV4 >> 8) & 0xFF,
+            isoCfg->ManagementServerIpV4 & 0xFF,
+            isoCfg->ManagementServerPort,
+            isoCfg->AllowDhcp,
+            isoCfg->AllowDns);
+        status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_OMINULL_CLEAR_ISOLATION_MODE:
+        KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
+        g_GlobalData.IsolationActive = FALSE;
+        g_GlobalData.Stats.IsolationActive = 0;
+        RtlZeroMemory(&g_GlobalData.IsolationConfig, sizeof(OMINULL_ISOLATION_CONFIG));
+        KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
+
+        DbgPrint("[ominull] IOCTL: Host Isolation DISABLED (Normal Traffic Restored)\n");
+        status = STATUS_SUCCESS;
         break;
 
     default:
