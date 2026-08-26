@@ -76,3 +76,14 @@ file "$BUILD_DIR/ominull-hub"
 echo "[+] Built: $BUILD_DIR/ominull-hub.exe"
 file "$BUILD_DIR/ominull-hub.exe"
 
+echo "[*] Compiling Linux eBPF kernel program (ominull_filter.bpf.o)..."
+clang -O2 -target bpf -I/usr/include/x86_64-linux-gnu -c "$ROOT_DIR/ebpf/ominull_filter.bpf.c" -o "$BUILD_DIR/ominull_filter.bpf.o"
+echo "[+] Built: $BUILD_DIR/ominull_filter.bpf.o"
+file "$BUILD_DIR/ominull_filter.bpf.o"
+
+echo "[*] Compiling Linux endpoint daemon (ominulld)..."
+gcc -Wall -O2 "$ROOT_DIR/agent/linux/main.c" -o "$BUILD_DIR/ominulld"
+echo "[+] Built: $BUILD_DIR/ominulld"
+file "$BUILD_DIR/ominulld"
+
+
