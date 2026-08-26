@@ -190,9 +190,9 @@ const dashboardHTML = `<!DOCTYPE html>
         <div style="display: flex; align-items: center; gap: 14px;">
             <button class="btn btn-cyan" style="font-weight: 800; padding: 7px 16px; font-size: 12px; box-shadow: 0 0 12px var(--cyan-glow);" onclick="openDeployModal()">🚀 Deploy New Agent</button>
             <div class="live-tag"><div class="pulse-dot"></div> TI & TELEMETRY LIVE</div>
-            <div style="background: var(--bg-surface); border: 1px solid var(--border-color); padding: 6px 14px; border-radius: 6px; font-size: 12px;">
-                <span style="color: var(--text-muted); margin-right: 6px;">Master Key:</span>
-                <code style="color: var(--cyan);">ominull-master-admin-key</code>
+            <div style="background: var(--bg-surface); border: 1px solid var(--border-color); padding: 6px 14px; border-radius: 6px; font-size: 12px; display: flex; align-items: center; gap: 6px;">
+                <span style="color: var(--text-muted);">Node:</span>
+                <span style="color: var(--cyan); font-weight: 700;">Proxmox LXC 150 (Production)</span>
             </div>
         </div>
     </header>
