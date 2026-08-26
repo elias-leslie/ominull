@@ -52,3 +52,27 @@ cp -f "$BUILD_DIR/ominullctl.exe" "$BUILD_DIR/ominull_ctl.exe"
 
 echo "[+] Built: $BUILD_DIR/ominullctl.exe"
 file "$BUILD_DIR/ominullctl.exe"
+
+echo "[*] Compiling endpoint service agent (ominulld.exe)..."
+x86_64-w64-mingw32-gcc \
+  -Wall -O2 \
+  -I"$INC_DIR" \
+  "$ROOT_DIR/agent/src/main.c" \
+  "$ROOT_DIR/agent/src/driver_client.c" \
+  "$ROOT_DIR/agent/src/hub_client.c" \
+  "$ROOT_DIR/agent/src/service.c" \
+  -o "$BUILD_DIR/ominulld.exe" \
+  -lwinhttp -lws2_32
+
+echo "[+] Built: $BUILD_DIR/ominulld.exe"
+file "$BUILD_DIR/ominulld.exe"
+
+echo "[*] Compiling central management hub (ominull-hub Linux & Windows)..."
+(cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -o "$BUILD_DIR/ominull-hub" cmd/main.go)
+(cd "$ROOT_DIR/hub" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o "$BUILD_DIR/ominull-hub.exe" cmd/main.go)
+
+echo "[+] Built: $BUILD_DIR/ominull-hub"
+file "$BUILD_DIR/ominull-hub"
+echo "[+] Built: $BUILD_DIR/ominull-hub.exe"
+file "$BUILD_DIR/ominull-hub.exe"
+

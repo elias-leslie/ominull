@@ -1,0 +1,101 @@
+#include "../include/agent.h"
+
+static void PrintUsage(const char* prog) {
+    printf("Ominull Endpoint Agent (v%s)\n", OMINULL_AGENT_VERSION);
+    printf("Usage:\n");
+    printf("  %s --console --hub <url> --key <api_key>   Run in foreground (interactive)\n", prog);
+    printf("  %s --service --hub <url> --key <api_key>   Run under Service Control Manager\n", prog);
+    printf("  %s --install --hub <url> --key <api_key>   Install Windows Service\n", prog);
+    printf("  %s --uninstall                             Uninstall Windows Service\n", prog);
+}
+
+int main(int argc, char* argv[]) {
+    AGENT_CONFIG config;
+    ZeroMemory(&config, sizeof(config));
+    strcpy(config.hub_url, "http://127.0.0.1:9999");
+    strcpy(config.api_key, "ominull-default-api-key");
+    strcpy(config.endpoint_id, "win11-target-01");
+
+    DWORD hostLen = sizeof(config.hostname);
+    if (!GetComputerNameA(config.hostname, &hostLen)) {
+        strcpy(config.hostname, "WINDOWS-ENDPOINT");
+    }
+
+    bool doInstall = false;
+    bool doUninstall = false;
+    bool doConsole = false;
+    bool doService = false;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--install") == 0) {
+            doInstall = true;
+        } else if (strcmp(argv[i], "--uninstall") == 0) {
+            doUninstall = true;
+        } else if (strcmp(argv[i], "--console") == 0) {
+            doConsole = true;
+        } else if (strcmp(argv[i], "--service") == 0) {
+            doService = true;
+        } else if (strcmp(argv[i], "--hub") == 0 && i + 1 < argc) {
+            strncpy(config.hub_url, argv[++i], sizeof(config.hub_url) - 1);
+        } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+            strncpy(config.api_key, argv[++i], sizeof(config.api_key) - 1);
+        } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            config.verbose = true;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            PrintUsage(argv[0]);
+            return 0;
+        }
+    }
+
+    if (doInstall) {
+        return Service_Install(config.hub_url, config.api_key) ? 0 : 1;
+    }
+
+    if (doUninstall) {
+        return Service_Uninstall() ? 0 : 1;
+    }
+
+    if (doConsole) {
+        printf("[*] Starting Ominull Agent in Console Mode (PID: %lu)...\n", GetCurrentProcessId());
+        printf("[*] Connecting to Hub at: %s (Key: %s)\n", config.hub_url, config.api_key);
+        
+        HANDLE hDriver = Driver_Open();
+        if (hDriver == INVALID_HANDLE_VALUE) {
+            fprintf(stderr, "[-] Warning: Could not open driver device. Running telemetry test loop...\n");
+        } else {
+            printf("[+] Connected to \\\\.\\Ominull driver successfully.\n");
+            Driver_Close(hDriver);
+        }
+
+        // Test one telemetry ping
+        OMINULL_EVENT testEvent;
+        ZeroMemory(&testEvent, sizeof(testEvent));
+        testEvent.EventType = OMINULL_EVENT_CONNECT_V4;
+        testEvent.Action = 0; // PERMIT
+        testEvent.Direction = 1; // OUTBOUND
+        testEvent.IpVersion = 4;
+        testEvent.Protocol = 6; // TCP
+        testEvent.Addr.Ipv4.LocalIp = (192 << 24) | (168 << 16) | (86 << 8) | 57;
+        testEvent.Addr.Ipv4.RemoteIp = (8 << 24) | (8 << 16) | (8 << 8) | 8;
+        testEvent.LocalPort = 54321;
+        testEvent.RemotePort = 443;
+        wcscpy(testEvent.ProcessPath, L"C:\\Windows\\System32\\svchost.exe");
+        testEvent.ProcessId = 1234;
+
+        printf("[*] Dispatching test telemetry event batch to Hub...\n");
+        if (Hub_SendTelemetryBatch(&config, &testEvent, 1)) {
+            printf("[+] Telemetry batch delivered successfully to %s\n", config.hub_url);
+        } else {
+            printf("[-] Failed to send telemetry batch to %s (is Hub running?)\n", config.hub_url);
+        }
+        return 0;
+    }
+
+    if (doService) {
+        Service_Run();
+        return 0;
+    }
+
+    PrintUsage(argv[0]);
+    return 1;
+}
