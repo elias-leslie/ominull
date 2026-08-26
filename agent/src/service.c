@@ -18,7 +18,7 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
     }
 }
 
-static void RunAgentLoop(AGENT_CONFIG* config) {
+void RunAgentLoop(AGENT_CONFIG* config) {
     HANDLE hDriver = Driver_Open();
     if (hDriver == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[-] Agent could not connect to Ominull driver. Retrying...\n");
@@ -36,7 +36,12 @@ static void RunAgentLoop(AGENT_CONFIG* config) {
         }
 
         if (hDriver == INVALID_HANDLE_VALUE) {
-            Sleep(2000);
+            DWORD now = GetTickCount();
+            if (now - lastFlush > 3000) {
+                Hub_SendTelemetryBatch(config, NULL, 0);
+                lastFlush = now;
+            }
+            Sleep(1000);
             hDriver = Driver_Open();
             continue;
         }

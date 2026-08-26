@@ -58,36 +58,7 @@ int main(int argc, char* argv[]) {
     if (doConsole) {
         printf("[*] Starting Ominull Agent in Console Mode (PID: %lu)...\n", GetCurrentProcessId());
         printf("[*] Connecting to Hub at: %s (Key: %s)\n", config.hub_url, config.api_key);
-        
-        HANDLE hDriver = Driver_Open();
-        if (hDriver == INVALID_HANDLE_VALUE) {
-            fprintf(stderr, "[-] Warning: Could not open driver device. Running telemetry test loop...\n");
-        } else {
-            printf("[+] Connected to \\\\.\\Ominull driver successfully.\n");
-            Driver_Close(hDriver);
-        }
-
-        // Test one telemetry ping
-        OMINULL_EVENT testEvent;
-        ZeroMemory(&testEvent, sizeof(testEvent));
-        testEvent.EventType = OMINULL_EVENT_CONNECT_V4;
-        testEvent.Action = 0; // PERMIT
-        testEvent.Direction = 1; // OUTBOUND
-        testEvent.IpVersion = 4;
-        testEvent.Protocol = 6; // TCP
-        testEvent.Addr.Ipv4.LocalIp = (192 << 24) | (168 << 16) | (86 << 8) | 57;
-        testEvent.Addr.Ipv4.RemoteIp = (8 << 24) | (8 << 16) | (8 << 8) | 8;
-        testEvent.LocalPort = 54321;
-        testEvent.RemotePort = 443;
-        wcscpy(testEvent.ProcessPath, L"C:\\Windows\\System32\\svchost.exe");
-        testEvent.ProcessId = 1234;
-
-        printf("[*] Dispatching test telemetry event batch to Hub...\n");
-        if (Hub_SendTelemetryBatch(&config, &testEvent, 1)) {
-            printf("[+] Telemetry batch delivered successfully to %s\n", config.hub_url);
-        } else {
-            printf("[-] Failed to send telemetry batch to %s (is Hub running?)\n", config.hub_url);
-        }
+        RunAgentLoop(&config);
         return 0;
     }
 

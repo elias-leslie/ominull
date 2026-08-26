@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -123,10 +124,9 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
 	mux.HandleFunc("/download/", s.handleDownload)
 
-	// 2. Telemetry WebSocket
-	mux.HandleFunc("/api/v1/ws/telemetry", s.handleWebSocket)
-
-	// 3. Multi-Tenant REST API
+	// 3. Multi-Tenant REST API & Hierarchy
+	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
+	mux.HandleFunc("/api/v1/locations", s.authMiddleware(s.handleLocations))
 	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(s.handleTenants))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
@@ -135,7 +135,10 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
 
-	// 4. Threat Intelligence & Dynamic Rules API
+	// 4. Dynamic Group Policy & Analytics API
+	mux.HandleFunc("/api/v1/policy-groups", s.authMiddleware(s.handlePolicyGroups))
+	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
+	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(s.handleThreatIntelSync))
 	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
@@ -728,7 +731,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := json.Unmarshal(bodyBytes, &batch); err == nil && batch.EndpointID != "" {
-			ip := strings.Split(r.RemoteAddr, ":")[0]
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				ip = r.RemoteAddr
+			}
 			if batch.IP != "" {
 				ip = batch.IP
 			}
@@ -1039,4 +1045,212 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(logs)
+}
+
+func (s *Server) handleGetHierarchy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	tree, err := s.store.GetHierarchy(tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tree)
+}
+
+func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		locs, err := s.store.ListLocations(tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(locs)
+
+	case http.MethodPost:
+		var loc storage.Location
+		if err := json.NewDecoder(r.Body).Decode(&loc); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if loc.ID == "" {
+			loc.ID = "loc-" + uuid.New().String()[:8]
+		}
+		if loc.TenantID == "" {
+			loc.TenantID = "default"
+		}
+		if role == "tenant" {
+			loc.TenantID = r.Header.Get("X-Tenant-ID")
+		}
+		loc.CreatedAt = time.Now().UTC()
+
+		if err := s.store.CreateLocation(loc); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(loc)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handlePolicyGroups(w http.ResponseWriter, r *http.Request) {
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		groups, err := s.store.ListPolicyGroups(tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(groups)
+
+	case http.MethodPost:
+		var g storage.PolicyGroup
+		if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if g.ID == "" {
+			g.ID = "grp-" + uuid.New().String()[:8]
+		}
+		if g.TenantID == "" {
+			g.TenantID = "default"
+		}
+		if role == "tenant" {
+			g.TenantID = r.Header.Get("X-Tenant-ID")
+		}
+		if g.Criteria == "" {
+			g.Criteria = "{}"
+		}
+		g.Active = true
+		g.CreatedAt = time.Now().UTC()
+
+		if err := s.store.CreatePolicyGroup(g); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Broadcast to matching connected endpoints
+		cmd := CommandMessage{
+			Type: "ADD_RULE",
+			Payload: map[string]interface{}{
+				"id":       g.ID,
+				"name":     g.Name,
+				"type":     g.RuleType,
+				"value":    g.RuleValue,
+				"port":     g.Port,
+				"protocol": g.Protocol,
+				"action":   g.Action,
+			},
+		}
+		s.clientsMu.RLock()
+		for epID := range s.clients {
+			_ = s.SendCommand(epID, cmd)
+		}
+		s.clientsMu.RUnlock()
+
+		_ = s.store.RecordAudit(storage.AuditEntry{
+			ID:        uuid.New().String(),
+			TenantID:  g.TenantID,
+			UserID:    r.Header.Get("X-User-ID"),
+			Username:  r.Header.Get("X-Username"),
+			Action:    "CREATE_POLICY_GROUP",
+			Resource:  g.ID,
+			Details:   fmt.Sprintf("Created group policy: %s (Action: %s)", g.Name, g.Action),
+			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+			Timestamp: time.Now().UTC(),
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(g)
+
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "missing id", http.StatusBadRequest)
+			return
+		}
+		if err := s.store.DeletePolicyGroup(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"deleted","id":"` + id + `"}`))
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTogglePolicyGroup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID     string `json:"id"`
+		Active bool   `json:"active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.TogglePolicyGroup(req.ID, req.Active); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "updated", "id": req.ID, "active": req.Active})
+}
+
+func (s *Server) handleGetAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	summary, err := s.store.GetAnalyticsSummary(tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
 }
