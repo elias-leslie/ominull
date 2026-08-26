@@ -1,4 +1,4 @@
-# Project Master Plan: SentinelMesh / KernelSentinel
+# Project Master Plan: Ominull / Ominull
 ## Cross-Platform Kernel Network Telemetry, Dynamic Enforcement & Rapid IR System
 
 **Author:** Antigravity AI & System Engineering Team  
@@ -13,14 +13,14 @@
 
 ## 1. Vision & Core Philosophy
 
-**KernelSentinel** (formerly Ominull) is an ultra-lean, high-performance, cross-platform kernel network security agent and rapid Incident Response (IR) control plane.
+**Ominull** (Enterprise Threat Nullification Platform) is an ultra-lean, high-performance, cross-platform kernel network security agent and rapid Incident Response (IR) control plane.
 
 ### Core Architectural Mandates:
 1. **Lean & Zero-Bloat:** Single self-contained binary for the management hub (no Docker/K8s, no PostgreSQL/Redis requirements). Single lightweight native agent (<15 MB RAM, <0.5% CPU overhead on endpoints).
 2. **Multi-Tenancy by Design (MSP/MSSP Ready):** Complete cryptographic and logical tenant separation. Manage 1 to 500 distinct client organizations from a single lightweight hub with tenant-scoped tokens, isolated policy tables, and segregated telemetry logs.
 3. **Rapid IR & Jump-Kit Deployment:** Turn any analyst laptop or existing server into an authoritative IR command hub in under 10 seconds. Deploy to remote endpoints via a 1-line PowerShell / Bash bootstrap over WinRM, SSH, MSP RMM tools (NinjaOne, Datto, ConnectWise), or EDR Live Response consoles.
-4. **Pluggable Kernel Architecture:** Unified cross-platform user-mode agent core (`sentineld`) with pluggable OS-specific ring 0 filtering engines:
-   - **Windows:** Native WFP Callout Driver (`ominull.sys` / `sentinel_wfp.sys`).
+4. **Pluggable Kernel Architecture:** Unified cross-platform user-mode agent core (`ominulld`) with pluggable OS-specific ring 0 filtering engines:
+   - **Windows:** Native WFP Callout Driver (`ominull.sys` / `ominull.sys`).
    - **Linux:** eBPF Kernel Probes (`sockops`, `cgroup_skb`, `tc` classifier).
    - **macOS:** System NetworkExtension (`NEFilterDataProvider`, `NEFilterPacketProvider`).
 5. **Kernel-Level Host Network Isolation:** Instant (<1 millisecond) host quarantine dropping 100% of lateral movement and exfiltration traffic while automatically maintaining an authenticated pinhole to the IR analyst's hub.
@@ -32,7 +32,7 @@
 ```
 +-----------------------------------------------------------------------------+
 |              CENTRAL MANAGEMENT HUB / ANALYST JUMP KIT                      |
-|                  (Single Portable Native Binary: sentinel-hub)              |
+|                  (Single Portable Native Binary: ominull-hub)              |
 |                                                                             |
 |  +-----------------------------------------------------------------------+  |
 |  |  Multi-Tenant Controller & Ingest Engine                              |  |
@@ -51,12 +51,12 @@
 |  (Windows 11 / Server 2025) | |    (Debian 12 / Ubuntu 24)  | |       (macOS 14 Sonoma)     |
 |                             | |                             | |                             |
 |  +-----------------------+  | |  +-----------------------+  | |  +-----------------------+  |
-|  | sentineld.exe Service |  | |  | sentineld Daemon      |  | |  | sentineld Daemon      |  |
+|  | ominulld.exe Service |  | |  | ominulld Daemon      |  | |  | ominulld Daemon      |  |
 |  | (Cross-Platform Core) |  | |  | (Cross-Platform Core) |  | |  | (Cross-Platform Core) |  |
 |  +-----------+-----------+  | |  +-----------+-----------+  | |  +-----------+-----------+  |
 |              | IOCTL         | |              | BPF Syscall   | |              | SystemExtension |
 |  +-----------v-----------+  | |  +-----------v-----------+  | |  +-----------v-----------+  |
-|  | sentinel_wfp.sys      |  | |  | eBPF Filter Probes    |  | |  | NEFilterProvider     |  |
+|  | ominull.sys      |  | |  | eBPF Filter Probes    |  | |  | NEFilterProvider     |  |
 |  | (WFP 6-Layer Callout) |  | |  | (cgroup_skb / tc)     |  | |  | (NetworkExtension)    |  |
 |  +-----------------------+  | |  +-----------------------+  | |  +-----------------------+  |
 +-----------------------------+ +-----------------------------+ +-----------------------------+
@@ -78,19 +78,19 @@
 
 ---
 
-### Phase 2: Lean Multi-Tenant Control Hub & Endpoint Agent (`sentineld`)
+### Phase 2: Lean Multi-Tenant Control Hub & Endpoint Agent (`ominulld`)
 - **Objective:** Build the single-binary management server and native Windows endpoint service with simple, robust authentication and multi-tenancy.
 - **Deliverables:**
-  - **`sentinel-hub` (Central Management Server & Jump Kit):**
+  - **`ominull-hub` (Central Management Server & Jump Kit):**
     - Single standalone executable with zero external database dependencies (embedded SQLite/DuckDB).
     - Multi-tenant tenant segregation (`TenantID`, tenant-scoped API keys, separate event logs).
     - Automated self-signed mTLS CA & ephemeral enrollment token generation.
     - Embedded Interactive Terminal UI (TUI) connection dashboard and lightweight REST/WebSocket API.
     - One-line remote bootstrap script generator (`/bootstrap.ps1`, `/bootstrap.sh`) for rapid deployment via WinRM, SSH, RMM, or EDR Live Response.
-  - **`sentineld.exe` (Windows Endpoint Service):**
+  - **`ominulld.exe` (Windows Endpoint Service):**
     - Background Windows Service managing `ominull.sys` lifecycle.
     - Inverted-call streaming consumer (`IOCTL_OMINULL_STREAM_EVENT`) with local ring-buffer offline buffering.
-    - Outbound mTLS / token connection to `sentinel-hub`.
+    - Outbound mTLS / token connection to `ominull-hub`.
 
 ---
 
@@ -102,8 +102,8 @@
     - Automatic whitelisting of Management Server IP:Port and essential DHCP lease maintenance.
     - Reversible via `IOCTL_OMINULL_CLEAR_ISOLATION_MODE`.
   - **Remote IR Orchestration:**
-    - Hub CLI / API command: `sentinel-hub isolate <endpoint_id|tenant_id>`.
-    - Instant broadcast C2 block: `sentinel-hub broadcast-block <cidr|domain|port> --tenant <tenant_id>`.
+    - Hub CLI / API command: `ominull-hub isolate <endpoint_id|tenant_id>`.
+    - Instant broadcast C2 block: `ominull-hub broadcast-block <cidr|domain|port> --tenant <tenant_id>`.
     - Live VM verification of isolation (proving lateral SMB/RDP and external HTTP are blocked while management stream remains active).
 
 ---
@@ -137,10 +137,10 @@
 ### Phase 6: Cross-Platform Linux Engine (Debian eBPF Backend)
 - **Objective:** Implement the `KernelFilterEngine` abstraction for Debian/Ubuntu Linux endpoints using modern eBPF.
 - **Deliverables:**
-  - Portable eBPF C program (`sentinel_ebpf.c`) loaded via `libbpf`:
+  - Portable eBPF C program (`ominull_ebpf.c`) loaded via `libbpf`:
     - `BPF_PROG_TYPE_CGROUP_SKB` for socket connect & bind tracking.
     - `BPF_PROG_TYPE_SCHED_CLS` (tc) for high-performance packet drop & host isolation.
-    - BPF ring buffer for real-time event streaming to Linux `sentineld`.
+    - BPF ring buffer for real-time event streaming to Linux `ominulld`.
   - Unified parity verification on Debian 12 / Ubuntu 24.
 
 ---

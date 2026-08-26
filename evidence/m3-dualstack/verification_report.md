@@ -63,7 +63,7 @@ The driver registers callouts and filters across all 6 core Windows Filtering Pl
 | 15 | ICMP Selective Traffic Verification | Ping permitted | 2 packets sent, 2 received (0% loss) | **PASS** |
 | 16 | Driver Stop & Teardown | Clean service stop (`STATE 1 STOPPED`, `WIN32_EXIT_CODE 0`) | `STATE 1 STOPPED (0x0)` | **PASS** |
 | 17 | Service Deletion | Service removed from SCM | `[SC] DeleteService SUCCESS` | **PASS** |
-| 18 | WFP Engine Zero-Leak State | 0 orphaned callouts, filters, sublayers, or sessions | 0 Sentinel objects in `wfp_post_unload.xml` | **PASS** |
+| 18 | WFP Engine Zero-Leak State | 0 orphaned callouts, filters, sublayers, or sessions | 0 Ominull objects in `wfp_post_unload.xml` | **PASS** |
 
 ---
 
