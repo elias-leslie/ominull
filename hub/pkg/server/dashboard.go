@@ -45,6 +45,7 @@ const dashboardHTML = `<!DOCTYPE html>
         .metric-card.red::before { background: var(--red); }
         .metric-card.green::before { background: var(--green); }
         .metric-card.purple::before { background: var(--purple); }
+        .metric-card.amber::before { background: var(--amber); }
         .metric-title { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 6px; }
         .metric-val { font-size: 32px; font-weight: 800; color: #fff; line-height: 1.1; }
         .metric-sub { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
@@ -55,13 +56,13 @@ const dashboardHTML = `<!DOCTYPE html>
         .bulk-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
         /* Section Containers */
-        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; margin-top: 20px; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; margin-top: 24px; }
         .section-title { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; color: #fff; display: flex; align-items: center; gap: 8px; }
         .section-actions { display: flex; gap: 8px; align-items: center; }
 
         /* Inputs & Buttons */
-        input[type="text"], select { background: var(--bg-surface); border: 1px solid var(--border-color); color: #fff; padding: 7px 12px; border-radius: 6px; font-size: 13px; outline: none; }
-        input[type="text"]:focus { border-color: var(--cyan); }
+        input[type="text"], input[type="number"], select { background: var(--bg-surface); border: 1px solid var(--border-color); color: #fff; padding: 7px 12px; border-radius: 6px; font-size: 13px; outline: none; }
+        input[type="text"]:focus, select:focus { border-color: var(--cyan); }
         .btn { background: var(--bg-surface); border: 1px solid var(--border-color); color: #fff; padding: 7px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 6px; }
         .btn:hover { background: var(--bg-hover); border-color: #6b7280; }
         .btn-cyan { background: rgba(6, 182, 212, 0.15); border-color: var(--cyan); color: var(--cyan); }
@@ -90,20 +91,16 @@ const dashboardHTML = `<!DOCTYPE html>
         .badge-isolated { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.5); }
         .badge-block { background: rgba(239, 68, 68, 0.2); color: #f87171; font-weight: 800; }
         .badge-permit { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .badge-ti { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.5); }
         .os-tag { background: #1f2937; padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #d1d5db; border: 1px solid #374151; font-family: monospace; }
 
-        /* Jump Kits Grid */
-        .jumpkits-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
-        .jumpkit-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px 20px; }
-        .jumpkit-card h4 { font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-        .code-snippet { background: #000; border: 1px solid #374151; border-radius: 6px; padding: 10px 14px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; color: #34d399; display: flex; justify-content: space-between; align-items: center; }
-        .copy-btn { background: #1f2937; border: 1px solid #374151; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; }
-        .copy-btn:hover { background: var(--cyan); color: #000; }
-
-        /* Modal Inspector */
+        /* Modals */
         .modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); display: none; align-items: center; justify-content: center; z-index: 1000; }
         .modal-content { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 12px; width: 550px; max-width: 90vw; padding: 24px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8); }
-        .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 16px; color: #fff; }
+        .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 16px; color: #fff; display: flex; justify-content: space-between; align-items: center; }
+        .form-group { margin-bottom: 14px; }
+        .form-label { display: block; font-size: 12px; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; text-transform: uppercase; }
+        .form-control { width: 100%; }
         .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1f2937; font-size: 13px; }
         .detail-label { color: var(--text-muted); font-weight: 600; }
         .detail-value { font-family: monospace; color: #fff; max-width: 320px; word-break: break-all; text-align: right; }
@@ -120,7 +117,7 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
         </div>
         <div style="display: flex; align-items: center; gap: 16px;">
-            <div class="live-tag"><div class="pulse-dot"></div> TELEMETRY STREAM ACTIVE</div>
+            <div class="live-tag"><div class="pulse-dot"></div> TI & TELEMETRY STREAM ACTIVE</div>
             <div style="background: var(--bg-surface); border: 1px solid var(--border-color); padding: 5px 12px; border-radius: 6px; font-size: 12px;">
                 <span style="color: var(--text-muted); margin-right: 6px;">Master Key:</span>
                 <code style="color: var(--cyan);">ominull-master-admin-key</code>
@@ -133,22 +130,27 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="metric-card">
             <div class="metric-title">Monitored Endpoints</div>
             <div class="metric-val" id="metric-endpoints">0</div>
-            <div class="metric-sub">Deterministic fleet ordering (Never Shifts)</div>
+            <div class="metric-sub">Deterministic fleet matrix</div>
+        </div>
+        <div class="metric-card amber">
+            <div class="metric-title">Threat Intel (C2 IOCs)</div>
+            <div class="metric-val" id="metric-iocs" style="color: var(--amber);">0</div>
+            <div class="metric-sub">Abuse.ch & Emerging Threats</div>
+        </div>
+        <div class="metric-card purple">
+            <div class="metric-title">Active Dynamic Rules</div>
+            <div class="metric-val" id="metric-rules" style="color: var(--purple);">0</div>
+            <div class="metric-sub">Broadcast to kernel callouts</div>
         </div>
         <div class="metric-card red">
             <div class="metric-title">Isolated Hosts (Quarantine)</div>
             <div class="metric-val" id="metric-isolated" style="color: var(--red);">0</div>
-            <div class="metric-sub">Kernel default-deny active</div>
+            <div class="metric-sub">Default-deny ring-0 active</div>
         </div>
         <div class="metric-card green">
-            <div class="metric-title">Telemetry Events Logged</div>
+            <div class="metric-title">Telemetry Events</div>
             <div class="metric-val" id="metric-events" style="color: var(--green);">0</div>
-            <div class="metric-sub">Inbound / Outbound flow decisions</div>
-        </div>
-        <div class="metric-card purple">
-            <div class="metric-title">Active Tenants</div>
-            <div class="metric-val" id="metric-tenants" style="color: var(--purple);">1</div>
-            <div class="metric-sub">Isolated multi-tenant partitions</div>
+            <div class="metric-sub">Real-time stream decisions</div>
         </div>
     </div>
 
@@ -171,7 +173,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="section-header">
         <div class="section-title">
             <span>Enrolled Fleet Matrix</span>
-            <span id="endpoint-count-badge" class="badge badge-online">3 ACTIVE</span>
+            <span id="endpoint-count-badge" class="badge badge-online">0 ACTIVE</span>
         </div>
         <div class="section-actions">
             <input type="text" id="ep-search" placeholder="Filter by host, IP or OS..." oninput="renderEndpoints()">
@@ -200,13 +202,36 @@ const dashboardHTML = `<!DOCTYPE html>
         </table>
     </div>
 
-    <!-- Floating Batch Action Bar for Selected Endpoints -->
-    <div id="batch-action-bar" style="display: none; background: #1f2937; border: 1px solid var(--cyan); border-radius: 8px; padding: 10px 16px; margin-top: 12px; justify-content: space-between; align-items: center;">
-        <span id="batch-selected-count" style="font-weight: 700; color: #fff; font-size: 13px;">0 endpoints selected</span>
-        <div style="display: flex; gap: 8px;">
-            <button class="btn btn-isolate" onclick="isolateSelected(true)">Isolate Selected</button>
-            <button class="btn btn-unisolate" onclick="isolateSelected(false)">Unisolate Selected</button>
+    <!-- Dynamic Policy & Rule Management Section -->
+    <div class="section-header">
+        <div class="section-title">
+            <span>Dynamic Kernel Policy & Threat Rules</span>
+            <span id="rules-count-badge" class="badge badge-ti">0 ACTIVE RULES</span>
         </div>
+        <div class="section-actions">
+            <button class="btn" onclick="syncThreatFeeds()">⚡ Sync TI Feeds</button>
+            <button class="btn btn-cyan" onclick="openRuleModal()">+ Add Policy Rule</button>
+        </div>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Rule Name</th>
+                    <th>Match Type</th>
+                    <th>Target Value</th>
+                    <th>Port / Protocol</th>
+                    <th>Verdict Action</th>
+                    <th>Deployment Scope</th>
+                    <th>Active Status</th>
+                    <th>Revoke</th>
+                </tr>
+            </thead>
+            <tbody id="rules-body">
+                <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No active policy rules defined.</td></tr>
+            </tbody>
+        </table>
     </div>
 
     <!-- Live Telemetry Stream Section -->
@@ -246,34 +271,73 @@ const dashboardHTML = `<!DOCTYPE html>
         </table>
     </div>
 
-    <!-- 1-Line Remote Deployment Jump-Kits -->
-    <div class="section-header">
-        <div class="section-title">Automated 1-Line Remote Deployment Jump-Kits</div>
-    </div>
-    <div class="jumpkits-grid">
-        <div class="jumpkit-card">
-            <h4>
-                <span>Windows 11 / Server 2025 (PowerShell / WinRM / EDR)</span>
-                <span class="os-tag">WFP KERNEL CALLOUT</span>
-            </h4>
-            <div class="code-snippet">
-                <span id="win-cmd">iwr -useb http://10.0.0.57:9999/bootstrap.ps1 | iex</span>
-                <button class="copy-btn" onclick="copyToClipboard('win-cmd', this)">Copy</button>
+    <!-- Rule Authoring Modal -->
+    <div id="rule-modal" class="modal-overlay" onclick="closeRuleModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-title">
+                <span>Author Dynamic Kernel Rule</span>
+                <span style="font-size: 12px; color: var(--cyan);">Ring-0 Callout Broadcast</span>
             </div>
-        </div>
-        <div class="jumpkit-card">
-            <h4>
-                <span>Linux (Debian / Ubuntu / RHEL via SSH / Ansible)</span>
-                <span class="os-tag">eBPF TC ENGINE</span>
-            </h4>
-            <div class="code-snippet">
-                <span id="linux-cmd">curl -sSL http://10.0.0.57:9999/bootstrap.sh | sudo bash</span>
-                <button class="copy-btn" onclick="copyToClipboard('linux-cmd', this)">Copy</button>
+            <div class="form-group">
+                <label class="form-label">Rule Name / Description</label>
+                <input type="text" id="rule-name" class="form-control" placeholder="e.g. Block CobaltStrike C2 Subnet">
+            </div>
+            <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                    <label class="form-label">Match Type</label>
+                    <select id="rule-type" class="form-control">
+                        <option value="cidr">CIDR Subnet (e.g. 198.51.100.0/24)</option>
+                        <option value="ip">Single IPv4 (e.g. 185.220.101.5)</option>
+                        <option value="domain">Domain / TLS SNI (e.g. evil-c2.net)</option>
+                        <option value="port">Port Only (e.g. 4444)</option>
+                        <option value="process">Process Path (e.g. powershell.exe)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label">Target Match Value</label>
+                    <input type="text" id="rule-value" class="form-control" placeholder="185.220.101.0/24">
+                </div>
+            </div>
+            <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                    <label class="form-label">Port (0 = All Ports)</label>
+                    <input type="number" id="rule-port" class="form-control" value="0">
+                </div>
+                <div>
+                    <label class="form-label">Protocol</label>
+                    <select id="rule-proto" class="form-control">
+                        <option value="any">Any Protocol</option>
+                        <option value="tcp">TCP (6)</option>
+                        <option value="udp">UDP (17)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                    <label class="form-label">Verdict Action</label>
+                    <select id="rule-action" class="form-control">
+                        <option value="BLOCK">🔴 BLOCK (Drop Traffic)</option>
+                        <option value="PERMIT">🟢 PERMIT (Allow Traffic)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label">Deployment Scope</label>
+                    <select id="rule-scope" class="form-control">
+                        <option value="all">Entire Fleet (All Platforms)</option>
+                        <option value="platform:windows">Windows Only (WFP)</option>
+                        <option value="platform:linux">Linux Only (eBPF)</option>
+                        <option value="platform:darwin">macOS Only (NetworkExt)</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+                <button class="btn" onclick="closeRuleModal()">Cancel</button>
+                <button class="btn btn-cyan" onclick="saveRule()">Save & Deploy Rule</button>
             </div>
         </div>
     </div>
 
-    <!-- Modal Event Detail Inspector -->
+    <!-- Forensic Inspector Modal -->
     <div id="inspector-modal" class="modal-overlay" onclick="closeModal(event)">
         <div class="modal-content" onclick="event.stopPropagation()">
             <div class="modal-title">Kernel Telemetry Forensic Inspector</div>
@@ -288,6 +352,8 @@ const dashboardHTML = `<!DOCTYPE html>
         var ADMIN_KEY = "ominull-master-admin-key";
         var rawEndpoints = [];
         var rawEvents = [];
+        var rawRules = [];
+        var rawIOCs = [];
         var selectedIDs = {};
 
         function fetchAPI(endpoint, method, body) {
@@ -304,25 +370,29 @@ const dashboardHTML = `<!DOCTYPE html>
             Promise.all([
                 fetchAPI("/api/v1/endpoints"),
                 fetchAPI("/api/v1/events"),
-                fetchAPI("/api/v1/tenants")
+                fetchAPI("/api/v1/rules"),
+                fetchAPI("/api/v1/threatintel/iocs")
             ]).then(function(results) {
                 var newEndpoints = results[0] || [];
-                // Sort deterministically by Hostname ASC, then ID ASC
                 newEndpoints.sort(function(a, b) {
                     return a.hostname.localeCompare(b.hostname) || a.id.localeCompare(b.id);
                 });
 
                 rawEndpoints = newEndpoints;
                 rawEvents = results[1] || [];
-                var tenants = results[2] || [];
+                rawRules = results[2] || [];
+                rawIOCs = results[3] || [];
 
                 document.getElementById("metric-endpoints").innerText = rawEndpoints.length;
                 document.getElementById("metric-isolated").innerText = rawEndpoints.filter(function(e) { return e.is_isolated; }).length;
                 document.getElementById("metric-events").innerText = rawEvents.length;
-                document.getElementById("metric-tenants").innerText = tenants.length;
+                document.getElementById("metric-rules").innerText = rawRules.length;
+                document.getElementById("metric-iocs").innerText = rawIOCs.length;
                 document.getElementById("endpoint-count-badge").innerText = rawEndpoints.length + " ACTIVE";
+                document.getElementById("rules-count-badge").innerText = rawRules.length + " ACTIVE RULES";
 
                 renderEndpoints();
+                renderRules();
                 renderEvents();
             }).catch(function(err) {
                 console.error("Sync error:", err);
@@ -357,68 +427,94 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<td>' + statusBadge + '</td>' +
                     '<td><strong style="color:#fff;">' + ep.hostname + '</strong></td>' +
                     '<td><span class="os-tag">' + ep.os + '</span></td>' +
-                    '<td><code>' + (ep.ip || "10.0.0.110") + '</code></td>' +
+                    '<td><code>' + (ep.ip || "10.0.0.50") + '</code></td>' +
                     '<td>v' + (ep.driver_version || "1.0.0") + '</td>' +
                     '<td>' + isoBadge + '</td>' +
                     '<td>' + new Date(ep.last_seen_at).toLocaleTimeString() + '</td>' +
                     '<td>' + isoBtn + '</td>' +
                 '</tr>';
             }).join("");
-
-            updateBatchActionBar();
         }
 
-        function toggleSelectEp(id, cb) {
-            if (cb.checked) {
-                selectedIDs[id] = true;
-            } else {
-                delete selectedIDs[id];
+        function renderRules() {
+            var tbody = document.getElementById("rules-body");
+            if (rawRules.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No active policy rules defined. Click "+ Add Policy Rule" to deploy.</td></tr>';
+                return;
             }
-            updateBatchActionBar();
+
+            tbody.innerHTML = rawRules.map(function(r) {
+                var actionBadge = r.action === "BLOCK" ? '<span class="badge badge-block">BLOCK</span>' : '<span class="badge badge-permit">PERMIT</span>';
+                var portText = r.port > 0 ? ":" + r.port : "Any";
+                var protoText = (r.protocol || "any").toUpperCase();
+
+                return '<tr>' +
+                    '<td><strong style="color:#fff;">' + r.name + '</strong></td>' +
+                    '<td><span class="os-tag">' + r.type.toUpperCase() + '</span></td>' +
+                    '<td><code>' + r.value + '</code></td>' +
+                    '<td>' + portText + ' / ' + protoText + '</td>' +
+                    '<td>' + actionBadge + '</td>' +
+                    '<td><span class="os-tag">' + (r.scope || "ALL").toUpperCase() + '</span></td>' +
+                    '<td><span class="badge badge-online">ACTIVE</span></td>' +
+                    '<td><button class="btn btn-isolate" style="padding: 2px 8px; font-size: 11px;" onclick="deleteRule(\'' + r.id + '\')">Revoke</button></td>' +
+                '</tr>';
+            }).join("");
         }
 
-        function toggleSelectAll(cb) {
-            rawEndpoints.forEach(function(ep) {
-                if (cb.checked) {
-                    selectedIDs[ep.id] = true;
-                } else {
-                    delete selectedIDs[ep.id];
-                }
+        function openRuleModal() {
+            document.getElementById("rule-modal").style.display = "flex";
+        }
+
+        function closeRuleModal() {
+            document.getElementById("rule-modal").style.display = "none";
+        }
+
+        function saveRule() {
+            var name = document.getElementById("rule-name").value.trim();
+            var type = document.getElementById("rule-type").value;
+            var value = document.getElementById("rule-value").value.trim();
+            var port = parseInt(document.getElementById("rule-port").value, 10) || 0;
+            var protocol = document.getElementById("rule-proto").value;
+            var action = document.getElementById("rule-action").value;
+            var scopeSel = document.getElementById("rule-scope").value;
+
+            if (!name || !value) {
+                return alert("Please fill in Rule Name and Target Match Value.");
+            }
+
+            var scope = "all";
+            var scopeVal = "";
+            if (scopeSel.startsWith("platform:")) {
+                scope = "platform";
+                scopeVal = scopeSel.split(":")[1];
+            }
+
+            fetchAPI("/api/v1/rules", "POST", {
+                name: name,
+                type: type,
+                value: value,
+                port: port,
+                protocol: protocol,
+                action: action,
+                scope: scope,
+                scope_value: scopeVal
+            }).then(function() {
+                closeRuleModal();
+                refreshData();
             });
-            renderEndpoints();
         }
 
-        function updateBatchActionBar() {
-            var count = Object.keys(selectedIDs).length;
-            var bar = document.getElementById("batch-action-bar");
-            if (count > 0) {
-                bar.style.display = "flex";
-                document.getElementById("batch-selected-count").innerText = count + " endpoint" + (count > 1 ? "s" : "") + " selected";
-            } else {
-                bar.style.display = "none";
+        function deleteRule(id) {
+            if (confirm("Revoke dynamic policy rule " + id + "?")) {
+                fetchAPI("/api/v1/rules?id=" + id, "DELETE").then(refreshData);
             }
         }
 
-        function isolateSelected(enable) {
-            var ids = Object.keys(selectedIDs);
-            if (ids.length === 0) return;
-            var actionText = enable ? "ISOLATE" : "UNISOLATE";
-            if (confirm("Are you sure you want to " + actionText + " " + ids.length + " selected endpoint(s)?")) {
-                var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
-                fetchAPI(url, "POST", { scope: "ids", ids: ids, allow_ips: ["10.0.0.57"] }).then(function() {
-                    selectedIDs = {};
-                    refreshData();
-                });
-            }
-        }
-
-        function executeBulkAction(scope, value, enable) {
-            var actionText = enable ? "ISOLATE (Default-Deny Quarantine)" : "UNISOLATE (Normal)";
-            var targetDesc = scope === "all" ? "the ENTIRE fleet" : "all " + value + " endpoints";
-            if (confirm("CRITICAL ACTION: Are you sure you want to " + actionText + " " + targetDesc + "?")) {
-                var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
-                fetchAPI(url, "POST", { scope: scope, value: value, allow_ips: ["10.0.0.57"] }).then(refreshData);
-            }
+        function syncThreatFeeds() {
+            fetchAPI("/api/v1/threatintel/sync", "POST").then(function(res) {
+                alert("Threat intelligence feed synchronization initiated in background.");
+                setTimeout(refreshData, 2000);
+            });
         }
 
         function renderEvents() {
@@ -480,7 +576,7 @@ const dashboardHTML = `<!DOCTYPE html>
         }
 
         function isolateTarget(endpointId) {
-            if (confirm("Are you sure you want to trigger microsecond kernel isolation for " + endpointId + "?")) {
+            if (confirm("Trigger microsecond kernel isolation for " + endpointId + "?")) {
                 fetchAPI("/api/v1/endpoints/isolate", "POST", { endpoint_id: endpointId, allow_ips: ["10.0.0.57"] }).then(refreshData);
             }
         }
@@ -489,17 +585,13 @@ const dashboardHTML = `<!DOCTYPE html>
             fetchAPI("/api/v1/endpoints/unisolate", "POST", { endpoint_id: endpointId }).then(refreshData);
         }
 
-        function copyToClipboard(elementId, btn) {
-            var text = document.getElementById(elementId).innerText;
-            navigator.clipboard.writeText(text).then(function() {
-                var orig = btn.innerText;
-                btn.innerText = "Copied!";
-                btn.style.background = "var(--green)";
-                setTimeout(function() {
-                    btn.innerText = orig;
-                    btn.style.background = "";
-                }, 1500);
-            });
+        function executeBulkAction(scope, value, enable) {
+            var actionText = enable ? "ISOLATE (Default-Deny Quarantine)" : "UNISOLATE (Normal)";
+            var targetDesc = scope === "all" ? "the ENTIRE fleet" : "all " + value + " endpoints";
+            if (confirm("CRITICAL ACTION: Are you sure you want to " + actionText + " " + targetDesc + "?")) {
+                var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
+                fetchAPI(url, "POST", { scope: scope, value: value, allow_ips: ["10.0.0.57"] }).then(refreshData);
+            }
         }
 
         function exportEventsCSV() {
