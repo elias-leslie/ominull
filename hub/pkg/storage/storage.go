@@ -73,6 +73,17 @@ type Rule struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+type Alert struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	EndpointID  string    `json:"endpoint_id"`
+	Timestamp   time.Time `json:"timestamp"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Severity    string    `json:"severity"` // LOW, MEDIUM, HIGH, CRITICAL
+	Mitigated   bool      `json:"mitigated"`
+}
+
 type Store struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -167,11 +178,23 @@ func (s *Store) initSchema() error {
 		created_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS alerts (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+		endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+		timestamp DATETIME NOT NULL,
+		title TEXT NOT NULL,
+		description TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		mitigated INTEGER NOT NULL DEFAULT 0
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
 	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_alerts_tenant_time ON alerts(tenant_id, timestamp DESC);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -623,4 +646,62 @@ func (s *Store) DeleteRule(id string) error {
 
 	_, err := s.db.Exec("DELETE FROM rules WHERE id = ?", id)
 	return err
+}
+
+func (s *Store) CreateAlert(a Alert) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val := 0
+	if a.Mitigated {
+		val = 1
+	}
+	_, err := s.db.Exec(
+		"INSERT INTO alerts (id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		a.ID, a.TenantID, a.EndpointID, a.Timestamp, a.Title, a.Description, a.Severity, val,
+	)
+	return err
+}
+
+func (s *Store) ListAlerts(tenantID string, limit int) ([]Alert, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated FROM alerts WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			tenantID, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated FROM alerts ORDER BY timestamp DESC LIMIT ?",
+			limit,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Alert
+	for rows.Next() {
+		var a Alert
+		var mitInt int
+		if err := rows.Scan(
+			&a.ID, &a.TenantID, &a.EndpointID, &a.Timestamp, &a.Title, &a.Description, &a.Severity, &mitInt,
+		); err != nil {
+			return nil, err
+		}
+		a.Mitigated = mitInt != 0
+		list = append(list, a)
+	}
+	return list, nil
 }

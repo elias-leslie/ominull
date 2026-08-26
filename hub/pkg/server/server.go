@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/bootstrap"
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
@@ -29,6 +30,7 @@ var upgrader = websocket.Upgrader{
 type Server struct {
 	store      *storage.Store
 	ti         *threatintel.Manager
+	detector   *detector.Engine
 	adminKey   string
 	binaryDir  string
 	hubURL     string
@@ -62,15 +64,25 @@ type CommandMessage struct {
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
-	return &Server{
+	eventsChan := make(chan storage.Event, 1000)
+	s := &Server{
 		store:      store,
 		ti:         threatintel.New(store),
 		adminKey:   adminKey,
 		binaryDir:  binaryDir,
 		hubURL:     hubURL,
 		clients:    make(map[string]*Client),
-		eventsChan: make(chan storage.Event, 1000),
+		eventsChan: eventsChan,
 	}
+	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
+		_ = s.store.SetEndpointIsolation(endpointID, true)
+		cmd := CommandMessage{
+			Type: "ISOLATE",
+			Payload: map[string]interface{}{"reason": reason},
+		}
+		return s.SendCommand(endpointID, cmd)
+	})
+	return s
 }
 
 func (s *Server) Events() <-chan storage.Event {
@@ -87,8 +99,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Start(addr string) error {
-	// Start Threat Intelligence feed scheduler
+	// Start Threat Intelligence feed scheduler & Behavioral Detector
 	s.ti.Start(context.Background(), 1*time.Hour)
+	s.detector.Start(context.Background())
 
 	mux := http.NewServeMux()
 
@@ -116,6 +129,7 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(s.handleThreatIntelSync))
 	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
+	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
@@ -130,6 +144,7 @@ func (s *Server) Start(addr string) error {
 
 func (s *Server) Close() error {
 	s.ti.Stop()
+	s.detector.Stop()
 	if s.httpServer != nil {
 		return s.httpServer.Close()
 	}
@@ -807,4 +822,26 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := "default"
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	alerts, err := s.store.ListAlerts(tenantID, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(alerts)
 }
