@@ -468,10 +468,14 @@ func (s *Store) seedDefaults() {
 
 	now := time.Now().UTC()
 	// Single Real Default Home Tenant
+	masterKey := os.Getenv("OMINULL_MASTER_KEY")
+	if masterKey == "" {
+		masterKey = "omi_live_master"
+	}
 	defaultTenant := Tenant{
 		ID:        "default",
 		Name:      "Home Network",
-		APIKey:    "ominull-master-admin-key",
+		APIKey:    masterKey,
 		CreatedAt: now,
 	}
 	_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",

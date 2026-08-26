@@ -105,7 +105,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(dashboardHTML))
+	html := strings.ReplaceAll(dashboardHTML, "ominull-master-admin-key", s.adminKey)
+	w.Write([]byte(html))
 }
 
 func (s *Server) Start(addr string) error {
