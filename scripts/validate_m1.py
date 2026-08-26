@@ -40,7 +40,7 @@ sublayer_in_loaded = "OminullSubLayer" in loaded_content
 callout_in_loaded = "OminullAleConnectCallout" in loaded_content
 filter_in_loaded = "OminullAleConnectFilter" in loaded_content
 
-print(f"\n[6] WFP Loaded Objects:")
+print("\n[6] WFP Loaded Objects:")
 print(f"    - Sublayer Added:            {'PASS' if sublayer_in_loaded else 'FAIL'}")
 print(f"    - Callout Registered/Added:  {'PASS' if callout_in_loaded else 'FAIL'}")
 print(f"    - Filter Added:              {'PASS' if filter_in_loaded else 'FAIL'}")
@@ -50,7 +50,7 @@ sublayer_in_post = "OminullSubLayer" in post_content
 callout_in_post = "OminullAleConnectCallout" in post_content
 filter_in_post = "OminullAleConnectFilter" in post_content
 
-print(f"\n[7] Zero-Leak Verification (Post-Unload):")
+print("\n[7] Zero-Leak Verification (Post-Unload):")
 print(f"    - Sublayer Leaked:           {'NO (CLEAN)' if not sublayer_in_post else 'LEAKED'}")
 print(f"    - Callout Leaked:            {'NO (CLEAN)' if not callout_in_post else 'LEAKED'}")
 print(f"    - Filter Leaked:             {'NO (CLEAN)' if not filter_in_post else 'LEAKED'}")
@@ -59,7 +59,7 @@ print(f"    - Filter Leaked:             {'NO (CLEAN)' if not filter_in_post els
 traffic_1_ok = "Ominull Test Server: OK" in log_content
 ping_ok = "Reply from 10.0.0.57" in log_content
 
-print(f"\n[8] Outbound Network Telemetry / ALE Traffic:")
+print("\n[8] Outbound Network Telemetry / ALE Traffic:")
 print(f"    - HTTP /traffic-1 Permitted: {'PASS' if traffic_1_ok else 'FAIL'}")
 print(f"    - ICMP Echo Permitted:       {'PASS' if ping_ok else 'FAIL'}")
 

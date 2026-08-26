@@ -2,7 +2,6 @@
 import http.server
 import socketserver
 import os
-import sys
 
 PORT = 9998
 OUTPUT_DIR = "/srv/workspaces/projects/ominull/evidence/m1-callout"

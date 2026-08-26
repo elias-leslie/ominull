@@ -46,6 +46,33 @@ type Event struct {
 	ProcessID   uint32    `json:"process_id"`
 }
 
+type IOC struct {
+	ID         string    `json:"id"`
+	Value      string    `json:"value"`
+	Type       string    `json:"type"` // "ipv4", "cidr", "domain", "hash"
+	Source     string    `json:"source"` // "feodo", "emerging_threats", "custom"
+	ThreatType string    `json:"threat_type"` // "c2", "malware_dist", "scanner"
+	Confidence int       `json:"confidence"`
+	Active     bool      `json:"active"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+}
+
+type Rule struct {
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenant_id"`
+	Name       string    `json:"name"`
+	Type       string    `json:"type"` // "ip", "cidr", "domain", "process", "port"
+	Value      string    `json:"value"`
+	Port       uint16    `json:"port"`
+	Protocol   string    `json:"protocol"` // "tcp", "udp", "any"
+	Action     string    `json:"action"` // "BLOCK", "PERMIT"
+	Scope      string    `json:"scope"` // "all", "platform", "department", "ids"
+	ScopeValue string    `json:"scope_value"`
+	Active     bool      `json:"active"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type Store struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -113,9 +140,38 @@ func (s *Store) initSchema() error {
 		process_id INTEGER NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS iocs (
+		id TEXT PRIMARY KEY,
+		value TEXT UNIQUE NOT NULL,
+		type TEXT NOT NULL,
+		source TEXT NOT NULL,
+		threat_type TEXT NOT NULL,
+		confidence INTEGER NOT NULL DEFAULT 80,
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL,
+		last_seen_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS rules (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		value TEXT NOT NULL,
+		port INTEGER DEFAULT 0,
+		protocol TEXT DEFAULT "any",
+		action TEXT NOT NULL DEFAULT "BLOCK",
+		scope TEXT NOT NULL DEFAULT "all",
+		scope_value TEXT DEFAULT "",
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
+	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -398,4 +454,173 @@ func (s *Store) QueryEvents(tenantID, endpointID string, limit int) ([]Event, er
 		list = append(list, e)
 	}
 	return list, nil
+}
+
+func (s *Store) UpsertIOC(ioc IOC) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val := 0
+	if ioc.Active {
+		val = 1
+	}
+	query := `
+	INSERT INTO iocs (id, value, type, source, threat_type, confidence, active, created_at, last_seen_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(value) DO UPDATE SET
+		threat_type=excluded.threat_type,
+		confidence=excluded.confidence,
+		active=excluded.active,
+		last_seen_at=excluded.last_seen_at
+	`
+	_, err := s.db.Exec(
+		query,
+		ioc.ID, ioc.Value, ioc.Type, ioc.Source, ioc.ThreatType,
+		ioc.Confidence, val, ioc.CreatedAt, ioc.LastSeenAt,
+	)
+	return err
+}
+
+func (s *Store) UpsertIOCsBatch(iocs []IOC) error {
+	if len(iocs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`
+	INSERT INTO iocs (id, value, type, source, threat_type, confidence, active, created_at, last_seen_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(value) DO UPDATE SET
+		threat_type=excluded.threat_type,
+		confidence=excluded.confidence,
+		active=excluded.active,
+		last_seen_at=excluded.last_seen_at
+	`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+
+	for _, ioc := range iocs {
+		val := 0
+		if ioc.Active {
+			val = 1
+		}
+		if _, err := stmt.Exec(
+			ioc.ID, ioc.Value, ioc.Type, ioc.Source, ioc.ThreatType,
+			ioc.Confidence, val, ioc.CreatedAt, ioc.LastSeenAt,
+		); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListIOCs(limit int) ([]IOC, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(
+		"SELECT id, value, type, source, threat_type, confidence, active, created_at, last_seen_at FROM iocs WHERE active = 1 ORDER BY last_seen_at DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []IOC
+	for rows.Next() {
+		var ioc IOC
+		var actInt int
+		if err := rows.Scan(
+			&ioc.ID, &ioc.Value, &ioc.Type, &ioc.Source, &ioc.ThreatType,
+			&ioc.Confidence, &actInt, &ioc.CreatedAt, &ioc.LastSeenAt,
+		); err != nil {
+			return nil, err
+		}
+		ioc.Active = actInt != 0
+		list = append(list, ioc)
+	}
+	return list, nil
+}
+
+func (s *Store) DeleteIOC(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM iocs WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) CreateRule(r Rule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val := 0
+	if r.Active {
+		val = 1
+	}
+	_, err := s.db.Exec(
+		"INSERT INTO rules (id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		r.ID, r.TenantID, r.Name, r.Type, r.Value, r.Port, r.Protocol, r.Action, r.Scope, r.ScopeValue, val, r.CreatedAt,
+	)
+	return err
+}
+
+func (s *Store) ListRules(tenantID string) ([]Rule, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at FROM rules WHERE tenant_id = ? ORDER BY created_at DESC",
+			tenantID,
+		)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at FROM rules ORDER BY created_at DESC",
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Rule
+	for rows.Next() {
+		var r Rule
+		var actInt int
+		if err := rows.Scan(
+			&r.ID, &r.TenantID, &r.Name, &r.Type, &r.Value, &r.Port, &r.Protocol, &r.Action, &r.Scope, &r.ScopeValue, &actInt, &r.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		r.Active = actInt != 0
+		list = append(list, r)
+	}
+	return list, nil
+}
+
+func (s *Store) DeleteRule(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM rules WHERE id = ?", id)
+	return err
 }

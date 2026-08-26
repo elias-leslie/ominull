@@ -4,7 +4,6 @@ import socketserver
 import threading
 import time
 import os
-import sys
 import subprocess
 import shutil
 
@@ -298,7 +297,7 @@ def deploy_and_test():
     has_stop_ok = "STATE              : 1  STOPPED" in log_text
     has_delete_ok = "[SC] DeleteService SUCCESS" in log_text
 
-    print(f"[1] Kernel Service Lifecycle:")
+    print("[1] Kernel Service Lifecycle:")
     print(f"    - Create Service:           {'PASS' if has_create_ok else 'FAIL'}")
     print(f"    - Start Service (RUNNING):  {'PASS' if has_start_running else 'FAIL'}")
     print(f"    - Driver Query:             {'PASS' if has_driverquery_ok else 'FAIL'}")
@@ -327,7 +326,7 @@ def deploy_and_test():
     all_callouts_present = all(c in loaded_xml for c in expected_callouts)
     all_filters_present = all(f in loaded_xml for f in expected_filters)
 
-    print(f"\n[2] Dual-Stack WFP Layer & Object Registration (Loaded):")
+    print("\n[2] Dual-Stack WFP Layer & Object Registration (Loaded):")
     print(f"    - Custom SubLayer (0xFFFF): {'PASS' if has_sublayer else 'FAIL'}")
     for c in expected_callouts:
         print(f"    - Callout: {c:33s} {'PASS' if c in loaded_xml else 'FAIL'}")
@@ -339,7 +338,7 @@ def deploy_and_test():
     callouts_leaked = any(c in post_xml for c in expected_callouts)
     filters_leaked = any(f in post_xml for f in expected_filters)
 
-    print(f"\n[3] Zero-Leak Deregistration Verification (Post-Unload):")
+    print("\n[3] Zero-Leak Deregistration Verification (Post-Unload):")
     print(f"    - SubLayer Leaked:          {'NO (CLEAN)' if not sublayer_leaked else 'LEAKED'}")
     print(f"    - Callouts Leaked:          {'NO (CLEAN)' if not callouts_leaked else 'LEAKED'}")
     print(f"    - Filters Leaked:           {'NO (CLEAN)' if not filters_leaked else 'LEAKED'}")
@@ -350,7 +349,7 @@ def deploy_and_test():
     has_rule_del = "Successfully deleted kernel rule" in log_text
     has_rule_clear = "Successfully cleared all kernel rules" in log_text
 
-    print(f"\n[4] Dynamic Policy Engine & IOCTL Management:")
+    print("\n[4] Dynamic Policy Engine & IOCTL Management:")
     print(f"    - Dynamic Block Rules Added: {'PASS' if has_rule_add else 'FAIL'}")
     print(f"    - Rules Table Displayed:     {'PASS' if has_rules_table else 'FAIL'}")
     print(f"    - Rule Deletion by ID:       {'PASS' if has_rule_del else 'FAIL'}")
@@ -361,7 +360,7 @@ def deploy_and_test():
     blocked_traffic_absent = "traffic-blocked" not in [t["path"].lstrip('/') for t in received_traffic]
     unblocked_ok = "traffic-unblocked" in [t["path"].lstrip('/') for t in received_traffic]
 
-    print(f"\n[5] Network Telemetry & Kernel Enforcement Traffic:")
+    print("\n[5] Network Telemetry & Kernel Enforcement Traffic:")
     print(f"    - Baseline Traffic Permitted: {'PASS' if baseline_ok else 'FAIL'}")
     print(f"    - Blocked Traffic Dropped:    {'PASS' if blocked_traffic_absent else 'FAIL'}")
     print(f"    - Unblocked Traffic Permitted: {'PASS' if unblocked_ok else 'FAIL'}")

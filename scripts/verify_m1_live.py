@@ -4,7 +4,6 @@ import socketserver
 import threading
 import time
 import os
-import sys
 import subprocess
 
 EVIDENCE_DIR = "/srv/workspaces/projects/ominull/evidence/m1-callout"

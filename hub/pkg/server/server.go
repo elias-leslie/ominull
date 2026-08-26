@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
 
 var upgrader = websocket.Upgrader{
@@ -26,13 +28,14 @@ var upgrader = websocket.Upgrader{
 
 type Server struct {
 	store      *storage.Store
+	ti         *threatintel.Manager
 	adminKey   string
 	binaryDir  string
 	hubURL     string
 	httpServer *http.Server
 
-	clientsMu sync.RWMutex
-	clients   map[string]*Client // endpointID -> Client
+	clientsMu  sync.RWMutex
+	clients    map[string]*Client // endpointID -> Client
 	eventsChan chan storage.Event
 }
 
@@ -61,6 +64,7 @@ type CommandMessage struct {
 func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 	return &Server{
 		store:      store,
+		ti:         threatintel.New(store),
 		adminKey:   adminKey,
 		binaryDir:  binaryDir,
 		hubURL:     hubURL,
@@ -83,6 +87,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Start(addr string) error {
+	// Start Threat Intelligence feed scheduler
+	s.ti.Start(context.Background(), 1*time.Hour)
+
 	mux := http.NewServeMux()
 
 	// 0. Embedded Web Dashboard
@@ -105,6 +112,11 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
 
+	// 4. Threat Intelligence & Dynamic Rules API
+	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
+	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(s.handleThreatIntelSync))
+	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
+
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -117,6 +129,7 @@ func (s *Server) Start(addr string) error {
 }
 
 func (s *Server) Close() error {
+	s.ti.Stop()
 	if s.httpServer != nil {
 		return s.httpServer.Close()
 	}
@@ -600,6 +613,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				if batch.Events[i].Timestamp.IsZero() {
 					batch.Events[i].Timestamp = time.Now().UTC()
 				}
+
+				// Match against Threat Intelligence Cache
+				if ioc, found := s.ti.CheckThreat(batch.Events[i].DstIP); found {
+					batch.Events[i].Action = "BLOCK"
+					log.Printf("[!] THREAT MATCH: Endpoint %s -> C2 IP %s blocked (Source: %s, Threat: %s, Confidence: %d%%)",
+						batch.EndpointID, batch.Events[i].DstIP, ioc.Source, ioc.ThreatType, ioc.Confidence)
+				} else if ioc, found := s.ti.CheckThreat(batch.Events[i].SrcIP); found {
+					batch.Events[i].Action = "BLOCK"
+					log.Printf("[!] THREAT MATCH: Inbound threat %s blocked on %s (Source: %s, Threat: %s)",
+						batch.Events[i].SrcIP, batch.EndpointID, ioc.Source, ioc.ThreatType)
+				}
+
 				select {
 				case s.eventsChan <- batch.Events[i]:
 				default:
@@ -618,6 +643,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				if rawEvents[i].Timestamp.IsZero() {
 					rawEvents[i].Timestamp = time.Now().UTC()
 				}
+
+				if ioc, found := s.ti.CheckThreat(rawEvents[i].DstIP); found {
+					rawEvents[i].Action = "BLOCK"
+					log.Printf("[!] THREAT MATCH: Connection to C2 IP %s blocked (Source: %s, Threat: %s)",
+						rawEvents[i].DstIP, ioc.Source, ioc.ThreatType)
+				}
+
 				select {
 				case s.eventsChan <- rawEvents[i]:
 				default:
@@ -642,4 +674,137 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events)
+}
+
+func (s *Server) handleThreatIntelIOCs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	iocs, err := s.store.ListIOCs(200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(iocs)
+}
+
+func (s *Server) handleThreatIntelSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	go func() {
+		_ = s.ti.SyncAllFeeds(context.Background())
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"syncing","message":"Threat intelligence synchronization initiated in background"}`))
+}
+
+func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
+	role := r.Header.Get("X-Role")
+	tenantID := "default"
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	if r.Method == http.MethodPost {
+		var req struct {
+			Name       string `json:"name"`
+			Type       string `json:"type"` // "ip", "cidr", "domain", "process", "port"
+			Value      string `json:"value"`
+			Port       uint16 `json:"port"`
+			Protocol   string `json:"protocol"`
+			Action     string `json:"action"` // "BLOCK", "PERMIT"
+			Scope      string `json:"scope"`
+			ScopeValue string `json:"scope_value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if req.Action == "" {
+			req.Action = "BLOCK"
+		}
+		if req.Protocol == "" {
+			req.Protocol = "any"
+		}
+		if req.Scope == "" {
+			req.Scope = "all"
+		}
+
+		rule := storage.Rule{
+			ID:         uuid.New().String(),
+			TenantID:   tenantID,
+			Name:       req.Name,
+			Type:       req.Type,
+			Value:      req.Value,
+			Port:       req.Port,
+			Protocol:   req.Protocol,
+			Action:     req.Action,
+			Scope:      req.Scope,
+			ScopeValue: req.ScopeValue,
+			Active:     true,
+			CreatedAt:  time.Now().UTC(),
+		}
+
+		if err := s.store.CreateRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Broadcast rule update to connected endpoints
+		cmd := CommandMessage{
+			Type: "UPDATE_CONFIG",
+			Payload: map[string]interface{}{
+				"rule": rule,
+			},
+		}
+		s.clientsMu.RLock()
+		for id := range s.clients {
+			_ = s.SendCommand(id, cmd)
+		}
+		s.clientsMu.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(rule)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		rules, err := s.store.ListRules(tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rules)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		ruleID := r.URL.Query().Get("id")
+		if ruleID == "" {
+			http.Error(w, "missing rule id", http.StatusBadRequest)
+			return
+		}
+		if err := s.store.DeleteRule(ruleID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"deleted","rule_id":"` + ruleID + `"}`))
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
