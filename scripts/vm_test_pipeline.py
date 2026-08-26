@@ -277,6 +277,7 @@ def main():
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
 
+    try:
         # 5. Rollback and Start VM via canonical st tool surface
         print(f"[5/6] Rolling back Proxmox VM {VM_ID} to snapshot '{SNAPSHOT}' via st vm...")
         import uuid
