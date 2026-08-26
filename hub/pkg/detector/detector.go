@@ -66,6 +66,14 @@ func (e *Engine) Stop() {
 func (e *Engine) Evaluate(ev storage.Event) {
 	now := time.Now().UTC()
 
+	// 0. Update Hierarchical Communications Baseline Profile
+	_ = e.store.RecordNetworkComms(ev, ev.EndpointID, "")
+
+	// 0.1 Check Active Custom Exclusions (Pinholes & Allowlists)
+	if e.store.IsExclusionMatch(ev, "") {
+		return // Traffic matches verified security tool or operational exclusion
+	}
+
 	// 1. Check for Rapid Port Sweeps / Reconnaissance
 	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 {
 		e.mu.Lock()
@@ -97,6 +105,20 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				Mitigated:   false,
 			}
 			_ = e.store.CreateAlert(alert)
+			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+				ID:          alert.ID,
+				TenantID:    ev.TenantID,
+				EndpointID:  ev.EndpointID,
+				Hostname:    ev.EndpointID,
+				AnomalyType: "PORT_SCAN_RECON",
+				Severity:    "HIGH",
+				Title:       alert.Title,
+				Description: alert.Description,
+				ProcessPath: ev.ProcessPath,
+				DstIP:       ev.DstIP,
+				DstPort:     ev.DstPort,
+				Timestamp:   now,
+			})
 			log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s", alert.Title, alert.EndpointID)
 		}
 	}
@@ -124,10 +146,44 @@ func (e *Engine) Evaluate(ev storage.Event) {
 			Mitigated:   false,
 		}
 		_ = e.store.CreateAlert(alert)
+		_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+			ID:          alert.ID,
+			TenantID:    ev.TenantID,
+			EndpointID:  ev.EndpointID,
+			Hostname:    ev.EndpointID,
+			AnomalyType: "NOVEL_PROCESS_EGRESS",
+			Severity:    "HIGH",
+			Title:       alert.Title,
+			Description: alert.Description,
+			ProcessPath: ev.ProcessPath,
+			DstIP:       ev.DstIP,
+			DstPort:     ev.DstPort,
+			Timestamp:   now,
+		})
 		log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s:%d)", alert.Title, alert.EndpointID, ev.DstIP, ev.DstPort)
 	}
 
-	// 3. Automated Nullification for Blocked Threats
+	// 3. Sensitive Port External Exposure
+	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && (ev.DstPort == 445 || ev.DstPort == 3389 || ev.DstPort == 23 || ev.DstPort == 135) {
+		anomaly := storage.AnomalyAlert{
+			ID:          uuid.New().String(),
+			TenantID:    ev.TenantID,
+			EndpointID:  ev.EndpointID,
+			Hostname:    ev.EndpointID,
+			AnomalyType: "SENSITIVE_PORT_EGRESS",
+			Severity:    "CRITICAL",
+			Title:       fmt.Sprintf("Sensitive Port %d Egress to External IP", ev.DstPort),
+			Description: fmt.Sprintf("Process %s attempted outbound connection on sensitive management/file-sharing port %d to %s.", ev.ProcessPath, ev.DstPort, ev.DstIP),
+			ProcessPath: ev.ProcessPath,
+			DstIP:       ev.DstIP,
+			DstPort:     ev.DstPort,
+			Timestamp:   now,
+		}
+		_ = e.store.CreateAnomalyAlert(anomaly)
+		log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
+	}
+
+	// 4. Automated Nullification for Blocked Threats
 	if ev.Action == "BLOCK" {
 		alert := storage.Alert{
 			ID:          uuid.New().String(),

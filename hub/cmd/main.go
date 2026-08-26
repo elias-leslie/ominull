@@ -60,24 +60,6 @@ func main() {
 	}
 
 	srv := server.New(store, *adminKey, absBinDir, *hubURL)
-
-	// Background real-time telemetry stream logger
-	go func() {
-		for ev := range srv.Events() {
-			color := "\033[32m" // Green for PERMIT
-			if ev.Action == "BLOCK" {
-				color = "\033[31m" // Red for BLOCK
-			}
-			reset := "\033[0m"
-
-			log.Printf("%s[%s][%s]%s %s %s:%d -> %s:%d | Proto:%d PID:%d (%s)",
-				color, ev.Layer, ev.Action, reset,
-				ev.Direction, ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort,
-				ev.Protocol, ev.ProcessID, ev.ProcessPath,
-			)
-		}
-	}()
-
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
 			log.Fatalf("[-] Hub server error: %v", err)

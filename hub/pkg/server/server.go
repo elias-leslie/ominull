@@ -135,7 +135,12 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
 
-	// 4. Dynamic Group Policy & Analytics API
+	// 4. Dynamic Group Policy, Exclusions & Profiling API
+	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
+	mux.HandleFunc("/api/v1/exclusions", s.authMiddleware(s.handleExclusions))
+	mux.HandleFunc("/api/v1/exclusions/toggle", s.authMiddleware(s.handleToggleExclusion))
+	mux.HandleFunc("/api/v1/anomalies", s.authMiddleware(s.handleAnomalies))
+	mux.HandleFunc("/api/v1/anomalies/acknowledge", s.authMiddleware(s.handleAcknowledgeAnomaly))
 	mux.HandleFunc("/api/v1/policy-groups", s.authMiddleware(s.handlePolicyGroups))
 	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
 	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
@@ -768,10 +773,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 						batch.Events[i].SrcIP, batch.EndpointID, ioc.Source, ioc.ThreatType)
 				}
 
-				select {
-				case s.eventsChan <- batch.Events[i]:
-				default:
-				}
+				// Evaluate against anomaly detection & comms profiling
+				s.detector.Evaluate(batch.Events[i])
 			}
 			s.store.InsertEventsBatch(batch.Events)
 			w.WriteHeader(http.StatusOK)
@@ -793,10 +796,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 						rawEvents[i].DstIP, ioc.Source, ioc.ThreatType)
 				}
 
-				select {
-				case s.eventsChan <- rawEvents[i]:
-				default:
-				}
+				// Evaluate against anomaly detection & comms profiling
+				s.detector.Evaluate(rawEvents[i])
 			}
 			s.store.InsertEventsBatch(rawEvents)
 			w.WriteHeader(http.StatusOK)
@@ -1253,4 +1254,188 @@ func (s *Server) handleGetAnalyticsSummary(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(summary)
+}
+
+func (s *Server) handleNetworkProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	level := r.URL.Query().Get("level") // "global", "client", "location", "endpoint"
+	id := r.URL.Query().Get("id")
+
+	role := r.Header.Get("X-Role")
+	if role == "tenant" {
+		level = "client"
+		id = r.Header.Get("X-Tenant-ID")
+	}
+
+	profiles, err := s.store.ListCommProfiles(level, id, 250)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(profiles)
+}
+
+func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		exclusions, err := s.store.ListExclusions(tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(exclusions)
+
+	case http.MethodPost:
+		var ex storage.Exclusion
+		if err := json.NewDecoder(r.Body).Decode(&ex); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if ex.ID == "" {
+			ex.ID = "ex-" + uuid.New().String()[:8]
+		}
+		if ex.TenantID == "" {
+			ex.TenantID = "default"
+		}
+		if role == "tenant" {
+			ex.TenantID = r.Header.Get("X-Tenant-ID")
+		}
+		if ex.Scope == "" {
+			ex.Scope = "global"
+		}
+		ex.Active = true
+		ex.CreatedAt = time.Now().UTC()
+
+		if err := s.store.CreateExclusion(ex); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Broadcast pinhole allowlist command to connected endpoints
+		cmd := CommandMessage{
+			Type: "ADD_RULE",
+			Payload: map[string]interface{}{
+				"id":       ex.ID,
+				"name":     ex.Name,
+				"type":     "ip",
+				"value":    ex.DstIPRange,
+				"port":     ex.Port,
+				"protocol": ex.Protocol,
+				"action":   "PERMIT",
+			},
+		}
+		s.clientsMu.RLock()
+		for epID := range s.clients {
+			_ = s.SendCommand(epID, cmd)
+		}
+		s.clientsMu.RUnlock()
+
+		_ = s.store.RecordAudit(storage.AuditEntry{
+			ID:        uuid.New().String(),
+			TenantID:  ex.TenantID,
+			UserID:    r.Header.Get("X-User-ID"),
+			Username:  r.Header.Get("X-Username"),
+			Action:    "CREATE_EXCLUSION",
+			Resource:  ex.ID,
+			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s:%d)", ex.Name, ex.ProcessPath, ex.Port),
+			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+			Timestamp: time.Now().UTC(),
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(ex)
+
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "missing id", http.StatusBadRequest)
+			return
+		}
+		if err := s.store.DeleteExclusion(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"deleted","id":"` + id + `"}`))
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID     string `json:"id"`
+		Active bool   `json:"active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.ToggleExclusion(req.ID, req.Active); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "updated", "id": req.ID, "active": req.Active})
+}
+
+func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	role := r.Header.Get("X-Role")
+	tenantID := ""
+	if role == "tenant" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	anomalies, err := s.store.ListAnomalyAlerts(tenantID, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(anomalies)
+}
+
+func (s *Server) handleAcknowledgeAnomaly(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.AcknowledgeAnomaly(req.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged", "id": req.ID})
 }

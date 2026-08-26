@@ -3,6 +3,8 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +65,60 @@ type Event struct {
 	Country     string    `json:"country"`
 	ProcessPath string    `json:"process_path"`
 	ProcessID   uint32    `json:"process_id"`
+}
+
+type CommProfile struct {
+	ID            string    `json:"id"`
+	TenantID      string    `json:"tenant_id"`
+	LocationID    string    `json:"location_id"`
+	EndpointID    string    `json:"endpoint_id"`
+	Hostname      string    `json:"hostname"`
+	ProcessName   string    `json:"process_name"`
+	ProcessPath   string    `json:"process_path"`
+	DstIP         string    `json:"dst_ip"`
+	DstPort       uint16    `json:"dst_port"`
+	Protocol      string    `json:"protocol"`
+	Direction     string    `json:"direction"`
+	Country       string    `json:"country"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	EventCount    int64     `json:"event_count"`
+	TotalBytesIn  int64     `json:"total_bytes_in"`
+	TotalBytesOut int64     `json:"total_bytes_out"`
+	IsBaseline    bool      `json:"is_baseline"`
+}
+
+type Exclusion struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	Scope       string    `json:"scope"`       // "global", "client", "location", "endpoint"
+	ScopeValue  string    `json:"scope_value"` // tenant_id, location_id, or endpoint_id
+	Name        string    `json:"name"`
+	ProcessPath string    `json:"process_path"`
+	DstIPRange  string    `json:"dst_ip_range"`
+	Port        uint16    `json:"port"`
+	Protocol    string    `json:"protocol"`
+	Reason      string    `json:"reason"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type AnomalyAlert struct {
+	ID           string    `json:"id"`
+	TenantID     string    `json:"tenant_id"`
+	LocationID   string    `json:"location_id"`
+	EndpointID   string    `json:"endpoint_id"`
+	Hostname     string    `json:"hostname"`
+	AnomalyType  string    `json:"anomaly_type"` // "NOVEL_PROCESS_EGRESS", "UNUSUAL_PORT", "BANDWIDTH_SPIKE", "NOVEL_COUNTRY"
+	Severity     string    `json:"severity"`     // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	Details      string    `json:"details"`
+	ProcessPath  string    `json:"process_path"`
+	DstIP        string    `json:"dst_ip"`
+	DstPort      uint16    `json:"dst_port"`
+	Timestamp    time.Time `json:"timestamp"`
+	Acknowledged bool      `json:"acknowledged"`
 }
 
 type IOC struct {
@@ -250,6 +306,60 @@ func (s *Store) initSchema() error {
 		process_id INTEGER NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS comm_profiles (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL,
+		location_id TEXT NOT NULL DEFAULT "",
+		endpoint_id TEXT NOT NULL,
+		hostname TEXT NOT NULL DEFAULT "",
+		process_name TEXT NOT NULL,
+		process_path TEXT NOT NULL DEFAULT "",
+		dst_ip TEXT NOT NULL,
+		dst_port INTEGER NOT NULL,
+		protocol TEXT NOT NULL DEFAULT "tcp",
+		direction TEXT NOT NULL DEFAULT "OUTBOUND",
+		country TEXT NOT NULL DEFAULT "US",
+		first_seen DATETIME NOT NULL,
+		last_seen DATETIME NOT NULL,
+		event_count INTEGER NOT NULL DEFAULT 1,
+		total_bytes_in INTEGER NOT NULL DEFAULT 0,
+		total_bytes_out INTEGER NOT NULL DEFAULT 0,
+		is_baseline INTEGER NOT NULL DEFAULT 1
+	);
+
+	CREATE TABLE IF NOT EXISTS exclusions (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL DEFAULT "default",
+		scope TEXT NOT NULL DEFAULT "global",
+		scope_value TEXT NOT NULL DEFAULT "",
+		name TEXT NOT NULL,
+		process_path TEXT NOT NULL DEFAULT "*",
+		dst_ip_range TEXT NOT NULL DEFAULT "*",
+		port INTEGER NOT NULL DEFAULT 0,
+		protocol TEXT NOT NULL DEFAULT "any",
+		reason TEXT NOT NULL DEFAULT "",
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS anomaly_alerts (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL,
+		location_id TEXT NOT NULL DEFAULT "",
+		endpoint_id TEXT NOT NULL,
+		hostname TEXT NOT NULL DEFAULT "",
+		anomaly_type TEXT NOT NULL,
+		severity TEXT NOT NULL DEFAULT "HIGH",
+		title TEXT NOT NULL,
+		description TEXT NOT NULL,
+		details TEXT NOT NULL DEFAULT "",
+		process_path TEXT NOT NULL DEFAULT "",
+		dst_ip TEXT NOT NULL DEFAULT "",
+		dst_port INTEGER NOT NULL DEFAULT 0,
+		timestamp DATETIME NOT NULL,
+		acknowledged INTEGER NOT NULL DEFAULT 0
+	);
+
 	CREATE TABLE IF NOT EXISTS iocs (
 		id TEXT PRIMARY KEY,
 		value TEXT UNIQUE NOT NULL,
@@ -319,6 +429,11 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
+	CREATE INDEX IF NOT EXISTS idx_comm_tenant ON comm_profiles(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_comm_loc ON comm_profiles(location_id);
+	CREATE INDEX IF NOT EXISTS idx_exclusions_tenant ON exclusions(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_anomaly_time ON anomaly_alerts(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_policy_groups_tenant ON policy_groups(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
 	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
@@ -329,7 +444,7 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
-	// Dynamic column migrations for existing databases
+	// Dynamic column migrations
 	migrations := []string{
 		"ALTER TABLE endpoints ADD COLUMN location_id TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN location_name TEXT DEFAULT ''",
@@ -352,7 +467,7 @@ func (s *Store) seedDefaults() {
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	// Default MSP Clients
+	// Default Tenants
 	tenants := []Tenant{
 		{ID: "default", Name: "Primary Enterprise / IR Incident", APIKey: "ominull-master-admin-key", CreatedAt: now},
 		{ID: "client-acme", Name: "Acme Global Industries (MSP-01)", APIKey: "key-acme-corp-prod", CreatedAt: now},
@@ -372,6 +487,56 @@ func (s *Store) seedDefaults() {
 	for _, l := range locations {
 		_, _ = s.db.Exec("INSERT OR IGNORE INTO locations (id, tenant_id, name, city, country, subnet_cidr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			l.ID, l.TenantID, l.Name, l.City, l.Country, l.SubnetCIDR, l.CreatedAt)
+	}
+
+	// Default Exclusions (Allowlists for critical tooling)
+	exclusions := []Exclusion{
+		{
+			ID:          "ex-splunk",
+			TenantID:    "default",
+			Scope:       "global",
+			ScopeValue:  "",
+			Name:        "Splunk Enterprise & Universal Forwarder Egress",
+			ProcessPath: "splunkd.exe",
+			DstIPRange:  "*",
+			Port:        8089,
+			Protocol:    "tcp",
+			Reason:      "Mandatory SIEM log shipping stream",
+			Active:      true,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "ex-velociraptor",
+			TenantID:    "default",
+			Scope:       "global",
+			ScopeValue:  "",
+			Name:        "Velociraptor Digital Forensics & IR Stream",
+			ProcessPath: "velociraptor",
+			DstIPRange:  "*",
+			Port:        8000,
+			Protocol:    "tcp",
+			Reason:      "Emergency incident response forensic artifact collection",
+			Active:      true,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "ex-hub",
+			TenantID:    "default",
+			Scope:       "global",
+			ScopeValue:  "",
+			Name:        "Ominull Central Command Hub Pinhole",
+			ProcessPath: "*",
+			DstIPRange:  "10.0.0.57",
+			Port:        9999,
+			Protocol:    "tcp",
+			Reason:      "Continuous mTLS heartbeats and telemetry channel",
+			Active:      true,
+			CreatedAt:   now,
+		},
+	}
+	for _, ex := range exclusions {
+		_, _ = s.db.Exec("INSERT OR IGNORE INTO exclusions (id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			ex.ID, ex.TenantID, ex.Scope, ex.ScopeValue, ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Protocol, ex.Reason, 1, ex.CreatedAt)
 	}
 
 	// Default Policy Groups
@@ -571,11 +736,6 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 		val = 1
 	}
 
-	var (
-		res sql.Result
-		err error
-	)
-
 	baseQuery := "UPDATE endpoints SET is_isolated = ?"
 	var args []interface{}
 	args = append(args, val)
@@ -608,7 +768,7 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 		}
 	}
 
-	res, err = s.db.Exec(baseQuery, args...)
+	res, err := s.db.Exec(baseQuery, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -827,6 +987,340 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 	}
 	return list, nil
 }
+
+/* NETWORK COMMUNICATIONS PROFILING & ANOMALY TRACKING */
+
+func (s *Store) RecordNetworkComms(ev Event, hostname string, locationID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cleanPath := strings.ReplaceAll(ev.ProcessPath, "\\", "/")
+	procName := filepath.Base(cleanPath)
+	if procName == "." || procName == "/" || procName == "\\" || procName == "" {
+		procName = "kernel/system"
+	}
+
+	protoStr := "TCP"
+	if ev.Protocol == 17 {
+		protoStr = "UDP"
+	} else if ev.Protocol == 1 {
+		protoStr = "ICMP"
+	}
+
+	dir := ev.Direction
+	if dir == "" {
+		dir = "OUTBOUND"
+	}
+	country := ev.Country
+	if country == "" {
+		country = "US"
+	}
+	if locationID == "" {
+		locationID = "loc-hq"
+	}
+
+	profID := fmt.Sprintf("%s:%s:%s:%d:%s", ev.EndpointID, procName, ev.DstIP, ev.DstPort, dir)
+
+	query := `
+	INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+	ON CONFLICT(id) DO UPDATE SET
+		last_seen=excluded.last_seen,
+		event_count=comm_profiles.event_count + 1,
+		total_bytes_in=comm_profiles.total_bytes_in + excluded.total_bytes_in,
+		total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out
+	`
+	_, err := s.db.Exec(
+		query,
+		profID, ev.TenantID, locationID, ev.EndpointID, hostname,
+		procName, ev.ProcessPath, ev.DstIP, ev.DstPort,
+		protoStr, dir, country, ev.Timestamp, ev.Timestamp,
+		ev.BytesIn, ev.BytesOut,
+	)
+	return err
+}
+
+func (s *Store) ListCommProfiles(level string, id string, limit int) ([]CommProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 250
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	switch level {
+	case "endpoint":
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline FROM comm_profiles WHERE endpoint_id = ? OR hostname = ? ORDER BY event_count DESC LIMIT ?", id, id, limit)
+	case "location":
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline FROM comm_profiles WHERE location_id = ? ORDER BY event_count DESC LIMIT ?", id, limit)
+	case "client":
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline FROM comm_profiles WHERE tenant_id = ? ORDER BY event_count DESC LIMIT ?", id, limit)
+	default: // global
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline FROM comm_profiles ORDER BY event_count DESC LIMIT ?", limit)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]CommProfile, 0)
+	for rows.Next() {
+		var cp CommProfile
+		var baseInt int
+		if err := rows.Scan(
+			&cp.ID, &cp.TenantID, &cp.LocationID, &cp.EndpointID, &cp.Hostname,
+			&cp.ProcessName, &cp.ProcessPath, &cp.DstIP, &cp.DstPort,
+			&cp.Protocol, &cp.Direction, &cp.Country,
+			&cp.FirstSeen, &cp.LastSeen, &cp.EventCount,
+			&cp.TotalBytesIn, &cp.TotalBytesOut, &baseInt,
+		); err != nil {
+			return nil, err
+		}
+		cp.IsBaseline = baseInt != 0
+		list = append(list, cp)
+	}
+	return list, nil
+}
+
+/* CUSTOM EXCLUSIONS (ALLOWLISTS & PINHOLES) */
+
+func (s *Store) CreateExclusion(ex Exclusion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	actInt := 0
+	if ex.Active {
+		actInt = 1
+	}
+
+	query := `
+	INSERT INTO exclusions (id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name=excluded.name,
+		process_path=excluded.process_path,
+		dst_ip_range=excluded.dst_ip_range,
+		port=excluded.port,
+		protocol=excluded.protocol,
+		reason=excluded.reason,
+		active=excluded.active
+	`
+	_, err := s.db.Exec(
+		query,
+		ex.ID, ex.TenantID, ex.Scope, ex.ScopeValue, ex.Name,
+		ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Protocol, ex.Reason, actInt, ex.CreatedAt,
+	)
+	return err
+}
+
+func (s *Store) ListExclusions(tenantID string) ([]Exclusion, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" && tenantID != "default" {
+		rows, err = s.db.Query("SELECT id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at FROM exclusions WHERE tenant_id = ? OR scope = 'global' ORDER BY created_at DESC", tenantID)
+	} else {
+		rows, err = s.db.Query("SELECT id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at FROM exclusions ORDER BY created_at DESC")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]Exclusion, 0)
+	for rows.Next() {
+		var ex Exclusion
+		var actInt int
+		if err := rows.Scan(
+			&ex.ID, &ex.TenantID, &ex.Scope, &ex.ScopeValue, &ex.Name,
+			&ex.ProcessPath, &ex.DstIPRange, &ex.Port, &ex.Protocol, &ex.Reason, &actInt, &ex.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		ex.Active = actInt != 0
+		list = append(list, ex)
+	}
+	return list, nil
+}
+
+func (s *Store) DeleteExclusion(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM exclusions WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) ToggleExclusion(id string, active bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	actInt := 0
+	if active {
+		actInt = 1
+	}
+	_, err := s.db.Exec("UPDATE exclusions SET active = ? WHERE id = ?", actInt, id)
+	return err
+}
+
+func (s *Store) IsExclusionMatch(ev Event, locationID string) bool {
+	exclusions, err := s.ListExclusions(ev.TenantID)
+	if err != nil || len(exclusions) == 0 {
+		return false
+	}
+
+	for _, ex := range exclusions {
+		if !ex.Active {
+			continue
+		}
+
+		// Check Scope
+		switch ex.Scope {
+		case "client":
+			if ex.ScopeValue != "" && ex.ScopeValue != ev.TenantID {
+				continue
+			}
+		case "location":
+			if ex.ScopeValue != "" && ex.ScopeValue != locationID {
+				continue
+			}
+		case "endpoint":
+			if ex.ScopeValue != "" && ex.ScopeValue != ev.EndpointID {
+				continue
+			}
+		}
+
+		// Check Protocol
+		if ex.Protocol != "any" && ex.Protocol != "" {
+			evProto := "tcp"
+			if ev.Protocol == 17 {
+				evProto = "udp"
+			}
+			if !strings.EqualFold(ex.Protocol, evProto) {
+				continue
+			}
+		}
+
+		// Check Port
+		if ex.Port > 0 && ex.Port != ev.DstPort && ex.Port != ev.SrcPort {
+			continue
+		}
+
+		// Check Process Path
+		if ex.ProcessPath != "*" && ex.ProcessPath != "" {
+			procLower := strings.ToLower(ev.ProcessPath)
+			targetLower := strings.ToLower(ex.ProcessPath)
+			if !strings.Contains(procLower, targetLower) {
+				continue
+			}
+		}
+
+		// Check IP Range / Target
+		if ex.DstIPRange != "*" && ex.DstIPRange != "" {
+			if strings.Contains(ex.DstIPRange, "/") {
+				_, ipNet, err := net.ParseCIDR(ex.DstIPRange)
+				if err == nil {
+					targetIP := net.ParseIP(ev.DstIP)
+					if targetIP == nil || !ipNet.Contains(targetIP) {
+						continue
+					}
+				}
+			} else if ex.DstIPRange != ev.DstIP {
+				continue
+			}
+		}
+
+		return true
+	}
+
+	return false
+}
+
+/* ANOMALY ALERTS */
+
+func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ackInt := 0
+	if a.Acknowledged {
+		ackInt = 1
+	}
+
+	query := `
+	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		severity=excluded.severity,
+		description=excluded.description,
+		timestamp=excluded.timestamp
+	`
+	_, err := s.db.Exec(
+		query,
+		a.ID, a.TenantID, a.LocationID, a.EndpointID, a.Hostname,
+		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details,
+		a.ProcessPath, a.DstIP, a.DstPort, a.Timestamp, ackInt,
+	)
+	return err
+}
+
+func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?", tenantID, limit)
+	} else {
+		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts ORDER BY timestamp DESC LIMIT ?", limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := make([]AnomalyAlert, 0)
+	for rows.Next() {
+		var a AnomalyAlert
+		var ackInt int
+		if err := rows.Scan(
+			&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
+			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details,
+			&a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
+		); err != nil {
+			return nil, err
+		}
+		a.Acknowledged = ackInt != 0
+		list = append(list, a)
+	}
+	return list, nil
+}
+
+func (s *Store) AcknowledgeAnomaly(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ?", id)
+	return err
+}
+
+/* THREAT INTEL & RULES */
 
 func (s *Store) UpsertIOCsBatch(iocs []IOC) error {
 	s.mu.Lock()

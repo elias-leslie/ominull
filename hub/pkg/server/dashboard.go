@@ -198,11 +198,12 @@ const dashboardHTML = `<!DOCTYPE html>
 
     <!-- Navigation Tabs -->
     <div class="nav-tabs">
-        <button class="tab-btn active" onclick="switchTab('hierarchy')">🏢 Fleet Hierarchy (MSP / Single Org)</button>
-        <button class="tab-btn" onclick="switchTab('policy')">🎯 Dynamic Group Policy Engine</button>
-        <button class="tab-btn" onclick="switchTab('analytics')">📊 Visual Analytics & Intelligence</button>
-        <button class="tab-btn" onclick="switchTab('threatintel')">🛡️ Threat Intel Feeds & IOCs</button>
-        <button class="tab-btn" onclick="switchTab('audit')">📜 Audit Trail & Stream</button>
+        <button class="tab-btn active" onclick="switchTab('hierarchy', this)">🏢 Fleet Hierarchy (MSP / Single Org)</button>
+        <button class="tab-btn" onclick="switchTab('comms', this)">📡 Network Comms Profiler & Exclusions</button>
+        <button class="tab-btn" onclick="switchTab('policy', this)">🎯 Dynamic Group Policy Engine</button>
+        <button class="tab-btn" onclick="switchTab('analytics', this)">📊 Visual Analytics & Intelligence</button>
+        <button class="tab-btn" onclick="switchTab('threatintel', this)">🛡️ Threat Intel Feeds & IOCs</button>
+        <button class="tab-btn" onclick="switchTab('audit', this)">📜 Audit Trail & Stream</button>
     </div>
 
     <!-- TAB 1: FLEET HIERARCHY -->
@@ -220,19 +221,19 @@ const dashboardHTML = `<!DOCTYPE html>
                 <div class="metric-sub">Default-deny atomic sublayer active</div>
             </div>
             <div class="metric-card amber">
-                <div class="metric-title">Threat Intel (C2 IOCs)</div>
-                <div class="metric-val" id="metric-iocs" style="color: var(--amber);">0</div>
-                <div class="metric-sub">Abuse.ch Feodo & Emerging Threats</div>
+                <div class="metric-title">Discovered Comm Profiles</div>
+                <div class="metric-val" id="metric-profiles" style="color: var(--amber);">0</div>
+                <div class="metric-sub">5-tuple & process baselines</div>
             </div>
             <div class="metric-card purple">
-                <div class="metric-title">Active Policy Groups</div>
-                <div class="metric-val" id="metric-groups" style="color: var(--purple);">0</div>
-                <div class="metric-sub">Dynamic attribute rule enclaves</div>
+                <div class="metric-title">Custom Tool Exclusions</div>
+                <div class="metric-val" id="metric-exclusions" style="color: var(--purple);">0</div>
+                <div class="metric-sub">High-priority permit pinholes</div>
             </div>
             <div class="metric-card green">
-                <div class="metric-title">Telemetry Events</div>
-                <div class="metric-val" id="metric-events" style="color: var(--green);">0</div>
-                <div class="metric-sub">Kernel packet & stream decisions</div>
+                <div class="metric-title">Active Threat IOCs</div>
+                <div class="metric-val" id="metric-iocs" style="color: var(--green);">0</div>
+                <div class="metric-sub">Abuse.ch Feodo & Emerging Threats</div>
             </div>
         </div>
 
@@ -287,7 +288,114 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- TAB 2: DYNAMIC GROUP POLICY ENGINE -->
+    <!-- TAB 2: NETWORK COMMS PROFILER & EXCLUSIONS -->
+    <div id="tab-comms" class="tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <div style="font-size: 18px; font-weight: 800; color: #fff;">Network Communications Profiler & Anomaly Detection</div>
+                <div style="font-size: 12px; color: var(--text-muted);">Continuous 5-tuple + process baseline tracking at Global, Client, Location, and Endpoint levels.</div>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <label style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Scope Level:</label>
+                <select id="comms-level-select" onchange="fetchCommsData()">
+                    <option value="global">🌐 Global Fleet (All Clients)</option>
+                    <option value="client:default">🏢 Client: Primary Enterprise</option>
+                    <option value="client:client-acme">🏢 Client: Acme Global (MSP-01)</option>
+                    <option value="client:client-wayne">🏢 Client: Wayne Enterprises (MSP-02)</option>
+                    <option value="location:loc-hq">📍 Location: Austin HQ DC</option>
+                    <option value="endpoint:linux-ominull-target-linux">💻 Endpoint: ominull-target-linux</option>
+                    <option value="endpoint:win11-target-01">💻 Endpoint: DESKTOP-T6BG81P</option>
+                    <option value="endpoint:macos-sonoma-01">💻 Endpoint: macos-sonoma-ir</option>
+                </select>
+                <button class="btn btn-cyan" onclick="openExclusionModal()">+ Create Custom Exclusion</button>
+            </div>
+        </div>
+
+        <!-- Discovered Abnormalities Section -->
+        <div style="margin-bottom: 24px;">
+            <div style="font-size: 14px; font-weight: 700; color: var(--red); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+                <span>⚠️ Detected Communication Abnormalities & Outliers</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Target Host</th>
+                            <th>Anomaly Classification</th>
+                            <th>Process Image</th>
+                            <th>Destination (IP:Port)</th>
+                            <th>Severity</th>
+                            <th>Description</th>
+                            <th style="text-align:right;">Incident Response Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="anomalies-body">
+                        <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No communication abnormalities currently detected.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Discovered Network Communication Baseline Profiles -->
+        <div style="margin-bottom: 24px;">
+            <div style="font-size: 14px; font-weight: 700; color: var(--cyan); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                <span>📊 Discovered Process & Network Communications Baseline</span>
+                <span style="font-size: 11px; color: var(--text-muted);">Learned 5-tuple flows across endpoints and subnets</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Process Name</th>
+                            <th>Origin Endpoint</th>
+                            <th>Destination IP</th>
+                            <th>Port / Protocol</th>
+                            <th>Direction</th>
+                            <th>Country</th>
+                            <th>Flow Count</th>
+                            <th>Bandwidth (In / Out)</th>
+                            <th>Last Seen</th>
+                            <th style="text-align:right;">Baseline Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="comms-profiles-body">
+                        <tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Loading communications profiles...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Custom Tool Exclusions & Pinhole Allowlists -->
+        <div>
+            <div style="font-size: 14px; font-weight: 700; color: var(--purple); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                <span>🛡️ Custom Security Tool Exclusions & Allowlist Pinholes</span>
+                <button class="btn btn-cyan" style="padding: 3px 10px; font-size: 11px;" onclick="openExclusionModal()">+ Add Exclusion</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Exclusion Name</th>
+                            <th>Target Process</th>
+                            <th>Destination IP / CIDR</th>
+                            <th>Port</th>
+                            <th>Protocol</th>
+                            <th>Scope</th>
+                            <th>Reason / Operational Justification</th>
+                            <th>Status</th>
+                            <th style="text-align:right;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="exclusions-body">
+                        <tr><td colspan="9" style="text-align: center; color: var(--text-muted);">Loading custom exclusions...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 3: DYNAMIC GROUP POLICY ENGINE -->
     <div id="tab-policy" class="tab-content">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
             <div>
@@ -474,6 +582,57 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- CREATE EXCLUSION MODAL -->
+    <div id="exclusion-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">
+                <span>Create Custom Tool Exclusion / Allowlist Pinhole</span>
+                <button class="btn" style="padding: 2px 8px;" onclick="closeExclusionModal()">✕</button>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Exclusion Name</label>
+                <input type="text" id="ex-name" class="form-control" placeholder="e.g. Velociraptor IR Collector Stream">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Scope Level</label>
+                <select id="ex-scope" class="form-control">
+                    <option value="global">🌐 Global Fleet-Wide (All Clients & Endpoints)</option>
+                    <option value="client">🏢 Client Organization Level</option>
+                    <option value="location">📍 Location / Site Level</option>
+                    <option value="endpoint">💻 Specific Endpoint</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Target Process (Optional, or '*' for any)</label>
+                <input type="text" id="ex-proc" class="form-control" placeholder="e.g. splunkd.exe, velociraptor, or *">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Destination IP / CIDR Range (Optional, or '*' for any)</label>
+                <input type="text" id="ex-ip" class="form-control" placeholder="e.g. 10.0.0.57, 10.0.0.0/8, or *">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Destination Port (0 for Any)</label>
+                <input type="number" id="ex-port" class="form-control" placeholder="0" value="0">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Protocol</label>
+                <select id="ex-proto" class="form-control">
+                    <option value="any">ANY Protocol</option>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Operational Reason / Justification</label>
+                <input type="text" id="ex-reason" class="form-control" placeholder="e.g. Mandatory forensic capture channel during IR">
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px;">
+                <button class="btn" onclick="closeExclusionModal()">Cancel</button>
+                <button class="btn btn-cyan" onclick="submitExclusion()">Deploy Exclusion Pinhole</button>
+            </div>
+        </div>
+    </div>
+
     <!-- CREATE POLICY GROUP MODAL -->
     <div id="policy-modal" class="modal-overlay">
         <div class="modal-content">
@@ -577,6 +736,9 @@ const dashboardHTML = `<!DOCTYPE html>
         var rawAnalytics = null;
         var rawIOCs = [];
         var rawAudit = [];
+        var rawCommProfiles = [];
+        var rawExclusions = [];
+        var rawAnomalies = [];
         var currentInspEp = null;
 
         function fetchAPI(endpoint, method, body) {
@@ -603,6 +765,7 @@ const dashboardHTML = `<!DOCTYPE html>
             var content = document.getElementById("tab-" + tabId);
             if (content) content.classList.add("active");
 
+            if (tabId === "comms") fetchCommsData();
             if (tabId === "analytics") fetchAnalytics();
             if (tabId === "policy") fetchPolicyGroups();
             if (tabId === "threatintel") fetchThreatIntel();
@@ -686,12 +849,14 @@ const dashboardHTML = `<!DOCTYPE html>
                 fetchAPI("/api/v1/hierarchy"),
                 fetchAPI("/api/v1/policy-groups"),
                 fetchAPI("/api/v1/threatintel/iocs"),
-                fetchAPI("/api/v1/events")
+                fetchAPI("/api/v1/exclusions"),
+                fetchAPI("/api/v1/network-profiles?level=global")
             ]).then(function(results) {
                 rawHierarchy = results[0] || [];
                 rawPolicyGroups = results[1] || [];
                 rawIOCs = results[2] || [];
-                var events = results[3] || [];
+                rawExclusions = results[3] || [];
+                rawCommProfiles = results[4] || [];
 
                 var totalEndpoints = 0;
                 var totalIsolated = 0;
@@ -702,9 +867,9 @@ const dashboardHTML = `<!DOCTYPE html>
 
                 document.getElementById("metric-endpoints").innerText = totalEndpoints;
                 document.getElementById("metric-isolated").innerText = totalIsolated;
+                document.getElementById("metric-profiles").innerText = rawCommProfiles.length;
+                document.getElementById("metric-exclusions").innerText = rawExclusions.length;
                 document.getElementById("metric-iocs").innerText = rawIOCs.length;
-                document.getElementById("metric-groups").innerText = rawPolicyGroups.length;
-                document.getElementById("metric-events").innerText = events.length;
 
                 renderHierarchy();
                 renderPolicyGroups();
@@ -889,6 +1054,147 @@ const dashboardHTML = `<!DOCTYPE html>
             if (confirm("CRITICAL ACTION: Are you sure you want to " + actionText + " " + targetDesc + "?")) {
                 var url = enable ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
                 fetchAPI(url, "POST", { scope: scope, value: value, allow_ips: ["10.0.0.57"] }).then(refreshData);
+            }
+        }
+
+        /* NETWORK COMMS PROFILING, ANOMALIES & EXCLUSIONS */
+
+        function fetchCommsData() {
+            var val = document.getElementById("comms-level-select").value || "global";
+            var parts = val.split(":");
+            var level = parts[0];
+            var id = parts.length > 1 ? parts[1] : "";
+
+            Promise.all([
+                fetchAPI("/api/v1/network-profiles?level=" + level + "&id=" + id),
+                fetchAPI("/api/v1/anomalies"),
+                fetchAPI("/api/v1/exclusions")
+            ]).then(function(results) {
+                rawCommProfiles = results[0] || [];
+                rawAnomalies = results[1] || [];
+                rawExclusions = results[2] || [];
+                renderCommsTab();
+            });
+        }
+
+        function renderCommsTab() {
+            var anoBody = document.getElementById("anomalies-body");
+            if (!rawAnomalies || rawAnomalies.length === 0) {
+                anoBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">No communication abnormalities currently detected.</td></tr>';
+            } else {
+                anoBody.innerHTML = rawAnomalies.map(function(a) {
+                    var sevBadge = '<span class="badge badge-isolated">' + a.severity + '</span>';
+                    return '<tr>' +
+                        '<td>' + new Date(a.timestamp).toLocaleTimeString() + '</td>' +
+                        '<td><strong style="color:#fff;">' + (a.hostname || a.endpoint_id) + '</strong></td>' +
+                        '<td><span class="badge badge-anomaly">' + a.anomaly_type + '</span></td>' +
+                        '<td><code>' + (a.process_path || "*") + '</code></td>' +
+                        '<td><code>' + a.dst_ip + (a.dst_port > 0 ? ":" + a.dst_port : "") + '</code></td>' +
+                        '<td>' + sevBadge + '</td>' +
+                        '<td style="font-size:12px;">' + a.description + '</td>' +
+                        '<td style="text-align:right;">' +
+                            '<button class="btn btn-isolate" style="padding:2px 8px;font-size:11px;" onclick="isolateTarget(\'' + a.endpoint_id + '\')">🛡️ Isolate Host</button> ' +
+                            '<button class="btn btn-cyan" style="padding:2px 8px;font-size:11px;" onclick="quickAllowlist(\'' + a.process_path + '\', \'' + a.dst_ip + '\', ' + a.dst_port + ')">⚡ Allowlist</button>' +
+                        '</td>' +
+                    '</tr>';
+                }).join("");
+            }
+
+            var profBody = document.getElementById("comms-profiles-body");
+            if (!rawCommProfiles || rawCommProfiles.length === 0) {
+                profBody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">No communications profiles captured for this scope.</td></tr>';
+            } else {
+                profBody.innerHTML = rawCommProfiles.map(function(p) {
+                    var inKB = (p.total_bytes_in / 1024).toFixed(1) + " KB";
+                    var outKB = (p.total_bytes_out / 1024).toFixed(1) + " KB";
+                    return '<tr>' +
+                        '<td><strong style="color:var(--cyan);">' + p.process_name + '</strong><div style="font-size:10px;color:var(--text-muted);">' + p.process_path + '</div></td>' +
+                        '<td>' + (p.hostname || p.endpoint_id) + '</td>' +
+                        '<td><code>' + p.dst_ip + '</code></td>' +
+                        '<td>' + (p.dst_port > 0 ? p.dst_port : "Any") + ' / <span class="os-tag">' + p.protocol + '</span></td>' +
+                        '<td><span class="os-tag">' + p.direction + '</span></td>' +
+                        '<td>🌐 ' + p.country + '</td>' +
+                        '<td><strong>' + p.event_count + '</strong> flows</td>' +
+                        '<td style="font-size:11px;">⬇️ ' + inKB + ' | ⬆️ ' + outKB + '</td>' +
+                        '<td>' + new Date(p.last_seen).toLocaleTimeString() + '</td>' +
+                        '<td style="text-align:right;">' +
+                            '<button class="btn btn-cyan" style="padding:2px 8px;font-size:11px;" onclick="quickAllowlist(\'' + p.process_name + '\', \'' + p.dst_ip + '\', ' + p.dst_port + ')">⚡ Add Exclusion</button>' +
+                        '</td>' +
+                    '</tr>';
+                }).join("");
+            }
+
+            var exBody = document.getElementById("exclusions-body");
+            if (!rawExclusions || rawExclusions.length === 0) {
+                exBody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);">No custom exclusions defined.</td></tr>';
+            } else {
+                exBody.innerHTML = rawExclusions.map(function(ex) {
+                    var actBadge = ex.active ? '<span class="badge badge-online">ACTIVE PINHOLE</span>' : '<span class="badge badge-offline">DISABLED</span>';
+                    return '<tr>' +
+                        '<td><strong style="color:#fff;">' + ex.name + '</strong></td>' +
+                        '<td><code>' + ex.process_path + '</code></td>' +
+                        '<td><code>' + ex.dst_ip_range + '</code></td>' +
+                        '<td>' + (ex.port > 0 ? ex.port : "Any") + '</td>' +
+                        '<td><span class="os-tag">' + ex.protocol.toUpperCase() + '</span></td>' +
+                        '<td><span class="os-tag">' + ex.scope.toUpperCase() + '</span></td>' +
+                        '<td style="font-size:12px;color:var(--text-muted);">' + ex.reason + '</td>' +
+                        '<td>' + actBadge + '</td>' +
+                        '<td style="text-align:right;">' +
+                            '<button class="btn btn-isolate" style="padding:2px 8px;font-size:11px;" onclick="deleteExclusion(\'' + ex.id + '\')">Delete</button>' +
+                        '</td>' +
+                    '</tr>';
+                }).join("");
+            }
+        }
+
+        function openExclusionModal() { document.getElementById("exclusion-modal").style.display = "flex"; }
+        function closeExclusionModal() { document.getElementById("exclusion-modal").style.display = "none"; }
+
+        function quickAllowlist(proc, ip, port) {
+            document.getElementById("ex-name").value = "Allowlist: " + (proc || ip);
+            document.getElementById("ex-proc").value = proc || "*";
+            document.getElementById("ex-ip").value = ip || "*";
+            document.getElementById("ex-port").value = port || 0;
+            document.getElementById("ex-reason").value = "Approved security / operational tool traffic";
+            openExclusionModal();
+        }
+
+        function submitExclusion() {
+            var name = document.getElementById("ex-name").value;
+            var scope = document.getElementById("ex-scope").value;
+            var proc = document.getElementById("ex-proc").value;
+            var ip = document.getElementById("ex-ip").value;
+            var port = parseInt(document.getElementById("ex-port").value) || 0;
+            var proto = document.getElementById("ex-proto").value;
+            var reason = document.getElementById("ex-reason").value;
+
+            if (!name) return alert("Please enter an exclusion name");
+
+            var payload = {
+                tenant_id: "default",
+                scope: scope,
+                name: name,
+                process_path: proc || "*",
+                dst_ip_range: ip || "*",
+                port: port,
+                protocol: proto,
+                reason: reason,
+                active: true
+            };
+
+            fetchAPI("/api/v1/exclusions", "POST", payload).then(function() {
+                closeExclusionModal();
+                fetchCommsData();
+                refreshData();
+            });
+        }
+
+        function deleteExclusion(id) {
+            if (confirm("Revoke exclusion and remove pinhole " + id + "?")) {
+                fetchAPI("/api/v1/exclusions?id=" + id, "DELETE").then(function() {
+                    fetchCommsData();
+                    refreshData();
+                });
             }
         }
 
