@@ -467,113 +467,28 @@ func (s *Store) seedDefaults() {
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	// Default Tenants
-	tenants := []Tenant{
-		{ID: "default", Name: "Primary Enterprise / IR Incident", APIKey: "ominull-master-admin-key", CreatedAt: now},
-		{ID: "client-acme", Name: "Acme Global Industries (MSP-01)", APIKey: "key-acme-corp-prod", CreatedAt: now},
-		{ID: "client-wayne", Name: "Wayne Enterprises R&D (MSP-02)", APIKey: "key-wayne-ent-prod", CreatedAt: now},
+	// Single Real Default Home Tenant
+	defaultTenant := Tenant{
+		ID:        "default",
+		Name:      "Home Network",
+		APIKey:    "ominull-master-admin-key",
+		CreatedAt: now,
 	}
-	for _, t := range tenants {
-		_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)", t.ID, t.Name, t.APIKey, t.CreatedAt)
-	}
+	_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
+		defaultTenant.ID, defaultTenant.Name, defaultTenant.APIKey, defaultTenant.CreatedAt)
 
-	// Default Locations
-	locations := []Location{
-		{ID: "loc-hq", TenantID: "default", Name: "Austin HQ Data Center", City: "Austin, TX", Country: "US", SubnetCIDR: "10.0.0.0/24", CreatedAt: now},
-		{ID: "loc-cloud", TenantID: "default", Name: "US-East AWS VPC", City: "Ashburn, VA", Country: "US", SubnetCIDR: "10.100.0.0/16", CreatedAt: now},
-		{ID: "loc-acme-hq", TenantID: "client-acme", Name: "New York Corporate Office", City: "New York, NY", Country: "US", SubnetCIDR: "10.0.10.0/24", CreatedAt: now},
-		{ID: "loc-wayne-lab", TenantID: "client-wayne", Name: "London Applied Sciences Lab", City: "London", Country: "GB", SubnetCIDR: "172.16.50.0/24", CreatedAt: now},
+	// Single Real Home Location
+	homeLocation := Location{
+		ID:         "loc-home",
+		TenantID:   "default",
+		Name:       "Primary Home LAN",
+		City:       "Local",
+		Country:    "US",
+		SubnetCIDR: "10.0.0.0/24",
+		CreatedAt:  now,
 	}
-	for _, l := range locations {
-		_, _ = s.db.Exec("INSERT OR IGNORE INTO locations (id, tenant_id, name, city, country, subnet_cidr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			l.ID, l.TenantID, l.Name, l.City, l.Country, l.SubnetCIDR, l.CreatedAt)
-	}
-
-	// Default Exclusions (Allowlists for critical tooling)
-	exclusions := []Exclusion{
-		{
-			ID:          "ex-splunk",
-			TenantID:    "default",
-			Scope:       "global",
-			ScopeValue:  "",
-			Name:        "Splunk Enterprise & Universal Forwarder Egress",
-			ProcessPath: "splunkd.exe",
-			DstIPRange:  "*",
-			Port:        8089,
-			Protocol:    "tcp",
-			Reason:      "Mandatory SIEM log shipping stream",
-			Active:      true,
-			CreatedAt:   now,
-		},
-		{
-			ID:          "ex-velociraptor",
-			TenantID:    "default",
-			Scope:       "global",
-			ScopeValue:  "",
-			Name:        "Velociraptor Digital Forensics & IR Stream",
-			ProcessPath: "velociraptor",
-			DstIPRange:  "*",
-			Port:        8000,
-			Protocol:    "tcp",
-			Reason:      "Emergency incident response forensic artifact collection",
-			Active:      true,
-			CreatedAt:   now,
-		},
-		{
-			ID:          "ex-hub",
-			TenantID:    "default",
-			Scope:       "global",
-			ScopeValue:  "",
-			Name:        "Ominull Central Command Hub Pinhole",
-			ProcessPath: "*",
-			DstIPRange:  "10.0.0.57",
-			Port:        9999,
-			Protocol:    "tcp",
-			Reason:      "Continuous mTLS heartbeats and telemetry channel",
-			Active:      true,
-			CreatedAt:   now,
-		},
-	}
-	for _, ex := range exclusions {
-		_, _ = s.db.Exec("INSERT OR IGNORE INTO exclusions (id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			ex.ID, ex.TenantID, ex.Scope, ex.ScopeValue, ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Protocol, ex.Reason, 1, ex.CreatedAt)
-	}
-
-	// Default Policy Groups
-	groups := []PolicyGroup{
-		{
-			ID:          "grp-c2-containment",
-			TenantID:    "default",
-			Name:        "Automated C2 & Egress Lockdown",
-			Description: "Blocks outbound execution from shell processes on all workstations",
-			Criteria:    `{"process":["powershell.exe","cmd.exe","bash","nc","curl"]}`,
-			Action:      "BLOCK",
-			RuleType:    "process",
-			RuleValue:   "powershell.exe,bash,nc",
-			Port:        0,
-			Protocol:    "any",
-			Active:      true,
-			CreatedAt:   now,
-		},
-		{
-			ID:          "grp-db-protection",
-			TenantID:    "default",
-			Name:        "Database Server Enclave Isolation",
-			Description: "Enforces strict port 5432/3306 permit rules on database servers",
-			Criteria:    `{"role":"db-server","subnet":"10.0.0.0/24"}`,
-			Action:      "PERMIT",
-			RuleType:    "port",
-			RuleValue:   "5432",
-			Port:        5432,
-			Protocol:    "tcp",
-			Active:      true,
-			CreatedAt:   now,
-		},
-	}
-	for _, g := range groups {
-		_, _ = s.db.Exec("INSERT OR IGNORE INTO policy_groups (id, tenant_id, name, description, criteria, action, rule_type, rule_value, port, protocol, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			g.ID, g.TenantID, g.Name, g.Description, g.Criteria, g.Action, g.RuleType, g.RuleValue, g.Port, g.Protocol, 1, g.CreatedAt)
-	}
+	_, _ = s.db.Exec("INSERT OR IGNORE INTO locations (id, tenant_id, name, city, country, subnet_cidr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		homeLocation.ID, homeLocation.TenantID, homeLocation.Name, homeLocation.City, homeLocation.Country, homeLocation.SubnetCIDR, homeLocation.CreatedAt)
 }
 
 func (s *Store) CreateTenant(t Tenant) error {

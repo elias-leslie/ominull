@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "ominull",
+    "repo_name": "ominull",
+    "display_name": "Ominull Enterprise Threat Nullification Platform"
+  },
+  "branding": {
+    "short_name": "Ominull",
+    "description": "Kernel-Native Cross-Platform Threat Nullification & Network Profiler Command Center."
+  },
+  "runtime": {
+    "backend_port": 9999,
+    "frontend_port": 9999,
+    "backend_dir": "hub",
+    "frontend_dir": "hub",
+    "health_endpoint": "/api/v1/hierarchy"
+  },
+  "services": {
+    "backend": "ominull-hub.service",
+    "frontend": "ominull-hub.service",
+    "default_workers": [],
+    "optional_workers": []
+  },
+  "hosts": {
+    "production_frontend": "omi.example.com"
+  },
+  "repository": {
+    "owner": "elias-leslie",
+    "name": "ominull",
+    "ssh_url": "git@github.com:elias-leslie/ominull.git",
+    "https_url": "https://github.com/elias-leslie/ominull"
+  }
+}
