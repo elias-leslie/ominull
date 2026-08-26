@@ -104,6 +104,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Zero-Trust Least Privilege: Reject Cloudflare Service Tokens on the Web Console
+	if r.Header.Get("CF-Access-Client-Id") != "" || r.Header.Get("Cf-Access-Client-Id") != "" || r.Header.Get("Cf-Access-Service-Token-Id") != "" {
+		http.Error(w, "Access Denied: Service Tokens are restricted to agent telemetry and API endpoints only.", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := strings.ReplaceAll(dashboardHTML, "ominull-master-admin-key", s.adminKey)
 	w.Write([]byte(html))
