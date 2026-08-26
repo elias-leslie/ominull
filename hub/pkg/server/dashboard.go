@@ -827,6 +827,8 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
         </div>
     </div>
+
+    <script>
         var API_KEY = "ominull-master-admin-key";
         var rawHierarchy = [];
         var rawPolicyGroups = [];
