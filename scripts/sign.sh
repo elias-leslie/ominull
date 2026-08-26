@@ -8,31 +8,36 @@ CERT_DIR="$ROOT_DIR/certs"
 
 mkdir -p "$CERT_DIR"
 
-if [[ ! -f "$CERT_DIR/testcert.pfx" ]]; then
-    echo "[*] Generating self-signed Authenticode test certificate..."
+if [[ ! -f "$CERT_DIR/ominull_testcert.pfx" ]]; then
+    echo "[*] Generating self-signed Authenticode test certificate for Ominull..."
     openssl req -x509 -newkey rsa:2048 \
-      -keyout "$CERT_DIR/testcert.key" \
-      -out "$CERT_DIR/testcert.cer" \
+      -keyout "$CERT_DIR/ominull_testcert.key" \
+      -out "$CERT_DIR/ominull_testcert.cer" \
       -days 3650 -nodes \
-      -subj "/CN=WfpSentinelTest" \
+      -subj "/CN=OminullTest" \
       -addext "extendedKeyUsage = codeSigning"
     
     openssl pkcs12 -export \
-      -out "$CERT_DIR/testcert.pfx" \
-      -inkey "$CERT_DIR/testcert.key" \
-      -in "$CERT_DIR/testcert.cer" \
-      -passout pass:wfpsentinel
+      -out "$CERT_DIR/ominull_testcert.pfx" \
+      -inkey "$CERT_DIR/ominull_testcert.key" \
+      -in "$CERT_DIR/ominull_testcert.cer" \
+      -passout pass:ominull
+
+    cp -f "$CERT_DIR/ominull_testcert.cer" "$CERT_DIR/testcert.cer"
 fi
 
-echo "[*] Test-signing wfpsentinel.sys with osslsigncode..."
-rm -f "$BUILD_DIR/wfpsentinel_signed.sys"
+PFX_FILE="$CERT_DIR/ominull_testcert.pfx"
+PFX_PASS="ominull"
+
+echo "[*] Test-signing ominull.sys with osslsigncode..."
+rm -f "$BUILD_DIR/ominull_signed.sys"
 osslsigncode sign \
-  -pkcs12 "$CERT_DIR/testcert.pfx" \
-  -pass wfpsentinel \
-  -n "wfpsentinel" \
-  -in "$BUILD_DIR/wfpsentinel.sys" \
-  -out "$BUILD_DIR/wfpsentinel_signed.sys"
+  -pkcs12 "$PFX_FILE" \
+  -pass "$PFX_PASS" \
+  -n "Ominull Kernel Security Driver" \
+  -in "$BUILD_DIR/ominull.sys" \
+  -out "$BUILD_DIR/ominull_signed.sys"
 
 echo "[+] Verifying digital signature..."
-osslsigncode verify "$BUILD_DIR/wfpsentinel_signed.sys" || true
-echo "[+] Successfully signed: $BUILD_DIR/wfpsentinel_signed.sys"
+osslsigncode verify "$BUILD_DIR/ominull_signed.sys" || true
+echo "[+] Successfully signed: $BUILD_DIR/ominull_signed.sys"

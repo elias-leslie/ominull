@@ -37,7 +37,7 @@ Per [PLAN.md](../../PLAN.md) §3 and §7:
 
 ## 4. Code Signing & Certificate Trust
 - **Digital Signature:** Authenticode SHA-256 digital signature embedded using `osslsigncode`.
-- **Certificate Authority:** Self-signed Root CA (`CN=WfpSentinelTest`) with `Code Signing` Enhanced Key Usage (`1.3.6.1.5.5.7.3.3`).
+- **Certificate Authority:** Self-signed Root CA (`CN=OminullTest`) with `Code Signing` Enhanced Key Usage (`1.3.6.1.5.5.7.3.3`).
 - **Target Trust Store:** Installed into `Root` and `TrustedPublisher` certificate stores via `certutil -addstore`.
 - **Target Boot Configuration:**
   - `bcdedit /set testsigning on`
@@ -46,12 +46,12 @@ Per [PLAN.md](../../PLAN.md) §3 and §7:
 
 ## 5. Driver Lifecycle Verification
 The driver was deployed, registered as a kernel service, started, inspected, stopped, and deleted:
-1. `sc.exe create wfpsentinel type= kernel binPath= C:\drv\wfpsentinel.sys`
-2. `sc.exe start wfpsentinel` -> Transitions to `RUNNING`
-3. `sc.exe query wfpsentinel` -> Confirmed `STATE: 4 RUNNING`
-4. `driverquery.exe /v | findstr /i "wfpsentinel"` -> Confirmed active kernel driver image in memory
-5. `sc.exe stop wfpsentinel` -> Invokes `DriverUnload` routine cleanly
-6. `sc.exe delete wfpsentinel` -> Service record removed
+1. `sc.exe create ominull type= kernel binPath= C:\drv\ominull.sys`
+2. `sc.exe start ominull` -> Transitions to `RUNNING`
+3. `sc.exe query ominull` -> Confirmed `STATE: 4 RUNNING`
+4. `driverquery.exe /v | findstr /i "ominull"` -> Confirmed active kernel driver image in memory
+5. `sc.exe stop ominull` -> Invokes `DriverUnload` routine cleanly
+6. `sc.exe delete ominull` -> Service record removed
 
 ## 6. PE Binary Headers & Analysis
 ```

@@ -1,15 +1,15 @@
-# PowerShell test-signing script for wfpsentinel.sys
+# PowerShell test-signing script for ominull.sys
 param (
     [string]$Configuration = "Debug",
     [string]$Platform = "x64",
-    [string]$CertSubject = "CN=WFPSentinelTestCert"
+    [string]$CertSubject = "CN=OminullTestCert"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Test Signing wfpsentinel.sys ===" -ForegroundColor Cyan
+Write-Host "=== Test Signing ominull.sys ===" -ForegroundColor Cyan
 
-$sysPath = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\wfpsentinel.sys"
+$sysPath = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\ominull.sys"
 if (-not (Test-Path $sysPath)) {
     throw "Driver binary not found at $sysPath. Run scripts\build.ps1 first."
 }
@@ -26,7 +26,7 @@ if (-not $cert) {
 }
 
 # Export public certificate (.cer) for installation on test target
-$cerPath = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\wfpsentinel.cer"
+$cerPath = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\ominull.cer"
 Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
 Write-Host "Exported public cert: $cerPath" -ForegroundColor Green
 
@@ -39,12 +39,12 @@ if (-not $signtool) {
 }
 
 Write-Host "Signing $sysPath with $($signtool.FullName)..."
-& $signtool.FullName sign /v /s My /n "WFPSentinelTestCert" /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 $sysPath
+& $signtool.FullName sign /v /s My /n "OminullTestCert" /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 $sysPath
 
 # If timestamping fails (e.g. offline), fallback to sign without timestamp
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Timestamping failed, signing without timestamp..."
-    & $signtool.FullName sign /v /s My /n "WFPSentinelTestCert" /fd SHA256 $sysPath
+    & $signtool.FullName sign /v /s My /n "OminullTestCert" /fd SHA256 $sysPath
 }
 
 Write-Host "Verifying signature on $sysPath..."

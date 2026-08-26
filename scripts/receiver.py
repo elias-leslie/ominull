@@ -5,7 +5,7 @@ import os
 import sys
 
 PORT = 9998
-OUTPUT_DIR = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"
+OUTPUT_DIR = "/srv/workspaces/projects/ominull/evidence/m1-callout"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 class EvidenceHandler(http.server.BaseHTTPRequestHandler):
@@ -14,7 +14,7 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"WfpSentinel Test Server: OK\n")
+        self.wfile.write(b"Ominull Test Server: OK\n")
 
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -26,11 +26,11 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
             filename = "upload.log"
 
         if "m3" in filename or "m3" in self.path:
-            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack"
+            out_dir = "/srv/workspaces/projects/ominull/evidence/m3-dualstack"
         elif "m2" in filename or "m2" in self.path:
-            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m2-enforcement"
+            out_dir = "/srv/workspaces/projects/ominull/evidence/m2-enforcement"
         else:
-            out_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"
+            out_dir = "/srv/workspaces/projects/ominull/evidence/m1-callout"
         os.makedirs(out_dir, exist_ok=True)
 
         filepath = os.path.join(out_dir, filename)

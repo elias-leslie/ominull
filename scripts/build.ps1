@@ -1,4 +1,4 @@
-# PowerShell build script for wfpsentinel
+# PowerShell build script for ominull
 param (
     [string]$Configuration = "Debug",
     [string]$Platform = "x64"
@@ -6,7 +6,7 @@ param (
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Building wfpsentinel.sys ($Configuration | $Platform) ===" -ForegroundColor Cyan
+Write-Host "=== Building ominull.sys ($Configuration | $Platform) ===" -ForegroundColor Cyan
 
 # Locate MSBuild via vswhere
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -24,7 +24,7 @@ if (-not (Test-Path $msBuildPath)) {
     throw "MSBuild.exe not found at $msBuildPath"
 }
 
-$projectPath = Join-Path $PSScriptRoot "..\driver\wfpsentinel.vcxproj"
+$projectPath = Join-Path $PSScriptRoot "..\driver\ominull.vcxproj"
 
 Write-Host "Invoking MSBuild on $projectPath..."
 & $msBuildPath $projectPath /p:Configuration=$Configuration /p:Platform=$Platform /t:Rebuild
@@ -33,7 +33,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "MSBuild failed with exit code $LASTEXITCODE"
 }
 
-$outputSys = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\wfpsentinel.sys"
+$outputSys = Join-Path $PSScriptRoot "..\bin\$Platform\$Configuration\ominull.sys"
 if (Test-Path $outputSys) {
     Write-Host "Build SUCCESS: $outputSys" -ForegroundColor Green
 } else {

@@ -1,14 +1,14 @@
-#include "driver.h"
+#include "ominull_driver.h"
 
 // Global driver state
-WFPSENTINEL_GLOBAL_DATA g_GlobalData = { 0 };
+OMINULL_GLOBAL_DATA g_GlobalData = { 0 };
 
 static UNICODE_STRING g_NtDeviceName;
 static UNICODE_STRING g_Win32DeviceName;
 
 // Helper: Extract process image path from ALE_APP_ID blob or metadata
 static void
-WfpSentinelExtractAppPath(
+OminullExtractAppPath(
     _In_opt_ const FWP_BYTE_BLOB*                  AppBlob,
     _In_opt_ const FWPS_INCOMING_METADATA_VALUES0* MetaValues,
     _Out_writes_(MaxChars) WCHAR*                  OutPath,
@@ -38,7 +38,7 @@ WfpSentinelExtractAppPath(
 
 // Helper: Non-pageable case-insensitive substring match for process image path
 static BOOLEAN
-WfpSentinelPathMatchesPattern(
+OminullPathMatchesPattern(
     _In_ const WCHAR* Path,
     _In_ const WCHAR* Pattern,
     _In_ UINT16       PatternLen
@@ -52,7 +52,7 @@ WfpSentinelPathMatchesPattern(
     }
 
     size_t pathLen = 0;
-    while (pathLen < WFPSENTINEL_MAX_PATH && Path[pathLen] != L'\0') {
+    while (pathLen < OMINULL_MAX_PATH && Path[pathLen] != L'\0') {
         pathLen++;
     }
 
@@ -81,7 +81,7 @@ WfpSentinelPathMatchesPattern(
 
 // Helper: Match IPv6 address against prefix with arbitrary prefix length (0-128)
 static BOOLEAN
-WfpSentinelIpv6PrefixMatch(
+OminullIpv6PrefixMatch(
     _In_reads_(16) const UINT8* Addr,
     _In_reads_(16) const UINT8* Prefix,
     _In_ UINT8                  PrefixLen
@@ -114,8 +114,8 @@ WfpSentinelIpv6PrefixMatch(
 }
 
 // Policy Engine: Evaluates connection parameters against dynamic rule table
-static UINT8
-WfpSentinelEvaluatePolicy(
+UINT8
+OminullEvaluatePolicy(
     _In_ UINT8                      Direction,
     _In_ UINT8                      IpVersion,
     _In_ UINT8                      Protocol,
@@ -127,15 +127,15 @@ WfpSentinelEvaluatePolicy(
     _In_ const WCHAR*               ProcessPath
 )
 {
-    UINT8 verdict = WFPSENTINEL_ACTION_ALLOW;
+    UINT8 verdict = OMINULL_ACTION_ALLOW;
     KIRQL oldIrql;
 
     KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
 
     for (UINT32 i = 0; i < g_GlobalData.RuleCount; i++) {
-        PWFPSENTINEL_RULE r = &g_GlobalData.Rules[i];
+        POMINULL_RULE r = &g_GlobalData.Rules[i];
 
-        if (r->Direction != WFPSENTINEL_DIR_ANY && r->Direction != Direction) {
+        if (r->Direction != OMINULL_DIR_ANY && r->Direction != Direction) {
             continue;
         }
         if (r->IpVersion != 0 && r->IpVersion != IpVersion) {
@@ -161,13 +161,13 @@ WfpSentinelEvaluatePolicy(
         }
 
         if (IpVersion == 6 && r->RemoteIpV6PrefixLen > 0 && RemoteIpV6 != NULL) {
-            if (!WfpSentinelIpv6PrefixMatch(RemoteIpV6, r->RemoteIpV6, r->RemoteIpV6PrefixLen)) {
+            if (!OminullIpv6PrefixMatch(RemoteIpV6, r->RemoteIpV6, r->RemoteIpV6PrefixLen)) {
                 continue;
             }
         }
 
         if (r->ProcessPathLen > 0) {
-            if (!WfpSentinelPathMatchesPattern(ProcessPath, r->ProcessPath, r->ProcessPathLen)) {
+            if (!OminullPathMatchesPattern(ProcessPath, r->ProcessPath, r->ProcessPathLen)) {
                 continue;
             }
         }
@@ -182,8 +182,8 @@ WfpSentinelEvaluatePolicy(
 
 // Inverted Call: Emits telemetry event to pending IRP or ring buffer
 VOID
-WfpSentinelEmitEvent(
-    _In_ const WFPSENTINEL_EVENT* Event
+OminullEmitEvent(
+    _In_ const OMINULL_EVENT* Event
 )
 {
     KIRQL oldIrql;
@@ -209,8 +209,8 @@ WfpSentinelEmitEvent(
     if (pendingIrp != NULL) {
         PVOID targetBuf = pendingIrp->AssociatedIrp.SystemBuffer;
         if (targetBuf) {
-            RtlCopyMemory(targetBuf, Event, sizeof(WFPSENTINEL_EVENT));
-            pendingIrp->IoStatus.Information = sizeof(WFPSENTINEL_EVENT);
+            RtlCopyMemory(targetBuf, Event, sizeof(OMINULL_EVENT));
+            pendingIrp->IoStatus.Information = sizeof(OMINULL_EVENT);
             pendingIrp->IoStatus.Status = STATUS_SUCCESS;
             g_GlobalData.Stats.TotalEventsStreamed++;
         } else {
@@ -221,14 +221,14 @@ WfpSentinelEmitEvent(
 
         IoCompleteRequest(pendingIrp, IO_NO_INCREMENT);
     } else {
-        if (g_GlobalData.EventCount < WFPSENTINEL_EVENT_QUEUE_SIZE) {
-            RtlCopyMemory(&g_GlobalData.EventQueue[g_GlobalData.EventHead], Event, sizeof(WFPSENTINEL_EVENT));
-            g_GlobalData.EventHead = (g_GlobalData.EventHead + 1) % WFPSENTINEL_EVENT_QUEUE_SIZE;
+        if (g_GlobalData.EventCount < OMINULL_EVENT_QUEUE_SIZE) {
+            RtlCopyMemory(&g_GlobalData.EventQueue[g_GlobalData.EventHead], Event, sizeof(OMINULL_EVENT));
+            g_GlobalData.EventHead = (g_GlobalData.EventHead + 1) % OMINULL_EVENT_QUEUE_SIZE;
             g_GlobalData.EventCount++;
         } else {
-            g_GlobalData.EventTail = (g_GlobalData.EventTail + 1) % WFPSENTINEL_EVENT_QUEUE_SIZE;
-            RtlCopyMemory(&g_GlobalData.EventQueue[g_GlobalData.EventHead], Event, sizeof(WFPSENTINEL_EVENT));
-            g_GlobalData.EventHead = (g_GlobalData.EventHead + 1) % WFPSENTINEL_EVENT_QUEUE_SIZE;
+            g_GlobalData.EventTail = (g_GlobalData.EventTail + 1) % OMINULL_EVENT_QUEUE_SIZE;
+            RtlCopyMemory(&g_GlobalData.EventQueue[g_GlobalData.EventHead], Event, sizeof(OMINULL_EVENT));
+            g_GlobalData.EventHead = (g_GlobalData.EventHead + 1) % OMINULL_EVENT_QUEUE_SIZE;
         }
         KeReleaseSpinLock(&g_GlobalData.TelemetryLock, oldIrql);
     }
@@ -237,7 +237,7 @@ WfpSentinelEmitEvent(
 // Inverted Call: Cancel routine for queued IRPs
 VOID
 NTAPI
-WfpSentinelIrpCancelRoutine(
+OminullIrpCancelRoutine(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp
 )
@@ -264,7 +264,7 @@ WfpSentinelIrpCancelRoutine(
 
 // Inverted Call: Flushes and cancels all pending streaming IRPs on close/teardown
 VOID
-WfpSentinelFlushPendingIrps(VOID)
+OminullFlushPendingIrps(VOID)
 {
     KIRQL oldIrql;
     LIST_ENTRY cancelList;
@@ -297,7 +297,7 @@ WfpSentinelFlushPendingIrps(VOID)
 
 // IRP Dispatch: Create / Open Handle
 NTSTATUS NTAPI
-WfpSentinelDispatchCreate(
+OminullDispatchCreate(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp
 )
@@ -311,13 +311,13 @@ WfpSentinelDispatchCreate(
 
 // IRP Dispatch: Close Handle
 NTSTATUS NTAPI
-WfpSentinelDispatchClose(
+OminullDispatchClose(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp
 )
 {
     UNREFERENCED_PARAMETER(DeviceObject);
-    WfpSentinelFlushPendingIrps();
+    OminullFlushPendingIrps();
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -326,7 +326,7 @@ WfpSentinelDispatchClose(
 
 // IRP Dispatch: Device Control (IOCTL Handler)
 NTSTATUS NTAPI
-WfpSentinelDispatchDeviceControl(
+OminullDispatchDeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp
 )
@@ -343,21 +343,21 @@ WfpSentinelDispatchDeviceControl(
     KIRQL oldIrql;
 
     switch (ioctl) {
-    case IOCTL_WFPSENTINEL_ADD_BLOCK_RULE: // Legacy IPv4 block IOCTL
-        if (inLen < sizeof(WFPSENTINEL_BLOCK_RULE) || !buf) {
+    case IOCTL_OMINULL_ADD_BLOCK_RULE: // Legacy IPv4 block IOCTL
+        if (inLen < sizeof(OMINULL_BLOCK_RULE) || !buf) {
             status = STATUS_INVALID_PARAMETER;
             break;
         }
 
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
-        if (g_GlobalData.RuleCount < WFPSENTINEL_MAX_RULES) {
-            PWFPSENTINEL_BLOCK_RULE legacyRule = (PWFPSENTINEL_BLOCK_RULE)buf;
-            PWFPSENTINEL_RULE rule = &g_GlobalData.Rules[g_GlobalData.RuleCount];
-            RtlZeroMemory(rule, sizeof(WFPSENTINEL_RULE));
+        if (g_GlobalData.RuleCount < OMINULL_MAX_RULES) {
+            POMINULL_BLOCK_RULE legacyRule = (POMINULL_BLOCK_RULE)buf;
+            POMINULL_RULE rule = &g_GlobalData.Rules[g_GlobalData.RuleCount];
+            RtlZeroMemory(rule, sizeof(OMINULL_RULE));
 
             rule->RuleId = ++g_GlobalData.NextRuleId;
-            rule->Action = WFPSENTINEL_ACTION_BLOCK;
-            rule->Direction = WFPSENTINEL_DIR_OUTBOUND;
+            rule->Action = OMINULL_ACTION_BLOCK;
+            rule->Direction = OMINULL_DIR_OUTBOUND;
             rule->IpVersion = 4;
             rule->RemoteIpV4 = legacyRule->RemoteIpV4;
             rule->RemoteIpV4Mask = legacyRule->RemoteIpMask ? legacyRule->RemoteIpMask : 0xFFFFFFFF;
@@ -369,7 +369,7 @@ WfpSentinelDispatchDeviceControl(
             g_GlobalData.Stats.ActiveRuleCount = g_GlobalData.RuleCount;
 
             UINT32 ip = rule->RemoteIpV4;
-            DbgPrint("[wfpsentinel] IOCTL: Added Legacy Block Rule #%u (ID=%u) -> Remote IP=%u.%u.%u.%u Port=%u Proto=%u PID=%llu\n",
+            DbgPrint("[ominull] IOCTL: Added Legacy Block Rule #%u (ID=%u) -> Remote IP=%u.%u.%u.%u Port=%u Proto=%u PID=%llu\n",
                 g_GlobalData.RuleCount, rule->RuleId,
                 (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
                 rule->RemotePort, rule->Protocol, rule->ProcessId);
@@ -380,18 +380,18 @@ WfpSentinelDispatchDeviceControl(
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
         break;
 
-    case IOCTL_WFPSENTINEL_ADD_RULE: // Advanced Dynamic Policy IOCTL
-        if (inLen < sizeof(WFPSENTINEL_RULE) || !buf) {
+    case IOCTL_OMINULL_ADD_RULE: // Advanced Dynamic Policy IOCTL
+        if (inLen < sizeof(OMINULL_RULE) || !buf) {
             status = STATUS_INVALID_PARAMETER;
             break;
         }
 
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
-        if (g_GlobalData.RuleCount < WFPSENTINEL_MAX_RULES) {
-            PWFPSENTINEL_RULE inputRule = (PWFPSENTINEL_RULE)buf;
-            PWFPSENTINEL_RULE rule = &g_GlobalData.Rules[g_GlobalData.RuleCount];
-            RtlCopyMemory(rule, inputRule, sizeof(WFPSENTINEL_RULE));
-            rule->ProcessPath[WFPSENTINEL_MAX_PATH - 1] = L'\0';
+        if (g_GlobalData.RuleCount < OMINULL_MAX_RULES) {
+            POMINULL_RULE inputRule = (POMINULL_RULE)buf;
+            POMINULL_RULE rule = &g_GlobalData.Rules[g_GlobalData.RuleCount];
+            RtlCopyMemory(rule, inputRule, sizeof(OMINULL_RULE));
+            rule->ProcessPath[OMINULL_MAX_PATH - 1] = L'\0';
 
             rule->RuleId = ++g_GlobalData.NextRuleId;
             g_GlobalData.RuleCount++;
@@ -402,7 +402,7 @@ WfpSentinelDispatchDeviceControl(
                 bytesReturned = sizeof(UINT32);
             }
 
-            DbgPrint("[wfpsentinel] IOCTL: Added Dynamic Rule ID=%u Action=%u Dir=%u IPVer=%u Port=%u Proto=%u PID=%llu App=%ws\n",
+            DbgPrint("[ominull] IOCTL: Added Dynamic Rule ID=%u Action=%u Dir=%u IPVer=%u Port=%u Proto=%u PID=%llu App=%ws\n",
                 rule->RuleId, rule->Action, rule->Direction, rule->IpVersion,
                 rule->RemotePort, rule->Protocol, rule->ProcessId,
                 rule->ProcessPathLen > 0 ? rule->ProcessPath : L"(any)");
@@ -413,7 +413,7 @@ WfpSentinelDispatchDeviceControl(
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
         break;
 
-    case IOCTL_WFPSENTINEL_DELETE_RULE:
+    case IOCTL_OMINULL_DELETE_RULE:
         if (inLen < sizeof(UINT32) || !buf) {
             status = STATUS_INVALID_PARAMETER;
             break;
@@ -432,7 +432,7 @@ WfpSentinelDispatchDeviceControl(
                     }
                     g_GlobalData.RuleCount--;
                     g_GlobalData.Stats.ActiveRuleCount = g_GlobalData.RuleCount;
-                    RtlZeroMemory(&g_GlobalData.Rules[g_GlobalData.RuleCount], sizeof(WFPSENTINEL_RULE));
+                    RtlZeroMemory(&g_GlobalData.Rules[g_GlobalData.RuleCount], sizeof(OMINULL_RULE));
                     break;
                 }
             }
@@ -442,67 +442,67 @@ WfpSentinelDispatchDeviceControl(
         }
         break;
 
-    case IOCTL_WFPSENTINEL_CLEAR_BLOCK_RULES:
-    case IOCTL_WFPSENTINEL_CLEAR_RULES:
+    case IOCTL_OMINULL_CLEAR_BLOCK_RULES:
+    case IOCTL_OMINULL_CLEAR_RULES:
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
         RtlZeroMemory(g_GlobalData.Rules, sizeof(g_GlobalData.Rules));
         g_GlobalData.RuleCount = 0;
         g_GlobalData.Stats.ActiveRuleCount = 0;
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-        DbgPrint("[wfpsentinel] IOCTL: Cleared all kernel rules\n");
+        DbgPrint("[ominull] IOCTL: Cleared all kernel rules\n");
         status = STATUS_SUCCESS;
         break;
 
-    case IOCTL_WFPSENTINEL_GET_RULES:
-        if (outLen < sizeof(WFPSENTINEL_RULES_LIST) || !buf) {
+    case IOCTL_OMINULL_GET_RULES:
+        if (outLen < sizeof(OMINULL_RULES_LIST) || !buf) {
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
 
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
-        PWFPSENTINEL_RULES_LIST list = (PWFPSENTINEL_RULES_LIST)buf;
+        POMINULL_RULES_LIST list = (POMINULL_RULES_LIST)buf;
         list->RuleCount = g_GlobalData.RuleCount;
-        RtlCopyMemory(list->Rules, g_GlobalData.Rules, g_GlobalData.RuleCount * sizeof(WFPSENTINEL_RULE));
-        bytesReturned = sizeof(UINT32) + g_GlobalData.RuleCount * sizeof(WFPSENTINEL_RULE);
+        RtlCopyMemory(list->Rules, g_GlobalData.Rules, g_GlobalData.RuleCount * sizeof(OMINULL_RULE));
+        bytesReturned = sizeof(UINT32) + g_GlobalData.RuleCount * sizeof(OMINULL_RULE);
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
         status = STATUS_SUCCESS;
         break;
 
-    case IOCTL_WFPSENTINEL_GET_STATS:
-        if (outLen < sizeof(WFPSENTINEL_STATS) || !buf) {
+    case IOCTL_OMINULL_GET_STATS:
+        if (outLen < sizeof(OMINULL_STATS) || !buf) {
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
 
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
-        RtlCopyMemory(buf, &g_GlobalData.Stats, sizeof(WFPSENTINEL_STATS));
-        bytesReturned = sizeof(WFPSENTINEL_STATS);
+        RtlCopyMemory(buf, &g_GlobalData.Stats, sizeof(OMINULL_STATS));
+        bytesReturned = sizeof(OMINULL_STATS);
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
         status = STATUS_SUCCESS;
         break;
 
-    case IOCTL_WFPSENTINEL_STREAM_EVENT: // Inverted Call Real-Time Event Streaming
-        if (outLen < sizeof(WFPSENTINEL_EVENT) || !buf) {
+    case IOCTL_OMINULL_STREAM_EVENT: // Inverted Call Real-Time Event Streaming
+        if (outLen < sizeof(OMINULL_EVENT) || !buf) {
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
 
         KeAcquireSpinLock(&g_GlobalData.TelemetryLock, &oldIrql);
         if (g_GlobalData.EventCount > 0) {
-            PWFPSENTINEL_EVENT ev = &g_GlobalData.EventQueue[g_GlobalData.EventTail];
-            RtlCopyMemory(buf, ev, sizeof(WFPSENTINEL_EVENT));
-            g_GlobalData.EventTail = (g_GlobalData.EventTail + 1) % WFPSENTINEL_EVENT_QUEUE_SIZE;
+            POMINULL_EVENT ev = &g_GlobalData.EventQueue[g_GlobalData.EventTail];
+            RtlCopyMemory(buf, ev, sizeof(OMINULL_EVENT));
+            g_GlobalData.EventTail = (g_GlobalData.EventTail + 1) % OMINULL_EVENT_QUEUE_SIZE;
             g_GlobalData.EventCount--;
             g_GlobalData.Stats.TotalEventsStreamed++;
-            bytesReturned = sizeof(WFPSENTINEL_EVENT);
+            bytesReturned = sizeof(OMINULL_EVENT);
             KeReleaseSpinLock(&g_GlobalData.TelemetryLock, oldIrql);
             status = STATUS_SUCCESS;
         } else {
             IoMarkIrpPending(Irp);
-            IoSetCancelRoutine(Irp, WfpSentinelIrpCancelRoutine);
+            IoSetCancelRoutine(Irp, OminullIrpCancelRoutine);
             InsertTailList(&g_GlobalData.PendingIrpList, &Irp->Tail.Overlay.ListEntry);
             g_GlobalData.Stats.PendingIrpCount++;
             KeReleaseSpinLock(&g_GlobalData.TelemetryLock, oldIrql);
@@ -523,7 +523,7 @@ WfpSentinelDispatchDeviceControl(
 
 // Classify: Outbound IPv4 ALE Connect
 void NTAPI
-WfpSentinelClassifyConnectV4(
+OminullClassifyConnectV4(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -553,15 +553,15 @@ WfpSentinelClassifyConnectV4(
         processId = inMetaValues->processId;
     }
 
-    WCHAR appPath[WFPSENTINEL_MAX_PATH];
+    WCHAR appPath[OMINULL_MAX_PATH];
     FWP_BYTE_BLOB* appBlob = NULL;
     if (inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
         appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_ALE_APP_ID].value.byteBlob;
     }
-    WfpSentinelExtractAppPath(appBlob, inMetaValues, appPath, WFPSENTINEL_MAX_PATH);
+    OminullExtractAppPath(appBlob, inMetaValues, appPath, OMINULL_MAX_PATH);
 
-    UINT8 verdict = WfpSentinelEvaluatePolicy(
-        WFPSENTINEL_DIR_OUTBOUND, 4, protocol, localPort, remotePort, remoteIp, NULL, processId, appPath
+    UINT8 verdict = OminullEvaluatePolicy(
+        OMINULL_DIR_OUTBOUND, 4, protocol, localPort, remotePort, remoteIp, NULL, processId, appPath
     );
 
     KIRQL oldIrql;
@@ -569,31 +569,31 @@ WfpSentinelClassifyConnectV4(
     g_GlobalData.Stats.TotalClassified++;
     g_GlobalData.Stats.TotalV4Connections++;
     g_GlobalData.Stats.TotalOutboundConnections++;
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
+    if (verdict == OMINULL_ACTION_BLOCK) {
         g_GlobalData.Stats.TotalBlocked++;
     } else {
         g_GlobalData.Stats.TotalPermitted++;
     }
     KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-    WFPSENTINEL_EVENT ev;
+    OMINULL_EVENT ev;
     RtlZeroMemory(&ev, sizeof(ev));
     KeQuerySystemTime((PLARGE_INTEGER)&ev.Timestamp);
-    ev.EventType = (verdict == WFPSENTINEL_ACTION_BLOCK) ? WFPSENTINEL_EVENT_BLOCKED : WFPSENTINEL_EVENT_CONNECT_V4;
-    ev.Action = (verdict == WFPSENTINEL_ACTION_BLOCK) ? 1 : 0;
+    ev.EventType = (verdict == OMINULL_ACTION_BLOCK) ? OMINULL_EVENT_BLOCKED : OMINULL_EVENT_CONNECT_V4;
+    ev.Action = (verdict == OMINULL_ACTION_BLOCK) ? 1 : 0;
     ev.ProcessId = processId;
     ev.IpVersion = 4;
     ev.Protocol = protocol;
-    ev.Direction = WFPSENTINEL_DIR_OUTBOUND;
+    ev.Direction = OMINULL_DIR_OUTBOUND;
     ev.LocalPort = localPort;
     ev.RemotePort = remotePort;
     ev.Addr.Ipv4.LocalIp = localIp;
     ev.Addr.Ipv4.RemoteIp = remoteIp;
     RtlCopyMemory(ev.ProcessPath, appPath, sizeof(appPath));
-    WfpSentinelEmitEvent(&ev);
+    OminullEmitEvent(&ev);
 
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
-        DbgPrint("[wfpsentinel] BLOCKED OUT V4: PID=%llu App=%ws Proto=%u -> Remote=%u.%u.%u.%u:%u\n",
+    if (verdict == OMINULL_ACTION_BLOCK) {
+        DbgPrint("[ominull] BLOCKED OUT V4: PID=%llu App=%ws Proto=%u -> Remote=%u.%u.%u.%u:%u\n",
             processId, appPath, protocol,
             (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
             remotePort);
@@ -602,7 +602,7 @@ WfpSentinelClassifyConnectV4(
             classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         }
     } else {
-        DbgPrint("[wfpsentinel] PERMIT OUT V4: PID=%llu Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
+        DbgPrint("[ominull] PERMIT OUT V4: PID=%llu Proto=%u Local=%u.%u.%u.%u:%u -> Remote=%u.%u.%u.%u:%u\n",
             processId, protocol,
             (localIp >> 24) & 0xFF, (localIp >> 16) & 0xFF, (localIp >> 8) & 0xFF, localIp & 0xFF, localPort,
             (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF, remotePort);
@@ -612,7 +612,7 @@ WfpSentinelClassifyConnectV4(
 
 // Classify: Outbound IPv6 ALE Connect
 void NTAPI
-WfpSentinelClassifyConnectV6(
+OminullClassifyConnectV6(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -651,15 +651,15 @@ WfpSentinelClassifyConnectV6(
         processId = inMetaValues->processId;
     }
 
-    WCHAR appPath[WFPSENTINEL_MAX_PATH];
+    WCHAR appPath[OMINULL_MAX_PATH];
     FWP_BYTE_BLOB* appBlob = NULL;
     if (inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V6_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
         appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V6_ALE_APP_ID].value.byteBlob;
     }
-    WfpSentinelExtractAppPath(appBlob, inMetaValues, appPath, WFPSENTINEL_MAX_PATH);
+    OminullExtractAppPath(appBlob, inMetaValues, appPath, OMINULL_MAX_PATH);
 
-    UINT8 verdict = WfpSentinelEvaluatePolicy(
-        WFPSENTINEL_DIR_OUTBOUND, 6, protocol, localPort, remotePort, 0, remoteIp6, processId, appPath
+    UINT8 verdict = OminullEvaluatePolicy(
+        OMINULL_DIR_OUTBOUND, 6, protocol, localPort, remotePort, 0, remoteIp6, processId, appPath
     );
 
     KIRQL oldIrql;
@@ -667,38 +667,38 @@ WfpSentinelClassifyConnectV6(
     g_GlobalData.Stats.TotalClassified++;
     g_GlobalData.Stats.TotalV6Connections++;
     g_GlobalData.Stats.TotalOutboundConnections++;
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
+    if (verdict == OMINULL_ACTION_BLOCK) {
         g_GlobalData.Stats.TotalBlocked++;
     } else {
         g_GlobalData.Stats.TotalPermitted++;
     }
     KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-    WFPSENTINEL_EVENT ev;
+    OMINULL_EVENT ev;
     RtlZeroMemory(&ev, sizeof(ev));
     KeQuerySystemTime((PLARGE_INTEGER)&ev.Timestamp);
-    ev.EventType = (verdict == WFPSENTINEL_ACTION_BLOCK) ? WFPSENTINEL_EVENT_BLOCKED : WFPSENTINEL_EVENT_CONNECT_V6;
-    ev.Action = (verdict == WFPSENTINEL_ACTION_BLOCK) ? 1 : 0;
+    ev.EventType = (verdict == OMINULL_ACTION_BLOCK) ? OMINULL_EVENT_BLOCKED : OMINULL_EVENT_CONNECT_V6;
+    ev.Action = (verdict == OMINULL_ACTION_BLOCK) ? 1 : 0;
     ev.ProcessId = processId;
     ev.IpVersion = 6;
     ev.Protocol = protocol;
-    ev.Direction = WFPSENTINEL_DIR_OUTBOUND;
+    ev.Direction = OMINULL_DIR_OUTBOUND;
     ev.LocalPort = localPort;
     ev.RemotePort = remotePort;
     RtlCopyMemory(ev.Addr.Ipv6.LocalIp, localIp6, 16);
     RtlCopyMemory(ev.Addr.Ipv6.RemoteIp, remoteIp6, 16);
     RtlCopyMemory(ev.ProcessPath, appPath, sizeof(appPath));
-    WfpSentinelEmitEvent(&ev);
+    OminullEmitEvent(&ev);
 
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
-        DbgPrint("[wfpsentinel] BLOCKED OUT V6: PID=%llu App=%ws Proto=%u RemotePort=%u\n",
+    if (verdict == OMINULL_ACTION_BLOCK) {
+        DbgPrint("[ominull] BLOCKED OUT V6: PID=%llu App=%ws Proto=%u RemotePort=%u\n",
             processId, appPath, protocol, remotePort);
         if (classifyOut->rights & FWPS_RIGHT_ACTION_WRITE) {
             classifyOut->actionType = FWP_ACTION_BLOCK;
             classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         }
     } else {
-        DbgPrint("[wfpsentinel] PERMIT OUT V6: PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
+        DbgPrint("[ominull] PERMIT OUT V6: PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
             processId, protocol, localPort, remotePort);
         classifyOut->actionType = FWP_ACTION_CONTINUE;
     }
@@ -706,7 +706,7 @@ WfpSentinelClassifyConnectV6(
 
 // Classify: Inbound IPv4 ALE Recv / Accept
 void NTAPI
-WfpSentinelClassifyRecvAcceptV4(
+OminullClassifyRecvAcceptV4(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -736,15 +736,15 @@ WfpSentinelClassifyRecvAcceptV4(
         processId = inMetaValues->processId;
     }
 
-    WCHAR appPath[WFPSENTINEL_MAX_PATH];
+    WCHAR appPath[OMINULL_MAX_PATH];
     FWP_BYTE_BLOB* appBlob = NULL;
     if (inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
         appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_ALE_APP_ID].value.byteBlob;
     }
-    WfpSentinelExtractAppPath(appBlob, inMetaValues, appPath, WFPSENTINEL_MAX_PATH);
+    OminullExtractAppPath(appBlob, inMetaValues, appPath, OMINULL_MAX_PATH);
 
-    UINT8 verdict = WfpSentinelEvaluatePolicy(
-        WFPSENTINEL_DIR_INBOUND, 4, protocol, localPort, remotePort, remoteIp, NULL, processId, appPath
+    UINT8 verdict = OminullEvaluatePolicy(
+        OMINULL_DIR_INBOUND, 4, protocol, localPort, remotePort, remoteIp, NULL, processId, appPath
     );
 
     KIRQL oldIrql;
@@ -752,31 +752,31 @@ WfpSentinelClassifyRecvAcceptV4(
     g_GlobalData.Stats.TotalClassified++;
     g_GlobalData.Stats.TotalV4Connections++;
     g_GlobalData.Stats.TotalInboundConnections++;
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
+    if (verdict == OMINULL_ACTION_BLOCK) {
         g_GlobalData.Stats.TotalBlocked++;
     } else {
         g_GlobalData.Stats.TotalPermitted++;
     }
     KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-    WFPSENTINEL_EVENT ev;
+    OMINULL_EVENT ev;
     RtlZeroMemory(&ev, sizeof(ev));
     KeQuerySystemTime((PLARGE_INTEGER)&ev.Timestamp);
-    ev.EventType = (verdict == WFPSENTINEL_ACTION_BLOCK) ? WFPSENTINEL_EVENT_BLOCKED : WFPSENTINEL_EVENT_RECV_ACCEPT_V4;
-    ev.Action = (verdict == WFPSENTINEL_ACTION_BLOCK) ? 1 : 0;
+    ev.EventType = (verdict == OMINULL_ACTION_BLOCK) ? OMINULL_EVENT_BLOCKED : OMINULL_EVENT_RECV_ACCEPT_V4;
+    ev.Action = (verdict == OMINULL_ACTION_BLOCK) ? 1 : 0;
     ev.ProcessId = processId;
     ev.IpVersion = 4;
     ev.Protocol = protocol;
-    ev.Direction = WFPSENTINEL_DIR_INBOUND;
+    ev.Direction = OMINULL_DIR_INBOUND;
     ev.LocalPort = localPort;
     ev.RemotePort = remotePort;
     ev.Addr.Ipv4.LocalIp = localIp;
     ev.Addr.Ipv4.RemoteIp = remoteIp;
     RtlCopyMemory(ev.ProcessPath, appPath, sizeof(appPath));
-    WfpSentinelEmitEvent(&ev);
+    OminullEmitEvent(&ev);
 
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
-        DbgPrint("[wfpsentinel] BLOCKED IN V4: PID=%llu App=%ws Proto=%u Remote=%u.%u.%u.%u:%u -> LocalPort=%u\n",
+    if (verdict == OMINULL_ACTION_BLOCK) {
+        DbgPrint("[ominull] BLOCKED IN V4: PID=%llu App=%ws Proto=%u Remote=%u.%u.%u.%u:%u -> LocalPort=%u\n",
             processId, appPath, protocol,
             (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
             remotePort, localPort);
@@ -785,7 +785,7 @@ WfpSentinelClassifyRecvAcceptV4(
             classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         }
     } else {
-        DbgPrint("[wfpsentinel] PERMIT IN V4: PID=%llu Proto=%u Remote=%u.%u.%u.%u:%u -> LocalPort=%u\n",
+        DbgPrint("[ominull] PERMIT IN V4: PID=%llu Proto=%u Remote=%u.%u.%u.%u:%u -> LocalPort=%u\n",
             processId, protocol,
             (remoteIp >> 24) & 0xFF, (remoteIp >> 16) & 0xFF, (remoteIp >> 8) & 0xFF, remoteIp & 0xFF,
             remotePort, localPort);
@@ -795,7 +795,7 @@ WfpSentinelClassifyRecvAcceptV4(
 
 // Classify: Inbound IPv6 ALE Recv / Accept
 void NTAPI
-WfpSentinelClassifyRecvAcceptV6(
+OminullClassifyRecvAcceptV6(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -834,15 +834,15 @@ WfpSentinelClassifyRecvAcceptV6(
         processId = inMetaValues->processId;
     }
 
-    WCHAR appPath[WFPSENTINEL_MAX_PATH];
+    WCHAR appPath[OMINULL_MAX_PATH];
     FWP_BYTE_BLOB* appBlob = NULL;
     if (inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
         appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_ALE_APP_ID].value.byteBlob;
     }
-    WfpSentinelExtractAppPath(appBlob, inMetaValues, appPath, WFPSENTINEL_MAX_PATH);
+    OminullExtractAppPath(appBlob, inMetaValues, appPath, OMINULL_MAX_PATH);
 
-    UINT8 verdict = WfpSentinelEvaluatePolicy(
-        WFPSENTINEL_DIR_INBOUND, 6, protocol, localPort, remotePort, 0, remoteIp6, processId, appPath
+    UINT8 verdict = OminullEvaluatePolicy(
+        OMINULL_DIR_INBOUND, 6, protocol, localPort, remotePort, 0, remoteIp6, processId, appPath
     );
 
     KIRQL oldIrql;
@@ -850,38 +850,38 @@ WfpSentinelClassifyRecvAcceptV6(
     g_GlobalData.Stats.TotalClassified++;
     g_GlobalData.Stats.TotalV6Connections++;
     g_GlobalData.Stats.TotalInboundConnections++;
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
+    if (verdict == OMINULL_ACTION_BLOCK) {
         g_GlobalData.Stats.TotalBlocked++;
     } else {
         g_GlobalData.Stats.TotalPermitted++;
     }
     KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-    WFPSENTINEL_EVENT ev;
+    OMINULL_EVENT ev;
     RtlZeroMemory(&ev, sizeof(ev));
     KeQuerySystemTime((PLARGE_INTEGER)&ev.Timestamp);
-    ev.EventType = (verdict == WFPSENTINEL_ACTION_BLOCK) ? WFPSENTINEL_EVENT_BLOCKED : WFPSENTINEL_EVENT_RECV_ACCEPT_V6;
-    ev.Action = (verdict == WFPSENTINEL_ACTION_BLOCK) ? 1 : 0;
+    ev.EventType = (verdict == OMINULL_ACTION_BLOCK) ? OMINULL_EVENT_BLOCKED : OMINULL_EVENT_RECV_ACCEPT_V6;
+    ev.Action = (verdict == OMINULL_ACTION_BLOCK) ? 1 : 0;
     ev.ProcessId = processId;
     ev.IpVersion = 6;
     ev.Protocol = protocol;
-    ev.Direction = WFPSENTINEL_DIR_INBOUND;
+    ev.Direction = OMINULL_DIR_INBOUND;
     ev.LocalPort = localPort;
     ev.RemotePort = remotePort;
     RtlCopyMemory(ev.Addr.Ipv6.LocalIp, localIp6, 16);
     RtlCopyMemory(ev.Addr.Ipv6.RemoteIp, remoteIp6, 16);
     RtlCopyMemory(ev.ProcessPath, appPath, sizeof(appPath));
-    WfpSentinelEmitEvent(&ev);
+    OminullEmitEvent(&ev);
 
-    if (verdict == WFPSENTINEL_ACTION_BLOCK) {
-        DbgPrint("[wfpsentinel] BLOCKED IN V6: PID=%llu App=%ws Proto=%u LocalPort=%u RemotePort=%u\n",
+    if (verdict == OMINULL_ACTION_BLOCK) {
+        DbgPrint("[ominull] BLOCKED IN V6: PID=%llu App=%ws Proto=%u LocalPort=%u RemotePort=%u\n",
             processId, appPath, protocol, localPort, remotePort);
         if (classifyOut->rights & FWPS_RIGHT_ACTION_WRITE) {
             classifyOut->actionType = FWP_ACTION_BLOCK;
             classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         }
     } else {
-        DbgPrint("[wfpsentinel] PERMIT IN V6: PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
+        DbgPrint("[ominull] PERMIT IN V6: PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
             processId, protocol, localPort, remotePort);
         classifyOut->actionType = FWP_ACTION_CONTINUE;
     }
@@ -889,7 +889,7 @@ WfpSentinelClassifyRecvAcceptV6(
 
 // Classify: ALE Flow Established V4 (Context Tracking)
 void NTAPI
-WfpSentinelClassifyFlowEstV4(
+OminullClassifyFlowEstV4(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -915,12 +915,12 @@ WfpSentinelClassifyFlowEstV4(
     if (flowContext == 0 && (inMetaValues->currentFields & FWPS_METADATA_FIELD_FLOW_HANDLE)) {
         UINT64 flowHandle = inMetaValues->flowHandle;
 
-        PWFPSENTINEL_FLOW_CONTEXT flowCtx = (PWFPSENTINEL_FLOW_CONTEXT)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(WFPSENTINEL_FLOW_CONTEXT), WFPSENTINEL_TAG
+        POMINULL_FLOW_CONTEXT flowCtx = (POMINULL_FLOW_CONTEXT)ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
         );
 
         if (flowCtx != NULL) {
-            RtlZeroMemory(flowCtx, sizeof(WFPSENTINEL_FLOW_CONTEXT));
+            RtlZeroMemory(flowCtx, sizeof(OMINULL_FLOW_CONTEXT));
             flowCtx->FlowId = flowHandle;
             flowCtx->IpVersion = 4;
             flowCtx->Protocol = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_PROTOCOL].value.uint8;
@@ -929,7 +929,7 @@ WfpSentinelClassifyFlowEstV4(
             flowCtx->Addr.Ipv4.LocalIp = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_LOCAL_ADDRESS].value.uint32;
             flowCtx->Addr.Ipv4.RemoteIp = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_REMOTE_ADDRESS].value.uint32;
             flowCtx->Direction = (inMetaValues->currentFields & FWPS_METADATA_FIELD_PACKET_DIRECTION) ?
-                (UINT8)inMetaValues->packetDirection : WFPSENTINEL_DIR_OUTBOUND;
+                (UINT8)inMetaValues->packetDirection : OMINULL_DIR_OUTBOUND;
 
             if (inMetaValues->currentFields & FWPS_METADATA_FIELD_PROCESS_ID) {
                 flowCtx->ProcessId = inMetaValues->processId;
@@ -939,7 +939,7 @@ WfpSentinelClassifyFlowEstV4(
             if (inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
                 appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_ALE_APP_ID].value.byteBlob;
             }
-            WfpSentinelExtractAppPath(appBlob, inMetaValues, flowCtx->ProcessPath, WFPSENTINEL_MAX_PATH);
+            OminullExtractAppPath(appBlob, inMetaValues, flowCtx->ProcessPath, OMINULL_MAX_PATH);
             KeQuerySystemTime(&flowCtx->CreationTime);
 
             NTSTATUS status = FwpsFlowAssociateContext0(
@@ -956,10 +956,10 @@ WfpSentinelClassifyFlowEstV4(
                 g_GlobalData.Stats.TotalFlowsActive++;
                 KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-                WFPSENTINEL_EVENT ev;
+                OMINULL_EVENT ev;
                 RtlZeroMemory(&ev, sizeof(ev));
                 ev.Timestamp = (UINT64)flowCtx->CreationTime.QuadPart;
-                ev.EventType = WFPSENTINEL_EVENT_FLOW_ESTABLISHED_V4;
+                ev.EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V4;
                 ev.Action = 0;
                 ev.ProcessId = flowCtx->ProcessId;
                 ev.IpVersion = 4;
@@ -971,16 +971,16 @@ WfpSentinelClassifyFlowEstV4(
                 ev.Addr.Ipv4.RemoteIp = flowCtx->Addr.Ipv4.RemoteIp;
                 ev.FlowId = flowHandle;
                 RtlCopyMemory(ev.ProcessPath, flowCtx->ProcessPath, sizeof(ev.ProcessPath));
-                WfpSentinelEmitEvent(&ev);
+                OminullEmitEvent(&ev);
 
-                DbgPrint("[wfpsentinel] FLOW_ESTABLISHED V4: FlowId=%llu PID=%llu Proto=%u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u\n",
+                DbgPrint("[ominull] FLOW_ESTABLISHED V4: FlowId=%llu PID=%llu Proto=%u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u\n",
                     flowHandle, flowCtx->ProcessId, flowCtx->Protocol,
                     (flowCtx->Addr.Ipv4.LocalIp >> 24) & 0xFF, (flowCtx->Addr.Ipv4.LocalIp >> 16) & 0xFF,
                     (flowCtx->Addr.Ipv4.LocalIp >> 8) & 0xFF, flowCtx->Addr.Ipv4.LocalIp & 0xFF, flowCtx->LocalPort,
                     (flowCtx->Addr.Ipv4.RemoteIp >> 24) & 0xFF, (flowCtx->Addr.Ipv4.RemoteIp >> 16) & 0xFF,
                     (flowCtx->Addr.Ipv4.RemoteIp >> 8) & 0xFF, flowCtx->Addr.Ipv4.RemoteIp & 0xFF, flowCtx->RemotePort);
             } else {
-                ExFreePoolWithTag(flowCtx, WFPSENTINEL_TAG);
+                ExFreePoolWithTag(flowCtx, OMINULL_TAG);
             }
         }
     }
@@ -988,7 +988,7 @@ WfpSentinelClassifyFlowEstV4(
 
 // Classify: ALE Flow Established V6 (Context Tracking)
 void NTAPI
-WfpSentinelClassifyFlowEstV6(
+OminullClassifyFlowEstV6(
     _In_ const FWPS_INCOMING_VALUES0*          inFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0* inMetaValues,
     _Inout_opt_ void*                          layerData,
@@ -1014,12 +1014,12 @@ WfpSentinelClassifyFlowEstV6(
     if (flowContext == 0 && (inMetaValues->currentFields & FWPS_METADATA_FIELD_FLOW_HANDLE)) {
         UINT64 flowHandle = inMetaValues->flowHandle;
 
-        PWFPSENTINEL_FLOW_CONTEXT flowCtx = (PWFPSENTINEL_FLOW_CONTEXT)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(WFPSENTINEL_FLOW_CONTEXT), WFPSENTINEL_TAG
+        POMINULL_FLOW_CONTEXT flowCtx = (POMINULL_FLOW_CONTEXT)ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(OMINULL_FLOW_CONTEXT), OMINULL_TAG
         );
 
         if (flowCtx != NULL) {
-            RtlZeroMemory(flowCtx, sizeof(WFPSENTINEL_FLOW_CONTEXT));
+            RtlZeroMemory(flowCtx, sizeof(OMINULL_FLOW_CONTEXT));
             flowCtx->FlowId = flowHandle;
             flowCtx->IpVersion = 6;
             flowCtx->Protocol = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_PROTOCOL].value.uint8;
@@ -1036,7 +1036,7 @@ WfpSentinelClassifyFlowEstV6(
             }
 
             flowCtx->Direction = (inMetaValues->currentFields & FWPS_METADATA_FIELD_PACKET_DIRECTION) ?
-                (UINT8)inMetaValues->packetDirection : WFPSENTINEL_DIR_OUTBOUND;
+                (UINT8)inMetaValues->packetDirection : OMINULL_DIR_OUTBOUND;
 
             if (inMetaValues->currentFields & FWPS_METADATA_FIELD_PROCESS_ID) {
                 flowCtx->ProcessId = inMetaValues->processId;
@@ -1046,7 +1046,7 @@ WfpSentinelClassifyFlowEstV6(
             if (inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_ALE_APP_ID].value.type == FWP_BYTE_BLOB_TYPE) {
                 appBlob = inFixedValues->incomingValue[FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_ALE_APP_ID].value.byteBlob;
             }
-            WfpSentinelExtractAppPath(appBlob, inMetaValues, flowCtx->ProcessPath, WFPSENTINEL_MAX_PATH);
+            OminullExtractAppPath(appBlob, inMetaValues, flowCtx->ProcessPath, OMINULL_MAX_PATH);
             KeQuerySystemTime(&flowCtx->CreationTime);
 
             NTSTATUS status = FwpsFlowAssociateContext0(
@@ -1063,10 +1063,10 @@ WfpSentinelClassifyFlowEstV6(
                 g_GlobalData.Stats.TotalFlowsActive++;
                 KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-                WFPSENTINEL_EVENT ev;
+                OMINULL_EVENT ev;
                 RtlZeroMemory(&ev, sizeof(ev));
                 ev.Timestamp = (UINT64)flowCtx->CreationTime.QuadPart;
-                ev.EventType = WFPSENTINEL_EVENT_FLOW_ESTABLISHED_V6;
+                ev.EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V6;
                 ev.Action = 0;
                 ev.ProcessId = flowCtx->ProcessId;
                 ev.IpVersion = 6;
@@ -1078,12 +1078,12 @@ WfpSentinelClassifyFlowEstV6(
                 RtlCopyMemory(ev.Addr.Ipv6.RemoteIp, flowCtx->Addr.Ipv6.RemoteIp, 16);
                 ev.FlowId = flowHandle;
                 RtlCopyMemory(ev.ProcessPath, flowCtx->ProcessPath, sizeof(ev.ProcessPath));
-                WfpSentinelEmitEvent(&ev);
+                OminullEmitEvent(&ev);
 
-                DbgPrint("[wfpsentinel] FLOW_ESTABLISHED V6: FlowId=%llu PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
+                DbgPrint("[ominull] FLOW_ESTABLISHED V6: FlowId=%llu PID=%llu Proto=%u LocalPort=%u RemotePort=%u\n",
                     flowHandle, flowCtx->ProcessId, flowCtx->Protocol, flowCtx->LocalPort, flowCtx->RemotePort);
             } else {
-                ExFreePoolWithTag(flowCtx, WFPSENTINEL_TAG);
+                ExFreePoolWithTag(flowCtx, OMINULL_TAG);
             }
         }
     }
@@ -1091,7 +1091,7 @@ WfpSentinelClassifyFlowEstV6(
 
 // Notification callback for filter lifecycle events
 NTSTATUS NTAPI
-WfpSentinelNotify(
+OminullNotify(
     _In_ FWPS_CALLOUT_NOTIFY_TYPE notifyType,
     _In_ const GUID*              filterKey,
     _Inout_ FWPS_FILTER0*         filter
@@ -1102,10 +1102,10 @@ WfpSentinelNotify(
 
     switch (notifyType) {
     case FWPS_CALLOUT_NOTIFY_ADD_FILTER:
-        DbgPrint("[wfpsentinel] NOTIFY: Filter registered on callout\n");
+        DbgPrint("[ominull] NOTIFY: Filter registered on callout\n");
         break;
     case FWPS_CALLOUT_NOTIFY_DELETE_FILTER:
-        DbgPrint("[wfpsentinel] NOTIFY: Filter removed from callout\n");
+        DbgPrint("[ominull] NOTIFY: Filter removed from callout\n");
         break;
     default:
         break;
@@ -1116,7 +1116,7 @@ WfpSentinelNotify(
 
 // Flow teardown callback
 void NTAPI
-WfpSentinelFlowDelete(
+OminullFlowDelete(
     _In_ UINT16 layerId,
     _In_ UINT32 calloutId,
     _In_ UINT64 flowContext
@@ -1126,12 +1126,12 @@ WfpSentinelFlowDelete(
     UNREFERENCED_PARAMETER(calloutId);
 
     if (flowContext != 0) {
-        PWFPSENTINEL_FLOW_CONTEXT ctx = (PWFPSENTINEL_FLOW_CONTEXT)flowContext;
+        POMINULL_FLOW_CONTEXT ctx = (POMINULL_FLOW_CONTEXT)flowContext;
 
-        WFPSENTINEL_EVENT ev;
+        OMINULL_EVENT ev;
         RtlZeroMemory(&ev, sizeof(ev));
         KeQuerySystemTime((PLARGE_INTEGER)&ev.Timestamp);
-        ev.EventType = WFPSENTINEL_EVENT_FLOW_CLOSED;
+        ev.EventType = OMINULL_EVENT_FLOW_CLOSED;
         ev.Action = 0;
         ev.ProcessId = ctx->ProcessId;
         ev.IpVersion = ctx->IpVersion;
@@ -1148,7 +1148,7 @@ WfpSentinelFlowDelete(
         }
         ev.FlowId = ctx->FlowId;
         RtlCopyMemory(ev.ProcessPath, ctx->ProcessPath, sizeof(ev.ProcessPath));
-        WfpSentinelEmitEvent(&ev);
+        OminullEmitEvent(&ev);
 
         KIRQL oldIrql;
         KeAcquireSpinLock(&g_GlobalData.PolicyLock, &oldIrql);
@@ -1157,15 +1157,15 @@ WfpSentinelFlowDelete(
         }
         KeReleaseSpinLock(&g_GlobalData.PolicyLock, oldIrql);
 
-        DbgPrint("[wfpsentinel] FLOW_DELETE: Connection flow destroyed (FlowId=%llu, PID=%llu)\n",
+        DbgPrint("[ominull] FLOW_DELETE: Connection flow destroyed (FlowId=%llu, PID=%llu)\n",
             ctx->FlowId, ctx->ProcessId);
 
-        ExFreePoolWithTag(ctx, WFPSENTINEL_TAG);
+        ExFreePoolWithTag(ctx, OMINULL_TAG);
     }
 }
 
 // Layer configuration table for unified multi-layer registration
-typedef struct _WFPSENTINEL_LAYER_CONFIG {
+typedef struct _OMINULL_LAYER_CONFIG {
     const GUID*                 LayerGuid;
     const GUID*                 CalloutGuid;
     const GUID*                 FilterGuid;
@@ -1175,80 +1175,80 @@ typedef struct _WFPSENTINEL_LAYER_CONFIG {
     const wchar_t*              FilterDesc;
     FWPS_CALLOUT_CLASSIFY_FN0   ClassifyFn;
     FWP_ACTION_TYPE             FilterActionType;
-} WFPSENTINEL_LAYER_CONFIG;
+} OMINULL_LAYER_CONFIG;
 
-static const WFPSENTINEL_LAYER_CONFIG g_LayerConfigs[WFPSENTINEL_LAYER_COUNT] = {
+static const OMINULL_LAYER_CONFIG g_LayerConfigs[OMINULL_LAYER_COUNT] = {
     { // 0: Connect V4
         &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-        &WFPSENTINEL_ALE_CONNECT_V4_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_CONNECT_V4_FILTER_GUID,
-        L"WfpSentinelAleConnectV4Callout",
-        L"WfpSentinel ALE Connect V4 Callout",
-        L"WfpSentinelAleConnectV4Filter",
-        L"WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter",
-        WfpSentinelClassifyConnectV4,
+        &OMINULL_ALE_CONNECT_V4_CALLOUT_GUID,
+        &OMINULL_ALE_CONNECT_V4_FILTER_GUID,
+        L"OminullAleConnectV4Callout",
+        L"Ominull ALE Connect V4 Callout",
+        L"OminullAleConnectV4Filter",
+        L"Ominull Outbound IPv4 ALE Connect Enforcement Filter",
+        OminullClassifyConnectV4,
         FWP_ACTION_CALLOUT_UNKNOWN
     },
     { // 1: Connect V6
         &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-        &WFPSENTINEL_ALE_CONNECT_V6_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_CONNECT_V6_FILTER_GUID,
-        L"WfpSentinelAleConnectV6Callout",
-        L"WfpSentinel ALE Connect V6 Callout",
-        L"WfpSentinelAleConnectV6Filter",
-        L"WfpSentinel Outbound IPv6 ALE Connect Enforcement Filter",
-        WfpSentinelClassifyConnectV6,
+        &OMINULL_ALE_CONNECT_V6_CALLOUT_GUID,
+        &OMINULL_ALE_CONNECT_V6_FILTER_GUID,
+        L"OminullAleConnectV6Callout",
+        L"Ominull ALE Connect V6 Callout",
+        L"OminullAleConnectV6Filter",
+        L"Ominull Outbound IPv6 ALE Connect Enforcement Filter",
+        OminullClassifyConnectV6,
         FWP_ACTION_CALLOUT_UNKNOWN
     },
     { // 2: Recv Accept V4
         &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-        &WFPSENTINEL_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_RECV_ACCEPT_V4_FILTER_GUID,
-        L"WfpSentinelAleRecvAcceptV4Callout",
-        L"WfpSentinel ALE Recv Accept V4 Callout",
-        L"WfpSentinelAleRecvAcceptV4Filter",
-        L"WfpSentinel Inbound IPv4 ALE Recv Accept Enforcement Filter",
-        WfpSentinelClassifyRecvAcceptV4,
+        &OMINULL_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
+        &OMINULL_ALE_RECV_ACCEPT_V4_FILTER_GUID,
+        L"OminullAleRecvAcceptV4Callout",
+        L"Ominull ALE Recv Accept V4 Callout",
+        L"OminullAleRecvAcceptV4Filter",
+        L"Ominull Inbound IPv4 ALE Recv Accept Enforcement Filter",
+        OminullClassifyRecvAcceptV4,
         FWP_ACTION_CALLOUT_UNKNOWN
     },
     { // 3: Recv Accept V6
         &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-        &WFPSENTINEL_ALE_RECV_ACCEPT_V6_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_RECV_ACCEPT_V6_FILTER_GUID,
-        L"WfpSentinelAleRecvAcceptV6Callout",
-        L"WfpSentinel ALE Recv Accept V6 Callout",
-        L"WfpSentinelAleRecvAcceptV6Filter",
-        L"WfpSentinel Inbound IPv6 ALE Recv Accept Enforcement Filter",
-        WfpSentinelClassifyRecvAcceptV6,
+        &OMINULL_ALE_RECV_ACCEPT_V6_CALLOUT_GUID,
+        &OMINULL_ALE_RECV_ACCEPT_V6_FILTER_GUID,
+        L"OminullAleRecvAcceptV6Callout",
+        L"Ominull ALE Recv Accept V6 Callout",
+        L"OminullAleRecvAcceptV6Filter",
+        L"Ominull Inbound IPv6 ALE Recv Accept Enforcement Filter",
+        OminullClassifyRecvAcceptV6,
         FWP_ACTION_CALLOUT_UNKNOWN
     },
     { // 4: Flow Established V4
         &FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4,
-        &WFPSENTINEL_ALE_FLOW_EST_V4_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_FLOW_EST_V4_FILTER_GUID,
-        L"WfpSentinelAleFlowEstV4Callout",
-        L"WfpSentinel ALE Flow Established V4 Callout",
-        L"WfpSentinelAleFlowEstV4Filter",
-        L"WfpSentinel Flow Established IPv4 Context Filter",
-        WfpSentinelClassifyFlowEstV4,
+        &OMINULL_ALE_FLOW_EST_V4_CALLOUT_GUID,
+        &OMINULL_ALE_FLOW_EST_V4_FILTER_GUID,
+        L"OminullAleFlowEstV4Callout",
+        L"Ominull ALE Flow Established V4 Callout",
+        L"OminullAleFlowEstV4Filter",
+        L"Ominull Flow Established IPv4 Context Filter",
+        OminullClassifyFlowEstV4,
         FWP_ACTION_CALLOUT_INSPECTION
     },
     { // 5: Flow Established V6
         &FWPM_LAYER_ALE_FLOW_ESTABLISHED_V6,
-        &WFPSENTINEL_ALE_FLOW_EST_V6_CALLOUT_GUID,
-        &WFPSENTINEL_ALE_FLOW_EST_V6_FILTER_GUID,
-        L"WfpSentinelAleFlowEstV6Callout",
-        L"WfpSentinel ALE Flow Established V6 Callout",
-        L"WfpSentinelAleFlowEstV6Filter",
-        L"WfpSentinel Flow Established IPv6 Context Filter",
-        WfpSentinelClassifyFlowEstV6,
+        &OMINULL_ALE_FLOW_EST_V6_CALLOUT_GUID,
+        &OMINULL_ALE_FLOW_EST_V6_FILTER_GUID,
+        L"OminullAleFlowEstV6Callout",
+        L"Ominull ALE Flow Established V6 Callout",
+        L"OminullAleFlowEstV6Filter",
+        L"Ominull Flow Established IPv6 Context Filter",
+        OminullClassifyFlowEstV6,
         FWP_ACTION_CALLOUT_INSPECTION
     }
 };
 
 // Register all 6 WFP sublayers, runtime callouts, engine callouts, and filters atomically
 NTSTATUS
-WfpSentinelRegisterCallouts(
+OminullRegisterCallouts(
     _In_ PDEVICE_OBJECT DeviceObject
 )
 {
@@ -1257,21 +1257,21 @@ WfpSentinelRegisterCallouts(
     FWPM_SUBLAYER0 subLayer = { 0 };
     BOOLEAN inTransaction = FALSE;
 
-    session.displayData.name = L"WfpSentinelSession";
-    session.displayData.description = L"WfpSentinel Kernel Enforcement Session";
+    session.displayData.name = L"OminullSession";
+    session.displayData.description = L"Ominull Kernel Enforcement Session";
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;
 
     // 1. Register all runtime callouts with WFP kernel runtime FIRST
-    for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+    for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
         FWPS_CALLOUT0 sCallout = { 0 };
         sCallout.calloutKey = *g_LayerConfigs[i].CalloutGuid;
         sCallout.classifyFn = g_LayerConfigs[i].ClassifyFn;
-        sCallout.notifyFn = WfpSentinelNotify;
-        sCallout.flowDeleteFn = (i == LAYER_IDX_FLOW_EST_V4 || i == LAYER_IDX_FLOW_EST_V6) ? WfpSentinelFlowDelete : NULL;
+        sCallout.notifyFn = OminullNotify;
+        sCallout.flowDeleteFn = (i == LAYER_IDX_FLOW_EST_V4 || i == LAYER_IDX_FLOW_EST_V6) ? OminullFlowDelete : NULL;
 
         status = FwpsCalloutRegister0(DeviceObject, &sCallout, &g_GlobalData.CalloutIds[i]);
         if (!NT_SUCCESS(status)) {
-            DbgPrint("[wfpsentinel] ERROR: FwpsCalloutRegister0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
+            DbgPrint("[ominull] ERROR: FwpsCalloutRegister0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
             goto ErrorCleanup;
         }
         g_GlobalData.CalloutRegistered[i] = TRUE;
@@ -1280,7 +1280,7 @@ WfpSentinelRegisterCallouts(
     // 2. Open WFP filter engine
     status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_DEFAULT, NULL, &session, &g_GlobalData.EngineHandle);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: FwpmEngineOpen0 failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: FwpmEngineOpen0 failed: 0x%08X\n", (UINT32)status);
         goto ErrorCleanup;
     }
     g_GlobalData.EngineOpened = TRUE;
@@ -1288,26 +1288,26 @@ WfpSentinelRegisterCallouts(
     // 3. Begin transaction for atomic multi-layer registration
     status = FwpmTransactionBegin0(g_GlobalData.EngineHandle, 0);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: FwpmTransactionBegin0 failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: FwpmTransactionBegin0 failed: 0x%08X\n", (UINT32)status);
         goto ErrorCleanup;
     }
     inTransaction = TRUE;
 
     // 4. Add custom sublayer at priority 0xFFFF
-    subLayer.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
-    subLayer.displayData.name = L"WfpSentinelSubLayer";
-    subLayer.displayData.description = L"WfpSentinel Enforcement SubLayer";
+    subLayer.subLayerKey = OMINULL_SUBLAYER_GUID;
+    subLayer.displayData.name = L"OminullSubLayer";
+    subLayer.displayData.description = L"Ominull Enforcement SubLayer";
     subLayer.weight = 0xFFFF;
 
     status = FwpmSubLayerAdd0(g_GlobalData.EngineHandle, &subLayer, NULL);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: FwpmSubLayerAdd0 failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: FwpmSubLayerAdd0 failed: 0x%08X\n", (UINT32)status);
         goto ErrorCleanup;
     }
     g_GlobalData.SubLayerAdded = TRUE;
 
     // 5. Add callouts and filters for all 6 layers
-    for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+    for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
         FWPM_CALLOUT0 mCallout = { 0 };
         mCallout.calloutKey = *g_LayerConfigs[i].CalloutGuid;
         mCallout.displayData.name = (wchar_t*)g_LayerConfigs[i].CalloutName;
@@ -1316,7 +1316,7 @@ WfpSentinelRegisterCallouts(
 
         status = FwpmCalloutAdd0(g_GlobalData.EngineHandle, &mCallout, NULL, NULL);
         if (!NT_SUCCESS(status)) {
-            DbgPrint("[wfpsentinel] ERROR: FwpmCalloutAdd0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
+            DbgPrint("[ominull] ERROR: FwpmCalloutAdd0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
             goto ErrorCleanup;
         }
         g_GlobalData.CalloutAdded[i] = TRUE;
@@ -1324,7 +1324,7 @@ WfpSentinelRegisterCallouts(
         FWPM_FILTER0 filter = { 0 };
         filter.filterKey = *g_LayerConfigs[i].FilterGuid;
         filter.layerKey = *g_LayerConfigs[i].LayerGuid;
-        filter.subLayerKey = WFPSENTINEL_SUBLAYER_GUID;
+        filter.subLayerKey = OMINULL_SUBLAYER_GUID;
         filter.displayData.name = (wchar_t*)g_LayerConfigs[i].FilterName;
         filter.displayData.description = (wchar_t*)g_LayerConfigs[i].FilterDesc;
         filter.action.type = g_LayerConfigs[i].FilterActionType;
@@ -1334,7 +1334,7 @@ WfpSentinelRegisterCallouts(
 
         status = FwpmFilterAdd0(g_GlobalData.EngineHandle, &filter, NULL, &g_GlobalData.FilterIds[i]);
         if (!NT_SUCCESS(status)) {
-            DbgPrint("[wfpsentinel] ERROR: FwpmFilterAdd0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
+            DbgPrint("[ominull] ERROR: FwpmFilterAdd0 failed for layer %d: 0x%08X\n", i, (UINT32)status);
             goto ErrorCleanup;
         }
         g_GlobalData.FilterAdded[i] = TRUE;
@@ -1343,34 +1343,34 @@ WfpSentinelRegisterCallouts(
     // 6. Commit atomic transaction
     status = FwpmTransactionCommit0(g_GlobalData.EngineHandle);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: FwpmTransactionCommit0 failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: FwpmTransactionCommit0 failed: 0x%08X\n", (UINT32)status);
         goto ErrorCleanup;
     }
 
-    DbgPrint("[wfpsentinel] All %d WFP layers, callouts, and filters registered successfully\n", WFPSENTINEL_LAYER_COUNT);
+    DbgPrint("[ominull] All %d WFP layers, callouts, and filters registered successfully\n", OMINULL_LAYER_COUNT);
     return STATUS_SUCCESS;
 
 ErrorCleanup:
     if (inTransaction && g_GlobalData.EngineHandle != NULL) {
         FwpmTransactionAbort0(g_GlobalData.EngineHandle);
     }
-    WfpSentinelUnregisterCallouts();
+    OminullUnregisterCallouts();
     return status;
 }
 
 // Unregister all WFP objects and close engine session cleanly with zero leaks
 VOID
-WfpSentinelUnregisterCallouts(VOID)
+OminullUnregisterCallouts(VOID)
 {
     if (g_GlobalData.EngineHandle != NULL) {
-        for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+        for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
             if (g_GlobalData.FilterAdded[i]) {
                 FwpmFilterDeleteById0(g_GlobalData.EngineHandle, g_GlobalData.FilterIds[i]);
                 g_GlobalData.FilterAdded[i] = FALSE;
             }
         }
 
-        for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+        for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
             if (g_GlobalData.CalloutAdded[i]) {
                 FwpmCalloutDeleteByKey0(g_GlobalData.EngineHandle, g_LayerConfigs[i].CalloutGuid);
                 g_GlobalData.CalloutAdded[i] = FALSE;
@@ -1378,11 +1378,11 @@ WfpSentinelUnregisterCallouts(VOID)
         }
 
         if (g_GlobalData.SubLayerAdded) {
-            FwpmSubLayerDeleteByKey0(g_GlobalData.EngineHandle, &WFPSENTINEL_SUBLAYER_GUID);
+            FwpmSubLayerDeleteByKey0(g_GlobalData.EngineHandle, &OMINULL_SUBLAYER_GUID);
             g_GlobalData.SubLayerAdded = FALSE;
         }
 
-        for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+        for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
             if (g_GlobalData.CalloutRegistered[i]) {
                 FwpsCalloutUnregisterById0(g_GlobalData.CalloutIds[i]);
                 g_GlobalData.CalloutRegistered[i] = FALSE;
@@ -1395,9 +1395,9 @@ WfpSentinelUnregisterCallouts(VOID)
             g_GlobalData.EngineOpened = FALSE;
         }
 
-        DbgPrint("[wfpsentinel] All WFP objects unregistered and engine closed cleanly\n");
+        DbgPrint("[ominull] All WFP objects unregistered and engine closed cleanly\n");
     } else {
-        for (int i = 0; i < WFPSENTINEL_LAYER_COUNT; i++) {
+        for (int i = 0; i < OMINULL_LAYER_COUNT; i++) {
             if (g_GlobalData.CalloutRegistered[i]) {
                 FwpsCalloutUnregisterById0(g_GlobalData.CalloutIds[i]);
                 g_GlobalData.CalloutRegistered[i] = FALSE;
@@ -1414,10 +1414,10 @@ DriverUnload(
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    DbgPrint("[wfpsentinel] DriverUnload: initiating teardown\n");
+    DbgPrint("[ominull] DriverUnload: initiating teardown\n");
 
-    WfpSentinelUnregisterCallouts();
-    WfpSentinelFlushPendingIrps();
+    OminullUnregisterCallouts();
+    OminullFlushPendingIrps();
 
     IoDeleteSymbolicLink(&g_Win32DeviceName);
     if (g_GlobalData.DeviceObject != NULL) {
@@ -1425,7 +1425,7 @@ DriverUnload(
         g_GlobalData.DeviceObject = NULL;
     }
 
-    DbgPrint("[wfpsentinel] DriverUnload: teardown complete, driver unloaded\n");
+    DbgPrint("[ominull] DriverUnload: teardown complete, driver unloaded\n");
 }
 
 // Driver initialization routine
@@ -1438,7 +1438,7 @@ DriverEntry(
     NTSTATUS status = STATUS_SUCCESS;
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    DbgPrint("[wfpsentinel] DriverEntry: initializing wfpsentinel.sys (Dual-Stack ALE & Inverted Call Engine)\n");
+    DbgPrint("[ominull] DriverEntry: initializing ominull.sys (Dual-Stack ALE & Inverted Call Engine)\n");
 
     KeInitializeSpinLock(&g_GlobalData.PolicyLock);
     KeInitializeSpinLock(&g_GlobalData.TelemetryLock);
@@ -1454,46 +1454,46 @@ DriverEntry(
     RtlZeroMemory(&g_GlobalData.Stats, sizeof(g_GlobalData.Stats));
 
     DriverObject->DriverUnload = DriverUnload;
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = WfpSentinelDispatchCreate;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = WfpSentinelDispatchClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WfpSentinelDispatchDeviceControl;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = OminullDispatchCreate;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = OminullDispatchClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = OminullDispatchDeviceControl;
 
-    RtlInitUnicodeString(&g_NtDeviceName, WFPSENTINEL_DEVICE_NAME);
-    RtlInitUnicodeString(&g_Win32DeviceName, WFPSENTINEL_SYMBOLIC_NAME);
+    RtlInitUnicodeString(&g_NtDeviceName, OMINULL_DEVICE_NAME);
+    RtlInitUnicodeString(&g_Win32DeviceName, OMINULL_SYMBOLIC_NAME);
 
     status = IoCreateDevice(
         DriverObject,
         0,
         &g_NtDeviceName,
-        WFPSENTINEL_DEVICE_TYPE,
+        OMINULL_DEVICE_TYPE,
         FILE_DEVICE_SECURE_OPEN,
         FALSE,
         &g_GlobalData.DeviceObject
     );
 
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: IoCreateDevice failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: IoCreateDevice failed: 0x%08X\n", (UINT32)status);
         return status;
     }
 
     status = IoCreateSymbolicLink(&g_Win32DeviceName, &g_NtDeviceName);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: IoCreateSymbolicLink failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: IoCreateSymbolicLink failed: 0x%08X\n", (UINT32)status);
         IoDeleteDevice(g_GlobalData.DeviceObject);
         g_GlobalData.DeviceObject = NULL;
         return status;
     }
 
-    status = WfpSentinelRegisterCallouts(g_GlobalData.DeviceObject);
+    status = OminullRegisterCallouts(g_GlobalData.DeviceObject);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("[wfpsentinel] ERROR: WfpSentinelRegisterCallouts failed: 0x%08X\n", (UINT32)status);
+        DbgPrint("[ominull] ERROR: OminullRegisterCallouts failed: 0x%08X\n", (UINT32)status);
         IoDeleteSymbolicLink(&g_Win32DeviceName);
         IoDeleteDevice(g_GlobalData.DeviceObject);
         g_GlobalData.DeviceObject = NULL;
         return status;
     }
 
-    DbgPrint("[wfpsentinel] DriverEntry: wfpsentinel.sys fully active across all 6 dual-stack layers\n");
+    DbgPrint("[ominull] DriverEntry: ominull.sys fully active across all 6 dual-stack layers\n");
     return STATUS_SUCCESS;
 }
 

@@ -17,7 +17,7 @@ x86_64-w64-mingw32-dlltool \
   -m i386:x86-64 \
   -D fwpkclnt.sys
 
-echo "[*] Compiling wfpsentinel.sys (x86_64 Windows Native Subsystem)..."
+echo "[*] Compiling ominull.sys (x86_64 Windows Native Subsystem)..."
 
 x86_64-w64-mingw32-gcc \
   -shared \
@@ -33,23 +33,22 @@ x86_64-w64-mingw32-gcc \
   -I"$INC_DIR" \
   -I/usr/x86_64-w64-mingw32/include/ddk \
   -L"$BUILD_DIR" \
-  -o "$BUILD_DIR/wfpsentinel.sys" \
+  -o "$BUILD_DIR/ominull.sys" \
   "$SRC_DIR/driver.c" \
   -lntoskrnl -lhal -lfwpkclnt -lndis
 
-echo "[+] Built: $BUILD_DIR/wfpsentinel.sys"
-file "$BUILD_DIR/wfpsentinel.sys"
+echo "[+] Built: $BUILD_DIR/ominull.sys"
+file "$BUILD_DIR/ominull.sys"
 
-echo "[*] Compiling user-mode control CLI (wfpsentinel_ctl.exe / wfpctl.exe)..."
+echo "[*] Compiling user-mode control CLI (ominullctl.exe)..."
 x86_64-w64-mingw32-gcc \
   -Wall -Wextra -O2 \
   -I"$INC_DIR" \
-  -o "$BUILD_DIR/wfpsentinel_ctl.exe" \
-  "$CLI_DIR/wfpsentinel_ctl.c" \
+  -o "$BUILD_DIR/ominullctl.exe" \
+  "$CLI_DIR/ominullctl.c" \
   -lws2_32
 
-cp -f "$BUILD_DIR/wfpsentinel_ctl.exe" "$BUILD_DIR/wfpctl.exe"
+cp -f "$BUILD_DIR/ominullctl.exe" "$BUILD_DIR/ominull_ctl.exe"
 
-echo "[+] Built: $BUILD_DIR/wfpsentinel_ctl.exe & $BUILD_DIR/wfpctl.exe"
-file "$BUILD_DIR/wfpsentinel_ctl.exe"
-
+echo "[+] Built: $BUILD_DIR/ominullctl.exe"
+file "$BUILD_DIR/ominullctl.exe"

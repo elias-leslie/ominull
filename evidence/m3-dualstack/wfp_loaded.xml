@@ -115,8 +115,8 @@
 		<item>
 			<sessionKey>{110d36a6-6001-4929-927c-20c50f79ba91}</sessionKey>
 			<displayData>
-				<name>WfpSentinelSession</name>
-				<description>WfpSentinel Kernel Enforcement Session</description>
+				<name>OminullSession</name>
+				<description>Ominull Kernel Enforcement Session</description>
 			</displayData>
 			<flags numItems="1">
 				<item>FWPM_SESSION_FLAG_DYNAMIC</item>
@@ -10210,8 +10210,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8243}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleRecvAcceptV4Callout</name>
-						<description>WfpSentinel ALE Recv Accept V4 Callout</description>
+						<name>OminullAleRecvAcceptV4Callout</name>
+						<description>Ominull ALE Recv Accept V4 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -16538,8 +16538,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8243}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleRecvAcceptV4Filter</name>
-						<description>WfpSentinel Inbound IPv4 ALE Recv Accept Enforcement Filter</description>
+						<name>OminullAleRecvAcceptV4Filter</name>
+						<description>Ominull Inbound IPv4 ALE Recv Accept Enforcement Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -17122,8 +17122,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8244}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleRecvAcceptV6Callout</name>
-						<description>WfpSentinel ALE Recv Accept V6 Callout</description>
+						<name>OminullAleRecvAcceptV6Callout</name>
+						<description>Ominull ALE Recv Accept V6 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -30207,8 +30207,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8244}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleRecvAcceptV6Filter</name>
-						<description>WfpSentinel Inbound IPv6 ALE Recv Accept Enforcement Filter</description>
+						<name>OminullAleRecvAcceptV6Filter</name>
+						<description>Ominull Inbound IPv6 ALE Recv Accept Enforcement Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -30797,8 +30797,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8241}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleConnectV4Callout</name>
-						<description>WfpSentinel ALE Connect V4 Callout</description>
+						<name>OminullAleConnectV4Callout</name>
+						<description>Ominull ALE Connect V4 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -34507,8 +34507,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8241}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleConnectV4Filter</name>
-						<description>WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter</description>
+						<name>OminullAleConnectV4Filter</name>
+						<description>Ominull Outbound IPv4 ALE Connect Enforcement Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -35127,8 +35127,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8242}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleConnectV6Callout</name>
-						<description>WfpSentinel ALE Connect V6 Callout</description>
+						<name>OminullAleConnectV6Callout</name>
+						<description>Ominull ALE Connect V6 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -41147,8 +41147,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8242}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleConnectV6Filter</name>
-						<description>WfpSentinel Outbound IPv6 ALE Connect Enforcement Filter</description>
+						<name>OminullAleConnectV6Filter</name>
+						<description>Ominull Outbound IPv6 ALE Connect Enforcement Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -41626,8 +41626,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8245}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleFlowEstV4Callout</name>
-						<description>WfpSentinel ALE Flow Established V4 Callout</description>
+						<name>OminullAleFlowEstV4Callout</name>
+						<description>Ominull ALE Flow Established V4 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -41834,8 +41834,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8245}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleFlowEstV4Filter</name>
-						<description>WfpSentinel Flow Established IPv4 Context Filter</description>
+						<name>OminullAleFlowEstV4Filter</name>
+						<description>Ominull Flow Established IPv4 Context Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -42212,8 +42212,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8246}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleFlowEstV6Callout</name>
-						<description>WfpSentinel ALE Flow Established V6 Callout</description>
+						<name>OminullAleFlowEstV6Callout</name>
+						<description>Ominull ALE Flow Established V6 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -42420,8 +42420,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8246}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleFlowEstV6Filter</name>
-						<description>WfpSentinel Flow Established IPv6 Context Filter</description>
+						<name>OminullAleFlowEstV6Filter</name>
+						<description>Ominull Flow Established IPv6 Context Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -50195,8 +50195,8 @@
 		<item>
 			<subLayerKey>{d9e5c461-5f87-4f2c-93d0-6e8a947c8240}</subLayerKey>
 			<displayData>
-				<name>WfpSentinelSubLayer</name>
-				<description>WfpSentinel Enforcement SubLayer</description>
+				<name>OminullSubLayer</name>
+				<description>Ominull Enforcement SubLayer</description>
 			</displayData>
 			<flags/>
 			<providerKey/>

@@ -1,6 +1,6 @@
 import os
 
-ev_dir = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"
+ev_dir = "/srv/workspaces/projects/ominull/evidence/m1-callout"
 loaded_path = os.path.join(ev_dir, "wfp_loaded.xml")
 post_path = os.path.join(ev_dir, "wfp_post_unload.xml")
 baseline_path = os.path.join(ev_dir, "wfp_baseline.xml")
@@ -19,13 +19,13 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as f:
     log_content = f.read()
 
 print("================================================================")
-print("       WFPSENTINEL MILESTONE 1 VERIFICATION REPORT")
+print("       OMINULL MILESTONE 1 VERIFICATION REPORT")
 print("================================================================")
 
 # 1. Driver Service & Presence Verification
 has_create_ok = "[SC] CreateService SUCCESS" in log_content
 has_start_running = "STATE              : 4  RUNNING" in log_content
-has_driverquery_ok = "wfpsentinel" in log_content and "Running" in log_content
+has_driverquery_ok = "ominull" in log_content and "Running" in log_content
 has_stop_ok = "STATE              : 1  STOPPED" in log_content
 has_delete_ok = "[SC] DeleteService SUCCESS" in log_content
 
@@ -36,9 +36,9 @@ print(f"[4] Service Stop (STOPPED):      {'PASS' if has_stop_ok else 'FAIL'}")
 print(f"[5] Service Deletion:            {'PASS' if has_delete_ok else 'FAIL'}")
 
 # 2. WFP Engine Objects Verification
-sublayer_in_loaded = "WfpSentinelSubLayer" in loaded_content
-callout_in_loaded = "WfpSentinelAleConnectCallout" in loaded_content
-filter_in_loaded = "WfpSentinelAleConnectFilter" in loaded_content
+sublayer_in_loaded = "OminullSubLayer" in loaded_content
+callout_in_loaded = "OminullAleConnectCallout" in loaded_content
+filter_in_loaded = "OminullAleConnectFilter" in loaded_content
 
 print(f"\n[6] WFP Loaded Objects:")
 print(f"    - Sublayer Added:            {'PASS' if sublayer_in_loaded else 'FAIL'}")
@@ -46,9 +46,9 @@ print(f"    - Callout Registered/Added:  {'PASS' if callout_in_loaded else 'FAIL
 print(f"    - Filter Added:              {'PASS' if filter_in_loaded else 'FAIL'}")
 
 # 3. Post-Unload Zero Leak Verification
-sublayer_in_post = "WfpSentinelSubLayer" in post_content
-callout_in_post = "WfpSentinelAleConnectCallout" in post_content
-filter_in_post = "WfpSentinelAleConnectFilter" in post_content
+sublayer_in_post = "OminullSubLayer" in post_content
+callout_in_post = "OminullAleConnectCallout" in post_content
+filter_in_post = "OminullAleConnectFilter" in post_content
 
 print(f"\n[7] Zero-Leak Verification (Post-Unload):")
 print(f"    - Sublayer Leaked:           {'NO (CLEAN)' if not sublayer_in_post else 'LEAKED'}")
@@ -56,7 +56,7 @@ print(f"    - Callout Leaked:            {'NO (CLEAN)' if not callout_in_post el
 print(f"    - Filter Leaked:             {'NO (CLEAN)' if not filter_in_post else 'LEAKED'}")
 
 # 4. Outbound Traffic Classification Verification
-traffic_1_ok = "WfpSentinel Test Server: OK" in log_content
+traffic_1_ok = "Ominull Test Server: OK" in log_content
 ping_ok = "Reply from 10.0.0.57" in log_content
 
 print(f"\n[8] Outbound Network Telemetry / ALE Traffic:")

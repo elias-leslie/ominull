@@ -7,7 +7,7 @@ import os
 import sys
 import subprocess
 
-EVIDENCE_DIR = "/srv/workspaces/projects/wfpsentinel/evidence/m1-callout"
+EVIDENCE_DIR = "/srv/workspaces/projects/ominull/evidence/m1-callout"
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
 PORT = 9998
@@ -22,7 +22,7 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"WfpSentinel Test Server: Traffic Received\n")
+        self.wfile.write(b"Ominull Test Server: Traffic Received\n")
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -106,24 +106,24 @@ def main():
     # Validate WFP objects in wfp_loaded.xml
     if "wfp_loaded.xml" in received_files:
         loaded_xml = received_files["wfp_loaded.xml"].decode('utf-8', errors='replace')
-        has_sublayer = "WfpSentinelSubLayer" in loaded_xml
-        has_callout = "WfpSentinelAleConnectCallout" in loaded_xml
-        has_filter = "WfpSentinelAleConnectFilter" in loaded_xml
+        has_sublayer = "OminullSubLayer" in loaded_xml
+        has_callout = "OminullAleConnectCallout" in loaded_xml
+        has_filter = "OminullAleConnectFilter" in loaded_xml
         print("\n--- WFP ENGINE STATE VALIDATION (LOADED) ---")
-        print(f"  [+] WfpSentinelSubLayer present: {has_sublayer}")
-        print(f"  [+] WfpSentinelAleConnectCallout present: {has_callout}")
-        print(f"  [+] WfpSentinelAleConnectFilter present: {has_filter}")
+        print(f"  [+] OminullSubLayer present: {has_sublayer}")
+        print(f"  [+] OminullAleConnectCallout present: {has_callout}")
+        print(f"  [+] OminullAleConnectFilter present: {has_filter}")
 
     # Validate zero leaks in wfp_post_unload.xml
     if "wfp_post_unload.xml" in received_files:
         post_xml = received_files["wfp_post_unload.xml"].decode('utf-8', errors='replace')
-        has_sublayer_post = "WfpSentinelSubLayer" in post_xml
-        has_callout_post = "WfpSentinelAleConnectCallout" in post_xml
-        has_filter_post = "WfpSentinelAleConnectFilter" in post_xml
+        has_sublayer_post = "OminullSubLayer" in post_xml
+        has_callout_post = "OminullAleConnectCallout" in post_xml
+        has_filter_post = "OminullAleConnectFilter" in post_xml
         print("\n--- ZERO-LEAK VALIDATION (POST-UNLOAD) ---")
-        print(f"  [+] WfpSentinelSubLayer leaked: {has_sublayer_post} (Expected: False)")
-        print(f"  [+] WfpSentinelAleConnectCallout leaked: {has_callout_post} (Expected: False)")
-        print(f"  [+] WfpSentinelAleConnectFilter leaked: {has_filter_post} (Expected: False)")
+        print(f"  [+] OminullSubLayer leaked: {has_sublayer_post} (Expected: False)")
+        print(f"  [+] OminullAleConnectCallout leaked: {has_callout_post} (Expected: False)")
+        print(f"  [+] OminullAleConnectFilter leaked: {has_filter_post} (Expected: False)")
 
         if not has_sublayer_post and not has_callout_post and not has_filter_post:
             print("\n>>> ZERO WFP OBJECT LEAKS CONFIRMED: PASS <<<")

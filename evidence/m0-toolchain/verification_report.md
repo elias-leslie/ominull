@@ -4,7 +4,7 @@
 - **Milestone:** Phase 0 (Milestone 0 — Toolchain Validation)
 - **Status:** PASS
 - **Target VM:** Proxmox VM 110 (`wfp-target-win11`)
-- **Driver Binary:** `build/wfpsentinel_signed.sys` (PE32+ native x86-64)
+- **Driver Binary:** `build/ominull_signed.sys` (PE32+ native x86-64)
 
 ### Verification Checklist
 - [x] Target Windows 11 Enterprise VM automated stand-up on Proxmox

@@ -115,8 +115,8 @@
 		<item>
 			<sessionKey>{21a5ebb2-5264-481f-a450-2c0d5c15d075}</sessionKey>
 			<displayData>
-				<name>WfpSentinelSession</name>
-				<description>WfpSentinel Kernel Enforcement Session</description>
+				<name>OminullSession</name>
+				<description>Ominull Kernel Enforcement Session</description>
 			</displayData>
 			<flags numItems="1">
 				<item>FWPM_SESSION_FLAG_DYNAMIC</item>
@@ -30715,8 +30715,8 @@
 				<item>
 					<calloutKey>{d9e5c462-5f87-4f2c-93d0-6e8a947c8241}</calloutKey>
 					<displayData>
-						<name>WfpSentinelAleConnectCallout</name>
-						<description>WfpSentinel ALE Connect V4 Callout</description>
+						<name>OminullAleConnectCallout</name>
+						<description>Ominull ALE Connect V4 Callout</description>
 					</displayData>
 					<flags numItems="1">
 						<item>FWPM_CALLOUT_FLAG_REGISTERED</item>
@@ -34425,8 +34425,8 @@
 				<item>
 					<filterKey>{d9e5c463-5f87-4f2c-93d0-6e8a947c8242}</filterKey>
 					<displayData>
-						<name>WfpSentinelAleConnectFilter</name>
-						<description>WfpSentinel Outbound IPv4 ALE Connect Enforcement Filter</description>
+						<name>OminullAleConnectFilter</name>
+						<description>Ominull Outbound IPv4 ALE Connect Enforcement Filter</description>
 					</displayData>
 					<flags/>
 					<providerKey/>
@@ -49959,8 +49959,8 @@
 		<item>
 			<subLayerKey>{d9e5c461-5f87-4f2c-93d0-6e8a947c8240}</subLayerKey>
 			<displayData>
-				<name>WfpSentinelSubLayer</name>
-				<description>WfpSentinel Enforcement SubLayer</description>
+				<name>OminullSubLayer</name>
+				<description>Ominull Enforcement SubLayer</description>
 			</displayData>
 			<flags/>
 			<providerKey/>

@@ -1,8 +1,10 @@
 === STARTING MILESTONE 2 KERNEL POLICY ENFORCEMENT VERIFICATION === 
 Date: Tue 08/25/2026 13:40:17.67 
 === [0] Configuring DbgPrint output mask in registry === 
-The operation completed successfully.
-The operation completed successfully.
+The operation completed successfully.
+
+The operation completed successfully.
+
 === [1] Importing test certificate into Root and TrustedPublisher stores === 
 Root "Trusted Root Certification Authorities"
 Signature matches Public Key
@@ -11,15 +13,15 @@ Related Certificates:
 Exact match:
 Element 9:
 Serial Number: 3b416608612479fff897a77b276450fc02515075
-Issuer: CN=WfpSentinelTest
+Issuer: CN=OminullTest
  NotBefore: 8/25/2026 10:50 AM
  NotAfter: 8/22/2036 10:50 AM
-Subject: CN=WfpSentinelTest
+Subject: CN=OminullTest
 Signature matches Public Key
 Root Certificate: Subject matches Issuer
 Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
 
-Certificate "WfpSentinelTest" already in store.
+Certificate "OminullTest" already in store.
 CertUtil: -addstore command completed successfully.
 TrustedPublisher "Trusted Publishers"
 Signature matches Public Key
@@ -28,24 +30,24 @@ Related Certificates:
 Exact match:
 Element 0:
 Serial Number: 3b416608612479fff897a77b276450fc02515075
-Issuer: CN=WfpSentinelTest
+Issuer: CN=OminullTest
  NotBefore: 8/25/2026 10:50 AM
  NotAfter: 8/22/2036 10:50 AM
-Subject: CN=WfpSentinelTest
+Subject: CN=OminullTest
 Signature matches Public Key
 Root Certificate: Subject matches Issuer
 Cert Hash(sha1): 1cac572461828811fad94151fb1a6d94982d1475
 
-Certificate "WfpSentinelTest" already in store.
+Certificate "OminullTest" already in store.
 CertUtil: -addstore command completed successfully.
 === [2] Capturing baseline WFP state (before driver load) === 
 Data collection successful; output = C:\drv\wfp_m2_baseline.xml
 
-=== [3] Creating kernel service 'wfpsentinel' === 
+=== [3] Creating kernel service 'ominull' === 
 [SC] CreateService SUCCESS
-=== [4] Starting kernel service 'wfpsentinel' === 
+=== [4] Starting kernel service 'ominull' === 
 
-SERVICE_NAME: wfpsentinel 
+SERVICE_NAME: ominull 
         TYPE               : 1  KERNEL_DRIVER  
         STATE              : 4  RUNNING 
                                 (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
@@ -57,7 +59,7 @@ SERVICE_NAME: wfpsentinel
         FLAGS              : 
 === [5] Verifying service status and driver presence === 
 
-SERVICE_NAME: wfpsentinel 
+SERVICE_NAME: ominull 
         TYPE               : 1  KERNEL_DRIVER  
         STATE              : 4  RUNNING 
                                 (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
@@ -65,12 +67,12 @@ SERVICE_NAME: wfpsentinel
         SERVICE_EXIT_CODE  : 0  (0x0)
         CHECKPOINT         : 0x0
         WAIT_HINT          : 0x0
-wfpsentinel  wfpsentinel            wfpsentinel            Kernel        Manual     Running    OK         TRUE        FALSE        0                 8,192       4,096      8/25/2026 1:36:51 PM   \??\C:\drv\wfpsentinel.sys                       0          
+ominull  ominull            ominull            Kernel        Manual     Running    OK         TRUE        FALSE        0                 8,192       4,096      8/25/2026 1:36:51 PM   \??\C:\drv\ominull.sys                       0          
 === [6] Capturing loaded WFP state (with active enforcement filter) === 
 Data collection successful; output = C:\drv\wfp_m2_loaded.xml
 
 === [7] Initial Kernel Statistics === 
-=== WFPSENTINEL KERNEL STATISTICS ===
+=== OMINULL KERNEL STATISTICS ===
   Active Block Rules:         0
   Total Connections Classified: 0
   Total Permitted:            0
@@ -79,24 +81,36 @@ Data collection successful; output = C:\drv\wfp_m2_loaded.xml
 [*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-baseline... 
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
 * Connected to 10.0.0.57 (10.0.0.57) port 9998
-> GET /m2-baseline HTTP/1.1
-> Host: 10.0.0.57:9998
-> User-Agent: curl/8.8.0
-> Accept: */*
-> 
+> GET /m2-baseline HTTP/1.1
+
+> Host: 10.0.0.57:9998
+
+> User-Agent: curl/8.8.0
+
+> Accept: */*
+
+> 
+
 * Request completely sent off
 * HTTP 1.0, assume close after body
-< HTTP/1.0 200 OK
-< Server: BaseHTTP/0.6 Python/3.12.3
-< Date: Tue, 25 Aug 2026 20:40:19 GMT
-< Content-type: text/plain
-< 
+< HTTP/1.0 200 OK
+
+< Server: BaseHTTP/0.6 Python/3.12.3
+
+< Date: Tue, 25 Aug 2026 20:40:19 GMT
+
+< Content-type: text/plain
+
+< 
+
 { [28 bytes data]
-100    28    0    28    0     0    923      0 --:--:-- --:--:-- --:--:--   933
+
+100    28    0    28    0     0    923      0 --:--:-- --:--:-- --:--:--   933
 * Closing connection
-WfpSentinel Test Server: OK
+Ominull Test Server: OK
 [Result Code: 0] 
 === [9] Step 2: Dynamically Pushing Kernel Block Rule via IOCTL === 
 [*] Adding rule to block 10.0.0.57:9998 (TCP)... 
@@ -105,7 +119,7 @@ WfpSentinel Test Server: OK
     Remote Port: 9998 (exact)
     Protocol:    6 (TCP)
     PID:         0 (any)
-=== WFPSENTINEL KERNEL STATISTICS ===
+=== OMINULL KERNEL STATISTICS ===
   Active Block Rules:         1
   Total Connections Classified: 0
   Total Permitted:            0
@@ -114,24 +128,36 @@ WfpSentinel Test Server: OK
 [*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-blocked (should fail/timeout)... 
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
 * Connected to 10.0.0.57 (10.0.0.57) port 9998
-> GET /m2-blocked HTTP/1.1
-> Host: 10.0.0.57:9998
-> User-Agent: curl/8.8.0
-> Accept: */*
-> 
+> GET /m2-blocked HTTP/1.1
+
+> Host: 10.0.0.57:9998
+
+> User-Agent: curl/8.8.0
+
+> Accept: */*
+
+> 
+
 * Request completely sent off
 * HTTP 1.0, assume close after body
-< HTTP/1.0 200 OK
-< Server: BaseHTTP/0.6 Python/3.12.3
-< Date: Tue, 25 Aug 2026 20:40:19 GMT
-< Content-type: text/plain
-< 
+< HTTP/1.0 200 OK
+
+< Server: BaseHTTP/0.6 Python/3.12.3
+
+< Date: Tue, 25 Aug 2026 20:40:19 GMT
+
+< Content-type: text/plain
+
+< 
+
 { [28 bytes data]
-100    28    0    28    0     0   1099      0 --:--:-- --:--:-- --:--:--  1120
+
+100    28    0    28    0     0   1099      0 --:--:-- --:--:-- --:--:--  1120
 * Closing connection
-WfpSentinel Test Server: OK
+Ominull Test Server: OK
 [Result Code: 0] (Non-zero indicates connection blocked) 
 === [11] Step 4: Selective Enforcement Test (Expected: ALLOW) === 
 [*] Testing ICMP ping to 10.0.0.57 to verify non-targeted traffic is permitted... 
@@ -145,14 +171,14 @@ Ping statistics for 10.0.0.57:
 Approximate round trip times in milli-seconds:
     Minimum = 3ms, Maximum = 3ms, Average = 3ms
 === [12] Kernel Statistics after Block Attempt === 
-=== WFPSENTINEL KERNEL STATISTICS ===
+=== OMINULL KERNEL STATISTICS ===
   Active Block Rules:         1
   Total Connections Classified: 0
   Total Permitted:            0
   Total Blocked:              0
 === [13] Step 5: Dynamically Clearing Kernel Block Rules via IOCTL === 
 [+] Successfully cleared all kernel block rules
-=== WFPSENTINEL KERNEL STATISTICS ===
+=== OMINULL KERNEL STATISTICS ===
   Active Block Rules:         0
   Total Connections Classified: 0
   Total Permitted:            0
@@ -161,41 +187,53 @@ Approximate round trip times in milli-seconds:
 [*] Sending outbound HTTP request to http://10.0.0.57:9998/m2-unblocked... 
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.0.57:9998...
 * Connected to 10.0.0.57 (10.0.0.57) port 9998
-> GET /m2-unblocked HTTP/1.1
-> Host: 10.0.0.57:9998
-> User-Agent: curl/8.8.0
-> Accept: */*
-> 
+> GET /m2-unblocked HTTP/1.1
+
+> Host: 10.0.0.57:9998
+
+> User-Agent: curl/8.8.0
+
+> Accept: */*
+
+> 
+
 * Request completely sent off
 * HTTP 1.0, assume close after body
-< HTTP/1.0 200 OK
-< Server: BaseHTTP/0.6 Python/3.12.3
-< Date: Tue, 25 Aug 2026 20:40:20 GMT
-< Content-type: text/plain
-< 
+< HTTP/1.0 200 OK
+
+< Server: BaseHTTP/0.6 Python/3.12.3
+
+< Date: Tue, 25 Aug 2026 20:40:20 GMT
+
+< Content-type: text/plain
+
+< 
+
 { [28 bytes data]
-100    28    0    28    0     0   1517      0 --:--:-- --:--:-- --:--:--  1555
+
+100    28    0    28    0     0   1517      0 --:--:-- --:--:-- --:--:--  1555
 * Closing connection
-WfpSentinel Test Server: OK
+Ominull Test Server: OK
 [Result Code: 0] 
 === [15] Final Kernel Statistics === 
-=== WFPSENTINEL KERNEL STATISTICS ===
+=== OMINULL KERNEL STATISTICS ===
   Active Block Rules:         0
   Total Connections Classified: 0
   Total Permitted:            0
   Total Blocked:              0
-=== [16] Stopping kernel service 'wfpsentinel' === 
+=== [16] Stopping kernel service 'ominull' === 
 
-SERVICE_NAME: wfpsentinel 
+SERVICE_NAME: ominull 
         TYPE               : 1  KERNEL_DRIVER  
         STATE              : 1  STOPPED 
         WIN32_EXIT_CODE    : 0  (0x0)
         SERVICE_EXIT_CODE  : 0  (0x0)
         CHECKPOINT         : 0x0
         WAIT_HINT          : 0x0
-=== [17] Deleting kernel service 'wfpsentinel' === 
+=== [17] Deleting kernel service 'ominull' === 
 [SC] DeleteService SUCCESS
 === [18] Capturing post-unload WFP state (zero-leak verification) === 
 Data collection successful; output = C:\drv\wfp_m2_post_unload.xml

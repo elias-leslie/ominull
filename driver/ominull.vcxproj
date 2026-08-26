@@ -17,7 +17,7 @@
     <MinimumVisualStudioVersion>12.0</MinimumVisualStudioVersion>
     <Configuration>Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
-    <RootNamespace>wfpsentinel</RootNamespace>
+    <RootNamespace>ominull</RootNamespace>
     <DriverType>KMDF</DriverType>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
   </PropertyGroup>

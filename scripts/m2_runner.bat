@@ -19,21 +19,21 @@ certutil.exe -f -addstore TrustedPublisher C:\drv\testcert.cer >> %LOG_FILE% 2>&
 echo === [2] Capturing baseline WFP state (before driver load) === >> %LOG_FILE%
 netsh.exe wfp show state file=C:\drv\wfp_m2_baseline.xml >> %LOG_FILE% 2>&1
 
-echo === [3] Creating kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe create wfpsentinel type= kernel binPath= C:\drv\wfpsentinel.sys >> %LOG_FILE% 2>&1
+echo === [3] Creating kernel service 'ominull' === >> %LOG_FILE%
+sc.exe create ominull type= kernel binPath= C:\drv\ominull.sys >> %LOG_FILE% 2>&1
 
-echo === [4] Starting kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe start wfpsentinel >> %LOG_FILE% 2>&1
+echo === [4] Starting kernel service 'ominull' === >> %LOG_FILE%
+sc.exe start ominull >> %LOG_FILE% 2>&1
 
 echo === [5] Verifying service status and driver presence === >> %LOG_FILE%
-sc.exe query wfpsentinel >> %LOG_FILE% 2>&1
-driverquery.exe /v /fo table | findstr.exe /i "wfpsentinel" >> %LOG_FILE% 2>&1
+sc.exe query ominull >> %LOG_FILE% 2>&1
+driverquery.exe /v /fo table | findstr.exe /i "ominull" >> %LOG_FILE% 2>&1
 
 echo === [6] Capturing loaded WFP state (with active enforcement filter) === >> %LOG_FILE%
 netsh.exe wfp show state file=C:\drv\wfp_m2_loaded.xml >> %LOG_FILE% 2>&1
 
 echo === [7] Initial Kernel Statistics === >> %LOG_FILE%
-C:\drv\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [8] Step 1: Baseline Connection Test (Expected: ALLOW) === >> %LOG_FILE%
 echo [*] Sending outbound HTTP request to http://%HOST_IP%:%HOST_PORT%/m2-baseline... >> %LOG_FILE%
@@ -42,8 +42,8 @@ echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [9] Step 2: Dynamically Pushing Kernel Block Rule via IOCTL === >> %LOG_FILE%
 echo [*] Adding rule to block %HOST_IP%:%HOST_PORT% (TCP)... >> %LOG_FILE%
-C:\drv\wfpsentinel_ctl.exe block %HOST_IP% %HOST_PORT% tcp >> %LOG_FILE% 2>&1
-C:\drv\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe block %HOST_IP% %HOST_PORT% tcp >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [10] Step 3: Blocked Connection Test (Expected: BLOCKED BY KERNEL) === >> %LOG_FILE%
 echo [*] Sending outbound HTTP request to http://%HOST_IP%:%HOST_PORT%/m2-blocked (should fail/timeout)... >> %LOG_FILE%
@@ -55,11 +55,11 @@ echo [*] Testing ICMP ping to %HOST_IP% to verify non-targeted traffic is permit
 ping.exe -n 2 %HOST_IP% >> %LOG_FILE% 2>&1
 
 echo === [12] Kernel Statistics after Block Attempt === >> %LOG_FILE%
-C:\drv\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [13] Step 5: Dynamically Clearing Kernel Block Rules via IOCTL === >> %LOG_FILE%
-C:\drv\wfpsentinel_ctl.exe clear >> %LOG_FILE% 2>&1
-C:\drv\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe clear >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [14] Step 6: Unblocked Connection Test (Expected: ALLOW AGAIN) === >> %LOG_FILE%
 echo [*] Sending outbound HTTP request to http://%HOST_IP%:%HOST_PORT%/m2-unblocked... >> %LOG_FILE%
@@ -67,13 +67,13 @@ curl.exe -v http://%HOST_IP%:%HOST_PORT%/m2-unblocked >> %LOG_FILE% 2>&1
 echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [15] Final Kernel Statistics === >> %LOG_FILE%
-C:\drv\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+C:\drv\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
-echo === [16] Stopping kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe stop wfpsentinel >> %LOG_FILE% 2>&1
+echo === [16] Stopping kernel service 'ominull' === >> %LOG_FILE%
+sc.exe stop ominull >> %LOG_FILE% 2>&1
 
-echo === [17] Deleting kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe delete wfpsentinel >> %LOG_FILE% 2>&1
+echo === [17] Deleting kernel service 'ominull' === >> %LOG_FILE%
+sc.exe delete ominull >> %LOG_FILE% 2>&1
 
 echo === [18] Capturing post-unload WFP state (zero-leak verification) === >> %LOG_FILE%
 netsh.exe wfp show state file=C:\drv\wfp_m2_post_unload.xml >> %LOG_FILE% 2>&1

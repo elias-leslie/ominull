@@ -13,14 +13,14 @@
 
 ## 1. Vision & Core Philosophy
 
-**KernelSentinel** (formerly WfpSentinel) is an ultra-lean, high-performance, cross-platform kernel network security agent and rapid Incident Response (IR) control plane.
+**KernelSentinel** (formerly Ominull) is an ultra-lean, high-performance, cross-platform kernel network security agent and rapid Incident Response (IR) control plane.
 
 ### Core Architectural Mandates:
 1. **Lean & Zero-Bloat:** Single self-contained binary for the management hub (no Docker/K8s, no PostgreSQL/Redis requirements). Single lightweight native agent (<15 MB RAM, <0.5% CPU overhead on endpoints).
 2. **Multi-Tenancy by Design (MSP/MSSP Ready):** Complete cryptographic and logical tenant separation. Manage 1 to 500 distinct client organizations from a single lightweight hub with tenant-scoped tokens, isolated policy tables, and segregated telemetry logs.
 3. **Rapid IR & Jump-Kit Deployment:** Turn any analyst laptop or existing server into an authoritative IR command hub in under 10 seconds. Deploy to remote endpoints via a 1-line PowerShell / Bash bootstrap over WinRM, SSH, MSP RMM tools (NinjaOne, Datto, ConnectWise), or EDR Live Response consoles.
 4. **Pluggable Kernel Architecture:** Unified cross-platform user-mode agent core (`sentineld`) with pluggable OS-specific ring 0 filtering engines:
-   - **Windows:** Native WFP Callout Driver (`wfpsentinel.sys` / `sentinel_wfp.sys`).
+   - **Windows:** Native WFP Callout Driver (`ominull.sys` / `sentinel_wfp.sys`).
    - **Linux:** eBPF Kernel Probes (`sockops`, `cgroup_skb`, `tc` classifier).
    - **macOS:** System NetworkExtension (`NEFilterDataProvider`, `NEFilterPacketProvider`).
 5. **Kernel-Level Host Network Isolation:** Instant (<1 millisecond) host quarantine dropping 100% of lateral movement and exfiltration traffic while automatically maintaining an authenticated pinhole to the IR analyst's hub.
@@ -88,8 +88,8 @@
     - Embedded Interactive Terminal UI (TUI) connection dashboard and lightweight REST/WebSocket API.
     - One-line remote bootstrap script generator (`/bootstrap.ps1`, `/bootstrap.sh`) for rapid deployment via WinRM, SSH, RMM, or EDR Live Response.
   - **`sentineld.exe` (Windows Endpoint Service):**
-    - Background Windows Service managing `wfpsentinel.sys` lifecycle.
-    - Inverted-call streaming consumer (`IOCTL_WFPSENTINEL_STREAM_EVENT`) with local ring-buffer offline buffering.
+    - Background Windows Service managing `ominull.sys` lifecycle.
+    - Inverted-call streaming consumer (`IOCTL_OMINULL_STREAM_EVENT`) with local ring-buffer offline buffering.
     - Outbound mTLS / token connection to `sentinel-hub`.
 
 ---
@@ -98,9 +98,9 @@
 - **Objective:** Implement microsecond kernel-level network quarantine with analyst hole-punching.
 - **Deliverables:**
   - **Kernel Isolation Subsystem:**
-    - Driver IOCTL `IOCTL_WFPSENTINEL_SET_ISOLATION_MODE` enabling default-drop in `WfpSentinelSubLayer` (priority `0xFFFF`).
+    - Driver IOCTL `IOCTL_OMINULL_SET_ISOLATION_MODE` enabling default-drop in `OminullSubLayer` (priority `0xFFFF`).
     - Automatic whitelisting of Management Server IP:Port and essential DHCP lease maintenance.
-    - Reversible via `IOCTL_WFPSENTINEL_CLEAR_ISOLATION_MODE`.
+    - Reversible via `IOCTL_OMINULL_CLEAR_ISOLATION_MODE`.
   - **Remote IR Orchestration:**
     - Hub CLI / API command: `sentinel-hub isolate <endpoint_id|tenant_id>`.
     - Instant broadcast C2 block: `sentinel-hub broadcast-block <cidr|domain|port> --tenant <tenant_id>`.

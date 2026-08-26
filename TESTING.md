@@ -1,6 +1,6 @@
 # Testing Methodology and Verification Protocol
 
-This document outlines the testing standards, safety requirements, and verification protocols for `wfpsentinel.sys`.
+This document outlines the testing standards, safety requirements, and verification protocols for `ominull.sys`.
 
 ## 1. Isolation & Safety Standard
 Kernel drivers execute with ring-0 privileges. A failure in kernel space triggers a system bugcheck (BSOD).
@@ -10,9 +10,9 @@ Kernel drivers execute with ring-0 privileges. A failure in kernel space trigger
 ## 2. Verification Protocol
 
 ### A. Driver Verifier Certification
-The target VM executes with Driver Verifier active against `wfpsentinel.sys`:
+The target VM executes with Driver Verifier active against `ominull.sys`:
 ```cmd
-verifier.exe /standard /driver wfpsentinel.sys
+verifier.exe /standard /driver ominull.sys
 ```
 Validation criteria:
 1. Special Pool allocations enabled.

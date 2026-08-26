@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-Milestone 3 successfully extends the **WfpSentinel** kernel callout driver and user-mode management CLI to deliver full dual-stack parity (IPv4 and IPv6), inbound connection monitoring, flow context tracking, and real-time inverted-call telemetry streaming.
+Milestone 3 successfully extends the **Ominull** kernel callout driver and user-mode management CLI to deliver full dual-stack parity (IPv4 and IPv6), inbound connection monitoring, flow context tracking, and real-time inverted-call telemetry streaming.
 
 The driver was compiled with `x86_64-w64-mingw32-gcc`, test-signed with an SHA-256 code signing certificate, deployed to a live Windows 11 Enterprise virtual machine in test-signing mode, and verified through an automated end-to-end test suite (`test_m3.bat`).
 
@@ -36,7 +36,7 @@ The driver registers callouts and filters across all 6 core Windows Filtering Pl
 - Context association at `ALE_FLOW_ESTABLISHED` and deterministic cleanup via `FwpsCalloutFlowDeleteNotifyFn0` callback.
 
 ### D. Real-Time Telemetry Streaming (Inverted Call Model)
-- Asynchronous pending IRP queue (`IOCTL_WFPSENTINEL_STREAM_EVENT`) enabling low-latency event delivery to user space without polling.
+- Asynchronous pending IRP queue (`IOCTL_OMINULL_STREAM_EVENT`) enabling low-latency event delivery to user space without polling.
 - Safe cancellation handler (`IoSetCancelRoutine`) and complete IRP flushing during driver teardown.
 - 512-entry circular event ring buffer for buffering bursts when no user-space consumer is attached.
 
@@ -71,19 +71,19 @@ The driver registers callouts and filters across all 6 core Windows Filtering Pl
 
 Diff analysis between `wfp_baseline.xml`, `wfp_loaded.xml`, and `wfp_post_unload.xml`:
 
-- **Baseline WFP Objects:** 0 WfpSentinel objects.
+- **Baseline WFP Objects:** 0 Ominull objects.
 - **Active Loaded Objects (14 total):**
-  - 1 WFP Dynamic Session: `WfpSentinelSession`
-  - 1 WFP Custom Sublayer: `WfpSentinelSubLayer` (Weight: `65535`)
-  - 6 WFP Management Callouts: `WfpSentinelAleConnectV4Callout`, `WfpSentinelAleConnectV6Callout`, `WfpSentinelAleRecvAcceptV4Callout`, `WfpSentinelAleRecvAcceptV6Callout`, `WfpSentinelAleFlowEstV4Callout`, `WfpSentinelAleFlowEstV6Callout`
-  - 6 WFP Management Filters: `WfpSentinelAleConnectV4Filter`, `WfpSentinelAleConnectV6Filter`, `WfpSentinelAleRecvAcceptV4Filter`, `WfpSentinelAleRecvAcceptV6Filter`, `WfpSentinelAleFlowEstV4Filter`, `WfpSentinelAleFlowEstV6Filter`
-- **Post-Unload Remaining Objects:** **0 WfpSentinel objects** (100% clean teardown, zero kernel resource leaks).
+  - 1 WFP Dynamic Session: `OminullSession`
+  - 1 WFP Custom Sublayer: `OminullSubLayer` (Weight: `65535`)
+  - 6 WFP Management Callouts: `OminullAleConnectV4Callout`, `OminullAleConnectV6Callout`, `OminullAleRecvAcceptV4Callout`, `OminullAleRecvAcceptV6Callout`, `OminullAleFlowEstV4Callout`, `OminullAleFlowEstV6Callout`
+  - 6 WFP Management Filters: `OminullAleConnectV4Filter`, `OminullAleConnectV6Filter`, `OminullAleRecvAcceptV4Filter`, `OminullAleRecvAcceptV6Filter`, `OminullAleFlowEstV4Filter`, `OminullAleFlowEstV6Filter`
+- **Post-Unload Remaining Objects:** **0 Ominull objects** (100% clean teardown, zero kernel resource leaks).
 
 ---
 
 ## 5. Artifact Files Collected in `evidence/m3-dualstack/`
 
-1. [`m3_log.txt`](file:///srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack/m3_log.txt) - Full test execution log from the target VM.
-2. [`wfp_baseline.xml`](file:///srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack/wfp_baseline.xml) - Baseline WFP engine state before driver load (1.78 MB).
-3. [`wfp_loaded.xml`](file:///srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack/wfp_loaded.xml) - Active WFP engine state showing all 6 layers, callouts, and filters registered (1.79 MB).
-4. [`wfp_post_unload.xml`](file:///srv/workspaces/projects/wfpsentinel/evidence/m3-dualstack/wfp_post_unload.xml) - Post-unload WFP engine state verifying zero object leakage (1.78 MB).
+1. [`m3_log.txt`](file:///srv/workspaces/projects/ominull/evidence/m3-dualstack/m3_log.txt) - Full test execution log from the target VM.
+2. [`wfp_baseline.xml`](file:///srv/workspaces/projects/ominull/evidence/m3-dualstack/wfp_baseline.xml) - Baseline WFP engine state before driver load (1.78 MB).
+3. [`wfp_loaded.xml`](file:///srv/workspaces/projects/ominull/evidence/m3-dualstack/wfp_loaded.xml) - Active WFP engine state showing all 6 layers, callouts, and filters registered (1.79 MB).
+4. [`wfp_post_unload.xml`](file:///srv/workspaces/projects/ominull/evidence/m3-dualstack/wfp_post_unload.xml) - Post-unload WFP engine state verifying zero object leakage (1.78 MB).

@@ -8,7 +8,7 @@ import sys
 import subprocess
 import shutil
 
-ROOT_DIR = "/srv/workspaces/projects/wfpsentinel"
+ROOT_DIR = "/srv/workspaces/projects/ominull"
 BUILD_DIR = os.path.join(ROOT_DIR, "build")
 EVIDENCE_DIR = os.path.join(ROOT_DIR, "evidence", "m3-dualstack")
 STAGING_DIR = os.path.join(BUILD_DIR, "m3_staging")
@@ -29,7 +29,7 @@ class EvidenceHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"WfpSentinel M3 Test Server: Traffic Received\n")
+        self.wfile.write(b"Ominull M3 Test Server: Traffic Received\n")
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -119,29 +119,29 @@ certutil.exe -addstore TrustedPublisher %DRV_DRIVE%:\\testcert.cer >> %LOG_FILE%
 
 echo === [3] Deploying driver and CLI binaries to X:\\drv === >> %LOG_FILE%
 mkdir X:\\drv >> %LOG_FILE% 2>&1
-if exist %DRV_DRIVE%:\\wfpsentinel_signed.sys (
-    copy /y %DRV_DRIVE%:\\wfpsentinel_signed.sys X:\\drv\\wfpsentinel.sys >> %LOG_FILE% 2>&1
+if exist %DRV_DRIVE%:\\ominull_signed.sys (
+    copy /y %DRV_DRIVE%:\\ominull_signed.sys X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
 ) else (
-    copy /y %DRV_DRIVE%:\\wfpsentinel.sys X:\\drv\\wfpsentinel.sys >> %LOG_FILE% 2>&1
+    copy /y %DRV_DRIVE%:\\ominull.sys X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
 )
-copy /y %DRV_DRIVE%:\\wfpsentinel_ctl.exe X:\\drv\\wfpsentinel_ctl.exe >> %LOG_FILE% 2>&1
-copy /y %DRV_DRIVE%:\\wfpctl.exe X:\\drv\\wfpctl.exe >> %LOG_FILE% 2>&1
+copy /y %DRV_DRIVE%:\\ominullctl.exe X:\\drv\\ominullctl.exe >> %LOG_FILE% 2>&1
+copy /y %DRV_DRIVE%:\\ominullctl.exe X:\\drv\\ominullctl.exe >> %LOG_FILE% 2>&1
 
-echo === [4] Creating kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe create wfpsentinel type= kernel binPath= X:\\drv\\wfpsentinel.sys >> %LOG_FILE% 2>&1
+echo === [4] Creating kernel service 'ominull' === >> %LOG_FILE%
+sc.exe create ominull type= kernel binPath= X:\\drv\\ominull.sys >> %LOG_FILE% 2>&1
 
-echo === [5] Starting kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe start wfpsentinel >> %LOG_FILE% 2>&1
+echo === [5] Starting kernel service 'ominull' === >> %LOG_FILE%
+sc.exe start ominull >> %LOG_FILE% 2>&1
 
 echo === [6] Verifying service status and driver presence === >> %LOG_FILE%
-sc.exe query wfpsentinel >> %LOG_FILE% 2>&1
-driverquery.exe /v | findstr /i "wfpsentinel" >> %LOG_FILE% 2>&1
+sc.exe query ominull >> %LOG_FILE% 2>&1
+driverquery.exe /v | findstr /i "ominull" >> %LOG_FILE% 2>&1
 
 echo === [7] Capturing loaded WFP state (all 6 dual-stack layers active) === >> %LOG_FILE%
 netsh.exe wfp show state file=X:\\wfp_loaded.xml >> %LOG_FILE% 2>&1
 
 echo === [8] Initial Kernel Statistics === >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [9] Step 1: Baseline Outbound HTTP Connection (Expected: PERMIT) === >> %LOG_FILE%
 curl.exe -v -m 5 http://10.0.0.57:9998/traffic-baseline >> %LOG_FILE% 2>&1
@@ -149,17 +149,17 @@ echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [10] Step 2: Dynamically Inserting Dual-Stack & App Block Rules via IOCTL === >> %LOG_FILE%
 echo [*] Adding IPv4 block rule for 10.0.0.57:9998 (TCP)... >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe block 10.0.0.57 9998 tcp >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe block 10.0.0.57 9998 tcp >> %LOG_FILE% 2>&1
 
 echo [*] Adding IPv6 block rule for ::1 (any port)... >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe block ::1 0 >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe block ::1 0 >> %LOG_FILE% 2>&1
 
 echo [*] Adding App-path block rule for test_blocked_app.exe... >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe block-app test_blocked_app.exe >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe block-app test_blocked_app.exe >> %LOG_FILE% 2>&1
 
 echo === [11] Listing Active Kernel Filtering Rules Table === >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe rules >> %LOG_FILE% 2>&1
-X:\\drv\\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [12] Step 3: Blocked Connection Verification (Expected: BLOCKED BY KERNEL) === >> %LOG_FILE%
 echo [*] Triggering outbound HTTP to blocked endpoint 10.0.0.57:9998/traffic-blocked (should fail/timeout)... >> %LOG_FILE%
@@ -171,30 +171,30 @@ echo [*] Testing ICMP ping to verify non-targeted traffic is permitted... >> %LO
 ping.exe -n 2 10.0.0.57 >> %LOG_FILE% 2>&1
 
 echo === [14] Kernel Statistics After Enforcement Test === >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [15] Step 5: Rule Deletion and Clearing via IOCTL === >> %LOG_FILE%
 echo [*] Deleting rule ID 3 (App block)... >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe delete 3 >> %LOG_FILE% 2>&1
-X:\\drv\\wfpsentinel_ctl.exe rules >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe delete 3 >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
 
 echo [*] Clearing all remaining rules... >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe clear >> %LOG_FILE% 2>&1
-X:\\drv\\wfpsentinel_ctl.exe rules >> %LOG_FILE% 2>&1
-X:\\drv\\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe clear >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe rules >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
 echo === [16] Step 6: Post-Clear Unblocked Connection (Expected: PERMIT AGAIN) === >> %LOG_FILE%
 curl.exe -v -m 5 http://10.0.0.57:9998/traffic-unblocked >> %LOG_FILE% 2>&1
 echo [Result Code: %ERRORLEVEL%] >> %LOG_FILE%
 
 echo === [17] Final Kernel Statistics === >> %LOG_FILE%
-X:\\drv\\wfpsentinel_ctl.exe stats >> %LOG_FILE% 2>&1
+X:\\drv\\ominullctl.exe stats >> %LOG_FILE% 2>&1
 
-echo === [18] Stopping kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe stop wfpsentinel >> %LOG_FILE% 2>&1
+echo === [18] Stopping kernel service 'ominull' === >> %LOG_FILE%
+sc.exe stop ominull >> %LOG_FILE% 2>&1
 
-echo === [19] Deleting kernel service 'wfpsentinel' === >> %LOG_FILE%
-sc.exe delete wfpsentinel >> %LOG_FILE% 2>&1
+echo === [19] Deleting kernel service 'ominull' === >> %LOG_FILE%
+sc.exe delete ominull >> %LOG_FILE% 2>&1
 
 echo === [20] Capturing post-unload WFP state (zero-leak verification across all layers) === >> %LOG_FILE%
 netsh.exe wfp show state file=X:\\wfp_post_unload.xml >> %LOG_FILE% 2>&1
@@ -212,10 +212,10 @@ echo === MILESTONE 3 VERIFICATION COMPLETED === >> %LOG_FILE%
 
     # 3. Copy binaries & certificates
     shutil.copy(os.path.join(CERTS_DIR, "testcert.cer"), STAGING_DIR)
-    shutil.copy(os.path.join(BUILD_DIR, "wfpsentinel_signed.sys"), os.path.join(STAGING_DIR, "wfpsentinel.sys"))
-    shutil.copy(os.path.join(BUILD_DIR, "wfpsentinel_signed.sys"), os.path.join(STAGING_DIR, "wfpsentinel_signed.sys"))
-    shutil.copy(os.path.join(BUILD_DIR, "wfpsentinel_ctl.exe"), STAGING_DIR)
-    shutil.copy(os.path.join(BUILD_DIR, "wfpctl.exe"), STAGING_DIR)
+    shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), os.path.join(STAGING_DIR, "ominull.sys"))
+    shutil.copy(os.path.join(BUILD_DIR, "ominull_signed.sys"), os.path.join(STAGING_DIR, "ominull_signed.sys"))
+    shutil.copy(os.path.join(BUILD_DIR, "ominullctl.exe"), STAGING_DIR)
+    shutil.copy(os.path.join(BUILD_DIR, "ominullctl.exe"), STAGING_DIR)
 
     print("[*] Creating ISO filesystem with genisoimage...")
     subprocess.run([
@@ -284,7 +284,7 @@ def deploy_and_test():
 
     # 8. Evaluation
     print("\n================================================================")
-    print("       WFPSENTINEL MILESTONE 3 VERIFICATION ANALYSIS")
+    print("       OMINULL MILESTONE 3 VERIFICATION ANALYSIS")
     print("================================================================")
 
     log_text = received_files.get("m3_log.txt", b"").decode('utf-8', errors='replace')
@@ -294,7 +294,7 @@ def deploy_and_test():
     # Service status
     has_create_ok = "[SC] CreateService SUCCESS" in log_text
     has_start_running = "STATE              : 4  RUNNING" in log_text
-    has_driverquery_ok = "wfpsentinel" in log_text and "Running" in log_text
+    has_driverquery_ok = "ominull" in log_text and "Running" in log_text
     has_stop_ok = "STATE              : 1  STOPPED" in log_text
     has_delete_ok = "[SC] DeleteService SUCCESS" in log_text
 
@@ -307,23 +307,23 @@ def deploy_and_test():
 
     # WFP Dual-Stack Objects
     expected_callouts = [
-        "WfpSentinelAleConnectV4Callout",
-        "WfpSentinelAleConnectV6Callout",
-        "WfpSentinelAleRecvAcceptV4Callout",
-        "WfpSentinelAleRecvAcceptV6Callout",
-        "WfpSentinelAleFlowEstV4Callout",
-        "WfpSentinelAleFlowEstV6Callout"
+        "OminullAleConnectV4Callout",
+        "OminullAleConnectV6Callout",
+        "OminullAleRecvAcceptV4Callout",
+        "OminullAleRecvAcceptV6Callout",
+        "OminullAleFlowEstV4Callout",
+        "OminullAleFlowEstV6Callout"
     ]
     expected_filters = [
-        "WfpSentinelAleConnectV4Filter",
-        "WfpSentinelAleConnectV6Filter",
-        "WfpSentinelAleRecvAcceptV4Filter",
-        "WfpSentinelAleRecvAcceptV6Filter",
-        "WfpSentinelAleFlowEstV4Filter",
-        "WfpSentinelAleFlowEstV6Filter"
+        "OminullAleConnectV4Filter",
+        "OminullAleConnectV6Filter",
+        "OminullAleRecvAcceptV4Filter",
+        "OminullAleRecvAcceptV6Filter",
+        "OminullAleFlowEstV4Filter",
+        "OminullAleFlowEstV6Filter"
     ]
 
-    has_sublayer = "WfpSentinelSubLayer" in loaded_xml
+    has_sublayer = "OminullSubLayer" in loaded_xml
     all_callouts_present = all(c in loaded_xml for c in expected_callouts)
     all_filters_present = all(f in loaded_xml for f in expected_filters)
 
@@ -335,7 +335,7 @@ def deploy_and_test():
         print(f"    - Filter:  {f:33s} {'PASS' if f in loaded_xml else 'FAIL'}")
 
     # Zero-Leak Verification
-    sublayer_leaked = "WfpSentinelSubLayer" in post_xml
+    sublayer_leaked = "OminullSubLayer" in post_xml
     callouts_leaked = any(c in post_xml for c in expected_callouts)
     filters_leaked = any(f in post_xml for f in expected_filters)
 
@@ -411,8 +411,8 @@ def deploy_and_test():
 - Lifetime flow teardown callback via `FwpsCalloutFlowDeleteNotifyFn0` with clean pool deallocation (`ExFreePoolWithTag`).
 
 ### D. Inverted-Call Telemetry Streaming
-- Asynchronous pending IRP queue (`IOCTL_WFPSENTINEL_STREAM_EVENT`) with cancel-safe routine (`IoSetCancelRoutine`).
-- Circular event ring buffer (`WFPSENTINEL_EVENT_QUEUE_SIZE = 512`) with atomic head/tail tracking.
+- Asynchronous pending IRP queue (`IOCTL_OMINULL_STREAM_EVENT`) with cancel-safe routine (`IoSetCancelRoutine`).
+- Circular event ring buffer (`OMINULL_EVENT_QUEUE_SIZE = 512`) with atomic head/tail tracking.
 
 ### E. Zero-Leak Clean Deregistration
 - Full object cleanup verified via `netsh wfp show state` XML dump diffing across pre-load, loaded, and post-unload states.

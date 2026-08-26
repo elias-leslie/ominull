@@ -1,93 +1,81 @@
-# WfpSentinel
+# Ominull
 
-**WfpSentinel** is a lightweight, high-performance Windows Filtering Platform (WFP) kernel-mode callout driver (`wfpsentinel.sys`) and user-mode control suite (`wfpsentinel_ctl.exe`) built for Windows 11 Enterprise (x86_64).
+**Ominull** is an ultra-lean, high-performance, cross-platform kernel network security agent, dynamic enforcement engine, and rapid Incident Response (IR) control plane.
 
-It demonstrates kernel-level network telemetry inspection, dynamic policy enforcement via IOCTL, spinlock-synchronized policy evaluation, and clean zero-leak engine deregistration at the Application Layer Enforcement (ALE) connect layer (`FWPM_LAYER_ALE_AUTH_CONNECT_V4`).
+It provides ring-0 connection and stream telemetry, dynamic policy evaluation, kernel-level host network isolation with forensic pinholing, and inverted-call event streaming across Windows (WFP), Linux (eBPF), and macOS (NetworkExtension).
 
 ---
 
 ## Architecture Overview
 
 ```
-+-------------------------------------------------------------------------+
-|                              USER MODE                                  |
-|                                                                         |
-|   +-----------------------+              +--------------------------+   |
-|   |   curl.exe / browser  |              |   wfpsentinel_ctl.exe    |   |
-|   |  (Outbound Traffic)   |              | (Dynamic Policy & Stats) |   |
-|   +-----------+-----------+              +------------+-------------+   |
-+---------------|---------------------------------------|-----------------+
-                | Connect()                             | DeviceIoControl()
-                |                                       | (\DosDevices\WfpSentinel)
-+---------------v---------------------------------------v-----------------+
-|                              KERNEL MODE                                |
-|                                                                         |
-|   +-----------------------------------------------------------------+   |
-|   |                WfpSentinel Driver (wfpsentinel.sys)             |   |
-|   |                                                                 |   |
-|   |   - Device Control Dispatch: Add / Clear / GetStats IOCTLs       |   |
-|   |   - Policy Engine: Spinlock-guarded Dynamic Block Rules Table   |   |
-|   |   - Statistics Engine: Total Classified, Permitted, Blocked     |   |
-|   |   - Custom Sublayer: Priority 0xFFFF (Evaluates First)          |   |
-|   |   - Callout Callback: WfpSentinelClassify                       |   |
-|   +--------------------------------+--------------------------------+   |
-|                                    |                                    |
-|   +--------------------------------v--------------------------------+   |
-|   |             Windows Filtering Platform (fwpkclnt.sys)           |   |
-|   |               [FWPM_LAYER_ALE_AUTH_CONNECT_V4]                  |   |
-|   |                                                                 |   |
-|   |     Match Block Rule?                                           |   |
-|   |       YES -> FWP_ACTION_BLOCK (Drops Connection)                |   |
-|   |       NO  -> FWP_ACTION_CONTINUE (Permits Normal Flow)          |   |
-|   +-----------------------------------------------------------------+   |
-+-------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|              CENTRAL MANAGEMENT HUB / ANALYST JUMP KIT                      |
+|                  (Single Portable Native Binary: ominull-hub)               |
+|                                                                             |
+|  - Zero dependencies (no PostgreSQL, no Redis, no Docker required)          |
+|  - Multi-Tenant Segregation for MSPs & MSSPs (Tenant A | Tenant B)          |
+|  - Ephemeral CA & Token Generation (mTLS + Ed25519)                         |
+|  - Embedded DuckDB / SQLite Event Store + TUI & Web SOC console             |
++-----------------------------------------------------------------------------+
+                                       ▲
+                       mTLS + Ephemeral Token (Port 8443)
+                                       │
+       ┌───────────────────────────────┼───────────────────────────────┐
+       ▼                               ▼                               ▼
++-----------------------------+ +-----------------------------+ +-----------------------------+
+|      WINDOWS ENDPOINT       | |       LINUX ENDPOINT        | |       macOS ENDPOINT        |
+|  (Windows 11 / Server 2025) | |    (Debian 12 / Ubuntu 24)  | |       (macOS 14 Sonoma)     |
+|                             | |                             | |                             |
+|  [ominulld.exe + WFP]       | |  [ominulld + eBPF]          | |  [ominulld + NEFilter]      |
++-----------------------------+ +-----------------------------+ +-----------------------------+
 ```
 
 ### Core Components
-1. **Kernel Callout Driver (`driver/src/driver.c`)**:
-   - Registers device object `\Device\WfpSentinel` and symbolic link `\DosDevices\WfpSentinel`.
-   - Creates a dedicated WFP sublayer at `0xFFFF` priority (`FWPM_SUBLAYER_WEIGHT_MAX`).
-   - Registers kernel callout and inspection filter at `FWPM_LAYER_ALE_AUTH_CONNECT_V4`.
-   - Extracts 4-tuple (Local/Remote IP & Port), IP protocol, Process ID (PID), and executable image path.
-   - Evaluates connections against dynamic block rules and returns `FWP_ACTION_BLOCK` or `FWP_ACTION_CONTINUE`.
-   - Guarantees zero WFP object leaks on driver unload (`DriverUnload`).
+1. **Windows Kernel Callout Driver (`driver/src/driver.c` $\rightarrow$ `ominull.sys`)**:
+   - Creates a dedicated high-priority WFP sublayer at `0xFFFF` priority (`FWPM_SUBLAYER_WEIGHT_MAX`).
+   - Registers callouts & filters across all 6 core dual-stack ALE layers:
+     - `FWPM_LAYER_ALE_AUTH_CONNECT_V4` & `_V6` (Outbound connection authorization)
+     - `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4` & `_V6` (Inbound connection & listening socket monitoring)
+     - `FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4` & `_V6` (Flow context tracking & lifetime cleanup)
+   - Dynamic policy engine supporting CIDR subnets, port ranges, protocols, PID, and executable path filtering.
+   - Host isolation mode (`IOCTL_OMINULL_SET_ISOLATION_MODE`) dropping all traffic except management hub pinholes.
+   - Inverted-call streaming (`IOCTL_OMINULL_STREAM_EVENT`) with zero polling overhead.
+   - Guaranteed zero WFP object leaks on service teardown.
 
-2. **User-Mode Control CLI (`cli/wfpsentinel_ctl.c`)**:
-   - `wfpsentinel_ctl block <ip> <port> [tcp|udp] [pid]`: Inserts kernel block rule dynamically via IOCTL.
-   - `wfpsentinel_ctl clear`: Clears all active kernel block rules.
-   - `wfpsentinel_ctl stats`: Queries live connection and policy counters from ring 0.
+2. **Endpoint Control CLI (`cli/ominullctl.c` $\rightarrow$ `ominullctl.exe`)**:
+   - `ominullctl block <ip> <port> [tcp|udp] [pid]`: Inserts dynamic kernel block rule.
+   - `ominullctl isolate`: Activates kernel-level network quarantine.
+   - `ominullctl unblock / clear`: Flushes active dynamic rules.
+   - `ominullctl monitor`: Streams ring-0 connection events in real-time.
+   - `ominullctl stats`: Queries live connection, flow, and policy counters.
 
 ---
 
 ## Directory Structure
 
 ```
-wfpsentinel/
+ominull/
 ├── build/                 # Compiled driver, CLI, and test-signed artifacts
 ├── certs/                 # Authenticode test-signing certificates & keys
-├── cli/                   # User-mode control utility source
-│   └── wfpsentinel_ctl.c
+├── cli/                   # User-mode control utility source (ominullctl.c)
 ├── driver/                # Kernel-mode driver source & headers
 │   ├── include/
-│   │   ├── driver.h
-│   │   ├── wfp_kernel.h
-│   │   └── wfpsentinel_ioctl.h
+│   │   ├── ominull_driver.h
+│   │   ├── ominull_ioctl.h
+│   │   └── wfp_kernel.h
 │   └── src/
 │       ├── driver.c
 │       └── fwpkclnt.def
 ├── evidence/              # Captured verification evidence & WFP state XML dumps
-│   ├── m0-toolchain/      # Cross-compilation and Authenticode signing report
-│   ├── m1-callout/        # Callout registration, ALE inspection, and zero-leak unload
-│   └── m2-enforcement/    # Dynamic IOCTL block enforcement, ping selectivity, and stats
 ├── scripts/               # Automation, build, signing, and test runners
 │   ├── build.sh
 │   ├── sign.sh
-│   ├── m2_runner.bat
-│   └── receiver.py
+│   └── vm_test_pipeline.py
 ├── LICENSE                # Apache 2.0
 ├── NOTICE
+├── PLAN.md                # Project Master Plan & Multi-Tenant Roadmap
 ├── README.md
-├── SECURITY.md
 └── TESTING.md
 ```
 
@@ -95,7 +83,7 @@ wfpsentinel/
 
 ## Build & Signing Instructions
 
-The driver and CLI are cross-compiled from Linux using `mingw-w64` and Authenticode test-signed using `osslsigncode`:
+Cross-compile the driver and CLI from Linux using `mingw-w64` and test-sign with `osslsigncode`:
 
 ```bash
 # 1. Compile driver and control CLI
@@ -104,18 +92,6 @@ The driver and CLI are cross-compiled from Linux using `mingw-w64` and Authentic
 # 2. Test-sign the kernel driver
 ./scripts/sign.sh
 ```
-
----
-
-## Verification & Testing
-
-All milestones are verified on an isolated Windows 11 Enterprise test VM with Driver Verifier active:
-
-- **Milestone 0 (Toolchain)**: Zero-dependency cross-compilation of native NT subsystem driver and PE Authenticode signing.
-- **Milestone 1 (Callout & Inspection)**: Driver load, ALE connection inspection, telemetry logging, and `netsh wfp show state` zero-leak verification across pre-load, loaded, and post-unload states.
-- **Milestone 2 (Dynamic Enforcement)**: Dynamic IOCTL rule insertion, kernel-level traffic blocking against targeted ports, selective non-targeted traffic pass-through, live stats accounting, and clean rule flushing.
-
-For complete test protocols, see [TESTING.md](TESTING.md).
 
 ---
 

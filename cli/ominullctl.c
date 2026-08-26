@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include "../driver/include/wfpsentinel_ioctl.h"
+#include "../driver/include/ominull_ioctl.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -27,7 +27,7 @@ static void SignalHandler(int signum) {
 
 static HANDLE OpenDriverHandle(void) {
     HANDLE hDevice = CreateFileA(
-        WFPSENTINEL_USERMODE_PATH,
+        OMINULL_USERMODE_PATH,
         GENERIC_READ | GENERIC_WRITE,
         0,
         NULL,
@@ -38,7 +38,7 @@ static HANDLE OpenDriverHandle(void) {
 
     if (hDevice == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-        printf("[-] Failed to open device %s (Error %lu)\n", WFPSENTINEL_USERMODE_PATH, err);
+        printf("[-] Failed to open device %s (Error %lu)\n", OMINULL_USERMODE_PATH, err);
     }
     return hDevice;
 }
@@ -71,29 +71,29 @@ static const char* ProtocolName(UINT8 proto) {
 
 static const char* DirectionName(UINT8 dir) {
     switch (dir) {
-    case WFPSENTINEL_DIR_OUTBOUND: return "OUTBOUND";
-    case WFPSENTINEL_DIR_INBOUND:  return "INBOUND";
+    case OMINULL_DIR_OUTBOUND: return "OUTBOUND";
+    case OMINULL_DIR_INBOUND:  return "INBOUND";
     default: return "ANY";
     }
 }
 
 static const char* EventTypeName(UINT32 evtType) {
     switch (evtType) {
-    case WFPSENTINEL_EVENT_CONNECT_V4:          return "CONNECT_V4";
-    case WFPSENTINEL_EVENT_CONNECT_V6:          return "CONNECT_V6";
-    case WFPSENTINEL_EVENT_RECV_ACCEPT_V4:      return "RECV_ACCEPT_V4";
-    case WFPSENTINEL_EVENT_RECV_ACCEPT_V6:      return "RECV_ACCEPT_V6";
-    case WFPSENTINEL_EVENT_FLOW_ESTABLISHED_V4: return "FLOW_EST_V4";
-    case WFPSENTINEL_EVENT_FLOW_ESTABLISHED_V6: return "FLOW_EST_V6";
-    case WFPSENTINEL_EVENT_FLOW_CLOSED:         return "FLOW_CLOSED";
-    case WFPSENTINEL_EVENT_BLOCKED:             return "BLOCKED";
+    case OMINULL_EVENT_CONNECT_V4:          return "CONNECT_V4";
+    case OMINULL_EVENT_CONNECT_V6:          return "CONNECT_V6";
+    case OMINULL_EVENT_RECV_ACCEPT_V4:      return "RECV_ACCEPT_V4";
+    case OMINULL_EVENT_RECV_ACCEPT_V6:      return "RECV_ACCEPT_V6";
+    case OMINULL_EVENT_FLOW_ESTABLISHED_V4: return "FLOW_EST_V4";
+    case OMINULL_EVENT_FLOW_ESTABLISHED_V6: return "FLOW_EST_V6";
+    case OMINULL_EVENT_FLOW_CLOSED:         return "FLOW_CLOSED";
+    case OMINULL_EVENT_BLOCKED:             return "BLOCKED";
     default: return "UNKNOWN";
     }
 }
 
 static void PrintUsage(const char* prog) {
     printf("===============================================================================\n");
-    printf("   WfpSentinel Policy Controller & Telemetry Streaming Utility (Dual-Stack)\n");
+    printf("   Ominull Policy Controller & Telemetry Streaming Utility (Dual-Stack)\n");
     printf("===============================================================================\n");
     printf("Usage:\n");
     printf("  %s block <ip[/cidr]> [port] [proto] [pid] [app] [--dir in|out]\n", prog);
@@ -121,10 +121,10 @@ static void PrintUsage(const char* prog) {
     printf("===============================================================================\n");
 }
 
-static int ParseRuleFromArgs(int argc, char* argv[], UINT8 action, PWFPSENTINEL_RULE outRule) {
-    ZeroMemory(outRule, sizeof(WFPSENTINEL_RULE));
+static int ParseRuleFromArgs(int argc, char* argv[], UINT8 action, POMINULL_RULE outRule) {
+    ZeroMemory(outRule, sizeof(OMINULL_RULE));
     outRule->Action = action;
-    outRule->Direction = WFPSENTINEL_DIR_ANY;
+    outRule->Direction = OMINULL_DIR_ANY;
 
     if (argc < 3) {
         printf("[-] Missing IP / CIDR argument\n");
@@ -181,9 +181,9 @@ static int ParseRuleFromArgs(int argc, char* argv[], UINT8 action, PWFPSENTINEL_
         if (_stricmp(argv[i], "--dir") == 0 && i + 1 < argc) {
             i++;
             if (_stricmp(argv[i], "in") == 0 || _stricmp(argv[i], "inbound") == 0) {
-                outRule->Direction = WFPSENTINEL_DIR_INBOUND;
+                outRule->Direction = OMINULL_DIR_INBOUND;
             } else if (_stricmp(argv[i], "out") == 0 || _stricmp(argv[i], "outbound") == 0) {
-                outRule->Direction = WFPSENTINEL_DIR_OUTBOUND;
+                outRule->Direction = OMINULL_DIR_OUTBOUND;
             }
         } else if (i == 3) {
             outRule->RemotePort = (UINT16)atoi(argv[3]);
@@ -200,7 +200,7 @@ static int ParseRuleFromArgs(int argc, char* argv[], UINT8 action, PWFPSENTINEL_
         } else if (i == 5) {
             outRule->ProcessId = (UINT64)_strtoui64(argv[5], NULL, 10);
         } else if (i == 6) {
-            int len = MultiByteToWideChar(CP_UTF8, 0, argv[6], -1, outRule->ProcessPath, WFPSENTINEL_MAX_PATH - 1);
+            int len = MultiByteToWideChar(CP_UTF8, 0, argv[6], -1, outRule->ProcessPath, OMINULL_MAX_PATH - 1);
             if (len > 0) {
                 outRule->ProcessPathLen = (UINT16)(len - 1);
             }
@@ -220,13 +220,13 @@ static void RunStreamMonitor(HANDLE hDevice) {
     signal(SIGINT, SignalHandler);
 
     while (g_Running) {
-        WFPSENTINEL_EVENT ev;
+        OMINULL_EVENT ev;
         ZeroMemory(&ev, sizeof(ev));
         DWORD bytesReturned = 0;
 
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_STREAM_EVENT,
+            IOCTL_OMINULL_STREAM_EVENT,
             NULL,
             0,
             &ev,
@@ -245,7 +245,7 @@ static void RunStreamMonitor(HANDLE hDevice) {
             continue;
         }
 
-        if (bytesReturned < sizeof(WFPSENTINEL_EVENT)) {
+        if (bytesReturned < sizeof(OMINULL_EVENT)) {
             continue;
         }
 
@@ -313,8 +313,8 @@ int main(int argc, char* argv[]) {
     g_hDevice = hDevice;
 
     if (_stricmp(argv[1], "block") == 0 || _stricmp(argv[1], "allow") == 0) {
-        UINT8 action = (_stricmp(argv[1], "block") == 0) ? WFPSENTINEL_ACTION_BLOCK : WFPSENTINEL_ACTION_ALLOW;
-        WFPSENTINEL_RULE rule;
+        UINT8 action = (_stricmp(argv[1], "block") == 0) ? OMINULL_ACTION_BLOCK : OMINULL_ACTION_ALLOW;
+        OMINULL_RULE rule;
         if (!ParseRuleFromArgs(argc, argv, action, &rule)) {
             CloseHandle(hDevice);
             WSACleanup();
@@ -325,7 +325,7 @@ int main(int argc, char* argv[]) {
         DWORD bytesReturned = 0;
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_ADD_RULE,
+            IOCTL_OMINULL_ADD_RULE,
             &rule,
             sizeof(rule),
             &assignedId,
@@ -354,7 +354,7 @@ int main(int argc, char* argv[]) {
             WideCharToMultiByte(CP_UTF8, 0, rule.ProcessPath, -1, pathBuf, sizeof(pathBuf), NULL, NULL);
 
             printf("[+] Successfully added %s rule in kernel (Rule ID: %u):\n",
-                (action == WFPSENTINEL_ACTION_BLOCK) ? "BLOCK" : "ALLOW", assignedId);
+                (action == OMINULL_ACTION_BLOCK) ? "BLOCK" : "ALLOW", assignedId);
             printf("    Direction:   %s\n", DirectionName(rule.Direction));
             printf("    IP Version:  IPv%u\n", rule.IpVersion);
             printf("    Remote IP:   %s\n", ipBuf);
@@ -365,7 +365,7 @@ int main(int argc, char* argv[]) {
                 printf("    App Path:    %s\n", pathBuf);
             }
         } else {
-            printf("[-] DeviceIoControl IOCTL_WFPSENTINEL_ADD_RULE failed: %lu\n", GetLastError());
+            printf("[-] DeviceIoControl IOCTL_OMINULL_ADD_RULE failed: %lu\n", GetLastError());
         }
 
     } else if (_stricmp(argv[1], "block-app") == 0 || _stricmp(argv[1], "allow-app") == 0) {
@@ -376,13 +376,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        UINT8 action = (_stricmp(argv[1], "block-app") == 0) ? WFPSENTINEL_ACTION_BLOCK : WFPSENTINEL_ACTION_ALLOW;
-        WFPSENTINEL_RULE rule;
+        UINT8 action = (_stricmp(argv[1], "block-app") == 0) ? OMINULL_ACTION_BLOCK : OMINULL_ACTION_ALLOW;
+        OMINULL_RULE rule;
         ZeroMemory(&rule, sizeof(rule));
         rule.Action = action;
-        rule.Direction = WFPSENTINEL_DIR_ANY;
+        rule.Direction = OMINULL_DIR_ANY;
 
-        int len = MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, rule.ProcessPath, WFPSENTINEL_MAX_PATH - 1);
+        int len = MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, rule.ProcessPath, OMINULL_MAX_PATH - 1);
         if (len > 0) {
             rule.ProcessPathLen = (UINT16)(len - 1);
         }
@@ -391,7 +391,7 @@ int main(int argc, char* argv[]) {
         DWORD bytesReturned = 0;
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_ADD_RULE,
+            IOCTL_OMINULL_ADD_RULE,
             &rule,
             sizeof(rule),
             &assignedId,
@@ -402,19 +402,19 @@ int main(int argc, char* argv[]) {
 
         if (ok) {
             printf("[+] Successfully added %s rule for process path: '%s' (Rule ID: %u)\n",
-                (action == WFPSENTINEL_ACTION_BLOCK) ? "BLOCK" : "ALLOW", argv[2], assignedId);
+                (action == OMINULL_ACTION_BLOCK) ? "BLOCK" : "ALLOW", argv[2], assignedId);
         } else {
             printf("[-] Failed to add rule: %lu\n", GetLastError());
         }
 
     } else if (_stricmp(argv[1], "rules") == 0) {
-        WFPSENTINEL_RULES_LIST list;
+        OMINULL_RULES_LIST list;
         ZeroMemory(&list, sizeof(list));
         DWORD bytesReturned = 0;
 
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_GET_RULES,
+            IOCTL_OMINULL_GET_RULES,
             NULL,
             0,
             &list,
@@ -430,7 +430,7 @@ int main(int argc, char* argv[]) {
             printf("----------------------------------------------------------------------------------------------------\n");
 
             for (UINT32 i = 0; i < list.RuleCount; i++) {
-                PWFPSENTINEL_RULE r = &list.Rules[i];
+                POMINULL_RULE r = &list.Rules[i];
                 char ipBuf[64] = "*";
                 if (r->IpVersion == 4 && r->RemoteIpV4 != 0) {
                     char ip4[32];
@@ -463,7 +463,7 @@ int main(int argc, char* argv[]) {
 
                 printf("%-4u %-7s %-8s %-5s %-32s %-6s %-6s %-6s %s\n",
                     r->RuleId,
-                    (r->Action == WFPSENTINEL_ACTION_BLOCK) ? "BLOCK" : "ALLOW",
+                    (r->Action == OMINULL_ACTION_BLOCK) ? "BLOCK" : "ALLOW",
                     DirectionName(r->Direction),
                     verBuf,
                     ipBuf,
@@ -473,7 +473,7 @@ int main(int argc, char* argv[]) {
                     pathBuf);
             }
         } else {
-            printf("[-] DeviceIoControl IOCTL_WFPSENTINEL_GET_RULES failed: %lu\n", GetLastError());
+            printf("[-] DeviceIoControl IOCTL_OMINULL_GET_RULES failed: %lu\n", GetLastError());
         }
 
     } else if (_stricmp(argv[1], "delete") == 0) {
@@ -489,7 +489,7 @@ int main(int argc, char* argv[]) {
 
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_DELETE_RULE,
+            IOCTL_OMINULL_DELETE_RULE,
             &targetId,
             sizeof(targetId),
             NULL,
@@ -508,7 +508,7 @@ int main(int argc, char* argv[]) {
         DWORD bytesReturned = 0;
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_CLEAR_RULES,
+            IOCTL_OMINULL_CLEAR_RULES,
             NULL,
             0,
             NULL,
@@ -524,13 +524,13 @@ int main(int argc, char* argv[]) {
         }
 
     } else if (_stricmp(argv[1], "stats") == 0) {
-        WFPSENTINEL_STATS stats;
+        OMINULL_STATS stats;
         ZeroMemory(&stats, sizeof(stats));
         DWORD bytesReturned = 0;
 
         BOOL ok = DeviceIoControl(
             hDevice,
-            IOCTL_WFPSENTINEL_GET_STATS,
+            IOCTL_OMINULL_GET_STATS,
             NULL,
             0,
             &stats,
@@ -541,7 +541,7 @@ int main(int argc, char* argv[]) {
 
         if (ok) {
             printf("===============================================================================\n");
-            printf("                     WFPSENTINEL KERNEL STATISTICS\n");
+            printf("                     OMINULL KERNEL STATISTICS\n");
             printf("===============================================================================\n");
             printf("  Policy Engine:\n");
             printf("    Active Dynamic Rules:             %u\n", stats.ActiveRuleCount);

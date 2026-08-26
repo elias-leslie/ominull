@@ -1,6 +1,6 @@
 # Evidence Directory
 
-This directory stores verification artifacts, test transcripts, and diagnostic logs for `wfpsentinel`.
+This directory stores verification artifacts, test transcripts, and diagnostic logs for `ominull`.
 
 ## Structure
 - `m0-toolchain/`: WinDbg transcript and loader logs proving build -> sign -> deploy -> break -> unload toolchain.
