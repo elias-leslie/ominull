@@ -610,6 +610,75 @@ func (e *Engine) Evaluate(ev storage.Event) {
 			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}
+
+	// 10. In-Flight DPI: Suspicious DGA Domain & High-Entropy C2 SNI
+	targetDomain := ev.SNI
+	if targetDomain == "" {
+		targetDomain = ev.Domain
+	}
+	if targetDomain != "" && len(targetDomain) >= 12 {
+		entropy := calcEntropy(targetDomain)
+		hasSuspiciousTLD := strings.HasSuffix(targetDomain, ".top") ||
+			strings.HasSuffix(targetDomain, ".xyz") ||
+			strings.HasSuffix(targetDomain, ".cc") ||
+			strings.HasSuffix(targetDomain, ".su") ||
+			strings.HasSuffix(targetDomain, ".tk") ||
+			strings.HasSuffix(targetDomain, ".biz")
+
+		if entropy >= 3.85 || (entropy >= 3.5 && hasSuspiciousTLD) {
+			alertKey := fmt.Sprintf("dga:%s:%s", ev.EndpointID, targetDomain)
+			if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
+				sev := "HIGH"
+				if entropy >= 4.1 || hasSuspiciousTLD {
+					sev = "CRITICAL"
+				}
+				alert := storage.Alert{
+					ID:          uuid.New().String(),
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Timestamp:   now,
+					Title:       fmt.Sprintf("Suspicious DGA / High-Entropy Domain Detected (%s)", targetDomain),
+					Description: fmt.Sprintf("Process %s contacted high-entropy domain %s (Shannon Entropy: %.2f) via %s.", procName, targetDomain, entropy, ev.DstIP),
+					Severity:    sev,
+					Mitigated:   false,
+				}
+				_ = e.store.CreateAlert(alert)
+				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+					ID:          alert.ID,
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Hostname:    endpoint.Hostname,
+					AnomalyType: "SUSPICIOUS_DGA_DOMAIN",
+					Severity:    sev,
+					Title:       alert.Title,
+					Description: alert.Description,
+					Details:     fmt.Sprintf("Target Domain: %s | Shannon Entropy: %.2f | Dst IP: %s:%d", targetDomain, entropy, ev.DstIP, ev.DstPort),
+					ProcessPath: ev.ProcessPath,
+					DstIP:       ev.DstIP,
+					DstPort:     ev.DstPort,
+					Timestamp:   now,
+				})
+				log.Printf("[!] ANOMALY ALERT [%s]: %s on %s -> %s (Entropy: %.2f)", sev, alert.Title, ev.EndpointID, targetDomain, entropy)
+			}
+		}
+	}
+}
+
+func calcEntropy(s string) float64 {
+	if len(s) == 0 {
+		return 0.0
+	}
+	counts := make(map[rune]float64)
+	for _, r := range s {
+		counts[r]++
+	}
+	entropy := 0.0
+	total := float64(len(s))
+	for _, count := range counts {
+		p := count / total
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }
 
 func isPrivateIP(ipStr string) bool {

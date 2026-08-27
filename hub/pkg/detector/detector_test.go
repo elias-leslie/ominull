@@ -129,6 +129,20 @@ func TestDetectorEngine(t *testing.T) {
 		})
 	}
 
+	// 7. Test Suspicious DGA Domain / High-Entropy SNI Anomaly
+	engine.Evaluate(storage.Event{
+		TenantID:    "default",
+		EndpointID:  "test-workstation-07",
+		Timestamp:   time.Now().UTC(),
+		Action:      "PERMIT",
+		Direction:   "OUTBOUND",
+		DstIP:       "198.51.100.22",
+		DstPort:     443,
+		SNI:         "xj829vbnpqlmz019.xyz",
+		ProcessPath: "/usr/bin/python3",
+		ProcessID:   8888,
+	})
+
 	// Verify Anomaly Alerts created
 	anomalies, err := store.ListAnomalyAlerts("default", 100)
 	if err != nil {
@@ -139,6 +153,7 @@ func TestDetectorEngine(t *testing.T) {
 	foundBwSpike := false
 	foundBeacon := false
 	foundLateral := false
+	foundDGA := false
 	for _, a := range anomalies {
 		if a.AnomalyType == "OFF_HOURS_ACTIVITY" {
 			foundOffHours = true
@@ -151,6 +166,9 @@ func TestDetectorEngine(t *testing.T) {
 		}
 		if a.AnomalyType == "LATERAL_PORT_SWEEP" {
 			foundLateral = true
+		}
+		if a.AnomalyType == "SUSPICIOUS_DGA_DOMAIN" {
+			foundDGA = true
 		}
 	}
 
@@ -165,5 +183,8 @@ func TestDetectorEngine(t *testing.T) {
 	}
 	if !foundLateral {
 		t.Errorf("expected LATERAL_PORT_SWEEP anomaly to be recorded")
+	}
+	if !foundDGA {
+		t.Errorf("expected SUSPICIOUS_DGA_DOMAIN anomaly to be recorded")
 	}
 }

@@ -209,16 +209,16 @@
 
 ---
 
-### Phase 18: Stream DPI & In-Flight TLS ClientHello SNI / DNS Dissection `[IN PROGRESS]`
+### Phase 18: Stream DPI & In-Flight TLS ClientHello SNI / DNS Dissection `[COMPLETED]`
 - **Objective:** Extract rich protocol metadata in-flight directly within the flow sniffer.
-- **Deliverables:**
-  - **TLS SNI Dissector (`agent/src/dpi`):** Parses initial TLS `ClientHello` packets on port 443 to extract the Server Name Indication hostname before encryption.
-  - **DNS Query/Response Sniffer:** Extracts queried domain names and resolved IP addresses on port 53.
-  - **Graph Enrichment:** Enriches raw IP nodes with fully qualified domain names (FQDNs) and DGA anomaly detection.
+- **Deliverables Completed:**
+  - **TLS SNI Dissector (`agent/include/dpi.h`):** Parses initial TLS `ClientHello` packets on port 443 to extract the Server Name Indication hostname before encryption (tested with synthetic TLS 1.3 packets).
+  - **DNS Query/Response Sniffer (`agent/include/dpi.h`):** Extracts queried domain names and resolved IP addresses on port 53.
+  - **Graph Enrichment & DGA Anomaly Heuristic:** Evaluates Shannon entropy on SNI and domain names ($>3.85$) to detect Domain Generation Algorithms (`SUSPICIOUS_DGA_DOMAIN`).
 
 ---
 
-### Phase 19: Cross-Platform Native Packaging & Release Pipeline `[PENDING]`
+### Phase 19: Cross-Platform Native Packaging & Release Pipeline `[IN PROGRESS]`
 - **Objective:** Build enterprise distribution packages for frictionless mass rollout.
 - **Deliverables:**
   - **Linux:** Native `.deb` (Debian/Ubuntu) and `.rpm` (RHEL/Rocky/Fedora) packages with systemd unit integration.

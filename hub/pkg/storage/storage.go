@@ -68,6 +68,8 @@ type Event struct {
 	Country     string    `json:"country"`
 	ProcessPath string    `json:"process_path"`
 	ProcessID   uint32    `json:"process_id"`
+	Domain      string    `json:"domain,omitempty"`
+	SNI         string    `json:"sni,omitempty"`
 }
 
 type CommProfile struct {
