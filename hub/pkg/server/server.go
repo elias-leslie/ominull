@@ -84,11 +84,11 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 	}
 
 	s := &Server{
-		store:      store,
-		ti:         threatintel.New(store),
-		pki:        pkiMgr,
-		scanner:    scanner.New(store),
-		deployer:   deployer.New(store, hubURL, adminKey),
+		store:    store,
+		ti:       threatintel.New(store),
+		pki:      pkiMgr,
+		scanner:  scanner.New(store),
+		deployer: deployer.New(store, hubURL, adminKey),
 		copilot: copilot.New(store, copilot.Config{
 			Provider:    copilot.ProviderLocalOllama,
 			OllamaURL:   "http://10.0.0.39:11434",
@@ -103,7 +103,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
 		_ = s.store.SetEndpointIsolation(endpointID, true)
 		cmd := CommandMessage{
-			Type: "ISOLATE",
+			Type:    "ISOLATE",
 			Payload: map[string]interface{}{"reason": reason},
 		}
 		return s.SendCommand(endpointID, cmd)
@@ -123,6 +123,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// Zero-Trust Least Privilege: Reject Cloudflare Service Tokens on the Web Console
 	if r.Header.Get("CF-Access-Client-Id") != "" || r.Header.Get("Cf-Access-Client-Id") != "" || r.Header.Get("Cf-Access-Service-Token-Id") != "" {
 		http.Error(w, "Access Denied: Service Tokens are restricted to agent telemetry and API endpoints only.", http.StatusForbidden)
+		return
+	}
+	// The console embeds the admin API key at serve-time, so it is only rendered
+	// for callers who can already present a valid admin credential.
+	provided := strings.TrimSpace(r.URL.Query().Get("key"))
+	if provided == "" {
+		provided = strings.TrimSpace(r.Header.Get("X-API-Key"))
+	}
+	if provided != s.adminKey {
+		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+			if claims, err := auth.ValidateJWT(strings.TrimPrefix(authHeader, "Bearer "), s.adminKey); err == nil && claims != nil {
+				provided = s.adminKey
+			}
+		}
+	}
+	if provided != s.adminKey {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("<!DOCTYPE html><html><head><title>Ominull Console - Access</title></head><body style=\"background:#0b1120;color:#e2e8f0;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><form method=\"GET\" action=\"/\" style=\"background:#111827;border:1px solid #1e293b;border-radius:12px;padding:32px;text-align:center;\"><div style=\"font-size:20px;font-weight:800;margin-bottom:8px;\">&#128737;&#65039; Ominull Console</div><div style=\"color:#94a3b8;font-size:12px;margin-bottom:16px;\">Admin API key required</div><input type=\"password\" name=\"key\" placeholder=\"Admin API Key\" autofocus style=\"background:#0b1120;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:8px 12px;width:260px;\"><br><br><button type=\"submit\" style=\"background:#06b6d4;color:#0b1120;border:0;border-radius:6px;padding:8px 20px;font-weight:800;cursor:pointer;\">Unlock Console</button></form></body></html>"))
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -253,7 +272,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if key == "" {
 				continue
 			}
-			if key == s.adminKey || key == "omi_live_master" || key == "ominull-master-admin-key" || key == "<redacted-rotated-key>" {
+			if key == s.adminKey {
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
 				next(w, r)
@@ -276,8 +295,9 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		key = s.adminKey
+	if key == "" || key != s.adminKey {
+		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+		return
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
@@ -302,8 +322,9 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		key = s.adminKey
+	if key == "" || key != s.adminKey {
+		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+		return
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
@@ -328,8 +349,9 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		key = s.adminKey
+	if key == "" || key != s.adminKey {
+		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+		return
 	}
 	hubURL := s.hubURL
 	if hubURL == "" {
@@ -705,7 +727,7 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		for _, id := range req.IDs {
 			s.store.SetEndpointIsolation(id, true)
 			cmd := CommandMessage{
-				Type: "ISOLATE",
+				Type:    "ISOLATE",
 				Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
 			}
 			_ = s.SendCommand(id, cmd)
@@ -720,7 +742,7 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := CommandMessage{
-			Type: "ISOLATE",
+			Type:    "ISOLATE",
 			Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
 		}
 		s.clientsMu.RLock()

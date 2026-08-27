@@ -13,7 +13,7 @@ int main(int argc, char* argv[]) {
     AGENT_CONFIG config;
     ZeroMemory(&config, sizeof(config));
     strcpy(config.hub_url, "http://10.0.0.58:9999");
-    strcpy(config.api_key, "<redacted-rotated-key>");
+    strcpy(config.api_key, "<provision-via-bootstrap>");
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-home");
 

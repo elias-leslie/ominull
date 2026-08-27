@@ -37,8 +37,31 @@ func TestBootstrapGenerators(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	// 1. PowerShell Bootstrap
-	req := httptest.NewRequest("GET", "/bootstrap.ps1?key=mock_tenant_token", nil)
+	// 0. Bootstrap must never be minted without the admin key (no defaults, no tenant keys).
+	for _, path := range []string{"/bootstrap.ps1", "/bootstrap.sh", "/bootstrap_mac.sh"} {
+		for _, name := range []string{"no-key", "wrong-key"} {
+			url := path
+			if name == "wrong-key" {
+				url = path + "?key=mock_tenant_token"
+			}
+			req := httptest.NewRequest("GET", url, nil)
+			w := httptest.NewRecorder()
+			switch path {
+			case "/bootstrap.ps1":
+				srv.handleBootstrapPS1(w, req)
+			case "/bootstrap.sh":
+				srv.handleBootstrapSH(w, req)
+			default:
+				srv.handleBootstrapMac(w, req)
+			}
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("%s (%s): expected 401 Unauthorized, got %d", path, name, w.Code)
+			}
+		}
+	}
+
+	// 1. PowerShell Bootstrap (admin key required)
+	req := httptest.NewRequest("GET", "/bootstrap.ps1?key=mock_admin_token", nil)
 	w := httptest.NewRecorder()
 	srv.handleBootstrapPS1(w, req)
 
@@ -46,12 +69,12 @@ func TestBootstrapGenerators(t *testing.T) {
 		t.Fatalf("Expected 200, got %d", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "Ominull Threat Nullification Service") || !strings.Contains(body, "mock_tenant_token") {
+	if !strings.Contains(body, "Ominull Threat Nullification Service") || !strings.Contains(body, "mock_admin_token") {
 		t.Errorf("PowerShell script missing expected bootstrap instructions: %s", body)
 	}
 
-	// 2. Bash Bootstrap
-	req = httptest.NewRequest("GET", "/bootstrap.sh?key=mock_tenant_token", nil)
+	// 2. Bash Bootstrap (admin key required)
+	req = httptest.NewRequest("GET", "/bootstrap.sh?key=mock_admin_token", nil)
 	w = httptest.NewRecorder()
 	srv.handleBootstrapSH(w, req)
 
@@ -59,7 +82,7 @@ func TestBootstrapGenerators(t *testing.T) {
 		t.Fatalf("Expected 200, got %d", w.Code)
 	}
 	body = w.Body.String()
-	if !strings.Contains(body, "ominulld.service") || !strings.Contains(body, "mock_tenant_token") {
+	if !strings.Contains(body, "ominulld.service") || !strings.Contains(body, "mock_admin_token") {
 		t.Errorf("Bash script missing expected systemd service configuration: %s", body)
 	}
 }

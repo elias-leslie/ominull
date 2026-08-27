@@ -68,7 +68,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/ominull/bin/ominulld https://omi.example.com omi_live_master
+ExecStart=/opt/ominull/bin/ominulld https://omi.example.com <provision-via-bootstrap>
 Restart=always
 RestartSec=5s
 KillMode=process
@@ -95,7 +95,7 @@ cat << 'WIN_INSTALL' > "${WIN_DIR}/install.ps1"
 # Ominull Windows Agent Unattended Installer
 param(
     [string]$HubURL = "https://omi.example.com",
-    [string]$APIKey = "omi_live_master",
+    [string]$APIKey = "<provision-via-bootstrap>",
     [string]$Role = "workstation",
     [string]$Location = "loc-home"
 )
@@ -137,7 +137,7 @@ cat << 'MAC_PLIST' > "${MAC_DIR}/dev.ominull.daemon.plist"
         <string>/bin/bash</string>
         <string>/usr/local/bin/ominull_mac_daemon.sh</string>
         <string>https://omi.example.com</string>
-        <string>omi_live_master</string>
+        <string><provision-via-bootstrap></string>
     </array>
     <key>RunAtLoad</key>
     <true/>

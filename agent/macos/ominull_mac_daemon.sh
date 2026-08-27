@@ -2,7 +2,7 @@
 set -u
 
 HUB_URL="${1:-http://10.0.0.58:9999}"
-API_KEY="${2:-<redacted-rotated-key>}"
+API_KEY="${2:-<provision-via-bootstrap>}"
 ROLE_TAG="${3:-workstation}"
 LOCATION_ID="${4:-loc-home}"
 ENDPOINT_ID="macos-$(hostname -s)"

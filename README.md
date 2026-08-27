@@ -140,7 +140,7 @@ CGO_ENABLED=1 go build -o bin/ominull-hub cmd/main.go
 # 2. Start the Hub
 ./bin/ominull-hub \
   -addr "0.0.0.0:9999" \
-  -key "omi_live_master" \
+  -key "<your-admin-key>" \
   -url "http://10.0.0.58:9999" \
   -db "/opt/ominull/data/ominull.db"
 ```
@@ -158,19 +158,19 @@ curl -s http://10.0.0.58:9999/download/ominull-agent_1.1.0_amd64.deb -o /tmp/omi
 sudo dpkg -i /tmp/ominull.deb
 
 # Or 1-line instant curl bootstrap:
-curl -s http://10.0.0.58:9999/bootstrap.sh?key=omi_live_master | sudo bash
+curl -s http://10.0.0.58:9999/bootstrap.sh?key=<your-admin-key> | sudo bash
 ```
 
 #### 2. Windows 11 / Server 2025
 ```powershell
 # In an Administrative PowerShell:
 Set-ExecutionPolicy Bypass -Scope Process -Force
-irm "http://10.0.0.58:9999/bootstrap.ps1?key=omi_live_master" | iex
+irm "http://10.0.0.58:9999/bootstrap.ps1?key=<your-admin-key>" | iex
 ```
 
 #### 3. macOS (Sonoma 14+)
 ```bash
-curl -s http://10.0.0.58:9999/bootstrap_mac.sh?key=omi_live_master | sudo bash
+curl -s http://10.0.0.58:9999/bootstrap_mac.sh?key=<your-admin-key> | sudo bash
 ```
 
 ---
