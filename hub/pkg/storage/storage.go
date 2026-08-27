@@ -199,6 +199,16 @@ type GeoCountryStat struct {
 	ThreatCount int64  `json:"threat_count"`
 }
 
+type QuarantinedPeer struct {
+	ID        string    `json:"id"`
+	TargetIP  string    `json:"target_ip"`
+	TargetMAC string    `json:"target_mac"`
+	Subnet    string    `json:"subnet"`
+	Reason    string    `json:"reason"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type TopologyNode struct {
 	ID         string `json:"id"`
 	Label      string `json:"label"`
@@ -487,6 +497,16 @@ func (s *Store) initSchema() error {
 		details TEXT NOT NULL,
 		ip_address TEXT NOT NULL,
 		timestamp DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS quarantined_peers (
+		id TEXT PRIMARY KEY,
+		target_ip TEXT NOT NULL UNIQUE,
+		target_mac TEXT NOT NULL DEFAULT "",
+		subnet TEXT NOT NULL DEFAULT "",
+		reason TEXT NOT NULL DEFAULT "",
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
@@ -2323,4 +2343,73 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	data.Metrics.UnmanagedNodesCount = unmanagedCount
 
 	return data, nil
+}
+
+/* QUARANTINED PEERS (SUBNET MESH ISOLATION) */
+
+func (s *Store) AddQuarantinedPeer(ip, mac, subnet, reason string) (*QuarantinedPeer, error) {
+	id := fmt.Sprintf("qpeer-%s", strings.ReplaceAll(ip, ".", "-"))
+	peer := &QuarantinedPeer{
+		ID:        id,
+		TargetIP:  ip,
+		TargetMAC: mac,
+		Subnet:    subnet,
+		Reason:    reason,
+		Active:    true,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	query := `
+	INSERT INTO quarantined_peers (id, target_ip, target_mac, subnet, reason, active, created_at)
+	VALUES (?, ?, ?, ?, ?, 1, ?)
+	ON CONFLICT(target_ip) DO UPDATE SET
+		target_mac=excluded.target_mac,
+		subnet=excluded.subnet,
+		reason=excluded.reason,
+		active=1,
+		created_at=excluded.created_at
+	`
+	_, err := s.db.Exec(query, peer.ID, peer.TargetIP, peer.TargetMAC, peer.Subnet, peer.Reason, peer.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add quarantined peer: %w", err)
+	}
+	return peer, nil
+}
+
+func (s *Store) RemoveQuarantinedPeer(ip string) error {
+	query := `DELETE FROM quarantined_peers WHERE target_ip = ?`
+	_, err := s.db.Exec(query, ip)
+	if err != nil {
+		return fmt.Errorf("failed to remove quarantined peer: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetQuarantinedPeers() ([]QuarantinedPeer, error) {
+	rows, err := s.db.Query(`SELECT id, target_ip, target_mac, subnet, reason, active, created_at FROM quarantined_peers WHERE active = 1 ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query quarantined peers: %w", err)
+	}
+	defer rows.Close()
+
+	var peers []QuarantinedPeer
+	for rows.Next() {
+		var p QuarantinedPeer
+		var activeInt int
+		if err := rows.Scan(&p.ID, &p.TargetIP, &p.TargetMAC, &p.Subnet, &p.Reason, &activeInt, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		p.Active = activeInt == 1
+		peers = append(peers, p)
+	}
+	return peers, nil
+}
+
+func (s *Store) IsPeerQuarantined(ip string) bool {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM quarantined_peers WHERE target_ip = ? AND active = 1`, ip).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
 }

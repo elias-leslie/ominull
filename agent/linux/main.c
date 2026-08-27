@@ -246,6 +246,41 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
     return count;
 }
 
+static void ApplyMeshQuarantineRule(const char* ip, bool block) {
+    if (!ip || !ip[0]) return;
+    char cmd[256];
+    if (block) {
+        snprintf(cmd, sizeof(cmd), "iptables -C INPUT -s %s -j DROP 2>/dev/null || iptables -I INPUT -s %s -j DROP 2>/dev/null", ip, ip);
+        int r1 = system(cmd); (void)r1;
+        snprintf(cmd, sizeof(cmd), "iptables -C OUTPUT -d %s -j DROP 2>/dev/null || iptables -I OUTPUT -d %s -j DROP 2>/dev/null", ip, ip);
+        int r2 = system(cmd); (void)r2;
+    } else {
+        snprintf(cmd, sizeof(cmd), "iptables -D INPUT -s %s -j DROP 2>/dev/null", ip);
+        int r1 = system(cmd); (void)r1;
+        snprintf(cmd, sizeof(cmd), "iptables -D OUTPUT -d %s -j DROP 2>/dev/null", ip);
+        int r2 = system(cmd); (void)r2;
+    }
+}
+
+static void SyncQuarantinedPeers(const char* respJson) {
+    if (!respJson) return;
+    const char* p = strstr(respJson, "\"quarantined_peers\":[");
+    if (!p) return;
+    p += 21;
+    while (*p && *p != ']') {
+        while (*p && (*p == ' ' || *p == ',' || *p == '"' || *p == '\n' || *p == '\r')) p++;
+        if (*p == ']' || !*p) break;
+        char ip[64] = {0};
+        int idx = 0;
+        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
+            ip[idx++] = *p++;
+        }
+        if (ip[0]) {
+            ApplyMeshQuarantineRule(ip, true);
+        }
+    }
+}
+
 static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     struct utsname sysInfo;
     uname(&sysInfo);
@@ -308,18 +343,26 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
     char cmd[bufCap + 2048];
     if (config->cf_client_id[0] && config->cf_client_secret[0]) {
         snprintf(cmd, sizeof(cmd),
-            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\" >/dev/null 2>&1",
+            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\" 2>/dev/null",
             config->api_key, config->cf_client_id, config->cf_client_secret, jsonBuf, config->hub_url
         );
     } else {
         snprintf(cmd, sizeof(cmd),
-            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\" >/dev/null 2>&1",
+            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\" 2>/dev/null",
             config->api_key, jsonBuf, config->hub_url
         );
     }
 
-    int sysRes = system(cmd);
-    (void)sysRes;
+    FILE* fp = popen(cmd, "r");
+    if (fp) {
+        char respBuf[4096] = {0};
+        size_t rBytes = fread(respBuf, 1, sizeof(respBuf) - 1, fp);
+        pclose(fp);
+        if (rBytes > 0) {
+            SyncQuarantinedPeers(respBuf);
+        }
+    }
+
     free(jsonBuf);
 }
 

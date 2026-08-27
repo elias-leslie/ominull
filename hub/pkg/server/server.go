@@ -187,6 +187,11 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(s.handleDeployerStatus))
 	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(s.handleDeployerJobs))
 
+	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
+	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(s.handleMeshQuarantine))
+	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(s.handleMeshUnquarantine))
+	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
+
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -848,8 +853,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				s.detector.Evaluate(batch.Events[i])
 			}
 			s.store.InsertEventsBatch(batch.Events)
+
+			qPeers, _ := s.store.GetQuarantinedPeers()
+			qIPs := make([]string, 0, len(qPeers))
+			for _, p := range qPeers {
+				if p.Active {
+					qIPs = append(qIPs, p.TargetIP)
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"ok"}`))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":            "ok",
+				"quarantined_peers": qIPs,
+			})
 			return
 		}
 
@@ -876,8 +894,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				s.detector.Evaluate(rawEvents[i])
 			}
 			s.store.InsertEventsBatch(rawEvents)
+
+			qPeers, _ := s.store.GetQuarantinedPeers()
+			qIPs := make([]string, 0, len(qPeers))
+			for _, p := range qPeers {
+				if p.Active {
+					qIPs = append(qIPs, p.TargetIP)
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"ok"}`))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":            "ok",
+				"quarantined_peers": qIPs,
+			})
 			return
 		}
 
@@ -1683,4 +1714,102 @@ func (s *Server) handleDeployerJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := s.deployer.ListJobs()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(jobs)
+}
+
+/* 10. SUBNET QUARANTINE MESH HANDLERS */
+
+type MeshQuarantineRequest struct {
+	TargetIP  string `json:"target_ip"`
+	TargetMAC string `json:"target_mac"`
+	Subnet    string `json:"subnet"`
+	Reason    string `json:"reason"`
+}
+
+func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req MeshQuarantineRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetIP == "" {
+		http.Error(w, "invalid request: target_ip is required", http.StatusBadRequest)
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "Unmanaged/rogue lateral threat quarantine"
+	}
+
+	peer, err := s.store.AddQuarantinedPeer(req.TargetIP, req.TargetMAC, req.Subnet, req.Reason)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast MESH_ISOLATE_PEER command to all connected agents
+	cmd := CommandMessage{
+		Type: "MESH_ISOLATE_PEER",
+		Payload: map[string]interface{}{
+			"target_ip":  req.TargetIP,
+			"target_mac": req.TargetMAC,
+			"action":     "BLOCK",
+			"reason":     req.Reason,
+		},
+	}
+	s.clientsMu.RLock()
+	for id := range s.clients {
+		_ = s.SendCommand(id, cmd)
+	}
+	s.clientsMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "quarantined",
+		"peer":   peer,
+	})
+}
+
+func (s *Server) handleMeshUnquarantine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req MeshQuarantineRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetIP == "" {
+		http.Error(w, "invalid request: target_ip is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.RemoveQuarantinedPeer(req.TargetIP); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cmd := CommandMessage{
+		Type: "MESH_ISOLATE_PEER",
+		Payload: map[string]interface{}{
+			"target_ip": req.TargetIP,
+			"action":    "ALLOW",
+		},
+	}
+	s.clientsMu.RLock()
+	for id := range s.clients {
+		_ = s.SendCommand(id, cmd)
+	}
+	s.clientsMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "unquarantined",
+		"target_ip": req.TargetIP,
+	})
+}
+
+func (s *Server) handleMeshQuarantinedList(w http.ResponseWriter, r *http.Request) {
+	peers, err := s.store.GetQuarantinedPeers()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peers)
 }

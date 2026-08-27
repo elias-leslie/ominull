@@ -2387,15 +2387,18 @@ const dashboardHTML = `<!DOCTYPE html>
 
         /* ASSET SCANNER & EXTENSIBLE FINGERPRINTING */
         var rawScannerAssets = [];
+        var rawQuarantinedPeers = [];
         var activeScanPolling = null;
 
         function fetchScannerData() {
             Promise.all([
                 fetchAPI("/api/v1/scanner/coverage"),
-                fetchAPI("/api/v1/scanner/results")
+                fetchAPI("/api/v1/scanner/results"),
+                fetchAPI("/api/v1/mesh/quarantined")
             ]).then(function(res) {
                 var cov = res[0] || {};
                 rawScannerAssets = res[1] || [];
+                rawQuarantinedPeers = res[2] || [];
 
                 document.getElementById("cov-total").innerText = cov.total_discovered || 0;
                 document.getElementById("cov-pct").innerText = (cov.coverage_percent || 0).toFixed(1) + "%";
@@ -2418,12 +2421,18 @@ const dashboardHTML = `<!DOCTYPE html>
             }
 
             tbody.innerHTML = rawScannerAssets.map(function(a) {
-                var isManagedBadge = a.is_managed 
-                    ? '<span class="badge badge-permit">🟢 MANAGED AGENT</span>' 
-                    : '<span class="badge badge-isolated">🔴 UNMANAGED</span>';
+                var isQuarantined = (rawQuarantinedPeers || []).some(function(p) { return p.target_ip === a.ip; });
+                var isManagedBadge = "";
+                if (a.is_managed) {
+                    isManagedBadge = '<span class="badge badge-permit">🟢 MANAGED AGENT</span>';
+                } else if (isQuarantined) {
+                    isManagedBadge = '<span class="badge badge-isolated" style="box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);">🛡️ MESH QUARANTINED</span>';
+                } else {
+                    isManagedBadge = '<span class="badge badge-isolated">🔴 UNMANAGED</span>';
+                }
 
                 var riskBadgeClass = "badge-permit";
-                if (a.risk_score === "CRITICAL") riskBadgeClass = "badge-isolated";
+                if (isQuarantined || a.risk_score === "CRITICAL") riskBadgeClass = "badge-isolated";
                 else if (a.risk_score === "HIGH") riskBadgeClass = "badge-threat";
                 else if (a.risk_score === "MEDIUM") riskBadgeClass = "badge-threat";
 
@@ -2440,6 +2449,16 @@ const dashboardHTML = `<!DOCTYPE html>
 
                 var confPct = Math.round((a.confidence || 0) * 100);
                 var confColor = confPct >= 85 ? "var(--green)" : (confPct >= 65 ? "var(--cyan)" : "var(--amber)");
+
+                var actionButtons = '<button class="btn" style="padding:3px 8px;font-size:11px;" onclick="openTrainModal(\'' + a.ip + '\')">🎓 Train</button>';
+                if (!a.is_managed) {
+                    if (isQuarantined) {
+                        actionButtons += '<button class="btn btn-isolate" style="padding:3px 8px;font-size:11px;" onclick="unquarantineMeshPeer(\'' + a.ip + '\')">🔓 Lift Mesh Block</button>';
+                    } else {
+                        actionButtons += '<button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="openDeployForIP(\'' + a.ip + '\', \'' + (a.os_guess || 'linux').replace(/'/g, "\\'") + '\')">🚀 Deploy</button>';
+                        actionButtons += '<button class="btn btn-isolate" style="padding:3px 8px;font-size:11px;" onclick="quarantineMeshPeer(\'' + a.ip + '\', \'' + (a.mac || '') + '\')">🛡️ Quarantine</button>';
+                    }
+                }
 
                 return '<tr>' +
                     '<td>' +
@@ -2464,13 +2483,12 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<td><div style="max-width:220px;display:flex;flex-wrap:wrap;gap:4px;">' + portsHtml + '</div></td>' +
                     '<td>' + isManagedBadge + '</td>' +
                     '<td>' +
-                        '<div class="badge ' + riskBadgeClass + '" style="margin-bottom:4px;">' + a.risk_score + '</div>' +
+                        '<div class="badge ' + riskBadgeClass + '" style="margin-bottom:4px;">' + (isQuarantined ? "QUARANTINED" : a.risk_score) + '</div>' +
                         weakHtml +
                     '</td>' +
                     '<td>' +
                         '<div style="display:flex;gap:4px;flex-direction:column;">' +
-                            '<button class="btn" style="padding:3px 8px;font-size:11px;" onclick="openTrainModal(\'' + a.ip + '\')">🎓 Train</button>' +
-                            (!a.is_managed ? '<button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="openDeployForIP(\'' + a.ip + '\', \'' + (a.os_guess || 'linux').replace(/'/g, "\\'") + '\')">🚀 Deploy</button>' : '') +
+                            actionButtons +
                         '</div>' +
                     '</td>' +
                 '</tr>';
@@ -2952,7 +2970,13 @@ const dashboardHTML = `<!DOCTYPE html>
 
             var actHtml = "";
             if (node.type === "unmanaged") {
-                actHtml += '<button class="btn btn-cyan" style="padding:4px 8px;font-size:11px;" onclick="openDeployModal()">🚀 Deploy Agent</button>';
+                var isQuarantined = (rawQuarantinedPeers || []).some(function(p) { return p.target_ip === node.ip; });
+                if (isQuarantined) {
+                    actHtml += '<button class="btn btn-isolate" style="padding:4px 8px;font-size:11px;" onclick="unquarantineMeshPeer(\'' + node.ip + '\')">🔓 Lift Mesh Block</button>';
+                } else {
+                    actHtml += '<button class="btn btn-isolate" style="padding:4px 8px;font-size:11px;" onclick="quarantineMeshPeer(\'' + node.ip + '\', \'\')">🛡️ Quarantine Mesh</button>';
+                    actHtml += '<button class="btn btn-cyan" style="padding:4px 8px;font-size:11px;" onclick="openDeployForIP(\'' + node.ip + '\', \'' + node.os.replace(/'/g, "\\'") + '\')">🚀 Deploy Agent</button>';
+                }
                 actHtml += '<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="openTrainModal(\'' + node.ip + '\')">🎓 Train</button>';
             } else if (node.type === "managed") {
                 actHtml += '<button class="btn btn-isolate" style="padding:4px 8px;font-size:11px;" onclick="toggleIsolation(\'' + node.ip + '\', ' + !node.isIsolated + ')">' + (node.isIsolated ? "Restore Host" : "Quarantine Host") + '</button>';
@@ -2963,6 +2987,35 @@ const dashboardHTML = `<!DOCTYPE html>
 
         function closeTopoInspector() {
             document.getElementById("topo-inspector").style.display = "none";
+        }
+
+        function quarantineMeshPeer(ip, mac) {
+            if (!confirm("Enforce subnet-wide mesh quarantine on " + ip + "?\n\nAll managed endpoints will drop 100% of network traffic to/from this device at the kernel level.")) return;
+            fetchAPI("/api/v1/mesh/quarantine", "POST", {
+                target_ip: ip,
+                target_mac: mac || "",
+                reason: "Subnet quarantine mesh containment"
+            }).then(function(res) {
+                alert("Subnet Quarantine Mesh activated! Traffic to/from " + ip + " is now blocked across all managed endpoints.");
+                fetchScannerData();
+                fetchTopologyData();
+                closeTopoInspector();
+            }).catch(function(err) {
+                alert("Failed to activate mesh quarantine: " + err);
+            });
+        }
+
+        function unquarantineMeshPeer(ip) {
+            fetchAPI("/api/v1/mesh/unquarantine", "POST", {
+                target_ip: ip
+            }).then(function(res) {
+                alert("Subnet Quarantine Mesh lifted for " + ip);
+                fetchScannerData();
+                fetchTopologyData();
+                closeTopoInspector();
+            }).catch(function(err) {
+                alert("Failed to lift mesh quarantine: " + err);
+            });
         }
 
         // Initialize on load

@@ -197,19 +197,19 @@
 
 ---
 
-### Phase 17: Subnet Quarantine Mesh (Lateral Shield for Rogue/Unmanaged Assets) `[IN PROGRESS]`
+### Phase 17: Subnet Quarantine Mesh (Lateral Shield for Rogue/Unmanaged Assets) `[COMPLETED]`
 - **Objective:** Enable kernel-level network isolation for rogue or unmanaged devices without requiring an agent on the target device.
-- **Deliverables:**
-  - **Mesh Command Protocol:** `MESH_ISOLATE_PEER` directive broadcast to all managed endpoints sharing an L2 subnet.
+- **Deliverables Completed:**
+  - **Mesh Command Protocol:** `MESH_ISOLATE_PEER` directive broadcast to all managed endpoints sharing an L2 subnet and synchronized on telemetry handshakes.
   - **Peer Kernel Suppression:**
-    - Linux: eBPF TC classifier filter dropping ingress/egress frames matching target MAC/IP on local interface.
-    - Windows: WFP callout filter dropping traffic to target MAC/IP across all network profiles.
+    - Linux: iptables / eBPF drop rules isolating rogue target MAC/IP across input/output paths.
+    - Windows: Dynamic WFP callout filter dropping traffic to target MAC/IP across all network profiles.
     - macOS: `pfctl` anchor inserting dynamic rapid-drop packet rules.
-  - **UI Integration:** 1-Click "Quarantine Rogue Asset" button in Asset Table and Topology Graph Inspector.
+  - **UI Integration:** 1-Click "Quarantine Rogue Asset" and "Lift Mesh Block" buttons in Asset Table and Topology Graph Inspector.
 
 ---
 
-### Phase 18: Stream DPI & In-Flight TLS ClientHello SNI / DNS Dissection `[PENDING]`
+### Phase 18: Stream DPI & In-Flight TLS ClientHello SNI / DNS Dissection `[IN PROGRESS]`
 - **Objective:** Extract rich protocol metadata in-flight directly within the flow sniffer.
 - **Deliverables:**
   - **TLS SNI Dissector (`agent/src/dpi`):** Parses initial TLS `ClientHello` packets on port 443 to extract the Server Name Indication hostname before encryption.
