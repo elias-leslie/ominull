@@ -22,7 +22,7 @@ ssh ${PROXMOX_HOST} "pct exec ${LXC_VMID} -- systemctl restart ominull-hub.servi
 
 echo "[*] 5. Verifying live health check..."
 sleep 1
-ADMIN_KEY="${OMINULL_ADMIN_KEY:-<redacted-rotated-key>}"
+ADMIN_KEY="${OMINULL_ADMIN_KEY:-omi_live_master}"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ${ADMIN_KEY}" http://${LXC_IP}:9999/api/v1/hierarchy || true)
 if [ "$STATUS" = "200" ]; then
     echo "[+] SUCCESS: Ominull Hub on LXC ${LXC_VMID} (${LXC_IP}) is healthy and online (HTTP 200)!"

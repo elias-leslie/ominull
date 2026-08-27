@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HUB_URL="${OMINULL_HUB_URL:-http://10.0.0.58:9999}"
-API_KEY="${OMINULL_API_KEY:-<redacted-rotated-key>}"
+HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
+API_KEY="${OMINULL_API_KEY:-omi_live_master}"
 
 call_api() {
     local method="$1"

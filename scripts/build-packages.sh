@@ -150,4 +150,12 @@ MAC_PLIST
 rm -rf "${MAC_DIR}"
 echo "  [+] Created: ${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz"
 
+# 5. Generate Checksums
+echo "[*] Generating Cryptographic SHA256 Checksums..."
+(
+    cd "${DIST_DIR}"
+    sha256sum ominull-agent_${VERSION}_amd64.deb ominull-agent-windows-${VERSION}.tar.gz ominull-agent-macos-${VERSION}.tar.gz > SHA256SUMS.txt
+)
+echo "  [+] Checksums recorded in ${DIST_DIR}/SHA256SUMS.txt"
+
 echo "[+] All cross-platform release packages built successfully in ${DIST_DIR}!"

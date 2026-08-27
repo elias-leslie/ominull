@@ -1,6 +1,5 @@
-# Build output
+# Build output & binary artifacts
 build/
-certs/
 bin/
 obj/
 x64/
@@ -8,6 +7,16 @@ x86/
 ARM64/
 Debug/
 Release/
+dist/*.deb
+dist/*.tar.gz
+dist/*.zip
+dist/*.exe
+dist/deb-build/
+dist/win-build/
+dist/mac-build/
+agent/bin/
+agent/tests/test_dpi
+hub/bin/
 *.sys
 *.cer
 *.cat
@@ -17,16 +26,48 @@ Release/
 *.tlog
 *.lastbuildstate
 *.unsuccessfulbuild
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
 
-# Visual Studio
+# Databases & local stores
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Certificates & sensitive keys
+certs/*.key
+certs/*.pfx
+certs/*.pem
+certs/*.crt
+certs/*.csr
+*.pfx
+*.key
+*.pem
+.env
+.env.*
+
+# Visual Studio & IDEs
 .vs/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+.vscode/
+.idea/
 
-# Python / Tools
+# Python / Scratch / Dev Tools
 __pycache__/
 *.pyc
 .venv/
 .dev-tools/
+scratch/
+.ruff_cache/
+coverage.out
+profile.out
