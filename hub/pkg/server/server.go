@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
+	"ominull/hub/pkg/copilot"
 	"ominull/hub/pkg/deployer"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
@@ -39,6 +40,7 @@ type Server struct {
 	pki        *pki.Manager
 	scanner    *scanner.Scanner
 	deployer   *deployer.Deployer
+	copilot    *copilot.Engine
 	adminKey   string
 	binaryDir  string
 	hubURL     string
@@ -87,6 +89,11 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 		pki:        pkiMgr,
 		scanner:    scanner.New(store),
 		deployer:   deployer.New(store, hubURL, adminKey),
+		copilot: copilot.New(store, copilot.Config{
+			Provider:    copilot.ProviderLocalOllama,
+			OllamaURL:   "http://10.0.0.39:11434",
+			OllamaModel: "llama3.2",
+		}),
 		adminKey:   adminKey,
 		binaryDir:  binaryDir,
 		hubURL:     hubURL,
@@ -191,6 +198,11 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(s.handleMeshQuarantine))
 	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(s.handleMeshUnquarantine))
 	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
+
+	// 11. Autonomous Security Copilot API
+	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(s.handleCopilotChat))
+	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(s.handleCopilotInvestigate))
+	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(s.handleCopilotConfig))
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
@@ -1812,4 +1824,88 @@ func (s *Server) handleMeshQuarantinedList(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(peers)
+}
+
+/* 11. AUTONOMOUS SECURITY COPILOT HANDLERS */
+
+func (s *Server) handleCopilotChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req copilot.ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		http.Error(w, "invalid request: message is required", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := s.copilot.HandleChat(r.Context(), req.Message)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleCopilotInvestigate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AlertID string `json:"alert_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AlertID == "" {
+		http.Error(w, "invalid request: alert_id is required", http.StatusBadRequest)
+		return
+	}
+
+	anomalies, err := s.store.ListAnomalyAlerts("default", 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var targetAlert *storage.AnomalyAlert
+	for _, a := range anomalies {
+		if a.ID == req.AlertID {
+			targetAlert = &a
+			break
+		}
+	}
+	if targetAlert == nil {
+		http.Error(w, "alert not found", http.StatusNotFound)
+		return
+	}
+
+	report, err := s.copilot.Investigate(r.Context(), *targetAlert)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(report)
+}
+
+func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.copilot.GetConfig())
+		return
+	}
+	if r.Method == http.MethodPost {
+		var cfg copilot.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.copilot.UpdateConfig(cfg)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.copilot.GetConfig())
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }

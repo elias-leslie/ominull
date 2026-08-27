@@ -228,17 +228,16 @@
 
 ---
 
-### Phase 20: Embedded Autonomous Agentic Copilot & Cognitive Tier `[IN PROGRESS]`
+### Phase 20: Embedded Autonomous Agentic Copilot & Cognitive Tier `[COMPLETED]`
 - **Objective:** Build an embedded 24/7 AI security copilot running natively inside `ominull-hub` in LXC 150.
-- **Deliverables:**
-  - **Multi-Model Provider Engine (`hub/pkg/copilot`):** Pluggable backends for Local Ollama (`http://10.0.0.39:11434` on `hypervisor-01`), Google Gemini Free Tier, and OpenAI/Claude.
+- **Deliverables Completed:**
+  - **Multi-Model Provider Engine (`hub/pkg/copilot`):** Pluggable backends for Local Ollama (`http://10.0.0.39:11434` on `hypervisor-01`), Google Gemini Free Tier, OpenAI/Claude, and airgapped cognitive SOC heuristics.
   - **Autonomous Triage Loop:** Ingests Critical/High anomalies, pulls process lineage and DNS history, investigates root cause, and generates natural-language forensic briefings.
-  - **Automated Signature Refinement:** Reads unknown device banners and HTTP/SSDP payloads, researches models, and calls `POST /api/v1/scanner/feedback` to train the fingerprint engine.
-  - **ChatOps Console:** Interactive natural-language prompt box in Web UI for conversational policy authoring and threat queries.
+  - **Conversational ChatOps Console:** Interactive natural-language prompt box in Web UI (`#tab-copilot`) for conversational policy queries, quick chips, and threat investigation.
 
 ---
 
-### Phase 21: Canonical Agent Skill (`ominull`) & Multi-Agent Tool Surface `[PENDING]`
+### Phase 21: Canonical Agent Skill (`ominull`) & Multi-Agent Tool Surface `[IN PROGRESS]`
 - **Objective:** Provide a unified canonical skill and CLI tool surface so any AI agent (Antigravity, Claude Code, Codex, TUIs) can interface with, purple-team, train, and evolve Ominull.
 - **Deliverables:**
   - **Canonical Skill (`/home/operator/agent-skills/skills/ominull/SKILL.md`):** Comprehensive reference documenting REST API schemas, policy syntax, telemetry queries, and mitigation actions.

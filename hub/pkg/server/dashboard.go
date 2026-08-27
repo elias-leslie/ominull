@@ -219,6 +219,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <!-- Navigation Tabs -->
     <div class="nav-tabs">
         <button class="tab-btn active" onclick="switchTab('hierarchy', this)">🏢 Fleet Hierarchy (MSP / Single Org)</button>
+        <button class="tab-btn" onclick="switchTab('copilot', this)">🤖 CyberOps Copilot</button>
         <button class="tab-btn" onclick="switchTab('scanner', this)">🔍 Asset Scanner & Coverage</button>
         <button class="tab-btn" onclick="switchTab('topology', this)">🌐 Communications Topology Graph</button>
         <button class="tab-btn" onclick="switchTab('comms', this)">📡 Network Comms Profiler & Exclusions</button>
@@ -579,6 +580,53 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- TAB: CYBEROPS COPILOT (COGNITIVE SOC & NL INTERFACE) -->
+    <div id="tab-copilot" class="tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div>
+                <div style="font-size: 18px; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 8px;">
+                    🤖 Ominull Autonomous CyberOps Copilot
+                    <span id="copilot-provider-badge" class="badge badge-permit" style="font-size: 11px;">🟢 LOCAL OLLAMA (llama3.2)</span>
+                </div>
+                <div style="font-size: 12px; color: var(--text-muted);">
+                    24/7 Cognitive Security Analyst with natural-language triage, automated MITRE ATT&CK correlation, and subnet containment orchestration.
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn" onclick="openCopilotConfigModal()">⚙️ Model Backend Settings</button>
+                <button class="btn btn-cyan" onclick="clearCopilotChat()">🧹 Clear Session</button>
+            </div>
+        </div>
+
+        <!-- Copilot Chat Container -->
+        <div class="card" style="display: flex; flex-direction: column; height: 600px; padding: 0; overflow: hidden;">
+            <!-- Message Stream -->
+            <div id="copilot-messages" style="flex: 1; padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; background: rgba(10, 15, 30, 0.6);">
+                <div style="display: flex; gap: 12px; align-items: flex-start;">
+                    <div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, var(--cyan), var(--purple)); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;">🤖</div>
+                    <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px 16px; max-width: 80%; color: #cbd5e1; font-size: 13px; line-height: 1.5;">
+                        <div style="font-weight: 700; color: var(--cyan); margin-bottom: 4px;">Ominull Threat Copilot Online</div>
+                        Hello Operator. I am monitoring your telemetry stream in real-time across your fleet. I can perform automated anomaly triage, MITRE ATT&CK root-cause analysis, subnet quarantine dispatch, or analyze network egress behavior. What would you like to explore?
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Action Chips -->
+            <div style="display: flex; gap: 8px; padding: 8px 16px; background: rgba(15, 23, 42, 0.8); border-top: 1px solid var(--border-color); overflow-x: auto;">
+                <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="sendCopilotChip('Investigate all recent Critical and High anomaly alerts.')">🔍 Triage Active Alerts</button>
+                <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="sendCopilotChip('Identify unmanaged rogue assets and weakpoints on subnet 10.0.0.0/24.')">📡 Subnet Risk Audit</button>
+                <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="sendCopilotChip('Check if any workstation exhibited off-hours C2 or DGA communication.')">🌙 Off-Hours Threat Check</button>
+                <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="sendCopilotChip('Summarize current zero-trust posture and quarantined peers.')">🛡️ Quarantined Mesh Status</button>
+            </div>
+
+            <!-- Input Box -->
+            <div style="display: flex; gap: 10px; padding: 14px; background: rgba(15, 23, 42, 0.95); border-top: 1px solid var(--border-color);">
+                <input type="text" id="copilot-input" class="form-control" style="flex: 1;" placeholder="Ask Threat Copilot (e.g. 'Investigate powershell.exe on workstation-02' or 'Quarantine 10.0.0.57')..." onkeydown="if(event.key==='Enter') sendCopilotChat()">
+                <button id="btn-copilot-send" class="btn btn-cyan" style="padding: 0 20px;" onclick="sendCopilotChat()">Send 🚀</button>
+            </div>
+        </div>
+    </div>
+
     <!-- TAB: ASSET SCANNER & COVERAGE -->
     <div id="tab-scanner" class="tab-content">
         <!-- Header & Scan Control Bar -->
@@ -762,6 +810,50 @@ const dashboardHTML = `<!DOCTYPE html>
             <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px;">
                 <button class="btn" onclick="closeTrainModal()">Cancel</button>
                 <button class="btn btn-cyan" onclick="submitTrainSignature()">Save & Train Engine</button>
+            </div>
+        </div>
+    <!-- COPILOT CONFIG MODAL -->
+    <div id="copilot-config-modal" class="modal-overlay">
+        <div class="modal-content" style="width: 540px;">
+            <div class="modal-title">
+                <span>⚙️ Threat Copilot Model Backend Settings</span>
+                <button class="btn" style="padding: 2px 8px;" onclick="closeCopilotConfigModal()">✕</button>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">Active Provider Engine</label>
+                <select id="copilot-cfg-provider" class="form-control" onchange="toggleCopilotConfigFields()">
+                    <option value="ollama">Local Ollama (Self-Hosted on hypervisor-01)</option>
+                    <option value="gemini">Google Gemini (Free Tier / API Key)</option>
+                    <option value="openai">OpenAI API (GPT-4o-mini / GPT-4o)</option>
+                    <option value="heuristic">Airgapped Cognitive SOC Heuristics (Zero-Network Fallback)</option>
+                </select>
+            </div>
+
+            <div id="copilot-field-ollama" class="form-group">
+                <label class="form-label">Local Ollama URL</label>
+                <input type="text" id="copilot-cfg-ollama-url" class="form-control" value="http://10.0.0.39:11434" placeholder="http://10.0.0.39:11434">
+                <label class="form-label" style="margin-top: 8px;">Model Name</label>
+                <input type="text" id="copilot-cfg-ollama-model" class="form-control" value="llama3.2" placeholder="llama3.2 or mistral">
+            </div>
+
+            <div id="copilot-field-gemini" class="form-group" style="display: none;">
+                <label class="form-label">Google Gemini API Key</label>
+                <input type="password" id="copilot-cfg-gemini-key" class="form-control" placeholder="AIzaSy...">
+                <label class="form-label" style="margin-top: 8px;">Gemini Model</label>
+                <input type="text" id="copilot-cfg-gemini-model" class="form-control" value="gemini-1.5-flash">
+            </div>
+
+            <div id="copilot-field-openai" class="form-group" style="display: none;">
+                <label class="form-label">OpenAI API Key</label>
+                <input type="password" id="copilot-cfg-openai-key" class="form-control" placeholder="sk-proj-...">
+                <label class="form-label" style="margin-top: 8px;">OpenAI Model</label>
+                <input type="text" id="copilot-cfg-openai-model" class="form-control" value="gpt-4o-mini">
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px;">
+                <button class="btn" onclick="closeCopilotConfigModal()">Cancel</button>
+                <button class="btn btn-cyan" onclick="saveCopilotConfig()">Save Settings</button>
             </div>
         </div>
     </div>
@@ -3015,6 +3107,117 @@ const dashboardHTML = `<!DOCTYPE html>
                 closeTopoInspector();
             }).catch(function(err) {
                 alert("Failed to lift mesh quarantine: " + err);
+            });
+        /* AUTONOMOUS THREAT COPILOT & CHATOPS */
+        function sendCopilotChat() {
+            var input = document.getElementById("copilot-input");
+            var text = input.value.trim();
+            if (!text) return;
+            input.value = "";
+            appendCopilotMessage("user", text);
+
+            var sendBtn = document.getElementById("btn-copilot-send");
+            sendBtn.disabled = true;
+            sendBtn.innerText = "Thinking...";
+
+            fetchAPI("/api/v1/copilot/chat", "POST", { message: text }).then(function(res) {
+                appendCopilotMessage("bot", res.reply);
+                sendBtn.disabled = false;
+                sendBtn.innerText = "Send 🚀";
+            }).catch(function(err) {
+                appendCopilotMessage("bot", "Error querying Threat Copilot: " + err);
+                sendBtn.disabled = false;
+                sendBtn.innerText = "Send 🚀";
+            });
+        }
+
+        function sendCopilotChip(promptText) {
+            document.getElementById("copilot-input").value = promptText;
+            sendCopilotChat();
+        }
+
+        function appendCopilotMessage(sender, msg) {
+            var box = document.getElementById("copilot-messages");
+            var isUser = sender === "user";
+            var div = document.createElement("div");
+            div.style.display = "flex";
+            div.style.gap = "12px";
+            div.style.alignItems = "flex-start";
+            div.style.justifyContent = isUser ? "flex-end" : "flex-start";
+
+            var avatar = isUser ? "👤" : "🤖";
+            var bg = isUser ? "rgba(6, 182, 212, 0.15)" : "rgba(255, 255, 255, 0.05)";
+            var border = isUser ? "rgba(6, 182, 212, 0.3)" : "rgba(255, 255, 255, 0.1)";
+
+            var formatted = msg;
+            if (!isUser) {
+                formatted = formatted
+                    .replace(/^### (.*$)/gim, '<div style="font-weight:800;color:var(--cyan);font-size:14px;margin-bottom:6px;">$1</div>')
+                    .replace(/^## (.*$)/gim, '<div style="font-weight:800;color:#fff;font-size:15px;margin-bottom:6px;">$1</div>')
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\n/g, '<br>');
+            }
+
+            var html = '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;padding:12px 16px;max-width:80%;color:#cbd5e1;font-size:13px;line-height:1.5;">' + formatted + '</div>';
+
+            div.innerHTML = isUser ? html + '<div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">' + avatar + '</div>'
+                                   : '<div style="width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg, var(--cyan), var(--purple));display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">' + avatar + '</div>' + html;
+
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function clearCopilotChat() {
+            var box = document.getElementById("copilot-messages");
+            box.innerHTML = '<div style="display: flex; gap: 12px; align-items: flex-start;">' +
+                '<div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, var(--cyan), var(--purple)); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;">🤖</div>' +
+                '<div style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px 16px; max-width: 80%; color: #cbd5e1; font-size: 13px; line-height: 1.5;">' +
+                    '<div style="font-weight: 700; color: var(--cyan); margin-bottom: 4px;">Session Reset</div>' +
+                    'Threat Copilot memory cleared. Ready for your next inquiry.' +
+                '</div></div>';
+        }
+
+        function openCopilotConfigModal() {
+            fetchAPI("/api/v1/copilot/config").then(function(cfg) {
+                document.getElementById("copilot-cfg-provider").value = cfg.provider || "ollama";
+                document.getElementById("copilot-cfg-ollama-url").value = cfg.ollama_url || "http://10.0.0.39:11434";
+                document.getElementById("copilot-cfg-ollama-model").value = cfg.ollama_model || "llama3.2";
+                document.getElementById("copilot-cfg-gemini-model").value = cfg.gemini_model || "gemini-1.5-flash";
+                document.getElementById("copilot-cfg-openai-model").value = cfg.openai_model || "gpt-4o-mini";
+                toggleCopilotConfigFields();
+                document.getElementById("copilot-config-modal").style.display = "block";
+            }).catch(function(err) {
+                alert("Failed to load Copilot config: " + err);
+            });
+        }
+
+        function closeCopilotConfigModal() {
+            document.getElementById("copilot-config-modal").style.display = "none";
+        }
+
+        function toggleCopilotConfigFields() {
+            var prov = document.getElementById("copilot-cfg-provider").value;
+            document.getElementById("copilot-field-ollama").style.display = prov === "ollama" ? "block" : "none";
+            document.getElementById("copilot-field-gemini").style.display = prov === "gemini" ? "block" : "none";
+            document.getElementById("copilot-field-openai").style.display = prov === "openai" ? "block" : "none";
+        }
+
+        function saveCopilotConfig() {
+            var prov = document.getElementById("copilot-cfg-provider").value;
+            var payload = {
+                provider: prov,
+                ollama_url: document.getElementById("copilot-cfg-ollama-url").value,
+                ollama_model: document.getElementById("copilot-cfg-ollama-model").value,
+                gemini_api_key: document.getElementById("copilot-cfg-gemini-key").value,
+                gemini_model: document.getElementById("copilot-cfg-gemini-model").value,
+                openai_api_key: document.getElementById("copilot-cfg-openai-key").value,
+                openai_model: document.getElementById("copilot-cfg-openai-model").value
+            };
+            fetchAPI("/api/v1/copilot/config", "POST", payload).then(function(res) {
+                alert("Copilot backend updated to " + res.provider);
+                closeCopilotConfigModal();
+            }).catch(function(err) {
+                alert("Failed to save Copilot config: " + err);
             });
         }
 
