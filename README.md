@@ -7,6 +7,10 @@
 
 **Ominull** is an enterprise-grade, ultra-lean kernel network security and autonomous Incident Response (IR) platform. It unifies microsecond ring-0 enforcement, in-flight Deep Packet Inspection (DPI), statistical behavioral anomaly detection, subnet quarantine mesh isolation, automated 1-click push-deployment, and an embedded 24/7 AI CyberOps Copilot into a single self-contained architecture.
 
+![Ominull Dashboard — Demo Mode](docs/screenshots/dashboard-demo.png)
+
+> **🎭 Demo Mode:** The web console ships with a built-in demo mode (toggle button in the header, or append `?demo=true` to the URL) that renders the entire dashboard against seeded synthetic fleet data — no live endpoints, keys, or infrastructure required. Ideal for screenshots, evaluations, and public documentation.
+
 ---
 
 ## 1. System Architecture
@@ -116,7 +120,7 @@ ominull/
 │   ├── build-packages.sh          # Cross-platform .deb / .tar.gz release builder
 │   ├── ominull-cli                # Standalone operator / AI agent CLI interface
 │   ├── sign.sh                    # Authenticode kernel driver signing script
-│   └── vm_test_pipeline.py        # Automated Proxmox VM testbench runner
+│   └── deploy_remote.sh.example   # Proxmox LXC hub deployment template
 ├── PLAN.md                        # Master Architecture & Milestone Plan (Phases 1-21)
 ├── README.md                      # Comprehensive Project Documentation
 └── TESTING.md                     # Verification Playbooks & Purple Team Tests

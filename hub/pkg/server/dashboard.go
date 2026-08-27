@@ -211,6 +211,7 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
         </div>
         <div style="display: flex; align-items: center; gap: 12px;">
+            <button id="btn-demo-mode" class="btn" style="font-weight: 700; padding: 6px 12px; font-size: 12px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #c084fc;" onclick="toggleDemoMode()">🎭 Demo Mode: OFF</button>
             <div class="live-tag"><div class="pulse-dot"></div> TELEMETRY ACTIVE</div>
             <button class="btn btn-cyan" style="font-weight: 800; padding: 6px 14px; font-size: 12px; box-shadow: 0 0 10px var(--cyan-glow);" onclick="openDeployModal()">🚀 Deploy New Agent</button>
         </div>
@@ -606,7 +607,7 @@ const dashboardHTML = `<!DOCTYPE html>
                     <div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, var(--cyan), var(--purple)); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;">🤖</div>
                     <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px 16px; max-width: 80%; color: #cbd5e1; font-size: 13px; line-height: 1.5;">
                         <div style="font-weight: 700; color: var(--cyan); margin-bottom: 4px;">Ominull Threat Copilot Online</div>
-                        Hello Operator. I am monitoring your telemetry stream in real-time across your fleet. I can perform automated anomaly triage, MITRE ATT&CK root-cause analysis, subnet quarantine dispatch, or analyze network egress behavior. What would you like to explore?
+                        Hello Security Operator. I am monitoring your telemetry stream in real-time across your fleet. I can perform automated anomaly triage, MITRE ATT&CK root-cause analysis, subnet quarantine dispatch, or analyze network egress behavior. What would you like to explore?
                     </div>
                 </div>
             </div>
@@ -621,7 +622,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
             <!-- Input Box -->
             <div style="display: flex; gap: 10px; padding: 14px; background: rgba(15, 23, 42, 0.95); border-top: 1px solid var(--border-color);">
-                <input type="text" id="copilot-input" class="form-control" style="flex: 1;" placeholder="Ask Threat Copilot (e.g. 'Investigate powershell.exe on workstation-02' or 'Quarantine 10.0.0.57')..." onkeydown="if(event.key==='Enter') sendCopilotChat()">
+                <input type="text" id="copilot-input" class="form-control" style="flex: 1;" placeholder="Ask Threat Copilot (e.g. 'Investigate powershell.exe on workstation-02' or 'Quarantine 10.0.0.50')..." onkeydown="if(event.key==='Enter') sendCopilotChat()">
                 <button id="btn-copilot-send" class="btn btn-cyan" style="padding: 0 20px;" onclick="sendCopilotChat()">Send 🚀</button>
             </div>
         </div>
@@ -832,7 +833,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
             <div id="copilot-field-ollama" class="form-group">
                 <label class="form-label">Local Ollama URL</label>
-                <input type="text" id="copilot-cfg-ollama-url" class="form-control" value="http://10.0.0.39:11434" placeholder="http://10.0.0.39:11434">
+                <input type="text" id="copilot-cfg-ollama-url" class="form-control" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434">
                 <label class="form-label" style="margin-top: 8px;">Model Name</label>
                 <input type="text" id="copilot-cfg-ollama-model" class="form-control" value="llama3.2" placeholder="llama3.2 or mistral">
             </div>
@@ -971,7 +972,7 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
             <div class="form-group">
                 <label class="form-label">Destination IP / CIDR Range (Optional, or '*' for any)</label>
-                <input type="text" id="ex-ip" class="form-control" placeholder="e.g. 10.0.0.57, 10.0.0.0/8, or *">
+                <input type="text" id="ex-ip" class="form-control" placeholder="e.g. 10.0.0.15, 10.0.0.0/8, or *">
             </div>
             <div class="form-group">
                 <label class="form-label">Destination Port (0 for Any)</label>
@@ -1132,7 +1133,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
                     <div class="form-group" style="margin-bottom:0;">
                         <label class="form-label">Target IP / Hostname</label>
-                        <input type="text" id="push-target-ip" class="form-control" placeholder="10.0.0.57">
+                        <input type="text" id="push-target-ip" class="form-control" placeholder="10.0.0.50">
                     </div>
                     <div class="form-group" style="margin-bottom:0;">
                         <label class="form-label">Port</label>
@@ -1209,7 +1210,7 @@ const dashboardHTML = `<!DOCTYPE html>
                     <div class="form-group" style="margin-bottom: 0;">
                         <label class="form-label">Location / Site Subnet</label>
                         <select id="deploy-location" class="form-control" onchange="generateDeployCommand();">
-                            <option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>
+                            <option value="loc-home">Corporate HQ LAN (10.0.0.0/24)</option>
                         </select>
                     </div>
                 </div>
@@ -1293,7 +1294,147 @@ const dashboardHTML = `<!DOCTYPE html>
         var rawAnomalies = [];
         var currentInspEp = null;
 
+        var isDemoMode = (new URLSearchParams(window.location.search).get("demo") === "true") || 
+                         (window.location.hash === "#demo") || 
+                         (localStorage.getItem("ominull_demo_mode") === "true");
+
+        function updateDemoButtonUI() {
+            var btn = document.getElementById("btn-demo-mode");
+            if (!btn) return;
+            if (isDemoMode) {
+                btn.innerText = "🎭 Demo Mode: ACTIVE";
+                btn.style.background = "rgba(16, 185, 129, 0.25)";
+                btn.style.border = "1px solid rgba(16, 185, 129, 0.6)";
+                btn.style.color = "#34d399";
+                btn.style.boxShadow = "0 0 10px rgba(16, 185, 129, 0.3)";
+            } else {
+                btn.innerText = "🎭 Demo Mode: OFF";
+                btn.style.background = "rgba(139, 92, 246, 0.15)";
+                btn.style.border = "1px solid rgba(139, 92, 246, 0.4)";
+                btn.style.color = "#c084fc";
+                btn.style.boxShadow = "none";
+            }
+        }
+
+        function toggleDemoMode() {
+            isDemoMode = !isDemoMode;
+            localStorage.setItem("ominull_demo_mode", isDemoMode ? "true" : "false");
+            updateDemoButtonUI();
+            refreshData();
+            if (currentTab) switchTab(currentTab);
+        }
+
+        function getSyntheticDemoData(endpoint, method, body) {
+            var now = new Date().toISOString();
+            if (endpoint.startsWith("/api/v1/hierarchy")) {
+                var demoEps = [
+                    { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4, Microsoft Defender", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9, Apple pfctl", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26, Clang 18", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.1.0, PostgreSQL 16, systemd", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" }
+                ];
+                var hqEps = demoEps.filter(function(e) { return e.location_id === "loc-hq"; });
+                var cloudEps = demoEps.filter(function(e) { return e.location_id === "loc-cloud"; });
+                return [
+                    {
+                        tenant: { id: "corp-default", name: "Acme CyberOps Enterprise" },
+                        locations: [
+                            { location: { id: "loc-hq", tenant_id: "corp-default", name: "Corporate HQ LAN", city: "Denver", country: "US", subnet_cidr: "10.0.4.0/24" }, endpoints: hqEps, total_endpoints: hqEps.length, isolated_count: 0 },
+                            { location: { id: "loc-cloud", tenant_id: "corp-default", name: "AWS Production VPC", city: "us-east-1", country: "US", subnet_cidr: "172.16.0.0/16" }, endpoints: cloudEps, total_endpoints: cloudEps.length, isolated_count: 0 }
+                        ],
+                        total_endpoints: demoEps.length,
+                        isolated_count: 0
+                    }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/endpoints")) {
+                return [
+                    { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4, Microsoft Defender", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.1.0, PostgreSQL 16, systemd", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9, Apple pfctl", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26, Clang 18", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/scanner/coverage")) {
+                return { total_discovered: 24, total_managed: 4, total_unmanaged: 20, coverage_percent: 16.7, critical_risks: 2, high_risks: 3 };
+            }
+            if (endpoint.startsWith("/api/v1/scanner/results")) {
+                return [
+                    { ip: "10.0.4.1", hostname: "core-gateway.corp.internal", vendor: "Cisco Systems", mac: "00:00:0C:9F:F0:01", os_guess: "Cisco IOS-XE Gateway", confidence: 0.95, category: "Router / Firewall", ttl: 255, app_delta_ms: 0.8, open_ports: [{ port: 22, service: "ssh", risk_level: "LOW" }, { port: 443, service: "https", risk_level: "LOW" }], is_managed: false, risk_score: "LOW", weakpoints: [] },
+                    { ip: "10.0.4.15", hostname: "corp-win11-exec.corp.internal", vendor: "Dell Inc.", mac: "00:1A:2B:3C:4D:5E", os_guess: "Windows 11 Enterprise (x86_64)", confidence: 0.98, category: "Workstation", ttl: 128, app_delta_ms: 1.1, open_ports: [{ port: 135, service: "epmap", risk_level: "LOW" }, { port: 445, service: "microsoft-ds", risk_level: "LOW" }], is_managed: true, risk_score: "LOW", weakpoints: [] },
+                    { ip: "10.0.4.55", hostname: "unmanaged-nas.corp.internal", vendor: "Synology Inc.", mac: "00:11:32:44:55:66", os_guess: "Synology DiskStation DSM 7.2", confidence: 0.92, category: "Storage / NAS", ttl: 64, app_delta_ms: 1.4, open_ports: [{ port: 5000, service: "http", risk_level: "HIGH" }, { port: 5001, service: "https", risk_level: "MEDIUM" }, { port: 445, service: "smb", risk_level: "HIGH" }], is_managed: false, risk_score: "HIGH", weakpoints: ["Unencrypted HTTP administrative console (Port 5000)", "SMBv1 legacy dialect enabled"] },
+                    { ip: "10.0.4.99", hostname: "rogue-dev-kali.corp.internal", vendor: "Raspberry Pi Foundation", mac: "B8:27:EB:12:34:56", os_guess: "Kali Linux Rolling (ARM64)", confidence: 0.89, category: "Shadow IT / Pentest", ttl: 64, app_delta_ms: 2.1, open_ports: [{ port: 22, service: "ssh", risk_level: "MEDIUM" }, { port: 4444, service: "metasploit", risk_level: "CRITICAL" }], is_managed: false, risk_score: "CRITICAL", weakpoints: ["Unauthorized Metasploit payload listener on Port 4444", "Unmanaged shadow IT device"] },
+                    { ip: "10.0.4.120", hostname: "lobby-smart-display.corp.internal", vendor: "Samsung Electronics", mac: "50:02:91:AA:BB:CC", os_guess: "Samsung Tizen Smart TV / Display", confidence: 0.88, category: "IoT / Smart Display", ttl: 64, app_delta_ms: 1.9, open_ports: [{ port: 8001, service: "smarttv-api", risk_level: "MEDIUM" }], is_managed: false, risk_score: "MEDIUM", weakpoints: ["Unauthenticated Smart TV remote API accessible on LAN"] }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/anomalies/alerts")) {
+                return [
+                    { id: "alert-dga-01", timestamp: now, endpoint_id: "win11-corp-exec", type: "CRITICAL", title: "Suspicious DGA / High-Entropy Domain Detected", description: "Process python3.exe queried high-entropy domain xj829vbnpqlmz019.xyz (Entropy: 4.02 bits/byte).", mitre_technique: "T1071.001", details: "Shannon Entropy: 4.02 | Destination: xj829vbnpqlmz019.xyz:443" },
+                    { id: "alert-offhours-02", timestamp: now, endpoint_id: "win11-corp-exec", type: "HIGH", title: "Off-Hours Workstation External Egress", description: "Interactive shell egress observed at 02:14 UTC to external IP 198.51.100.22:8443.", mitre_technique: "T1059.001", details: "Parent: explorer.exe -> powershell.exe -> 198.51.100.22:8443" },
+                    { id: "alert-fanout-03", timestamp: now, endpoint_id: "mac-eng-lead", type: "HIGH", title: "Internal Subnet Fan-Out / Port Sweep", description: "Host initiated TCP connection probes to 8 distinct internal hosts within 60s window.", mitre_technique: "T1046", details: "Probed ports: 445, 3389 across 10.0.4.0/24" }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/topology/graph")) {
+                return {
+                    nodes: [
+                        { id: "10.0.4.1", name: "Cisco Gateway", type: "gateway", ip: "10.0.4.1", status: "online" },
+                        { id: "10.0.4.15", name: "corp-win11-exec", type: "workstation", ip: "10.0.4.15", status: "online", is_managed: true },
+                        { id: "10.0.4.20", name: "dmz-web-01", type: "server", ip: "10.0.4.20", status: "online", is_managed: true },
+                        { id: "10.0.4.88", name: "mac-eng-lead", type: "workstation", ip: "10.0.4.88", status: "online", is_managed: true },
+                        { id: "10.0.4.99", name: "rogue-dev-kali", type: "rogue", ip: "10.0.4.99", status: "online", is_managed: false },
+                        { id: "10.0.4.55", name: "unmanaged-nas", type: "nas", ip: "10.0.4.55", status: "online", is_managed: false }
+                    ],
+                    links: [
+                        { source: "10.0.4.15", target: "10.0.4.1", flow_count: 840, bytes: 4201000 },
+                        { source: "10.0.4.20", target: "10.0.4.1", flow_count: 1420, bytes: 18200000 },
+                        { source: "10.0.4.88", target: "10.0.4.1", flow_count: 310, bytes: 1900000 },
+                        { source: "10.0.4.99", target: "10.0.4.55", flow_count: 95, bytes: 480000 }
+                    ]
+                };
+            }
+            if (endpoint.startsWith("/api/v1/copilot/chat")) {
+                return {
+                    reply: "### 🔍 Ominull Cognitive SOC Forensic Briefing\n\n- **Severity:** HIGH / CRITICAL\n- **Attack Vector:** Anomaly correlation indicates unauthorized lateral enumeration and DGA beaconing on endpoint 'win11-corp-exec' (10.0.4.15).\n- **MITRE ATT&CK:** T1071.001 (Application Layer Protocol: Web Protocols), T1046 (Network Service Discovery).\n- **Forensic Findings:** Process 'powershell.exe' spawned outbound socket to unauthorized C2 domain 'xj829vbnpqlmz019.xyz'.\n- **Recommended Remediation:**\n  1. Enforce Ring-0 host isolation via WFP sublayer.\n  2. Terminate malicious PID and capture socket memory dump.\n  3. Enforce Subnet Mesh lateral drop on rogue host '10.0.4.99'.",
+                    timestamp: now,
+                    model: "ollama (demo)",
+                    provider: "ollama"
+                };
+            }
+            if (endpoint.startsWith("/api/v1/threatintel/iocs")) {
+                return [
+                    { id: "ioc-01", indicator: "185.220.101.5", type: "IPv4", threat_name: "Feodo C2 Botnet", confidence: "HIGH", source: "Abuse.ch Feodo Tracker", created_at: now },
+                    { id: "ioc-02", indicator: "194.26.29.114", type: "IPv4", threat_name: "Cobalt Strike Beacon", confidence: "HIGH", source: "Emerging Threats", created_at: now },
+                    { id: "ioc-03", indicator: "xj829vbnpqlmz019.xyz", type: "Domain", threat_name: "DGA C2 Domain", confidence: "CRITICAL", source: "Stream DPI Shannon Entropy", created_at: now }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/policy-groups")) {
+                return [
+                    { id: "pg-default-zt", name: "Corporate Zero-Trust Default", priority: 100, rules_count: 14, endpoints_count: 4, active: true },
+                    { id: "pg-quarantine-drop", name: "Emergency Lateral Quarantine", priority: 999, rules_count: 3, endpoints_count: 0, active: true }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/exclusions")) {
+                return [
+                    { id: "ex-01", name: "Domain Controller Kerberos", target_type: "port", target_value: "88", protocol: "tcp", description: "Internal Active Directory authentication" }
+                ];
+            }
+            if (endpoint.startsWith("/api/v1/network-profiles")) {
+                return [];
+            }
+            if (endpoint.startsWith("/api/v1/mesh/quarantined")) {
+                return [];
+            }
+            return {};
+        }
+
         function fetchAPI(endpoint, method, body) {
+            if (isDemoMode) {
+                return new Promise(function(resolve) {
+                    setTimeout(function() {
+                        resolve(getSyntheticDemoData(endpoint, method, body));
+                    }, 50);
+                });
+            }
             var opts = {
                 method: method || "GET",
                 headers: {
@@ -2401,7 +2542,7 @@ const dashboardHTML = `<!DOCTYPE html>
                     return '<option value="' + l.location.id + '">' + l.location.name + ' (' + l.location.subnet_cidr + ')</option>';
                 }).join("");
             } else {
-                locSelect.innerHTML = '<option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>';
+                locSelect.innerHTML = '<option value="loc-home">Corporate HQ LAN (10.0.0.0/24)</option>';
             }
         }
 
@@ -3108,6 +3249,8 @@ const dashboardHTML = `<!DOCTYPE html>
             }).catch(function(err) {
                 alert("Failed to lift mesh quarantine: " + err);
             });
+        }
+
         /* AUTONOMOUS THREAT COPILOT & CHATOPS */
         function sendCopilotChat() {
             var input = document.getElementById("copilot-input");
@@ -3180,7 +3323,7 @@ const dashboardHTML = `<!DOCTYPE html>
         function openCopilotConfigModal() {
             fetchAPI("/api/v1/copilot/config").then(function(cfg) {
                 document.getElementById("copilot-cfg-provider").value = cfg.provider || "ollama";
-                document.getElementById("copilot-cfg-ollama-url").value = cfg.ollama_url || "http://10.0.0.39:11434";
+                document.getElementById("copilot-cfg-ollama-url").value = cfg.ollama_url || "http://127.0.0.1:11434";
                 document.getElementById("copilot-cfg-ollama-model").value = cfg.ollama_model || "llama3.2";
                 document.getElementById("copilot-cfg-gemini-model").value = cfg.gemini_model || "gemini-1.5-flash";
                 document.getElementById("copilot-cfg-openai-model").value = cfg.openai_model || "gpt-4o-mini";
@@ -3222,6 +3365,7 @@ const dashboardHTML = `<!DOCTYPE html>
         }
 
         // Initialize on load
+        updateDemoButtonUI();
         refreshData();
         setInterval(refreshData, 5000);
     </script>

@@ -69,5 +69,37 @@ __pycache__/
 .dev-tools/
 scratch/
 .ruff_cache/
+.pytest_cache/
 coverage.out
 profile.out
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# SummitFlow / agent session state (generated locally per machine)
+.st/
+.summitflow/
+.fallow/
+graphify-out/
+
+# Secrets & local credentials
+credentials.json
+secrets.json
+backup-index.json
+
+# Personal / local-only infrastructure tooling (use deploy_remote.sh.example as template)
+.index.yaml
+scripts/deploy_remote.sh
+scripts/connect-linux-shell.sh
+scripts/connect-mac-gui.sh
+scripts/connect-mac-shell.sh
+scripts/connect-win-rdp.sh
+scripts/m2_runner.bat
+scripts/validate_m1.py
+scripts/verify_m1_live.py
+scripts/verify_m3_live.py
+scripts/vm_test_pipeline.py

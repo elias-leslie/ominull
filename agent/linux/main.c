@@ -369,10 +369,10 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 int main(int argc, char* argv[]) {
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
-    strcpy(config.hub_url, "https://omi.example.com");
+    strcpy(config.hub_url, "http://127.0.0.1:9999");
     strcpy(config.api_key, "omi_live_master");
     strcpy(config.role_tag, "workstation");
-    strcpy(config.location_id, "loc-home");
+    strcpy(config.location_id, "loc-default");
     gethostname(config.hostname, sizeof(config.hostname) - 1);
     snprintf(config.endpoint_id, sizeof(config.endpoint_id), "linux-%.50s", config.hostname);
     GetPrimaryNetworkInfo(config.primary_ip, sizeof(config.primary_ip), config.primary_mac, sizeof(config.primary_mac));
