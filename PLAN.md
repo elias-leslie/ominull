@@ -158,9 +158,9 @@
     - 1-Click Approve verified (operational exclusion pinhole deployment).
   - **100% Automated Unit Test Suite Pass:** Verified across all Go packages in `hub/`.
 
-### Phase 14: Multi-Tier Network Asset Scanner & Extensible OS Fingerprinting `[IN PROGRESS]`
+### Phase 14: Multi-Tier Network Asset Scanner & Extensible OS Fingerprinting `[COMPLETED]`
 - **Objective:** Build native pure-Go multi-tier network scanner with passive, standard, and aggressive IR modes, extensible signature engine, and TCP/IP stack + application response delta timing heuristics.
-- **Deliverables:**
+- **Deliverables Completed:**
   - **Scanner Profiles:**
     - `Passive`: L2 ARP / Neighbor cache snooping and unmanaged peer flow correlation.
     - `Standard`: Subnet ping/ARP sweep + Top 100 common ports + service banner grabbing + OUI MAC lookup.
@@ -174,9 +174,9 @@
 
 ---
 
-### Phase 15: Visual Communications Topology Graph & Relationship Outlier Engine `[IN PROGRESS]`
+### Phase 15: Visual Communications Topology Graph & Relationship Outlier Engine `[COMPLETED]`
 - **Objective:** Provide visual force-directed network topology mapping and graph-driven topological anomaly detection.
-- **Deliverables:**
+- **Deliverables Completed:**
   - **Graph Data Model & Storage:** In-memory and persisted directed graph ($V, E$) tracking Endpoints, Unmanaged Nodes, Cloud ASNs, and External WAN IOCs.
   - **Topological Anomaly Detection:**
     - `LATERAL_PORT_SWEEP`: Sudden degree spike ($k_{out} > 5$) / 02:00 off-hours sweep across internal subnet.
