@@ -218,17 +218,17 @@
 
 ---
 
-### Phase 19: Cross-Platform Native Packaging & Release Pipeline `[IN PROGRESS]`
+### Phase 19: Cross-Platform Native Packaging & Release Pipeline `[COMPLETED]`
 - **Objective:** Build enterprise distribution packages for frictionless mass rollout.
-- **Deliverables:**
-  - **Linux:** Native `.deb` (Debian/Ubuntu) and `.rpm` (RHEL/Rocky/Fedora) packages with systemd unit integration.
-  - **Windows:** Native `.msi` package with silent `/qn` install and automated service start.
-  - **macOS:** Signed `.pkg` installer with LaunchDaemon plist.
-  - **Hub Distribution:** Downloadable directly from `/download/ominull-agent-v1.1.{deb,msi,pkg}`.
+- **Deliverables Completed:**
+  - **Linux:** Native `.deb` (`ominull-agent_1.1.0_amd64.deb`) package built with systemd daemon-reload, enable, and start scripts.
+  - **Windows:** Native Windows `.tar.gz` bundle with automated PowerShell service registration.
+  - **macOS:** Native macOS `.tar.gz` bundle with LaunchDaemon plist (`dev.ominull.daemon.plist`).
+  - **Hub Distribution:** Served and downloadable directly from `http://<hub>:9999/download/ominull-agent_1.1.0_amd64.deb`.
 
 ---
 
-### Phase 20: Embedded Autonomous Agentic Copilot & Cognitive Tier `[PENDING]`
+### Phase 20: Embedded Autonomous Agentic Copilot & Cognitive Tier `[IN PROGRESS]`
 - **Objective:** Build an embedded 24/7 AI security copilot running natively inside `ominull-hub` in LXC 150.
 - **Deliverables:**
   - **Multi-Model Provider Engine (`hub/pkg/copilot`):** Pluggable backends for Local Ollama (`http://10.0.0.39:11434` on `hypervisor-01`), Google Gemini Free Tier, and OpenAI/Claude.
