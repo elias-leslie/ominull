@@ -50,4 +50,20 @@ func TestThreatIntelManager(t *testing.T) {
 	if foundClean {
 		t.Fatalf("8.8.8.8 should not be in threat feed")
 	}
+
+	// Verify Offline GeoIP and ASN Resolution
+	geoGoogle := ResolveGeoIP("8.8.8.8")
+	if geoGoogle.Country != "US" || geoGoogle.ASN != "AS15169" {
+		t.Errorf("unexpected GeoIP for 8.8.8.8: %+v", geoGoogle)
+	}
+
+	geoCF := ResolveGeoIP("1.1.1.1")
+	if geoCF.Country != "AU" || geoCF.ASN != "AS13335" {
+		t.Errorf("unexpected GeoIP for 1.1.1.1: %+v", geoCF)
+	}
+
+	geoLocal := ResolveGeoIP("192.168.1.1")
+	if geoLocal.Country != "LOCAL" || geoLocal.ASN != "AS-PRIVATE" {
+		t.Errorf("unexpected GeoIP for private IP: %+v", geoLocal)
+	}
 }

@@ -17,6 +17,12 @@ typedef struct _AGENT_CONFIG {
     char api_key[128];
     char endpoint_id[64];
     char hostname[128];
+    char location_id[64];
+    char role_tag[64];
+    char cf_client_id[128];
+    char cf_client_secret[128];
+    char primary_ip[64];
+    char primary_mac[32];
     bool is_service;
     bool verbose;
 } AGENT_CONFIG;

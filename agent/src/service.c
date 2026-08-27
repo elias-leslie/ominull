@@ -1,3 +1,7 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <psapi.h>
 #include "../include/agent.h"
 
 static SERVICE_STATUS g_ServiceStatus;
@@ -18,50 +22,94 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
     }
 }
 
+static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) {
+    size_t count = 0;
+    DWORD dwSize = 0;
+
+    DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    if (ret == ERROR_INSUFFICIENT_BUFFER && dwSize > 0) {
+        PMIB_TCPTABLE_OWNER_PID pTcpTable = (PMIB_TCPTABLE_OWNER_PID)malloc(dwSize);
+        if (pTcpTable) {
+            if (GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+                for (DWORD i = 0; i < pTcpTable->dwNumEntries && count < maxEvents; i++) {
+                    MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
+                    if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
+
+                    OMINULL_EVENT* ev = &outEvents[count];
+                    memset(ev, 0, sizeof(OMINULL_EVENT));
+                    ev->EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V4;
+                    ev->Action = 0; // Permit
+                    ev->Direction = 1; // Outbound
+                    ev->Protocol = IPPROTO_TCP;
+                    ev->IpVersion = 4;
+                    ev->ProcessId = row.dwOwningPid;
+                    ev->LocalPort = ntohs((u_short)row.dwLocalPort);
+                    ev->RemotePort = ntohs((u_short)row.dwRemotePort);
+                    ev->Addr.Ipv4.LocalIp = ntohl(row.dwLocalAddr);
+                    ev->Addr.Ipv4.RemoteIp = ntohl(row.dwRemoteAddr);
+
+                    wcscpy(ev->ProcessPath, L"C:\\Windows\\System32\\ntoskrnl.exe");
+                    if (row.dwOwningPid > 4) {
+                        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.dwOwningPid);
+                        if (hProc) {
+                            DWORD pathLen = OMINULL_MAX_PATH;
+                            if (QueryFullProcessImageNameW(hProc, 0, ev->ProcessPath, &pathLen)) {
+                                ev->ProcessPath[OMINULL_MAX_PATH - 1] = L'\0';
+                            }
+                            CloseHandle(hProc);
+                        }
+                    }
+                    count++;
+                }
+            }
+            free(pTcpTable);
+        }
+    }
+    return count;
+}
+
 void RunAgentLoop(AGENT_CONFIG* config) {
     HANDLE hDriver = Driver_Open();
     if (hDriver == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "[-] Agent could not connect to Ominull driver. Retrying...\n");
+        printf("[*] Ominull kernel driver not present. Operating in User-Mode High-Fidelity Flow Mode.\n");
+    } else {
+        printf("[+] Connected to Ominull WFP kernel driver.\n");
     }
 
     OMINULL_EVENT eventBatch[64];
     size_t batchCount = 0;
     DWORD lastFlush = GetTickCount();
 
-    printf("[+] Ominull Agent running. Streaming kernel events to Hub: %s\n", config->hub_url);
+    printf("[+] Ominull Agent running. Streaming network flows to Hub: %s\n", config->hub_url);
 
     while (1) {
         if (g_StopEvent && WaitForSingleObject(g_StopEvent, 0) == WAIT_OBJECT_0) {
             break;
         }
 
-        if (hDriver == INVALID_HANDLE_VALUE) {
-            DWORD now = GetTickCount();
-            if (now - lastFlush > 3000) {
-                Hub_SendTelemetryBatch(config, NULL, 0);
-                lastFlush = now;
-            }
-            Sleep(1000);
-            hDriver = Driver_Open();
-            continue;
-        }
-
-        OMINULL_EVENT ev;
-        if (Driver_StreamEvents(hDriver, &ev)) {
-            eventBatch[batchCount++] = ev;
-            if (config->verbose) {
-                printf("[EVENT] Type: 0x%X Action: %u PID: %llu\n", ev.EventType, ev.Action, (unsigned long long)ev.ProcessId);
+        // 1. Collect driver events if connected
+        if (hDriver != INVALID_HANDLE_VALUE) {
+            OMINULL_EVENT ev;
+            while (Driver_StreamEvents(hDriver, &ev) && batchCount < 48) {
+                eventBatch[batchCount++] = ev;
+                if (config->verbose) {
+                    printf("[DRIVER EVENT] Type: 0x%lX Action: %lu PID: %llu\n", (unsigned long)ev.EventType, (unsigned long)ev.Action, (unsigned long long)ev.ProcessId);
+                }
             }
         }
 
+        // 2. Poll live socket table flows
         DWORD now = GetTickCount();
-        if (batchCount >= 32 || (batchCount > 0 && (now - lastFlush > 1000))) {
+        if (now - lastFlush >= 2500) {
+            size_t socketCount = PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
+            batchCount += socketCount;
+
             Hub_SendTelemetryBatch(config, eventBatch, batchCount);
             batchCount = 0;
             lastFlush = now;
         }
 
-        Sleep(10); // Low-latency poll
+        Sleep(100);
     }
 
     if (batchCount > 0) {

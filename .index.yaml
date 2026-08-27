@@ -1,35 +1,39 @@
 project: ominull
-generated_at: 2026-08-26 16:16 UTC
+generated_at: 2026-08-27 14:17 UTC
+identity:
+  display_name: Ominull
+  short_name: Ominull
 services:
-  backend_port: 8000
-  frontend_port: 3000
+  backend_port: 9999
+  frontend_port: 9999
   infrastructure:
     postgres: 5432
     redis: 6379
 urls:
-  frontend: http://localhost:3000
-  api: http://localhost:8000/api
+  frontend: http://localhost:9999
+  api: http://localhost:9999/api
 network:
   host_ip: 10.0.0.57
   hostname: workstation-01
 explorer:
   scan_status: completed
-  last_completed_scan: '2026-08-26T14:20:49.343110+00:00'
+  last_completed_scan: '2026-08-27T12:17:04.728701+00:00'
   last_scan_type: file
   entry_counts:
     architecture: 1
-    file: 111
-  symbol_count: 50
+    file: 331
+  symbol_count: 175
   stale_metadata_count: 0
 folders:
-  (root): 18 files - tests
+  (root): 21 files - tests
   .github: 2 files
-  agent: 14 files - services
+  agent: 17 files - services
   certs: 6 files - tests
   cli: 1 files
   driver: 11 files
   ebpf: 1 files
   evidence: 21 files
-  hub: 23 files - tests
-  scripts: 13 files - tests
+  hub: 27 files - tests
+  scratch: 202 files - tests
+  scripts: 21 files - tests
   tests: 1 files - tests

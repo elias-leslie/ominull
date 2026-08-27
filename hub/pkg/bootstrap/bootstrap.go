@@ -165,14 +165,44 @@ echo -e "\033[90m[+] Installing Ominull Enterprise Trust Anchor...\033[0m"
 curl -sSL %s "$HUB_URL/api/v1/pki/ca.crt" -o "$INSTALL_DIR/ca.crt" || true
 security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$INSTALL_DIR/ca.crt" 2>/dev/null || true
 
-echo -e "\033[90m[+] Downloading macOS Packet Filter Engine...\033[0m"
+echo -e "\033[90m[+] Downloading macOS Packet Filter Engine and Daemon...\033[0m"
 curl -sSL %s "$HUB_URL/download/pf_engine.sh" -o "$INSTALL_DIR/pf_engine.sh"
-chmod +x "$INSTALL_DIR/pf_engine.sh"
+curl -sSL %s "$HUB_URL/download/ominull_mac_daemon.sh" -o "$INSTALL_DIR/ominull_mac_daemon.sh"
+chmod +x "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
 
-echo -e "\033[90m[+] Testing BSD Packet Filter Subsystem...\033[0m"
-"$INSTALL_DIR/pf_engine.sh" test
+echo -e "\033[90m[+] Configuring macOS LaunchDaemon Service...\033[0m"
+cat << 'PLIST' > /Library/LaunchDaemons/dev.ominull.daemon.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.ominull.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/opt/ominull/ominull_mac_daemon.sh</string>
+        <string>%s</string>
+        <string>%s</string>
+        <string>%s</string>
+        <string>%s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/ominull.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ominull.error.log</string>
+</dict>
+</plist>
+PLIST
 
-echo -e "\033[32m[SUCCESS] Ominull macOS Zero-Friction Protection Active!\033[0m"
+launchctl unload /Library/LaunchDaemons/dev.ominull.daemon.plist 2>/dev/null || true
+launchctl load -w /Library/LaunchDaemons/dev.ominull.daemon.plist
+
+echo -e "\033[32m[SUCCESS] Ominull macOS Zero-Friction Protection Daemon Active!\033[0m"
 `
-	return strings.TrimSpace(fmt.Sprintf(script, hubURL, tenantAPIKey, roleTag, locationID, cfCurlHeader, cfCurlHeader))
+	return strings.TrimSpace(fmt.Sprintf(script, hubURL, tenantAPIKey, roleTag, locationID, cfCurlHeader, cfCurlHeader, cfCurlHeader, hubURL, tenantAPIKey, roleTag, locationID))
 }

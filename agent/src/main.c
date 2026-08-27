@@ -12,14 +12,16 @@ static void PrintUsage(const char* prog) {
 int main(int argc, char* argv[]) {
     AGENT_CONFIG config;
     ZeroMemory(&config, sizeof(config));
-    strcpy(config.hub_url, "http://127.0.0.1:9999");
-    strcpy(config.api_key, "ominull-default-api-key");
-    strcpy(config.endpoint_id, "win11-target-01");
+    strcpy(config.hub_url, "http://10.0.0.58:9999");
+    strcpy(config.api_key, "<redacted-rotated-key>");
+    strcpy(config.role_tag, "workstation");
+    strcpy(config.location_id, "loc-home");
 
     DWORD hostLen = sizeof(config.hostname);
     if (!GetComputerNameA(config.hostname, &hostLen)) {
-        strcpy(config.hostname, "WINDOWS-ENDPOINT");
+        strcpy(config.hostname, "win11-target-01");
     }
+    snprintf(config.endpoint_id, sizeof(config.endpoint_id), "win11-%s", config.hostname);
 
     bool doInstall = false;
     bool doUninstall = false;
@@ -39,6 +41,16 @@ int main(int argc, char* argv[]) {
             strncpy(config.hub_url, argv[++i], sizeof(config.hub_url) - 1);
         } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
             strncpy(config.api_key, argv[++i], sizeof(config.api_key) - 1);
+        } else if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
+            strncpy(config.endpoint_id, argv[++i], sizeof(config.endpoint_id) - 1);
+        } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
+            strncpy(config.role_tag, argv[++i], sizeof(config.role_tag) - 1);
+        } else if (strcmp(argv[i], "--location") == 0 && i + 1 < argc) {
+            strncpy(config.location_id, argv[++i], sizeof(config.location_id) - 1);
+        } else if (strcmp(argv[i], "--cf-id") == 0 && i + 1 < argc) {
+            strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
+        } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
+            strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
         } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
             config.verbose = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {

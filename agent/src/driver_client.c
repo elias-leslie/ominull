@@ -11,15 +11,20 @@ HANDLE Driver_Open(void) {
         NULL
     );
 
+    static bool loggedOnce = false;
     if (hDevice == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND) {
-            fprintf(stderr, "[-] Ominull driver device not found. Is ominull.sys running?\n");
-        } else {
-            fprintf(stderr, "[-] Failed to open Ominull driver (Error: %lu)\n", err);
+        if (!loggedOnce) {
+            DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND) {
+                fprintf(stderr, "[-] Ominull driver device not found. Retrying in background...\n");
+            } else {
+                fprintf(stderr, "[-] Failed to open Ominull driver (Error: %lu)\n", err);
+            }
+            loggedOnce = true;
         }
         return INVALID_HANDLE_VALUE;
     }
+    loggedOnce = false;
 
     return hDevice;
 }

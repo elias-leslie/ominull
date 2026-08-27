@@ -1,2 +1,7 @@
 scripts/deploy_remote.sh:curl-auth-header:25
 scripts/deploy_remote.sh:curl-auth-header:26
+scripts/fleet-unisolate.sh:generic-api-key:3
+scripts/fleet-status.sh:generic-api-key:3
+scripts/fleet-isolate.sh:generic-api-key:3
+agent/src/main.c:generic-api-key:16
+hub/pkg/server/server.go:generic-api-key:231

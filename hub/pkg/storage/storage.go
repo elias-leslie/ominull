@@ -154,11 +154,14 @@ type Rule struct {
 type PolicyGroup struct {
 	ID          string    `json:"id"`
 	TenantID    string    `json:"tenant_id"`
+	Scope       string    `json:"scope"`       // "global", "client", "location", "endpoint", "role"
+	ScopeValue  string    `json:"scope_value"` // tenant_id, location_id, endpoint_id, or role
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
-	Criteria    string    `json:"criteria"` // JSON string: {"os":"windows","role":"db-server","subnet":"10.0.0.0/24","process":"powershell"}
-	Action      string    `json:"action"`   // BLOCK, PERMIT, ISOLATE
-	RuleType    string    `json:"rule_type"`
+	Schedule    string    `json:"schedule"`    // "all", "business_hours", "off_hours"
+	Criteria    string    `json:"criteria"`    // JSON string: {"os":"windows","role":"db-server","subnet":"10.0.0.0/24","process":"powershell"}
+	Action      string    `json:"action"`      // BLOCK, PERMIT, ISOLATE, ALERT, THROTTLE
+	RuleType    string    `json:"rule_type"`   // "ip", "cidr", "process", "port", "domain"
 	RuleValue   string    `json:"rule_value"`
 	Port        uint16    `json:"port"`
 	Protocol    string    `json:"protocol"`
@@ -180,6 +183,60 @@ type HierarchyLocation struct {
 	IsolatedCount  int        `json:"isolated_count"`
 }
 
+type TopTalker struct {
+	Process    string `json:"process"`
+	FlowCount  int64  `json:"flow_count"`
+	BytesIn    int64  `json:"bytes_in"`
+	BytesOut   int64  `json:"bytes_out"`
+	TotalBytes int64  `json:"total_bytes"`
+}
+
+type GeoCountryStat struct {
+	Country     string `json:"country"`
+	CountryName string `json:"country_name"`
+	FlowCount   int64  `json:"flow_count"`
+	TotalBytes  int64  `json:"total_bytes"`
+	ThreatCount int64  `json:"threat_count"`
+}
+
+type TopologyNode struct {
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	Type       string `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"
+	IP         string `json:"ip"`
+	OS         string `json:"os"`
+	Role       string `json:"role"`
+	Risk       string `json:"risk"` // "CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"
+	IsIsolated bool   `json:"is_isolated"`
+	Group      string `json:"group"`
+}
+
+type TopologyEdge struct {
+	ID         string    `json:"id"`
+	Source     string    `json:"source"`
+	Target     string    `json:"target"`
+	Protocol   string    `json:"protocol"`
+	Port       uint16    `json:"port"`
+	FlowCount  int64     `json:"flow_count"`
+	TotalBytes int64     `json:"total_bytes"`
+	Verdict    string    `json:"verdict"` // "clean", "anomalous", "blocked"
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+type TopologyMetrics struct {
+	TotalNodes          int `json:"total_nodes"`
+	TotalEdges          int `json:"total_edges"`
+	AnomalousEdgeCount  int `json:"anomalous_edge_count"`
+	ManagedNodesCount   int `json:"managed_nodes_count"`
+	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
+}
+
+type TopologyData struct {
+	Nodes   []TopologyNode  `json:"nodes"`
+	Edges   []TopologyEdge  `json:"edges"`
+	Metrics TopologyMetrics `json:"metrics"`
+}
+
 type AnalyticsSummary struct {
 	TotalBytesIn      int64                `json:"total_bytes_in"`
 	TotalBytesOut     int64                `json:"total_bytes_out"`
@@ -191,6 +248,10 @@ type AnalyticsSummary struct {
 	SeverityCounts    map[string]int64     `json:"severity_counts"`
 	EnforcementCounts map[string]int64     `json:"enforcement_counts"`
 	BandwidthTimeline []BandwidthDataPoint `json:"bandwidth_timeline"`
+	DiurnalBaseline   map[int]int64        `json:"diurnal_baseline"`
+	DiurnalLive       map[int]int64        `json:"diurnal_live"`
+	TopTalkers        []TopTalker          `json:"top_talkers"`
+	GeoStats          []GeoCountryStat     `json:"geo_stats"`
 }
 
 type BandwidthDataPoint struct {
@@ -457,6 +518,13 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
+		"ALTER TABLE events ADD COLUMN city TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN asn TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN org TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE policy_groups ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+		"ALTER TABLE policy_groups ADD COLUMN scope_value TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE policy_groups ADD COLUMN schedule TEXT NOT NULL DEFAULT 'all'",
 	}
 	for _, m := range migrations {
 		_, _ = s.db.Exec(m)
@@ -616,9 +684,27 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if ep.LocationID == "" {
-		ep.LocationID = "loc-hq"
-		ep.LocationName = "Austin HQ Data Center"
+	if ep.TenantID == "" {
+		ep.TenantID = "default"
+	}
+
+	if ep.LocationID == "" || ep.LocationID == "loc-hq" {
+		// Resolve the first location for this tenant
+		var locID, locName string
+		row := s.db.QueryRow(`SELECT id, name FROM locations WHERE tenant_id = ? ORDER BY created_at ASC LIMIT 1`, ep.TenantID)
+		if err := row.Scan(&locID, &locName); err == nil && locID != "" {
+			ep.LocationID = locID
+			ep.LocationName = locName
+		} else {
+			ep.LocationID = "loc-home"
+			ep.LocationName = "Primary Home LAN"
+		}
+	} else if ep.LocationName == "" {
+		var locName string
+		row := s.db.QueryRow(`SELECT name FROM locations WHERE id = ?`, ep.LocationID)
+		if err := row.Scan(&locName); err == nil && locName != "" {
+			ep.LocationName = locName
+		}
 	}
 	if ep.RoleTag == "" {
 		ep.RoleTag = "workstation"
@@ -761,6 +847,30 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	return list, nil
 }
 
+func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var ep Endpoint
+	var isoInt int
+	err := s.db.QueryRow(
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
+		id, id,
+	).Scan(
+		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
+		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion,
+		&ep.Status, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ep.IsIsolated = isoInt != 0
+	return &ep, nil
+}
+
 func (s *Store) GetHierarchy(tenantID string) ([]HierarchyClient, error) {
 	tenants, err := s.ListTenants()
 	if err != nil {
@@ -799,6 +909,29 @@ func (s *Store) GetHierarchy(tenantID string) ([]HierarchyClient, error) {
 			TotalEndpoints: len(eps),
 			IsolatedCount:  isoCount,
 		})
+	}
+
+	// Attach any orphan endpoints to the first location of their tenant
+	for _, ep := range endpoints {
+		found := false
+		for _, loc := range locations {
+			if loc.ID == ep.LocationID {
+				found = true
+				break
+			}
+		}
+		if !found && len(locations) > 0 {
+			for i := range tenantLocMap[ep.TenantID] {
+				if tenantLocMap[ep.TenantID][i].Location.TenantID == ep.TenantID {
+					tenantLocMap[ep.TenantID][i].Endpoints = append(tenantLocMap[ep.TenantID][i].Endpoints, ep)
+					tenantLocMap[ep.TenantID][i].TotalEndpoints++
+					if ep.IsIsolated {
+						tenantLocMap[ep.TenantID][i].IsolatedCount++
+					}
+					break
+				}
+			}
+		}
 	}
 
 	var result []HierarchyClient
@@ -1433,7 +1566,233 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 		})
 	}
 
+	// 7. Diurnal Time-of-Day Activity (Baseline vs Live by Hour 0-23)
+	baseline, live, _ := s.GetDiurnalProfiles(tenantID)
+	summary.DiurnalBaseline = baseline
+	summary.DiurnalLive = live
+
+	// 8. Top Network Talkers (Processes by flow count and bandwidth)
+	var ttQuery string
+	if tenantID != "" {
+		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles WHERE tenant_id = ? GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
+	} else {
+		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
+	}
+	ttRows, err := s.db.Query(ttQuery, args...)
+	if err == nil {
+		for ttRows.Next() {
+			var tt TopTalker
+			if err := ttRows.Scan(&tt.Process, &tt.FlowCount, &tt.BytesIn, &tt.BytesOut); err == nil {
+				tt.TotalBytes = tt.BytesIn + tt.BytesOut
+				summary.TopTalkers = append(summary.TopTalkers, tt)
+			}
+		}
+		ttRows.Close()
+	}
+
+	// 9. GeoIP Country Distribution & Threat Metrics
+	var geoQuery string
+	if tenantID != "" {
+		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events WHERE tenant_id = ? GROUP BY country ORDER BY COUNT(*) DESC LIMIT 12"
+	} else {
+		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events GROUP BY country ORDER BY COUNT(*) DESC LIMIT 12"
+	}
+	gRows, err := s.db.Query(geoQuery, args...)
+	if err == nil {
+		countryNames := map[string]string{
+			"US": "United States", "DE": "Germany", "GB": "United Kingdom", "NL": "Netherlands",
+			"FR": "France", "CN": "China", "RU": "Russia", "JP": "Japan", "SG": "Singapore",
+			"AU": "Australia", "CA": "Canada", "CH": "Switzerland", "SE": "Sweden", "PL": "Poland",
+			"KR": "South Korea", "BR": "Brazil", "IN": "India", "LOCAL": "Internal LAN",
+		}
+		for gRows.Next() {
+			var gs GeoCountryStat
+			if err := gRows.Scan(&gs.Country, &gs.FlowCount, &gs.TotalBytes, &gs.ThreatCount); err == nil {
+				if name, ok := countryNames[gs.Country]; ok {
+					gs.CountryName = name
+				} else {
+					gs.CountryName = gs.Country
+				}
+				summary.GeoStats = append(summary.GeoStats, gs)
+			}
+		}
+		gRows.Close()
+	}
+
 	return summary, nil
+}
+
+func (s *Store) IsFirstSeenDestination(tenantID, dstIP string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM comm_profiles WHERE dst_ip = ?", dstIP).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count <= 1
+}
+
+func (s *Store) GetDiurnalProfiles(tenantID string) (map[int]int64, map[int]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	baseline := make(map[int]int64)
+	live := make(map[int]int64)
+
+	// Workstation standard business diurnal profile (low at night 00:00-06:00, peak 09:00-17:00, taper 18:00-23:00)
+	weights := []float64{
+		0.05, 0.03, 0.02, 0.02, 0.04, 0.10, // 00:00 - 05:00
+		0.25, 0.60, 0.90, 1.00, 0.95, 0.90, // 06:00 - 11:00
+		0.85, 0.95, 1.00, 0.95, 0.85, 0.70, // 12:00 - 17:00
+		0.45, 0.30, 0.20, 0.15, 0.10, 0.08, // 18:00 - 23:00
+	}
+
+	var totalCount int64
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&totalCount)
+	scale := float64(totalCount) / 12.0
+	if scale < 10 {
+		scale = 50
+	}
+
+	for hr := 0; hr < 24; hr++ {
+		baseline[hr] = int64(weights[hr] * scale)
+		live[hr] = 0
+	}
+
+	var query string
+	var args []interface{}
+	if tenantID != "" {
+		query = "SELECT strftime('%H', timestamp) as hr, count(*) FROM events WHERE tenant_id = ? GROUP BY hr"
+		args = append(args, tenantID)
+	} else {
+		query = "SELECT strftime('%H', timestamp) as hr, count(*) FROM events GROUP BY hr"
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err == nil {
+		for rows.Next() {
+			var hrStr string
+			var count int64
+			if err := rows.Scan(&hrStr, &count); err == nil {
+				var hr int
+				if _, err := fmt.Sscanf(hrStr, "%d", &hr); err == nil && hr >= 0 && hr < 24 {
+					live[hr] = count
+				}
+			}
+		}
+		rows.Close()
+	}
+
+	return baseline, live, nil
+}
+
+func (s *Store) EvaluatePolicyHierarchy(ev Event, ep Endpoint) (*PolicyGroup, string) {
+	policies, err := s.ListPolicyGroups(ev.TenantID)
+	if err != nil || len(policies) == 0 {
+		return nil, ""
+	}
+
+	now := ev.Timestamp
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	hr := now.Hour()
+	isBusinessHours := hr >= 8 && hr < 18
+
+	// 4-Tier Hierarchical Order:
+	// Tier 3: Endpoint / Role (Highest Specificity)
+	// Tier 2: Location
+	// Tier 1: Client / Tenant
+	// Tier 0: Global (Broadest Scope)
+	var tier3, tier2, tier1, tier0 []PolicyGroup
+	for _, p := range policies {
+		if !p.Active {
+			continue
+		}
+		switch p.Scope {
+		case "endpoint":
+			if p.ScopeValue == ev.EndpointID || p.ScopeValue == ep.Hostname {
+				tier3 = append(tier3, p)
+			}
+		case "role":
+			if ep.RoleTag != "" && strings.EqualFold(p.ScopeValue, ep.RoleTag) {
+				tier3 = append(tier3, p)
+			}
+		case "location":
+			if ep.LocationID != "" && p.ScopeValue == ep.LocationID {
+				tier2 = append(tier2, p)
+			}
+		case "client":
+			if p.ScopeValue == ev.TenantID {
+				tier1 = append(tier1, p)
+			}
+		default: // global
+			tier0 = append(tier0, p)
+		}
+	}
+
+	ordered := append(tier3, append(tier2, append(tier1, tier0...)...)...)
+
+	for _, p := range ordered {
+		// 1. Time Schedule Match
+		if p.Schedule == "business_hours" && !isBusinessHours {
+			continue
+		}
+		if p.Schedule == "off_hours" && isBusinessHours {
+			continue
+		}
+
+		// 2. Protocol Match
+		if p.Protocol != "" && p.Protocol != "any" {
+			evProto := "tcp"
+			if ev.Protocol == 17 {
+				evProto = "udp"
+			} else if ev.Protocol == 1 {
+				evProto = "icmp"
+			}
+			if !strings.EqualFold(p.Protocol, evProto) {
+				continue
+			}
+		}
+
+		// 3. Port Match
+		if p.Port > 0 && p.Port != ev.DstPort && p.Port != ev.SrcPort {
+			continue
+		}
+
+		// 4. Rule Type & Value Match
+		ruleVal := strings.TrimSpace(p.RuleValue)
+		switch p.RuleType {
+		case "ip", "cidr":
+			if ruleVal != "" && ruleVal != "*" {
+				if strings.Contains(ruleVal, "/") {
+					_, ipNet, err := net.ParseCIDR(ruleVal)
+					if err == nil {
+						targetIP := net.ParseIP(ev.DstIP)
+						if targetIP == nil || !ipNet.Contains(targetIP) {
+							continue
+						}
+					}
+				} else if ruleVal != ev.DstIP {
+					continue
+				}
+			}
+		case "process":
+			if ruleVal != "" && ruleVal != "*" {
+				procLower := strings.ToLower(ev.ProcessPath)
+				targetLower := strings.ToLower(ruleVal)
+				if !strings.Contains(procLower, targetLower) {
+					continue
+				}
+			}
+		}
+
+		return &p, p.Action
+	}
+
+	return nil, ""
 }
 
 func (s *Store) CreatePolicyGroup(g PolicyGroup) error {
@@ -1444,10 +1803,34 @@ func (s *Store) CreatePolicyGroup(g PolicyGroup) error {
 	if g.Active {
 		actInt = 1
 	}
+	if g.Scope == "" {
+		g.Scope = "global"
+	}
+	if g.Schedule == "" {
+		g.Schedule = "all"
+	}
 
+	query := `
+	INSERT INTO policy_groups (id, tenant_id, scope, scope_value, name, description, schedule, criteria, action, rule_type, rule_value, port, protocol, active, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		scope=excluded.scope,
+		scope_value=excluded.scope_value,
+		name=excluded.name,
+		description=excluded.description,
+		schedule=excluded.schedule,
+		criteria=excluded.criteria,
+		action=excluded.action,
+		rule_type=excluded.rule_type,
+		rule_value=excluded.rule_value,
+		port=excluded.port,
+		protocol=excluded.protocol,
+		active=excluded.active
+	`
 	_, err := s.db.Exec(
-		"INSERT INTO policy_groups (id, tenant_id, name, description, criteria, action, rule_type, rule_value, port, protocol, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		g.ID, g.TenantID, g.Name, g.Description, g.Criteria, g.Action, g.RuleType, g.RuleValue, g.Port, g.Protocol, actInt, g.CreatedAt,
+		query,
+		g.ID, g.TenantID, g.Scope, g.ScopeValue, g.Name, g.Description, g.Schedule,
+		g.Criteria, g.Action, g.RuleType, g.RuleValue, g.Port, g.Protocol, actInt, g.CreatedAt,
 	)
 	return err
 }
@@ -1462,12 +1845,12 @@ func (s *Store) ListPolicyGroups(tenantID string) ([]PolicyGroup, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, name, description, criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups WHERE tenant_id = ? ORDER BY created_at DESC",
+			"SELECT id, tenant_id, COALESCE(scope, 'global'), COALESCE(scope_value, ''), name, description, COALESCE(schedule, 'all'), criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups WHERE tenant_id = ? OR scope = 'global' ORDER BY created_at DESC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, name, description, criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups ORDER BY created_at DESC",
+			"SELECT id, tenant_id, COALESCE(scope, 'global'), COALESCE(scope_value, ''), name, description, COALESCE(schedule, 'all'), criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups ORDER BY created_at DESC",
 		)
 	}
 	if err != nil {
@@ -1480,7 +1863,8 @@ func (s *Store) ListPolicyGroups(tenantID string) ([]PolicyGroup, error) {
 		var g PolicyGroup
 		var actInt int
 		if err := rows.Scan(
-			&g.ID, &g.TenantID, &g.Name, &g.Description, &g.Criteria, &g.Action, &g.RuleType, &g.RuleValue, &g.Port, &g.Protocol, &actInt, &g.CreatedAt,
+			&g.ID, &g.TenantID, &g.Scope, &g.ScopeValue, &g.Name, &g.Description, &g.Schedule,
+			&g.Criteria, &g.Action, &g.RuleType, &g.RuleValue, &g.Port, &g.Protocol, &actInt, &g.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1761,4 +2145,182 @@ func (s *Store) ListAuditLogs(tenantID string, limit int) ([]AuditEntry, error) 
 		list = append(list, a)
 	}
 	return list, nil
+}
+
+func (s *Store) GetEndpoints() []Endpoint {
+	eps, err := s.ListEndpoints("")
+	if err != nil {
+		return []Endpoint{}
+	}
+	return eps
+}
+
+func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data TopologyData
+	data.Nodes = make([]TopologyNode, 0)
+	data.Edges = make([]TopologyEdge, 0)
+
+	nodeMap := make(map[string]TopologyNode)
+	endpoints, err := s.ListEndpoints("")
+	if err != nil {
+		return data, err
+	}
+
+	for _, ep := range endpoints {
+		nType := "managed"
+		risk := "CLEAN"
+		if ep.IsIsolated {
+			risk = "CRITICAL"
+		}
+		nodeMap[ep.IP] = TopologyNode{
+			ID:         ep.IP,
+			Label:      ep.Hostname,
+			Type:       nType,
+			IP:         ep.IP,
+			OS:         ep.OS,
+			Role:       ep.RoleTag,
+			Risk:       risk,
+			IsIsolated: ep.IsIsolated,
+			Group:      ep.RoleTag,
+		}
+	}
+
+	cutoff := time.Now().UTC().Add(-timeWindow)
+	rows, err := s.db.Query(
+		`SELECT src_ip, dst_ip, protocol, dst_port, action, SUM(bytes_in + bytes_out), COUNT(*), MAX(timestamp)
+		 FROM events
+		 WHERE timestamp >= ?
+		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
+		cutoff,
+	)
+	if err != nil {
+		return data, err
+	}
+	defer rows.Close()
+
+	edgeMap := make(map[string]*TopologyEdge)
+
+	for rows.Next() {
+		var srcIP, dstIP, action string
+		var protoInt int
+		var dstPort int
+		var totalBytes int64
+		var flowCount int64
+		var maxTime time.Time
+
+		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &maxTime); err != nil {
+			continue
+		}
+
+		if srcIP == "127.0.0.1" || dstIP == "127.0.0.1" {
+			continue
+		}
+
+		// Ensure source node exists
+		if _, exists := nodeMap[srcIP]; !exists {
+			nodeMap[srcIP] = TopologyNode{
+				ID:    srcIP,
+				Label: srcIP,
+				Type:  "unmanaged",
+				IP:    srcIP,
+				OS:    "Unmanaged Internal Host",
+				Role:  "workstation",
+				Risk:  "MEDIUM",
+				Group: "unmanaged",
+			}
+		}
+
+		// Ensure target node exists
+		if _, exists := nodeMap[dstIP]; !exists {
+			tType := "cloud"
+			group := "Public Cloud / SaaS"
+			risk := "CLEAN"
+
+			if strings.HasPrefix(dstIP, "192.168.") || strings.HasPrefix(dstIP, "10.") || strings.HasPrefix(dstIP, "172.") {
+				tType = "unmanaged"
+				group = "unmanaged"
+				risk = "MEDIUM"
+			} else if action == "BLOCK" {
+				tType = "threat"
+				group = "Threat / Blocked IOC"
+				risk = "CRITICAL"
+			}
+
+			nodeMap[dstIP] = TopologyNode{
+				ID:    dstIP,
+				Label: dstIP,
+				Type:  tType,
+				IP:    dstIP,
+				OS:    group,
+				Role:  tType,
+				Risk:  risk,
+				Group: group,
+			}
+		}
+
+		protoStr := "TCP"
+		if protoInt == 17 {
+			protoStr = "UDP"
+		} else if protoInt == 1 {
+			protoStr = "ICMP"
+		}
+
+		verdict := "clean"
+		if action == "BLOCK" {
+			verdict = "blocked"
+		} else if nodeMap[srcIP].Risk == "CRITICAL" || nodeMap[dstIP].Risk == "CRITICAL" {
+			verdict = "anomalous"
+		}
+
+		edgeKey := fmt.Sprintf("%s->%s:%d", srcIP, dstIP, dstPort)
+		if existing, ok := edgeMap[edgeKey]; ok {
+			existing.FlowCount += flowCount
+			existing.TotalBytes += totalBytes
+			if verdict != "clean" {
+				existing.Verdict = verdict
+			}
+		} else {
+			edgeMap[edgeKey] = &TopologyEdge{
+				ID:         edgeKey,
+				Source:     srcIP,
+				Target:     dstIP,
+				Protocol:   protoStr,
+				Port:       uint16(dstPort),
+				FlowCount:  flowCount,
+				TotalBytes: totalBytes,
+				Verdict:    verdict,
+				LastSeen:   maxTime,
+			}
+		}
+	}
+
+	managedCount := 0
+	unmanagedCount := 0
+	for _, n := range nodeMap {
+		data.Nodes = append(data.Nodes, n)
+		if n.Type == "managed" {
+			managedCount++
+		} else if n.Type == "unmanaged" {
+			unmanagedCount++
+		}
+	}
+
+	anomEdges := 0
+	for _, e := range edgeMap {
+		data.Edges = append(data.Edges, *e)
+		if e.Verdict != "clean" {
+			anomEdges++
+		}
+	}
+
+	data.Metrics.TotalNodes = len(data.Nodes)
+	data.Metrics.TotalEdges = len(data.Edges)
+	data.Metrics.AnomalousEdgeCount = anomEdges
+	data.Metrics.ManagedNodesCount = managedCount
+	data.Metrics.UnmanagedNodesCount = unmanagedCount
+
+	return data, nil
 }
