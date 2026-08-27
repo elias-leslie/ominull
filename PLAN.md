@@ -237,12 +237,12 @@
 
 ---
 
-### Phase 21: Canonical Agent Skill (`ominull`) & Multi-Agent Tool Surface `[IN PROGRESS]`
+### Phase 21: Canonical Agent Skill (`ominull`) & Multi-Agent Tool Surface `[COMPLETED]`
 - **Objective:** Provide a unified canonical skill and CLI tool surface so any AI agent (Antigravity, Claude Code, Codex, TUIs) can interface with, purple-team, train, and evolve Ominull.
-- **Deliverables:**
+- **Deliverables Completed:**
   - **Canonical Skill (`/home/operator/agent-skills/skills/ominull/SKILL.md`):** Comprehensive reference documenting REST API schemas, policy syntax, telemetry queries, and mitigation actions.
-  - **Harness Distribution:** Synced across Claude Code, Codex, and Antigravity/Gemini harnesses via `~/agent-skills/install.sh`.
-  - **CLI Tool Surface (`st ominull` / scripts):** CLI commands for agents to query telemetry, run synthetic purple-team adversary simulations (T1046, T1071, T1048), train signatures, and verify kernel drops.
+  - **Harness Distribution:** Synced across Claude Code (`.claude/skills`), OpenAI Codex (`.codex/skills`), and Antigravity/Gemini (`.gemini/config/skills`) with 0 errors and 0 drift via `st skills audit`.
+  - **CLI Tool Surface (`/srv/workspaces/projects/ominull/scripts/ominull-cli`):** Standalone multi-agent CLI utility for querying telemetry, running synthetic adversary simulations, training device signatures, isolating rogue hosts, and conversational Copilot ChatOps.
 
 ---
 

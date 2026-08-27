@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HUB_URL="${OMINULL_HUB_URL:-http://10.0.0.58:9999}"
+API_KEY="${OMINULL_API_KEY:-<redacted-rotated-key>}"
+
+call_api() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+
+    if [ -n "$data" ]; then
+        curl -s -X "$method" \
+            -H "X-API-Key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$data" \
+            "${HUB_URL}${endpoint}"
+    else
+        curl -s -X "$method" \
+            -H "X-API-Key: $API_KEY" \
+            "${HUB_URL}${endpoint}"
+    fi
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    status)
+        echo "=== Ominull Hub Status (${HUB_URL}) ==="
+        call_api GET "/api/v1/hierarchy" | jq . 2>/dev/null || call_api GET "/api/v1/hierarchy"
+        echo ""
+        echo "=== Online Endpoints ==="
+        call_api GET "/api/v1/endpoints" | jq . 2>/dev/null || call_api GET "/api/v1/endpoints"
+        ;;
+
+    scan)
+        subnet="${1:-10.0.0.0/24}"
+        profile="${2:-standard}"
+        echo "[*] Initiating ${profile} network sweep on ${subnet}..."
+        resp=$(call_api POST "/api/v1/scanner/scan" "{\"subnet\":\"$subnet\",\"profile\":\"$profile\"}")
+        echo "$resp" | jq . 2>/dev/null || echo "$resp"
+        scan_id=$(echo "$resp" | jq -r .scan_id 2>/dev/null || echo "")
+        if [ -n "$scan_id" ] && [ "$scan_id" != "null" ]; then
+            echo "[*] Polling scan progress (ID: $scan_id)..."
+            while true; do
+                sleep 1
+                st=$(call_api GET "/api/v1/scanner/status?id=$scan_id")
+                pct=$(echo "$st" | jq -r .progress 2>/dev/null || echo "0")
+                status=$(echo "$st" | jq -r .status 2>/dev/null || echo "running")
+                found=$(echo "$st" | jq -r .found_count 2>/dev/null || echo "0")
+                echo -ne "\r[*] Progress: ${pct}% (${found} live hosts found)..."
+                if [ "$status" = "completed" ] || [ "$status" = "failed" ]; then
+                    echo -e "\n[+] Scan finished with status: ${status}"
+                    break
+                fi
+            done
+        fi
+        ;;
+
+    assets)
+        echo "=== Discovered Subnet Assets ==="
+        call_api GET "/api/v1/scanner/results" | jq . 2>/dev/null || call_api GET "/api/v1/scanner/results"
+        ;;
+
+    train)
+        if [ "$#" -lt 4 ]; then
+            echo "Usage: ominull-cli train <ip> <device_name> <vendor> <category>"
+            exit 1
+        fi
+        ip="$1"
+        name="$2"
+        vendor="$3"
+        cat="$4"
+        echo "[*] Training OS Fingerprint for $ip -> $name ($vendor, $cat)..."
+        call_api POST "/api/v1/scanner/feedback" "{\"ip\":\"$ip\",\"name\":\"$name\",\"vendor\":\"$vendor\",\"category\":\"$cat\"}" | jq .
+        ;;
+
+    alerts)
+        echo "=== Active Behavioral Anomaly Alerts ==="
+        call_api GET "/api/v1/anomalies/alerts" | jq . 2>/dev/null || call_api GET "/api/v1/anomalies/alerts"
+        ;;
+
+    investigate)
+        if [ "$#" -lt 1 ]; then
+            echo "Usage: ominull-cli investigate <alert_id>"
+            exit 1
+        fi
+        alert_id="$1"
+        echo "[*] Investigating Alert $alert_id with Autonomous CyberOps Copilot..."
+        call_api POST "/api/v1/copilot/investigate" "{\"alert_id\":\"$alert_id\"}" | jq .
+        ;;
+
+    quarantine-mesh)
+        if [ "$#" -lt 1 ]; then
+            echo "Usage: ominull-cli quarantine-mesh <target_ip> [target_mac] [reason]"
+            exit 1
+        fi
+        tip="$1"
+        tmac="${2:-}"
+        reason="${3:-Subnet lateral quarantine from CLI}"
+        echo "[*] Enforcing Subnet Quarantine Mesh on $tip..."
+        call_api POST "/api/v1/mesh/quarantine" "{\"target_ip\":\"$tip\",\"target_mac\":\"$tmac\",\"reason\":\"$reason\"}" | jq .
+        ;;
+
+    unquarantine-mesh)
+        if [ "$#" -lt 1 ]; then
+            echo "Usage: ominull-cli unquarantine-mesh <target_ip>"
+            exit 1
+        fi
+        tip="$1"
+        echo "[*] Lifting Subnet Quarantine Mesh on $tip..."
+        call_api POST "/api/v1/mesh/unquarantine" "{\"target_ip\":\"$tip\"}" | jq .
+        ;;
+
+    chat)
+        if [ "$#" -lt 1 ]; then
+            echo "Usage: ominull-cli chat \"<query>\""
+            exit 1
+        fi
+        msg="$*"
+        echo "[*] Asking CyberOps Copilot: \"$msg\"..."
+        call_api POST "/api/v1/copilot/chat" "{\"message\":\"$msg\"}" | jq -r .reply
+        ;;
+
+    deploy)
+        if [ "$#" -lt 1 ]; then
+            echo "Usage: ominull-cli deploy <target_ip> [user] [password]"
+            exit 1
+        fi
+        tip="$1"
+        user="${2:-operator}"
+        pass="${3:-}"
+        echo "[*] Dispatching 1-Click Remote Push Deployment to $tip ($user)..."
+        call_api POST "/api/v1/deployer/push" "{\"target_ip\":\"$tip\",\"ssh_user\":\"$user\",\"auth_method\":\"password\",\"password\":\"$pass\",\"sudo_password\":\"$pass\"}" | jq .
+        ;;
+
+    help|*)
+        echo "Ominull CyberOps CLI Utility"
+        echo "Usage: ominull-cli <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  status                       View fleet hierarchy, tenants, and active endpoints"
+        echo "  scan [subnet] [profile]      Run standard or aggressive asset discovery sweep"
+        echo "  assets                       List all discovered subnet assets, OS guesses, weakpoints"
+        echo "  train <ip> <name> <v> <cat>  Train / refine dynamic fingerprint engine with ground truth"
+        echo "  alerts                       List active behavioral anomaly alerts & outliers"
+        echo "  investigate <alert_id>       Execute autonomous AI forensic triage on an alert"
+        echo "  quarantine-mesh <ip>         Enforce subnet-wide lateral mesh drop for rogue host"
+        echo "  unquarantine-mesh <ip>       Lift subnet-wide mesh quarantine"
+        echo "  chat \"<query>\"               Query embedded CyberOps Copilot in natural language"
+        echo "  deploy <ip> [user] [pass]    Push-deploy agent over SSH to unmanaged asset"
+        ;;
+esac
