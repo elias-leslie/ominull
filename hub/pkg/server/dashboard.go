@@ -1019,107 +1019,167 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- DEPLOY AGENT INTERACTIVE WIZARD MODAL (WAZUH-STYLE) -->
+    <!-- DEPLOY AGENT INTERACTIVE WIZARD MODAL (PUSH + 1-LINER) -->
     <div id="deploy-modal" class="modal-overlay">
         <div class="modal-content" style="width: 780px;">
             <div class="modal-title">
-                <span style="display: flex; align-items: center; gap: 8px;">🚀 Deploy New Endpoint Agent</span>
+                <span style="display: flex; align-items: center; gap: 8px;">🚀 Onboard Endpoint Agent</span>
                 <button class="btn" style="padding: 2px 8px;" onclick="closeDeployModal()">✕</button>
             </div>
             
-            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">
-                Generate an unattended 1-liner deployment command pre-configured with your organization, location, and zero-trust edge tokens.
+            <div style="display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
+                <button id="deploy-tab-push" class="btn btn-cyan" style="font-weight: 700; font-size: 12px;" onclick="switchDeployMode('push')">🚀 Direct Push from Hub (SSH / WinRM)</button>
+                <button id="deploy-tab-manual" class="btn" style="font-weight: 700; font-size: 12px;" onclick="switchDeployMode('manual')">📋 Manual Unattended Script</button>
             </div>
 
-            <!-- Step 1: Platform Selection -->
-            <div style="margin-bottom: 16px;">
-                <label class="form-label">1. Select Target Operating System</label>
-                <div style="display: flex; gap: 10px;">
-                    <button id="plat-btn-windows" class="btn btn-cyan" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('windows')">
-                        🪟 Windows (WFP / Ring-0)
-                    </button>
-                    <button id="plat-btn-linux" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('linux')">
-                        🐧 Linux (eBPF / TC)
-                    </button>
-                    <button id="plat-btn-macos" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('macos')">
-                        🍏 macOS (PF Anchor)
-                    </button>
+            <!-- MODE A: DIRECT REMOTE PUSH (RECOMMENDED) -->
+            <div id="deploy-mode-push">
+                <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 14px;">
+                    Deploy, configure, and start the Ominull Agent on a remote target host over SSH or WinRM directly from the Hub with zero interactive steps on the endpoint.
                 </div>
-            </div>
-
-            <!-- Step 2: Tenant & Location Selection -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
-                <div class="form-group" style="margin-bottom: 0;">
-                    <label class="form-label">2. Target Client Organization</label>
-                    <select id="deploy-tenant" class="form-control" onchange="updateDeployLocationOptions(); generateDeployCommand();">
-                        <option value="default">Home Network</option>
-                    </select>
-                </div>
-                <div class="form-group" style="margin-bottom: 0;">
-                    <label class="form-label">Location / Site Subnet</label>
-                    <select id="deploy-location" class="form-control" onchange="generateDeployCommand();">
-                        <option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>
-                    </select>
-                </div>
-            </div>
-
-            <!-- Step 3: Endpoint Role & Server URL -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
-                <div class="form-group" style="margin-bottom: 0;">
-                    <label class="form-label">3. Endpoint Role / Function</label>
-                    <select id="deploy-role" class="form-control" onchange="generateDeployCommand();">
-                        <option value="workstation">Workstation (Standard PC / Laptop)</option>
-                        <option value="db-server">Database Server (Postgres / MySQL / SQLite)</option>
-                        <option value="web-server">Web / Application Server</option>
-                        <option value="incident-response">🚨 Incident Response Target (Live IR)</option>
-                        <option value="executive-laptop">Executive / High-Value Laptop</option>
-                    </select>
-                </div>
-                <div class="form-group" style="margin-bottom: 0;">
-                    <label class="form-label">Hub Server Address (WAN / LAN)</label>
-                    <input type="text" id="deploy-hub-url" class="form-control" value="https://omi.example.com" oninput="generateDeployCommand();">
-                </div>
-            </div>
-
-            <!-- Step 4: Cloudflare Zero Trust Authentication (Optional / Pre-fill) -->
-            <div style="background: rgba(6, 182, 212, 0.05); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <div>
-                        <span style="font-size: 11px; font-weight: 700; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.5px;">4. Cloudflare Zero Trust Edge Service Tokens</span>
-                        <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Required for WAN endpoints connecting over the Internet via Cloudflare Tunnel.</div>
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Target IP / Hostname</label>
+                        <input type="text" id="push-target-ip" class="form-control" placeholder="10.0.0.57">
                     </div>
-                    <label style="font-size: 11px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                        <input type="checkbox" id="deploy-save-tokens" checked onchange="saveTokensPreference()"> Remember in browser
-                    </label>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Port</label>
+                        <input type="number" id="push-port" class="form-control" value="22">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Target OS</label>
+                        <select id="push-os" class="form-control">
+                            <option value="auto">Auto-Detect</option>
+                            <option value="linux">Linux (eBPF)</option>
+                            <option value="windows">Windows (WFP)</option>
+                            <option value="macos">macOS (PF)</option>
+                        </select>
+                    </div>
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">SSH / WinRM Username</label>
+                        <input type="text" id="push-username" class="form-control" value="root">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Target Role</label>
+                        <select id="push-role" class="form-control">
+                            <option value="workstation">Workstation (Standard PC / Laptop)</option>
+                            <option value="server">Application Server</option>
+                            <option value="db-server">Database Server</option>
+                            <option value="incident-response">🚨 Incident Response Target</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 12px;">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Remote Password / Sudo Password</label>
+                        <input type="password" id="push-password" class="form-control" placeholder="Enter target root or administrator password...">
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+                    <span id="push-status-badge" style="font-size: 12px; font-weight: 700; color: var(--text-muted);">Ready to push</span>
+                    <button id="btn-launch-push" class="btn btn-cyan" style="font-weight: 800; padding: 8px 18px;" onclick="launchPushDeployment()">🚀 Launch Push Onboarding</button>
+                </div>
+                <div id="push-terminal-box" style="display:none; margin-top:14px; background:#080c14; border:1px solid var(--border-highlight); border-radius:6px; padding:12px; font-family:monospace; font-size:12px; color:#34d399; max-height:220px; overflow-y:auto; line-height:1.5; white-space:pre-wrap;"></div>
+            </div>
+
+            <!-- MODE B: MANUAL 1-LINER SCRIPT -->
+            <div id="deploy-mode-manual" style="display: none;">
+                <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">
+                    Generate an unattended 1-liner deployment command pre-configured with your organization, location, and zero-trust edge tokens.
+                </div>
+
+                <!-- Step 1: Platform Selection -->
+                <div style="margin-bottom: 16px;">
+                    <label class="form-label">1. Select Target Operating System</label>
+                    <div style="display: flex; gap: 10px;">
+                        <button id="plat-btn-windows" class="btn btn-cyan" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('windows')">
+                            🪟 Windows (WFP / Ring-0)
+                        </button>
+                        <button id="plat-btn-linux" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('linux')">
+                            🐧 Linux (eBPF / TC)
+                        </button>
+                        <button id="plat-btn-macos" class="btn" style="flex: 1; padding: 10px; font-size: 13px; font-weight: 700; justify-content: center;" onclick="selectDeployPlatform('macos')">
+                            🍏 macOS (PF Anchor)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Step 2: Tenant & Location Selection -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client ID (e.g. xxxxx.access)</label>
-                        <input type="text" id="deploy-cf-id" class="form-control" placeholder="9cfabb152a7bd00bfd1355139039d084.access" oninput="generateDeployCommand();">
+                        <label class="form-label">2. Target Client Organization</label>
+                        <select id="deploy-tenant" class="form-control" onchange="updateDeployLocationOptions(); generateDeployCommand();">
+                            <option value="default">Home Network</option>
+                        </select>
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client Secret</label>
-                        <div style="display: flex; gap: 6px;">
-                            <input type="password" id="deploy-cf-secret" class="form-control" placeholder="Paste Cloudflare Client Secret..." oninput="generateDeployCommand();" style="flex: 1;">
-                            <button id="toggle-secret-btn" class="btn" style="padding: 6px 12px; font-size: 13px;" onclick="toggleSecretVisibility()" title="Toggle secret visibility">👁️</button>
+                        <label class="form-label">Location / Site Subnet</label>
+                        <select id="deploy-location" class="form-control" onchange="generateDeployCommand();">
+                            <option value="loc-home">Primary Home LAN (10.0.0.0/24)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Step 3: Endpoint Role & Server URL -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label">3. Endpoint Role / Function</label>
+                        <select id="deploy-role" class="form-control" onchange="generateDeployCommand();">
+                            <option value="workstation">Workstation (Standard PC / Laptop)</option>
+                            <option value="db-server">Database Server (Postgres / MySQL / SQLite)</option>
+                            <option value="web-server">Web / Application Server</option>
+                            <option value="incident-response">🚨 Incident Response Target (Live IR)</option>
+                            <option value="executive-laptop">Executive / High-Value Laptop</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label">Hub Server Address (WAN / LAN)</label>
+                        <input type="text" id="deploy-hub-url" class="form-control" value="https://omi.example.com" oninput="generateDeployCommand();">
+                    </div>
+                </div>
+
+                <!-- Step 4: Cloudflare Zero Trust Authentication -->
+                <div style="background: rgba(6, 182, 212, 0.05); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <div>
+                            <span style="font-size: 11px; font-weight: 700; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.5px;">4. Cloudflare Zero Trust Edge Service Tokens</span>
+                            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Required for WAN endpoints connecting over the Internet via Cloudflare Tunnel.</div>
+                        </div>
+                        <label style="font-size: 11px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="checkbox" id="deploy-save-tokens" checked onchange="saveTokensPreference()"> Remember in browser
+                        </label>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client ID (e.g. xxxxx.access)</label>
+                            <input type="text" id="deploy-cf-id" class="form-control" placeholder="9cfabb152a7bd00bfd1355139039d084.access" oninput="generateDeployCommand();">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label" style="font-size: 11px; color: var(--text-muted);">Client Secret</label>
+                            <div style="display: flex; gap: 6px;">
+                                <input type="password" id="deploy-cf-secret" class="form-control" placeholder="Paste Cloudflare Client Secret..." oninput="generateDeployCommand();" style="flex: 1;">
+                                <button id="toggle-secret-btn" class="btn" style="padding: 6px 12px; font-size: 13px;" onclick="toggleSecretVisibility()" title="Toggle secret visibility">👁️</button>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- Step 5: Generated One-Liner -->
-            <div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <label class="form-label" style="margin-bottom: 0;">5. Run Command on Endpoint (Administrator / Root)</label>
-                        <span id="copy-toast" style="font-size: 11px; font-weight: 700; color: var(--green); opacity: 0; transition: opacity 0.2s ease;">✓ Copied to Clipboard!</span>
-                    </div>
-                    <button class="btn btn-cyan" style="padding: 5px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;" onclick="copyDeployCommand()">
-                        📋 Copy Command
-                    </button>
-                </div>
+                <!-- Step 5: Generated One-Liner -->
                 <div>
-                    <textarea id="deploy-command-output" readonly style="width: 100%; height: 105px; background: #080c14; border: 1px solid var(--border-highlight); border-radius: 6px; padding: 12px 14px; font-family: monospace; font-size: 12px; line-height: 1.5; color: #34d399; resize: none; outline: none; word-break: break-all;"></textarea>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <label class="form-label" style="margin-bottom: 0;">5. Run Command on Endpoint (Administrator / Root)</label>
+                            <span id="copy-toast" style="font-size: 11px; font-weight: 700; color: var(--green); opacity: 0; transition: opacity 0.2s ease;">✓ Copied to Clipboard!</span>
+                        </div>
+                        <button class="btn btn-cyan" style="padding: 5px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;" onclick="copyDeployCommand()">
+                            📋 Copy Command
+                        </button>
+                    </div>
+                    <div>
+                        <textarea id="deploy-command-output" readonly style="width: 100%; height: 105px; background: #080c14; border: 1px solid var(--border-highlight); border-radius: 6px; padding: 12px 14px; font-family: monospace; font-size: 12px; line-height: 1.5; color: #34d399; resize: none; outline: none; word-break: break-all;"></textarea>
+                    </div>
                 </div>
             </div>
 
@@ -2064,10 +2124,33 @@ const dashboardHTML = `<!DOCTYPE html>
             });
         }
 
-        /* DEPLOY AGENT MODAL (WAZUH-STYLE) */
+        /* DEPLOY AGENT MODAL (PUSH + WAZUH-STYLE 1-LINER) */
         var currentDeployPlatform = "windows";
+        var currentDeployMode = "push";
+        var activePushJobInterval = null;
 
-        function openDeployModal() {
+        function switchDeployMode(mode) {
+            currentDeployMode = mode;
+            var pushTab = document.getElementById("deploy-tab-push");
+            var manualTab = document.getElementById("deploy-tab-manual");
+            var pushPanel = document.getElementById("deploy-mode-push");
+            var manualPanel = document.getElementById("deploy-mode-manual");
+
+            if (mode === "push") {
+                pushTab.className = "btn btn-cyan";
+                manualTab.className = "btn";
+                pushPanel.style.display = "block";
+                manualPanel.style.display = "none";
+            } else {
+                pushTab.className = "btn";
+                manualTab.className = "btn btn-cyan";
+                pushPanel.style.display = "none";
+                manualPanel.style.display = "block";
+                generateDeployCommand();
+            }
+        }
+
+        function openDeployModal(targetIp, targetOs) {
             // Load remembered tokens from localStorage
             if (localStorage.getItem("ominull_save_cf_tokens") !== "false") {
                 document.getElementById("deploy-cf-id").value = localStorage.getItem("ominull_cf_id") || "";
@@ -2076,21 +2159,130 @@ const dashboardHTML = `<!DOCTYPE html>
             }
             populateDeployDropdowns();
             selectDeployPlatform(currentDeployPlatform);
+
+            if (targetIp) {
+                document.getElementById("push-target-ip").value = targetIp;
+            }
+            if (targetOs) {
+                var osNorm = targetOs.toLowerCase();
+                if (osNorm.indexOf("win") !== -1) {
+                    document.getElementById("push-os").value = "windows";
+                    selectDeployPlatform("windows");
+                } else if (osNorm.indexOf("mac") !== -1 || osNorm.indexOf("darwin") !== -1) {
+                    document.getElementById("push-os").value = "macos";
+                    selectDeployPlatform("macos");
+                } else {
+                    document.getElementById("push-os").value = "linux";
+                    selectDeployPlatform("linux");
+                }
+            }
+
+            switchDeployMode("push");
+            document.getElementById("push-terminal-box").style.display = "none";
+            document.getElementById("push-status-badge").innerText = "Ready to push";
+            document.getElementById("push-status-badge").style.color = "var(--text-muted)";
+            document.getElementById("btn-launch-push").disabled = false;
+            document.getElementById("btn-launch-push").innerText = "🚀 Launch Push Onboarding";
+
             document.getElementById("deploy-modal").style.display = "flex";
         }
 
         function closeDeployModal() {
+            if (activePushJobInterval) {
+                clearInterval(activePushJobInterval);
+                activePushJobInterval = null;
+            }
             document.getElementById("deploy-modal").style.display = "none";
+        }
+
+        function launchPushDeployment() {
+            var targetIp = document.getElementById("push-target-ip").value.trim();
+            var port = parseInt(document.getElementById("push-port").value, 10) || 22;
+            var os = document.getElementById("push-os").value;
+            var username = document.getElementById("push-username").value.trim() || "root";
+            var password = document.getElementById("push-password").value;
+            var role = document.getElementById("push-role").value;
+            var tenantId = document.getElementById("deploy-tenant").value || "default";
+            var locId = document.getElementById("deploy-location").value || "loc-home";
+            var hubUrl = document.getElementById("deploy-hub-url").value.trim() || "https://omi.example.com";
+
+            if (!targetIp) return alert("Please specify the target IP address.");
+
+            var btn = document.getElementById("btn-launch-push");
+            var badge = document.getElementById("push-status-badge");
+            var term = document.getElementById("push-terminal-box");
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Pushing Agent...";
+            badge.innerText = "Deployment in progress...";
+            badge.style.color = "var(--amber)";
+            term.style.display = "block";
+            term.innerText = "[*] Dispatching remote push onboarding job to " + targetIp + ":" + port + "...\n";
+
+            fetchAPI("/api/v1/deployer/push", "POST", {
+                target_ip: targetIp,
+                port: port,
+                os: os,
+                username: username,
+                password: password,
+                role: role,
+                tenant_id: tenantId,
+                location_id: locId,
+                hub_url: hubUrl
+            }).then(function(res) {
+                var jobId = res.job_id;
+                term.innerText += "[+] Job ID: " + jobId + " queued. Streaming remote console...\n";
+
+                activePushJobInterval = setInterval(function() {
+                    fetchAPI("/api/v1/deployer/status?id=" + jobId).then(function(job) {
+                        if (!job) return;
+                        if (job.logs && job.logs.length > 0) {
+                            term.innerText = job.logs.join("\n");
+                            term.scrollTop = term.scrollHeight;
+                        }
+
+                        if (job.status === "success") {
+                            clearInterval(activePushJobInterval);
+                            activePushJobInterval = null;
+                            btn.disabled = false;
+                            btn.innerText = "✓ Push Completed";
+                            badge.innerText = "✓ Successfully Onboarded";
+                            badge.style.color = "var(--green)";
+                            loadHierarchy();
+                            if (document.getElementById("tab-scanner").classList.contains("active")) {
+                                fetchScannerData();
+                            }
+                        } else if (job.status === "failed") {
+                            clearInterval(activePushJobInterval);
+                            activePushJobInterval = null;
+                            btn.disabled = false;
+                            btn.innerText = "❌ Push Failed";
+                            badge.innerText = "Deployment Failed";
+                            badge.style.color = "var(--red)";
+                        }
+                    }).catch(function(e) {
+                        console.error(e);
+                    });
+                }, 800);
+            }).catch(function(err) {
+                btn.disabled = false;
+                btn.innerText = "🚀 Launch Push Onboarding";
+                badge.innerText = "Push Error: " + err;
+                badge.style.color = "var(--red)";
+                term.innerText += "[-] HTTP dispatch error: " + err + "\n";
+            });
         }
 
         function selectDeployPlatform(plat) {
             currentDeployPlatform = plat;
             ["windows", "linux", "macos"].forEach(function(p) {
                 var btn = document.getElementById("plat-btn-" + p);
-                if (p === plat) {
-                    btn.className = "btn btn-cyan";
-                } else {
-                    btn.className = "btn";
+                if (btn) {
+                    if (p === plat) {
+                        btn.className = "btn btn-cyan";
+                    } else {
+                        btn.className = "btn";
+                    }
                 }
             });
             generateDeployCommand();
@@ -2278,7 +2470,7 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<td>' +
                         '<div style="display:flex;gap:4px;flex-direction:column;">' +
                             '<button class="btn" style="padding:3px 8px;font-size:11px;" onclick="openTrainModal(\'' + a.ip + '\')">🎓 Train</button>' +
-                            (!a.is_managed ? '<button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="openDeployForIP(\'' + a.ip + '\')">🚀 Deploy</button>' : '') +
+                            (!a.is_managed ? '<button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="openDeployForIP(\'' + a.ip + '\', \'' + (a.os_guess || 'linux').replace(/'/g, "\\'") + '\')">🚀 Deploy</button>' : '') +
                         '</div>' +
                     '</td>' +
                 '</tr>';
@@ -2375,8 +2567,8 @@ const dashboardHTML = `<!DOCTYPE html>
             });
         }
 
-        function openDeployForIP(ip) {
-            openDeployModal();
+        function openDeployForIP(ip, osGuess) {
+            openDeployModal(ip, osGuess);
         }
 
         /* FORCE-DIRECTED COMMUNICATIONS TOPOLOGY GRAPH */

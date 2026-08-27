@@ -187,6 +187,66 @@
 
 ---
 
+### Phase 16: Automated 1-Click Remote Push-Deployment Engine `[COMPLETED]`
+- **Objective:** Turn discovered network assets into active endpoints via pure-Go SSH and WinRM jump onboarding directly from the Hub.
+- **Deliverables Completed:**
+  - **Hub Jump Engine (`hub/pkg/deployer`):** Go-native SSH and WinRM/PowerShell remoting clients for Linux, Windows, and macOS.
+  - **Credential Management & Jump Vault:** Securely handles ephemeral or vaulted SSH keypairs, passwords, and service account tokens.
+  - **Automated Service Provisioning:** Pushes agent binaries, registers system services (`systemd`, Windows Service Manager, LaunchDaemon), and validates live telemetry stream within 5 seconds.
+  - **UI Integration:** 1-Click "Deploy Agent" modal with dual mode (Zero-Touch Push + Manual One-Liner) and real-time streaming console logs.
+
+---
+
+### Phase 17: Subnet Quarantine Mesh (Lateral Shield for Rogue/Unmanaged Assets) `[IN PROGRESS]`
+- **Objective:** Enable kernel-level network isolation for rogue or unmanaged devices without requiring an agent on the target device.
+- **Deliverables:**
+  - **Mesh Command Protocol:** `MESH_ISOLATE_PEER` directive broadcast to all managed endpoints sharing an L2 subnet.
+  - **Peer Kernel Suppression:**
+    - Linux: eBPF TC classifier filter dropping ingress/egress frames matching target MAC/IP on local interface.
+    - Windows: WFP callout filter dropping traffic to target MAC/IP across all network profiles.
+    - macOS: `pfctl` anchor inserting dynamic rapid-drop packet rules.
+  - **UI Integration:** 1-Click "Quarantine Rogue Asset" button in Asset Table and Topology Graph Inspector.
+
+---
+
+### Phase 18: Stream DPI & In-Flight TLS ClientHello SNI / DNS Dissection `[PENDING]`
+- **Objective:** Extract rich protocol metadata in-flight directly within the flow sniffer.
+- **Deliverables:**
+  - **TLS SNI Dissector (`agent/src/dpi`):** Parses initial TLS `ClientHello` packets on port 443 to extract the Server Name Indication hostname before encryption.
+  - **DNS Query/Response Sniffer:** Extracts queried domain names and resolved IP addresses on port 53.
+  - **Graph Enrichment:** Enriches raw IP nodes with fully qualified domain names (FQDNs) and DGA anomaly detection.
+
+---
+
+### Phase 19: Cross-Platform Native Packaging & Release Pipeline `[PENDING]`
+- **Objective:** Build enterprise distribution packages for frictionless mass rollout.
+- **Deliverables:**
+  - **Linux:** Native `.deb` (Debian/Ubuntu) and `.rpm` (RHEL/Rocky/Fedora) packages with systemd unit integration.
+  - **Windows:** Native `.msi` package with silent `/qn` install and automated service start.
+  - **macOS:** Signed `.pkg` installer with LaunchDaemon plist.
+  - **Hub Distribution:** Downloadable directly from `/download/ominull-agent-v1.1.{deb,msi,pkg}`.
+
+---
+
+### Phase 20: Embedded Autonomous Agentic Copilot & Cognitive Tier `[PENDING]`
+- **Objective:** Build an embedded 24/7 AI security copilot running natively inside `ominull-hub` in LXC 150.
+- **Deliverables:**
+  - **Multi-Model Provider Engine (`hub/pkg/copilot`):** Pluggable backends for Local Ollama (`http://10.0.0.39:11434` on `hypervisor-01`), Google Gemini Free Tier, and OpenAI/Claude.
+  - **Autonomous Triage Loop:** Ingests Critical/High anomalies, pulls process lineage and DNS history, investigates root cause, and generates natural-language forensic briefings.
+  - **Automated Signature Refinement:** Reads unknown device banners and HTTP/SSDP payloads, researches models, and calls `POST /api/v1/scanner/feedback` to train the fingerprint engine.
+  - **ChatOps Console:** Interactive natural-language prompt box in Web UI for conversational policy authoring and threat queries.
+
+---
+
+### Phase 21: Canonical Agent Skill (`ominull`) & Multi-Agent Tool Surface `[PENDING]`
+- **Objective:** Provide a unified canonical skill and CLI tool surface so any AI agent (Antigravity, Claude Code, Codex, TUIs) can interface with, purple-team, train, and evolve Ominull.
+- **Deliverables:**
+  - **Canonical Skill (`/home/operator/agent-skills/skills/ominull/SKILL.md`):** Comprehensive reference documenting REST API schemas, policy syntax, telemetry queries, and mitigation actions.
+  - **Harness Distribution:** Synced across Claude Code, Codex, and Antigravity/Gemini harnesses via `~/agent-skills/install.sh`.
+  - **CLI Tool Surface (`st ominull` / scripts):** CLI commands for agents to query telemetry, run synthetic purple-team adversary simulations (T1046, T1071, T1048), train signatures, and verify kernel drops.
+
+---
+
 ## 4. Verification & Quality Gates
 
 1. **Pass Criteria:** 100% automated test pass, zero kernel panics / BSODs, zero memory leaks, and sub-millisecond policy evaluation.

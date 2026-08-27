@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
+	"ominull/hub/pkg/deployer"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
@@ -37,6 +38,7 @@ type Server struct {
 	detector   *detector.Engine
 	pki        *pki.Manager
 	scanner    *scanner.Scanner
+	deployer   *deployer.Deployer
 	adminKey   string
 	binaryDir  string
 	hubURL     string
@@ -84,6 +86,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 		ti:         threatintel.New(store),
 		pki:        pkiMgr,
 		scanner:    scanner.New(store),
+		deployer:   deployer.New(store, hubURL, adminKey),
 		adminKey:   adminKey,
 		binaryDir:  binaryDir,
 		hubURL:     hubURL,
@@ -178,6 +181,11 @@ func (s *Server) Start(addr string) error {
 
 	// 8. Visual Communications Topology Graph API
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(s.handleTopologyGraph))
+
+	// 9. Remote Push-Deployment Engine API
+	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(s.handleDeployerPush))
+	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(s.handleDeployerStatus))
+	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(s.handleDeployerJobs))
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
@@ -1627,4 +1635,52 @@ func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(topoData)
+}
+
+/* 9. REMOTE PUSH-DEPLOYMENT ENGINE HANDLERS */
+
+func (s *Server) handleDeployerPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req deployer.DeployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jobID, err := s.deployer.DispatchPush(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"job_id":    jobID,
+		"target_ip": req.TargetIP,
+		"status":    "running",
+	})
+}
+
+func (s *Server) handleDeployerStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := r.URL.Query().Get("id")
+	if jobID == "" {
+		http.Error(w, "missing job id", http.StatusBadRequest)
+		return
+	}
+	st, err := s.deployer.GetJobStatus(jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(st)
+}
+
+func (s *Server) handleDeployerJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := s.deployer.ListJobs()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(jobs)
 }
