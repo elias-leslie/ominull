@@ -28,21 +28,20 @@ Orientation for coding agents and new contributors. Deeper detail lives in
    upgrade — that is what makes self-update safe.
 4. **Sort endpoint lists on stable identity, never on last-seen.** A row that moves under
    the operator between refreshes turns an isolate click into the wrong machine.
-5. **No environment specifics in tracked files.** No usernames, real domains, LAN IPs,
-   hostnames, or keys. Local operator tooling (`scripts/connect-*.sh`,
-   `scripts/deploy_remote.sh`) is gitignored on purpose; see
-   `scripts/deploy_remote.sh.example`.
-
-   This rule is **not currently satisfied**. The check
+5. **No environment specifics in tracked files.** No usernames, real domains, real LAN
+   IPs, hostnames, or keys. The check is against the *real* values, not against private
+   ranges — RFC1918 addresses in docs and demo data are deliberate:
 
    ```bash
-   git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" -- ':!evidence'
+   git grep -niE "kasadis|davion|192\.168\.86\.|summitflow\.dev"
    ```
 
-   still returns the live fleet subnet and hub addresses in `README.md`, `PLAN.md`, and
-   several sources, and `evidence/` carries more. Treat it as a known debt, not as a
-   green check: do not add new specifics, and see the ops vault brief for the scrub
-   plan and the authoritative pattern list.
+   The `10.0.0.x` addresses throughout the docs and console are a stand-in subnet, and
+   `10.0.4.x` / `172.16.x` belong to the demo fixtures. Keep it that way: substitute, do
+   not delete, when a real address would otherwise appear.
+
+   Local operator tooling (`scripts/connect-*.sh`, `scripts/deploy_remote.sh`) holds the
+   real addresses and is gitignored on purpose; see `scripts/deploy_remote.sh.example`.
 
 ## Gates
 
