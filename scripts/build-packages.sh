@@ -37,13 +37,25 @@ Description: Ominull Linux Kernel Threat Nullification & Flow Telemetry Agent
  off-hours anomaly detection, and autonomous lateral threat containment.
 DEB_CONTROL
 
+# The agent's hub URL and enrolment key live in an EnvironmentFile that the package
+# creates once and never overwrites. This is what makes self-update safe: an upgrade
+# replaces the binary and the unit, but an endpoint keeps the credentials it was
+# enrolled with instead of reverting to placeholders and dropping off the fleet.
 cat << 'DEB_POSTINST' > "${DEB_DIR}/DEBIAN/postinst"
 #!/bin/sh
 set -e
+mkdir -p /etc/ominull
+if [ ! -f /etc/ominull/agent.conf ]; then
+    cat << 'CONF' > /etc/ominull/agent.conf
+# Ominull agent runtime arguments. Written once at install and preserved on upgrade.
+OMINULL_ARGS=--hub https://omi.example.com --key <provision-via-bootstrap> --role workstation --location loc-default
+CONF
+    chmod 600 /etc/ominull/agent.conf
+fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
-    systemctl enable ominull.service || true
-    systemctl start ominull.service || true
+    systemctl enable ominull-agent.service || true
+    systemctl restart ominull-agent.service || true
 fi
 exit 0
 DEB_POSTINST
@@ -53,14 +65,17 @@ cat << 'DEB_PRERM' > "${DEB_DIR}/DEBIAN/prerm"
 #!/bin/sh
 set -e
 if [ -d /run/systemd/system ]; then
-    systemctl stop ominull.service || true
-    systemctl disable ominull.service || true
+    systemctl stop ominull-agent.service || true
+    # Only a full removal should disable the unit; an upgrade must leave it enabled.
+    if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+        systemctl disable ominull-agent.service || true
+    fi
 fi
 exit 0
 DEB_PRERM
 chmod 755 "${DEB_DIR}/DEBIAN/prerm"
 
-cat << 'DEB_SERVICE' > "${DEB_DIR}/etc/systemd/system/ominull.service"
+cat << 'DEB_SERVICE' > "${DEB_DIR}/etc/systemd/system/ominull-agent.service"
 [Unit]
 Description=Ominull Linux Native Threat Nullification Daemon
 After=network.target network-online.target
@@ -68,9 +83,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/ominull/bin/ominulld https://omi.example.com <provision-via-bootstrap>
+EnvironmentFile=/etc/ominull/agent.conf
+ExecStart=/opt/ominull/bin/ominulld $OMINULL_ARGS
 Restart=always
 RestartSec=5s
+# The agent installs its own upgrades as a detached child; KillMode=process keeps
+# systemd from tearing that install down along with the daemon it replaces.
 KillMode=process
 
 [Install]

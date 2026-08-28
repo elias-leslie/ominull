@@ -101,12 +101,24 @@ curl -sSL %s "$HUB_URL/api/v1/pki/ca.crt" -o /usr/local/share/ca-certificates/om
 update-ca-certificates 2>/dev/null || true
 
 echo -e "\033[90m[+] Downloading Ominull daemon...\033[0m"
-systemctl stop ominulld.service 2>/dev/null || true
-curl -sSL %s "$HUB_URL/download/ominulld" -o "$INSTALL_DIR/ominulld"
-chmod +x "$INSTALL_DIR/ominulld"
+systemctl stop ominull-agent.service 2>/dev/null || true
+# Retire units from older installers so an endpoint never runs two agents at once.
+systemctl disable --now ominulld.service ominull.service 2>/dev/null || true
+mkdir -p "$INSTALL_DIR/bin"
+curl -sSL %s "$HUB_URL/download/ominulld" -o "$INSTALL_DIR/bin/ominulld"
+chmod +x "$INSTALL_DIR/bin/ominulld"
+
+# The .deb upgrade path reads this same file and leaves it untouched, so an endpoint
+# enrolled here keeps its hub URL and key when it later self-updates.
+echo -e "\033[90m[+] Writing enrolment config...\033[0m"
+mkdir -p /etc/ominull
+cat << CONF > /etc/ominull/agent.conf
+OMINULL_ARGS=--hub $HUB_URL --key $API_KEY --role $ROLE_TAG --location $LOCATION_ID%s
+CONF
+chmod 600 /etc/ominull/agent.conf
 
 echo -e "\033[90m[+] Creating systemd service unit...\033[0m"
-cat << UNIT > /etc/systemd/system/ominulld.service
+cat << UNIT > /etc/systemd/system/ominull-agent.service
 [Unit]
 Description=Ominull Threat Nullification Service
 After=network.target network-online.target
@@ -114,17 +126,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/ominulld --hub $HUB_URL --key $API_KEY --role $ROLE_TAG --location $LOCATION_ID%s
+EnvironmentFile=/etc/ominull/agent.conf
+ExecStart=$INSTALL_DIR/bin/ominulld \$OMINULL_ARGS
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now ominulld.service
+systemctl enable --now ominull-agent.service
 
 echo -e "\033[32m[SUCCESS] Ominull Linux Service deployed and actively reporting to Hub!\033[0m"
 `

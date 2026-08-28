@@ -244,6 +244,18 @@
   - **Harness Distribution:** Synced across Claude Code (`.claude/skills`), OpenAI Codex (`.codex/skills`), and Antigravity/Gemini (`.gemini/config/skills`) with 0 errors and 0 drift via `st skills audit`.
   - **CLI Tool Surface (`/srv/workspaces/projects/ominull/scripts/ominull-cli`):** Standalone multi-agent CLI utility for querying telemetry, running synthetic adversary simulations, training device signatures, isolating rogue hosts, and conversational Copilot ChatOps.
 
+### Phase 22: Agent Release Versioning, Remote Update Push & Roll-Out Pipeline `[COMPLETED]`
+- **Objective:** Close the loop between changing the code and the fleet actually running it. Prior to this phase the hub had no notion of which agent release it served, endpoint versions were displayed nowhere, and updating an agent meant re-running the SSH push-deployer by hand.
+- **Deliverables Completed:**
+  - **Single Source of Truth (`VERSION`, `scripts/version.sh`):** One canonical version compiled into the hub, all three agent codebases, and the package filenames the hub serves. `version.sh check` fails on drift and gates CI — it immediately caught the Windows/portable agent still pinned at `1.0.0`.
+  - **Hub Version Tracking & Update Orchestration (`hub/pkg/server/server.go`, `hub/pkg/storage/storage.go`):** `POST /api/v1/agents/update` (admin-only) publishes a release and queues per-endpoint jobs; `GET /api/v1/agents/update-status` reports currency and pending jobs; `GET /api/v1/agent/config` is the agent-facing poll. Downgrades below the hub's own bundle are refused.
+  - **Update-over-Telemetry:** The `POST /api/v1/events` response carries an `agent_update` descriptor, so an agent learns about a release on the connection it already holds. The job retires only when the endpoint reports the target version back, making the update observed rather than assumed.
+  - **Linux Self-Update (`agent/linux/main.c`):** Installs the hub-offered package detached from the daemon dpkg is about to stop, guarded on root, package type, hub-origin URL pinning, and a strict character allowlist before the URL reaches a shell. `--no-auto-update` opts out.
+  - **Config-Preserving Package Layout:** Enrolment moved to `/etc/ominull/agent.conf`, written once and never overwritten, with the `.deb` and the bootstrap installer converged on one unit (`ominull-agent.service`) — so a self-update keeps the endpoint's hub URL and key instead of reverting to placeholders.
+  - **Console Surface (`hub/pkg/server/dashboard.go`):** Per-endpoint agent version column with out-of-date and update-queued badges, an outdated count in the stats ribbon, and per-endpoint plus fleet-wide push buttons.
+  - **Roll-Out Pipeline (`scripts/release.sh`):** Bump → test → package → ship to hub → roll agents → wait for fleet convergence, enforcing hub-before-agents ordering.
+  - **Mesh Quarantine Reconciliation Fix:** The Linux agent now lifts drop rules for peers the hub has released, instead of only ever adding them — an endpoint that was offline during a release previously kept the peer blackholed indefinitely.
+
 ---
 
 ## 4. Verification & Quality Gates

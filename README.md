@@ -79,6 +79,12 @@
 - **Pure-Go SSH Provisioning:** Uses `golang.org/x/crypto/ssh` to jump to internal LAN endpoints, probe target architecture (`uname -s`), upload bootstrap installers, register systemd / Windows services, and verify live check-in.
 - **Web UI & CLI Integration:** Deploy directly from the Discovered Assets table in the console or via CLI.
 
+### ⬆️ Agent Version Tracking & Remote Update Push
+- **Fleet Version Currency:** The hub knows which agent release it bundles and serves, tracks the version every endpoint reports, and flags endpoints running anything older — surfaced per host in the console and in the executive stats ribbon.
+- **Push Updates from the Console or CLI:** Publish a release to one endpoint or the whole fleet. Linux endpoints install it themselves over the telemetry connection they already hold; platforms without a self-update path are reported as needing the SSH push-deployer.
+- **Observed, Not Assumed:** An update job only retires when the endpoint reports the target version back, so the console distinguishes "queued" from "actually running".
+- **Config Survives Upgrades:** Enrolment lives in `/etc/ominull/agent.conf`, which the package creates once and never overwrites — an endpoint keeps its hub URL and key across a self-update instead of reverting to placeholders.
+
 ### 🤖 Embedded Autonomous AI CyberOps Copilot
 - **Pluggable Multi-Model Providers:** Local Ollama (`llama3.2` / `mistral` on LAN), Google Gemini Free Tier, OpenAI (`gpt-4o-mini`), and airgapped cognitive SOC heuristics.
 - **ChatOps & Automated Triage:** Conversational query interface (`#tab-copilot`), automated MITRE ATT&CK technique mapping, root-cause analysis, and recommended containment steps.
@@ -208,6 +214,11 @@ ominull-cli chat "Are there any unauthorized devices communicating on sensitive 
 
 # 9. 1-Click Remote SSH Push Deployment
 ominull-cli deploy 10.0.0.50 operator "YourPassword"
+
+# 10. Agent Release Management
+ominull-cli agent-versions                     # Version currency + pending update jobs
+ominull-cli agent-update linux-web-01          # Push the bundled release to one endpoint
+ominull-cli agent-update all 1.2.0             # Push a specific release fleet-wide
 ```
 
 ---
@@ -232,6 +243,9 @@ All administrative API endpoints require the master or tenant authentication hea
 | `/api/v1/mesh/quarantined` | `GET` | List all active mesh-quarantined peer IPs |
 | `/api/v1/topology/graph` | `GET` | Retrieve visual communications topology graph nodes & edges |
 | `/api/v1/deployer/push` | `POST` | Dispatch 1-click SSH push-deployment job |
+| `/api/v1/agents/update` | `POST` | Publish an agent release to one endpoint or the whole fleet (admin only) |
+| `/api/v1/agents/update-status` | `GET` | Report fleet agent-version currency and pending update jobs |
+| `/api/v1/agent/config` | `GET` | Agent-facing poll returning the update package URL when outdated |
 | `/api/v1/copilot/chat` | `POST` | Natural-language query interface with Threat Copilot |
 | `/api/v1/copilot/investigate` | `POST` | Autonomous AI forensic investigation of an alert |
 | `/api/v1/copilot/config` | `GET/POST` | Retrieve or configure active LLM provider backend |
@@ -246,7 +260,44 @@ Ominull includes a canonical agent skill authored for Claude Code, OpenAI Codex,
 
 ---
 
-## 8. Verification & Quality Gates
+## 8. Release & Fleet Roll-Out Process
+
+Shipping a change is two hops, and skipping either leaves the fleet on stale code: the hub
+must be running the new build (it serves the packages and decides who is outdated) *before*
+agents can be told to take it. `scripts/release.sh` owns that sequence so it cannot be run
+out of order.
+
+```bash
+export OMINULL_HUB_URL=https://omi.example.com
+export OMINULL_ADMIN_KEY=<admin-key>
+
+# Full pipeline: bump -> test -> package -> ship to hub -> roll agents -> wait for convergence
+./scripts/release.sh --version 1.2.0
+
+./scripts/release.sh --hub-only      # ship the hub, leave the fleet alone
+./scripts/release.sh --agents-only   # roll a release the hub already serves
+```
+
+`VERSION` at the repo root is the single source of truth. It is compiled into the hub, into
+all three agent codebases, and into the package filenames the hub serves for self-update —
+if any of those drift, endpoints are offered a package the hub cannot serve. `scripts/version.sh`
+owns every one of those sites, and `scripts/version.sh check` is a CI gate:
+
+```bash
+./scripts/version.sh show           # print the canonical version
+./scripts/version.sh check          # fail on drift between sources
+./scripts/version.sh bump 1.2.0     # rewrite every version site
+```
+
+Shipping to the hub host is deployment-specific and therefore not tracked. Copy
+`scripts/deploy_remote.sh.example` to `scripts/deploy_remote.sh` and fill in your hub host,
+or point `OMINULL_DEPLOY_CMD` at your own script. Whatever it does, it must place the agent
+packages in the hub's `--binary-dir`: that directory is what `/download/` serves, and it is
+where self-updating agents fetch from.
+
+---
+
+## 9. Verification & Quality Gates
 
 Run the automated test suites:
 
@@ -262,6 +313,6 @@ gcc -O2 -Wall -Wextra -o /tmp/test_dpi /srv/workspaces/projects/ominull/agent/te
 
 ---
 
-## 9. License
+## 10. License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

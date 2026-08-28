@@ -265,11 +265,24 @@ static void ApplyMeshQuarantineRule(const char* ip, bool block) {
     }
 }
 
+#define MAX_QUARANTINED_PEERS 64
+
+// SyncQuarantinedPeers reconciles kernel drop rules against the hub's authoritative
+// peer list on every heartbeat. Reconciling rather than only adding matters: a peer
+// the hub has released must have its rule lifted, and an endpoint that was offline
+// when the release happened would otherwise keep the host blackholed indefinitely.
 static void SyncQuarantinedPeers(const char* respJson) {
+    static char applied[MAX_QUARANTINED_PEERS][64];
+    static int appliedCount = 0;
+
     if (!respJson) return;
     const char* p = strstr(respJson, "\"quarantined_peers\":[");
     if (!p) return;
     p += 21;
+
+    char current[MAX_QUARANTINED_PEERS][64];
+    int currentCount = 0;
+
     while (*p && *p != ']') {
         while (*p && (*p == ' ' || *p == ',' || *p == '"' || *p == '\n' || *p == '\r')) p++;
         if (*p == ']' || !*p) break;
@@ -278,10 +291,30 @@ static void SyncQuarantinedPeers(const char* respJson) {
         while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
             ip[idx++] = *p++;
         }
-        if (ip[0]) {
+        if (ip[0] && currentCount < MAX_QUARANTINED_PEERS) {
             ApplyMeshQuarantineRule(ip, true);
+            snprintf(current[currentCount++], sizeof(current[0]), "%s", ip);
         }
     }
+
+    // Lift rules for every peer that was blocked on a previous heartbeat but is no
+    // longer on the hub's list.
+    for (int i = 0; i < appliedCount; i++) {
+        bool stillQuarantined = false;
+        for (int j = 0; j < currentCount; j++) {
+            if (strcmp(applied[i], current[j]) == 0) {
+                stillQuarantined = true;
+                break;
+            }
+        }
+        if (!stillQuarantined) {
+            printf("[*] Hub released peer %s; lifting mesh drop rules.\n", applied[i]);
+            ApplyMeshQuarantineRule(applied[i], false);
+        }
+    }
+
+    memcpy(applied, current, sizeof(current));
+    appliedCount = currentCount;
 }
 
 // ExtractJsonString pulls a flat "key":"value" pair out of a JSON fragment. The hub's
@@ -361,7 +394,7 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
         "setsid nohup sh -c 'curl -fsSL -m 300 -o \"%s\" \"%s\" && dpkg -i \"%s\"; rm -f \"%s\"; "
-        "systemctl restart ominull.service' >/dev/null 2>&1 </dev/null &",
+        "systemctl restart ominull-agent.service' >/dev/null 2>&1 </dev/null &",
         debPath, url, debPath, debPath);
     int rc = system(cmd);
     (void)rc;
