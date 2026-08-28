@@ -29,9 +29,20 @@ Orientation for coding agents and new contributors. Deeper detail lives in
 4. **Sort endpoint lists on stable identity, never on last-seen.** A row that moves under
    the operator between refreshes turns an isolate click into the wrong machine.
 5. **No environment specifics in tracked files.** No usernames, real domains, LAN IPs,
-   hostnames, or keys. `git grep -nE "<username>|<your-domain>|<your-subnet>"` should stay
-   empty. Local operator tooling (`scripts/connect-*.sh`, `scripts/deploy_remote.sh`) is
-   gitignored on purpose; see `scripts/deploy_remote.sh.example`.
+   hostnames, or keys. Local operator tooling (`scripts/connect-*.sh`,
+   `scripts/deploy_remote.sh`) is gitignored on purpose; see
+   `scripts/deploy_remote.sh.example`.
+
+   This rule is **not currently satisfied**. The check
+
+   ```bash
+   git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" -- ':!evidence'
+   ```
+
+   still returns the live fleet subnet and hub addresses in `README.md`, `PLAN.md`, and
+   several sources, and `evidence/` carries more. Treat it as a known debt, not as a
+   green check: do not add new specifics, and see the ops vault brief for the scrub
+   plan and the authoritative pattern list.
 
 ## Gates
 
