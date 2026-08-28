@@ -373,29 +373,38 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         printf("[!] Agent v%s is available but this daemon is not running as root; skipping self-update.\n", version);
         return;
     }
-    // Pin the download to the configured hub. A response that points elsewhere is not
-    // an update, it is a redirect to an untrusted binary.
-    if (strncmp(url, config->hub_url, strlen(config->hub_url)) != 0) {
-        printf("[!] Rejected agent update from %s: it does not originate from the configured hub.\n", url);
+
+    // Take only the path from the descriptor and fetch it from the hub this daemon is
+    // already configured to talk to. The hub advertises its public URL, which behind a
+    // reverse proxy is legitimately a different host than the agent dials, so matching
+    // on the host would break valid deployments; ignoring the host entirely is also
+    // strictly safer, because no hub response can redirect the download elsewhere.
+    const char* path = strstr(url, "://");
+    path = path ? strchr(path + 3, '/') : (url[0] == '/' ? url : NULL);
+    if (!path || strncmp(path, "/download/", 10) != 0) {
+        printf("[!] Rejected agent update v%s: '%s' is not a hub package path.\n", version, url);
         return;
     }
-    if (!IsSafeToken(url, true) || !IsSafeToken(version, false)) {
+    if (!IsSafeToken(path, true) || !IsSafeToken(version, false)) {
         printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
         return;
     }
 
+    char fetchURL[800];
+    snprintf(fetchURL, sizeof(fetchURL), "%s%s", config->hub_url, path);
+
     char debPath[128];
     snprintf(debPath, sizeof(debPath), "/tmp/ominull-agent_%s_amd64.deb", version);
 
-    printf("[*] Hub published agent v%s (running v%s); downloading and installing...\n",
-           version, OMINULL_LINUX_AGENT_VERSION);
+    printf("[*] Hub published agent v%s (running v%s); fetching %s\n",
+           version, OMINULL_LINUX_AGENT_VERSION, fetchURL);
     fflush(stdout);
 
-    char cmd[1024];
+    char cmd[2048];
     snprintf(cmd, sizeof(cmd),
         "setsid nohup sh -c 'curl -fsSL -m 300 -o \"%s\" \"%s\" && dpkg -i \"%s\"; rm -f \"%s\"; "
         "systemctl restart ominull-agent.service' >/dev/null 2>&1 </dev/null &",
-        debPath, url, debPath, debPath);
+        debPath, fetchURL, debPath, debPath);
     int rc = system(cmd);
     (void)rc;
 }
@@ -487,6 +496,8 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 }
 
 int main(int argc, char* argv[]) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
     strcpy(config.hub_url, "http://127.0.0.1:9999");
