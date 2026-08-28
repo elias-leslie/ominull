@@ -86,7 +86,107 @@ func New(store *storage.Store) *Scanner {
 		activeScans:  make(map[string]*ScanStatus),
 		cachedAssets: make(map[string]DiscoveredAsset),
 	}
+	// Discovery used to live only in cachedAssets, so a hub restart erased
+	// every host the scanner had ever found. The assets table is now the
+	// record of truth and this map is a read cache over it.
+	s.hydrateFromStore()
 	return s
+}
+
+// hydrateFromStore refills the in-memory cache from the persisted asset
+// graph. Only assets a scan actually touched come back: an asset known solely
+// from an agent check-in or from flow inference is not a discovery result and
+// would inflate the coverage denominator with hosts nobody probed.
+func (s *Scanner) hydrateFromStore() {
+	if s.store == nil {
+		return
+	}
+	assets, err := s.store.ListAssets("")
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range assets {
+		if !hasSource(a, storage.SourceScan) {
+			continue
+		}
+		s.cachedAssets[a.IP] = assetToDiscovered(a)
+	}
+}
+
+func hasSource(a storage.Asset, source string) bool {
+	for _, c := range a.Claims {
+		if c.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
+// assetToDiscovered projects a persisted asset back onto the scanner's own
+// shape. Confidence is taken from the winning identity claim so a rehydrated
+// row reports the same fingerprint strength it did before the restart.
+func assetToDiscovered(a storage.Asset) DiscoveredAsset {
+	ports := make([]PortInfo, 0, len(a.Ports))
+	for _, p := range a.Ports {
+		ports = append(ports, PortInfo{
+			Port:      p.Port,
+			Protocol:  p.Protocol,
+			Service:   p.Service,
+			Banner:    p.Banner,
+			LatencyMs: p.LatencyMs,
+			RiskLevel: p.RiskLevel,
+		})
+	}
+	conf := 0.0
+	ttl := 64
+	for _, c := range a.Claims {
+		if c.Source == storage.SourceScan && c.Field == storage.FieldOS && c.Confidence > conf {
+			conf = c.Confidence
+		}
+	}
+	weakpoints, risk := evaluateWeakpoints(ports, a.HasAgent(), a.OS)
+	if a.RiskScore != "" {
+		risk = a.RiskScore
+	}
+	return DiscoveredAsset{
+		IP:              a.IP,
+		MAC:             a.MAC,
+		Vendor:          a.Vendor,
+		Hostname:        a.Hostname,
+		OSGuess:         a.OS,
+		Category:        a.Category,
+		Confidence:      conf,
+		OpenPorts:       ports,
+		IsManaged:       a.HasAgent(),
+		AgentEndpointID: a.AgentEndpointID,
+		RiskScore:       risk,
+		Weakpoints:      weakpoints,
+		TTL:             ttl,
+		LastSeen:        a.LastSeenAt,
+	}
+}
+
+// persist writes a probe result through to the asset graph, which is what
+// makes a discovery outlive the process that found it.
+func (s *Scanner) persist(a DiscoveredAsset) {
+	if s.store == nil {
+		return
+	}
+	ports := make([]storage.AssetPort, 0, len(a.OpenPorts))
+	for _, p := range a.OpenPorts {
+		ports = append(ports, storage.AssetPort{
+			Port:      p.Port,
+			Protocol:  strings.ToLower(p.Protocol),
+			Service:   p.Service,
+			Banner:    p.Banner,
+			RiskLevel: p.RiskLevel,
+			LatencyMs: p.LatencyMs,
+		})
+	}
+	_ = s.store.UpsertAssetFromScan(a.IP, a.MAC, a.Vendor, a.Hostname, a.OSGuess, a.Category,
+		a.RiskScore, a.Confidence, ports, a.LastSeen)
 }
 
 // Common ports for Standard Profile (Top 30 High Value)
@@ -232,8 +332,16 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 			if live {
 				discMu.Lock()
 				discovered = append(discovered, asset)
-				s.cachedAssets[asset.IP] = asset
 				discMu.Unlock()
+
+				// cachedAssets is read under s.mu by the API handlers, so it
+				// must be written under s.mu too, not under the local slice
+				// mutex this loop uses for `discovered`.
+				s.mu.Lock()
+				s.cachedAssets[asset.IP] = asset
+				s.mu.Unlock()
+
+				s.persist(asset)
 			}
 
 			s.mu.Lock()
@@ -601,6 +709,13 @@ func (s *Scanner) TrainSignature(ip, actualName, vendor, category string) (*Devi
 	s.cachedAssets[ip] = asset
 
 	return &newSig, nil
+}
+
+// SignatureCount reports how many operator-trained signatures are loaded.
+func (s *Scanner) SignatureCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.customSigs)
 }
 
 func (s *Scanner) GetDiscoveredAssets() []DiscoveredAsset {

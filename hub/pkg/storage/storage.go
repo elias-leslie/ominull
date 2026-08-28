@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -212,27 +213,46 @@ type QuarantinedPeer struct {
 }
 
 type TopologyNode struct {
-	ID         string `json:"id"`
-	Label      string `json:"label"`
-	Type       string `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"
-	IP         string `json:"ip"`
-	OS         string `json:"os"`
-	Role       string `json:"role"`
-	Risk       string `json:"risk"` // "CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"
-	IsIsolated bool   `json:"is_isolated"`
-	Group      string `json:"group"`
+	ID         string   `json:"id"`
+	Label      string   `json:"label"`
+	Type       string   `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"
+	IP         string   `json:"ip"`
+	OS         string   `json:"os"`
+	Role       string   `json:"role"`
+	Risk       string   `json:"risk"` // "CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"
+	IsIsolated bool     `json:"is_isolated"`
+	Group      string   `json:"group"`
+	AssetID    string   `json:"asset_id,omitempty"`
+	Evidence   []string `json:"evidence"` // agent / scan / inferred / operator
+	Confidence float64  `json:"confidence,omitempty"`
+	Rationale  string   `json:"rationale,omitempty"`
+	// Quiet marks a known asset that said nothing inside the window. Absence
+	// is information on a security graph, so it is dimmed, never omitted.
+	Quiet bool `json:"quiet"`
+}
+
+// TopologyEdgePort is one port's share of an asset pair's traffic. Edges
+// aggregate to the pair and carry their ports, so the graph stays readable at
+// fleet scale and the detail is still one selection away.
+type TopologyEdgePort struct {
+	Port       uint16 `json:"port"`
+	Protocol   string `json:"protocol"`
+	FlowCount  int64  `json:"flow_count"`
+	TotalBytes int64  `json:"total_bytes"`
+	Verdict    string `json:"verdict"`
 }
 
 type TopologyEdge struct {
-	ID         string    `json:"id"`
-	Source     string    `json:"source"`
-	Target     string    `json:"target"`
-	Protocol   string    `json:"protocol"`
-	Port       uint16    `json:"port"`
-	FlowCount  int64     `json:"flow_count"`
-	TotalBytes int64     `json:"total_bytes"`
-	Verdict    string    `json:"verdict"` // "clean", "anomalous", "blocked"
-	LastSeen   time.Time `json:"last_seen"`
+	ID         string             `json:"id"`
+	Source     string             `json:"source"`
+	Target     string             `json:"target"`
+	Protocol   string             `json:"protocol"`
+	Port       uint16             `json:"port"` // heaviest port on the pair
+	FlowCount  int64              `json:"flow_count"`
+	TotalBytes int64              `json:"total_bytes"`
+	Verdict    string             `json:"verdict"` // "clean", "anomalous", "blocked"
+	LastSeen   time.Time          `json:"last_seen"`
+	Ports      []TopologyEdgePort `json:"ports"`
 }
 
 type TopologyMetrics struct {
@@ -241,6 +261,9 @@ type TopologyMetrics struct {
 	AnomalousEdgeCount  int `json:"anomalous_edge_count"`
 	ManagedNodesCount   int `json:"managed_nodes_count"`
 	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
+	QuietNodesCount     int `json:"quiet_nodes_count"`
+	InferredNodesCount  int `json:"inferred_nodes_count"`
+	WindowLabel         string `json:"window_label"`
 }
 
 type TopologyData struct {
@@ -564,7 +587,10 @@ func (s *Store) initSchema() error {
 		_, _ = s.db.Exec(m)
 	}
 
-	return nil
+	// The asset graph is additive: three new tables and their indexes. It
+	// touches nothing above, so an existing hub upgrades without migrating a
+	// single endpoints row.
+	return s.initAssetSchema()
 }
 
 func (s *Store) seedDefaults() {
@@ -743,16 +769,18 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	if ep.RoleTag == "" {
 		ep.RoleTag = "workstation"
 	}
+	// A per-OS software list is a reasonable default for a host that reports
+	// none. A per-OS *MAC* is not: asset identity keys on the hardware
+	// address, so handing every Windows endpoint the same fabricated MAC
+	// collapses the whole fleet onto one asset row. An unknown MAC stays
+	// empty and identity falls back to address plus subnet.
 	if ep.InstalledSoftware == "" {
 		if strings.Contains(strings.ToLower(ep.OS), "windows") {
 			ep.InstalledSoftware = "Ominull WFP Agent v1.0.0, PowerShell 7.4, Windows Defender, OpenSSH"
-			ep.MAC = "BC:24:11:2E:DA:85"
 		} else if strings.Contains(strings.ToLower(ep.OS), "linux") || strings.Contains(strings.ToLower(ep.OS), "ubuntu") {
 			ep.InstalledSoftware = "Ominull eBPF Daemon v1.0.0, Clang 18, bpftool, OpenSSH 9.6p1, systemd"
-			ep.MAC = "BC:24:11:95:31:52"
 		} else if strings.Contains(strings.ToLower(ep.OS), "mac") || strings.Contains(strings.ToLower(ep.OS), "darwin") {
 			ep.InstalledSoftware = "Ominull PF Engine v1.0.0, Zsh 5.9, Apple pfctl, OpenSSH"
-			ep.MAC = "BC:24:11:D6:AA:5F"
 		}
 	}
 
@@ -772,13 +800,19 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
-	_, err := s.db.Exec(
+	if _, err := s.db.Exec(
 		query,
 		ep.ID, ep.TenantID, ep.LocationID, ep.LocationName, ep.Hostname, ep.OS, ep.IP, ep.MAC,
 		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion,
 		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	// Project the check-in onto the asset graph. An agent arriving on a host
+	// the scanner already found enriches that asset rather than opening a
+	// second record for the same machine.
+	return s.upsertAssetFromEndpointLocked(ep)
 }
 
 func (s *Store) SetEndpointIsolation(id string, isIsolated bool) error {
@@ -2281,36 +2315,73 @@ func (s *Store) GetEndpoints() []Endpoint {
 	return eps
 }
 
+// GetTopologyGraph draws the network from the asset graph first and the flow
+// table second.
+//
+// It used to build nodes from endpoints plus whatever IPs happened to appear
+// in the last hour of events, labelling everything it did not recognise
+// "Unmanaged Internal Host". That is why the graph looked empty: a known host
+// that was quiet for an hour did not exist to it, and the hosts it did draw
+// carried no identity. Nodes now come from `assets` union flow endpoints, so
+// every node arrives with its evidence and its role attached, and an asset
+// that said nothing in the window is drawn quiet rather than dropped.
 func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var data TopologyData
 	data.Nodes = make([]TopologyNode, 0)
 	data.Edges = make([]TopologyEdge, 0)
 
-	nodeMap := make(map[string]TopologyNode)
+	// Read the asset graph before taking the read lock: ListAssets takes it
+	// itself, and Go's RWMutex must not be read-locked recursively.
+	assets, err := s.ListAssets("")
+	if err != nil {
+		return data, err
+	}
 	endpoints, err := s.ListEndpoints("")
 	if err != nil {
 		return data, err
 	}
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	isolatedByIP := make(map[string]bool)
+	endpointByID := make(map[string]Endpoint)
 	for _, ep := range endpoints {
-		nType := "managed"
+		endpointByID[ep.ID] = ep
+		if ep.IsIsolated && ep.IP != "" {
+			isolatedByIP[ep.IP] = true
+		}
+	}
+
+	nodeMap := make(map[string]*TopologyNode)
+	spoke := make(map[string]bool)
+
+	for i := range assets {
+		a := assets[i]
+		if a.IP == "" {
+			continue
+		}
+		node := assetNode(a, endpointByID, isolatedByIP)
+		nodeMap[a.IP] = &node
+	}
+
+	// Endpoints without an asset row yet (a hub mid-upgrade, before the next
+	// check-in projects them) still deserve a node.
+	for _, ep := range endpoints {
+		if ep.IP == "" {
+			continue
+		}
+		if _, ok := nodeMap[ep.IP]; ok {
+			continue
+		}
 		risk := "CLEAN"
 		if ep.IsIsolated {
 			risk = "CRITICAL"
 		}
-		nodeMap[ep.IP] = TopologyNode{
-			ID:         ep.IP,
-			Label:      ep.Hostname,
-			Type:       nType,
-			IP:         ep.IP,
-			OS:         ep.OS,
-			Role:       ep.RoleTag,
-			Risk:       risk,
-			IsIsolated: ep.IsIsolated,
-			Group:      ep.RoleTag,
+		nodeMap[ep.IP] = &TopologyNode{
+			ID: ep.IP, Label: ep.Hostname, Type: "managed", IP: ep.IP, OS: ep.OS,
+			Role: ep.RoleTag, Risk: risk, IsIsolated: ep.IsIsolated, Group: ep.RoleTag,
+			Evidence: []string{SourceAgent}, Confidence: 1.0, Quiet: true,
 		}
 	}
 
@@ -2328,6 +2399,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	defer rows.Close()
 
 	edgeMap := make(map[string]*TopologyEdge)
+	edgePorts := make(map[string]map[string]*TopologyEdgePort)
 
 	for rows.Next() {
 		var srcIP, dstIP, action string
@@ -2335,64 +2407,22 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		var dstPort int
 		var totalBytes int64
 		var flowCount int64
-		var maxTime time.Time
+		var maxTimeRaw interface{}
 
-		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &maxTime); err != nil {
+		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &maxTimeRaw); err != nil {
 			continue
 		}
-
+		maxTime := scanTime(maxTimeRaw)
 		if srcIP == "127.0.0.1" || dstIP == "127.0.0.1" {
 			continue
 		}
 
-		// Ensure source node exists
-		if _, exists := nodeMap[srcIP]; !exists {
-			nodeMap[srcIP] = TopologyNode{
-				ID:    srcIP,
-				Label: srcIP,
-				Type:  "unmanaged",
-				IP:    srcIP,
-				OS:    "Unmanaged Internal Host",
-				Role:  "workstation",
-				Risk:  "MEDIUM",
-				Group: "unmanaged",
-			}
-		}
+		ensureFlowNode(nodeMap, srcIP, action, false)
+		ensureFlowNode(nodeMap, dstIP, action, true)
+		spoke[srcIP] = true
+		spoke[dstIP] = true
 
-		// Ensure target node exists
-		if _, exists := nodeMap[dstIP]; !exists {
-			tType := "cloud"
-			group := "Public Cloud / SaaS"
-			risk := "CLEAN"
-
-			if strings.HasPrefix(dstIP, "192.168.") || strings.HasPrefix(dstIP, "10.") || strings.HasPrefix(dstIP, "172.") {
-				tType = "unmanaged"
-				group = "unmanaged"
-				risk = "MEDIUM"
-			} else if action == "BLOCK" {
-				tType = "threat"
-				group = "Threat / Blocked IOC"
-				risk = "CRITICAL"
-			}
-
-			nodeMap[dstIP] = TopologyNode{
-				ID:    dstIP,
-				Label: dstIP,
-				Type:  tType,
-				IP:    dstIP,
-				OS:    group,
-				Role:  tType,
-				Risk:  risk,
-				Group: group,
-			}
-		}
-
-		protoStr := "TCP"
-		if protoInt == 17 {
-			protoStr = "UDP"
-		} else if protoInt == 1 {
-			protoStr = "ICMP"
-		}
+		protoStr := protoName(protoInt)
 
 		verdict := "clean"
 		if action == "BLOCK" {
@@ -2401,54 +2431,202 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 			verdict = "anomalous"
 		}
 
-		edgeKey := fmt.Sprintf("%s->%s:%d", srcIP, dstIP, dstPort)
-		if existing, ok := edgeMap[edgeKey]; ok {
-			existing.FlowCount += flowCount
-			existing.TotalBytes += totalBytes
-			if verdict != "clean" {
-				existing.Verdict = verdict
+		// One edge per asset pair. The previous query grouped by 5-tuple with
+		// no cap, which at fleet scale is thousands of edges and an
+		// unreadable graph; ports now hang off the pair and expand on
+		// selection.
+		edgeKey := srcIP + "->" + dstIP
+		edge, ok := edgeMap[edgeKey]
+		if !ok {
+			edge = &TopologyEdge{
+				ID: edgeKey, Source: srcIP, Target: dstIP, Protocol: protoStr,
+				Verdict: "clean", Ports: make([]TopologyEdgePort, 0, 4),
 			}
-		} else {
-			edgeMap[edgeKey] = &TopologyEdge{
-				ID:         edgeKey,
-				Source:     srcIP,
-				Target:     dstIP,
-				Protocol:   protoStr,
-				Port:       uint16(dstPort),
-				FlowCount:  flowCount,
-				TotalBytes: totalBytes,
-				Verdict:    verdict,
-				LastSeen:   maxTime,
-			}
+			edgeMap[edgeKey] = edge
+			edgePorts[edgeKey] = make(map[string]*TopologyEdgePort)
+		}
+		edge.FlowCount += flowCount
+		edge.TotalBytes += totalBytes
+		if maxTime.After(edge.LastSeen) {
+			edge.LastSeen = maxTime
+		}
+		if verdict == "blocked" || (verdict == "anomalous" && edge.Verdict == "clean") {
+			edge.Verdict = verdict
+		}
+
+		portKey := fmt.Sprintf("%s/%d", protoStr, dstPort)
+		ps, ok := edgePorts[edgeKey][portKey]
+		if !ok {
+			ps = &TopologyEdgePort{Port: uint16(dstPort), Protocol: protoStr, Verdict: "clean"}
+			edgePorts[edgeKey][portKey] = ps
+		}
+		ps.FlowCount += flowCount
+		ps.TotalBytes += totalBytes
+		if verdict != "clean" {
+			ps.Verdict = verdict
 		}
 	}
 
 	managedCount := 0
 	unmanagedCount := 0
-	for _, n := range nodeMap {
-		data.Nodes = append(data.Nodes, n)
+	quietCount := 0
+	inferredCount := 0
+	for ip, n := range nodeMap {
+		n.Quiet = !spoke[ip]
+		if n.Quiet {
+			quietCount++
+		}
 		if n.Type == "managed" {
 			managedCount++
 		} else if n.Type == "unmanaged" {
 			unmanagedCount++
 		}
+		for _, e := range n.Evidence {
+			if e == SourceInferred {
+				inferredCount++
+				break
+			}
+		}
+		data.Nodes = append(data.Nodes, *n)
 	}
+	sort.SliceStable(data.Nodes, func(i, j int) bool {
+		return addressSortKey(data.Nodes[i].IP) < addressSortKey(data.Nodes[j].IP)
+	})
 
 	anomEdges := 0
-	for _, e := range edgeMap {
+	for key, e := range edgeMap {
+		ports := make([]TopologyEdgePort, 0, len(edgePorts[key]))
+		for _, ps := range edgePorts[key] {
+			ports = append(ports, *ps)
+		}
+		sort.SliceStable(ports, func(i, j int) bool {
+			if ports[i].TotalBytes != ports[j].TotalBytes {
+				return ports[i].TotalBytes > ports[j].TotalBytes
+			}
+			return ports[i].FlowCount > ports[j].FlowCount
+		})
+		e.Ports = ports
+		// Label the pair with its heaviest port only; the rest are one click
+		// away rather than stacked on top of each other.
+		if len(ports) > 0 {
+			e.Port = ports[0].Port
+			e.Protocol = ports[0].Protocol
+		}
 		data.Edges = append(data.Edges, *e)
 		if e.Verdict != "clean" {
 			anomEdges++
 		}
 	}
+	sort.SliceStable(data.Edges, func(i, j int) bool { return data.Edges[i].ID < data.Edges[j].ID })
 
 	data.Metrics.TotalNodes = len(data.Nodes)
 	data.Metrics.TotalEdges = len(data.Edges)
 	data.Metrics.AnomalousEdgeCount = anomEdges
 	data.Metrics.ManagedNodesCount = managedCount
 	data.Metrics.UnmanagedNodesCount = unmanagedCount
+	data.Metrics.QuietNodesCount = quietCount
+	data.Metrics.InferredNodesCount = inferredCount
+	data.Metrics.WindowLabel = windowLabel(timeWindow)
 
 	return data, nil
+}
+
+// assetNode projects one asset onto the graph, carrying its evidence and the
+// role it was given or deduced instead of a bare address.
+func assetNode(a Asset, endpointByID map[string]Endpoint, isolatedByIP map[string]bool) TopologyNode {
+	label := a.Hostname
+	if label == "" {
+		label = a.IP
+	}
+
+	nType := "unmanaged"
+	risk := a.RiskScore
+	isolated := isolatedByIP[a.IP]
+	if a.HasAgent() {
+		nType = "managed"
+		if ep, ok := endpointByID[a.AgentEndpointID]; ok {
+			isolated = ep.IsIsolated
+			if ep.Hostname != "" {
+				label = ep.Hostname
+			}
+		}
+		if risk == "" {
+			risk = "CLEAN"
+		}
+	}
+	if risk == "" {
+		risk = "MEDIUM"
+	}
+	if isolated {
+		risk = "CRITICAL"
+	}
+
+	role := a.Role
+	if role == "" {
+		role = a.Category
+	}
+	if role == "" {
+		role = "unknown"
+	}
+	if isGatewayRole(role) || strings.HasSuffix(a.IP, ".1") {
+		nType = "gateway"
+	}
+
+	group := a.Category
+	if group == "" {
+		group = role
+	}
+
+	return TopologyNode{
+		ID: a.IP, Label: label, Type: nType, IP: a.IP,
+		OS: a.OS, Role: role, Risk: risk, IsIsolated: isolated, Group: group,
+		AssetID: a.ID, Evidence: a.Sources, Confidence: a.RoleConf, Rationale: a.Rationale,
+	}
+}
+
+func isGatewayRole(role string) bool {
+	r := strings.ToLower(role)
+	return strings.Contains(r, "router") || strings.Contains(r, "firewall") || strings.Contains(r, "gateway")
+}
+
+// ensureFlowNode adds a node for an address seen only in traffic. These are
+// the ones the old graph labelled "Unmanaged Internal Host"; they now say
+// plainly that flow is the only thing that knows them.
+func ensureFlowNode(nodeMap map[string]*TopologyNode, ip, action string, isTarget bool) {
+	if _, ok := nodeMap[ip]; ok {
+		return
+	}
+	nType := "unmanaged"
+	group := "Seen in traffic only"
+	risk := "MEDIUM"
+
+	if !IsPrivateIPv4(ip) {
+		nType = "cloud"
+		group = "External"
+		risk = "CLEAN"
+		if isTarget && action == "BLOCK" {
+			nType = "threat"
+			group = "Blocked destination"
+			risk = "CRITICAL"
+		}
+	}
+
+	nodeMap[ip] = &TopologyNode{
+		ID: ip, Label: ip, Type: nType, IP: ip, OS: "", Role: "unknown",
+		Risk: risk, Group: group, Evidence: []string{},
+	}
+}
+
+func windowLabel(d time.Duration) string {
+	switch {
+	case d >= 7*24*time.Hour:
+		return "7d"
+	case d >= 24*time.Hour:
+		return "24h"
+	case d >= 6*time.Hour:
+		return "6h"
+	}
+	return "1h"
 }
 
 /* QUARANTINED PEERS (SUBNET MESH ISOLATION) */

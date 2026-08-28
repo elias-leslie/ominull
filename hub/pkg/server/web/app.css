@@ -1236,6 +1236,22 @@ p.pending {
   align-items: baseline;
 }
 
+/* Claims group under the field they argue about, so two opinions about the
+   OS read as a disagreement rather than as two unrelated rows. */
+.claim-field {
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-top: var(--s-2);
+}
+
+.claim-field:first-child {
+  margin-top: 0;
+}
+
 .claim .src {
   font-family: var(--f-cond);
   font-weight: 600;
@@ -1773,6 +1789,14 @@ p.pending {
   stroke-dasharray: 4 3;
 }
 
+.topo-canvas .edge {
+  cursor: pointer;
+}
+
+.topo-canvas .edge[data-selected="true"] {
+  stroke: var(--brand);
+}
+
 .topo-canvas .node {
   cursor: pointer;
   fill: var(--ink-3);
@@ -1785,6 +1809,21 @@ p.pending {
 .topo-canvas .node[data-kind="gateway"] { fill: var(--info); }
 .topo-canvas .node[data-kind="threat"] { fill: var(--crit-hot); }
 .topo-canvas .node[data-kind="isolated"] { fill: var(--crit); }
+
+/* A known asset that said nothing inside the window is drawn hollow rather
+   than dropped. Absence is information on a security graph: a workstation
+   that has gone silent is exactly what an operator wants to notice. */
+.topo-canvas .node[data-quiet="true"] {
+  fill: var(--ground);
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.topo-canvas .node[data-quiet="true"][data-kind="managed"] { color: var(--ok); }
+.topo-canvas .node[data-quiet="true"][data-kind="unmanaged"] { color: var(--warn); }
+.topo-canvas .node[data-quiet="true"][data-kind="gateway"] { color: var(--info); }
+.topo-canvas .node[data-quiet="true"][data-kind="threat"] { color: var(--crit-hot); }
+.topo-canvas .node[data-quiet="true"][data-kind="isolated"] { color: var(--crit); }
 
 .topo-canvas .node[data-selected="true"] {
   stroke: var(--brand);

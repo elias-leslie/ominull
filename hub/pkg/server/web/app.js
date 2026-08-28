@@ -217,7 +217,9 @@
 
     hierarchy: [],
     endpoints: [],
+    assetGraph: [],
     scanAssets: [],
+    inference: null,
     coverage: null,
     anomalies: [],
     updateStatus: null,
@@ -243,6 +245,7 @@
     routeKey: "",
 
     topoSelected: "",
+    topoEdgeSelected: "",
     chat: [],
     chatBusy: false,
     statHistory: {},
@@ -370,35 +373,164 @@
       });
     }
 
+    /* What a flow-inference pass concludes over this fixture. Each rationale
+       states only what the traffic actually shows: how many endpoints, from
+       which processes, on which ports, and what is absent. */
+    var DEMO_INFERENCES = [
+      {
+        ip: "10.0.4.10", role: "domain-controller", label: "Domain controller", confidence: 0.86,
+        rationale: "6 agented endpoints across 2 locations, from lsass.exe and svchost.exe, on 389/88/445/135; fan-in without any fan-out; nothing else on 10.0.4.0/24 answers 88."
+      },
+      {
+        ip: "10.0.4.12", role: "domain-controller", label: "Domain controller", confidence: 0.86,
+        rationale: "5 agented endpoints across 2 locations, from lsass.exe and svchost.exe, on 88/389/135; fan-in without any fan-out; no probe has ever reached this address and no agent reports from it."
+      },
+      {
+        ip: "10.0.4.55", role: "file-server", label: "File server", confidence: 0.74,
+        rationale: "4 agented endpoints, on 445; fan-in without any fan-out; 620.0 MB across 3120 flows."
+      },
+      {
+        ip: "10.0.4.71", role: "print-server", label: "Print server", confidence: 0.65,
+        rationale: "3 agented endpoints, on 9100/631; nothing else on 10.0.4.0/24 answers 9100."
+      }
+    ];
+
+    /* Nodes come from the asset graph, so every one carries its evidence and
+       its role. Two of them are quiet: known assets that said nothing inside
+       the window, drawn dimmed rather than dropped. */
     var topoNodes = endpoints.map(function (e) {
       return {
-        id: e.id, label: e.hostname, type: "managed", ip: e.ip, os: e.os,
+        id: e.ip, label: e.hostname, type: "managed", ip: e.ip, os: e.os,
         role: e.role_tag, risk: e.is_isolated ? "CRITICAL" : "CLEAN",
-        is_isolated: e.is_isolated, group: e.location_name
+        is_isolated: e.is_isolated, group: e.location_name,
+        evidence: ["agent", "scan"], confidence: 1.0, quiet: e.status !== "online"
       };
     });
-    topoNodes.push({ id: "10.0.4.1", label: "core-gateway", type: "gateway", ip: "10.0.4.1", os: "Cisco IOS-XE", role: "gateway", risk: "LOW", is_isolated: false, group: "Corporate HQ LAN" });
-    topoNodes.push({ id: "10.0.4.10", label: "10.0.4.10", type: "unmanaged", ip: "10.0.4.10", os: "Windows Server", role: "", risk: "MEDIUM", is_isolated: false, group: "Corporate HQ LAN" });
-    topoNodes.push({ id: "10.0.4.55", label: "unmanaged-nas", type: "unmanaged", ip: "10.0.4.55", os: "Synology DSM", role: "", risk: "HIGH", is_isolated: false, group: "Corporate HQ LAN" });
-    topoNodes.push({ id: "10.0.4.99", label: "rogue-dev-kali", type: "unmanaged", ip: "10.0.4.99", os: "Kali Linux", role: "", risk: "CRITICAL", is_isolated: false, group: "Corporate HQ LAN" });
-    topoNodes.push({ id: "198.51.100.22", label: "198.51.100.22", type: "threat", ip: "198.51.100.22", os: "", role: "", risk: "CRITICAL", is_isolated: false, group: "External" });
+    topoNodes.push({ id: "10.0.4.1", label: "core-gateway", type: "gateway", ip: "10.0.4.1", os: "Cisco IOS-XE Gateway", role: "Router / Firewall", risk: "LOW", is_isolated: false, group: "Corporate HQ LAN", evidence: ["scan"], quiet: false });
+    topoNodes.push({ id: "10.0.4.10", label: "10.0.4.10", type: "unmanaged", ip: "10.0.4.10", os: "Windows Server", role: "domain-controller", risk: "MEDIUM", is_isolated: false, group: "Server", evidence: ["scan", "inferred"], confidence: 0.86, rationale: DEMO_INFERENCES[0].rationale, quiet: false });
+    topoNodes.push({ id: "10.0.4.12", label: "10.0.4.12", type: "unmanaged", ip: "10.0.4.12", os: "", role: "domain-controller", risk: "MEDIUM", is_isolated: false, group: "Seen in traffic only", evidence: ["inferred"], confidence: 0.86, rationale: DEMO_INFERENCES[1].rationale, quiet: false });
+    topoNodes.push({ id: "10.0.4.55", label: "unmanaged-nas", type: "unmanaged", ip: "10.0.4.55", os: "Synology DiskStation DSM 7.2", role: "file-server", risk: "HIGH", is_isolated: false, group: "Storage / NAS", evidence: ["scan", "inferred"], confidence: 0.74, rationale: DEMO_INFERENCES[2].rationale, quiet: false });
+    topoNodes.push({ id: "10.0.4.71", label: "10.0.4.71", type: "unmanaged", ip: "10.0.4.71", os: "Embedded print controller", role: "print-server", risk: "MEDIUM", is_isolated: false, group: "Printer", evidence: ["scan", "inferred"], confidence: 0.65, rationale: DEMO_INFERENCES[3].rationale, quiet: true });
+    topoNodes.push({ id: "10.0.4.99", label: "rogue-dev-kali", type: "unmanaged", ip: "10.0.4.99", os: "Kali Linux Rolling (ARM64)", role: "Shadow IT / Pentest", risk: "CRITICAL", is_isolated: false, group: "Shadow IT / Pentest", evidence: ["scan"], quiet: false });
+    topoNodes.push({ id: "10.0.4.120", label: "lobby-display", type: "unmanaged", ip: "10.0.4.120", os: "Samsung Tizen Smart Display", role: "IoT / Display", risk: "MEDIUM", is_isolated: false, group: "IoT / Display", evidence: ["scan"], quiet: true });
+    topoNodes.push({ id: "198.51.100.22", label: "198.51.100.22", type: "threat", ip: "198.51.100.22", os: "", role: "unknown", risk: "CRITICAL", is_isolated: false, group: "Blocked destination", evidence: [], quiet: false });
+
+    /* The demo asset graph is generated from the same two fixtures the live
+       hub merges, plus the inferences flow alone supports. 10.0.4.12 exists
+       in no scan and runs no agent: it is named entirely by the shape of the
+       traffic other hosts send it. */
+    function demoClaim(field, source, value, confidence, rationale, seen) {
+      return { field: field, source: source, value: value, confidence: confidence, rationale: rationale || "", observed_at: seen, winner: false };
+    }
+
+    /* Same rule as the hub: highest confidence wins per field, operator and
+       agent claims outrank scan and inference outright. */
+    var demoMergeAsset = DEMO_REMERGE;
+
+    function demoAssetGraph() {
+      var scanByIP = {};
+      var scanByEp = {};
+      scan.forEach(function (a) { scanByIP[a.ip] = a; if (a.agent_endpoint_id) scanByEp[a.agent_endpoint_id] = a; });
+
+      var out = [];
+      var used = {};
+
+      endpoints.forEach(function (ep) {
+        var sc = scanByEp[ep.id] || scanByIP[ep.ip] || null;
+        if (sc) used[sc.ip] = true;
+        var claims = [
+          demoClaim("hostname", "agent", ep.hostname, 1.0, "", ep.last_seen_at),
+          demoClaim("os", "agent", ep.os, 1.0, "", ep.last_seen_at),
+          demoClaim("role", "agent", ep.role_tag, 1.0, "operator-assigned role tag on the agent", ep.last_seen_at)
+        ];
+        if (sc) {
+          claims.push(demoClaim("os", "scan", sc.os_guess, sc.confidence, "TTL and application-delta fingerprint", sc.last_seen));
+          claims.push(demoClaim("vendor", "scan", sc.vendor, 0.9, "OUI lookup on the hardware address", sc.last_seen));
+          claims.push(demoClaim("category", "scan", sc.category, sc.confidence, "device signature match on open ports and banners", sc.last_seen));
+          claims.push(demoClaim("risk", "scan", sc.risk_score, sc.confidence, "exposure assessment of open ports", sc.last_seen));
+        }
+        out.push(demoMergeAsset({
+          id: "asset-mac-" + (ep.mac || ep.id).replace(/:/g, "").toLowerCase(),
+          identity_kind: ep.mac ? "mac" : "ip", identity_value: ep.mac || ep.ip,
+          agent_endpoint_id: ep.id, tenant_id: ep.tenant_id, location_id: ep.location_id,
+          ip: ep.ip, mac: ep.mac || (sc ? sc.mac : ""), subnet: "",
+          first_seen_at: ep.created_at, last_seen_at: ep.last_seen_at,
+          ports: sc ? sc.open_ports : [], claims: claims
+        }));
+      });
+
+      scan.forEach(function (sc) {
+        if (used[sc.ip]) return;
+        out.push(demoMergeAsset({
+          id: "asset-mac-" + (sc.mac || sc.ip).replace(/[:.]/g, "").toLowerCase(),
+          identity_kind: sc.mac ? "mac" : "ip", identity_value: sc.mac || sc.ip,
+          agent_endpoint_id: "", tenant_id: "default", location_id: "",
+          ip: sc.ip, mac: sc.mac, subnet: "10.0.4.0/24",
+          first_seen_at: sc.last_seen, last_seen_at: sc.last_seen,
+          ports: sc.open_ports,
+          claims: [
+            demoClaim("hostname", "scan", sc.hostname, sc.confidence, "reverse lookup during probe", sc.last_seen),
+            demoClaim("os", "scan", sc.os_guess, sc.confidence, "TTL and application-delta fingerprint", sc.last_seen),
+            demoClaim("vendor", "scan", sc.vendor, 0.9, "OUI lookup on the hardware address", sc.last_seen),
+            demoClaim("category", "scan", sc.category, sc.confidence, "device signature match on open ports and banners", sc.last_seen),
+            demoClaim("risk", "scan", sc.risk_score, sc.confidence, "exposure assessment of open ports", sc.last_seen)
+          ].filter(function (c) { return c.value; })
+        }));
+      });
+
+      /* A host with no agent and no scan, named from flow alone. */
+      out.push(demoMergeAsset({
+        id: "asset-ip-10-0-4-12-10-0-4-0-24", identity_kind: "ip", identity_value: "10.0.4.12|10.0.4.0/24",
+        agent_endpoint_id: "", tenant_id: "default", location_id: "",
+        ip: "10.0.4.12", mac: "", subnet: "10.0.4.0/24",
+        first_seen_at: mins(300), last_seen_at: mins(0.4), ports: [],
+        claims: [demoClaim("role", "inferred", "domain-controller", 0.86, DEMO_INFERENCES[1].rationale, mins(0.4))]
+      }));
+
+      out.forEach(function (a) {
+        DEMO_INFERENCES.forEach(function (inf) {
+          if (a.ip !== inf.ip) return;
+          if (a.claims.some(function (c) { return c.source === "inferred" && c.field === "role"; })) return;
+          a.claims.push(demoClaim("role", "inferred", inf.role, inf.confidence, inf.rationale, a.last_seen_at));
+          demoMergeAsset(a);
+        });
+      });
+      return out;
+    }
 
     var topoEdges = [
-      { id: "e1", source: "win11-corp-exec", target: "10.0.4.10", protocol: "tcp", port: 389, flow_count: 2140, total_bytes: 42000000, verdict: "clean", last_seen: now },
-      { id: "e2", source: "mac-eng-lead", target: "10.0.4.10", protocol: "tcp", port: 88, flow_count: 980, total_bytes: 12000000, verdict: "clean", last_seen: now },
-      { id: "e3", source: "linux-dmz-web-01", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 18200, total_bytes: 1420000000, verdict: "clean", last_seen: now },
-      { id: "e4", source: "win11-branch-kiosk", target: "10.0.4.10", protocol: "tcp", port: 445, flow_count: 640, total_bytes: 8100000, verdict: "clean", last_seen: now },
-      { id: "e5", source: "linux-branch-nvr", target: "10.0.4.55", protocol: "tcp", port: 445, flow_count: 3120, total_bytes: 620000000, verdict: "clean", last_seen: now },
-      { id: "e6", source: "win11-corp-exec", target: "198.51.100.22", protocol: "tcp", port: 443, flow_count: 142, total_bytes: 810000, verdict: "blocked", last_seen: now },
-      { id: "e7", source: "mac-eng-lead", target: "10.0.4.99", protocol: "tcp", port: 4444, flow_count: 61, total_bytes: 190000, verdict: "anomalous", last_seen: now },
-      { id: "e8", source: "linux-prod-db-01", target: "linux-prod-api-02", protocol: "tcp", port: 5432, flow_count: 9400, total_bytes: 2100000000, verdict: "clean", last_seen: now },
-      { id: "e9", source: "win11-fin-11", target: "10.0.4.10", protocol: "tcp", port: 135, flow_count: 220, total_bytes: 2400000, verdict: "clean", last_seen: now },
-      { id: "e10", source: "linux-prod-api-02", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 5100, total_bytes: 310000000, verdict: "clean", last_seen: now }
+      { id: "e1", source: "10.0.4.15", target: "10.0.4.10", protocol: "tcp", port: 389, flow_count: 2140, total_bytes: 42000000, verdict: "clean", last_seen: now },
+      { id: "e2", source: "10.0.4.88", target: "10.0.4.10", protocol: "tcp", port: 88, flow_count: 980, total_bytes: 12000000, verdict: "clean", last_seen: now },
+      { id: "e3", source: "10.0.4.20", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 18200, total_bytes: 1420000000, verdict: "clean", last_seen: now },
+      { id: "e4", source: "10.0.4.44", target: "10.0.4.10", protocol: "tcp", port: 445, flow_count: 640, total_bytes: 8100000, verdict: "clean", last_seen: now },
+      { id: "e5", source: "10.0.4.46", target: "10.0.4.55", protocol: "tcp", port: 445, flow_count: 3120, total_bytes: 620000000, verdict: "clean", last_seen: now },
+      { id: "e6", source: "10.0.4.15", target: "198.51.100.22", protocol: "tcp", port: 443, flow_count: 142, total_bytes: 810000, verdict: "blocked", last_seen: now },
+      { id: "e7", source: "10.0.4.88", target: "10.0.4.99", protocol: "tcp", port: 4444, flow_count: 61, total_bytes: 190000, verdict: "anomalous", last_seen: now },
+      { id: "e8", source: "172.16.10.4", target: "172.16.10.9", protocol: "tcp", port: 5432, flow_count: 9400, total_bytes: 2100000000, verdict: "clean", last_seen: now },
+      { id: "e9", source: "10.0.4.31", target: "10.0.4.10", protocol: "tcp", port: 135, flow_count: 220, total_bytes: 2400000, verdict: "clean", last_seen: now },
+      { id: "e10", source: "172.16.10.9", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 5100, total_bytes: 310000000, verdict: "clean", last_seen: now },
+      { id: "e11", source: "10.0.4.15", target: "10.0.4.12", protocol: "tcp", port: 88, flow_count: 1480, total_bytes: 9200000, verdict: "clean", last_seen: now },
+      { id: "e12", source: "10.0.4.31", target: "10.0.4.12", protocol: "tcp", port: 389, flow_count: 910, total_bytes: 5400000, verdict: "clean", last_seen: now },
+      { id: "e13", source: "10.0.4.44", target: "10.0.4.12", protocol: "tcp", port: 135, flow_count: 320, total_bytes: 1900000, verdict: "clean", last_seen: now }
     ];
+
+    /* The hub aggregates edges to the asset pair and hands the port breakdown
+       over with them, so the demo carries the same shape. */
+    topoEdges.forEach(function (e) {
+      e.ports = [{ port: e.port, protocol: (e.protocol || "tcp").toUpperCase(), flow_count: e.flow_count, total_bytes: e.total_bytes, verdict: e.verdict }];
+    });
+    topoEdges[0].ports.push({ port: 445, protocol: "TCP", flow_count: 610, total_bytes: 7400000, verdict: "clean" });
+    topoEdges[0].ports.push({ port: 135, protocol: "TCP", flow_count: 240, total_bytes: 1100000, verdict: "clean" });
+    topoEdges[0].ports.push({ port: 88, protocol: "TCP", flow_count: 1290, total_bytes: 6800000, verdict: "clean" });
 
     return {
       "/api/v1/hierarchy": hierarchy,
       "/api/v1/endpoints": endpoints,
+      "/api/v1/assets": demoAssetGraph(),
+      "/api/v1/inference/status": {
+        last_run: mins(1), inferred_count: DEMO_INFERENCES.length, window: "24h0m0s",
+        interval: "5m0s", last_error: "", max_confidence: 0.9, results: DEMO_INFERENCES
+      },
       "/api/v1/scanner/results": scan,
       "/api/v1/scanner/coverage": {
         total_discovered: scan.length, total_managed: 4, total_unmanaged: scan.length - 4,
@@ -450,7 +582,10 @@
         { id: 9006, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1.2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.10", src_port: 49813, dst_port: 88, bytes_in: 4100, bytes_out: 2600, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
         { id: 9007, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.10", src_port: 51002, dst_port: 445, bytes_in: 812000, bytes_out: 44000, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 1044 },
         { id: 9008, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(140), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.10", src_port: 50221, dst_port: 135, bytes_in: 9400, bytes_out: 3100, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 998 },
-        { id: 9009, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(3), layer: "PF_OUT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.10", src_port: 61140, dst_port: 389, bytes_in: 15200, bytes_out: 6100, country: "", process_path: "/usr/libexec/opendirectoryd", process_id: 221 }
+        { id: 9009, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(3), layer: "PF_OUT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.10", src_port: 61140, dst_port: 389, bytes_in: 15200, bytes_out: 6100, country: "", process_path: "/usr/libexec/opendirectoryd", process_id: 221 },
+        { id: 9010, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.12", src_port: 49901, dst_port: 88, bytes_in: 8400, bytes_out: 3100, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
+        { id: 9011, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(2.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.12", src_port: 50120, dst_port: 389, bytes_in: 6200, bytes_out: 2400, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 704 },
+        { id: 9012, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(4.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.12", src_port: 51002, dst_port: 135, bytes_in: 3100, bytes_out: 1400, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 988 }
       ],
       "/api/v1/analytics/summary": {
         total_bytes_in: 3120000000, total_bytes_out: 7480000000, total_events: 48210,
@@ -475,7 +610,10 @@
         metrics: {
           total_nodes: topoNodes.length, total_edges: topoEdges.length,
           anomalous_edge_count: 2, managed_nodes_count: endpoints.length,
-          unmanaged_nodes_count: topoNodes.length - endpoints.length
+          unmanaged_nodes_count: topoNodes.length - endpoints.length,
+          quiet_nodes_count: topoNodes.filter(function (n) { return n.quiet; }).length,
+          inferred_nodes_count: topoNodes.filter(function (n) { return (n.evidence || []).indexOf("inferred") >= 0; }).length,
+          window_label: "24h"
         }
       },
       "/api/v1/copilot/config": { provider: "ollama", ollama_model: "llama3.2" }
@@ -483,6 +621,32 @@
   }
 
   var DEMO_CACHE = null;
+
+  /* The same merge rule the hub applies, so a demo correction visibly wins
+     the field the way a live one would. */
+  function DEMO_REMERGE(a) {
+    var rank = { operator: 3, agent: 2, scan: 1, inferred: 1 };
+    var best = {};
+    arrayOf(a.claims).forEach(function (c) {
+      c.winner = false;
+      var b = best[c.field];
+      if (!b || rank[c.source] > rank[b.source] ||
+        (rank[c.source] === rank[b.source] && c.confidence > b.confidence)) best[c.field] = c;
+    });
+    a.hostname = ""; a.os = ""; a.vendor = ""; a.category = ""; a.role = "";
+    a.risk_score = ""; a.role_confidence = 0; a.rationale = "";
+    Object.keys(best).forEach(function (f) {
+      var c = best[f];
+      c.winner = true;
+      if (f === "hostname") a.hostname = c.value;
+      else if (f === "os") a.os = c.value;
+      else if (f === "vendor") a.vendor = c.value;
+      else if (f === "category") a.category = c.value;
+      else if (f === "risk") a.risk_score = c.value;
+      else if (f === "role") { a.role = c.value; a.role_confidence = c.confidence; a.rationale = c.rationale; }
+    });
+    return a;
+  }
 
   function demoResponse(path, method, body) {
     if (!DEMO_CACHE) DEMO_CACHE = demoData();
@@ -536,6 +700,30 @@
         reply: "Severity: HIGH.\n\nThe fan-in shape on 10.0.4.10 (389/88/135/445 from lsass.exe and svchost.exe, in bursts at logon) reads as a directory server, not a workstation. corp-win11-exec is the host to look at first: it is the only endpoint with both a blocked external session and an unusual internal sweep in the same hour.\n\nRecommended order:\n  1. Keep corp-win11-exec isolated; capture the socket table before release.\n  2. Confirm 10.0.4.99 stays mesh-quarantined - the 4444 listener is still up.\n  3. Deploy an agent to 10.0.4.10 so the directory server stops being inferred.",
         timestamp: new Date().toISOString(), model: "llama3.2 (demo)", provider: "ollama"
       };
+    }
+    if (base === "/api/v1/assets/correct") {
+      var target = DEMO_CACHE["/api/v1/assets"].filter(function (a) {
+        return a.id === (body && body.asset_id) || (body && body.ip && a.ip === body.ip);
+      })[0];
+      if (target) {
+        target.claims = target.claims.filter(function (c) {
+          return !(c.source === "operator" && c.field === body.field);
+        });
+        if (!body.withdraw) {
+          target.claims.push({
+            field: body.field, source: "operator", value: body.value, confidence: 1.0,
+            rationale: body.reason || "operator correction",
+            observed_at: new Date().toISOString(), winner: false
+          });
+        }
+        DEMO_REMERGE(target);
+      }
+      return target || { status: "ok" };
+    }
+    if (base === "/api/v1/inference/run") {
+      var st = DEMO_CACHE["/api/v1/inference/status"];
+      st.last_run = new Date().toISOString();
+      return { status: "completed", inferred_count: arrayOf(st.results).length, detail: st };
     }
     if (base === "/api/v1/scanner/scan") return { scan_id: "scan-demo", status: "running" };
     if (base === "/api/v1/agents/update") {
@@ -636,17 +824,49 @@
     return !!t && (Date.now() - t.getTime()) < 30000;
   }
 
-  /* Folds endpoints (agent evidence) and scanner assets (scan evidence) into a
-     single row per host. Join is on agent_endpoint_id first, then IP. Pass 2
-     replaces both sources with the persisted assets table; the shape here is
-     already the merged one so only the source changes. */
-  function buildAssets() {
-    var byIP = {};
-    var byEndpoint = {};
-    arrayOf(state.scanAssets).forEach(function (a) {
-      if (a.ip) byIP[a.ip] = a;
-      if (a.agent_endpoint_id) byEndpoint[a.agent_endpoint_id] = a;
+  /* One row per host, from the server's asset graph.
+
+     Pass 1 merged endpoints and scan results here in the browser, which meant
+     the console's idea of a host and the hub's idea of a host could differ.
+     The merge now happens once, in the store, against a persisted assets
+     table; this function only decorates the result with the things that are
+     genuinely presentational - the client and location names, the live agent
+     status, and the mesh state. */
+  function bestClaim(asset, field, source) {
+    var found = null;
+    arrayOf(asset.claims).forEach(function (c) {
+      if (c.field !== field || (source && c.source !== source)) return;
+      if (!found || (c.confidence || 0) > (found.confidence || 0)) found = c;
     });
+    return found;
+  }
+
+  function claimGrade(claim) {
+    if (!claim) return false;
+    return (claim.confidence || 0) >= 0.6 ? "full" : "partial";
+  }
+
+  function evidenceOf(a) {
+    var scanClaim = null;
+    var inferredClaim = null;
+    arrayOf(a.claims).forEach(function (c) {
+      if (c.source === "scan" && (!scanClaim || (c.confidence || 0) > (scanClaim.confidence || 0))) scanClaim = c;
+      if (c.source === "inferred" && (!inferredClaim || (c.confidence || 0) > (inferredClaim.confidence || 0))) inferredClaim = c;
+    });
+    return {
+      agent: !!a.agent_endpoint_id,
+      scan: claimGrade(scanClaim),
+      inferred: claimGrade(inferredClaim),
+      operator: !!bestClaim(a, "role", "operator") || !!bestClaim(a, "category", "operator")
+    };
+  }
+
+  function buildAssets() {
+    var epById = {};
+    arrayOf(state.endpoints).forEach(function (ep) { epById[ep.id] = ep; });
+
+    var scanByIP = {};
+    arrayOf(state.scanAssets).forEach(function (a) { if (a.ip) scanByIP[a.ip] = a; });
 
     var locationOf = {};
     var tenantOf = {};
@@ -663,72 +883,61 @@
     });
 
     var latest = (state.updateStatus && state.updateStatus.latest_version) || "";
-    var used = {};
-    var rows = [];
+    var graph = arrayOf(state.assetGraph);
+    if (!graph.length) graph = legacyAssetGraph();
 
-    arrayOf(state.endpoints).forEach(function (ep) {
-      var scan = byEndpoint[ep.id] || (ep.ip ? byIP[ep.ip] : null) || null;
-      if (scan) used[scan.ip] = true;
+    var rows = graph.map(function (a) {
+      var ep = a.agent_endpoint_id ? epById[a.agent_endpoint_id] : null;
+      var loc = ep ? locationOf[ep.location_id] : null;
+      var ten = ep ? tenantOf[ep.location_id] : null;
+      var ev = evidenceOf(a);
 
-      var loc = locationOf[ep.location_id];
-      var ten = tenantOf[ep.location_id];
-      var online = endpointOnline(ep);
-      var st = ep.is_isolated ? STATE_QUARANTINED : (online ? STATE_ONLINE : STATE_OFFLINE);
-      var stale = !!latest && versionLess(ep.driver_version, latest);
+      var seen = parseTime(a.last_seen_at);
+      var online = ep ? endpointOnline(ep) : false;
+      var quiet = !seen || (Date.now() - seen.getTime()) > 3600000;
 
-      rows.push({
-        key: ep.id,
-        name: ep.hostname || ep.ip || ep.id,
-        ip: ep.ip || "",
-        mac: ep.mac || (scan ? scan.mac : "") || "",
-        identity: [ep.os, ep.role_tag].filter(Boolean).join(" \u00b7 ") || "\u2014",
-        tenantId: ep.tenant_id || (ten ? ten.id : ""),
-        tenantName: ten ? ten.name : (ep.tenant_id || "Unassigned"),
-        locationId: ep.location_id || "",
-        locationName: ep.location_name || (loc ? loc.name : "Unassigned"),
-        subnet: loc ? loc.subnet_cidr : "",
-        evidence: { agent: true, scan: scan ? (scan.confidence >= 0.6 ? "full" : "partial") : false, inferred: false },
+      var st;
+      if (ep) st = ep.is_isolated ? STATE_QUARANTINED : (online ? STATE_ONLINE : STATE_OFFLINE);
+      else st = quiet ? STATE_SILENT : STATE_NOAGENT;
+
+      var roleClaim = bestClaim(a, "role");
+      var inferredRole = bestClaim(a, "role", "inferred");
+      var identityBits = [a.os || "Unidentified"];
+      var descriptor = a.category || a.role;
+      if (descriptor) identityBits.push(descriptor);
+
+      return {
+        key: a.id,
+        assetId: a.id,
+        name: a.hostname || a.ip || a.id,
+        ip: a.ip || "",
+        mac: a.mac || "",
+        vendor: a.vendor || "",
+        identity: identityBits.join(" \u00b7 "),
+        tenantId: a.tenant_id || "",
+        tenantName: ten ? ten.name : (ep ? (ep.tenant_id || "Unassigned") : "Unassigned"),
+        locationId: a.location_id || "",
+        locationName: ep ? (ep.location_name || (loc ? loc.name : "Unassigned"))
+          : "Discovered \u2014 no client assigned",
+        subnet: a.subnet || (loc ? loc.subnet_cidr : ""),
+        evidence: ev,
         endpoint: ep,
-        scan: scan,
+        scan: scanByIP[a.ip] || null,
+        claims: arrayOf(a.claims),
+        role: a.role || "",
+        roleConf: Number(a.role_confidence) || 0,
+        rationale: a.rationale || "",
+        inferredRole: inferredRole,
+        roleSource: roleClaim ? roleClaim.source : "",
         state: st,
         online: online,
-        isolated: !!ep.is_isolated,
-        meshed: !!meshByIP[ep.ip],
-        stale: stale,
-        ports: scan ? arrayOf(scan.open_ports) : [],
-        risk: scan ? scan.risk_score : "",
-        lastSeen: parseTime(ep.last_seen_at) || (scan ? parseTime(scan.last_seen) : null)
-      });
-    });
-
-    arrayOf(state.scanAssets).forEach(function (a) {
-      if (used[a.ip]) return;
-      var seen = parseTime(a.last_seen);
-      var quiet = !seen || (Date.now() - seen.getTime()) > 3600000;
-      var identityBits = [a.os_guess || "Unidentified", a.category].filter(Boolean);
-      rows.push({
-        key: "ip:" + a.ip,
-        name: a.hostname || a.ip,
-        ip: a.ip,
-        mac: a.mac || "",
-        identity: identityBits.join(" \u00b7 "),
-        tenantId: "",
-        tenantName: "Unassigned",
-        locationId: "",
-        locationName: "Discovered \u2014 no client assigned",
-        subnet: "",
-        evidence: { agent: false, scan: a.confidence >= 0.6 ? "full" : "partial", inferred: false },
-        endpoint: null,
-        scan: a,
-        state: quiet ? STATE_SILENT : STATE_NOAGENT,
-        online: !quiet,
-        isolated: false,
+        isolated: !!(ep && ep.is_isolated),
         meshed: !!meshByIP[a.ip],
-        stale: false,
-        ports: arrayOf(a.open_ports),
+        stale: !!(ep && latest && versionLess(ep.driver_version, latest)),
+        ports: arrayOf(a.ports),
         risk: a.risk_score || "",
-        lastSeen: seen
-      });
+        lastSeen: ep ? (parseTime(ep.last_seen_at) || seen) : seen
+      };
     });
 
     rows.forEach(function (r) {
@@ -737,7 +946,8 @@
         return p.risk_level === "HIGH" || p.risk_level === "CRITICAL";
       }).length;
       r.groupKey = r.tenantName + " \u203a " + r.locationName;
-      r.searchText = [r.name, r.ip, r.mac, r.identity, r.tenantName, r.locationName, r.key].join(" ").toLowerCase();
+      r.searchText = [r.name, r.ip, r.mac, r.identity, r.role, r.tenantName, r.locationName, r.key]
+        .join(" ").toLowerCase();
     });
 
     /* Stable identity ordering. last_seen_at is deliberately not consulted:
@@ -751,6 +961,46 @@
     state.assets = rows;
     state.assetByKey = {};
     rows.forEach(function (r) { state.assetByKey[r.key] = r; });
+  }
+
+  /* A hub older than this console has no /api/v1/assets. Rather than render
+     an empty fleet during a rolling upgrade, synthesise the same shape from
+     the two sources Pass 1 used. */
+  function legacyAssetGraph() {
+    var out = [];
+    var used = {};
+    var scanByIP = {};
+    var scanByEndpoint = {};
+    arrayOf(state.scanAssets).forEach(function (a) {
+      if (a.ip) scanByIP[a.ip] = a;
+      if (a.agent_endpoint_id) scanByEndpoint[a.agent_endpoint_id] = a;
+    });
+
+    arrayOf(state.endpoints).forEach(function (ep) {
+      var sc = scanByEndpoint[ep.id] || scanByIP[ep.ip] || null;
+      if (sc) used[sc.ip] = true;
+      var claims = [{ field: "os", source: "agent", value: ep.os || "", confidence: 1, winner: true }];
+      if (sc && sc.os_guess) claims.push({ field: "os", source: "scan", value: sc.os_guess, confidence: Number(sc.confidence) || 0, winner: false });
+      out.push({
+        id: ep.id, agent_endpoint_id: ep.id, ip: ep.ip || "", mac: ep.mac || "",
+        hostname: ep.hostname, os: ep.os, vendor: sc ? sc.vendor : "", category: ep.role_tag,
+        role: ep.role_tag, risk_score: sc ? sc.risk_score : "", tenant_id: ep.tenant_id,
+        location_id: ep.location_id, last_seen_at: ep.last_seen_at,
+        ports: sc ? arrayOf(sc.open_ports) : [], claims: claims
+      });
+    });
+
+    arrayOf(state.scanAssets).forEach(function (a) {
+      if (used[a.ip]) return;
+      out.push({
+        id: "ip:" + a.ip, agent_endpoint_id: "", ip: a.ip, mac: a.mac || "",
+        hostname: a.hostname, os: a.os_guess, vendor: a.vendor, category: a.category,
+        role: "", risk_score: a.risk_score, tenant_id: "", location_id: "",
+        last_seen_at: a.last_seen, ports: arrayOf(a.open_ports),
+        claims: [{ field: "os", source: "scan", value: a.os_guess || "", confidence: Number(a.confidence) || 0, winner: true }]
+      });
+    });
+    return out;
   }
 
   /* -------------------------------------------------------------- filters */
@@ -873,6 +1123,10 @@
     });
   }
 
+  function inferredCount() {
+    return state.assets.filter(function (a) { return !!a.evidence.inferred; }).length;
+  }
+
   function sectionSummary() {
     var stats = assetStats();
     if (state.section === "discovery") {
@@ -882,8 +1136,8 @@
         { label: "Managed", value: String(cov.total_managed !== undefined ? cov.total_managed : stats.agented) },
         { label: "Unmanaged", value: String(cov.total_unmanaged !== undefined ? cov.total_unmanaged : stats.noagent), tone: "warn" },
         { label: "Coverage", value: (cov.coverage_percent !== undefined ? cov.coverage_percent : 0) + "%" },
-        { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" },
-        { label: "High risks", value: String(cov.high_risks || 0), tone: cov.high_risks ? "warn" : "" }
+        { label: "Deduced from flow", value: String(inferredCount()) },
+        { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" }
       ];
     }
     if (state.section === "topology") {
@@ -893,8 +1147,8 @@
         { label: "Edges", value: String(m.total_edges || 0) },
         { label: "Managed", value: String(m.managed_nodes_count || 0) },
         { label: "Unmanaged", value: String(m.unmanaged_nodes_count || 0), tone: "warn" },
-        { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" },
-        { label: "Window", value: state.topoWindow }
+        { label: "Quiet in window", value: String(m.quiet_nodes_count || 0) },
+        { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" }
       ];
     }
     if (state.section === "traffic") {
@@ -981,6 +1235,21 @@
     menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
     menu.appendChild(menuItem("Correct fingerprint\u2026", "i-tag", null, function () { correctFingerprint(asset); },
       { disabled: !asset.scan, why: "Needs a scan result to correct" }));
+
+    var inferred = asset.inferredRole;
+    var corrected = bestClaim({ claims: asset.claims }, "role", "operator");
+    if (corrected) {
+      menu.appendChild(menuItem("Withdraw role correction", "i-refresh", null, function () {
+        correctAsset(asset, "role", "", "", true);
+      }));
+    } else if (inferred) {
+      menu.appendChild(menuItem("Confirm " + roleLabel(inferred.value).toLowerCase(), "i-check", null, function () {
+        correctAsset(asset, "role", inferred.value, "operator confirmed the flow inference", false);
+      }));
+      menu.appendChild(menuItem("Not a " + roleLabel(inferred.value).toLowerCase(), "i-close", null, function () {
+        correctAsset(asset, "role", "unknown", "operator rejected the flow inference", false);
+      }, { danger: true }));
+    }
 
     menu.appendChild(h("div", { cls: "sep" }));
     menu.appendChild(h("div", { cls: "lbl", text: "Act" }));
@@ -1114,7 +1383,7 @@
       cls: "ev",
       title: "Known by \u2014 agent: " + (asset.evidence.agent ? "yes" : "no") +
         ", scan: " + (asset.evidence.scan || "no") +
-        ", inferred: no (Pass 2)"
+        ", inferred: " + (asset.evidence.inferred || "no")
     });
     wrap.appendChild(h("i", { "data-on": asset.evidence.agent ? "agent" : null }));
     wrap.appendChild(h("i", { "data-on": asset.evidence.scan ? "scan" : null }));
@@ -1140,16 +1409,119 @@
       h("span", { cls: "conf", text: confidence === null ? "" : confidence.toFixed(2) }));
   }
 
+  var FIELD_LABEL = {
+    hostname: "Hostname", os: "Operating system", vendor: "Vendor",
+    category: "Device class", role: "Role", risk: "Risk"
+  };
+
+  /* Every source's opinion, winner first, losers kept. An operator has to be
+     able to see that the scanner said one thing and the agent another; a
+     merge that silently discards the loser is a merge you cannot audit. */
+  function claimsPanel(asset) {
+    var wrap = h("div", { cls: "claims" });
+    var byField = {};
+    var order = [];
+    arrayOf(asset.claims).forEach(function (c) {
+      if (!byField[c.field]) { byField[c.field] = []; order.push(c.field); }
+      byField[c.field].push(c);
+    });
+    if (!order.length) {
+      wrap.appendChild(claimRow("\u2014", "No identity claim yet", null, false));
+      return wrap;
+    }
+    order.sort(function (a, b) {
+      var rank = { hostname: 0, os: 1, category: 2, role: 3, vendor: 4, risk: 5 };
+      return (rank[a] === undefined ? 9 : rank[a]) - (rank[b] === undefined ? 9 : rank[b]);
+    });
+    order.forEach(function (field) {
+      wrap.appendChild(h("div", { cls: "claim-field", text: FIELD_LABEL[field] || field }));
+      byField[field].forEach(function (c) {
+        wrap.appendChild(claimRow(c.source, c.value, Number(c.confidence) || 0, !!c.winner));
+      });
+    });
+    return wrap;
+  }
+
+  /* Corrections outrank every other source permanently, so they are an
+     explicit act with a visible result, not a silent edit. */
+  function correctAsset(asset, field, value, reason, withdraw) {
+    return request("/api/v1/assets/correct", "POST", {
+      asset_id: asset.assetId, ip: asset.ip, field: field,
+      value: value, reason: reason, withdraw: !!withdraw
+    }).then(function () {
+      toast(withdraw ? "Correction withdrawn on " + asset.name
+        : "Recorded: " + (FIELD_LABEL[field] || field) + " is " + value, "ok");
+      refresh();
+    }).catch(function (e) { toast("Correction failed: " + e.message, "crit"); });
+  }
+
+  function roleLabel(role) {
+    if (!role) return "";
+    return role.charAt(0).toUpperCase() + role.slice(1).replace(/-/g, " ");
+  }
+
+  /* The inference panel: what was deduced, why, and the two buttons that end
+     the argument. Confirm pins the deduction; Reject withdraws it and leaves
+     the row unclaimed rather than substituting another guess. */
+  function inferencePanel(asset) {
+    var wrap = h("div", {});
+    var inferred = asset.inferredRole;
+    var operator = bestClaim({ claims: asset.claims }, "role", "operator");
+
+    if (!inferred && !operator) return null;
+
+    if (inferred) {
+      wrap.appendChild(h("p", { cls: "why" },
+        h("b", { text: "Flow inference: " + roleLabel(inferred.value) + "." }),
+        document.createTextNode(" " + (inferred.rationale || ""))));
+      wrap.appendChild(h("div", { cls: "detail-acts" }, meter(Number(inferred.confidence) || 0)));
+    }
+
+    if (operator) {
+      wrap.appendChild(h("p", { cls: "why" },
+        h("b", { text: "Operator correction: " + roleLabel(operator.value) + "." }),
+        document.createTextNode(" " + (operator.rationale || "") +
+          " This outranks the inference and every scan.")));
+      wrap.appendChild(h("div", { cls: "detail-acts" },
+        h("button", {
+          cls: "mini", type: "button", text: "Withdraw correction",
+          on: {
+            click: function (e) {
+              e.stopPropagation();
+              correctAsset(asset, "role", "", "", true);
+            }
+          }
+        })));
+      return wrap;
+    }
+
+    var acts = h("div", { cls: "detail-acts" });
+    acts.appendChild(h("button", {
+      cls: "mini", type: "button", text: "Confirm " + roleLabel(inferred.value).toLowerCase(),
+      on: {
+        click: function (e) {
+          e.stopPropagation();
+          correctAsset(asset, "role", inferred.value, "operator confirmed the flow inference", false);
+        }
+      }
+    }));
+    acts.appendChild(h("button", {
+      cls: "mini", type: "button", text: "Not a " + roleLabel(inferred.value).toLowerCase(),
+      "data-danger": "true",
+      on: {
+        click: function (e) {
+          e.stopPropagation();
+          correctAsset(asset, "role", "unknown", "operator rejected the flow inference", false);
+        }
+      }
+    }));
+    wrap.appendChild(acts);
+    return wrap;
+  }
+
   function detailRow(asset, colspan) {
     var ep = asset.endpoint;
     var sc = asset.scan;
-
-    /* Identity: highest-confidence claim per field wins, losing claims stay
-       visible. Agent evidence is 1.0 by definition. */
-    var claims = h("div", { cls: "claims" });
-    if (ep) claims.appendChild(claimRow("agent", ep.os || "\u2014", 1.0, true));
-    if (sc && sc.os_guess) claims.appendChild(claimRow("scan", sc.os_guess, Number(sc.confidence) || 0, !ep));
-    if (!ep && !sc) claims.appendChild(claimRow("\u2014", "No identity claim", null, false));
 
     var kv = h("dl", { cls: "kv" });
     var addKV = function (k, v, strong) {
@@ -1157,7 +1529,8 @@
       kv.appendChild(h("dd", {}, strong ? h("b", { text: v }) : document.createTextNode(v)));
     };
     addKV("Address", asset.ip || "\u2014", true);
-    addKV("MAC / OUI", (asset.mac || "\u2014") + (sc && sc.vendor ? " \u00b7 " + sc.vendor : ""));
+    addKV("MAC / OUI", (asset.mac || "\u2014") + (asset.vendor ? " \u00b7 " + asset.vendor : ""));
+    addKV("Identity key", asset.assetId);
     addKV("Client", asset.tenantName);
     addKV("Location", asset.locationName);
     if (ep) {
@@ -1174,7 +1547,7 @@
 
     var identityCol = h("div", {},
       h("h4", { text: "Identity \u2014 merged claims" }),
-      claims,
+      claimsPanel(asset),
       kv,
       h("div", { cls: "detail-acts" },
         h("button", {
@@ -1188,11 +1561,11 @@
         ports.appendChild(h("span", { cls: "port", "data-risk": p.risk_level || "LOW", text: p.port + (p.service ? " " + p.service : "") }));
       });
     } else {
-      ports.appendChild(h("span", { cls: "dim-3", text: asset.scan ? "No open ports observed" : "Not scanned" }));
+      ports.appendChild(h("span", { cls: "dim-3", text: asset.evidence.scan ? "No open ports observed" : "Not scanned" }));
     }
 
     var exposureCol = h("div", {}, h("h4", { text: "Observed exposure" }), ports);
-    var weak = asset.scan ? arrayOf(asset.scan.weakpoints) : [];
+    var weak = sc ? arrayOf(sc.weakpoints) : [];
     if (weak.length) {
       var list = h("div", { cls: "why" });
       weak.forEach(function (w) { list.appendChild(h("div", { text: "\u00b7 " + w })); });
@@ -1204,30 +1577,35 @@
       exposureCol.appendChild(h("div", { cls: "why", text: "Peer mesh is dropping traffic to this address across the subnet." }));
     }
 
-    /* Pass 2 fills this column with the inference rationale. Until then it
-       says plainly what evidence exists and what is still missing, rather
-       than showing an empty panel. */
     var whyCol = h("div", {}, h("h4", { text: "Why we think this" }));
-    if (ep && sc) {
+    var inference = inferencePanel(asset);
+    if (inference) {
+      whyCol.appendChild(inference);
+    } else if (ep && asset.evidence.scan) {
+      var osScan = bestClaim({ claims: asset.claims }, "os", "scan");
       whyCol.appendChild(h("p", { cls: "why" },
         h("b", { text: "Agent and scan agree on this host." }),
         document.createTextNode(" The agent reports " + (ep.os || "an OS") + " directly; the probe independently fingerprinted " +
-          (sc.os_guess || "the same host") + " at " + ((Number(sc.confidence) || 0).toFixed(2)) + " confidence.")));
-      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(Number(sc.confidence) || 0)));
+          ((osScan && osScan.value) || "the same host") + " at " + ((osScan ? Number(osScan.confidence) : 0) || 0).toFixed(2) + " confidence.")));
+      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter((osScan ? Number(osScan.confidence) : 0) || 0)));
     } else if (ep) {
       whyCol.appendChild(h("p", { cls: "why" },
         h("b", { text: "Agent ground truth only." }),
-        document.createTextNode(" No scan has covered this address, so open ports and the OUI vendor are unknown. Run Discovery over " +
+        document.createTextNode(" No scan has covered this address and no flow shape names it, so open ports and the OUI vendor are unknown. Run Discovery over " +
           (asset.subnet || "its subnet") + " to add the second source.")));
-    } else if (sc) {
+    } else if (asset.evidence.scan) {
+      var osClaim = bestClaim({ claims: asset.claims }, "os", "scan");
       whyCol.appendChild(h("p", { cls: "why" },
         h("b", { text: "Probe evidence only." }),
-        document.createTextNode(" " + (sc.os_guess || "Unidentified") + " at " + ((Number(sc.confidence) || 0).toFixed(2)) +
-          " confidence from TTL " + (sc.ttl || "?") + ", app delta " + (sc.app_delta_ms || 0) + " ms" +
-          (sc.vendor ? " and the " + sc.vendor + " OUI" : "") + ".")));
-      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(Number(sc.confidence) || 0)));
+        document.createTextNode(" " + ((osClaim && osClaim.value) || "Unidentified") + " at " +
+          (((osClaim ? Number(osClaim.confidence) : 0) || 0).toFixed(2)) + " confidence" +
+          (sc ? " from TTL " + (sc.ttl || "?") + ", app delta " + (sc.app_delta_ms || 0) + " ms" : "") +
+          (asset.vendor ? " and the " + asset.vendor + " OUI" : "") +
+          ". Nothing in the last day of traffic gives it a role.")));
+      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(((osClaim ? Number(osClaim.confidence) : 0) || 0))));
+    } else {
+      whyCol.appendChild(h("p", { cls: "why", text: "Seen, but not yet identified by any source." }));
     }
-    whyCol.appendChild(h("p", { cls: "pending", text: "Flow inference \u2014 Pass 2. Role deduced from neighbours' traffic, with a rationale and Confirm / Not-a-DC correction, lands with the persisted assets table." }));
 
     var td = h("td", { colspan: String(colspan) }, h("div", { cls: "detail" }, identityCol, exposureCol, whyCol));
     return h("tr", { cls: "exp" }, td);
@@ -1462,7 +1840,9 @@
               }
             }
           })),
-        h("p", { cls: "pending", text: state.scanJob ? "Last job: " + state.scanJob : "Discovered assets live in memory until Pass 2 persists them \u2014 a hub restart clears this list." })));
+        h("p", { cls: "pending", text: state.scanJob
+          ? "Last job: " + state.scanJob
+          : "Discovered assets are written to the asset graph as they are found, so they survive a hub restart and an agent installed later enriches the same row." })));
 
     var unmanaged = state.assets.filter(function (a) { return !a.evidence.agent; });
     var worklist = card("Deployment worklist \u2014 seen, but not covered",
@@ -1488,11 +1868,47 @@
         h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
         h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: (cov.coverage_percent || 0) + "%" })),
         h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
-        h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) })));
+        h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }),
+        h("dt", { text: "Named by flow" }), h("dd", {}, h("b", { text: String(inferredCount()) }))));
+
+    var inf = state.inference || {};
+    var infBody = h("div", { cls: "card-body" });
+    var infRows = arrayOf(inf.results);
+    if (infRows.length) {
+      infBody.appendChild(simpleTable(["Address", "Deduced role", "Confidence", "Why"],
+        infRows.map(function (r) {
+          var asset = state.assets.filter(function (a) { return a.ip === r.ip; })[0];
+          return [
+            h("span", { cls: "ip", text: r.ip }),
+            h("span", {}, h("b", { text: r.label || roleLabel(r.role) })),
+            h("span", { cls: "ago", text: (Number(r.confidence) || 0).toFixed(2) }),
+            h("span", { cls: "dim",
+              on: asset ? { click: function () { state.expandedKey = asset.key; state.cursorKey = asset.key; go("assets"); } } : null,
+              text: r.rationale || "" })
+          ];
+        })));
+    } else {
+      infBody.appendChild(h("div", { cls: "empty", text: "No role deduced from flow in the current window." }));
+    }
+    infBody.appendChild(h("p", { cls: "pending", text: "Inference runs every " + (inf.interval || "5m") +
+      " over a " + (inf.window || "24h") + " window of traffic. It never outranks an agent, a scan or an operator correction." }));
 
     clear(view);
     view.appendChild(h("div", { cls: "pad stack" },
       h("div", { cls: "cols" }, launch, card("Coverage", covBody)),
+      card("Deduced from flow \u2014 hosts nothing probed and nothing runs on", infBody, [
+        h("button", {
+          cls: "mini", type: "button", text: "Run inference now",
+          on: {
+            click: function () {
+              request("/api/v1/inference/run", "POST").then(function (res) {
+                toast("Inference pass complete: " + ((res && res.inferred_count) || 0) + " role(s)", "ok");
+                refresh();
+              }).catch(function (e) { toast("Inference failed: " + e.message, "crit"); });
+            }
+          }
+        })
+      ], true),
       worklist));
   }
 
@@ -1545,6 +1961,13 @@
     return "unmanaged";
   }
 
+  function nodeLabelFor(nodes, id) {
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].id === id) return nodes[i].label || id;
+    }
+    return id;
+  }
+
   function renderTopology() {
     var view = $("view");
     var data = state.topology;
@@ -1573,17 +1996,53 @@
       var id = a + "\u0000" + b;
       var p = pairs[id];
       if (!p) {
-        p = pairs[id] = { source: a, target: b, flow: 0, bytes: 0, verdict: "clean", topPort: e.port, topFlow: 0 };
+        p = pairs[id] = { id: id, source: a, target: b, flow: 0, bytes: 0, verdict: "clean", topPort: e.port, topFlow: 0, ports: {} };
       }
       p.flow += Number(e.flow_count) || 0;
       p.bytes += Number(e.total_bytes) || 0;
       if (e.verdict === "blocked") p.verdict = "blocked";
       else if (e.verdict === "anomalous" && p.verdict !== "blocked") p.verdict = "anomalous";
       if ((Number(e.flow_count) || 0) >= p.topFlow) { p.topFlow = Number(e.flow_count) || 0; p.topPort = e.port; }
+
+      /* The hub aggregates to the asset pair and hands the ports over with
+         it, so the graph can stay one line per pair and still answer "which
+         ports" without another round trip. */
+      arrayOf(e.ports).forEach(function (ps) {
+        var k = (ps.protocol || "TCP") + "/" + ps.port;
+        var slot = p.ports[k] || (p.ports[k] = { port: ps.port, protocol: ps.protocol || "TCP", flow: 0, bytes: 0, verdict: "clean" });
+        slot.flow += Number(ps.flow_count) || 0;
+        slot.bytes += Number(ps.total_bytes) || 0;
+        if (ps.verdict && ps.verdict !== "clean") slot.verdict = ps.verdict;
+      });
     });
 
     var edgeLayer = s("g");
     var labelLayer = s("g");
+
+    /* Where the node circles and their captions will land. A port label that
+       falls on top of a hostname is worse than no port label at all: the two
+       strings interleave and neither can be read. The selected-link panel is
+       the authoritative port list, so the label is a convenience we drop
+       rather than draw illegibly. Node captions sit centred below the circle
+       at pt.y + pt.r + 11; the half-width is estimated from the monospace
+       advance, which is close enough for an overlap test. */
+    var occupied = [];
+    nodes.forEach(function (n) {
+      var pt = pos[n.id];
+      if (!pt) return;
+      var text = n.label || n.id;
+      var half = Math.max(pt.r, text.length * 2.6);
+      occupied.push({ x0: pt.x - pt.r, x1: pt.x + pt.r, y0: pt.y - pt.r, y1: pt.y + pt.r });
+      occupied.push({ x0: pt.x - half, x1: pt.x + half, y0: pt.y + pt.r + 4, y1: pt.y + pt.r + 15 });
+    });
+    function labelIsClear(x, y) {
+      for (var i = 0; i < occupied.length; i++) {
+        var o = occupied[i];
+        if (x > o.x0 - 9 && x < o.x1 + 9 && y > o.y0 - 7 && y < o.y1 + 7) return false;
+      }
+      return true;
+    }
+
     Object.keys(pairs).sort().forEach(function (id) {
       var p = pairs[id];
       var a = pos[p.source], b = pos[p.target];
@@ -1591,11 +2050,21 @@
       var w = 0.8 + (p.flow / maxFlow) * 2.6;
       edgeLayer.appendChild(s("line", {
         "class": "edge", "data-verdict": p.verdict,
-        x1: a.x, y1: a.y, x2: b.x, y2: b.y, "stroke-width": w.toFixed(2)
+        "data-selected": state.topoEdgeSelected === id ? "true" : "false",
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y, "stroke-width": w.toFixed(2),
+        on: {
+          click: function (ev) {
+            ev.stopPropagation();
+            state.topoEdgeSelected = state.topoEdgeSelected === id ? "" : id;
+            state.topoSelected = "";
+            render();
+          }
+        }
       }));
-      if (p.topPort) {
+      var lx = (a.x + b.x) / 2, ly = (a.y + b.y) / 2 - 3;
+      if (p.topPort && labelIsClear(lx, ly)) {
         labelLayer.appendChild(s("text", {
-          "class": "elabel", x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 3, "text-anchor": "middle",
+          "class": "elabel", x: lx, y: ly, "text-anchor": "middle",
           text: String(p.topPort)
         }));
       }
@@ -1608,12 +2077,19 @@
       var circle = s("circle", {
         "class": "node", "data-kind": nodeKind(n),
         "data-selected": state.topoSelected === n.id ? "true" : "false",
+        /* A known asset that was quiet in the window is dimmed, never
+           omitted: absence is information on a security graph. */
+        "data-quiet": n.quiet ? "true" : "false",
         cx: pt.x, cy: pt.y, r: pt.r,
         on: {
-          click: function () { state.topoSelected = n.id; render(); }
+          click: function () { state.topoSelected = n.id; state.topoEdgeSelected = ""; render(); }
         }
       });
-      circle.appendChild(s("title", { text: (n.label || n.id) + " \u00b7 " + (n.ip || "") }));
+      circle.appendChild(s("title", {
+        text: (n.label || n.id) + " \u00b7 " + (n.ip || "") +
+          (n.role && n.role !== "unknown" ? " \u00b7 " + n.role : "") +
+          (n.quiet ? " \u00b7 quiet in this window" : "")
+      }));
       nodeLayer.appendChild(circle);
       labelLayer.appendChild(s("text", {
         "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
@@ -1628,9 +2104,40 @@
     var sel = null;
     nodes.forEach(function (n) { if (n.id === state.topoSelected) sel = n; });
 
-    var side = h("div", { cls: "topo-side" }, h("h4", { text: "Selected node" }));
-    if (!sel) {
-      side.appendChild(h("p", { cls: "pending", text: "Click a node. Selection is shared with the Assets table \u2014 the graph is a lens, not a destination." }));
+    var selEdge = state.topoEdgeSelected ? pairs[state.topoEdgeSelected] : null;
+
+    var side = h("div", { cls: "topo-side" }, h("h4", { text: selEdge ? "Selected link" : "Selected node" }));
+    if (selEdge) {
+      /* Ports expand on selection rather than being drawn on every edge. */
+      side.appendChild(h("dl", { cls: "kv" },
+        h("dt", { text: "Between" }), h("dd", {}, h("b", { text: nodeLabelFor(nodes, selEdge.source) })),
+        h("dt", { text: "and" }), h("dd", {}, h("b", { text: nodeLabelFor(nodes, selEdge.target) })),
+        h("dt", { text: "Flows" }), h("dd", { text: String(selEdge.flow) }),
+        h("dt", { text: "Volume" }), h("dd", { text: bytes(selEdge.bytes) }),
+        h("dt", { text: "Verdict" }), h("dd", { text: selEdge.verdict })));
+
+      var portKeys = Object.keys(selEdge.ports).sort(function (a, b) {
+        return selEdge.ports[b].bytes - selEdge.ports[a].bytes;
+      });
+      if (portKeys.length) {
+        side.appendChild(h("h4", { text: "Ports on this link" }));
+        var plist = h("div", { cls: "portlist" });
+        portKeys.forEach(function (k) {
+          var ps = selEdge.ports[k];
+          plist.appendChild(h("span", {
+            cls: "port", "data-risk": ps.verdict === "blocked" ? "CRITICAL" : "LOW",
+            text: ps.port + " " + ps.protocol + " \u00b7 " + bytes(ps.bytes)
+          }));
+        });
+        side.appendChild(plist);
+      }
+      side.appendChild(h("div", { cls: "detail-acts" },
+        h("button", {
+          cls: "mini", type: "button", text: "Clear selection",
+          on: { click: function () { state.topoEdgeSelected = ""; render(); } }
+        })));
+    } else if (!sel) {
+      side.appendChild(h("p", { cls: "pending", text: "Click a node, or a link to see its ports. Selection is shared with the Assets table \u2014 the graph is a lens, not a destination." }));
     } else {
       var linked = Object.keys(pairs).map(function (k) { return pairs[k]; })
         .filter(function (p) { return p.source === sel.id || p.target === sel.id; });
@@ -1638,12 +2145,19 @@
         h("dt", { text: "Asset" }), h("dd", {}, h("b", { text: sel.label || sel.id })),
         h("dt", { text: "Address" }), h("dd", { text: sel.ip || "\u2014" }),
         h("dt", { text: "Identity" }), h("dd", { text: sel.os || "\u2014" }),
-        h("dt", { text: "Role" }), h("dd", { text: sel.role || "\u2014" }),
+        h("dt", { text: "Role" }), h("dd", { text: (sel.role && sel.role !== "unknown" ? roleLabel(sel.role) : "\u2014") }),
+        h("dt", { text: "Known by" }), h("dd", { text: arrayOf(sel.evidence).join(", ") || "flow only" }),
         h("dt", { text: "Risk" }), h("dd", { text: sel.risk || "\u2014" }),
+        h("dt", { text: "In window" }), h("dd", { text: sel.quiet ? "quiet" : "active" }),
         h("dt", { text: "Peers" }), h("dd", {}, h("b", { text: String(linked.length) })),
         h("dt", { text: "Flows" }), h("dd", { text: String(linked.reduce(function (t, p) { return t + p.flow; }, 0)) }),
         h("dt", { text: "Volume" }), h("dd", { text: bytes(linked.reduce(function (t, p) { return t + p.bytes; }, 0)) }));
       side.appendChild(kv);
+      if (sel.rationale) {
+        side.appendChild(h("p", { cls: "why" },
+          h("b", { text: "Deduced from flow." }),
+          document.createTextNode(" " + sel.rationale)));
+      }
 
       var asset = state.assetByKey[sel.id] || state.assets.filter(function (a) { return a.ip && a.ip === sel.ip; })[0];
       var acts = h("div", { cls: "detail-acts" });
@@ -1662,7 +2176,7 @@
           }
         }));
       } else {
-        acts.appendChild(h("span", { cls: "pending", text: "No asset record for this node yet \u2014 Pass 2 draws nodes from the assets table." }));
+        acts.appendChild(h("span", { cls: "pending", text: "Seen in traffic only \u2014 no asset record, no agent and no probe has reached this address." }));
       }
       side.appendChild(acts);
     }
@@ -1672,7 +2186,7 @@
       .forEach(function (pair) {
         legend.appendChild(h("span", {}, h("i", { "data-kind": pair[0] }), h("span", { text: pair[1] })));
       });
-    legend.appendChild(h("span", { text: "edge width = flow volume \u00b7 dashed = blocked \u00b7 label = heaviest port per pair" }));
+    legend.appendChild(h("span", { text: "edge width = flow volume \u00b7 dashed = blocked \u00b7 label = heaviest port per pair \u00b7 hollow = quiet in this window" }));
 
     view.appendChild(h("div", { cls: "topo" }, h("div", { cls: "topo-canvas" }, svg), side));
     view.appendChild(legend);
@@ -1914,7 +2428,8 @@
         h("dt", { text: "Asset" }), h("dd", {}, h("b", { text: asset.name })),
         h("dt", { text: "Address" }), h("dd", {}, h("b", { text: asset.ip || "\u2014" })),
         h("dt", { text: "MAC" }), h("dd", { text: asset.mac || "\u2014" }),
-        h("dt", { text: "Vendor" }), h("dd", { text: (sc && sc.vendor) || "\u2014" }),
+        h("dt", { text: "Vendor" }), h("dd", { text: asset.vendor || "\u2014" }),
+        h("dt", { text: "Role" }), h("dd", {}, h("b", { text: asset.role && asset.role !== "unknown" ? roleLabel(asset.role) : "\u2014" })),
         h("dt", { text: "Identity" }), h("dd", { text: asset.identity }),
         h("dt", { text: "Client" }), h("dd", { text: asset.tenantName }),
         h("dt", { text: "Location" }), h("dd", { text: asset.locationName }),
@@ -1951,11 +2466,9 @@
     }
 
     var evBody = h("div", { cls: "card-body" });
-    var claims = h("div", { cls: "claims" });
-    if (ep) claims.appendChild(claimRow("agent", ep.os || "\u2014", 1.0, true));
-    if (sc && sc.os_guess) claims.appendChild(claimRow("scan", sc.os_guess, Number(sc.confidence) || 0, !ep));
-    claims.appendChild(claimRow("inferred", "Pass 2 \u2014 role from neighbours' flow", null, false));
-    evBody.appendChild(claims);
+    evBody.appendChild(claimsPanel(asset));
+    var routeInference = inferencePanel(asset);
+    if (routeInference) evBody.appendChild(routeInference);
     evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing claims stay on the row so an operator can see that the scanner said one thing and the agent another." }));
 
     var flows = state.events.filter(function (e) {
@@ -2635,6 +3148,7 @@
     var jobs = [
       request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
       request("/api/v1/endpoints").then(function (d) { state.endpoints = arrayOf(d); }),
+      request("/api/v1/assets").then(function (d) { state.assetGraph = arrayOf(d); }),
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/anomalies").then(function (d) {
@@ -2658,6 +3172,9 @@
       jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
+    if (state.section === "discovery" || state.section === "topology" || state.expandedKey || state.routeKey) {
+      jobs.push(request("/api/v1/inference/status").then(function (d) { state.inference = d || null; }));
+    }
 
     return Promise.all(jobs.map(function (p) {
       return p.catch(function (e) {

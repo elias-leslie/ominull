@@ -22,6 +22,7 @@ import (
 	"ominull/hub/pkg/copilot"
 	"ominull/hub/pkg/deployer"
 	"ominull/hub/pkg/detector"
+	"ominull/hub/pkg/inference"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
@@ -40,6 +41,7 @@ type Server struct {
 	detector     *detector.Engine
 	pki          *pki.Manager
 	scanner      *scanner.Scanner
+	inference    *inference.Engine
 	deployer     *deployer.Deployer
 	copilot      *copilot.Engine
 	adminKey     string
@@ -85,12 +87,21 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		log.Printf("[-] Warning: Failed to initialize Autonomous PKI Manager: %v", err)
 	}
 
+	// Project every existing endpoint into the asset graph before anything
+	// reads it. A hub upgrading into this schema then shows its whole fleet
+	// at once instead of one host per agent check-in, and the scanner's cache
+	// hydrates from a populated table.
+	if err := store.BackfillAssetsFromEndpoints(); err != nil {
+		log.Printf("[-] Warning: Failed to backfill the asset graph from endpoints: %v", err)
+	}
+
 	s := &Server{
 		store:    store,
 		ti:       threatintel.New(store),
-		pki:      pkiMgr,
-		scanner:  scanner.New(store),
-		deployer: deployer.New(store, hubURL, adminKey),
+		pki:       pkiMgr,
+		scanner:   scanner.New(store),
+		inference: inference.New(store),
+		deployer:  deployer.New(store, hubURL, adminKey),
 		copilot: copilot.New(store, copilot.Config{
 			Provider:    copilot.ProviderLocalOllama,
 			OllamaURL:   "http://10.0.0.39:11434",
@@ -156,6 +167,9 @@ func (s *Server) Start(addr string) error {
 	// Start Threat Intelligence feed scheduler & Behavioral Detector
 	s.ti.Start(context.Background(), 1*time.Hour)
 	s.detector.Start(context.Background())
+	// Role inference walks the whole events window, so it runs on a schedule
+	// of its own rather than on any console request.
+	go s.inference.Start(context.Background())
 
 	mux := http.NewServeMux()
 
@@ -218,6 +232,12 @@ func (s *Server) Start(addr string) error {
 
 	// 8. Visual Communications Topology Graph API
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(s.handleTopologyGraph))
+
+	// 8b. Unified asset graph and flow inference
+	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
+	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(s.handleAssetCorrect))
+	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(s.handleInferenceStatus))
+	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(s.handleInferenceRun))
 
 	// 9. Remote Push-Deployment Engine API
 	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(s.handleDeployerPush))
@@ -1950,12 +1970,15 @@ func (s *Server) handleScannerFeedback(w http.ResponseWriter, r *http.Request) {
 /* 8. VISUAL COMMUNICATIONS TOPOLOGY GRAPH HANDLER */
 
 func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
+	// Default 24h, not 1h: a known asset that was quiet in the last hour is
+	// still on the network, and the graph draws it dimmed rather than
+	// pretending it does not exist.
 	windowStr := r.URL.Query().Get("window")
-	windowDuration := 1 * time.Hour
-	if windowStr == "6h" {
+	windowDuration := 24 * time.Hour
+	if windowStr == "1h" {
+		windowDuration = 1 * time.Hour
+	} else if windowStr == "6h" {
 		windowDuration = 6 * time.Hour
-	} else if windowStr == "24h" {
-		windowDuration = 24 * time.Hour
 	} else if windowStr == "7d" {
 		windowDuration = 7 * 24 * time.Hour
 	}
@@ -1968,6 +1991,135 @@ func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(topoData)
+}
+
+/* 8b. UNIFIED ASSET GRAPH + FLOW INFERENCE HANDLERS */
+
+// handleAssets returns the whole asset graph: one row per host, however many
+// sources know about it, with every source's claim attached so the console can
+// show the losing opinions next to the winning one.
+func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	assets, err := s.store.ListAssets(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(assets)
+}
+
+// handleAssetCorrect records an operator's verdict on a field, or withdraws
+// one. A correction outranks every other source permanently, and where it
+// corrects a device identity it is also fed back into the scanner's signature
+// set so the next probe of a similar host gets it right unaided.
+func (s *Server) handleAssetCorrect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AssetID  string `json:"asset_id"`
+		IP       string `json:"ip"`
+		Field    string `json:"field"`
+		Value    string `json:"value"`
+		Reason   string `json:"reason"`
+		Withdraw bool   `json:"withdraw"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Field == "" {
+		http.Error(w, "missing field", http.StatusBadRequest)
+		return
+	}
+
+	key := req.AssetID
+	if key == "" {
+		key = req.IP
+	}
+	asset, err := s.store.GetAsset(key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	if req.Withdraw {
+		if err := s.store.DropClaim(asset.ID, req.Field, storage.SourceOperator); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if req.Value == "" {
+			http.Error(w, "missing value", http.StatusBadRequest)
+			return
+		}
+		if err := s.store.CorrectAsset(asset.ID, req.Field, req.Value, req.Reason); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Feed signature training: an operator naming what a device actually
+		// is teaches the fingerprinter, not just this one row.
+		if req.Field == storage.FieldCategory && asset.IP != "" {
+			if _, err := s.scanner.TrainSignature(asset.IP, req.Value, asset.Vendor, req.Value); err != nil {
+				log.Printf("[*] Correction on %s not fed to signature training: %v", asset.IP, err)
+			}
+		}
+	}
+
+	action := "CORRECT_ASSET"
+	if req.Withdraw {
+		action = "WITHDRAW_CORRECTION"
+	}
+	_ = s.store.RecordAudit(storage.AuditEntry{
+		ID:        uuid.NewString(),
+		TenantID:  asset.TenantID,
+		UserID:    "admin",
+		Username:  "admin",
+		Action:    action,
+		Resource:  asset.ID,
+		Details:   req.Field + " = " + req.Value,
+		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		Timestamp: time.Now().UTC(),
+	})
+
+	updated, err := s.store.GetAsset(asset.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handleInferenceStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.inference.Status())
+}
+
+// handleInferenceRun triggers a pass out of schedule. Inference is scheduled
+// work; this exists so an operator who just onboarded a subnet does not wait
+// for the next tick.
+func (s *Server) handleInferenceRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	n, err := s.inference.RunOnce()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":         "completed",
+		"inferred_count": n,
+		"detail":         s.inference.Status(),
+	})
 }
 
 /* 9. REMOTE PUSH-DEPLOYMENT ENGINE HANDLERS */
