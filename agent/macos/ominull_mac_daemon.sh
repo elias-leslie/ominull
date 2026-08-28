@@ -5,7 +5,9 @@ HUB_URL="${1:-http://10.0.0.58:9999}"
 API_KEY="${2:-<provision-via-bootstrap>}"
 ROLE_TAG="${3:-workstation}"
 LOCATION_ID="${4:-loc-home}"
-ENDPOINT_ID="macos-$(hostname -s)"
+# Endpoint identity is pinned at enrolment when supplied. Deriving it from the hostname
+# alone forks a renamed host into a second fleet record with no history.
+ENDPOINT_ID="${5:-macos-$(hostname -s)}"
 IS_ISOLATED="false"
 
 echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.1.0)..."

@@ -105,8 +105,25 @@ WIN_DIR="${DIST_DIR}/win-build"
 rm -rf "${WIN_DIR}"
 mkdir -p "${WIN_DIR}"
 
-if [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
+# Build the Windows agent rather than picking up whatever happens to be lying in
+# agent/bin. Shipping the bundle without the binary produced an installer with nothing
+# to install, which is how the fleet ended up unable to take a Windows update at all.
+if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "  [*] Cross-compiling Windows agent (mingw-w64)..."
+    x86_64-w64-mingw32-gcc -O2 -Wall -Wextra \
+        -o "${ROOT_DIR}/agent/bin/ominulld.exe" \
+        "${ROOT_DIR}/agent/src/main.c" \
+        "${ROOT_DIR}/agent/src/hub_client.c" \
+        "${ROOT_DIR}/agent/src/service.c" \
+        "${ROOT_DIR}/agent/src/driver_client.c" \
+        -lws2_32 -lwinhttp -liphlpapi -ladvapi32
     cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
+elif [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
+    echo "  [!] mingw-w64 not installed; packaging the previously built ominulld.exe"
+    cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
+else
+    echo "  [-] Cannot build the Windows agent: install mingw-w64 (x86_64-w64-mingw32-gcc)." >&2
+    exit 1
 fi
 
 cat << 'WIN_INSTALL' > "${WIN_DIR}/install.ps1"
@@ -121,11 +138,11 @@ $InstallDir = "C:\Program Files\Ominull"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item ".\ominulld.exe" -Destination "$InstallDir\ominulld.exe" -Force
 
-# Register Windows Service
-sc.exe stop OminullAgent 2>$null | Out-Null
-sc.exe delete OminullAgent 2>$null | Out-Null
-sc.exe create OminullAgent binPath= "\"$InstallDir\ominulld.exe\" --hub $HubURL --key $APIKey --role $Role --location $Location" start= auto DisplayName= "Ominull Threat Nullification Service"
-sc.exe start OminullAgent
+# Register through the agent's own installer. Registering the binPath by hand omits the
+# --service flag the SCM entry point requires, and the service then exits immediately.
+& "$InstallDir\ominulld.exe" --uninstall 2>$null | Out-Null
+& "$InstallDir\ominulld.exe" --install --hub $HubURL --key $APIKey --role $Role --location $Location
+sc.exe start ominulld
 Write-Host "[+] Ominull Windows Agent installed and started successfully!" -ForegroundColor Green
 WIN_INSTALL
 

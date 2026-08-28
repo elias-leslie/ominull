@@ -75,6 +75,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (doService) {
+        Service_SetConfig(&config);
         Service_Run();
         return 0;
     }

@@ -38,6 +38,7 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
 
 // Service dispatcher
 void Service_Run(void);
+void Service_SetConfig(const AGENT_CONFIG* config);
 bool Service_Install(const char* hubUrl, const char* apiKey);
 bool Service_Uninstall(void);
 void RunAgentLoop(AGENT_CONFIG* config);

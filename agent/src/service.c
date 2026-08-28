@@ -122,6 +122,10 @@ void RunAgentLoop(AGENT_CONFIG* config) {
 }
 
 static void WINAPI ServiceMain(DWORD argc, LPSTR *argv) {
+    // The SCM dispatch arguments are not the service's configuration; that was parsed
+    // from the registered binPath in main() and handed over via Service_SetConfig.
+    (void)argc;
+    (void)argv;
     g_StatusHandle = RegisterServiceCtrlHandlerA(SERVICE_NAME, ServiceCtrlHandler);
     if (!g_StatusHandle) return;
 
@@ -145,6 +149,17 @@ static void WINAPI ServiceMain(DWORD argc, LPSTR *argv) {
 
     g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+}
+
+// Service_SetConfig hands the command line main() parsed to the SCM entry point.
+// ServiceMain cannot parse it itself: the arguments it receives come from the SCM, not
+// from the registered binPath, so without this the service ran with an empty hub URL
+// and key and could never report telemetry.
+void Service_SetConfig(const AGENT_CONFIG* config) {
+    if (config) {
+        g_Config = *config;
+        g_Config.is_service = true;
+    }
 }
 
 void Service_Run(void) {
