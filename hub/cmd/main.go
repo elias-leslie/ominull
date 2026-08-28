@@ -22,13 +22,24 @@ const banner = `
   Universal Kernel Threat Nullification Hub
 `
 
+// defaultAgentVersion is the agent release bundled with this hub build. It must track
+// VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
+// hub can actually serve from its download directory.
+const defaultAgentVersion = "1.1.0"
+
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
 	dbPath := flag.String("db", "ominull.db", "Path to SQLite database file")
 	adminKey := flag.String("admin-key", "", "Master Admin API Key (defaults to auto-generated key in DB)")
 	binaryDir := flag.String("binary-dir", "./build", "Path to directory containing driver and agent binaries")
 	hubURL := flag.String("hub-url", "", "Public Hub URL for bootstrap scripts (e.g. https://omi.example.com)")
+	agentVersion := flag.String("agent-version", defaultAgentVersion, "Agent version bundled with this hub build (offered to outdated endpoints)")
 	flag.Parse()
+
+	resolvedAgentVersion := *agentVersion
+	if env := os.Getenv("OMINULL_AGENT_VERSION"); env != "" && *agentVersion == defaultAgentVersion {
+		resolvedAgentVersion = env
+	}
 
 	fmt.Print(banner)
 	log.Printf("[*] Initializing Ominull Multi-Tenant Storage: %s", *dbPath)
@@ -55,13 +66,14 @@ func main() {
 	}
 	log.Printf("[+] Cryptographic Master API Key Active: %s", resolvedAdminKey)
 
-	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL)
+	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
 			log.Fatalf("[-] Hub server error: %v", err)
 		}
 	}()
 
+	log.Printf("[+] Bundled agent release:      v%s (endpoints below this are offered an update)", resolvedAgentVersion)
 	log.Printf("[+] Bootstrap script endpoint: http://localhost%s/bootstrap.ps1", *listenAddr)
 	log.Printf("[+] Multi-Tenant REST API:    http://localhost%s/api/v1/", *listenAddr)
 

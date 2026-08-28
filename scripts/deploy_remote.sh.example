@@ -1,33 +1,53 @@
 #!/usr/bin/env bash
 # Example deployment script: build the Ominull Hub and push it to a Proxmox LXC container.
 # Copy to deploy_remote.sh (git-ignored) and fill in your own infrastructure values.
+#
+# scripts/release.sh calls this as its "ship to the hub host" step. Besides the hub
+# binary it must also place the agent packages in the hub's --binary-dir: that directory
+# is what /download/ serves, and it is where self-updating agents fetch their package
+# from. A hub that is newer than the packages it serves will offer endpoints a download
+# that 404s.
 set -euo pipefail
 
 PROXMOX_HOST="proxmox.example"      # Your Proxmox host (ssh alias or IP)
 LXC_VMID="150"                      # Container ID running the hub
 LXC_IP="10.0.0.58"                  # Container IP on your management LAN
+REMOTE_BIN_DIR="/opt/ominull/bin"   # Must match the hub's --binary-dir
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="${OMINULL_RELEASE_VERSION:-$("${ROOT_DIR}/scripts/version.sh" show)}"
 
 echo "[*] 1. Building clean Linux amd64 binary..."
-cd "$(dirname "$0")/../hub"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../build/ominull-hub cmd/main.go
-echo "[+] Build complete: ../build/ominull-hub"
+(cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${ROOT_DIR}/build/ominull-hub" cmd/main.go)
+echo "[+] Build complete: ${ROOT_DIR}/build/ominull-hub"
 
 echo "[*] 2. Running local test suite..."
-go test ./...
+(cd "${ROOT_DIR}/hub" && go test ./...)
 
-echo "[*] 3. Atomically syncing binary to Proxmox LXC ${LXC_VMID} (${LXC_IP})..."
-scp ../build/ominull-hub "${PROXMOX_HOST}:/tmp/ominull-hub"
-ssh "${PROXMOX_HOST}" "pct push ${LXC_VMID} /tmp/ominull-hub /tmp/ominull-hub.new && pct exec ${LXC_VMID} -- bash -c 'chmod +x /tmp/ominull-hub.new && mv -f /tmp/ominull-hub.new /opt/ominull/bin/ominull-hub'"
+echo "[*] 3. Atomically syncing hub binary to Proxmox LXC ${LXC_VMID} (${LXC_IP})..."
+scp "${ROOT_DIR}/build/ominull-hub" "${PROXMOX_HOST}:/tmp/ominull-hub"
+ssh "${PROXMOX_HOST}" "pct push ${LXC_VMID} /tmp/ominull-hub /tmp/ominull-hub.new && pct exec ${LXC_VMID} -- bash -c 'chmod +x /tmp/ominull-hub.new && mv -f /tmp/ominull-hub.new ${REMOTE_BIN_DIR}/ominull-hub'"
 
-echo "[*] 4. Restarting ominull-hub.service inside LXC..."
+echo "[*] 4. Publishing v${VERSION} agent packages into the hub download directory..."
+for pkg in "ominull-agent_${VERSION}_amd64.deb" "ominull-agent-windows-${VERSION}.tar.gz" "ominull-agent-macos-${VERSION}.tar.gz"; do
+    if [ -f "${ROOT_DIR}/dist/${pkg}" ]; then
+        scp "${ROOT_DIR}/dist/${pkg}" "${PROXMOX_HOST}:/tmp/${pkg}"
+        ssh "${PROXMOX_HOST}" "pct push ${LXC_VMID} /tmp/${pkg} ${REMOTE_BIN_DIR}/${pkg} && rm -f /tmp/${pkg}"
+        echo "    [+] Published ${pkg}"
+    else
+        echo "    [!] Missing dist/${pkg} - run scripts/build-packages.sh first"
+    fi
+done
+
+echo "[*] 5. Restarting ominull-hub.service inside LXC..."
 ssh "${PROXMOX_HOST}" "pct exec ${LXC_VMID} -- systemctl restart ominull-hub.service"
 
-echo "[*] 5. Verifying live health check..."
-sleep 1
+echo "[*] 6. Verifying live health check..."
+sleep 2
 ADMIN_KEY="${OMINULL_ADMIN_KEY:?set OMINULL_ADMIN_KEY}"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ${ADMIN_KEY}" "http://${LXC_IP}:9999/api/v1/hierarchy" || true)
 if [ "$STATUS" = "200" ]; then
-    echo "[+] SUCCESS: Ominull Hub on LXC ${LXC_VMID} (${LXC_IP}) is healthy and online (HTTP 200)!"
+    echo "[+] SUCCESS: Ominull Hub on LXC ${LXC_VMID} (${LXC_IP}) is healthy and serving v${VERSION} packages."
 else
     echo "[-] WARNING: Health check returned HTTP ${STATUS}"
     exit 1

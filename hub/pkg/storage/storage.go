@@ -362,6 +362,18 @@ func (s *Store) initSchema() error {
 		created_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS agent_update_jobs (
+		endpoint_id TEXT PRIMARY KEY,
+		desired_version TEXT NOT NULL,
+		requested_at DATETIME NOT NULL,
+		completed_at DATETIME
+	);
+
 	CREATE TABLE IF NOT EXISTS events (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -827,6 +839,94 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ---- Agent version tracking & remote update orchestration ----
+
+// AgentUpdateJob tracks a requested remote agent update for one endpoint.
+type AgentUpdateJob struct {
+	EndpointID     string     `json:"endpoint_id"`
+	DesiredVersion string     `json:"desired_version"`
+	RequestedAt    time.Time  `json:"requested_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+}
+
+func (s *Store) GetSetting(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var val string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return val, err
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value)
+	return err
+}
+
+// RequestAgentUpdate queues (or refreshes) a remote update job for an endpoint.
+func (s *Store) RequestAgentUpdate(endpointID, desiredVersion string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO agent_update_jobs (endpoint_id, desired_version, requested_at)
+		VALUES (?, ?, ?) ON CONFLICT(endpoint_id) DO UPDATE SET desired_version = excluded.desired_version, requested_at = excluded.requested_at, completed_at = NULL`,
+		endpointID, desiredVersion, time.Now().UTC())
+	return err
+}
+
+func (s *Store) GetAgentUpdateJob(endpointID string) (*AgentUpdateJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var job AgentUpdateJob
+	var completed sql.NullTime
+	err := s.db.QueryRow("SELECT endpoint_id, desired_version, requested_at, completed_at FROM agent_update_jobs WHERE endpoint_id = ?", endpointID).
+		Scan(&job.EndpointID, &job.DesiredVersion, &job.RequestedAt, &completed)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if completed.Valid {
+		job.CompletedAt = &completed.Time
+	}
+	return &job, nil
+}
+
+func (s *Store) ListPendingAgentUpdates() ([]AgentUpdateJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query("SELECT endpoint_id, desired_version, requested_at, completed_at FROM agent_update_jobs WHERE completed_at IS NULL ORDER BY requested_at ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []AgentUpdateJob
+	for rows.Next() {
+		var job AgentUpdateJob
+		var completed sql.NullTime
+		if err := rows.Scan(&job.EndpointID, &job.DesiredVersion, &job.RequestedAt, &completed); err != nil {
+			return nil, err
+		}
+		if completed.Valid {
+			job.CompletedAt = &completed.Time
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+// CompleteAgentUpdate marks a queued update job as delivered (agent reported the target version).
+func (s *Store) CompleteAgentUpdate(endpointID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE agent_update_jobs SET completed_at = ? WHERE endpoint_id = ?", time.Now().UTC(), endpointID)
+	return err
 }
 
 func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {

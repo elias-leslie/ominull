@@ -8,6 +8,20 @@ on:
     branches: [ main ]
 
 jobs:
+  version-consistency:
+    name: Release Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # The hub, the three agents, and the package filenames must all agree, or the
+      # fleet is offered a self-update package the hub cannot serve.
+      - name: Verify every version site matches VERSION
+        run: |
+          chmod +x ./scripts/version.sh
+          ./scripts/version.sh check
+
   test-hub:
     name: Go Hub Unit & Behavioral Engine Tests
     runs-on: ubuntu-latest
@@ -46,7 +60,7 @@ jobs:
   build-packages:
     name: Cross-Platform Release Packaging
     runs-on: ubuntu-latest
-    needs: [test-hub, test-agent-dpi]
+    needs: [version-consistency, test-hub, test-agent-dpi]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

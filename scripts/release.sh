@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+# Ominull end-to-end release pipeline: version -> build -> hub -> agents.
+#
+# Rolling a code change to the fleet is two hops, and skipping either one leaves the
+# fleet on stale code: the hub has to be running the new build (it is what serves the
+# packages and decides who is outdated), and only then can the agents be told to take
+# it. This script owns both hops so the sequence cannot be run out of order.
+#
+#   release.sh [--version X.Y.Z] [--skip-tests] [--hub-only] [--agents-only] [--no-wait]
+#
+# Environment:
+#   OMINULL_HUB_URL     Hub base URL for the agent roll-out (default http://127.0.0.1:9999)
+#   OMINULL_ADMIN_KEY   Hub admin key (required for --agents-only / the roll-out phase)
+#   OMINULL_DEPLOY_CMD  Command that ships build output to the hub host. Defaults to
+#                       scripts/deploy_remote.sh, which is deployment-specific and
+#                       therefore untracked; see deploy_remote.sh.example.
+#
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
+DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy_remote.sh}"
+
+VERSION=""
+SKIP_TESTS=0
+DO_HUB=1
+DO_AGENTS=1
+WAIT_FOR_AGENTS=1
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version)     VERSION="${2:?--version needs a value}"; shift 2 ;;
+        --skip-tests)  SKIP_TESTS=1; shift ;;
+        --hub-only)    DO_AGENTS=0; shift ;;
+        --agents-only) DO_HUB=0; shift ;;
+        --no-wait)     WAIT_FOR_AGENTS=0; shift ;;
+        -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
+        *)             echo "[-] Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ -n "${VERSION}" ]; then
+    echo "[*] Bumping release version to ${VERSION}..."
+    "${ROOT_DIR}/scripts/version.sh" bump "${VERSION}"
+else
+    VERSION="$("${ROOT_DIR}/scripts/version.sh" show)"
+    echo "[*] Releasing Ominull v${VERSION} (no bump requested)."
+    "${ROOT_DIR}/scripts/version.sh" check
+fi
+
+if [ "${DO_HUB}" -eq 1 ]; then
+    if [ "${SKIP_TESTS}" -eq 0 ]; then
+        echo "[*] Running hub test suite (race detector)..."
+        (cd "${ROOT_DIR}/hub" && go test -race ./...)
+        echo "[*] Compiling C stream-DPI unit tests..."
+        gcc -O2 -Wall -Wextra -o "${ROOT_DIR}/agent/bin/test_dpi" "${ROOT_DIR}/agent/tests/test_dpi.c"
+        "${ROOT_DIR}/agent/bin/test_dpi"
+    fi
+
+    echo "[*] Building cross-platform agent packages..."
+    "${ROOT_DIR}/scripts/build-packages.sh"
+
+    echo "[*] Shipping hub build and agent packages to the hub host..."
+    if [ -x "${DEPLOY_CMD}" ]; then
+        OMINULL_RELEASE_VERSION="${VERSION}" "${DEPLOY_CMD}"
+    else
+        echo "[-] No deploy command at ${DEPLOY_CMD}."
+        echo "    Set OMINULL_DEPLOY_CMD, or copy scripts/deploy_remote.sh.example to"
+        echo "    scripts/deploy_remote.sh and fill in this deployment's hub host."
+        exit 1
+    fi
+fi
+
+if [ "${DO_AGENTS}" -eq 0 ]; then
+    echo "[+] Hub is running v${VERSION}. Agents not rolled (--hub-only)."
+    exit 0
+fi
+
+ADMIN_KEY="${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY to roll the agent fleet}"
+api() {
+    curl -fsS -X "$1" -H "X-API-Key: ${ADMIN_KEY}" -H "Content-Type: application/json" \
+        ${3:+-d "$3"} "${HUB_URL}$2"
+}
+
+echo "[*] Publishing agent v${VERSION} to every outdated endpoint..."
+api POST /api/v1/agents/update "{\"all\":true,\"version\":\"${VERSION}\"}" | jq . 2>/dev/null || true
+
+if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
+    echo "[+] Roll-out published. Agents apply it on their next telemetry heartbeat."
+    exit 0
+fi
+
+# Agents pick the update up on their telemetry heartbeat, install it, and are restarted
+# by the package's postinst; the job only retires once one reports the new version back.
+echo "[*] Waiting for endpoints to report v${VERSION} (up to 5 minutes)..."
+for _ in $(seq 1 60); do
+    status="$(api GET /api/v1/agents/update-status || echo '{}')"
+    outdated="$(printf '%s' "${status}" | jq '(.outdated // []) | length' 2>/dev/null || echo "?")"
+    if [ "${outdated}" = "0" ]; then
+        echo "[+] Entire fleet is running agent v${VERSION}."
+        exit 0
+    fi
+    echo "    ${outdated} endpoint(s) still outdated..."
+    sleep 5
+done
+
+echo "[!] Fleet did not fully converge within the timeout. Remaining:"
+api GET /api/v1/agents/update-status | jq '.outdated' 2>/dev/null || true
+echo "    Platforms without self-update (Windows/macOS) need the SSH push-deployer:"
+echo "    scripts/ominull-cli deploy <ip> <user> <password>"
+exit 1

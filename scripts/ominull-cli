@@ -135,6 +135,28 @@ case "$cmd" in
         call_api POST "/api/v1/deployer/push" "{\"target_ip\":\"$tip\",\"ssh_user\":\"$user\",\"auth_method\":\"password\",\"password\":\"$pass\",\"sudo_password\":\"$pass\"}" | jq .
         ;;
 
+    agent-versions)
+        echo "=== Fleet Agent Version Currency ==="
+        call_api GET "/api/v1/agents/update-status" | jq . 2>/dev/null || call_api GET "/api/v1/agents/update-status"
+        ;;
+
+    agent-update)
+        target="${1:-}"
+        version="${2:-}"
+        if [ -z "$target" ]; then
+            echo "Usage: ominull-cli agent-update <endpoint_id|all> [version]"
+            exit 1
+        fi
+        if [ "$target" = "all" ]; then
+            body="{\"all\":true,\"version\":\"$version\"}"
+            echo "[*] Publishing agent update to every outdated endpoint..."
+        else
+            body="{\"endpoint_ids\":[\"$target\"],\"version\":\"$version\"}"
+            echo "[*] Publishing agent update to $target..."
+        fi
+        call_api POST "/api/v1/agents/update" "$body" | jq . 2>/dev/null || call_api POST "/api/v1/agents/update" "$body"
+        ;;
+
     help|*)
         echo "Ominull CyberOps CLI Utility"
         echo "Usage: ominull-cli <command> [args]"
@@ -150,5 +172,7 @@ case "$cmd" in
         echo "  unquarantine-mesh <ip>       Lift subnet-wide mesh quarantine"
         echo "  chat \"<query>\"               Query embedded CyberOps Copilot in natural language"
         echo "  deploy <ip> [user] [pass]    Push-deploy agent over SSH to unmanaged asset"
+        echo "  agent-versions               Report fleet agent-version currency and pending updates"
+        echo "  agent-update <id|all> [ver]  Publish an agent release to outdated endpoints"
         ;;
 esac

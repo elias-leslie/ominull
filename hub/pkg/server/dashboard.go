@@ -259,6 +259,11 @@ const dashboardHTML = `<!DOCTYPE html>
                     <span>⚡ Allowlist Pinholes:</span>
                     <strong id="metric-exclusions">0</strong>
                 </div>
+                <div class="stat-divider"></div>
+                <div class="stat-pill amber" title="Endpoints running an agent older than the release the hub is serving">
+                    <span>⬆️ Outdated Agents:</span>
+                    <strong id="metric-outdated">0</strong>
+                </div>
             </div>
             <div style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px;">
                 <span style="color: var(--green);">●</span> Zero-Trust Sublayer Active
@@ -274,6 +279,7 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="toolbar-right">
                 <button class="btn btn-bulk-red" style="padding: 6px 12px; font-size: 11px;" onclick="executeBulkAction('all', '', true)">🚨 Isolate Fleet</button>
                 <button class="btn btn-bulk-green" style="padding: 6px 12px; font-size: 11px;" onclick="executeBulkAction('all', '', false)">Unisolate All</button>
+                <button class="btn btn-cyan" id="btn-update-agents" style="padding: 6px 12px; font-size: 11px;" onclick="pushAgentUpdate('all')">⬆️ Update Outdated Agents</button>
                 <div class="stat-divider" style="height: 20px; margin: 0 4px;"></div>
                 <button class="btn" style="padding: 6px 12px; font-size: 11px;" onclick="openLocationModal()">+ Add Location</button>
                 <button class="btn btn-cyan" style="padding: 6px 12px; font-size: 11px;" onclick="openPolicyModal()">+ Create Policy Rule</button>
@@ -1292,7 +1298,70 @@ const dashboardHTML = `<!DOCTYPE html>
         var rawCommProfiles = [];
         var rawExclusions = [];
         var rawAnomalies = [];
+        var agentVersions = { latest_version: "", outdated: [], pending: [] };
         var currentInspEp = null;
+
+        // Endpoints report their version decorated with their enforcement engine
+        // ("1.1.0 (WFP Callout)"), so compare only the leading major.minor.patch.
+        function normalizeAgentVersion(v) {
+            var match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(String(v || "").trim());
+            if (!match) return [0, 0, 0];
+            return [parseInt(match[1] || 0, 10), parseInt(match[2] || 0, 10), parseInt(match[3] || 0, 10)];
+        }
+
+        function isAgentOutdated(ep) {
+            if (!agentVersions.latest_version) return false;
+            var running = normalizeAgentVersion(ep.driver_version);
+            var latest = normalizeAgentVersion(agentVersions.latest_version);
+            for (var i = 0; i < 3; i++) {
+                if (running[i] !== latest[i]) return running[i] < latest[i];
+            }
+            return false;
+        }
+
+        function agentUpdatePending(endpointId) {
+            return (agentVersions.pending || []).some(function(job) {
+                return job.endpoint_id === endpointId && !job.completed_at;
+            });
+        }
+
+        function agentVersionCell(ep) {
+            var running = ep.driver_version || "unknown";
+            if (agentUpdatePending(ep.id)) {
+                return '<span class="badge badge-isolated" title="Update queued; the agent applies it on its next telemetry heartbeat">⏳ ' +
+                    running + ' → ' + agentVersions.latest_version + '</span>';
+            }
+            if (isAgentOutdated(ep)) {
+                return '<span class="badge badge-isolated" title="Hub is serving agent v' + agentVersions.latest_version + '">⬆️ ' +
+                    running + '</span>';
+            }
+            return '<span class="badge badge-online" title="Running the release the hub is serving">' + running + '</span>';
+        }
+
+        function pushAgentUpdate(target) {
+            var body = (target === "all") ? { all: true } : { endpoint_ids: [target] };
+            var label = (target === "all") ? "every outdated endpoint" : target;
+            if (isDemoMode) {
+                alert("Demo mode: an agent update would be published to " + label + ".");
+                return;
+            }
+            fetchAPI("/api/v1/agents/update", "POST", body).then(function(res) {
+                var scheduled = (res.scheduled || []).length;
+                var unsupported = res.unsupported || [];
+                var msg = "Published agent v" + res.desired_version + " to " + scheduled + " endpoint(s).";
+                if (scheduled > 0) {
+                    msg += "\nEach agent installs it on its next telemetry heartbeat.";
+                }
+                if (unsupported.length > 0) {
+                    msg += "\n\nRequires the SSH push-deployer (no self-update on this platform yet):\n" +
+                        unsupported.map(function(u) { return "  • " + u.hostname + " (" + u.os + ")"; }).join("\n");
+                }
+                alert(msg);
+                refreshData();
+            }).catch(function(err) {
+                alert("Agent update push failed: " + err.message);
+            });
+        }
 
         var isDemoMode = (new URLSearchParams(window.location.search).get("demo") === "true") || 
                          (window.location.hash === "#demo") || 
@@ -1331,7 +1400,7 @@ const dashboardHTML = `<!DOCTYPE html>
                     { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4, Microsoft Defender", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
                     { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9, Apple pfctl", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
                     { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26, Clang 18", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
-                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.1.0, PostgreSQL 16, systemd", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" }
+                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.0.0, PostgreSQL 16, systemd", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" }
                 ];
                 var hqEps = demoEps.filter(function(e) { return e.location_id === "loc-hq"; });
                 var cloudEps = demoEps.filter(function(e) { return e.location_id === "loc-cloud"; });
@@ -1350,7 +1419,7 @@ const dashboardHTML = `<!DOCTYPE html>
             if (endpoint.startsWith("/api/v1/endpoints")) {
                 return [
                     { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4, Microsoft Defender", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
-                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.1.0, PostgreSQL 16, systemd", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+                    { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.0.0, PostgreSQL 16, systemd", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
                     { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9, Apple pfctl", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
                     { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26, Clang 18", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" }
                 ];
@@ -1423,6 +1492,15 @@ const dashboardHTML = `<!DOCTYPE html>
             }
             if (endpoint.startsWith("/api/v1/mesh/quarantined")) {
                 return [];
+            }
+            if (endpoint.startsWith("/api/v1/agents/update-status")) {
+                return {
+                    latest_version: "1.1.0",
+                    outdated: [
+                        { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", driver_version: "1.0.0 (eBPF/TC)" }
+                    ],
+                    pending: []
+                };
             }
             return {};
         }
@@ -1545,13 +1623,15 @@ const dashboardHTML = `<!DOCTYPE html>
                 fetchAPI("/api/v1/policy-groups"),
                 fetchAPI("/api/v1/threatintel/iocs"),
                 fetchAPI("/api/v1/exclusions"),
-                fetchAPI("/api/v1/network-profiles?level=global")
+                fetchAPI("/api/v1/network-profiles?level=global"),
+                fetchAPI("/api/v1/agents/update-status")
             ]).then(function(results) {
                 rawHierarchy = results[0] || [];
                 rawPolicyGroups = results[1] || [];
                 rawIOCs = results[2] || [];
                 rawExclusions = results[3] || [];
                 rawCommProfiles = results[4] || [];
+                agentVersions = results[5] || { latest_version: "", outdated: [], pending: [] };
 
                 var totalEndpoints = 0;
                 var totalIsolated = 0;
@@ -1565,6 +1645,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById("metric-profiles").innerText = rawCommProfiles.length;
                 document.getElementById("metric-exclusions").innerText = rawExclusions.length;
                 document.getElementById("metric-iocs").innerText = rawIOCs.length;
+                document.getElementById("metric-outdated").innerText = (agentVersions.outdated || []).length;
 
                 renderHierarchy();
                 renderPolicyGroups();
@@ -1608,6 +1689,10 @@ const dashboardHTML = `<!DOCTYPE html>
                             ? '<button class="btn btn-unisolate" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); unisolateTarget(\'' + ep.id + '\')">UNISOLATE</button>'
                             : '<button class="btn btn-isolate" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); isolateTarget(\'' + ep.id + '\')">ISOLATE</button>';
 
+                        var updBtn = (isAgentOutdated(ep) && !agentUpdatePending(ep.id))
+                            ? '<button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); pushAgentUpdate(\'' + ep.id + '\')">⬆️ Update</button> '
+                            : '';
+
                         var enf = getEnforcementDetails(ep);
                         var enfBadge = '<div class="tooltip-container">' +
                             '<span class="badge-enforce ' + enf.cssClass + '">' + enf.icon + ' ' + enf.name + '</span>' +
@@ -1627,8 +1712,9 @@ const dashboardHTML = `<!DOCTYPE html>
                             '<td>' + enfBadge + '</td>' +
                             '<td><code>' + ep.ip + '</code></td>' +
                             '<td>' + isoBadge + '</td>' +
+                            '<td>' + agentVersionCell(ep) + '</td>' +
                             '<td>' + new Date(ep.last_seen_at).toLocaleTimeString() + '</td>' +
-                            '<td style="text-align:right;">' + isoBtn + ' <button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openEndpointModal(\'' + ep.id + '\')">🔍 Inspect</button></td>' +
+                            '<td style="text-align:right;">' + updBtn + isoBtn + ' <button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openEndpointModal(\'' + ep.id + '\')">🔍 Inspect</button></td>' +
                         '</tr>';
                     });
 
@@ -1651,11 +1737,12 @@ const dashboardHTML = `<!DOCTYPE html>
                                             '<th>Enforcement Architecture</th>' +
                                             '<th>IP Address</th>' +
                                             '<th>Isolation State</th>' +
+                                            '<th>Agent Version</th>' +
                                             '<th>Last Seen</th>' +
                                             '<th style="text-align:right;">Host Controls</th>' +
                                         '</tr>' +
                                     '</thead>' +
-                                    '<tbody>' + (epRows || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">No endpoints enrolled at this site.</td></tr>') + '</tbody>' +
+                                    '<tbody>' + (epRows || '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);">No endpoints enrolled at this site.</td></tr>') + '</tbody>' +
                                 '</table>' +
                             '</div>' +
                         '</div>';
@@ -1703,6 +1790,11 @@ const dashboardHTML = `<!DOCTYPE html>
                 '<div class="detail-row"><span class="detail-label">Role / Function</span><span class="detail-value"><span class="role-tag">' + (found.role_tag || "workstation") + '</span></span></div>' +
                 '<div class="detail-row"><span class="detail-label">Location / Site</span><span class="detail-value">' + (found.location_name || "Austin HQ Data Center") + '</span></div>' +
                 '<div class="detail-row"><span class="detail-label">Installed Software & Modules</span><span class="detail-value" style="font-size:11px;">' + (found.installed_software || "Ominull Agent v1.0.0") + '</span></div>' +
+                '<div class="detail-row"><span class="detail-label">Agent Release</span><span class="detail-value">' + agentVersionCell(found) +
+                    (isAgentOutdated(found) && !agentUpdatePending(found.id)
+                        ? ' <button class="btn btn-cyan" style="padding:3px 8px;font-size:11px;margin-left:8px;" onclick="pushAgentUpdate(\'' + found.id + '\')">⬆️ Push Update</button>'
+                        : '') +
+                '</span></div>' +
                 '<div class="detail-row"><span class="detail-label">Quarantine State</span><span class="detail-value">' + (found.is_isolated ? '<span class="badge badge-isolated">QUARANTINED</span>' : '<span class="badge badge-online">NORMAL</span>') + '</span></div>';
 
             document.getElementById("insp-content").innerHTML = content;

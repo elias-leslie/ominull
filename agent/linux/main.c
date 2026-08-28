@@ -35,6 +35,7 @@ typedef struct {
     char primary_ip[64];
     char primary_mac[32];
     bool verbose;
+    bool auto_update;
 } LINUX_AGENT_CONFIG;
 
 typedef struct {
@@ -53,7 +54,9 @@ typedef struct {
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
-    printf("  %s --hub <url> --key <api_key> [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [-v]\n", prog);
+    printf("  %s --hub <url> --key <api_key> [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [-v]\n", prog);
+    printf("\nOptions:\n");
+    printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
 }
 
 static void GetPrimaryNetworkInfo(char* outIp, size_t ipLen, char* outMac, size_t macLen) {
@@ -281,6 +284,89 @@ static void SyncQuarantinedPeers(const char* respJson) {
     }
 }
 
+// ExtractJsonString pulls a flat "key":"value" pair out of a JSON fragment. The hub's
+// update descriptor has no nesting or escaping beyond this, so a full parser is not
+// warranted here.
+static bool ExtractJsonString(const char* json, const char* key, char* out, size_t outLen) {
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    const char* p = strstr(json, needle);
+    if (!p) return false;
+    p += strlen(needle);
+    size_t idx = 0;
+    while (*p && *p != '"' && idx < outLen - 1) {
+        out[idx++] = *p++;
+    }
+    out[idx] = '\0';
+    return idx > 0;
+}
+
+// IsSafeToken rejects anything outside the character set a package URL or version can
+// legitimately use, so a malformed hub response can never reach the shell as an operator.
+static bool IsSafeToken(const char* s, bool allowUrlChars) {
+    if (!s || !s[0]) return false;
+    for (const char* p = s; *p; p++) {
+        if (isalnum((unsigned char)*p)) continue;
+        if (*p == '.' || *p == '_' || *p == '-') continue;
+        if (allowUrlChars && (*p == ':' || *p == '/' || *p == '~' || *p == '%' || *p == '+')) continue;
+        return false;
+    }
+    return true;
+}
+
+// ApplyAgentUpdate installs a newer agent package when the hub offers one on a telemetry
+// heartbeat. The install runs detached: dpkg's prerm stops this very daemon, so a child
+// of the current process would be torn down mid-install.
+static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJson) {
+    static char attemptedVersion[64] = {0};
+
+    if (!config->auto_update || !respJson) return;
+    const char* block = strstr(respJson, "\"agent_update\"");
+    if (!block) return;
+
+    char version[64] = {0}, pkg[32] = {0}, url[512] = {0};
+    if (!ExtractJsonString(block, "version", version, sizeof(version))) return;
+    if (!ExtractJsonString(block, "url", url, sizeof(url))) return;
+    ExtractJsonString(block, "package", pkg, sizeof(pkg));
+
+    if (strcmp(attemptedVersion, version) == 0) return; // already tried this release
+    snprintf(attemptedVersion, sizeof(attemptedVersion), "%s", version);
+
+    if (pkg[0] && strcmp(pkg, "deb") != 0) {
+        printf("[!] Hub offers agent v%s as a '%s' package; this daemon only self-installs .deb.\n", version, pkg);
+        return;
+    }
+    if (geteuid() != 0) {
+        printf("[!] Agent v%s is available but this daemon is not running as root; skipping self-update.\n", version);
+        return;
+    }
+    // Pin the download to the configured hub. A response that points elsewhere is not
+    // an update, it is a redirect to an untrusted binary.
+    if (strncmp(url, config->hub_url, strlen(config->hub_url)) != 0) {
+        printf("[!] Rejected agent update from %s: it does not originate from the configured hub.\n", url);
+        return;
+    }
+    if (!IsSafeToken(url, true) || !IsSafeToken(version, false)) {
+        printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
+        return;
+    }
+
+    char debPath[128];
+    snprintf(debPath, sizeof(debPath), "/tmp/ominull-agent_%s_amd64.deb", version);
+
+    printf("[*] Hub published agent v%s (running v%s); downloading and installing...\n",
+           version, OMINULL_LINUX_AGENT_VERSION);
+    fflush(stdout);
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "setsid nohup sh -c 'curl -fsSL -m 300 -o \"%s\" \"%s\" && dpkg -i \"%s\"; rm -f \"%s\"; "
+        "systemctl restart ominull.service' >/dev/null 2>&1 </dev/null &",
+        debPath, url, debPath, debPath);
+    int rc = system(cmd);
+    (void)rc;
+}
+
 static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     struct utsname sysInfo;
     uname(&sysInfo);
@@ -360,6 +446,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         pclose(fp);
         if (rBytes > 0) {
             SyncQuarantinedPeers(respBuf);
+            ApplyAgentUpdate(config, respBuf);
         }
     }
 
@@ -373,6 +460,7 @@ int main(int argc, char* argv[]) {
     strcpy(config.api_key, "<provision-via-bootstrap>");
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-default");
+    config.auto_update = true;
     gethostname(config.hostname, sizeof(config.hostname) - 1);
     snprintf(config.endpoint_id, sizeof(config.endpoint_id), "linux-%.50s", config.hostname);
     GetPrimaryNetworkInfo(config.primary_ip, sizeof(config.primary_ip), config.primary_mac, sizeof(config.primary_mac));
@@ -392,6 +480,8 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
         } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--no-auto-update") == 0) {
+            config.auto_update = false;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             config.verbose = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -416,6 +506,8 @@ int main(int argc, char* argv[]) {
     printf("  Hostname:      %s\n", config.hostname);
     printf("  Kernel / OS:   %s %s (%s)\n", sysInfo.sysname, sysInfo.release, sysInfo.machine);
     printf("  Hub Endpoint:  %s\n", config.hub_url);
+    printf("  Agent Version: %s (self-update %s)\n", OMINULL_LINUX_AGENT_VERSION,
+           config.auto_update ? "enabled" : "disabled");
     printf("===============================================================================\n");
 
     signal(SIGINT, SignalHandler);

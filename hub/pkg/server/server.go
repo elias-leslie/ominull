@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,17 +35,18 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	store      *storage.Store
-	ti         *threatintel.Manager
-	detector   *detector.Engine
-	pki        *pki.Manager
-	scanner    *scanner.Scanner
-	deployer   *deployer.Deployer
-	copilot    *copilot.Engine
-	adminKey   string
-	binaryDir  string
-	hubURL     string
-	httpServer *http.Server
+	store        *storage.Store
+	ti           *threatintel.Manager
+	detector     *detector.Engine
+	pki          *pki.Manager
+	scanner      *scanner.Scanner
+	deployer     *deployer.Deployer
+	copilot      *copilot.Engine
+	adminKey     string
+	binaryDir    string
+	hubURL       string
+	agentVersion string
+	httpServer   *http.Server
 
 	clientsMu  sync.RWMutex
 	clients    map[string]*Client // endpointID -> Client
@@ -76,7 +78,7 @@ type CommandMessage struct {
 	Payload interface{} `json:"payload"`
 }
 
-func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
+func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
 	eventsChan := make(chan storage.Event, 1000)
 	pkiMgr, err := pki.New(filepath.Join(binaryDir, "certs"))
 	if err != nil {
@@ -94,11 +96,12 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL string) *Server {
 			OllamaURL:   "http://10.0.0.39:11434",
 			OllamaModel: "llama3.2",
 		}),
-		adminKey:   adminKey,
-		binaryDir:  binaryDir,
-		hubURL:     hubURL,
-		clients:    make(map[string]*Client),
-		eventsChan: eventsChan,
+		adminKey:     adminKey,
+		binaryDir:    binaryDir,
+		hubURL:       hubURL,
+		agentVersion: agentVersion,
+		clients:      make(map[string]*Client),
+		eventsChan:   eventsChan,
 	}
 	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
 		_ = s.store.SetEndpointIsolation(endpointID, true)
@@ -170,6 +173,9 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/locations", s.authMiddleware(s.handleLocations))
 	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(s.handleTenants))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
+	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
+	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
+	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(s.handleAgentsUpdateStatus))
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
 	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
@@ -291,6 +297,253 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		http.Error(w, `{"error":"invalid or missing api key"}`, http.StatusUnauthorized)
 		return
 	}
+}
+
+// versionParts extracts the leading major.minor.patch triple from a reported version
+// string. Endpoints decorate the version with an engine suffix ("1.1.0 (WFP Callout)",
+// "1.1.0 (eBPF/TC)"), so each component is read up to its first non-digit.
+func versionParts(v string) [3]int {
+	var out [3]int
+	fields := strings.Split(strings.TrimPrefix(strings.TrimSpace(v), "v"), ".")
+	for i := 0; i < 3 && i < len(fields); i++ {
+		digits := strings.TrimSpace(fields[i])
+		end := 0
+		for end < len(digits) && digits[end] >= '0' && digits[end] <= '9' {
+			end++
+		}
+		out[i], _ = strconv.Atoi(digits[:end])
+	}
+	return out
+}
+
+// compareVersions compares dotted numeric versions: -1 if a < b, 0 if equal, 1 if a > b.
+func compareVersions(a, b string) int {
+	as, bs := versionParts(a), versionParts(b)
+	for i := 0; i < 3; i++ {
+		if as[i] != bs[i] {
+			if as[i] < bs[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// desiredAgentVersion resolves the fleet-wide target agent version: the operator-set
+// value if present, otherwise the version bundled with this hub build.
+func (s *Server) desiredAgentVersion() string {
+	if v, _ := s.store.GetSetting("desired_agent_version"); strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return s.agentVersion
+}
+
+// agentPackageURL builds the download URL for an agent package of the given version.
+func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
+	baseURL := strings.TrimSuffix(s.hubURL, "/")
+	if baseURL == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+			scheme = proto
+		}
+		baseURL = scheme + "://" + r.Host
+	}
+	switch pkg {
+	case "windows":
+		return baseURL + "/download/ominull-agent-windows-" + version + ".tar.gz"
+	case "macos":
+		return baseURL + "/download/ominull-agent-macos-" + version + ".tar.gz"
+	default:
+		return baseURL + "/download/ominull-agent_" + version + "_amd64.deb"
+	}
+}
+
+// agentPackageKind maps a reported OS string onto the packaging flavour the hub serves.
+func agentPackageKind(osName string) string {
+	lower := strings.ToLower(osName)
+	switch {
+	case strings.Contains(lower, "windows"):
+		return "windows"
+	case strings.Contains(lower, "darwin"), strings.Contains(lower, "mac"):
+		return "macos"
+	default:
+		return "deb"
+	}
+}
+
+// pendingAgentUpdate resolves the update an endpoint should apply given the version it
+// just reported. It also retires any queued job the endpoint has already satisfied, so
+// the agent reporting its new version is what closes the loop on an update.
+func (s *Server) pendingAgentUpdate(endpointID, reportedVersion string) (string, bool) {
+	target := s.desiredAgentVersion()
+	job, _ := s.store.GetAgentUpdateJob(endpointID)
+	if job != nil && job.CompletedAt == nil {
+		if compareVersions(job.DesiredVersion, target) > 0 {
+			target = job.DesiredVersion
+		}
+		if compareVersions(reportedVersion, job.DesiredVersion) >= 0 {
+			s.store.CompleteAgentUpdate(endpointID)
+		}
+	}
+	return target, compareVersions(reportedVersion, target) < 0
+}
+
+// handleAgentConfig is the agent-facing configuration poll. Agents call it with their
+// endpoint_id; if the hub has queued an update job (or a fleet-wide desired version)
+// newer than the agent's reported version, the response carries the update package URL.
+func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	endpointID := strings.TrimSpace(r.URL.Query().Get("endpoint_id"))
+	if endpointID == "" {
+		http.Error(w, `{"error":"endpoint_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	ep, err := s.store.GetEndpoint(endpointID)
+	if err != nil || ep == nil {
+		http.Error(w, `{"error":"endpoint not registered"}`, http.StatusNotFound)
+		return
+	}
+
+	reported := ep.DriverVersion
+	if v := strings.TrimSpace(r.URL.Query().Get("version")); v != "" {
+		reported = v
+	}
+	desired, outdated := s.pendingAgentUpdate(endpointID, reported)
+
+	resp := map[string]interface{}{
+		"endpoint_id":      ep.ID,
+		"agent_version":    reported,
+		"latest_version":   desired,
+		"update_available": outdated,
+	}
+	if outdated {
+		pkg := agentPackageKind(ep.OS)
+		resp["update_version"] = desired
+		resp["package"] = pkg
+		resp["update_url"] = s.agentPackageURL(r, desired, pkg)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleAgentsUpdate lets an operator push a new agent version to endpoints.
+// Linux endpoints self-update over their existing hub connection; other platforms
+// are reported back as requiring the SSH/WinRM push-deployer.
+func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Role") != "admin" {
+		http.Error(w, `{"error":"admin role required"}`, http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		EndpointIDs []string `json:"endpoint_ids"`
+		All         bool     `json:"all"`
+		Version     string   `json:"version"`
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+		return
+	}
+
+	version := strings.TrimSpace(req.Version)
+	if version == "" {
+		version = s.desiredAgentVersion()
+	}
+	if compareVersions(s.agentVersion, version) > 0 {
+		http.Error(w, `{"error":"refusing to downgrade: hub bundle ships agent `+s.agentVersion+`"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.store.SetSetting("desired_agent_version", version); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	endpoints, err := s.store.ListEndpoints("")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var scheduled, unsupported []map[string]string
+	for _, ep := range endpoints {
+		if !req.All && !contains(req.EndpointIDs, ep.ID) {
+			continue
+		}
+		if compareVersions(ep.DriverVersion, version) >= 0 {
+			continue // already up to date
+		}
+		if strings.Contains(strings.ToLower(ep.OS), "linux") {
+			if err := s.store.RequestAgentUpdate(ep.ID, version); err == nil {
+				scheduled = append(scheduled, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "from": ep.DriverVersion, "to": version})
+			}
+			continue
+		}
+		unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "self-update not supported on this platform yet; use the SSH/WinRM push-deployer"})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"desired_version": version,
+		"scheduled":       scheduled,
+		"unsupported":     unsupported,
+	})
+}
+
+// handleAgentsUpdateStatus reports fleet agent-version currency and pending update jobs.
+func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	latest := s.desiredAgentVersion()
+	endpoints, err := s.store.ListEndpoints("")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var outdated []map[string]string
+	for _, ep := range endpoints {
+		if compareVersions(ep.DriverVersion, latest) < 0 {
+			outdated = append(outdated, map[string]string{
+				"endpoint_id":    ep.ID,
+				"hostname":       ep.Hostname,
+				"os":             ep.OS,
+				"ip":             ep.IP,
+				"driver_version": ep.DriverVersion,
+			})
+		}
+	}
+	pending, _ := s.store.ListPendingAgentUpdates()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"latest_version": latest,
+		"outdated":       outdated,
+		"pending":        pending,
+	})
+}
+
+func contains(list []string, target string) bool {
+	for _, item := range list {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
@@ -896,12 +1149,22 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			resp := map[string]interface{}{
 				"status":            "ok",
 				"quarantined_peers": qIPs,
-			})
+			}
+			if target, outdated := s.pendingAgentUpdate(batch.EndpointID, batch.DriverVersion); outdated {
+				pkg := agentPackageKind(batch.OS)
+				resp["agent_update"] = map[string]string{
+					"version": target,
+					"package": pkg,
+					"url":     s.agentPackageURL(r, target, pkg),
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
