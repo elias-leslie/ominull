@@ -10,13 +10,19 @@ LOCATION_ID="${4:-loc-home}"
 ENDPOINT_ID="${5:-macos-$(hostname -s)}"
 IS_ISOLATED="false"
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.1.0)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.2.0)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 
 while true; do
+    # Report nothing rather than something invented. A fixed fallback address
+    # and a shared placeholder MAC used to stand in here; both are harmful now
+    # that the hub keys asset identity on what the agent reports, because every
+    # Mac that failed detection would land on one asset record. Empty lets the
+    # hub fall back to the connection's own address and to address-plus-subnet
+    # identity. Note the MAC pipeline ends in awk, which succeeds on no input,
+    # so the old `|| echo` fallback was mostly unreachable anyway.
     IP=$(ipconfig getifaddr en0 2>/dev/null || ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -n 1)
-    if [[ -z "$IP" ]]; then IP="10.0.0.63"; fi
-    MAC=$(ifconfig en0 2>/dev/null | grep ether | awk '{print $2}' || echo "02:42:0a:00:00:02")
+    MAC=$(ifconfig en0 2>/dev/null | awk '/ether/ {print $2; exit}')
 
     # 1. Collect active socket flows with process name & PID
     EVENTS_JSON=$(lsof -iTCP -iUDP -n -P 2>/dev/null | awk '
@@ -54,7 +60,7 @@ while true; do
   "os": "macOS Sonoma 14.8.9 (x86_64)",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.1.0 (PF)",
+  "driver_version": "1.2.0 (PF)",
   "events": $EVENTS_JSON
 }
 JSON

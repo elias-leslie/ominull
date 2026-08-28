@@ -63,14 +63,20 @@ type Client struct {
 }
 
 type TelemetryBatchMessage struct {
-	Type          string          `json:"type"` // "telemetry"
-	EndpointID    string          `json:"endpoint_id"`
-	TenantID      string          `json:"tenant_id"`
-	LocationID    string          `json:"location_id"`
-	Role          string          `json:"role"`
-	Hostname      string          `json:"hostname"`
-	OS            string          `json:"os"`
-	IP            string          `json:"ip"`
+	Type       string `json:"type"` // "telemetry"
+	EndpointID string `json:"endpoint_id"`
+	TenantID   string `json:"tenant_id"`
+	LocationID string `json:"location_id"`
+	Role       string `json:"role"`
+	Hostname   string `json:"hostname"`
+	OS         string `json:"os"`
+	IP         string `json:"ip"`
+	// MAC is the endpoint's primary hardware address. Asset identity keys on
+	// it, so an agented host that changes DHCP lease stays one record instead
+	// of forking a second one. The Linux and macOS agents have always sent
+	// this field; until 1.2.0 the hub had nowhere to put it and encoding/json
+	// discarded it, which left every agented asset keyed on address alone.
+	MAC           string          `json:"mac"`
 	DriverVersion string          `json:"driver_version"`
 	Events        []storage.Event `json:"events"`
 }
@@ -96,8 +102,8 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	}
 
 	s := &Server{
-		store:    store,
-		ti:       threatintel.New(store),
+		store:     store,
+		ti:        threatintel.New(store),
 		pki:       pkiMgr,
 		scanner:   scanner.New(store),
 		inference: inference.New(store),
@@ -1131,6 +1137,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				Hostname:      batch.Hostname,
 				OS:            batch.OS,
 				IP:            ip,
+				MAC:           batch.MAC,
 				DriverVersion: batch.DriverVersion,
 				Status:        "online",
 				LastSeenAt:    time.Now().UTC(),

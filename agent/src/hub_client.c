@@ -6,7 +6,130 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <iphlpapi.h>
 #include "../include/agent.h"
+
+/* ---------------------------------------------------------------------------
+ * Host identity
+ *
+ * The hub keys asset identity on the hardware address, so what the agent
+ * reports here decides whether a machine stays one asset record across a DHCP
+ * lease change or forks a second one. Everything below is observed; nothing is
+ * assumed. A field that cannot be determined is left empty, and the hub treats
+ * empty as unknown rather than recording a guess as ground truth.
+ * ------------------------------------------------------------------------- */
+
+static void ReadRegString(const char* value, char* out, DWORD outLen) {
+    out[0] = '\0';
+    DWORD size = outLen;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE,
+                     "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     value, RRF_RT_REG_SZ, NULL, out, &size) != ERROR_SUCCESS) {
+        out[0] = '\0';
+    }
+}
+
+static void DetectOSVersion(char* out, size_t outLen) {
+    char product[96] = {0};
+    char display[32] = {0};
+    char build[32] = {0};
+
+    ReadRegString("ProductName", product, sizeof(product));
+    ReadRegString("DisplayVersion", display, sizeof(display));
+    ReadRegString("CurrentBuildNumber", build, sizeof(build));
+
+    /* Windows 11 still reports a ProductName of "Windows 10 ..." - the edition
+     * is right, the number is not. Build 22000 is the 10/11 boundary and is the
+     * only reliable discriminator available from the registry. */
+    char name[128] = {0};
+    if (product[0]) {
+        snprintf(name, sizeof(name), "%s", product);
+        if (atoi(build) >= 22000 && strncmp(name, "Windows 10", 10) == 0) {
+            char tail[128] = {0};
+            snprintf(tail, sizeof(tail), "%s", name + 10);
+            snprintf(name, sizeof(name), "Windows 11%s", tail);
+        }
+    } else {
+        snprintf(name, sizeof(name), "Windows");
+    }
+
+    SYSTEM_INFO si;
+    ZeroMemory(&si, sizeof(si));
+    GetNativeSystemInfo(&si);
+    const char* arch = "unknown";
+    switch (si.wProcessorArchitecture) {
+        case PROCESSOR_ARCHITECTURE_AMD64: arch = "x86_64"; break;
+        case PROCESSOR_ARCHITECTURE_ARM64: arch = "arm64";  break;
+        case PROCESSOR_ARCHITECTURE_INTEL: arch = "x86";    break;
+        default: break;
+    }
+
+    if (display[0]) {
+        snprintf(out, outLen, "%s %s (%s)", name, display, arch);
+    } else {
+        snprintf(out, outLen, "%s (%s)", name, arch);
+    }
+}
+
+/* Picks the adapter that actually carries this host's traffic: up, not
+ * loopback, holding an IPv4 address. An adapter with a gateway wins outright -
+ * that is the same "default route" test the Linux agent makes - so a host with
+ * a live NIC plus a stack of virtual bridges reports the NIC. */
+static void DetectPrimaryAdapter(char* outIp, size_t ipLen, char* outMac, size_t macLen) {
+    outIp[0] = '\0';
+    outMac[0] = '\0';
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG size = 0;
+    if (GetAdaptersAddresses(AF_INET, flags, NULL, NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
+        return;
+    }
+
+    IP_ADAPTER_ADDRESSES* adapters = (IP_ADAPTER_ADDRESSES*)malloc(size);
+    if (!adapters) {
+        return;
+    }
+    if (GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &size) != NO_ERROR) {
+        free(adapters);
+        return;
+    }
+
+    bool haveGateway = false;
+    for (IP_ADAPTER_ADDRESSES* a = adapters; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        if (a->PhysicalAddressLength != 6) continue;
+        if (!a->FirstUnicastAddress) continue;
+
+        struct sockaddr_in* sa = (struct sockaddr_in*)a->FirstUnicastAddress->Address.lpSockaddr;
+        if (!sa || sa->sin_family != AF_INET) continue;
+
+        bool hasGateway = (a->FirstGatewayAddress != NULL);
+        if (haveGateway && !hasGateway) continue;
+
+        const unsigned char* o = (const unsigned char*)&sa->sin_addr;
+        snprintf(outIp, ipLen, "%u.%u.%u.%u", o[0], o[1], o[2], o[3]);
+
+        const unsigned char* m = a->PhysicalAddress;
+        snprintf(outMac, macLen, "%02x:%02x:%02x:%02x:%02x:%02x",
+                 m[0], m[1], m[2], m[3], m[4], m[5]);
+
+        if (hasGateway) {
+            haveGateway = true;
+            break;
+        }
+    }
+
+    free(adapters);
+}
+
+void Agent_DetectHostIdentity(AGENT_CONFIG* config) {
+    if (!config) return;
+    DetectPrimaryAdapter(config->primary_ip, sizeof(config->primary_ip),
+                         config->primary_mac, sizeof(config->primary_mac));
+    DetectOSVersion(config->os_version, sizeof(config->os_version));
+}
+
 
 static void IPToString(uint32_t ip, char* outStr, size_t maxLen) {
     uint8_t b1 = (ip >> 24) & 0xFF;
@@ -77,9 +200,14 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     const char* role = config->role_tag[0] ? config->role_tag : "workstation";
     const char* loc = config->location_id[0] ? config->location_id : "loc-home";
 
+    /* os, ip and mac are observed at startup rather than hardcoded. The hub
+     * records the agent's claims at confidence 1.0, so a literal string here
+     * would enter the asset model as ground truth and outrank a real scan. */
     int offset = snprintf(jsonBuf, jsonCapacity,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"Windows 11 Enterprise (x86_64)\",\"driver_version\":\"%s\",\"events\":[",
-        config->endpoint_id, loc, role, config->hostname, OMINULL_AGENT_VERSION
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"events\":[",
+        config->endpoint_id, loc, role, config->hostname,
+        config->os_version, config->primary_ip, config->primary_mac,
+        OMINULL_AGENT_VERSION
     );
 
     for (size_t i = 0; events && i < count; i++) {

@@ -12,7 +12,7 @@
 #include <sys/utsname.h>
 #include <sys/stat.h>
 
-#define OMINULL_LINUX_AGENT_VERSION "1.1.0"
+#define OMINULL_LINUX_AGENT_VERSION "1.2.0"
 #define MAX_FLOWS_PER_BATCH 64
 #define MAX_PATH_LEN 512
 
@@ -60,8 +60,19 @@ static void PrintUsage(const char* prog) {
 }
 
 static void GetPrimaryNetworkInfo(char* outIp, size_t ipLen, char* outMac, size_t macLen) {
-    strncpy(outIp, "127.0.0.1", ipLen - 1);
-    strncpy(outMac, "02:42:0a:00:00:01", macLen - 1);
+    /* Report nothing rather than something invented.
+     *
+     * These used to default to 127.0.0.1 and a fixed 02:42:0a:00:00:01. Both
+     * are actively harmful now that the hub keys asset identity on what the
+     * agent reports: a shared placeholder MAC makes every host whose interface
+     * lookup fails - a container, a network namespace, a box with no default
+     * route - collapse onto a single asset record, and a loopback address
+     * overrides the peer address the hub would otherwise have used. Empty is
+     * honest, and the hub already knows what to do with it: it falls back to
+     * the connection's own address, and identity falls back to address plus
+     * subnet. */
+    outIp[0] = '\0';
+    outMac[0] = '\0';
 
     FILE* fp = popen("ip -4 route show default 2>/dev/null | awk '{print $5}'", "r");
     if (fp) {

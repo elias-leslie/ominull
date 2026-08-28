@@ -23,6 +23,10 @@ int main(int argc, char* argv[]) {
     }
     snprintf(config.endpoint_id, sizeof(config.endpoint_id), "win11-%s", config.hostname);
 
+    /* Observe the address, hardware address and OS once, before either the
+       console or the service path takes the config. */
+    Agent_DetectHostIdentity(&config);
+
     bool doInstall = false;
     bool doUninstall = false;
     bool doConsole = false;

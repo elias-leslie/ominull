@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.1.0"
+#define OMINULL_AGENT_VERSION "1.2.0"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -23,6 +23,7 @@ typedef struct _AGENT_CONFIG {
     char cf_client_secret[128];
     char primary_ip[64];
     char primary_mac[32];
+    char os_version[128];
     bool is_service;
     bool verbose;
 } AGENT_CONFIG;
@@ -35,6 +36,13 @@ bool Driver_SetIsolation(HANDLE hDevice, bool enable, uint32_t allowHubIP, uint1
 
 // Hub communication & networking
 bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count);
+
+// Fills primary_ip, primary_mac and os_version from the running system. Called
+// once at startup: the hub keys asset identity on the hardware address, so
+// these have to be observed rather than assumed. Any field that cannot be
+// determined is left empty, which the hub treats as "unknown" instead of
+// recording a guess as ground truth.
+void Agent_DetectHostIdentity(AGENT_CONFIG* config);
 
 // Service dispatcher
 void Service_Run(void);

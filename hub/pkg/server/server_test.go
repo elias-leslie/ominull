@@ -479,3 +479,65 @@ func TestEndpointOrderIsStableAcrossHeartbeats(t *testing.T) {
 		t.Errorf("Order changed after a heartbeat: expected %v, got %v", want, got)
 	}
 }
+
+// The Linux and macOS agents have always reported a hardware address, but the
+// telemetry struct had no field for it, so encoding/json dropped it on the
+// floor and every agented asset fell back to address-plus-subnet identity.
+// That defeats the point of keying on the MAC: the whole reason to do so is
+// that a host keeps its identity when its lease changes.
+func TestTelemetryMACReachesAssetIdentity(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	post := func(ip string) {
+		t.Helper()
+		batch, _ := json.Marshal(map[string]interface{}{
+			"type":           "telemetry",
+			"endpoint_id":    "linux-web-01",
+			"hostname":       "linux-web-01",
+			"os":             "Debian 12",
+			"ip":             ip,
+			"mac":            "00:1A:2B:3C:4D:5E",
+			"driver_version": "1.2.0",
+			"events":         []storage.Event{},
+		})
+		req := httptest.NewRequest("POST", "/api/v1/events", bytes.NewReader(batch))
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.authMiddleware(srv.handleEvents)(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("telemetry post returned %d (%s)", w.Code, w.Body.String())
+		}
+	}
+
+	post("10.0.4.20")
+
+	assets, err := store.ListAssets("")
+	if err != nil {
+		t.Fatalf("ListAssets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected one asset, got %d", len(assets))
+	}
+	if assets[0].MAC != "00:1a:2b:3c:4d:5e" {
+		t.Errorf("the reported MAC never reached the asset: %q", assets[0].MAC)
+	}
+	if assets[0].IdentityKind != "mac" {
+		t.Errorf("identity did not key on the hardware address: kind=%q value=%q",
+			assets[0].IdentityKind, assets[0].IdentityValue)
+	}
+
+	// The point of hardware identity: a new lease is the same machine.
+	post("10.0.4.77")
+
+	assets, err = store.ListAssets("")
+	if err != nil {
+		t.Fatalf("ListAssets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("a DHCP lease change forked the host into %d assets", len(assets))
+	}
+	if assets[0].IP != "10.0.4.77" {
+		t.Errorf("asset did not follow the endpoint to its new address: %q", assets[0].IP)
+	}
+}
