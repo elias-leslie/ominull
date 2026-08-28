@@ -1671,7 +1671,15 @@ const dashboardHTML = `<!DOCTYPE html>
 
                 (client.locations || []).forEach(function(loc) {
                     var epRows = "";
-                    (loc.endpoints || []).forEach(function(ep) {
+                    // Rows must not move between refreshes: an endpoint that shifts under
+                    // the cursor turns an isolate click into the wrong machine. Sort on
+                    // stable identity, never on last_seen_at.
+                    var orderedEndpoints = (loc.endpoints || []).slice().sort(function(a, b) {
+                        var an = (a.hostname || "").toLowerCase(), bn = (b.hostname || "").toLowerCase();
+                        if (an !== bn) return an < bn ? -1 : 1;
+                        return (a.id || "") < (b.id || "") ? -1 : 1;
+                    });
+                    orderedEndpoints.forEach(function(ep) {
                         var matches = clientMatches ||
                             loc.location.name.toLowerCase().includes(search) ||
                             ep.hostname.toLowerCase().includes(search) ||

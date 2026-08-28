@@ -929,6 +929,10 @@ func (s *Store) CompleteAgentUpdate(endpointID string) error {
 	return err
 }
 
+// ListEndpoints returns endpoints in a stable order. Ordering by last_seen_at made rows
+// reshuffle on every telemetry heartbeat, which moves a host out from under the operator's
+// cursor between refreshes — an isolate click could land on the wrong machine. Hostname is
+// stable identity; id breaks ties so the order is fully deterministic.
 func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -939,12 +943,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY last_seen_at DESC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY last_seen_at DESC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {

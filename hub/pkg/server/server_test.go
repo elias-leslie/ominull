@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -422,5 +423,59 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	job, _ := store.GetAgentUpdateJob("linux-web-01")
 	if job == nil || job.CompletedAt == nil {
 		t.Errorf("Expected a completed_at timestamp on the retired job, got %v", job)
+	}
+}
+
+func TestEndpointOrderIsStableAcrossHeartbeats(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	// Enrol out of alphabetical order so a correct sort is observable.
+	for _, name := range []string{"zulu-host", "alpha-host", "mike-host"} {
+		seedEndpoint(t, store, "ep-"+name, "Linux 6.8.0-40-generic", "1.1.0")
+		if err := store.UpsertEndpoint(storage.Endpoint{
+			ID: "ep-" + name, TenantID: "default", Hostname: name,
+			OS: "Linux 6.8.0-40-generic", IP: "10.0.4.20", DriverVersion: "1.1.0",
+			Status: "online", LastSeenAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seeding %s failed: %v", name, err)
+		}
+	}
+
+	order := func() []string {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/v1/endpoints", nil)
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.authMiddleware(srv.handleEndpoints)(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected 200 listing endpoints, got %d", w.Code)
+		}
+		var eps []storage.Endpoint
+		json.NewDecoder(w.Body).Decode(&eps)
+		names := make([]string, 0, len(eps))
+		for _, ep := range eps {
+			names = append(names, ep.Hostname)
+		}
+		return names
+	}
+
+	want := []string{"alpha-host", "mike-host", "zulu-host"}
+	if got := order(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Expected hostname order %v, got %v", want, got)
+	}
+
+	// A heartbeat from the alphabetically-first host must not move it to the top or
+	// bottom of the list: rows that reshuffle under the operator make an isolate click
+	// land on whichever machine slid into that row.
+	if err := store.UpsertEndpoint(storage.Endpoint{
+		ID: "ep-zulu-host", TenantID: "default", Hostname: "zulu-host",
+		OS: "Linux 6.8.0-40-generic", IP: "10.0.4.20", DriverVersion: "1.1.0",
+		Status: "online", LastSeenAt: time.Now().UTC().Add(time.Minute), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("heartbeat upsert failed: %v", err)
+	}
+	if got := order(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Order changed after a heartbeat: expected %v, got %v", want, got)
 	}
 }
