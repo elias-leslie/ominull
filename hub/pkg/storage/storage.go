@@ -1727,7 +1727,7 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 	}
 
 	// 7. Diurnal Time-of-Day Activity (Baseline vs Live by Hour 0-23)
-	baseline, live, _ := s.GetDiurnalProfiles(tenantID)
+	baseline, live, _ := s.diurnalProfilesLocked(tenantID)
 	summary.DiurnalBaseline = baseline
 	summary.DiurnalLive = live
 
@@ -1794,10 +1794,20 @@ func (s *Store) IsFirstSeenDestination(tenantID, dstIP string) bool {
 	return count <= 1
 }
 
+// GetDiurnalProfiles takes the read lock and delegates. Callers that already
+// hold the lock must use diurnalProfilesLocked instead: sync.RWMutex is not
+// reentrant, and a recursive RLock deadlocks the moment a writer queues
+// between the two acquisitions - the inner call waits for the writer, the
+// writer waits for the outer read lock to drop, and every later reader piles
+// up behind them. GetAnalyticsSummary used to call this method while holding
+// the lock, which took the whole hub down under a write-heavy load.
 func (s *Store) GetDiurnalProfiles(tenantID string) (map[int]int64, map[int]int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.diurnalProfilesLocked(tenantID)
+}
 
+func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]int64, error) {
 	baseline := make(map[int]int64)
 	live := make(map[int]int64)
 
