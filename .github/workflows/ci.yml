@@ -57,6 +57,17 @@ jobs:
           mkdir -p agent/bin
           gcc -O2 -Wall -Wextra -o agent/bin/ominull-agent agent/linux/main.c
 
+      - name: Install mingw-w64 Cross Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mingw-w64
+
+      - name: Compile Windows Native Agent
+        run: |
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o agent/bin/ominulld.exe \
+            agent/src/main.c agent/src/hub_client.c agent/src/service.c agent/src/driver_client.c \
+            -lws2_32 -lwinhttp -liphlpapi -ladvapi32
+
   build-packages:
     name: Cross-Platform Release Packaging
     runs-on: ubuntu-latest
@@ -65,10 +76,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Packaging Utilities (dpkg-dev, zip)
+      # mingw-w64 builds the Windows agent. Without it the bundle used to ship an
+      # installer with no binary, which is why the fleet could not take a Windows update.
+      - name: Install Packaging Utilities (dpkg-dev, zip, mingw-w64)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq dpkg-dev zip
+          sudo apt-get install -y -qq dpkg-dev zip mingw-w64
 
       - name: Build Cross-Platform Packages
         run: |
