@@ -144,12 +144,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if provided != s.adminKey {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("<!DOCTYPE html><html><head><title>Ominull Console - Access</title></head><body style=\"background:#0b1120;color:#e2e8f0;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><form method=\"GET\" action=\"/\" style=\"background:#111827;border:1px solid #1e293b;border-radius:12px;padding:32px;text-align:center;\"><div style=\"font-size:20px;font-weight:800;margin-bottom:8px;\">&#128737;&#65039; Ominull Console</div><div style=\"color:#94a3b8;font-size:12px;margin-bottom:16px;\">Admin API key required</div><input type=\"password\" name=\"key\" placeholder=\"Admin API Key\" autofocus style=\"background:#0b1120;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:8px 12px;width:260px;\"><br><br><button type=\"submit\" style=\"background:#06b6d4;color:#0b1120;border:0;border-radius:6px;padding:8px 20px;font-weight:800;cursor:pointer;\">Unlock Console</button></form></body></html>"))
+		w.Write(consoleGate())
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	html := strings.ReplaceAll(dashboardHTML, "ominull-master-admin-key", s.adminKey)
-	w.Write([]byte(html))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(consoleDocument(s.adminKey, s.agentVersion))
 }
 
 func (s *Server) Start(addr string) error {
@@ -159,8 +159,13 @@ func (s *Server) Start(addr string) error {
 
 	mux := http.NewServeMux()
 
-	// 0. Embedded Web Dashboard
+	// 0. Embedded operator console: the gated document at "/", plus the
+	// stylesheet, script and fonts it loads. Asset paths are registered
+	// individually so "/" keeps its own not-found behaviour.
 	mux.HandleFunc("/", s.handleDashboard)
+	for _, assetPath := range consoleAssetPaths() {
+		mux.HandleFunc(assetPath, s.handleConsoleAsset)
+	}
 
 	// 1. Static Bootstrap & Binary Downloads
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)

@@ -1,0 +1,13 @@
+{
+  "//": "Ominull ships no TypeScript and no npm build. This file exists so the shared `st check` gate has a defined input set: it parses the one hand-written script in the repo, the embedded operator console, and reports syntax errors. Type checking stays off — app.js is plain browser ES5 with no annotations to check.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "es2017",
+    "lib": ["es2017", "dom"],
+    "moduleDetection": "force",
+    "module": "preserve"
+  },
+  "include": ["hub/pkg/server/web/app.js"]
+}

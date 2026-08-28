@@ -1,0 +1,2716 @@
+/* Ominull console.
+ *
+ * Invariants this file exists to hold:
+ *   - No inline style attributes. Anything data-driven is SVG geometry or a
+ *     data-* attribute the stylesheet selects on. A `style=` here would be a
+ *     colour that the theme switcher cannot reach.
+ *   - Hue means state. Chrome uses only the neutral ink tokens and --brand;
+ *     --ok/--warn/--crit/--info are reserved for asset state.
+ *   - Rows sort on stable identity, never last_seen_at, so an isolate click
+ *     cannot land on a host that reshuffled under the cursor.
+ *   - Selection, cursor and expansion live in state, not in the DOM, so a
+ *     five-second refresh preserves all three.
+ */
+(function () {
+  "use strict";
+
+  var CFG = window.OMINULL || {};
+  var API_KEY = CFG.key || "";
+  var HUB_VERSION = CFG.version || "";
+
+  var THEMES = ["graphite", "bunker", "ash", "phosphor"];
+  var THEME_NAMES = {
+    graphite: "Graphite",
+    bunker: "Bunker",
+    ash: "Ash",
+    phosphor: "Phosphor"
+  };
+  var DEFAULT_THEME = "ash";
+
+  var SECTIONS = [
+    { id: "assets", label: "Assets" },
+    { id: "discovery", label: "Discovery" },
+    { id: "topology", label: "Topology" },
+    { id: "traffic", label: "Traffic" },
+    { id: "policy", label: "Policy" },
+    { id: "audit", label: "Audit" }
+  ];
+
+  var IS_MAC = /mac|iphone|ipad/i.test(navigator.userAgent);
+  var MOD_LABEL = IS_MAC ? "\u2318K" : "Ctrl K";
+
+  /* ------------------------------------------------------------------ dom */
+
+  function h(tag, props) {
+    var el = document.createElement(tag);
+    if (props) {
+      for (var k in props) {
+        if (!Object.prototype.hasOwnProperty.call(props, k)) continue;
+        var v = props[k];
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "text") el.textContent = String(v);
+        else if (k === "cls") el.className = v;
+        else if (k === "on") {
+          for (var ev in v) el.addEventListener(ev, v[ev]);
+        } else if (v === true) el.setAttribute(k, "");
+        else el.setAttribute(k, String(v));
+      }
+    }
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c === null || c === undefined || c === false) continue;
+      if (Array.isArray(c)) c.forEach(function (x) { if (x) el.appendChild(x); });
+      else if (typeof c === "string" || typeof c === "number") el.appendChild(document.createTextNode(String(c)));
+      else el.appendChild(c);
+    }
+    return el;
+  }
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function s(tag, attrs) {
+    var el = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "text") { el.textContent = String(v); continue; }
+        if (k === "on") { for (var ev in v) el.addEventListener(ev, v[ev]); continue; }
+        el.setAttribute(k, String(v));
+      }
+    }
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (!c) continue;
+      if (Array.isArray(c)) c.forEach(function (x) { if (x) el.appendChild(x); });
+      else el.appendChild(c);
+    }
+    return el;
+  }
+
+  function icon(id, small) {
+    var svg = s("svg", { "class": small ? "ic ic-s" : "ic", "aria-hidden": "true" });
+    var use = document.createElementNS(SVG_NS, "use");
+    use.setAttribute("href", "#" + id);
+    svg.appendChild(use);
+    return svg;
+  }
+
+  function clear(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  /* Overlay geometry is the one thing the stylesheet cannot know: a context
+     menu opens where the pointer is. It travels as custom properties the
+     stylesheet reads, so no appearance value is ever written inline. */
+  function placeOverlay(el, x, y) {
+    el.style.setProperty("--x", Math.round(Math.max(8, x)) + "px");
+    el.style.setProperty("--y", Math.round(Math.max(8, y)) + "px");
+  }
+
+  function $(id) { return document.getElementById(id); }
+
+  /* ------------------------------------------------------------- storage */
+
+  function readStore(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function writeStore(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      /* Storage is a convenience here; the console must work without it. */
+    }
+  }
+
+  /* --------------------------------------------------------------- utils */
+
+  function pad(n, w) {
+    var t = String(n);
+    while (t.length < w) t = "0" + t;
+    return t;
+  }
+
+  /* Zero-pads dotted-quads so 10.0.4.9 sorts before 10.0.4.20. Anything that is
+     not an IPv4 literal sorts after every address, by its own text. */
+  function addressSortKey(ip) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || ""));
+    if (!m) return "9|" + String(ip || "");
+    return "1|" + pad(m[1], 3) + pad(m[2], 3) + pad(m[3], 3) + pad(m[4], 3);
+  }
+
+  function parseTime(v) {
+    if (!v) return null;
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function ago(date) {
+    if (!date) return "\u2014";
+    var secs = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (secs < 60) return secs + "s";
+    var mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m " + pad(secs % 60, 2) + "s";
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + "h " + pad(mins % 60, 2) + "m";
+    return Math.floor(hrs / 24) + "d " + pad(hrs % 24, 2) + "h";
+  }
+
+  function bytes(n) {
+    n = Number(n) || 0;
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+  }
+
+  function versionTriple(v) {
+    var out = [0, 0, 0];
+    var parts = String(v || "").replace(/^v/, "").split(".");
+    for (var i = 0; i < 3 && i < parts.length; i++) out[i] = parseInt(parts[i], 10) || 0;
+    return out;
+  }
+
+  function versionLess(a, b) {
+    var x = versionTriple(a), y = versionTriple(b);
+    for (var i = 0; i < 3; i++) {
+      if (x[i] !== y[i]) return x[i] < y[i];
+    }
+    return false;
+  }
+
+  function shortVersion(v) {
+    var m = /^v?(\d+\.\d+\.\d+)/.exec(String(v || ""));
+    return m ? m[1] : (v || "\u2014");
+  }
+
+  /* Engine label from the decorated driver version an agent reports, e.g.
+     "1.1.0 (WFP Callout)" -> "WFP Callout". */
+  function engineOf(v) {
+    var m = /\(([^)]+)\)/.exec(String(v || ""));
+    return m ? m[1] : "";
+  }
+
+  function osFamily(os) {
+    var l = String(os || "").toLowerCase();
+    if (l.indexOf("windows") >= 0) return "windows";
+    if (l.indexOf("mac") >= 0 || l.indexOf("darwin") >= 0) return "macos";
+    if (l.indexOf("linux") >= 0 || l.indexOf("debian") >= 0 || l.indexOf("ubuntu") >= 0) return "linux";
+    return "";
+  }
+
+  /* --------------------------------------------------------------- state */
+
+  var state = {
+    section: "assets",
+    theme: DEFAULT_THEME,
+    demo: false,
+    loading: true,
+    lastError: "",
+
+    hierarchy: [],
+    endpoints: [],
+    scanAssets: [],
+    coverage: null,
+    anomalies: [],
+    updateStatus: null,
+    meshPeers: [],
+    policyGroups: [],
+    exclusions: [],
+    iocs: [],
+    audit: [],
+    events: [],
+    analytics: null,
+    topology: null,
+    topoWindow: "24h",
+
+    assets: [],
+    assetByKey: {},
+
+    filters: {},
+    query: "",
+    selected: {},
+    cursorKey: "",
+    expandedKey: "",
+    collapsedGroups: {},
+    routeKey: "",
+
+    topoSelected: "",
+    chat: [],
+    chatBusy: false,
+    statHistory: {},
+    scanJob: null
+  };
+
+  function selectedKeys() {
+    return Object.keys(state.selected).filter(function (k) { return state.selected[k]; });
+  }
+
+  /* ----------------------------------------------------------------- api */
+
+  function apiURL(path) {
+    return path;
+  }
+
+  function request(path, method, body) {
+    if (state.demo) return demoResponse(path, method, body);
+    var opts = {
+      method: method || "GET",
+      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" }
+    };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(apiURL(path), opts).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (t) {
+          throw new Error("HTTP " + res.status + (t ? ": " + t.slice(0, 200) : ""));
+        });
+      }
+      var ct = res.headers.get("content-type") || "";
+      if (ct.indexOf("application/json") < 0) return res.text();
+      return res.json();
+    });
+  }
+
+  function arrayOf(v) {
+    return Array.isArray(v) ? v : [];
+  }
+
+  /* ------------------------------------------------------- demo fixtures */
+
+  /* Demo mode seeds a synthetic fleet so the console can be exercised and
+     screenshotted without a live hub. Addresses are 10.0.4.x / 172.16.x by
+     repo convention. */
+  function demoData() {
+    var now = new Date().toISOString();
+    var mins = function (m) { return new Date(Date.now() - m * 60000).toISOString(); };
+
+    var endpoints = [
+      { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: true, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+      { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: mins(0.1), created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.2), created_at: "2026-08-20T10:00:00Z" },
+      { id: "win11-fin-11", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", mac: "00:1A:2B:99:88:77", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.0.0", driver_version: "1.0.0 (WFP Callout)", status: "offline", is_isolated: false, last_seen_at: mins(134), created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.0.0, PostgreSQL 16", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.05), created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-prod-api-02", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-api-02", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.9", mac: "02:42:AC:11:00:09", role_tag: "app-server", installed_software: "Ominull eBPF Daemon v1.1.0", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.15), created_at: "2026-08-21T10:00:00Z" },
+      { id: "win11-branch-kiosk", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-kiosk-19", os: "Windows 11 IoT Enterprise (x86_64)", ip: "10.0.4.44", mac: "00:1A:2B:44:44:44", role_tag: "kiosk", installed_software: "Ominull WFP Agent v1.1.0", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: mins(0.3), created_at: "2026-08-22T10:00:00Z" },
+      { id: "linux-branch-nvr", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", mac: "00:50:56:46:46:46", role_tag: "recorder", installed_software: "Ominull eBPF Daemon v1.0.0", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.4), created_at: "2026-08-22T10:00:00Z" }
+    ];
+
+    var locations = [
+      { id: "loc-hq", tenant_id: "corp-default", name: "Corporate HQ LAN", city: "Denver", country: "US", subnet_cidr: "10.0.4.0/24" },
+      { id: "loc-cloud", tenant_id: "corp-default", name: "AWS Production VPC", city: "us-east-1", country: "US", subnet_cidr: "172.16.0.0/16" },
+      { id: "loc-branch", tenant_id: "harbour-health", name: "Branch Clinic", city: "Portland", country: "US", subnet_cidr: "10.0.4.0/24" }
+    ];
+    var tenants = [
+      { id: "corp-default", name: "Acme CyberOps Enterprise" },
+      { id: "harbour-health", name: "Harbourline Health" }
+    ];
+
+    var hierarchy = tenants.map(function (t) {
+      var locs = locations.filter(function (l) { return l.tenant_id === t.id; }).map(function (l) {
+        var eps = endpoints.filter(function (e) { return e.location_id === l.id; });
+        return {
+          location: l,
+          endpoints: eps,
+          total_endpoints: eps.length,
+          isolated_count: eps.filter(function (e) { return e.is_isolated; }).length
+        };
+      });
+      var all = endpoints.filter(function (e) { return e.tenant_id === t.id; });
+      return {
+        tenant: t,
+        locations: locs,
+        total_endpoints: all.length,
+        isolated_count: all.filter(function (e) { return e.is_isolated; }).length
+      };
+    });
+
+    var scan = [
+      { ip: "10.0.4.1", mac: "00:00:0C:9F:F0:01", vendor: "Cisco Systems", hostname: "core-gateway", os_guess: "Cisco IOS-XE Gateway", category: "Router / Firewall", confidence: 0.95, ttl: 255, app_delta_ms: 0.8, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], last_seen: mins(2), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "LOW" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
+      { ip: "10.0.4.10", mac: "00:1A:2B:0A:0A:0A", vendor: "Dell Inc.", hostname: "", os_guess: "Windows Server", category: "Server", confidence: 0.71, ttl: 128, app_delta_ms: 1.0, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["RDP reachable from three subnets"], last_seen: mins(0.2), open_ports: [{ port: 53, protocol: "tcp", service: "dns", risk_level: "LOW" }, { port: 88, protocol: "tcp", service: "kerberos", risk_level: "LOW" }, { port: 135, protocol: "tcp", service: "rpc", risk_level: "LOW" }, { port: 389, protocol: "tcp", service: "ldap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 636, protocol: "tcp", service: "ldaps", risk_level: "LOW" }, { port: 3389, protocol: "tcp", service: "rdp", risk_level: "HIGH" }] },
+      { ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", vendor: "Dell Inc.", hostname: "corp-win11-exec", os_guess: "Windows 11 Enterprise (x86_64)", category: "Workstation", confidence: 0.98, ttl: 128, app_delta_ms: 1.1, is_managed: true, agent_endpoint_id: "win11-corp-exec", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 135, protocol: "tcp", service: "epmap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "microsoft-ds", risk_level: "LOW" }] },
+      { ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", vendor: "VMware, Inc.", hostname: "dmz-web-01", os_guess: "Linux (generic)", category: "Server", confidence: 0.62, ttl: 64, app_delta_ms: 1.2, is_managed: true, agent_endpoint_id: "linux-dmz-web-01", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 80, protocol: "tcp", service: "http", risk_level: "MEDIUM" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
+      { ip: "10.0.4.55", mac: "00:11:32:44:55:66", vendor: "Synology Inc.", hostname: "unmanaged-nas", os_guess: "Synology DiskStation DSM 7.2", category: "Storage / NAS", confidence: 0.92, ttl: 64, app_delta_ms: 1.4, is_managed: false, agent_endpoint_id: "", risk_score: "HIGH", weakpoints: ["Unencrypted HTTP administrative console (port 5000)", "SMBv1 legacy dialect enabled"], last_seen: mins(3), open_ports: [{ port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 5000, protocol: "tcp", service: "http", risk_level: "HIGH" }, { port: 5001, protocol: "tcp", service: "https", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.71", mac: "00:1B:A9:71:71:71", vendor: "Brother Industries", hostname: "", os_guess: "Embedded print controller", category: "Printer", confidence: 0.44, ttl: 64, app_delta_ms: 2.6, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated raw print queue on 9100"], last_seen: mins(4), open_ports: [{ port: 631, protocol: "tcp", service: "ipp", risk_level: "LOW" }, { port: 9100, protocol: "tcp", service: "jetdirect", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", vendor: "Apple, Inc.", hostname: "mac-eng-lead", os_guess: "macOS", category: "Workstation", confidence: 0.81, ttl: 64, app_delta_ms: 1.0, is_managed: true, agent_endpoint_id: "mac-eng-lead", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.99", mac: "B8:27:EB:12:34:56", vendor: "Raspberry Pi Foundation", hostname: "rogue-dev-kali", os_guess: "Kali Linux Rolling (ARM64)", category: "Shadow IT / Pentest", confidence: 0.89, ttl: 64, app_delta_ms: 2.1, is_managed: false, agent_endpoint_id: "", risk_score: "CRITICAL", weakpoints: ["Unauthorized Metasploit payload listener on port 4444", "Unmanaged shadow IT device"], last_seen: mins(0.5), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }, { port: 4444, protocol: "tcp", service: "metasploit", risk_level: "CRITICAL" }] },
+      { ip: "10.0.4.120", mac: "50:02:91:AA:BB:CC", vendor: "Samsung Electronics", hostname: "lobby-display", os_guess: "Samsung Tizen Smart Display", category: "IoT / Display", confidence: 0.88, ttl: 64, app_delta_ms: 1.9, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated smart-display remote API on LAN"], last_seen: mins(9), open_ports: [{ port: 8001, protocol: "tcp", service: "smarttv-api", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.201", mac: "", vendor: "", hostname: "", os_guess: "", category: "", confidence: 0.12, ttl: 0, app_delta_ms: 0, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], last_seen: mins(62), open_ports: [] }
+    ];
+
+    var anomalies = [
+      { id: "alert-dga-01", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "win11-corp-exec", hostname: "corp-win11-exec", anomaly_type: "DGA_BEACONING", severity: "CRITICAL", title: "Suspicious DGA / high-entropy domain", description: "Process powershell.exe queried 142 high-entropy domains in 60s; 138 returned NXDOMAIN.", details: "Shannon entropy 4.02 bits/byte | destination xj829vbnpqlmz019.xyz:443", process_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", dst_ip: "198.51.100.22", dst_port: 443, timestamp: mins(4), acknowledged: false },
+      { id: "alert-offhours-02", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "win11-corp-exec", hostname: "corp-win11-exec", anomaly_type: "NOVEL_PROCESS_EGRESS", severity: "HIGH", title: "Off-hours interactive shell egress", description: "Interactive shell opened an external session at 02:14 UTC.", details: "explorer.exe -> powershell.exe -> 198.51.100.22:8443", process_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", dst_ip: "198.51.100.22", dst_port: 8443, timestamp: mins(38), acknowledged: false },
+      { id: "alert-fanout-03", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "mac-eng-lead", hostname: "mac-eng-lead", anomaly_type: "UNUSUAL_PORT", severity: "HIGH", title: "Internal subnet fan-out / port sweep", description: "Host probed 8 distinct internal addresses within a 60s window.", details: "Probed 445, 3389 across 10.0.4.0/24", process_path: "/usr/bin/nmap", dst_ip: "10.0.4.0/24", dst_port: 445, timestamp: mins(51), acknowledged: false },
+      { id: "alert-bandwidth-04", tenant_id: "corp-default", location_id: "loc-cloud", endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", anomaly_type: "BANDWIDTH_SPIKE", severity: "MEDIUM", title: "Egress volume 14x baseline", description: "Sustained outbound transfer well above the learned diurnal baseline.", details: "4.2 GB out in 20m vs 300 MB baseline", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip: "203.0.113.51", dst_port: 5432, timestamp: mins(96), acknowledged: false }
+    ];
+
+    var talkers = [
+      { process: "C:\\Windows\\System32\\svchost.exe", flow_count: 18422, bytes_in: 920000000, bytes_out: 210000000, total_bytes: 1130000000 },
+      { process: "/usr/sbin/nginx", flow_count: 12408, bytes_in: 180000000, bytes_out: 1420000000, total_bytes: 1600000000 },
+      { process: "/usr/lib/postgresql/16/bin/postgres", flow_count: 6120, bytes_in: 88000000, bytes_out: 4200000000, total_bytes: 4288000000 },
+      { process: "powershell.exe", flow_count: 942, bytes_in: 4100000, bytes_out: 19400000, total_bytes: 23500000 },
+      { process: "/usr/bin/nmap", flow_count: 618, bytes_in: 210000, bytes_out: 480000, total_bytes: 690000 }
+    ];
+
+    var timeline = [];
+    for (var i = 23; i >= 0; i--) {
+      var base = 40 + Math.round(38 * Math.sin((23 - i) / 3.4));
+      timeline.push({
+        timestamp: new Date(Date.now() - i * 3600000).toISOString(),
+        bytes_in: (base + 22) * 4200000,
+        bytes_out: (base + 9) * 3100000,
+        blocks: Math.max(0, 12 - Math.abs(12 - (23 - i)))
+      });
+    }
+
+    var topoNodes = endpoints.map(function (e) {
+      return {
+        id: e.id, label: e.hostname, type: "managed", ip: e.ip, os: e.os,
+        role: e.role_tag, risk: e.is_isolated ? "CRITICAL" : "CLEAN",
+        is_isolated: e.is_isolated, group: e.location_name
+      };
+    });
+    topoNodes.push({ id: "10.0.4.1", label: "core-gateway", type: "gateway", ip: "10.0.4.1", os: "Cisco IOS-XE", role: "gateway", risk: "LOW", is_isolated: false, group: "Corporate HQ LAN" });
+    topoNodes.push({ id: "10.0.4.10", label: "10.0.4.10", type: "unmanaged", ip: "10.0.4.10", os: "Windows Server", role: "", risk: "MEDIUM", is_isolated: false, group: "Corporate HQ LAN" });
+    topoNodes.push({ id: "10.0.4.55", label: "unmanaged-nas", type: "unmanaged", ip: "10.0.4.55", os: "Synology DSM", role: "", risk: "HIGH", is_isolated: false, group: "Corporate HQ LAN" });
+    topoNodes.push({ id: "10.0.4.99", label: "rogue-dev-kali", type: "unmanaged", ip: "10.0.4.99", os: "Kali Linux", role: "", risk: "CRITICAL", is_isolated: false, group: "Corporate HQ LAN" });
+    topoNodes.push({ id: "198.51.100.22", label: "198.51.100.22", type: "threat", ip: "198.51.100.22", os: "", role: "", risk: "CRITICAL", is_isolated: false, group: "External" });
+
+    var topoEdges = [
+      { id: "e1", source: "win11-corp-exec", target: "10.0.4.10", protocol: "tcp", port: 389, flow_count: 2140, total_bytes: 42000000, verdict: "clean", last_seen: now },
+      { id: "e2", source: "mac-eng-lead", target: "10.0.4.10", protocol: "tcp", port: 88, flow_count: 980, total_bytes: 12000000, verdict: "clean", last_seen: now },
+      { id: "e3", source: "linux-dmz-web-01", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 18200, total_bytes: 1420000000, verdict: "clean", last_seen: now },
+      { id: "e4", source: "win11-branch-kiosk", target: "10.0.4.10", protocol: "tcp", port: 445, flow_count: 640, total_bytes: 8100000, verdict: "clean", last_seen: now },
+      { id: "e5", source: "linux-branch-nvr", target: "10.0.4.55", protocol: "tcp", port: 445, flow_count: 3120, total_bytes: 620000000, verdict: "clean", last_seen: now },
+      { id: "e6", source: "win11-corp-exec", target: "198.51.100.22", protocol: "tcp", port: 443, flow_count: 142, total_bytes: 810000, verdict: "blocked", last_seen: now },
+      { id: "e7", source: "mac-eng-lead", target: "10.0.4.99", protocol: "tcp", port: 4444, flow_count: 61, total_bytes: 190000, verdict: "anomalous", last_seen: now },
+      { id: "e8", source: "linux-prod-db-01", target: "linux-prod-api-02", protocol: "tcp", port: 5432, flow_count: 9400, total_bytes: 2100000000, verdict: "clean", last_seen: now },
+      { id: "e9", source: "win11-fin-11", target: "10.0.4.10", protocol: "tcp", port: 135, flow_count: 220, total_bytes: 2400000, verdict: "clean", last_seen: now },
+      { id: "e10", source: "linux-prod-api-02", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 5100, total_bytes: 310000000, verdict: "clean", last_seen: now }
+    ];
+
+    return {
+      "/api/v1/hierarchy": hierarchy,
+      "/api/v1/endpoints": endpoints,
+      "/api/v1/scanner/results": scan,
+      "/api/v1/scanner/coverage": {
+        total_discovered: scan.length, total_managed: 4, total_unmanaged: scan.length - 4,
+        coverage_percent: Math.round((4 / scan.length) * 1000) / 10, critical_risks: 1, high_risks: 1
+      },
+      "/api/v1/anomalies": anomalies,
+      "/api/v1/agents/update-status": {
+        latest_version: "1.1.0",
+        outdated: [
+          { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", driver_version: "1.0.0 (eBPF/TC)" },
+          { endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", driver_version: "1.0.0 (WFP Callout)" },
+          { endpoint_id: "linux-branch-nvr", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", driver_version: "1.0.0 (eBPF/TC)" }
+        ],
+        pending: []
+      },
+      "/api/v1/mesh/quarantined": [
+        { id: "mq-01", target_ip: "10.0.4.99", target_mac: "B8:27:EB:12:34:56", subnet: "10.0.4.0/24", reason: "Metasploit listener on 4444", active: true, created_at: mins(22) }
+      ],
+      "/api/v1/policy-groups": [
+        { id: "pg-default-zt", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Corporate zero-trust default", description: "Baseline egress control for every managed endpoint", schedule: "all", criteria: "{}", action: "BLOCK", rule_type: "port", rule_value: "", port: 445, protocol: "tcp", active: true, created_at: "2026-08-20T10:00:00Z" },
+        { id: "pg-quarantine-drop", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Emergency lateral quarantine", description: "Drops peer-to-peer traffic for quarantined hosts", schedule: "all", criteria: "{}", action: "ISOLATE", rule_type: "cidr", rule_value: "10.0.4.0/24", port: 0, protocol: "any", active: true, created_at: "2026-08-21T10:00:00Z" },
+        { id: "pg-offhours", tenant_id: "corp-default", scope: "client", scope_value: "corp-default", name: "Off-hours shell egress alert", description: "Alerts on interactive shells opening external sessions outside business hours", schedule: "off_hours", criteria: "{\"process\":\"powershell\"}", action: "ALERT", rule_type: "process", rule_value: "powershell.exe", port: 0, protocol: "tcp", active: false, created_at: "2026-08-23T10:00:00Z" }
+      ],
+      "/api/v1/exclusions": [
+        { id: "ex-01", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Directory service authentication", process_path: "", dst_ip_range: "10.0.4.10/32", port: 88, protocol: "tcp", reason: "Kerberos to the site directory server", active: true, created_at: "2026-08-20T10:00:00Z" },
+        { id: "ex-02", tenant_id: "corp-default", scope: "location", scope_value: "loc-cloud", name: "Database replication", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip_range: "172.16.10.0/24", port: 5432, protocol: "tcp", reason: "Intra-VPC replication", active: true, created_at: "2026-08-21T10:00:00Z" }
+      ],
+      "/api/v1/threatintel/iocs": [
+        { id: "ioc-01", value: "185.220.101.5", type: "ipv4", source: "feodo", threat_type: "c2", confidence: 90, active: true, created_at: mins(180), last_seen_at: mins(12) },
+        { id: "ioc-02", value: "194.26.29.114", type: "ipv4", source: "emerging_threats", threat_type: "c2", confidence: 85, active: true, created_at: mins(240), last_seen_at: mins(40) },
+        { id: "ioc-03", value: "xj829vbnpqlmz019.xyz", type: "domain", source: "custom", threat_type: "c2", confidence: 95, active: true, created_at: mins(6), last_seen_at: mins(4) },
+        { id: "ioc-04", value: "198.51.100.0/24", type: "cidr", source: "emerging_threats", threat_type: "scanner", confidence: 70, active: true, created_at: mins(600), last_seen_at: mins(90) }
+      ],
+      "/api/v1/audit/logs": [
+        { id: "a-1", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "ISOLATE_HOST", resource: "win11-corp-exec", details: "Auto-isolated by detector: DGA beaconing", ip_address: "10.0.4.58", timestamp: mins(4) },
+        { id: "a-2", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "MESH_QUARANTINE", resource: "10.0.4.99", details: "Metasploit listener on 4444", ip_address: "10.0.4.58", timestamp: mins(22) },
+        { id: "a-3", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "SYNC_TI", resource: "threatintel", details: "4 indicators refreshed from 3 feeds", ip_address: "10.0.4.58", timestamp: mins(60) },
+        { id: "a-4", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "ADD_RULE", resource: "pg-offhours", details: "Off-hours shell egress alert created", ip_address: "10.0.4.58", timestamp: mins(180) }
+      ],
+      "/api/v1/events": [
+        { id: 9001, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(4), layer: "ALE_AUTH_CONNECT", action: "BLOCK", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "198.51.100.22", src_port: 52140, dst_port: 443, bytes_in: 0, bytes_out: 1240, country: "NL", process_path: "powershell.exe", process_id: 4812, domain: "xj829vbnpqlmz019.xyz" },
+        { id: 9002, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(51), layer: "PF_OUT", action: "BLOCK", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.99", src_port: 61022, dst_port: 4444, bytes_in: 0, bytes_out: 480, country: "", process_path: "/usr/bin/nmap", process_id: 9911 },
+        { id: 9003, tenant_id: "corp-default", endpoint_id: "linux-dmz-web-01", timestamp: mins(2), layer: "TC_EGRESS", action: "PERMIT", direction: "INBOUND", protocol: 6, src_ip: "203.0.113.9", dst_ip: "10.0.4.20", src_port: 44120, dst_port: 443, bytes_in: 8400, bytes_out: 142000, country: "DE", process_path: "/usr/sbin/nginx", process_id: 1220 },
+        { id: 9004, tenant_id: "corp-default", endpoint_id: "linux-prod-db-01", timestamp: mins(96), layer: "TC_EGRESS", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "172.16.10.4", dst_ip: "203.0.113.51", src_port: 40122, dst_port: 5432, bytes_in: 210000, bytes_out: 4200000000, country: "US", process_path: "/usr/lib/postgresql/16/bin/postgres", process_id: 780 },
+        /* Fan-in to 10.0.4.10 from several agented endpoints on directory
+           ports. This is the shape Pass 2 reads as "domain controller"; in
+           Pass 1 it is visible as flow, not yet as an inference. */
+        { id: 9005, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.10", src_port: 49812, dst_port: 389, bytes_in: 21400, bytes_out: 9200, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
+        { id: 9006, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1.2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.10", src_port: 49813, dst_port: 88, bytes_in: 4100, bytes_out: 2600, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
+        { id: 9007, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.10", src_port: 51002, dst_port: 445, bytes_in: 812000, bytes_out: 44000, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 1044 },
+        { id: 9008, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(140), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.10", src_port: 50221, dst_port: 135, bytes_in: 9400, bytes_out: 3100, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 998 },
+        { id: 9009, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(3), layer: "PF_OUT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.10", src_port: 61140, dst_port: 389, bytes_in: 15200, bytes_out: 6100, country: "", process_path: "/usr/libexec/opendirectoryd", process_id: 221 }
+      ],
+      "/api/v1/analytics/summary": {
+        total_bytes_in: 3120000000, total_bytes_out: 7480000000, total_events: 48210,
+        total_blocks: 318, total_permits: 47892,
+        countries: { US: 31200, DE: 4210, NL: 980, SG: 640, GB: 410 },
+        top_processes: {},
+        severity_counts: { CRITICAL: 1, HIGH: 2, MEDIUM: 1, LOW: 0 },
+        enforcement_counts: { "WFP Callout": 3, "eBPF/TC": 4, PF: 1 },
+        bandwidth_timeline: timeline,
+        diurnal_baseline: {}, diurnal_live: {},
+        top_talkers: talkers,
+        geo_stats: [
+          { country: "US", country_name: "United States", flow_count: 31200, total_bytes: 6100000000, threat_count: 2 },
+          { country: "DE", country_name: "Germany", flow_count: 4210, total_bytes: 820000000, threat_count: 0 },
+          { country: "NL", country_name: "Netherlands", flow_count: 980, total_bytes: 41000000, threat_count: 1 },
+          { country: "SG", country_name: "Singapore", flow_count: 640, total_bytes: 22000000, threat_count: 0 },
+          { country: "GB", country_name: "United Kingdom", flow_count: 410, total_bytes: 18000000, threat_count: 0 }
+        ]
+      },
+      "/api/v1/topology/graph": {
+        nodes: topoNodes, edges: topoEdges,
+        metrics: {
+          total_nodes: topoNodes.length, total_edges: topoEdges.length,
+          anomalous_edge_count: 2, managed_nodes_count: endpoints.length,
+          unmanaged_nodes_count: topoNodes.length - endpoints.length
+        }
+      },
+      "/api/v1/copilot/config": { provider: "ollama", ollama_model: "llama3.2" }
+    };
+  }
+
+  var DEMO_CACHE = null;
+
+  function demoResponse(path, method, body) {
+    if (!DEMO_CACHE) DEMO_CACHE = demoData();
+    var base = path.split("?")[0];
+
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        if (method && method !== "GET") {
+          resolve(demoMutate(base, body));
+          return;
+        }
+        var hit = DEMO_CACHE[base];
+        if (hit !== undefined) {
+          resolve(hit);
+          return;
+        }
+        resolve(base.indexOf("/coverage") >= 0 || base.indexOf("/summary") >= 0 ? {} : []);
+      }, 40);
+    });
+  }
+
+  /* Demo writes mutate the fixture so an isolate or an acknowledge visibly
+     lands, the same way it would against a live hub. */
+  function demoMutate(base, body) {
+    var eps = DEMO_CACHE["/api/v1/endpoints"];
+    var setIso = function (id, on) {
+      eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
+      DEMO_CACHE["/api/v1/hierarchy"] = demoRebuildHierarchy();
+    };
+    if (base === "/api/v1/endpoints/isolate") { setIso(body && body.endpoint_id, true); return { status: "isolated" }; }
+    if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
+    if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
+    if (base === "/api/v1/endpoints/unisolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, false); }); return { status: "released" }; }
+    if (base === "/api/v1/anomalies/acknowledge") {
+      DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
+      return { status: "acknowledged" };
+    }
+    if (base === "/api/v1/mesh/quarantine") {
+      DEMO_CACHE["/api/v1/mesh/quarantined"].push({
+        id: "mq-" + Date.now(), target_ip: body && body.target_ip, target_mac: "", subnet: "10.0.4.0/24",
+        reason: (body && body.reason) || "Operator action", active: true, created_at: new Date().toISOString()
+      });
+      return { status: "quarantined" };
+    }
+    if (base === "/api/v1/mesh/unquarantine") {
+      DEMO_CACHE["/api/v1/mesh/quarantined"] = DEMO_CACHE["/api/v1/mesh/quarantined"].filter(function (p) { return p.target_ip !== (body && body.target_ip); });
+      return { status: "unquarantined" };
+    }
+    if (base === "/api/v1/copilot/chat") {
+      return {
+        reply: "Severity: HIGH.\n\nThe fan-in shape on 10.0.4.10 (389/88/135/445 from lsass.exe and svchost.exe, in bursts at logon) reads as a directory server, not a workstation. corp-win11-exec is the host to look at first: it is the only endpoint with both a blocked external session and an unusual internal sweep in the same hour.\n\nRecommended order:\n  1. Keep corp-win11-exec isolated; capture the socket table before release.\n  2. Confirm 10.0.4.99 stays mesh-quarantined - the 4444 listener is still up.\n  3. Deploy an agent to 10.0.4.10 so the directory server stops being inferred.",
+        timestamp: new Date().toISOString(), model: "llama3.2 (demo)", provider: "ollama"
+      };
+    }
+    if (base === "/api/v1/scanner/scan") return { scan_id: "scan-demo", status: "running" };
+    if (base === "/api/v1/agents/update") {
+      return { desired_version: "1.1.0", scheduled: [{ endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", from: "1.0.0", to: "1.1.0" }], unsupported: [{ endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows", reason: "self-update not supported on this platform yet; use the SSH/WinRM push-deployer" }] };
+    }
+    return { status: "ok" };
+  }
+
+  function demoRebuildHierarchy() {
+    var eps = DEMO_CACHE["/api/v1/endpoints"];
+    return DEMO_CACHE["/api/v1/hierarchy"].map(function (c) {
+      var locs = c.locations.map(function (l) {
+        var mine = eps.filter(function (e) { return e.location_id === l.location.id; });
+        return { location: l.location, endpoints: mine, total_endpoints: mine.length, isolated_count: mine.filter(function (e) { return e.is_isolated; }).length };
+      });
+      var all = eps.filter(function (e) { return e.tenant_id === c.tenant.id; });
+      return { tenant: c.tenant, locations: locs, total_endpoints: all.length, isolated_count: all.filter(function (e) { return e.is_isolated; }).length };
+    });
+  }
+
+  /* ---------------------------------------------------------------- toast */
+
+  function toast(message, tone) {
+    var box = $("toasts");
+    var node = h("div", { cls: "toast", "data-tone": tone || "" }, message);
+    box.appendChild(node);
+    setTimeout(function () {
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }, tone === "crit" ? 8000 : 4500);
+  }
+
+  /* ---------------------------------------------------------------- theme */
+
+  function applyTheme(name, persist) {
+    if (THEMES.indexOf(name) < 0) name = DEFAULT_THEME;
+    state.theme = name;
+    document.documentElement.setAttribute("data-theme", name);
+    if (persist) writeStore("ominull.theme", name);
+    var slots = ["theme-sw-1", "theme-sw-2", "theme-sw-3", "theme-sw-4"];
+    var roles = ["ground", "ink", "ok", "crit"];
+    slots.forEach(function (id, i) {
+      $(id).className = "sw sw-" + roles[i] + "-" + name;
+    });
+    $("theme-btn").setAttribute("title", "Theme: " + THEME_NAMES[name]);
+  }
+
+  var themePop = null;
+
+  function closeThemePop() {
+    if (themePop && themePop.parentNode) themePop.parentNode.removeChild(themePop);
+    themePop = null;
+    $("theme-btn").setAttribute("aria-expanded", "false");
+  }
+
+  function openThemePop() {
+    closeThemePop();
+    var btn = $("theme-btn");
+    var pop = h("div", { cls: "theme-pop", role: "radiogroup", "aria-label": "Theme" },
+      h("div", { cls: "lbl", text: "Palette" }));
+
+    THEMES.forEach(function (t) {
+      var chips = h("span", { cls: "chips" });
+      ["ground", "ink", "brand", "ok", "warn", "crit"].forEach(function (role) {
+        chips.appendChild(h("i", { cls: "sw-" + role + "-" + t }));
+      });
+      pop.appendChild(h("button", {
+        cls: "theme-opt", type: "button", role: "radio",
+        "aria-checked": state.theme === t ? "true" : "false",
+        on: {
+          click: function () {
+            applyTheme(t, true);
+            closeThemePop();
+            toast("Theme: " + THEME_NAMES[t], "ok");
+          }
+        }
+      }, h("span", { text: THEME_NAMES[t] }), chips));
+    });
+
+    document.body.appendChild(pop);
+    var r = btn.getBoundingClientRect();
+    var pr = pop.getBoundingClientRect();
+    placeOverlay(pop, r.right + 8, Math.min(r.bottom - pr.height, window.innerHeight - pr.height - 8));
+    themePop = pop;
+    btn.setAttribute("aria-expanded", "true");
+  }
+
+  /* ------------------------------------------------------- asset merging */
+
+  var STATE_ONLINE = { tone: "ok", glyph: "g-online", word: "Online" };
+  var STATE_OFFLINE = { tone: "idle", glyph: "g-offline", word: "Offline" };
+  var STATE_QUARANTINED = { tone: "crit", glyph: "g-quarantine", word: "Quarantined" };
+  var STATE_NOAGENT = { tone: "warn", glyph: "g-watch", word: "No agent" };
+  var STATE_SILENT = { tone: "idle", glyph: "g-unknown", word: "Silent" };
+
+  function endpointOnline(ep) {
+    if (ep.status === "online") return true;
+    var t = parseTime(ep.last_seen_at);
+    return !!t && (Date.now() - t.getTime()) < 30000;
+  }
+
+  /* Folds endpoints (agent evidence) and scanner assets (scan evidence) into a
+     single row per host. Join is on agent_endpoint_id first, then IP. Pass 2
+     replaces both sources with the persisted assets table; the shape here is
+     already the merged one so only the source changes. */
+  function buildAssets() {
+    var byIP = {};
+    var byEndpoint = {};
+    arrayOf(state.scanAssets).forEach(function (a) {
+      if (a.ip) byIP[a.ip] = a;
+      if (a.agent_endpoint_id) byEndpoint[a.agent_endpoint_id] = a;
+    });
+
+    var locationOf = {};
+    var tenantOf = {};
+    arrayOf(state.hierarchy).forEach(function (c) {
+      arrayOf(c.locations).forEach(function (l) {
+        locationOf[l.location.id] = l.location;
+        tenantOf[l.location.id] = c.tenant;
+      });
+    });
+
+    var meshByIP = {};
+    arrayOf(state.meshPeers).forEach(function (p) {
+      if (p.active !== false) meshByIP[p.target_ip] = p;
+    });
+
+    var latest = (state.updateStatus && state.updateStatus.latest_version) || "";
+    var used = {};
+    var rows = [];
+
+    arrayOf(state.endpoints).forEach(function (ep) {
+      var scan = byEndpoint[ep.id] || (ep.ip ? byIP[ep.ip] : null) || null;
+      if (scan) used[scan.ip] = true;
+
+      var loc = locationOf[ep.location_id];
+      var ten = tenantOf[ep.location_id];
+      var online = endpointOnline(ep);
+      var st = ep.is_isolated ? STATE_QUARANTINED : (online ? STATE_ONLINE : STATE_OFFLINE);
+      var stale = !!latest && versionLess(ep.driver_version, latest);
+
+      rows.push({
+        key: ep.id,
+        name: ep.hostname || ep.ip || ep.id,
+        ip: ep.ip || "",
+        mac: ep.mac || (scan ? scan.mac : "") || "",
+        identity: [ep.os, ep.role_tag].filter(Boolean).join(" \u00b7 ") || "\u2014",
+        tenantId: ep.tenant_id || (ten ? ten.id : ""),
+        tenantName: ten ? ten.name : (ep.tenant_id || "Unassigned"),
+        locationId: ep.location_id || "",
+        locationName: ep.location_name || (loc ? loc.name : "Unassigned"),
+        subnet: loc ? loc.subnet_cidr : "",
+        evidence: { agent: true, scan: scan ? (scan.confidence >= 0.6 ? "full" : "partial") : false, inferred: false },
+        endpoint: ep,
+        scan: scan,
+        state: st,
+        online: online,
+        isolated: !!ep.is_isolated,
+        meshed: !!meshByIP[ep.ip],
+        stale: stale,
+        ports: scan ? arrayOf(scan.open_ports) : [],
+        risk: scan ? scan.risk_score : "",
+        lastSeen: parseTime(ep.last_seen_at) || (scan ? parseTime(scan.last_seen) : null)
+      });
+    });
+
+    arrayOf(state.scanAssets).forEach(function (a) {
+      if (used[a.ip]) return;
+      var seen = parseTime(a.last_seen);
+      var quiet = !seen || (Date.now() - seen.getTime()) > 3600000;
+      var identityBits = [a.os_guess || "Unidentified", a.category].filter(Boolean);
+      rows.push({
+        key: "ip:" + a.ip,
+        name: a.hostname || a.ip,
+        ip: a.ip,
+        mac: a.mac || "",
+        identity: identityBits.join(" \u00b7 "),
+        tenantId: "",
+        tenantName: "Unassigned",
+        locationId: "",
+        locationName: "Discovered \u2014 no client assigned",
+        subnet: "",
+        evidence: { agent: false, scan: a.confidence >= 0.6 ? "full" : "partial", inferred: false },
+        endpoint: null,
+        scan: a,
+        state: quiet ? STATE_SILENT : STATE_NOAGENT,
+        online: !quiet,
+        isolated: false,
+        meshed: !!meshByIP[a.ip],
+        stale: false,
+        ports: arrayOf(a.open_ports),
+        risk: a.risk_score || "",
+        lastSeen: seen
+      });
+    });
+
+    rows.forEach(function (r) {
+      r.sortKey = addressSortKey(r.ip) + "|" + r.key;
+      r.riskyPorts = r.ports.filter(function (p) {
+        return p.risk_level === "HIGH" || p.risk_level === "CRITICAL";
+      }).length;
+      r.groupKey = r.tenantName + " \u203a " + r.locationName;
+      r.searchText = [r.name, r.ip, r.mac, r.identity, r.tenantName, r.locationName, r.key].join(" ").toLowerCase();
+    });
+
+    /* Stable identity ordering. last_seen_at is deliberately not consulted:
+       rows that reshuffle under the cursor make an isolate click hit the wrong
+       host, and that has already cost this project time once. */
+    rows.sort(function (a, b) {
+      if (a.groupKey !== b.groupKey) return a.groupKey < b.groupKey ? -1 : 1;
+      return a.sortKey < b.sortKey ? -1 : (a.sortKey > b.sortKey ? 1 : 0);
+    });
+
+    state.assets = rows;
+    state.assetByKey = {};
+    rows.forEach(function (r) { state.assetByKey[r.key] = r; });
+  }
+
+  /* -------------------------------------------------------------- filters */
+
+  var FILTERS = {
+    agented: { label: "Agented", test: function (a) { return a.evidence.agent; } },
+    noagent: { label: "No agent", test: function (a) { return !a.evidence.agent; } },
+    quarantined: { label: "Quarantined", test: function (a) { return a.isolated || a.meshed; } },
+    outdated: { label: "Agent outdated", test: function (a) { return a.stale; } },
+    risky: { label: "Risky ports", test: function (a) { return a.riskyPorts > 0; } },
+    offline: { label: "Offline", test: function (a) { return a.evidence.agent && !a.online; } }
+  };
+
+  function activeFilters() {
+    return Object.keys(state.filters).filter(function (k) { return state.filters[k]; });
+  }
+
+  function visibleAssets() {
+    var active = activeFilters();
+    var q = state.query.trim().toLowerCase();
+    return state.assets.filter(function (a) {
+      for (var i = 0; i < active.length; i++) {
+        var f = FILTERS[active[i]];
+        if (f && !f.test(a)) return false;
+      }
+      if (q && a.searchText.indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  /* ---------------------------------------------------------------- stats */
+
+  function assetStats() {
+    var a = state.assets;
+    var count = function (fn) { return a.filter(fn).length; };
+    return {
+      total: a.length,
+      agented: count(function (x) { return x.evidence.agent; }),
+      noagent: count(function (x) { return !x.evidence.agent; }),
+      quarantined: count(function (x) { return x.isolated || x.meshed; }),
+      outdated: count(function (x) { return x.stale; }),
+      risky: count(function (x) { return x.riskyPorts > 0; }),
+      offline: count(function (x) { return x.evidence.agent && !x.online; })
+    };
+  }
+
+  /* Keeps a short rolling history per stat so the tile sparkline shows real
+     movement rather than a decorative shape. */
+  function pushHistory(stats) {
+    Object.keys(stats).forEach(function (k) {
+      var series = state.statHistory[k] || (state.statHistory[k] = []);
+      series.push(stats[k]);
+      if (series.length > 12) series.shift();
+    });
+  }
+
+  /* Scaled to the series' own range, not to zero: a stat that has not moved
+     draws a flat low line instead of six full-height bars shouting at an
+     operator about nothing happening. */
+  function sparkline(values) {
+    if (!values || values.length < 2) return null;
+    var max = Math.max.apply(null, values);
+    var min = Math.min.apply(null, values);
+    var span = max - min;
+    var n = values.length;
+    var svg = s("svg", { "class": "spark", viewBox: "0 0 " + (n * 3) + " 12", preserveAspectRatio: "none", "aria-hidden": "true" });
+    values.forEach(function (v, i) {
+      var hgt = span > 0 ? Math.max(1, Math.round(2 + ((v - min) / span) * 10)) : 2;
+      svg.appendChild(s("rect", {
+        "class": i === n - 1 ? "bar-last" : "bar",
+        x: i * 3, y: 12 - hgt, width: 2, height: hgt, rx: 0.5
+      }));
+    });
+    return svg;
+  }
+
+  function renderStrip() {
+    var strip = $("strip");
+    clear(strip);
+
+    if (state.section !== "assets") {
+      sectionSummary().forEach(function (t) {
+        strip.appendChild(h("div", { cls: "tile", "data-static": "true", "data-tone": t.tone || "" },
+          h("div", { cls: "v", text: t.value }),
+          h("div", { cls: "l", text: t.label })));
+      });
+      return;
+    }
+
+    var stats = assetStats();
+    var tiles = [
+      { id: "", label: "Assets known", value: stats.total, tone: "" },
+      { id: "agented", label: "Agented", value: stats.agented, tone: "" },
+      { id: "noagent", label: "No agent", value: stats.noagent, tone: stats.noagent ? "warn" : "" },
+      { id: "quarantined", label: "Quarantined", value: stats.quarantined, tone: stats.quarantined ? "crit" : "" },
+      { id: "outdated", label: "Agent outdated", value: stats.outdated, tone: stats.outdated ? "warn" : "" },
+      { id: "risky", label: "Risky ports", value: stats.risky, tone: stats.risky ? "warn" : "" }
+    ];
+
+    tiles.forEach(function (t) {
+      var pressed = t.id ? !!state.filters[t.id] : activeFilters().length === 0;
+      var tile = h("button", {
+        cls: "tile", type: "button", "data-tone": t.tone,
+        "aria-pressed": pressed ? "true" : "false",
+        title: t.id ? "Filter to " + t.label.toLowerCase() : "Clear filters",
+        on: {
+          click: function () {
+            if (!t.id) state.filters = {};
+            else state.filters[t.id] = !state.filters[t.id];
+            state.cursorKey = "";
+            render();
+          }
+        }
+      },
+        h("div", { cls: "v", text: String(t.value) }),
+        h("div", { cls: "l", text: t.label }));
+      var spark = sparkline(state.statHistory[t.id || "total"]);
+      if (spark) tile.appendChild(spark);
+      strip.appendChild(tile);
+    });
+  }
+
+  function sectionSummary() {
+    var stats = assetStats();
+    if (state.section === "discovery") {
+      var cov = state.coverage || {};
+      return [
+        { label: "Discovered", value: String(cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) },
+        { label: "Managed", value: String(cov.total_managed !== undefined ? cov.total_managed : stats.agented) },
+        { label: "Unmanaged", value: String(cov.total_unmanaged !== undefined ? cov.total_unmanaged : stats.noagent), tone: "warn" },
+        { label: "Coverage", value: (cov.coverage_percent !== undefined ? cov.coverage_percent : 0) + "%" },
+        { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" },
+        { label: "High risks", value: String(cov.high_risks || 0), tone: cov.high_risks ? "warn" : "" }
+      ];
+    }
+    if (state.section === "topology") {
+      var m = (state.topology && state.topology.metrics) || {};
+      return [
+        { label: "Nodes", value: String(m.total_nodes || 0) },
+        { label: "Edges", value: String(m.total_edges || 0) },
+        { label: "Managed", value: String(m.managed_nodes_count || 0) },
+        { label: "Unmanaged", value: String(m.unmanaged_nodes_count || 0), tone: "warn" },
+        { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" },
+        { label: "Window", value: state.topoWindow }
+      ];
+    }
+    if (state.section === "traffic") {
+      var an = state.analytics || {};
+      return [
+        { label: "Events", value: String(an.total_events || 0) },
+        { label: "Blocked", value: String(an.total_blocks || 0), tone: an.total_blocks ? "crit" : "" },
+        { label: "Permitted", value: String(an.total_permits || 0) },
+        { label: "Bytes in", value: bytes(an.total_bytes_in) },
+        { label: "Bytes out", value: bytes(an.total_bytes_out) },
+        { label: "Countries", value: String(arrayOf(an.geo_stats).length) }
+      ];
+    }
+    if (state.section === "policy") {
+      return [
+        { label: "Policy groups", value: String(state.policyGroups.length) },
+        { label: "Active", value: String(state.policyGroups.filter(function (g) { return g.active; }).length) },
+        { label: "Exclusions", value: String(state.exclusions.length) },
+        { label: "Indicators", value: String(state.iocs.length) },
+        { label: "Mesh quarantined", value: String(state.meshPeers.length), tone: state.meshPeers.length ? "crit" : "" },
+        { label: "Isolated hosts", value: String(stats.quarantined), tone: stats.quarantined ? "crit" : "" }
+      ];
+    }
+    if (state.section === "audit") {
+      return [
+        { label: "Audit entries", value: String(state.audit.length) },
+        { label: "Recent events", value: String(state.events.length) },
+        { label: "Open alerts", value: String(state.anomalies.length), tone: state.anomalies.length ? "warn" : "" },
+        { label: "Blocked flows", value: String(state.events.filter(function (e) { return e.action === "BLOCK"; }).length), tone: "crit" },
+        { label: "Assets known", value: String(stats.total) },
+        { label: "Agented", value: String(stats.agented) }
+      ];
+    }
+    return [];
+  }
+
+  /* --------------------------------------------------------- context menu */
+
+  var ctxMenu = null;
+
+  function closeCtx() {
+    if (ctxMenu && ctxMenu.parentNode) ctxMenu.parentNode.removeChild(ctxMenu);
+    ctxMenu = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.menu-btn[aria-expanded="true"]'), function (b) {
+      b.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function menuItem(label, iconId, shortcut, fn, opts) {
+    opts = opts || {};
+    var btn = h("button", {
+      type: "button", role: "menuitem",
+      "data-danger": opts.danger ? "true" : null,
+      disabled: opts.disabled ? true : null,
+      on: {
+        click: function () {
+          closeCtx();
+          if (!opts.disabled) fn();
+        }
+      }
+    }, icon(iconId), h("span", { text: label }));
+    if (shortcut) btn.appendChild(h("kbd", { text: shortcut }));
+    if (opts.disabled && opts.why) btn.setAttribute("title", opts.why);
+    return btn;
+  }
+
+  /* Actions live in a menu rather than a row of buttons because a menu grows
+     with capability and a button row does not. */
+  function openAssetMenu(asset, x, y, anchorBtn) {
+    closeCtx();
+    var agent = asset.evidence.agent;
+    var menu = h("div", { cls: "ctx", role: "menu" });
+
+    menu.appendChild(h("div", { cls: "lbl", text: "Asset" }));
+    menu.appendChild(menuItem("Open full view", "i-external", "\u21b5", function () { openRoute(asset.key); }));
+    menu.appendChild(menuItem("Show in topology", "i-topology", "g t", function () {
+      state.topoSelected = asset.evidence.agent ? asset.key : asset.ip;
+      go("topology");
+    }));
+    menu.appendChild(menuItem("Copy address", "i-copy", "y", function () { copyAddress(asset); }));
+
+    menu.appendChild(h("div", { cls: "sep" }));
+    menu.appendChild(h("div", { cls: "lbl", text: "Discovery" }));
+    menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
+    menu.appendChild(menuItem("Correct fingerprint\u2026", "i-tag", null, function () { correctFingerprint(asset); },
+      { disabled: !asset.scan, why: "Needs a scan result to correct" }));
+
+    menu.appendChild(h("div", { cls: "sep" }));
+    menu.appendChild(h("div", { cls: "lbl", text: "Act" }));
+    menu.appendChild(menuItem("Deploy agent", "i-download", "d", function () { deployAgent(asset); },
+      { disabled: agent, why: "This host already runs an agent" }));
+
+    if (agent && asset.isolated) {
+      menu.appendChild(menuItem("Release host", "i-unlock", null, function () { setIsolation(asset, false); }));
+    } else {
+      menu.appendChild(menuItem("Isolate host", "i-lock", "i", function () { setIsolation(asset, true); },
+        { danger: true, disabled: !agent, why: "Ring-0 isolation needs an agent; use mesh quarantine instead" }));
+    }
+
+    if (asset.meshed) {
+      menu.appendChild(menuItem("Release from peer mesh", "i-unlock", null, function () { setMesh(asset, false); }));
+    } else {
+      menu.appendChild(menuItem("Quarantine via peer mesh", "i-lock", null, function () { setMesh(asset, true); },
+        { danger: true, disabled: !asset.ip, why: "Needs an address" }));
+    }
+
+    document.body.appendChild(menu);
+    var r = menu.getBoundingClientRect();
+    placeOverlay(menu, Math.min(x, window.innerWidth - r.width - 8), Math.min(y, window.innerHeight - r.height - 8));
+    ctxMenu = menu;
+    if (anchorBtn) anchorBtn.setAttribute("aria-expanded", "true");
+  }
+
+  /* --------------------------------------------------------------- actions */
+
+  function copyAddress(asset) {
+    var value = asset.ip || asset.name;
+    var done = function () { toast("Copied " + value, "ok"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, function () { toast("Could not copy \u2014 " + value); });
+    } else {
+      toast(value);
+    }
+  }
+
+  function setIsolation(asset, on) {
+    if (!asset.endpoint) { toast("No agent on " + asset.name + " \u2014 use mesh quarantine", "warn"); return; }
+    var path = on ? "/api/v1/endpoints/isolate" : "/api/v1/endpoints/unisolate";
+    var body = { endpoint_id: asset.endpoint.id };
+    if (on) body.allow_ips = [];
+    request(path, "POST", body).then(function () {
+      toast((on ? "Isolated " : "Released ") + asset.name, on ? "crit" : "ok");
+      refresh();
+    }).catch(function (e) { toast("Isolation failed: " + e.message, "crit"); });
+  }
+
+  function setMesh(asset, on) {
+    if (!asset.ip) { toast("No address for " + asset.name, "warn"); return; }
+    var path = on ? "/api/v1/mesh/quarantine" : "/api/v1/mesh/unquarantine";
+    var body = { target_ip: asset.ip };
+    if (on) {
+      body.target_mac = asset.mac || "";
+      body.subnet = asset.subnet || "";
+      body.reason = "Operator action from the console";
+    }
+    request(path, "POST", body).then(function () {
+      toast((on ? "Mesh-quarantined " : "Released from mesh: ") + asset.ip, on ? "crit" : "ok");
+      refresh();
+    }).catch(function (e) { toast("Mesh action failed: " + e.message, "crit"); });
+  }
+
+  function rescan(asset) {
+    if (!asset.ip) { toast("No address to rescan", "warn"); return; }
+    request("/api/v1/scanner/scan", "POST", { subnet: asset.ip + "/32", profile: "standard" })
+      .then(function (res) {
+        toast("Rescanning " + asset.ip + (res && res.scan_id ? " (" + res.scan_id + ")" : ""), "ok");
+        setTimeout(refresh, 2500);
+      })
+      .catch(function (e) { toast("Rescan failed: " + e.message, "crit"); });
+  }
+
+  function correctFingerprint(asset) {
+    var actual = window.prompt("Actual device for " + asset.ip + ":", asset.scan ? asset.scan.os_guess : "");
+    if (!actual) return;
+    request("/api/v1/scanner/feedback", "POST", {
+      ip: asset.ip, actual_device: actual,
+      vendor: asset.scan ? asset.scan.vendor : "",
+      category: asset.scan ? asset.scan.category : ""
+    }).then(function () {
+      toast("Signature trained for " + asset.ip, "ok");
+      refresh();
+    }).catch(function (e) { toast("Training failed: " + e.message, "crit"); });
+  }
+
+  function deployAgent(asset) {
+    if (asset.evidence.agent) { toast(asset.name + " already runs an agent", "warn"); return; }
+    var user = window.prompt("SSH user for " + asset.ip + ":", "");
+    if (!user) return;
+    var family = osFamily(asset.scan ? asset.scan.os_guess : "") || "linux";
+    request("/api/v1/deployer/push", "POST", {
+      target_ip: asset.ip, username: user, os: family,
+      protocol: family === "windows" ? "winrm" : "ssh"
+    }).then(function (job) {
+      toast("Deployment queued for " + asset.ip + (job && job.job_id ? " (" + job.job_id + ")" : ""), "ok");
+    }).catch(function (e) { toast("Deploy failed: " + e.message, "crit"); });
+  }
+
+  function bulkIsolate(on) {
+    var keys = selectedKeys();
+    var ids = keys.map(function (k) { return state.assetByKey[k]; })
+      .filter(function (a) { return a && a.endpoint; })
+      .map(function (a) { return a.endpoint.id; });
+    if (!ids.length) { toast("Select agented hosts first", "warn"); return; }
+    var path = on ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
+    var body = { endpoint_ids: ids };
+    if (on) body.allow_ips = [];
+    request(path, "POST", body).then(function () {
+      toast((on ? "Isolated " : "Released ") + ids.length + " host" + (ids.length === 1 ? "" : "s"), on ? "crit" : "ok");
+      refresh();
+    }).catch(function (e) { toast("Bulk action failed: " + e.message, "crit"); });
+  }
+
+  function pushAgentUpdates() {
+    request("/api/v1/agents/update", "POST", { all: true }).then(function (res) {
+      var n = arrayOf(res && res.scheduled).length;
+      var u = arrayOf(res && res.unsupported).length;
+      toast("Queued " + n + " self-update" + (n === 1 ? "" : "s") +
+        (u ? "; " + u + " need the push-deployer" : ""), n ? "ok" : "warn");
+      refresh();
+    }).catch(function (e) { toast("Update push failed: " + e.message, "crit"); });
+  }
+
+  /* ---------------------------------------------------------- assets view */
+
+  function evidenceStrip(asset) {
+    var wrap = h("span", {
+      cls: "ev",
+      title: "Known by \u2014 agent: " + (asset.evidence.agent ? "yes" : "no") +
+        ", scan: " + (asset.evidence.scan || "no") +
+        ", inferred: no (Pass 2)"
+    });
+    wrap.appendChild(h("i", { "data-on": asset.evidence.agent ? "agent" : null }));
+    wrap.appendChild(h("i", { "data-on": asset.evidence.scan ? "scan" : null }));
+    wrap.appendChild(h("i", { "data-on": asset.evidence.inferred ? "inferred" : null }));
+    return wrap;
+  }
+
+  function stateBadge(st) {
+    return h("span", { cls: "st", "data-state": st.tone }, icon(st.glyph, true), h("span", { text: st.word }));
+  }
+
+  function meter(fraction) {
+    var svg = s("svg", { "class": "meter", viewBox: "0 0 110 3", preserveAspectRatio: "none", "aria-hidden": "true" });
+    svg.appendChild(s("rect", { "class": "track", x: 0, y: 0, width: 110, height: 3, rx: 1.5 }));
+    svg.appendChild(s("rect", { "class": "fill", x: 0, y: 0, width: Math.max(0, Math.min(1, fraction)) * 110, height: 3, rx: 1.5 }));
+    return svg;
+  }
+
+  function claimRow(source, value, confidence, win) {
+    return h("div", { cls: "claim", "data-win": win ? "true" : "false" },
+      h("span", { cls: "src", text: source }),
+      h("span", { cls: "val", text: value }),
+      h("span", { cls: "conf", text: confidence === null ? "" : confidence.toFixed(2) }));
+  }
+
+  function detailRow(asset, colspan) {
+    var ep = asset.endpoint;
+    var sc = asset.scan;
+
+    /* Identity: highest-confidence claim per field wins, losing claims stay
+       visible. Agent evidence is 1.0 by definition. */
+    var claims = h("div", { cls: "claims" });
+    if (ep) claims.appendChild(claimRow("agent", ep.os || "\u2014", 1.0, true));
+    if (sc && sc.os_guess) claims.appendChild(claimRow("scan", sc.os_guess, Number(sc.confidence) || 0, !ep));
+    if (!ep && !sc) claims.appendChild(claimRow("\u2014", "No identity claim", null, false));
+
+    var kv = h("dl", { cls: "kv" });
+    var addKV = function (k, v, strong) {
+      kv.appendChild(h("dt", { text: k }));
+      kv.appendChild(h("dd", {}, strong ? h("b", { text: v }) : document.createTextNode(v)));
+    };
+    addKV("Address", asset.ip || "\u2014", true);
+    addKV("MAC / OUI", (asset.mac || "\u2014") + (sc && sc.vendor ? " \u00b7 " + sc.vendor : ""));
+    addKV("Client", asset.tenantName);
+    addKV("Location", asset.locationName);
+    if (ep) {
+      addKV("Endpoint id", ep.id);
+      addKV("Agent", shortVersion(ep.driver_version) + (engineOf(ep.driver_version) ? " \u00b7 " + engineOf(ep.driver_version) : ""), true);
+      if (ep.installed_software) addKV("Software", ep.installed_software);
+    } else {
+      addKV("Agent", "none \u2014 deployment candidate", true);
+    }
+    if (sc) {
+      addKV("TTL", String(sc.ttl || "\u2014"));
+      addKV("App delta", (sc.app_delta_ms || 0) + " ms");
+    }
+
+    var identityCol = h("div", {},
+      h("h4", { text: "Identity \u2014 merged claims" }),
+      claims,
+      kv,
+      h("div", { cls: "detail-acts" },
+        h("button", {
+          cls: "mini", type: "button", text: "Open full asset view",
+          on: { click: function (e) { e.stopPropagation(); openRoute(asset.key); } }
+        })));
+
+    var ports = h("div", { cls: "portlist" });
+    if (asset.ports.length) {
+      asset.ports.slice().sort(function (a, b) { return (a.port || 0) - (b.port || 0); }).forEach(function (p) {
+        ports.appendChild(h("span", { cls: "port", "data-risk": p.risk_level || "LOW", text: p.port + (p.service ? " " + p.service : "") }));
+      });
+    } else {
+      ports.appendChild(h("span", { cls: "dim-3", text: asset.scan ? "No open ports observed" : "Not scanned" }));
+    }
+
+    var exposureCol = h("div", {}, h("h4", { text: "Observed exposure" }), ports);
+    var weak = asset.scan ? arrayOf(asset.scan.weakpoints) : [];
+    if (weak.length) {
+      var list = h("div", { cls: "why" });
+      weak.forEach(function (w) { list.appendChild(h("div", { text: "\u00b7 " + w })); });
+      exposureCol.appendChild(h("h4", { text: "Weak points" }));
+      exposureCol.appendChild(list);
+    }
+    if (asset.meshed) {
+      exposureCol.appendChild(h("h4", { text: "Mesh" }));
+      exposureCol.appendChild(h("div", { cls: "why", text: "Peer mesh is dropping traffic to this address across the subnet." }));
+    }
+
+    /* Pass 2 fills this column with the inference rationale. Until then it
+       says plainly what evidence exists and what is still missing, rather
+       than showing an empty panel. */
+    var whyCol = h("div", {}, h("h4", { text: "Why we think this" }));
+    if (ep && sc) {
+      whyCol.appendChild(h("p", { cls: "why" },
+        h("b", { text: "Agent and scan agree on this host." }),
+        document.createTextNode(" The agent reports " + (ep.os || "an OS") + " directly; the probe independently fingerprinted " +
+          (sc.os_guess || "the same host") + " at " + ((Number(sc.confidence) || 0).toFixed(2)) + " confidence.")));
+      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(Number(sc.confidence) || 0)));
+    } else if (ep) {
+      whyCol.appendChild(h("p", { cls: "why" },
+        h("b", { text: "Agent ground truth only." }),
+        document.createTextNode(" No scan has covered this address, so open ports and the OUI vendor are unknown. Run Discovery over " +
+          (asset.subnet || "its subnet") + " to add the second source.")));
+    } else if (sc) {
+      whyCol.appendChild(h("p", { cls: "why" },
+        h("b", { text: "Probe evidence only." }),
+        document.createTextNode(" " + (sc.os_guess || "Unidentified") + " at " + ((Number(sc.confidence) || 0).toFixed(2)) +
+          " confidence from TTL " + (sc.ttl || "?") + ", app delta " + (sc.app_delta_ms || 0) + " ms" +
+          (sc.vendor ? " and the " + sc.vendor + " OUI" : "") + ".")));
+      whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(Number(sc.confidence) || 0)));
+    }
+    whyCol.appendChild(h("p", { cls: "pending", text: "Flow inference \u2014 Pass 2. Role deduced from neighbours' traffic, with a rationale and Confirm / Not-a-DC correction, lands with the persisted assets table." }));
+
+    var td = h("td", { colspan: String(colspan) }, h("div", { cls: "detail" }, identityCol, exposureCol, whyCol));
+    return h("tr", { cls: "exp" }, td);
+  }
+
+  function assetRow(asset, colspan) {
+    var selected = !!state.selected[asset.key];
+    var isCursor = state.cursorKey === asset.key;
+
+    var check = h("input", {
+      type: "checkbox", "aria-label": "Select " + asset.name,
+      on: {
+        click: function (e) { e.stopPropagation(); },
+        change: function (e) {
+          state.selected[asset.key] = e.target.checked;
+          if (!e.target.checked) delete state.selected[asset.key];
+          render();
+        }
+      }
+    });
+    check.checked = selected;
+
+    var menuBtn = h("button", {
+      cls: "menu-btn", type: "button", "aria-haspopup": "true", "aria-expanded": "false",
+      "aria-label": "Actions for " + asset.name,
+      on: {
+        click: function (e) {
+          e.stopPropagation();
+          var r = e.currentTarget.getBoundingClientRect();
+          openAssetMenu(asset, r.left - 170, r.bottom + 2, e.currentTarget);
+        }
+      }
+    }, icon("i-dots"));
+
+    var nameCell = h("td", {}, h("span", { cls: "host", text: asset.name }));
+    /* Annotate only when the name is a bare address: the Identity column
+       already carries the category, so repeating it on a named host is noise. */
+    if (asset.name === asset.ip && asset.scan && asset.scan.category) {
+      nameCell.appendChild(document.createTextNode(" "));
+      nameCell.appendChild(h("span", { cls: "dim-3", text: "\u2192 likely " + asset.scan.category.toLowerCase() }));
+    }
+
+    var agentCell;
+    if (asset.endpoint) {
+      agentCell = h("span", { cls: "ver", "data-stale": asset.stale ? "true" : "false", text: shortVersion(asset.endpoint.driver_version) });
+    } else {
+      agentCell = h("span", { cls: "dim-3", text: "\u2014" });
+    }
+
+    var exposure = asset.ports.length
+      ? h("span", { cls: "ago", text: asset.ports.length + (asset.riskyPorts ? " \u00b7 " + asset.riskyPorts + " risky" : "") })
+      : h("span", { cls: "dim-3", text: asset.scan ? "0" : "\u2014" });
+
+    /* Cell order must match the header in renderAssets():
+       select \u00b7 Asset \u00b7 Address \u00b7 Identity \u00b7 Known by \u00b7 State \u00b7 Exposure \u00b7
+       Agent \u00b7 Last seen \u00b7 menu */
+    return h("tr", {
+      cls: "row",
+      "data-selected": selected ? "true" : "false",
+      "data-cursor": isCursor ? "true" : "false",
+      "data-key": asset.key,
+      on: {
+        click: function () {
+          state.cursorKey = asset.key;
+          state.expandedKey = state.expandedKey === asset.key ? "" : asset.key;
+          render();
+        },
+        contextmenu: function (e) {
+          e.preventDefault();
+          state.cursorKey = asset.key;
+          openAssetMenu(asset, e.clientX, e.clientY, null);
+        }
+      }
+    },
+      h("td", {}, check),
+      nameCell,
+      h("td", {}, h("span", { cls: "ip", text: asset.ip || "\u2014" })),
+      h("td", { cls: "dim" }, h("span", { text: asset.identity })),
+      h("td", {}, evidenceStrip(asset)),
+      h("td", {}, stateBadge(asset.state)),
+      h("td", {}, exposure),
+      h("td", {}, agentCell),
+      h("td", {}, h("span", { cls: "ago", text: ago(asset.lastSeen) })),
+      h("td", {}, menuBtn));
+  }
+
+  function renderAssets() {
+    var view = $("view");
+    var rows = visibleAssets();
+    var cols = 10;
+
+    var head = h("tr", {},
+      h("th", { cls: "c-sel" }, (function () {
+        var all = rows.length > 0 && rows.every(function (r) { return state.selected[r.key]; });
+        var box = h("input", {
+          type: "checkbox", "aria-label": "Select all rows",
+          on: {
+            change: function (e) {
+              rows.forEach(function (r) {
+                if (e.target.checked) state.selected[r.key] = true;
+                else delete state.selected[r.key];
+              });
+              render();
+            }
+          }
+        });
+        box.checked = all;
+        return box;
+      })()),
+      h("th", { text: "Asset" }),
+      h("th", { text: "Address" }),
+      h("th", { text: "Identity" }),
+      h("th", { title: "agent \u00b7 scan \u00b7 inferred", text: "Known by" }),
+      h("th", { text: "State" }),
+      h("th", { text: "Exposure" }),
+      h("th", { text: "Agent" }),
+      h("th", { text: "Last seen" }),
+      h("th", { cls: "c-menu" }));
+
+    var tbody = h("tbody");
+    var currentGroup = null;
+    var groupCounts = {};
+    rows.forEach(function (r) {
+      if (!groupCounts[r.groupKey]) groupCounts[r.groupKey] = { n: 0, q: 0, noagent: 0 };
+      groupCounts[r.groupKey].n++;
+      if (r.isolated || r.meshed) groupCounts[r.groupKey].q++;
+      if (!r.evidence.agent) groupCounts[r.groupKey].noagent++;
+    });
+
+    rows.forEach(function (r) {
+      if (r.groupKey !== currentGroup) {
+        currentGroup = r.groupKey;
+        var g = groupCounts[currentGroup];
+        var collapsed = !!state.collapsedGroups[currentGroup];
+        var meta = g.n + " asset" + (g.n === 1 ? "" : "s") +
+          (g.noagent ? " \u00b7 " + g.noagent + " without an agent" : "") +
+          (g.q ? " \u00b7 " + g.q + " quarantined" : "");
+        (function (key) {
+          tbody.appendChild(h("tr", {
+            cls: "grp", "aria-expanded": collapsed ? "false" : "true",
+            on: {
+              click: function () {
+                if (state.collapsedGroups[key]) delete state.collapsedGroups[key];
+                else state.collapsedGroups[key] = true;
+                render();
+              }
+            }
+          }, h("td", { colspan: String(cols) },
+            h("span", { cls: "tw" },
+              (function () { var i = icon("i-twist", true); i.classList.add("ic-twist"); return i; })(),
+              h("span", { text: key }),
+              h("span", { cls: "cnt", text: "\u2014 " + meta })))));
+        })(currentGroup);
+      }
+      if (state.collapsedGroups[currentGroup]) return;
+      tbody.appendChild(assetRow(r, cols));
+      if (state.expandedKey === r.key) tbody.appendChild(detailRow(r, cols));
+    });
+
+    if (!rows.length) {
+      tbody.appendChild(h("tr", {}, h("td", { colspan: String(cols) },
+        h("div", { cls: "empty", text: state.loading ? "Loading fleet\u2026" : "No asset matches the current filters." }))));
+    }
+
+    var wrap = h("div", { cls: "tblwrap" }, h("table", {}, h("thead", {}, head), tbody));
+
+    var key = h("div", { cls: "evkey" },
+      h("span", {}, h("i", { "data-on": "agent" }), h("span", { text: "agent \u2014 ground truth" })),
+      h("span", {}, h("i", { "data-on": "scan" }), h("span", { text: "scan \u2014 probed" })),
+      h("span", {}, h("i", { "data-on": "inferred" }), h("span", { text: "inferred \u2014 deduced from flow (Pass 2)" })),
+      h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
+      h("span", { text: "j/k move \u00b7 x select \u00b7 i isolate \u00b7 r rescan \u00b7 y copy \u00b7 / filter \u00b7 enter open" }));
+
+    clear(view);
+    view.appendChild(wrap);
+    view.appendChild(key);
+  }
+
+  /* ------------------------------------------------------- other sections */
+
+  function card(title, body, actions, wide) {
+    var head = h("h3", {}, h("span", { cls: "fill", text: title }));
+    if (actions) actions.forEach(function (a) { head.appendChild(a); });
+    return h("section", { cls: wide ? "card card-wide" : "card" }, head, body);
+  }
+
+  function simpleTable(headers, rows) {
+    var thead = h("tr");
+    headers.forEach(function (t) { thead.appendChild(h("th", { text: t })); });
+    var tbody = h("tbody");
+    if (!rows.length) {
+      tbody.appendChild(h("tr", {}, h("td", { colspan: String(headers.length) },
+        h("div", { cls: "empty", text: "Nothing recorded." }))));
+    }
+    rows.forEach(function (cells) {
+      var tr = h("tr", { cls: "row" });
+      cells.forEach(function (c) {
+        tr.appendChild(h("td", {}, typeof c === "string" ? document.createTextNode(c) : c));
+      });
+      tbody.appendChild(tr);
+    });
+    return h("div", { cls: "tblwrap" }, h("table", {}, h("thead", {}, thead), tbody));
+  }
+
+  function renderDiscovery() {
+    var view = $("view");
+    var cov = state.coverage || {};
+
+    var subnetInput = h("input", { type: "text", id: "scan-subnet", value: "10.0.4.0/24", placeholder: "10.0.4.0/24" });
+    var profileSel = h("select", { id: "scan-profile" },
+      h("option", { value: "quick", text: "Quick" }),
+      h("option", { value: "standard", text: "Standard" }),
+      h("option", { value: "deep", text: "Deep" }));
+    profileSel.value = "standard";
+
+    var launch = card("Subnet sweep",
+      h("div", { cls: "card-body" },
+        h("div", { cls: "form-row" },
+          h("label", { cls: "field" }, h("span", { text: "Subnet" }), subnetInput),
+          h("label", { cls: "field" }, h("span", { text: "Profile" }), profileSel),
+          h("button", {
+            cls: "btn btn-primary", type: "button", text: "Start scan",
+            on: {
+              click: function () {
+                request("/api/v1/scanner/scan", "POST", { subnet: subnetInput.value, profile: profileSel.value })
+                  .then(function (res) {
+                    state.scanJob = res && res.scan_id ? res.scan_id : "running";
+                    toast("Scan started on " + subnetInput.value, "ok");
+                    setTimeout(refresh, 3000);
+                  })
+                  .catch(function (e) { toast("Scan failed: " + e.message, "crit"); });
+              }
+            }
+          })),
+        h("p", { cls: "pending", text: state.scanJob ? "Last job: " + state.scanJob : "Discovered assets live in memory until Pass 2 persists them \u2014 a hub restart clears this list." })));
+
+    var unmanaged = state.assets.filter(function (a) { return !a.evidence.agent; });
+    var worklist = card("Deployment worklist \u2014 seen, but not covered",
+      simpleTable(["Address", "Identity", "Vendor", "Exposure", "Risk", "Last seen", ""],
+        unmanaged.map(function (a) {
+          return [
+            h("span", { cls: "ip", text: a.ip || "\u2014" }),
+            h("span", { cls: "dim", text: a.identity }),
+            h("span", { cls: "dim-3", text: (a.scan && a.scan.vendor) || "\u2014" }),
+            h("span", { cls: "ago", text: String(a.ports.length) }),
+            h("span", { cls: "st", "data-state": a.riskyPorts ? "warn" : "idle" },
+              icon(a.riskyPorts ? "g-watch" : "g-offline", true),
+              h("span", { text: a.risk || "LOW" })),
+            h("span", { cls: "ago", text: ago(a.lastSeen) }),
+            h("button", { cls: "mini", type: "button", text: "Deploy agent", on: { click: function () { deployAgent(a); } } })
+          ];
+        })));
+
+    var covBody = h("div", { cls: "card-body" },
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Discovered" }), h("dd", {}, h("b", { text: String(cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) })),
+        h("dt", { text: "Managed" }), h("dd", { text: String(cov.total_managed || 0) }),
+        h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
+        h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: (cov.coverage_percent || 0) + "%" })),
+        h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
+        h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) })));
+
+    clear(view);
+    view.appendChild(h("div", { cls: "pad stack" },
+      h("div", { cls: "cols" }, launch, card("Coverage", covBody)),
+      worklist));
+  }
+
+  /* Radial layout: highest-degree node in the centre, its neighbours on the
+     inner ring, everything else outside. Deterministic in node id so the graph
+     does not jump between five-second refreshes. */
+  function layoutTopology(nodes, edges) {
+    var degree = {};
+    nodes.forEach(function (n) { degree[n.id] = 0; });
+    edges.forEach(function (e) {
+      if (degree[e.source] !== undefined) degree[e.source]++;
+      if (degree[e.target] !== undefined) degree[e.target]++;
+    });
+    var ordered = nodes.slice().sort(function (a, b) {
+      if (degree[b.id] !== degree[a.id]) return degree[b.id] - degree[a.id];
+      return a.id < b.id ? -1 : 1;
+    });
+    if (!ordered.length) return {};
+
+    var W = 900, H = 420, cx = W / 2, cy = H / 2;
+    var pos = {};
+    var hub = ordered[0];
+    pos[hub.id] = { x: cx, y: cy, r: 13 };
+
+    var neighbours = [];
+    var outer = [];
+    ordered.slice(1).forEach(function (n) {
+      var touches = edges.some(function (e) {
+        return (e.source === hub.id && e.target === n.id) || (e.target === hub.id && e.source === n.id);
+      });
+      (touches ? neighbours : outer).push(n);
+    });
+
+    var place = function (list, radiusX, radiusY, phase, r) {
+      list.forEach(function (n, i) {
+        var a = phase + (i / Math.max(1, list.length)) * Math.PI * 2;
+        pos[n.id] = { x: cx + Math.cos(a) * radiusX, y: cy + Math.sin(a) * radiusY, r: r };
+      });
+    };
+    place(neighbours, 150, 118, -Math.PI / 2, 9);
+    place(outer, 330, 175, -Math.PI / 2 + 0.35, 8);
+    return { pos: pos, width: W, height: H };
+  }
+
+  function nodeKind(n) {
+    if (n.is_isolated) return "isolated";
+    if (n.type === "threat") return "threat";
+    if (n.type === "gateway") return "gateway";
+    if (n.type === "managed") return "managed";
+    return "unmanaged";
+  }
+
+  function renderTopology() {
+    var view = $("view");
+    var data = state.topology;
+    clear(view);
+
+    if (!data || !arrayOf(data.nodes).length) {
+      view.appendChild(h("div", { cls: "empty", text: state.loading ? "Loading graph\u2026" : "No flow recorded in this window." }));
+      return;
+    }
+
+    var nodes = arrayOf(data.nodes);
+    var edges = arrayOf(data.edges);
+    var layout = layoutTopology(nodes, edges);
+    var pos = layout.pos;
+
+    var maxFlow = Math.max.apply(null, edges.map(function (e) { return Number(e.flow_count) || 1; }).concat([1]));
+
+    var svg = s("svg", { viewBox: "0 0 " + layout.width + " " + layout.height, preserveAspectRatio: "xMidYMid meet", role: "img", "aria-label": "Communications topology" });
+
+    /* Aggregate to asset-pair edges and label only the heaviest port per pair;
+       labelling every 5-tuple is what makes these graphs unreadable. */
+    var pairs = {};
+    edges.forEach(function (e) {
+      var a = e.source < e.target ? e.source : e.target;
+      var b = e.source < e.target ? e.target : e.source;
+      var id = a + "\u0000" + b;
+      var p = pairs[id];
+      if (!p) {
+        p = pairs[id] = { source: a, target: b, flow: 0, bytes: 0, verdict: "clean", topPort: e.port, topFlow: 0 };
+      }
+      p.flow += Number(e.flow_count) || 0;
+      p.bytes += Number(e.total_bytes) || 0;
+      if (e.verdict === "blocked") p.verdict = "blocked";
+      else if (e.verdict === "anomalous" && p.verdict !== "blocked") p.verdict = "anomalous";
+      if ((Number(e.flow_count) || 0) >= p.topFlow) { p.topFlow = Number(e.flow_count) || 0; p.topPort = e.port; }
+    });
+
+    var edgeLayer = s("g");
+    var labelLayer = s("g");
+    Object.keys(pairs).sort().forEach(function (id) {
+      var p = pairs[id];
+      var a = pos[p.source], b = pos[p.target];
+      if (!a || !b) return;
+      var w = 0.8 + (p.flow / maxFlow) * 2.6;
+      edgeLayer.appendChild(s("line", {
+        "class": "edge", "data-verdict": p.verdict,
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y, "stroke-width": w.toFixed(2)
+      }));
+      if (p.topPort) {
+        labelLayer.appendChild(s("text", {
+          "class": "elabel", x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 3, "text-anchor": "middle",
+          text: String(p.topPort)
+        }));
+      }
+    });
+
+    var nodeLayer = s("g");
+    nodes.forEach(function (n) {
+      var pt = pos[n.id];
+      if (!pt) return;
+      var circle = s("circle", {
+        "class": "node", "data-kind": nodeKind(n),
+        "data-selected": state.topoSelected === n.id ? "true" : "false",
+        cx: pt.x, cy: pt.y, r: pt.r,
+        on: {
+          click: function () { state.topoSelected = n.id; render(); }
+        }
+      });
+      circle.appendChild(s("title", { text: (n.label || n.id) + " \u00b7 " + (n.ip || "") }));
+      nodeLayer.appendChild(circle);
+      labelLayer.appendChild(s("text", {
+        "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
+        text: n.label || n.id
+      }));
+    });
+
+    svg.appendChild(edgeLayer);
+    svg.appendChild(nodeLayer);
+    svg.appendChild(labelLayer);
+
+    var sel = null;
+    nodes.forEach(function (n) { if (n.id === state.topoSelected) sel = n; });
+
+    var side = h("div", { cls: "topo-side" }, h("h4", { text: "Selected node" }));
+    if (!sel) {
+      side.appendChild(h("p", { cls: "pending", text: "Click a node. Selection is shared with the Assets table \u2014 the graph is a lens, not a destination." }));
+    } else {
+      var linked = Object.keys(pairs).map(function (k) { return pairs[k]; })
+        .filter(function (p) { return p.source === sel.id || p.target === sel.id; });
+      var kv = h("dl", { cls: "kv" },
+        h("dt", { text: "Asset" }), h("dd", {}, h("b", { text: sel.label || sel.id })),
+        h("dt", { text: "Address" }), h("dd", { text: sel.ip || "\u2014" }),
+        h("dt", { text: "Identity" }), h("dd", { text: sel.os || "\u2014" }),
+        h("dt", { text: "Role" }), h("dd", { text: sel.role || "\u2014" }),
+        h("dt", { text: "Risk" }), h("dd", { text: sel.risk || "\u2014" }),
+        h("dt", { text: "Peers" }), h("dd", {}, h("b", { text: String(linked.length) })),
+        h("dt", { text: "Flows" }), h("dd", { text: String(linked.reduce(function (t, p) { return t + p.flow; }, 0)) }),
+        h("dt", { text: "Volume" }), h("dd", { text: bytes(linked.reduce(function (t, p) { return t + p.bytes; }, 0)) }));
+      side.appendChild(kv);
+
+      var asset = state.assetByKey[sel.id] || state.assets.filter(function (a) { return a.ip && a.ip === sel.ip; })[0];
+      var acts = h("div", { cls: "detail-acts" });
+      if (asset) {
+        acts.appendChild(h("button", { cls: "mini", type: "button", text: "Open asset", on: { click: function () { openRoute(asset.key); } } }));
+        acts.appendChild(h("button", {
+          cls: "mini", type: "button", text: "Show in table",
+          on: {
+            click: function () {
+              state.filters = {};
+              state.query = asset.ip || asset.name;
+              state.expandedKey = asset.key;
+              state.cursorKey = asset.key;
+              go("assets");
+            }
+          }
+        }));
+      } else {
+        acts.appendChild(h("span", { cls: "pending", text: "No asset record for this node yet \u2014 Pass 2 draws nodes from the assets table." }));
+      }
+      side.appendChild(acts);
+    }
+
+    var legend = h("div", { cls: "legend" });
+    [["managed", "agented"], ["unmanaged", "no agent"], ["gateway", "gateway"], ["isolated", "quarantined"], ["threat", "external threat"]]
+      .forEach(function (pair) {
+        legend.appendChild(h("span", {}, h("i", { "data-kind": pair[0] }), h("span", { text: pair[1] })));
+      });
+    legend.appendChild(h("span", { text: "edge width = flow volume \u00b7 dashed = blocked \u00b7 label = heaviest port per pair" }));
+
+    view.appendChild(h("div", { cls: "topo" }, h("div", { cls: "topo-canvas" }, svg), side));
+    view.appendChild(legend);
+  }
+
+  function barList(items, valueFn, labelFn, textFn) {
+    var max = Math.max.apply(null, items.map(valueFn).concat([1]));
+    var list = h("div", { cls: "barlist" });
+    items.forEach(function (it) {
+      var frac = Math.max(0, Math.min(1, valueFn(it) / max));
+      var svg = s("svg", { viewBox: "0 0 118 8", preserveAspectRatio: "none", "aria-hidden": "true" });
+      svg.appendChild(s("rect", { "class": "track", x: 0, y: 2, width: 118, height: 4, rx: 2 }));
+      svg.appendChild(s("rect", { "class": "fill", x: 0, y: 2, width: (frac * 118).toFixed(1), height: 4, rx: 2 }));
+      list.appendChild(h("div", { cls: "barrow" },
+        h("span", { cls: "n", text: labelFn(it), title: labelFn(it) }),
+        svg,
+        h("span", { cls: "v", text: textFn(it) })));
+    });
+    return list;
+  }
+
+  function renderTraffic() {
+    var view = $("view");
+    var an = state.analytics || {};
+    clear(view);
+
+    var timeline = arrayOf(an.bandwidth_timeline);
+    var chartCard;
+    if (timeline.length) {
+      var maxB = Math.max.apply(null, timeline.map(function (p) {
+        return Math.max(Number(p.bytes_in) || 0, Number(p.bytes_out) || 0);
+      }).concat([1]));
+      var n = timeline.length;
+      var svg = s("svg", { "class": "chart", viewBox: "0 0 " + (n * 8) + " 132", preserveAspectRatio: "none", role: "img", "aria-label": "Bandwidth over time" });
+      timeline.forEach(function (p, i) {
+        var hi = Math.max(1, Math.round(((Number(p.bytes_in) || 0) / maxB) * 60));
+        var ho = Math.max(1, Math.round(((Number(p.bytes_out) || 0) / maxB) * 60));
+        svg.appendChild(s("rect", { "class": "series-in", x: i * 8, y: 62 - hi, width: 3, height: hi }));
+        svg.appendChild(s("rect", { "class": "series-out", x: i * 8 + 3.5, y: 62 - ho, width: 3, height: ho }));
+        var hb = Math.min(60, (Number(p.blocks) || 0) * 4);
+        if (hb) svg.appendChild(s("rect", { "class": "series-block", x: i * 8, y: 66, width: 6.5, height: hb }));
+      });
+      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 63, x2: n * 8, y2: 63 }));
+      chartCard = card("Bandwidth and blocks",
+        h("div", { cls: "card-body" }, svg,
+          h("div", { cls: "legend" },
+            h("span", { text: "above the axis: bytes in / bytes out" }),
+            h("span", { text: "below: blocked flows" }))));
+    } else {
+      chartCard = card("Bandwidth and blocks", h("div", { cls: "empty", text: "No timeline in this window." }));
+    }
+
+    var talkers = arrayOf(an.top_talkers);
+    var talkerCard = card("Top talkers",
+      h("div", { cls: "card-body" },
+        talkers.length
+          ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
+              function (t) { return t.process || "\u2014"; },
+              function (t) { return bytes(t.total_bytes); })
+          : h("div", { cls: "empty", text: "No process attribution yet." })));
+
+    var geo = arrayOf(an.geo_stats);
+    var geoCard = card("Destinations by country",
+      h("div", { cls: "card-body" },
+        geo.length
+          ? barList(geo, function (g) { return Number(g.flow_count) || 0; },
+              function (g) { return (g.country_name || g.country) + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
+              function (g) { return bytes(g.total_bytes); })
+          : h("div", { cls: "empty", text: "No geo data." })));
+
+    var evRows = state.events.slice(0, 60).map(function (e) {
+      return [
+        h("span", { cls: "ago", text: ago(parseTime(e.timestamp)) }),
+        h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
+          icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
+          h("span", { text: e.action || "\u2014" })),
+        h("span", { cls: "dim-3", text: e.direction || "" }),
+        h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
+        h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
+        h("span", { cls: "dim", text: e.process_path || e.domain || "\u2014" }),
+        h("span", { cls: "ago", text: bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)) })
+      ];
+    });
+
+    view.appendChild(h("div", { cls: "pad stack" },
+      chartCard,
+      h("div", { cls: "cols" }, talkerCard, geoCard),
+      card("Recent flows", simpleTable(["Age", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
+  }
+
+  function renderPolicy() {
+    var view = $("view");
+    clear(view);
+
+    var groups = simpleTable(["Name", "Scope", "Action", "Match", "Schedule", "State", ""],
+      state.policyGroups.map(function (g) {
+        return [
+          h("span", { text: g.name || g.id }),
+          h("span", { cls: "dim-3", text: g.scope + (g.scope_value ? " \u00b7 " + g.scope_value : "") }),
+          h("span", { cls: "dim", text: g.action || "\u2014" }),
+          h("span", { cls: "ip", text: (g.rule_type || "") + " " + (g.rule_value || (g.port ? String(g.port) : "")) }),
+          h("span", { cls: "dim-3", text: g.schedule || "all" }),
+          h("span", { cls: "st", "data-state": g.active ? "ok" : "idle" },
+            icon(g.active ? "g-online" : "g-offline", true),
+            h("span", { text: g.active ? "Active" : "Paused" })),
+          h("button", {
+            cls: "mini", type: "button", text: g.active ? "Pause" : "Activate",
+            on: {
+              click: function () {
+                request("/api/v1/policy-groups/toggle", "POST", { id: g.id, active: !g.active })
+                  .then(function () { toast((g.active ? "Paused " : "Activated ") + (g.name || g.id), "ok"); refresh(); })
+                  .catch(function (e) { toast("Toggle failed: " + e.message, "crit"); });
+              }
+            }
+          })
+        ];
+      }));
+
+    var excl = simpleTable(["Name", "Scope", "Process", "Destination", "Port", "State"],
+      state.exclusions.map(function (x) {
+        return [
+          h("span", { text: x.name || x.id }),
+          h("span", { cls: "dim-3", text: x.scope + (x.scope_value ? " \u00b7 " + x.scope_value : "") }),
+          h("span", { cls: "dim", text: x.process_path || "any" }),
+          h("span", { cls: "ip", text: x.dst_ip_range || "any" }),
+          h("span", { cls: "ip", text: (x.port ? String(x.port) : "any") + "/" + (x.protocol || "any") }),
+          h("span", { cls: "st", "data-state": x.active ? "ok" : "idle" },
+            icon(x.active ? "g-online" : "g-offline", true),
+            h("span", { text: x.active ? "Active" : "Off" }))
+        ];
+      }));
+
+    var iocs = simpleTable(["Indicator", "Type", "Threat", "Source", "Confidence", "Last seen"],
+      state.iocs.map(function (i) {
+        return [
+          h("span", { cls: "ip", text: i.value || i.indicator || "\u2014" }),
+          h("span", { cls: "dim-3", text: i.type || "" }),
+          h("span", { cls: "dim", text: i.threat_type || i.threat_name || "" }),
+          h("span", { cls: "dim-3", text: i.source || "" }),
+          h("span", { cls: "ago", text: String(i.confidence !== undefined ? i.confidence : "") }),
+          h("span", { cls: "ago", text: ago(parseTime(i.last_seen_at || i.created_at)) })
+        ];
+      }));
+
+    var mesh = simpleTable(["Address", "MAC", "Subnet", "Reason", "Since", ""],
+      state.meshPeers.map(function (p) {
+        return [
+          h("span", { cls: "ip", text: p.target_ip }),
+          h("span", { cls: "ip", text: p.target_mac || "\u2014" }),
+          h("span", { cls: "ip", text: p.subnet || "\u2014" }),
+          h("span", { cls: "dim", text: p.reason || "" }),
+          h("span", { cls: "ago", text: ago(parseTime(p.created_at)) }),
+          h("button", {
+            cls: "mini", type: "button", text: "Release",
+            on: {
+              click: function () {
+                request("/api/v1/mesh/unquarantine", "POST", { target_ip: p.target_ip })
+                  .then(function () { toast("Released " + p.target_ip + " from the mesh", "ok"); refresh(); })
+                  .catch(function (e) { toast("Release failed: " + e.message, "crit"); });
+              }
+            }
+          })
+        ];
+      }));
+
+    view.appendChild(h("div", { cls: "pad stack" },
+      card("Policy groups", groups),
+      card("Exclusions", excl),
+      card("Threat indicators", iocs, [
+        h("button", {
+          cls: "btn", type: "button", text: "Sync feeds",
+          on: {
+            click: function () {
+              request("/api/v1/threatintel/sync", "POST")
+                .then(function () { toast("Indicator feeds synced", "ok"); refresh(); })
+                .catch(function (e) { toast("Sync failed: " + e.message, "crit"); });
+            }
+          }
+        })
+      ]),
+      card("Peer-mesh quarantine", mesh)));
+  }
+
+  function renderAudit() {
+    var view = $("view");
+    clear(view);
+
+    var rows = state.audit.map(function (a) {
+      return [
+        h("span", { cls: "ago", text: ago(parseTime(a.timestamp)) }),
+        h("span", { cls: "dim", text: a.username || a.user_id || "\u2014" }),
+        h("span", { text: a.action || "" }),
+        h("span", { cls: "ip", text: a.resource || "" }),
+        h("span", { cls: "dim-3", text: a.details || "" }),
+        h("span", { cls: "ip", text: a.ip_address || "" })
+      ];
+    });
+
+    view.appendChild(h("div", { cls: "pad stack" },
+      card("Audit trail", simpleTable(["Age", "Actor", "Action", "Resource", "Details", "From"], rows))));
+  }
+
+  /* --------------------------------------------------------- full route */
+
+  var routeEl = null;
+
+  function closeRoute() {
+    if (routeEl && routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    routeEl = null;
+    state.routeKey = "";
+  }
+
+  function openRoute(key) {
+    state.routeKey = key;
+    renderRoute();
+    /* The full view shows this asset's recent flows, which only the Traffic and
+       Audit sections load; fetch them on demand so the panel is never empty. */
+    if (!state.events.length) {
+      request("/api/v1/events").then(function (d) {
+        state.events = arrayOf(d);
+        if (state.routeKey) renderRoute();
+      }).catch(function () { /* the panel degrades to "nothing recorded" */ });
+    }
+  }
+
+  function renderRoute() {
+    if (routeEl && routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    routeEl = null;
+    if (!state.routeKey) return;
+
+    var asset = state.assetByKey[state.routeKey];
+    if (!asset) { state.routeKey = ""; return; }
+
+    var ep = asset.endpoint;
+    var sc = asset.scan;
+
+    var idCard = card("Identity", h("div", { cls: "card-body" },
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Asset" }), h("dd", {}, h("b", { text: asset.name })),
+        h("dt", { text: "Address" }), h("dd", {}, h("b", { text: asset.ip || "\u2014" })),
+        h("dt", { text: "MAC" }), h("dd", { text: asset.mac || "\u2014" }),
+        h("dt", { text: "Vendor" }), h("dd", { text: (sc && sc.vendor) || "\u2014" }),
+        h("dt", { text: "Identity" }), h("dd", { text: asset.identity }),
+        h("dt", { text: "Client" }), h("dd", { text: asset.tenantName }),
+        h("dt", { text: "Location" }), h("dd", { text: asset.locationName }),
+        h("dt", { text: "Subnet" }), h("dd", { text: asset.subnet || "\u2014" }),
+        h("dt", { text: "Last seen" }), h("dd", { text: ago(asset.lastSeen) + " ago" }))));
+
+    var agentCard = card("Agent", h("div", { cls: "card-body" },
+      ep
+        ? h("dl", { cls: "kv" },
+            h("dt", { text: "Endpoint id" }), h("dd", {}, h("b", { text: ep.id })),
+            h("dt", { text: "Version" }), h("dd", { text: shortVersion(ep.driver_version) + (asset.stale ? " \u2014 outdated" : "") }),
+            h("dt", { text: "Engine" }), h("dd", { text: engineOf(ep.driver_version) || "\u2014" }),
+            h("dt", { text: "OS" }), h("dd", { text: ep.os || "\u2014" }),
+            h("dt", { text: "Role" }), h("dd", { text: ep.role_tag || "\u2014" }),
+            h("dt", { text: "Software" }), h("dd", { text: ep.installed_software || "\u2014" }),
+            h("dt", { text: "Registered" }), h("dd", { text: ago(parseTime(ep.created_at)) + " ago" }))
+        : h("div", { cls: "empty", text: "No agent on this asset. It is on the deployment worklist." })));
+
+    var portsBody = h("div", { cls: "card-body" });
+    if (asset.ports.length) {
+      var pl = h("div", { cls: "portlist" });
+      asset.ports.slice().sort(function (a, b) { return (a.port || 0) - (b.port || 0); }).forEach(function (p) {
+        pl.appendChild(h("span", { cls: "port", "data-risk": p.risk_level || "LOW", text: p.port + (p.service ? " " + p.service : "") }));
+      });
+      portsBody.appendChild(pl);
+    } else {
+      portsBody.appendChild(h("div", { cls: "empty", text: sc ? "No open ports observed." : "Not scanned." }));
+    }
+    var weak = sc ? arrayOf(sc.weakpoints) : [];
+    if (weak.length) {
+      var wl = h("div", { cls: "why" });
+      weak.forEach(function (w) { wl.appendChild(h("div", { text: "\u00b7 " + w })); });
+      portsBody.appendChild(wl);
+    }
+
+    var evBody = h("div", { cls: "card-body" });
+    var claims = h("div", { cls: "claims" });
+    if (ep) claims.appendChild(claimRow("agent", ep.os || "\u2014", 1.0, true));
+    if (sc && sc.os_guess) claims.appendChild(claimRow("scan", sc.os_guess, Number(sc.confidence) || 0, !ep));
+    claims.appendChild(claimRow("inferred", "Pass 2 \u2014 role from neighbours' flow", null, false));
+    evBody.appendChild(claims);
+    evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing claims stay on the row so an operator can see that the scanner said one thing and the agent another." }));
+
+    var flows = state.events.filter(function (e) {
+      return (ep && e.endpoint_id === ep.id) || (asset.ip && (e.src_ip === asset.ip || e.dst_ip === asset.ip));
+    }).slice(0, 25);
+    var flowCard = card("Recent flows", simpleTable(["Age", "Action", "Source", "Destination", "Process"],
+      flows.map(function (e) {
+        return [
+          h("span", { cls: "ago", text: ago(parseTime(e.timestamp)) }),
+          h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
+            icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
+            h("span", { text: e.action || "" })),
+          h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
+          h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
+          h("span", { cls: "dim", text: e.process_path || e.domain || "\u2014" })
+        ];
+      })), null, true);
+
+    var alerts = state.anomalies.filter(function (a) { return (ep && a.endpoint_id === ep.id) || (asset.ip && a.dst_ip === asset.ip); });
+    var alertCard = card("Open alerts", alerts.length
+      ? h("div", {}, alerts.map(function (a) { return alertCardNode(a, true); }))
+      : h("div", { cls: "empty", text: "No open alert on this asset." }), null, true);
+
+    routeEl = h("div", { cls: "route", role: "dialog", "aria-label": "Asset " + asset.name },
+      h("div", { cls: "route-head" },
+        h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Back", on: { click: closeRoute } }, icon("i-close")),
+        h("h2", { text: asset.name }),
+        stateBadge(asset.state),
+        evidenceStrip(asset),
+        h("span", { cls: "fill" }),
+        h("button", { cls: "btn", type: "button", text: "Copy address", on: { click: function () { copyAddress(asset); } } }),
+        h("button", {
+          cls: "btn", type: "button", text: "Actions",
+          on: {
+            click: function (e) {
+              var r = e.currentTarget.getBoundingClientRect();
+              openAssetMenu(asset, r.left - 60, r.bottom + 4, null);
+            }
+          }
+        })),
+      h("div", { cls: "route-body" }, idCard, agentCard, card("Observed exposure", portsBody),
+        card("Evidence", evBody), flowCard, alertCard));
+
+    document.body.appendChild(routeEl);
+  }
+
+  /* -------------------------------------------------------------- drawers */
+
+  var drawerEl = null;
+  var scrimEl = null;
+  var openDrawer = "";
+  var chatInput = null;
+
+  function closeDrawer() {
+    if (drawerEl && drawerEl.parentNode) drawerEl.parentNode.removeChild(drawerEl);
+    if (scrimEl && scrimEl.parentNode) scrimEl.parentNode.removeChild(scrimEl);
+    drawerEl = null;
+    scrimEl = null;
+    openDrawer = "";
+    $("btn-alerts").setAttribute("aria-expanded", "false");
+    $("btn-copilot").setAttribute("aria-expanded", "false");
+  }
+
+  function showDrawer(kind) {
+    if (openDrawer === kind) { closeDrawer(); return; }
+    closeDrawer();
+    openDrawer = kind;
+    scrimEl = h("div", { cls: "scrim", on: { click: closeDrawer } });
+    document.body.appendChild(scrimEl);
+    drawerEl = h("aside", { cls: "drawer", role: "dialog", "aria-label": kind === "alerts" ? "Alerts" : "Copilot" });
+    document.body.appendChild(drawerEl);
+    $(kind === "alerts" ? "btn-alerts" : "btn-copilot").setAttribute("aria-expanded", "true");
+    renderDrawer();
+  }
+
+  function alertCardNode(a, compact) {
+    var node = h("div", { cls: "alert", "data-sev": a.severity || "LOW" },
+      h("div", { cls: "sev" }),
+      h("div", {},
+        h("div", { cls: "sev-word", text: (a.severity || "LOW") + " \u00b7 " + (a.anomaly_type || "ANOMALY") }),
+        h("div", { cls: "ttl", text: a.title || "Anomaly" }),
+        h("div", { cls: "meta", text: (a.hostname || a.endpoint_id || "\u2014") + " \u00b7 " + ago(parseTime(a.timestamp)) + " ago" }),
+        h("div", { cls: "desc", text: a.description || "" }),
+        a.details ? h("div", { cls: "meta", text: a.details }) : null,
+        compact ? null : h("div", { cls: "acts" },
+          h("button", {
+            cls: "mini", type: "button", text: "Ask Copilot",
+            on: { click: function () { askAboutAlert(a); } }
+          }),
+          h("button", {
+            cls: "mini", type: "button", text: "Open asset",
+            on: {
+              click: function () {
+                var asset = state.assetByKey[a.endpoint_id];
+                if (asset) { closeDrawer(); openRoute(asset.key); }
+                else toast("No asset row for " + a.endpoint_id, "warn");
+              }
+            }
+          }),
+          h("button", {
+            cls: "mini", type: "button", "data-danger": "true", text: "Isolate host",
+            on: {
+              click: function () {
+                var asset = state.assetByKey[a.endpoint_id];
+                if (asset) setIsolation(asset, true);
+                else toast("No agented asset for " + a.endpoint_id, "warn");
+              }
+            }
+          }),
+          h("button", {
+            cls: "mini", type: "button", text: "Acknowledge",
+            on: {
+              click: function () {
+                request("/api/v1/anomalies/acknowledge", "POST", { id: a.id })
+                  .then(function () { toast("Acknowledged", "ok"); refresh(); })
+                  .catch(function (e) { toast("Acknowledge failed: " + e.message, "crit"); });
+              }
+            }
+          }))));
+    return node;
+  }
+
+  function renderDrawer() {
+    if (!drawerEl) return;
+    var wasOpen = drawerEl.childNodes.length > 0;
+    clear(drawerEl);
+
+    if (openDrawer === "alerts") {
+      drawerEl.appendChild(h("div", { cls: "drawer-head" },
+        icon("i-alert"),
+        h("h2", { text: "Alerts" }),
+        h("span", { cls: "fill" }),
+        h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeDrawer } }, icon("i-close"))));
+      var body = h("div", { cls: "drawer-body" });
+      if (!state.anomalies.length) {
+        body.appendChild(h("div", { cls: "empty", text: "No open anomalies." }));
+      } else {
+        state.anomalies.forEach(function (a) { body.appendChild(alertCardNode(a, false)); });
+      }
+      drawerEl.appendChild(body);
+      return;
+    }
+
+    drawerEl.appendChild(h("div", { cls: "drawer-head" },
+      icon("i-copilot"),
+      h("h2", { text: "Copilot" }),
+      h("span", { cls: "fill" }),
+      h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeDrawer } }, icon("i-close"))));
+
+    var chat = h("div", { cls: "chat" });
+    if (!state.chat.length) {
+      chat.appendChild(h("div", { cls: "empty", text: "Ask about a host, an alert, or the fleet. The drawer stays open over whatever you are looking at." }));
+    }
+    state.chat.forEach(function (m) {
+      chat.appendChild(h("div", { cls: "msg", "data-who": m.who },
+        h("div", { cls: "who", text: m.who === "you" ? "You" : "Copilot" }),
+        h("pre", { text: m.text })));
+    });
+    if (state.chatBusy) chat.appendChild(h("div", { cls: "empty", text: "Thinking\u2026" }));
+    drawerEl.appendChild(h("div", { cls: "drawer-body" }, chat));
+
+    /* The composer node survives re-renders so a five-second poll cannot wipe
+       a half-typed question or yank focus back mid-sentence. */
+    if (!chatInput) {
+      chatInput = h("textarea", { placeholder: "Ask the Copilot\u2026", "aria-label": "Message" });
+      chatInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitChat(); }
+      });
+    }
+    drawerEl.appendChild(h("div", { cls: "drawer-foot" }, chatInput,
+      h("button", { cls: "btn btn-primary", type: "button", text: "Send", on: { click: submitChat } })));
+    if (!wasOpen) chatInput.focus();
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function submitChat() {
+    if (!chatInput) return;
+    var text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = "";
+    sendChat(text);
+  }
+
+  function sendChat(text) {
+    state.chat.push({ who: "you", text: text });
+    state.chatBusy = true;
+    renderDrawer();
+    request("/api/v1/copilot/chat", "POST", { message: text }).then(function (res) {
+      state.chatBusy = false;
+      state.chat.push({ who: "copilot", text: (res && res.reply) || "(no reply)" });
+      renderDrawer();
+    }).catch(function (e) {
+      state.chatBusy = false;
+      state.chat.push({ who: "copilot", text: "Copilot unavailable: " + e.message });
+      renderDrawer();
+    });
+  }
+
+  function askAboutAlert(a) {
+    showDrawerIfNeeded("copilot");
+    var q = "Investigate alert " + a.id + ": " + (a.title || "") + " on " + (a.hostname || a.endpoint_id) +
+      ". " + (a.description || "") + " " + (a.details || "");
+    sendChat(q.trim());
+  }
+
+  function showDrawerIfNeeded(kind) {
+    if (openDrawer !== kind) showDrawer(kind);
+  }
+
+  /* ------------------------------------------------------ command palette */
+
+  var paletteEl = null;
+  var paletteItems = [];
+  var paletteCursor = 0;
+
+  function closePalette() {
+    if (paletteEl && paletteEl.parentNode) paletteEl.parentNode.removeChild(paletteEl);
+    paletteEl = null;
+  }
+
+  function paletteSource() {
+    var items = [];
+
+    SECTIONS.forEach(function (sec) {
+      items.push({
+        group: "Go", label: "Go to " + sec.label, iconId: "i-" + sec.id,
+        hint: "section", run: function () { go(sec.id); }
+      });
+    });
+
+    state.assets.forEach(function (a) {
+      items.push({
+        group: "Assets", label: a.name, mono: true,
+        iconId: a.evidence.agent ? "i-assets" : "i-discovery",
+        hint: (a.ip || "") + " \u00b7 " + a.state.word,
+        extra: a.searchText,
+        run: function () {
+          state.filters = {};
+          state.query = "";
+          state.expandedKey = a.key;
+          state.cursorKey = a.key;
+          go("assets");
+          openRoute(a.key);
+        }
+      });
+    });
+
+    var seenGroups = {};
+    state.assets.forEach(function (a) {
+      if (seenGroups[a.groupKey]) return;
+      seenGroups[a.groupKey] = true;
+      items.push({
+        group: "Scope", label: a.groupKey, iconId: "i-tag", hint: "filter",
+        run: function () {
+          state.filters = {};
+          state.query = a.locationName;
+          go("assets");
+        }
+      });
+    });
+
+    Object.keys(FILTERS).forEach(function (k) {
+      items.push({
+        group: "Filter", label: "Filter: " + FILTERS[k].label, iconId: "i-search", hint: "assets",
+        run: function () { state.filters = {}; state.filters[k] = true; go("assets"); }
+      });
+    });
+
+    items.push({ group: "Act", label: "Isolate selected hosts", iconId: "i-lock", hint: "bulk", run: function () { bulkIsolate(true); } });
+    items.push({ group: "Act", label: "Release selected hosts", iconId: "i-unlock", hint: "bulk", run: function () { bulkIsolate(false); } });
+    items.push({ group: "Act", label: "Push agent updates to the fleet", iconId: "i-download", hint: "agents", run: pushAgentUpdates });
+    items.push({ group: "Act", label: "Sync threat-intel feeds", iconId: "i-refresh", hint: "policy", run: function () {
+      request("/api/v1/threatintel/sync", "POST").then(function () { toast("Feeds synced", "ok"); refresh(); })
+        .catch(function (e) { toast("Sync failed: " + e.message, "crit"); });
+    } });
+    items.push({ group: "Act", label: "Refresh now", iconId: "i-refresh", hint: "", run: refresh });
+    items.push({ group: "Act", label: "Open alerts drawer", iconId: "i-alert", hint: "", run: function () { showDrawer("alerts"); } });
+    items.push({ group: "Act", label: "Open Copilot drawer", iconId: "i-copilot", hint: "", run: function () { showDrawer("copilot"); } });
+
+    THEMES.forEach(function (t) {
+      items.push({
+        group: "Theme", label: "Theme: " + THEME_NAMES[t], iconId: "i-theme", hint: t,
+        run: function () { applyTheme(t, true); toast("Theme: " + THEME_NAMES[t], "ok"); }
+      });
+    });
+
+    items.push({
+      group: "Theme", label: state.demo ? "Leave demo mode" : "Enter demo mode", iconId: "i-tag",
+      hint: "synthetic fleet",
+      run: function () {
+        state.demo = !state.demo;
+        writeStore("ominull.demo", state.demo ? "true" : "false");
+        toast(state.demo ? "Demo mode on \u2014 synthetic fleet" : "Demo mode off", "warn");
+        refresh();
+      }
+    });
+
+    return items;
+  }
+
+  function scoreItem(item, q) {
+    if (!q) return 1;
+    var hay = (item.label + " " + (item.hint || "") + " " + (item.extra || "")).toLowerCase();
+    var idx = hay.indexOf(q);
+    if (idx < 0) {
+      /* Subsequence fallback so "wexec" still reaches "corp-win11-exec". */
+      var j = 0;
+      for (var i = 0; i < hay.length && j < q.length; i++) {
+        if (hay[i] === q[j]) j++;
+      }
+      return j === q.length ? 0.2 : 0;
+    }
+    return idx === 0 ? 3 : 2;
+  }
+
+  function renderPaletteList(query) {
+    var q = query.trim().toLowerCase();
+    var all = paletteSource();
+    var scored = [];
+    all.forEach(function (it) {
+      var sc = scoreItem(it, q);
+      if (sc > 0) scored.push({ it: it, score: sc });
+    });
+    scored.sort(function (a, b) { return b.score - a.score; });
+    paletteItems = scored.slice(0, 60).map(function (x) { return x.it; });
+    if (paletteCursor >= paletteItems.length) paletteCursor = 0;
+
+    var list = paletteEl.querySelector(".palette-list");
+    clear(list);
+    var lastGroup = "";
+    paletteItems.forEach(function (it, i) {
+      if (it.group !== lastGroup) {
+        lastGroup = it.group;
+        list.appendChild(h("div", { cls: "lbl", text: it.group }));
+      }
+      list.appendChild(h("button", {
+        cls: "pi", type: "button", "data-cursor": i === paletteCursor ? "true" : "false",
+        on: {
+          click: function () { closePalette(); it.run(); },
+          mouseenter: function () {
+            paletteCursor = i;
+            Array.prototype.forEach.call(list.querySelectorAll(".pi"), function (b, bi) {
+              b.setAttribute("data-cursor", bi === i ? "true" : "false");
+            });
+          }
+        }
+      },
+        icon(it.iconId),
+        h("span", { cls: it.mono ? "t t-mono" : "t", text: it.label }),
+        it.hint ? h("span", { cls: "s", text: it.hint }) : null));
+    });
+
+    if (!paletteItems.length) {
+      list.appendChild(h("div", { cls: "empty", text: "Nothing matches." }));
+    }
+  }
+
+  function openPalette() {
+    if (paletteEl) return;
+    paletteCursor = 0;
+    var input = h("input", { type: "text", placeholder: "Jump to a host, an address, a section, or an action\u2026", "aria-label": "Command palette" });
+    paletteEl = h("div", {
+      cls: "palette-wrap",
+      on: {
+        click: function (e) { if (e.target === paletteEl) closePalette(); }
+      }
+    },
+      h("div", { cls: "palette" },
+        input,
+        h("div", { cls: "palette-list" }),
+        h("div", { cls: "palette-foot" },
+          h("span", { text: "enter run" }),
+          h("span", { text: "up/down move" }),
+          h("span", { text: "esc close" }))));
+    document.body.appendChild(paletteEl);
+    renderPaletteList("");
+
+    input.addEventListener("input", function () {
+      paletteCursor = 0;
+      renderPaletteList(input.value);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown" || (e.key === "n" && e.ctrlKey)) {
+        e.preventDefault();
+        paletteCursor = Math.min(paletteItems.length - 1, paletteCursor + 1);
+        renderPaletteList(input.value);
+        var cur = paletteEl.querySelector('.pi[data-cursor="true"]');
+        if (cur) cur.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "ArrowUp" || (e.key === "p" && e.ctrlKey)) {
+        e.preventDefault();
+        paletteCursor = Math.max(0, paletteCursor - 1);
+        renderPaletteList(input.value);
+        var cur2 = paletteEl.querySelector('.pi[data-cursor="true"]');
+        if (cur2) cur2.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        var it = paletteItems[paletteCursor];
+        if (it) { closePalette(); it.run(); }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closePalette();
+      }
+    });
+    input.focus();
+  }
+
+  /* ------------------------------------------------------------ keyboard */
+
+  function cursorIndex(rows) {
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].key === state.cursorKey) return i;
+    }
+    return -1;
+  }
+
+  function moveCursor(delta) {
+    var rows = visibleAssets().filter(function (r) { return !state.collapsedGroups[r.groupKey]; });
+    if (!rows.length) return;
+    var i = cursorIndex(rows);
+    i = i < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, i + delta));
+    state.cursorKey = rows[i].key;
+    render();
+    var el = document.querySelector('tr.row[data-key="' + cssEscape(state.cursorKey) + '"]');
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }
+
+  function cssEscape(v) {
+    return String(v).replace(/["\\]/g, "\\$&");
+  }
+
+  function cursorAsset() {
+    return state.cursorKey ? state.assetByKey[state.cursorKey] : null;
+  }
+
+  function typingInField(e) {
+    var t = e.target;
+    if (!t) return false;
+    var tag = (t.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || t.isContentEditable;
+  }
+
+  document.addEventListener("keydown", function (e) {
+    var mod = IS_MAC ? e.metaKey : e.ctrlKey;
+    if (mod && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      openPalette();
+      return;
+    }
+
+    if (e.key === "Escape") {
+      if (paletteEl) { closePalette(); return; }
+      if (ctxMenu) { closeCtx(); return; }
+      if (themePop) { closeThemePop(); return; }
+      if (routeEl) { closeRoute(); return; }
+      if (openDrawer) { closeDrawer(); return; }
+      if (state.query) { state.query = ""; render(); return; }
+      return;
+    }
+
+    if (paletteEl || typingInField(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+
+    /* Row operations. Terminal muscle memory, no mouse round-trip. */
+    if (state.section !== "assets" || routeEl) {
+      if (e.key === "/") { e.preventDefault(); go("assets"); focusFilter(); }
+      return;
+    }
+
+    var a;
+    switch (e.key) {
+      case "j":
+        e.preventDefault(); moveCursor(1); break;
+      case "k":
+        e.preventDefault(); moveCursor(-1); break;
+      case "x":
+        a = cursorAsset();
+        if (a) {
+          e.preventDefault();
+          if (state.selected[a.key]) delete state.selected[a.key];
+          else state.selected[a.key] = true;
+          render();
+        }
+        break;
+      case "i":
+        a = cursorAsset();
+        if (a) { e.preventDefault(); setIsolation(a, !a.isolated); }
+        break;
+      case "r":
+        a = cursorAsset();
+        if (a) { e.preventDefault(); rescan(a); }
+        break;
+      case "y":
+        a = cursorAsset();
+        if (a) { e.preventDefault(); copyAddress(a); }
+        break;
+      case "d":
+        a = cursorAsset();
+        if (a && !a.evidence.agent) { e.preventDefault(); deployAgent(a); }
+        break;
+      case "Enter":
+        a = cursorAsset();
+        if (a) { e.preventDefault(); openRoute(a.key); }
+        break;
+      case "/":
+        e.preventDefault(); focusFilter(); break;
+      default:
+        break;
+    }
+  });
+
+  function focusFilter() {
+    var input = $("filter-input");
+    if (input) { input.focus(); input.select(); }
+  }
+
+  document.addEventListener("click", function (e) {
+    if (ctxMenu && !ctxMenu.contains(e.target)) closeCtx();
+    if (themePop && !themePop.contains(e.target) && e.target !== $("theme-btn") && !$("theme-btn").contains(e.target)) closeThemePop();
+  }, true);
+
+  window.addEventListener("resize", function () {
+    closeCtx();
+    closeThemePop();
+  });
+
+  /* ------------------------------------------------------------- topbar */
+
+  var filterInput = null;
+
+  function updateCrumb() {
+    var sec = SECTIONS.filter(function (x) { return x.id === state.section; })[0];
+    $("crumb-main").textContent = sec ? sec.label : "";
+
+    var sub = "";
+    if (state.section === "assets") {
+      var stats = assetStats();
+      var active = activeFilters();
+      sub = "/ " + stats.total + " known \u00b7 " + stats.agented + " agented";
+      if (active.length) {
+        sub += " \u00b7 filtered: " + active.map(function (k) { return FILTERS[k].label.toLowerCase(); }).join(", ");
+      }
+      if (state.query) sub += " \u00b7 \u201c" + state.query + "\u201d";
+    } else if (state.section === "discovery") {
+      var cov = state.coverage || {};
+      sub = "/ " + (cov.coverage_percent || 0) + "% covered";
+    } else if (state.section === "topology") {
+      sub = "/ " + state.topoWindow + " window";
+    } else if (state.demo) {
+      sub = "/ demo";
+    }
+    if (state.demo && state.section === "assets") sub += " \u00b7 demo";
+    $("crumb-sub").textContent = sub;
+
+    $("hub-version").textContent = HUB_VERSION ? "hub " + HUB_VERSION : "";
+
+    var pip = $("alert-count");
+    pip.textContent = String(state.anomalies.length);
+    pip.setAttribute("data-n", String(state.anomalies.length));
+
+    var health = $("health");
+    var hstate = state.lastError ? "down" : (assetStats().offline > 0 ? "degraded" : "ok");
+    health.setAttribute("data-state", hstate);
+    health.setAttribute("title", state.lastError
+      ? "Hub unreachable: " + state.lastError
+      : (hstate === "degraded" ? "Hub healthy \u00b7 some endpoints offline" : "Hub healthy"));
+    $("health-word").textContent = health.getAttribute("title");
+  }
+
+  function renderTopbar() {
+    updateCrumb();
+
+    var actions = $("topbar-actions");
+    clear(actions);
+
+    if (state.section === "assets") {
+      /* The filter field is reused rather than rebuilt: render() runs on every
+         five-second poll, and a fresh input would drop the caret mid-word. */
+      var input = filterInput;
+      if (!input) {
+        input = filterInput = h("input", {
+          type: "search", id: "filter-input", placeholder: "Filter rows", "aria-label": "Filter rows"
+        });
+        input.value = state.query;
+        input.addEventListener("input", function () {
+          state.query = input.value;
+          state.cursorKey = "";
+          renderBody();
+          renderStrip();
+          updateCrumb();
+        });
+      } else if (document.activeElement !== input) {
+        input.value = state.query;
+      }
+      actions.appendChild(input);
+
+      var sel = selectedKeys().length;
+      if (sel) {
+        actions.appendChild(h("button", {
+          cls: "btn", type: "button", text: "Release " + sel,
+          on: { click: function () { bulkIsolate(false); } }
+        }));
+        actions.appendChild(h("button", {
+          cls: "btn", type: "button", text: "Isolate " + sel,
+          on: { click: function () { bulkIsolate(true); } }
+        }));
+      }
+      if (assetStats().outdated) {
+        actions.appendChild(h("button", {
+          cls: "btn btn-primary", type: "button", text: "Update agents",
+          on: { click: pushAgentUpdates }
+        }));
+      }
+    } else if (state.section === "topology") {
+      ["1h", "6h", "24h", "7d"].forEach(function (w) {
+        actions.appendChild(h("button", {
+          cls: state.topoWindow === w ? "btn btn-primary" : "btn", type: "button", text: w,
+          on: {
+            click: function () {
+              state.topoWindow = w;
+              loadTopology().then(render);
+            }
+          }
+        }));
+      });
+    } else if (state.section === "discovery") {
+      actions.appendChild(h("button", {
+        cls: "btn", type: "button", text: "Refresh",
+        on: { click: refresh }
+      }));
+    }
+  }
+
+  /* --------------------------------------------------------------- render */
+
+  function renderBody() {
+    var view = $("view");
+    var scrollTop = view.scrollTop;
+
+    if (state.section === "assets") renderAssets();
+    else if (state.section === "discovery") renderDiscovery();
+    else if (state.section === "topology") renderTopology();
+    else if (state.section === "traffic") renderTraffic();
+    else if (state.section === "policy") renderPolicy();
+    else if (state.section === "audit") renderAudit();
+
+    view.scrollTop = scrollTop;
+
+    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
+      b.setAttribute("aria-current", b.getAttribute("data-section") === state.section ? "true" : "false");
+    });
+  }
+
+  function render() {
+    renderTopbar();
+    renderStrip();
+    renderBody();
+    if (routeEl) renderRoute();
+    if (drawerEl) renderDrawer();
+  }
+
+  function go(section) {
+    state.section = section;
+    closeRoute();
+    closeDrawer();
+    render();
+    refresh();
+  }
+
+  /* ----------------------------------------------------------------- load */
+
+  function loadTopology() {
+    return request("/api/v1/topology/graph?window=" + encodeURIComponent(state.topoWindow))
+      .then(function (d) { state.topology = d || null; })
+      .catch(function () { state.topology = null; });
+  }
+
+  function refresh() {
+    var jobs = [
+      request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
+      request("/api/v1/endpoints").then(function (d) { state.endpoints = arrayOf(d); }),
+      request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
+      request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
+      request("/api/v1/anomalies").then(function (d) {
+        state.anomalies = arrayOf(d).filter(function (a) { return !a.acknowledged; });
+      }),
+      request("/api/v1/agents/update-status").then(function (d) { state.updateStatus = d || null; }),
+      request("/api/v1/mesh/quarantined").then(function (d) { state.meshPeers = arrayOf(d); })
+    ];
+
+    if (state.section === "policy") {
+      jobs.push(request("/api/v1/policy-groups").then(function (d) { state.policyGroups = arrayOf(d); }));
+      jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
+      jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
+    }
+    if (state.section === "audit") {
+      jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
+      jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
+    }
+    if (state.section === "traffic" || state.routeKey) {
+      jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }));
+      jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
+    }
+    if (state.section === "topology") jobs.push(loadTopology());
+
+    return Promise.all(jobs.map(function (p) {
+      return p.catch(function (e) {
+        state.lastError = e.message;
+        return null;
+      });
+    })).then(function () {
+      state.loading = false;
+      buildAssets();
+      pushHistory(Object.assign({ total: state.assets.length }, assetStats()));
+      /* Drop selections for assets that no longer exist, but keep every other
+         selection so a five-second refresh never clears the operator's work. */
+      Object.keys(state.selected).forEach(function (k) {
+        if (!state.assetByKey[k]) delete state.selected[k];
+      });
+      if (state.expandedKey && !state.assetByKey[state.expandedKey]) state.expandedKey = "";
+      if (state.cursorKey && !state.assetByKey[state.cursorKey]) state.cursorKey = "";
+      if (state.routeKey && !state.assetByKey[state.routeKey]) closeRoute();
+      render();
+    });
+  }
+
+  /* ------------------------------------------------------------------ init */
+
+  function init() {
+    var params = new URLSearchParams(window.location.search);
+    state.demo = params.get("demo") === "true" ||
+      window.location.hash === "#demo" ||
+      readStore("ominull.demo", "false") === "true";
+
+    applyTheme(readStore("ominull.theme", DEFAULT_THEME), false);
+
+    $("omni-kbd").textContent = MOD_LABEL;
+    $("omni").addEventListener("click", openPalette);
+    $("btn-alerts").addEventListener("click", function () { showDrawer("alerts"); });
+    $("btn-copilot").addEventListener("click", function () { showDrawer("copilot"); });
+    $("theme-btn").addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (themePop) closeThemePop();
+      else openThemePop();
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
+      b.addEventListener("click", function () { go(b.getAttribute("data-section")); });
+    });
+
+    if (state.demo) toast("Demo mode \u2014 synthetic fleet, no live hub data", "warn");
+
+    render();
+    refresh();
+    setInterval(refresh, 5000);
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
