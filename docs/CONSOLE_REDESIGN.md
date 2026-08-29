@@ -273,8 +273,9 @@ Requirements:
 
 - **Repo hygiene.** No usernames, real domains, real LAN IPs, hostnames or keys in tracked
   files. `10.0.0.x` is the deliberate stand-in; demo fixtures use `10.0.4.x` / `172.16.x`.
-  Substitute, never delete. Verify with
-  `git grep -niE "kasadis|davion|192\.168\.86\.|summitflow\.dev"`.
+  Substitute, never delete. The check greps for the real values, so the pattern itself
+  belongs in the private ops brief, not here -- writing it down in the public repo leaks
+  exactly what it exists to catch.
 - **`VERSION` is the single source of truth**; `scripts/version.sh check` is a CI gate.
 - **Hub ships before agents.** Use `scripts/release.sh`; never hand-roll the two hops.
 - **Offline first.** No CDN, no npm, no runtime network dependency in the console.
