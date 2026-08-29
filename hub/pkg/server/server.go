@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,8 +48,11 @@ type Server struct {
 	adminKey     string
 	binaryDir    string
 	hubURL       string
+	agentHubURL  string
 	agentVersion string
 	httpServer   *http.Server
+	tlsServer    *http.Server
+	tlsOpts      TLSOptions
 
 	clientsMu  sync.RWMutex
 	clients    map[string]*Client // endpointID -> Client
@@ -90,6 +94,39 @@ type TelemetryBatchMessage struct {
 type CommandMessage struct {
 	Type    string      `json:"type"` // "ISOLATE", "UNISOLATE", "UPDATE_CONFIG"
 	Payload interface{} `json:"payload"`
+}
+
+// TLSOptions configures the hub's HTTPS listener. Agents carry the API key in
+// a header and take isolation commands from the response body, so the listener
+// they talk to has to be this one; the plain-HTTP listener stays available for
+// a reverse proxy terminating on loopback and for an operator CLI, and can be
+// switched off entirely once a fleet has converged onto TLS.
+type TLSOptions struct {
+	// Listen is the HTTPS bind address. Empty disables the listener.
+	Listen string
+	// CertFile and KeyFile override the hub's own PKI with an operator-supplied
+	// certificate - a public one, for a hub reachable under a real domain.
+	CertFile string
+	KeyFile  string
+	// Hosts are extra SANs to put in the self-issued certificate. The hub always
+	// includes localhost, its own interface addresses and the host in --hub-url;
+	// this covers the cases it cannot see, such as a floating VIP.
+	Hosts []string
+}
+
+// SetTLS installs the HTTPS configuration. Call it before Start.
+func (s *Server) SetTLS(opts TLSOptions) {
+	s.tlsOpts = opts
+}
+
+// SetAgentHubURL sets the transport enrolment writes into an agent's config.
+// It is deliberately separate from --hub-url: the hub is published to operators
+// and installers at one address, typically through a reverse proxy, and reached
+// by agents at another - the TLS listener whose certificate they pin. Left
+// empty, enrolment falls back to the published URL and the deployment behaves
+// exactly as it did before there was a TLS listener at all.
+func (s *Server) SetAgentHubURL(u string) {
+	s.agentHubURL = u
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
@@ -266,24 +303,148 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(s.handleCopilotInvestigate))
 	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(s.handleCopilotConfig))
 
-	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+	// Both listeners share one mux. Which port a request arrived on decides
+	// whether it was encrypted, never what it is allowed to do - an endpoint
+	// that behaved differently per listener would be a second policy surface
+	// to keep in step with the first.
+	errs := make(chan error, 2)
+	listeners := 0
+
+	if s.tlsOpts.Listen != "" {
+		tlsCfg, err := s.tlsConfig()
+		if err != nil {
+			return fmt.Errorf("TLS listener on %s: %w", s.tlsOpts.Listen, err)
+		}
+		s.tlsServer = &http.Server{
+			Addr:         s.tlsOpts.Listen,
+			Handler:      mux,
+			TLSConfig:    tlsCfg,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		listeners++
+		log.Printf("[+] Ominull Hub listening on %s over TLS (agent transport)", s.tlsOpts.Listen)
+		go func() { errs <- s.tlsServer.ListenAndServeTLS("", "") }()
 	}
 
-	log.Printf("[+] Ominull Hub listening on %s (Admin Key configured)", addr)
-	return s.httpServer.ListenAndServe()
+	if addr != "" {
+		s.httpServer = &http.Server{
+			Addr:         addr,
+			Handler:      mux,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		listeners++
+		log.Printf("[+] Ominull Hub listening on %s in the clear (Admin Key configured)", addr)
+		go func() { errs <- s.httpServer.ListenAndServe() }()
+	}
+
+	if listeners == 0 {
+		return fmt.Errorf("no listener configured: --listen and --tls-listen are both empty")
+	}
+
+	// Whichever listener fails first ends Start. A shutdown closes both, and
+	// the close of the one we are not reporting on is not an error worth
+	// drowning the real one in.
+	if err := <-errs; err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// tlsConfig resolves the certificate the HTTPS listener presents: an
+// operator-supplied pair when one is configured, and otherwise a leaf the hub
+// signs with its own CA - the same CA it already serves at
+// /api/v1/pki/ca.crt and that enrolment pins on every agent.
+//
+// The SAN set is fixed at start rather than recomputed per handshake, so a hub
+// whose address changes needs a restart to reissue. That is a deliberate trade:
+// enumerating interfaces on every connection to catch a rare DHCP move would
+// cost more than the restart it saves.
+func (s *Server) tlsConfig() (*tls.Config, error) {
+	base := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if s.tlsOpts.CertFile != "" || s.tlsOpts.KeyFile != "" {
+		if s.tlsOpts.CertFile == "" || s.tlsOpts.KeyFile == "" {
+			return nil, fmt.Errorf("--tls-cert and --tls-key must be given together")
+		}
+		cert, err := tls.LoadX509KeyPair(s.tlsOpts.CertFile, s.tlsOpts.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load the supplied certificate: %w", err)
+		}
+		base.Certificates = []tls.Certificate{cert}
+		log.Printf("[+] TLS certificate: operator-supplied (%s)", s.tlsOpts.CertFile)
+		return base, nil
+	}
+
+	if s.pki == nil {
+		return nil, fmt.Errorf("the PKI manager failed to initialize, so no certificate can be issued; pass --tls-cert/--tls-key or fix the certs directory")
+	}
+
+	hosts := hubSANs(s.hubURL, s.tlsOpts.Hosts)
+	cert, err := s.pki.ServerCertificate(hosts)
+	if err != nil {
+		return nil, err
+	}
+	base.Certificates = []tls.Certificate{*cert}
+	log.Printf("[+] TLS certificate: issued by the hub CA for %s (expires %s)",
+		strings.Join(hosts, ", "), cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
+	return base, nil
+}
+
+// hubSANs collects every name an agent could plausibly dial this hub by. The
+// interface addresses matter most: on the LAN an agent connects to the hub by
+// IP, and a certificate without that IP in a SAN is rejected by curl, WinHTTP
+// and Go alike - correctly, and with an error that reads like a CA problem.
+func hubSANs(hubURL string, extra []string) []string {
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
+
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		hosts = append(hosts, hostname)
+	}
+
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok || ipNet.IP.IsLoopback() || ipNet.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			hosts = append(hosts, ipNet.IP.String())
+		}
+	}
+
+	if hubURL != "" {
+		trimmed := hubURL
+		for _, scheme := range []string{"https://", "http://"} {
+			trimmed = strings.TrimPrefix(trimmed, scheme)
+		}
+		if slash := strings.IndexByte(trimmed, '/'); slash >= 0 {
+			trimmed = trimmed[:slash]
+		}
+		if host, _, err := net.SplitHostPort(trimmed); err == nil {
+			trimmed = host
+		}
+		if trimmed != "" {
+			hosts = append(hosts, trimmed)
+		}
+	}
+
+	return append(hosts, extra...)
 }
 
 func (s *Server) Close() error {
 	s.ti.Stop()
 	s.detector.Stop()
+	var err error
 	if s.httpServer != nil {
-		return s.httpServer.Close()
+		err = s.httpServer.Close()
 	}
-	return nil
+	if s.tlsServer != nil {
+		if tlsErr := s.tlsServer.Close(); err == nil {
+			err = tlsErr
+		}
+	}
+	return err
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -678,12 +839,18 @@ func contains(list []string, target string) bool {
 	return false
 }
 
-func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
+// bootstrapOptions authenticates a bootstrap request and gathers the enrolment
+// it describes. All three generators need the same inputs, and the one that
+// matters here is the split between the two URLs: the installer runs against
+// hubURL, while the agent it installs is pointed at the TLS transport the hub
+// was configured to advertise.
+func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (bootstrap.Options, bool) {
 	key := r.URL.Query().Get("key")
 	if key == "" || key != s.adminKey {
 		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
-		return
+		return bootstrap.Options{}, false
 	}
+
 	hubURL := s.hubURL
 	if hubURL == "" {
 		hubURL = "https://" + r.Host
@@ -697,66 +864,44 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 	if cfSecret == "" {
 		cfSecret = r.Header.Get("CF-Access-Client-Secret")
 	}
-	locationID := r.URL.Query().Get("location")
-	roleTag := r.URL.Query().Get("role")
 
-	script := bootstrap.GeneratePowerShell(hubURL, key, cfID, cfSecret, locationID, roleTag)
+	return bootstrap.Options{
+		HubURL:         hubURL,
+		AgentHubURL:    s.agentHubURL,
+		TenantAPIKey:   key,
+		CFClientID:     cfID,
+		CFClientSecret: cfSecret,
+		LocationID:     r.URL.Query().Get("location"),
+		RoleTag:        r.URL.Query().Get("role"),
+		EndpointID:     r.URL.Query().Get("endpoint_id"),
+	}, true
+}
+
+func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
+	opts, ok := s.bootstrapOptions(w, r)
+	if !ok {
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(script))
+	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
 }
 
 func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
-	key := r.URL.Query().Get("key")
-	if key == "" || key != s.adminKey {
-		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+	opts, ok := s.bootstrapOptions(w, r)
+	if !ok {
 		return
 	}
-	hubURL := s.hubURL
-	if hubURL == "" {
-		hubURL = "https://" + r.Host
-	}
-
-	cfID := r.URL.Query().Get("cf_id")
-	if cfID == "" {
-		cfID = r.Header.Get("CF-Access-Client-Id")
-	}
-	cfSecret := r.URL.Query().Get("cf_secret")
-	if cfSecret == "" {
-		cfSecret = r.Header.Get("CF-Access-Client-Secret")
-	}
-	locationID := r.URL.Query().Get("location")
-	roleTag := r.URL.Query().Get("role")
-
-	script := bootstrap.GenerateBash(hubURL, key, cfID, cfSecret, locationID, roleTag)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(script))
+	w.Write([]byte(bootstrap.GenerateBash(opts)))
 }
 
 func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
-	key := r.URL.Query().Get("key")
-	if key == "" || key != s.adminKey {
-		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+	opts, ok := s.bootstrapOptions(w, r)
+	if !ok {
 		return
 	}
-	hubURL := s.hubURL
-	if hubURL == "" {
-		hubURL = "https://" + r.Host
-	}
-
-	cfID := r.URL.Query().Get("cf_id")
-	if cfID == "" {
-		cfID = r.Header.Get("CF-Access-Client-Id")
-	}
-	cfSecret := r.URL.Query().Get("cf_secret")
-	if cfSecret == "" {
-		cfSecret = r.Header.Get("CF-Access-Client-Secret")
-	}
-	locationID := r.URL.Query().Get("location")
-	roleTag := r.URL.Query().Get("role")
-
-	script := bootstrap.GenerateMacOS(hubURL, key, cfID, cfSecret, locationID, roleTag)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(script))
+	w.Write([]byte(bootstrap.GenerateMacOS(opts)))
 }
 
 func (s *Server) handlePKICACert(w http.ResponseWriter, r *http.Request) {

@@ -3,8 +3,11 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 )
 
@@ -64,30 +68,149 @@ func TestBootstrapGenerators(t *testing.T) {
 		}
 	}
 
-	// 1. PowerShell Bootstrap (admin key required)
-	req := httptest.NewRequest("GET", "/bootstrap.ps1?key=mock_admin_token", nil)
-	w := httptest.NewRecorder()
-	srv.handleBootstrapPS1(w, req)
+	// Enrolment is the only step that plants the trust anchor, so every
+	// generated script has to fetch the CA and hand the agent both that file
+	// and the TLS address to use it against. A script that installs an agent
+	// pointed at plain HTTP is the defect this checks for.
+	srv.SetAgentHubURL("https://10.0.0.57:9443")
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", w.Code)
+	for _, tc := range []struct {
+		name    string
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+		want    []string
+	}{
+		{
+			name:    "powershell",
+			path:    "/bootstrap.ps1",
+			handler: srv.handleBootstrapPS1,
+			want: []string{
+				"mock_admin_token",
+				"/api/v1/pki/ca.crt",
+				`Cert:\LocalMachine\Root`,
+				`--hub $AgentHubURL`,
+				`--ca "$InstallDir\ca.crt"`,
+				`$AgentHubURL = "https://10.0.0.57:9443"`,
+			},
+		},
+		{
+			name:    "bash",
+			path:    "/bootstrap.sh",
+			handler: srv.handleBootstrapSH,
+			want: []string{
+				"mock_admin_token",
+				"ominulld.service",
+				"/api/v1/pki/ca.crt",
+				`CA_PATH="/etc/ominull/ca.crt"`,
+				"--hub $AGENT_HUB_URL",
+				"--ca $CA_PATH",
+				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
+			},
+		},
+		{
+			name:    "macos",
+			path:    "/bootstrap.mac.sh",
+			handler: srv.handleBootstrapMac,
+			want: []string{
+				"mock_admin_token",
+				"/api/v1/pki/ca.crt",
+				`CA_PATH="$INSTALL_DIR/ca.crt"`,
+				"<string>$ENDPOINT_ID</string>",
+				"<string>$CA_PATH</string>",
+				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path+"?key=mock_admin_token", nil)
+			w := httptest.NewRecorder()
+			tc.handler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			body := w.Body.String()
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("bootstrap script is missing %q:\n%s", want, body)
+				}
+			}
+			// The generators used to hand-build the Windows binPath, which
+			// dropped the --service flag the SCM entry point needs. Registration
+			// goes through the agent's own installer now.
+			if strings.Contains(body, "sc.exe create") {
+				t.Errorf("bootstrap script hand-builds the service binPath instead of using --install:\n%s", body)
+			}
+		})
 	}
-	body := w.Body.String()
-	if !strings.Contains(body, "Ominull Threat Nullification Service") || !strings.Contains(body, "mock_admin_token") {
-		t.Errorf("PowerShell script missing expected bootstrap instructions: %s", body)
+}
+
+// TestHubTLSListenerPinsToItsOwnCA is the transport half of the same guarantee:
+// the hub serves a certificate its own CA signed, so an agent that pins that CA
+// connects and an agent holding any other CA is refused rather than quietly
+// talking to whoever answered.
+func TestHubTLSListenerPinsToItsOwnCA(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0"})
+	tlsCfg, err := srv.tlsConfig()
+	if err != nil {
+		t.Fatalf("tlsConfig failed: %v", err)
 	}
 
-	// 2. Bash Bootstrap (admin key required)
-	req = httptest.NewRequest("GET", "/bootstrap.sh?key=mock_admin_token", nil)
-	w = httptest.NewRecorder()
-	srv.handleBootstrapSH(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", w.Code)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
 	}
-	body = w.Body.String()
-	if !strings.Contains(body, "ominulld.service") || !strings.Contains(body, "mock_admin_token") {
-		t.Errorf("Bash script missing expected systemd service configuration: %s", body)
+	defer ln.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/pki/ca.crt", srv.handlePKICACert)
+	go func() { _ = http.Serve(ln, mux) }()
+
+	url := "https://" + ln.Addr().String() + "/api/v1/pki/ca.crt"
+
+	// 1. The hub's own CA verifies the hub. This is what every agent does.
+	hubCA := x509.NewCertPool()
+	if !hubCA.AppendCertsFromPEM(srv.pki.GetCAPEM()) {
+		t.Fatalf("hub CA PEM did not parse")
+	}
+	resp, err := tlsClient(hubCA).Get(url)
+	if err != nil {
+		t.Fatalf("an agent pinning the hub CA should reach the hub, got: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(srv.pki.GetCAPEM())) {
+		t.Errorf("the hub served a CA that is not the one signing its own certificate")
+	}
+
+	// 2. A different CA does not. An agent given the wrong anchor has to fail
+	// here and not fall through to an unverified connection.
+	otherPKI, err := pki.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("second PKI failed: %v", err)
+	}
+	otherCA := x509.NewCertPool()
+	otherCA.AppendCertsFromPEM(otherPKI.GetCAPEM())
+	if _, err := tlsClient(otherCA).Get(url); err == nil {
+		t.Fatalf("an agent holding the wrong CA reached the hub anyway")
+	}
+
+	// 3. And neither does trusting nothing at all.
+	if _, err := tlsClient(x509.NewCertPool()).Get(url); err == nil {
+		t.Fatalf("an agent trusting no CA reached the hub anyway")
+	}
+}
+
+func tlsClient(roots *x509.CertPool) *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		},
 	}
 }
 

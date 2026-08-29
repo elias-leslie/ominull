@@ -162,38 +162,18 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         respOut[0] = '\0';
     }
 
-    // Parse host and port from hub_url (e.g. https://omi.example.com or http://10.0.0.58:9999)
-    WCHAR wHost[128] = {0};
-    INTERNET_PORT port = 80;
-    BOOL isHttps = FALSE;
-
-    const char* p = config->hub_url;
-    if (strncmp(p, "https://", 8) == 0) {
-        isHttps = TRUE;
-        port = 443;
-        p += 8;
-    } else if (strncmp(p, "http://", 7) == 0) {
-        port = 80;
-        p += 7;
+    /* Checked before the batch is built, not after the send fails. The payload
+     * and the X-API-Key header that authenticates it are the things being
+     * protected, so the hub has to be proven to be the hub first. */
+    if (!Hub_TransportReady(config)) {
+        return false;
     }
 
     char hostStr[128] = {0};
-    const char* colon = strchr(p, ':');
-    const char* slash = strchr(p, '/');
-
-    if (colon) {
-        size_t hLen = colon - p;
-        if (hLen >= sizeof(hostStr)) hLen = sizeof(hostStr) - 1;
-        snprintf(hostStr, sizeof(hostStr), "%.*s", (int)hLen, p);
-        port = (INTERNET_PORT)atoi(colon + 1);
-    } else if (slash) {
-        size_t hLen = slash - p;
-        if (hLen >= sizeof(hostStr)) hLen = sizeof(hostStr) - 1;
-        snprintf(hostStr, sizeof(hostStr), "%.*s", (int)hLen, p);
-    } else {
-        snprintf(hostStr, sizeof(hostStr), "%s", p);
-    }
-
+    WCHAR wHost[128] = {0};
+    WORD port = 80;
+    BOOL isHttps = FALSE;
+    Hub_SplitURL(config->hub_url, hostStr, sizeof(hostStr), &port, &isHttps);
     MultiByteToWideChar(CP_UTF8, 0, hostStr, -1, wHost, 128);
 
     // Build JSON Payload (64KB dynamic buffer)
@@ -300,13 +280,10 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         return false;
     }
 
-    if (isHttps) {
-        DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                        SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
-                        SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                        SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
-    }
+    /* No SECURITY_FLAG_IGNORE_* overrides. They were here because there was no
+     * trusted anchor to check against; enrolment installs the hub's CA now, so
+     * an unknown issuer, a mismatched name or an expired certificate fails the
+     * handshake instead of being waved through. */
 
     WCHAR wHeaders[1024] = {0};
     WCHAR wKey[128] = {0};
@@ -337,6 +314,12 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     DWORD dwStatusCode = 0;
     if (bResults) {
         bResults = WinHttpReceiveResponse(hRequest, NULL);
+        /* The body carries isolation state and the update descriptor. Confirm
+         * the peer is still the enrolled hub before any of it is read, so a
+         * mid-session identity change cannot steer this endpoint. */
+        if (bResults && !Hub_VerifyRequestPin(hRequest, config)) {
+            bResults = FALSE;
+        }
         if (bResults) {
             DWORD dwSize = sizeof(dwStatusCode);
             WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);

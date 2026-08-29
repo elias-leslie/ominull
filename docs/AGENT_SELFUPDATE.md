@@ -209,10 +209,13 @@ the running agent left untouched.
 
 ## Still open
 
-- **Transport is plain HTTP** between agents and the hub on the LAN. The
-  signature is what makes that survivable, and it is why the signature, not the
-  digest, is the control that matters. The hub already has PKI (`pkg/pki`);
-  moving agent traffic onto it is worth doing and is not done here.
+- ~~**Transport is plain HTTP** between agents and the hub on the LAN.~~ Done in
+  v1.4.0: the hub serves HTTPS on a leaf signed by its own CA, enrolment plants
+  that CA on every endpoint, and all three agents pin it and refuse rather than
+  fall back to HTTP. The signature is still what makes a package safe — it is
+  verified against a key compiled into the agent, not against the hub — but the
+  API key, the telemetry and the isolation commands are no longer in the clear.
+  See `docs/AGENT_TLS.md`.
 - **No platform-native signing yet.** Authenticode on Windows (`scripts/sign.ps1`
   exists) and `codesign`/notarization on macOS would add what the OS itself
   enforces, on top of the portable scheme. Neither is required for the update

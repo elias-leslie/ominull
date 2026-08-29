@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.3.3"
+#define OMINULL_AGENT_VERSION "1.4.1"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -24,8 +24,15 @@ typedef struct _AGENT_CONFIG {
     char primary_ip[64];
     char primary_mac[32];
     char os_version[128];
+    /* The hub's CA, planted by enrolment. Every hub connection is verified
+     * against this file, so it lives beside the binary rather than under a
+     * path an upgrade replaces. */
+    char ca_path[260];
     bool is_service;
     bool verbose;
+    /* Opt-in to a cleartext hub. Off by default: without it the agent refuses
+     * an http:// hub rather than putting the API key on the wire. */
+    bool allow_plaintext;
 } AGENT_CONFIG;
 
 // Driver communication interface
@@ -55,10 +62,28 @@ void Agent_DetectHostIdentity(AGENT_CONFIG* config);
 void Update_Apply(const AGENT_CONFIG* config, const char* respJson);
 void Update_CheckStartup(const AGENT_CONFIG* config);
 
+/* Hub transport security. Hub_TransportReady gates every outbound request:
+ * it refuses a cleartext hub, refuses a missing CA, and proves the peer really
+ * is the hub before anything carrying the API key is sent. Hub_VerifyRequestPin
+ * re-checks the certificate on a request that has already been answered, so a
+ * response from anything but the enrolled hub is discarded rather than acted
+ * on. Both are no-ops when a cleartext transport was explicitly allowed.
+ * Rationale and the reason the check is a preflight: agent/src/hub_tls.c. */
+bool Hub_TransportReady(const AGENT_CONFIG* config);
+bool Hub_VerifyRequestPin(void* hRequest, const AGENT_CONFIG* config);
+bool Hub_UsesTLS(const AGENT_CONFIG* config);
+// Splits a hub URL into host, port and scheme. port is WinHTTP's INTERNET_PORT,
+// spelled as the WORD it is so this header stays usable without winhttp.h.
+void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BOOL* isHttps);
+
 // Service dispatcher
 void Service_Run(void);
 void Service_SetConfig(const AGENT_CONFIG* config);
-bool Service_Install(const char* hubUrl, const char* apiKey);
+// Installs the service with the full running configuration. It takes the whole
+// config rather than a hub URL and key because the SCM command line is the only
+// place the service's arguments exist: anything left out here - the role, the
+// location, the pinned CA - is simply lost at the next start.
+bool Service_Install(const AGENT_CONFIG* config);
 // Registers the SCM recovery actions self-update relies on. Idempotent, and
 // applied on every start so an in-place upgrade is not left without them.
 void Service_EnsureRecovery(void);

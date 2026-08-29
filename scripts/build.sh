@@ -60,9 +60,11 @@ x86_64-w64-mingw32-gcc \
   "$ROOT_DIR/agent/src/main.c" \
   "$ROOT_DIR/agent/src/driver_client.c" \
   "$ROOT_DIR/agent/src/hub_client.c" \
+  "$ROOT_DIR/agent/src/hub_tls.c" \
   "$ROOT_DIR/agent/src/service.c" \
+  "$ROOT_DIR/agent/src/updater.c" \
   -o "$BUILD_DIR/ominulld.exe" \
-  -lwinhttp -lws2_32
+  -lwinhttp -lws2_32 -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
 
 echo "[+] Built: $BUILD_DIR/ominulld.exe"
 file "$BUILD_DIR/ominulld.exe"

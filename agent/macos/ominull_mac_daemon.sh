@@ -1,13 +1,17 @@
 #!/bin/bash
 set -u
 
-HUB_URL="${1:-http://10.0.0.58:9999}"
+HUB_URL="${1:-https://10.0.0.58:9443}"
 API_KEY="${2:-<provision-via-bootstrap>}"
 ROLE_TAG="${3:-workstation}"
 LOCATION_ID="${4:-loc-home}"
 # Endpoint identity is pinned at enrolment when supplied. Deriving it from the hostname
 # alone forks a renamed host into a second fleet record with no history.
 ENDPOINT_ID="${5:-macos-$(hostname -s)}"
+# The hub's CA, planted by enrolment. Every connection below is verified against
+# this file and nothing else - not the system keychain, which any admin-installed
+# anchor could widen without anyone noticing.
+CA_PATH="${6:-/opt/ominull/ca.crt}"
 IS_ISOLATED="false"
 ATTEMPTED_VERSION=""
 # Bounded retry, not a single shot: a dropped download would otherwise wedge this
@@ -30,6 +34,118 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F
 0e6k7D05y7jLxXQblk3d7ZirBH3MNJlo7aUbtmlQ2izz/u5wTG2ztJ9TBw==
 -----END PUBLIC KEY-----
 PUBKEY
+
+# ---------------------------------------------------------------------------
+# Hub transport
+#
+# The telemetry payload, the API key that authenticates it and the isolation
+# state read back from the hub all cross the LAN on every pass of the loop. On
+# plain HTTP every one of those is readable and forgeable by anyone on the path,
+# so the transport is checked before the first byte is sent.
+#
+# There is no fallback. A daemon that cannot verify the hub keeps its packet
+# filter rules exactly as they are and repeats the reason; it never retries in
+# the clear, because a silent downgrade is what an on-path attacker is trying
+# to provoke.
+# ---------------------------------------------------------------------------
+
+# Every hub connection goes through hub_curl, which pins the CA: trust this one
+# and no other, and refuse a redirect off TLS - without that a redirect to
+# http:// would carry the API key to the next hop in the clear.
+#
+# The odd-looking expansion is for macOS's bash 3.2, where "${arr[@]}" on an
+# empty array is an unbound variable under set -u. The array is empty exactly in
+# the deliberate plaintext case, which is the one that must not crash the daemon
+# in a different way than it already warns about.
+HUB_CURL_ARGS=()
+if [[ "$HUB_URL" == https://* ]]; then
+    HUB_CURL_ARGS=(--cacert "$CA_PATH" --proto "=https" --proto-redir "=https")
+fi
+
+hub_curl() {
+    curl ${HUB_CURL_ARGS[@]+"${HUB_CURL_ARGS[@]}"} "$@"
+}
+
+LAST_TRANSPORT_COMPLAINT=0
+# Repeats at most once a minute: the failure persists until an operator fixes
+# it, and a line every three seconds would bury everything else in the log.
+report_transport_refusal() {
+    local now
+    now=$(date +%s)
+    if [[ "$LAST_TRANSPORT_COMPLAINT" -ne 0 && $((now - LAST_TRANSPORT_COMPLAINT)) -lt 60 ]]; then
+        return 0
+    fi
+    LAST_TRANSPORT_COMPLAINT="$now"
+    echo "[!] Refusing to talk to the hub: $1" >&2
+}
+
+# --cacert is passed above and is not, on its own, a pin here. Apple's curl is
+# built MultiSSL and defaults to Secure Transport, which accepts --cacert and
+# then ignores it: trust comes from the system keychain instead. A rogue CA
+# handed to curl on this platform still reaches the hub, and an impostor holding
+# any keychain-trusted certificate would be reached just the same. That is the
+# silent downgrade this whole change exists to prevent, so the pin is proved
+# separately, before anything carrying the API key is sent.
+#
+# openssl does enforce -CAfile, so the hub's certificate is fetched and checked
+# against the enrolled CA directly. openssl checks the chain, not the name; the
+# name is what Secure Transport checks on the request itself, so between them
+# both halves are covered.
+#
+# Cached: long enough that the three-second telemetry loop is not opening a
+# handshake of its own each pass, short enough that a replaced hub identity is
+# caught quickly.
+PIN_REVALIDATE_SECS=900
+PIN_LAST_OK=0
+
+hub_pin_ok() {
+    local now hostport host port leaf
+    now=$(date +%s)
+    if [[ "$PIN_LAST_OK" -ne 0 && $((now - PIN_LAST_OK)) -lt "$PIN_REVALIDATE_SECS" ]]; then
+        return 0
+    fi
+
+    hostport="${HUB_URL#https://}"
+    hostport="${hostport%%/*}"
+    host="${hostport%%:*}"
+    port="${hostport##*:}"
+    [[ "$port" == "$host" ]] && port=443
+
+    # No -servername for a bare address: SNI carries host names, not IPs.
+    local sni=()
+    case "$host" in
+        *[!0-9.]*) sni=(-servername "$host") ;;
+    esac
+
+    leaf=$(/usr/bin/openssl s_client -connect "$host:$port" ${sni[@]+"${sni[@]}"} \
+               -showcerts </dev/null 2>/dev/null | /usr/bin/openssl x509 2>/dev/null)
+    if [[ -z "$leaf" ]]; then
+        report_transport_refusal "no TLS handshake with $host:$port, so the hub could not prove its identity."
+        return 1
+    fi
+    if ! printf '%s\n' "$leaf" | /usr/bin/openssl verify -CAfile "$CA_PATH" /dev/stdin >/dev/null 2>&1; then
+        report_transport_refusal "the certificate $host:$port presented does not chain to the CA this endpoint was enrolled with. Something other than the hub answered, and nothing it says will be acted on."
+        return 1
+    fi
+
+    PIN_LAST_OK="$now"
+    return 0
+}
+
+hub_transport_ready() {
+    if [[ "$HUB_URL" != https://* ]]; then
+        if [[ "${OMINULL_ALLOW_PLAINTEXT:-0}" == "1" ]]; then
+            return 0
+        fi
+        report_transport_refusal "the configured hub URL is not https://. Re-enrol this endpoint against the hub's TLS address, or set OMINULL_ALLOW_PLAINTEXT=1 to accept a cleartext transport deliberately."
+        return 1
+    fi
+    if [[ ! -r "$CA_PATH" ]]; then
+        report_transport_refusal "the CA certificate $CA_PATH cannot be read. Enrolment installs it; without it the hub's identity cannot be checked."
+        return 1
+    fi
+    hub_pin_ok
+}
 
 # json_field pulls one string value out of a flat JSON object body.
 json_field() {
@@ -107,8 +223,8 @@ apply_agent_update() {
         set -e
         printf '%s\n' "$OMINULL_RELEASE_PUBKEY" > "$UPDATE_DIR/release.pub"
         chmod 600 "$UPDATE_DIR/release.pub"
-        curl -fsSL -m 300 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz" "${HUB_URL}${pkg_path}"
-        curl -fsSL -m 60 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz.sig" "${HUB_URL}${sig_path}"
+        hub_curl -fsSL -m 300 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz" "${HUB_URL}${pkg_path}"
+        hub_curl -fsSL -m 60 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz.sig" "${HUB_URL}${sig_path}"
         echo "$sha  $UPDATE_DIR/agent.tar.gz" | shasum -a 256 -c -
         /usr/bin/openssl dgst -sha256 -verify "$UPDATE_DIR/release.pub" \
             -signature "$UPDATE_DIR/agent.tar.gz.sig" "$UPDATE_DIR/agent.tar.gz"
@@ -142,10 +258,20 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.3.3)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.4.1)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
+if [[ "$HUB_URL" == https://* ]]; then
+    echo "[+] Hub trust: TLS, pinned to $CA_PATH"
+else
+    echo "[+] Hub trust: NONE - cleartext transport"
+fi
 
 while true; do
+    if ! hub_transport_ready; then
+        sleep 3
+        continue
+    fi
+
     # Report nothing rather than something invented. A fixed fallback address
     # and a shared placeholder MAC used to stand in here; both are harmful now
     # that the hub keys asset identity on what the agent reports, because every
@@ -198,7 +324,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.3.3 (PF)",
+  "driver_version": "1.4.1 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -208,14 +334,17 @@ JSON
     # 3. Stream Telemetry Batch to Hub
     # Keep the response: the hub answers a telemetry POST with the agent_update
     # descriptor, which is how this agent learns a release exists at all.
-    RESPONSE=$(curl -sSL -m 5 -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+    # stderr is deliberately not discarded: a rejected certificate is the one
+    # failure this daemon must not swallow, and it used to look exactly like the
+    # hub being unreachable.
+    RESPONSE=$(hub_curl -sSL -m 5 -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
         -d "$PAYLOAD" \
-        "$HUB_URL/api/v1/events?api_key=$API_KEY" 2>/dev/null || true)
+        "$HUB_URL/api/v1/events?api_key=$API_KEY" || true)
 
     apply_agent_update "$RESPONSE"
 
     # 4. Check Dynamic Host Network Isolation Status
-    NEW_ISOLATED=$(curl -sSL -m 5 -H "X-API-Key: $API_KEY" "$HUB_URL/api/v1/endpoints?api_key=$API_KEY" 2>/dev/null | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
+    NEW_ISOLATED=$(hub_curl -sSL -m 5 -H "X-API-Key: $API_KEY" "$HUB_URL/api/v1/endpoints?api_key=$API_KEY" | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
     if [[ "$NEW_ISOLATED" == "true" && "$IS_ISOLATED" != "true" ]]; then
         echo "[!] Threat Nullification: ACTIVATING MACOS PACKET FILTER ISOLATION..."
         /opt/ominull/pf_engine.sh isolate 10.0.0.58 2>/dev/null || /opt/ominull/pf_engine.sh isolate 10.0.0.57 2>/dev/null || true

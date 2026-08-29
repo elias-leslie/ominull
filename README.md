@@ -145,13 +145,25 @@ CGO_ENABLED=1 go build -o bin/ominull-hub cmd/main.go
 
 # 2. Start the Hub
 ./bin/ominull-hub \
-  -addr "0.0.0.0:9999" \
-  -key "<your-admin-key>" \
-  -url "http://10.0.0.58:9999" \
-  -db "/opt/ominull/data/ominull.db"
+  --listen ":9999" \
+  --tls-listen ":9443" \
+  --admin-key "<your-admin-key>" \
+  --hub-url "https://omi.example.com" \
+  --agent-hub-url "https://10.0.0.58:9443" \
+  --binary-dir "/opt/ominull/bin" \
+  --db "/opt/ominull/data/ominull.db"
 ```
 
 Open the embedded Web Console at `http://<hub-ip>:9999` and authenticate with your API key.
+
+**Agent transport.** `--tls-listen` is what the fleet talks to. The hub signs its
+own certificate with the CA it serves at `/api/v1/pki/ca.crt`, enrolment installs
+that CA on every endpoint, and each agent verifies the hub against it and no
+other anchor — refusing to report rather than falling back to cleartext if it
+cannot. `--agent-hub-url` is the address written into an enrolled agent's config,
+kept separate from `--hub-url` so the hub can be published to operators through a
+proxy while the fleet dials it directly. Design and rationale:
+[`docs/AGENT_TLS.md`](docs/AGENT_TLS.md).
 
 ---
 

@@ -1,5 +1,7 @@
 #include "../include/agent.h"
 
+#define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
+
 static void PrintUsage(const char* prog) {
     printf("Ominull Endpoint Agent (v%s)\n", OMINULL_AGENT_VERSION);
     printf("Usage:\n");
@@ -7,13 +9,17 @@ static void PrintUsage(const char* prog) {
     printf("  %s --service --hub <url> --key <api_key>   Run under Service Control Manager\n", prog);
     printf("  %s --install --hub <url> --key <api_key>   Install Windows Service\n", prog);
     printf("  %s --uninstall                             Uninstall Windows Service\n", prog);
+    printf("\nOptions:\n");
+    printf("  --ca <path>          CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
+    printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
 }
 
 int main(int argc, char* argv[]) {
     AGENT_CONFIG config;
     ZeroMemory(&config, sizeof(config));
-    strcpy(config.hub_url, "http://10.0.0.58:9999");
+    strcpy(config.hub_url, "https://10.0.0.58:9443");
     strcpy(config.api_key, "<provision-via-bootstrap>");
+    strcpy(config.ca_path, OMINULL_DEFAULT_CA_PATH);
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-home");
 
@@ -55,6 +61,10 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
         } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
+            strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
+        } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
+            config.allow_plaintext = true;
         } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
             config.verbose = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -64,7 +74,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (doInstall) {
-        return Service_Install(config.hub_url, config.api_key) ? 0 : 1;
+        return Service_Install(&config) ? 0 : 1;
     }
 
     if (doUninstall) {
@@ -81,6 +91,12 @@ int main(int argc, char* argv[]) {
     if (doConsole) {
         printf("[*] Starting Ominull Agent in Console Mode (PID: %lu)...\n", GetCurrentProcessId());
         printf("[*] Connecting to Hub at: %s (Key: %s)\n", config.hub_url, config.api_key);
+        if (Hub_UsesTLS(&config)) {
+            printf("[*] Hub trust: TLS, pinned to %s\n", config.ca_path);
+        } else {
+            printf("[*] Hub trust: NONE - cleartext transport%s\n",
+                   config.allow_plaintext ? " (--allow-plaintext)" : " (will refuse to report)");
+        }
         RunAgentLoop(&config);
         return 0;
     }

@@ -104,39 +104,19 @@ static bool IsHexDigest(const char* s) {
 
 /* ------------------------------------------------------------------- HTTP */
 
-/* SplitHubURL mirrors the parsing Hub_SendTelemetryBatch does, so a download
- * goes to exactly the hub the agent is already configured to talk to. */
-static void SplitHubURL(const char* hubUrl, char* host, size_t hostLen, INTERNET_PORT* port, BOOL* isHttps) {
-    const char* p = hubUrl;
-    *isHttps = FALSE;
-    *port = 80;
-    if (strncmp(p, "https://", 8) == 0) {
-        *isHttps = TRUE;
-        *port = 443;
-        p += 8;
-    } else if (strncmp(p, "http://", 7) == 0) {
-        p += 7;
-    }
-    const char* colon = strchr(p, ':');
-    const char* slash = strchr(p, '/');
-    if (colon) {
-        snprintf(host, hostLen, "%.*s", (int)(colon - p), p);
-        *port = (INTERNET_PORT)atoi(colon + 1);
-    } else if (slash) {
-        snprintf(host, hostLen, "%.*s", (int)(slash - p), p);
-    } else {
-        snprintf(host, hostLen, "%s", p);
-    }
-}
-
 /* DownloadToFile fetches one hub path into a file, replacing whatever is there.
  * A short or failed download leaves no file behind, so a later step can never
  * pick up a partial one. */
 static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const char* destPath) {
+    /* The download carries the API key too, and it is fetched from wherever the
+     * agent is pointed. Prove that is the enrolled hub before asking it for
+     * anything. */
+    if (!Hub_TransportReady(config)) return false;
+
     char host[128] = {0};
-    INTERNET_PORT port = 80;
+    WORD port = 80;
     BOOL isHttps = FALSE;
-    SplitHubURL(config->hub_url, host, sizeof(host), &port, &isHttps);
+    Hub_SplitURL(config->hub_url, host, sizeof(host), &port, &isHttps);
 
     WCHAR wHost[128] = {0}, wPath[512] = {0};
     MultiByteToWideChar(CP_UTF8, 0, host, -1, wHost, 128);
@@ -156,11 +136,9 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
                                   WINHTTP_DEFAULT_ACCEPT_TYPES, isHttps ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) goto done;
 
-    if (isHttps) {
-        DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
-                        SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
-    }
+    /* No SECURITY_FLAG_IGNORE_* overrides here either. The release signature
+     * already makes a forged package uninstallable; refusing an unverifiable
+     * hub keeps a hostile path from serving one at all. */
 
     {
         WCHAR wHeaders[512] = {0}, wKey[128] = {0};
@@ -172,6 +150,7 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) goto done;
     if (!WinHttpReceiveResponse(hRequest, NULL)) goto done;
+    if (!Hub_VerifyRequestPin(hRequest, config)) goto done;
 
     {
         DWORD status = 0, statusLen = sizeof(status);

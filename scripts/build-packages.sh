@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.3.3"
+VERSION="1.4.1"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.3.3
+Version: 1.4.1
 Section: security
 Priority: optional
 Architecture: amd64
@@ -58,7 +58,7 @@ chmod 700 /var/lib/ominull/updates
 if [ ! -f /etc/ominull/agent.conf ]; then
     cat << 'CONF' > /etc/ominull/agent.conf
 # Ominull agent runtime arguments. Written once at install and preserved on upgrade.
-OMINULL_ARGS=--hub https://omi.example.com --key <provision-via-bootstrap> --role workstation --location loc-default
+OMINULL_ARGS=--hub https://omi.example.com --key <provision-via-bootstrap> --role workstation --location loc-default --ca /etc/ominull/ca.crt
 CONF
     chmod 600 /etc/ominull/agent.conf
 fi
@@ -124,10 +124,11 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         -o "${ROOT_DIR}/agent/bin/ominulld.exe" \
         "${ROOT_DIR}/agent/src/main.c" \
         "${ROOT_DIR}/agent/src/hub_client.c" \
+        "${ROOT_DIR}/agent/src/hub_tls.c" \
         "${ROOT_DIR}/agent/src/service.c" \
         "${ROOT_DIR}/agent/src/driver_client.c" \
         "${ROOT_DIR}/agent/src/updater.c" \
-        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt
+        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
     cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
 elif [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
     echo "  [!] mingw-w64 not installed; packaging the previously built ominulld.exe"
@@ -143,16 +144,24 @@ param(
     [string]$HubURL = "https://omi.example.com",
     [string]$APIKey = "<provision-via-bootstrap>",
     [string]$Role = "workstation",
-    [string]$Location = "loc-home"
+    [string]$Location = "loc-home",
+    [string]$CAPath = "C:\Program Files\Ominull\ca.crt"
 )
 $InstallDir = "C:\Program Files\Ominull"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item ".\ominulld.exe" -Destination "$InstallDir\ominulld.exe" -Force
 
+# The agent verifies the hub against this file and nothing else, so an install
+# that cannot find it produces a service that refuses to report rather than one
+# that reports in the clear.
+if (-not (Test-Path $CAPath)) {
+    Write-Host "[!] No CA at $CAPath. Enrol through the hub's bootstrap script, or fetch $HubURL/api/v1/pki/ca.crt to that path first." -ForegroundColor Yellow
+}
+
 # Register through the agent's own installer. Registering the binPath by hand omits the
 # --service flag the SCM entry point requires, and the service then exits immediately.
 & "$InstallDir\ominulld.exe" --uninstall 2>$null | Out-Null
-& "$InstallDir\ominulld.exe" --install --hub $HubURL --key $APIKey --role $Role --location $Location
+& "$InstallDir\ominulld.exe" --install --hub $HubURL --key $APIKey --role $Role --location $Location --ca $CAPath
 sc.exe start ominulld
 Write-Host "[+] Ominull Windows Agent installed and started successfully!" -ForegroundColor Green
 WIN_INSTALL
@@ -184,6 +193,10 @@ cat << 'MAC_PLIST' > "${MAC_DIR}/dev.ominull.daemon.plist"
         <string>/usr/local/bin/ominull_mac_daemon.sh</string>
         <string>https://omi.example.com</string>
         <string><provision-via-bootstrap></string>
+        <string>workstation</string>
+        <string>loc-home</string>
+        <string></string>
+        <string>/opt/ominull/ca.crt</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

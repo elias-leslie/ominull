@@ -253,14 +253,38 @@ void Service_EnsureRecovery(void) {
     CloseServiceHandle(schSCManager);
 }
 
-bool Service_Install(const char* hubUrl, const char* apiKey) {
+bool Service_Install(const AGENT_CONFIG* config) {
+    if (!config) return false;
+
     char binaryPath[MAX_PATH];
     if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) {
         return false;
     }
 
-    char cmdLine[MAX_PATH * 2];
-    snprintf(cmdLine, sizeof(cmdLine), "\"%s\" --service --hub %s --key %s", binaryPath, hubUrl, apiKey);
+    /* The SCM command line is the only place the service's configuration
+     * exists - ServiceMain gets SCM's argv, not this one - so everything the
+     * running agent needs has to be written here. It used to carry only the hub
+     * URL and the key, which silently dropped the role and location an operator
+     * enrolled with; the CA path would have gone the same way, leaving a
+     * service that could not verify the hub it was installed to talk to.
+     *
+     * The quoting matters: a CA path under Program Files contains a space, and
+     * an unquoted one would be parsed as two arguments. */
+    char cmdLine[MAX_PATH * 4];
+    int n = snprintf(cmdLine, sizeof(cmdLine),
+                     "\"%s\" --service --hub %s --key %s --role %s --location %s --id %s --ca \"%s\"",
+                     binaryPath, config->hub_url, config->api_key,
+                     config->role_tag[0] ? config->role_tag : "workstation",
+                     config->location_id[0] ? config->location_id : "loc-home",
+                     config->endpoint_id, config->ca_path);
+    if (n > 0 && (size_t)n < sizeof(cmdLine) &&
+        config->cf_client_id[0] && config->cf_client_secret[0]) {
+        snprintf(cmdLine + n, sizeof(cmdLine) - n, " --cf-id %s --cf-secret %s",
+                 config->cf_client_id, config->cf_client_secret);
+    }
+    if (config->allow_plaintext) {
+        strncat(cmdLine, " --allow-plaintext", sizeof(cmdLine) - strlen(cmdLine) - 1);
+    }
 
     SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!schSCManager) {

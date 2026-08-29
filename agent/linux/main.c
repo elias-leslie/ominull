@@ -17,7 +17,13 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.3.3"
+#define OMINULL_LINUX_AGENT_VERSION "1.4.1"
+
+// Where enrolment leaves the hub's CA certificate. The agent verifies every
+// hub connection against this file and nothing else, so it sits beside the
+// enrolment config in /etc rather than under the install prefix: an upgrade
+// replaces /opt/ominull, and the trust anchor has to survive that.
+#define OMINULL_DEFAULT_CA_PATH "/etc/ominull/ca.crt"
 
 // Where a downloaded release is staged before it is verified and installed.
 // This must be a directory only root can write. The previous implementation
@@ -50,8 +56,10 @@ typedef struct {
     char cf_client_secret[128];
     char primary_ip[64];
     char primary_mac[32];
+    char ca_path[256];
     bool verbose;
     bool auto_update;
+    bool allow_plaintext;
 } LINUX_AGENT_CONFIG;
 
 typedef struct {
@@ -70,9 +78,75 @@ typedef struct {
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
-    printf("  %s --hub <url> --key <api_key> [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [-v]\n", prog);
+    printf("  %s --hub <url> --key <api_key> [--ca <path>] [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
     printf("\nOptions:\n");
+    printf("  --ca <path>        CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
+    printf("  --allow-plaintext  Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
     printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Hub transport
+ *
+ * Everything this agent sends carries the tenant API key, and everything it
+ * receives can move the host: an isolation command, a mesh quarantine list, a
+ * release to install. On plain HTTP all of that is readable and writable by
+ * anyone on the path, so the transport is checked before a batch is built
+ * rather than after a failure.
+ *
+ * The check has no degraded mode. An agent that cannot verify the hub keeps
+ * enforcing locally and says so on every attempt; it does not fall back to
+ * HTTP, because a silent downgrade is exactly the outcome an on-path attacker
+ * would be trying to force.
+ * ------------------------------------------------------------------------- */
+
+static bool HubUsesTLS(const LINUX_AGENT_CONFIG* config) {
+    return strncmp(config->hub_url, "https://", 8) == 0;
+}
+
+/* Complains at most once a minute. The failure is permanent until an operator
+ * fixes it, and a line every three seconds would bury the rest of the log. */
+static void ReportTransportRefusal(const char* reason) {
+    static time_t lastReport = 0;
+    time_t now = time(NULL);
+    if (lastReport != 0 && now - lastReport < 60) return;
+    lastReport = now;
+    fprintf(stderr, "[!] Refusing to talk to the hub: %s\n", reason);
+    fflush(stderr);
+}
+
+static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
+    if (!HubUsesTLS(config)) {
+        if (config->allow_plaintext) return true;
+        ReportTransportRefusal(
+            "the configured hub URL is not https://. Re-enrol this endpoint against the hub's "
+            "TLS address, or pass --allow-plaintext to accept a cleartext transport deliberately.");
+        return false;
+    }
+    if (config->ca_path[0] == '\0') {
+        ReportTransportRefusal("no CA certificate is configured; pass --ca <path>.");
+        return false;
+    }
+    if (access(config->ca_path, R_OK) != 0) {
+        char reason[512];
+        snprintf(reason, sizeof(reason),
+                 "the CA certificate %s cannot be read (%s). Enrolment installs it; without it "
+                 "the hub's identity cannot be checked.", config->ca_path, strerror(errno));
+        ReportTransportRefusal(reason);
+        return false;
+    }
+    return true;
+}
+
+/* The curl flags that make a hub connection verifiable: trust this CA and no
+ * other, and refuse to follow a redirect off TLS. Without --proto a redirect
+ * to http:// would hand the API key over in the clear on the next hop. */
+static void HubCurlSecurityArgs(const LINUX_AGENT_CONFIG* config, char* out, size_t outLen) {
+    if (HubUsesTLS(config)) {
+        snprintf(out, outLen, "--cacert \"%s\" --proto =https --proto-redir =https", config->ca_path);
+    } else {
+        out[0] = '\0';
+    }
 }
 
 static void GetPrimaryNetworkInfo(char* outIp, size_t ipLen, char* outMac, size_t macLen) {
@@ -535,7 +609,15 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
     // inline shell command so that every step is written down in one auditable
     // place, and `set -e` guarantees a failed download, a wrong digest or a bad
     // signature stops before dpkg is ever reached.
-    char script[3072];
+    /* The release signature is what makes an update safe, and it is checked
+     * below regardless. The CA pin here is a second, earlier line: it keeps the
+     * package from being fetched from anyone but the hub in the first place,
+     * so a hostile path cannot even spend the endpoint's bandwidth or learn
+     * which version it is on. */
+    char curlSec[320];
+    HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
+
+    char script[3584];
     int n = snprintf(script, sizeof(script),
         "#!/bin/sh\n"
         "set -e\n"
@@ -543,8 +625,8 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         "exec >>/var/log/ominull-update.log 2>&1\n"
         "echo \"=== $(date -u '+%%Y-%%m-%%dT%%H:%%M:%%SZ') updating to v%s ===\"\n"
         "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
-        "curl -fsSL -m 300 -o \"$D/agent.deb\" \"%s%s\"\n"
-        "curl -fsSL -m 60 -o \"$D/agent.deb.sig\" \"%s%s\"\n"
+        "curl -fsSL %s -m 300 -o \"$D/agent.deb\" \"%s%s\"\n"
+        "curl -fsSL %s -m 60 -o \"$D/agent.deb.sig\" \"%s%s\"\n"
         "echo \"%s  $D/agent.deb\" | sha256sum -c -\n"
         "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/agent.deb.sig\" \"$D/agent.deb\"\n"
         "echo \"[+] v%s verified against the pinned release key; installing\"\n"
@@ -552,8 +634,8 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
         "systemctl restart ominull-agent.service\n",
         OMINULL_UPDATE_DIR, version,
-        config->hub_url, pkgPath,
-        config->hub_url, sigPath,
+        curlSec, config->hub_url, pkgPath,
+        curlSec, config->hub_url, sigPath,
         sha256, version);
     if (n < 0 || n >= (int)sizeof(script)) {
         printf("[!] Rejected agent update v%s: updater script would be truncated.\n", version);
@@ -569,6 +651,10 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
 }
 
 static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
+    /* Checked before the batch is built, not after it fails: the payload and
+     * the header that authenticates it are the things being protected. */
+    if (!HubTransportReady(config)) return;
+
     struct utsname sysInfo;
     uname(&sysInfo);
 
@@ -627,16 +713,22 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 
     snprintf(jsonBuf + offset, bufCap - offset, "]}");
 
+    char curlSec[320];
+    HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
+
+    /* -sS rather than -s, and stderr is no longer discarded. A rejected
+     * certificate is the one failure this agent must not swallow, and it used
+     * to look identical to the hub being down. */
     char cmd[bufCap + 2048];
     if (config->cf_client_id[0] && config->cf_client_secret[0]) {
         snprintf(cmd, sizeof(cmd),
-            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\" 2>/dev/null",
-            config->api_key, config->cf_client_id, config->cf_client_secret, jsonBuf, config->hub_url
+            "curl -sS %s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\"",
+            curlSec, config->api_key, config->cf_client_id, config->cf_client_secret, jsonBuf, config->hub_url
         );
     } else {
         snprintf(cmd, sizeof(cmd),
-            "curl -s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\" 2>/dev/null",
-            config->api_key, jsonBuf, config->hub_url
+            "curl -sS %s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\"",
+            curlSec, config->api_key, jsonBuf, config->hub_url
         );
     }
 
@@ -659,8 +751,9 @@ int main(int argc, char* argv[]) {
 
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
-    strcpy(config.hub_url, "http://127.0.0.1:9999");
+    strcpy(config.hub_url, "https://127.0.0.1:9443");
     strcpy(config.api_key, "<provision-via-bootstrap>");
+    strcpy(config.ca_path, OMINULL_DEFAULT_CA_PATH);
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-default");
     config.auto_update = true;
@@ -683,6 +776,10 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
         } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
+            strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
+        } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
+            config.allow_plaintext = true;
         } else if (strcmp(argv[i], "--no-auto-update") == 0) {
             config.auto_update = false;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
@@ -709,6 +806,12 @@ int main(int argc, char* argv[]) {
     printf("  Hostname:      %s\n", config.hostname);
     printf("  Kernel / OS:   %s %s (%s)\n", sysInfo.sysname, sysInfo.release, sysInfo.machine);
     printf("  Hub Endpoint:  %s\n", config.hub_url);
+    if (HubUsesTLS(&config)) {
+        printf("  Hub Trust:     TLS, pinned to %s\n", config.ca_path);
+    } else {
+        printf("  Hub Trust:     NONE - cleartext transport%s\n",
+               config.allow_plaintext ? " (--allow-plaintext)" : " (will refuse to report)");
+    }
     printf("  Agent Version: %s (self-update %s)\n", OMINULL_LINUX_AGENT_VERSION,
            config.auto_update ? "enabled" : "disabled");
     printf("===============================================================================\n");
