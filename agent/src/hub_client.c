@@ -280,6 +280,12 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         return false;
     }
 
+    /* Present this endpoint's certificate, when enrolment issued one. It has to
+     * be set on the handle before WinHttpSendRequest: the client certificate is
+     * chosen during the handshake, and by the time the request has been sent
+     * there is nothing left to negotiate. */
+    Hub_AttachClientCert(hRequest, config);
+
     /* No SECURITY_FLAG_IGNORE_* overrides. They were here because there was no
      * trusted anchor to check against; enrolment installs the hub's CA now, so
      * an unknown issuer, a mismatched name or an expired certificate fails the
@@ -353,10 +359,31 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         static DWORD lastAuthReport = 0;
         DWORD now = GetTickCount();
         if (lastAuthReport == 0 || now - lastAuthReport >= 60000) {
-            printf("[!] The hub refused this endpoint's telemetry with HTTP %lu. The API key in "
-                   "--key-file is not one it accepts; nothing is being recorded until it is fixed.\n",
-                   dwStatusCode);
+            /* 403 while presenting a certificate is the identity check and not
+             * the key: the hub compares the name in the certificate against the
+             * endpoint id being reported and refuses the two disagreeing. */
+            if (dwStatusCode == 403 && Hub_HasClientCert()) {
+                printf("[!] The hub refused this endpoint's telemetry with HTTP %lu. It reports as "
+                       "\"%s\", which is not the endpoint named by %s; re-enrol or correct --id. "
+                       "Nothing is being recorded until it is fixed.\n",
+                       dwStatusCode, config->endpoint_id, config->client_pfx_path);
+            } else {
+                printf("[!] The hub refused this endpoint's telemetry with HTTP %lu. The API key in "
+                       "--key-file is not one it accepts; nothing is being recorded until it is fixed.\n",
+                       dwStatusCode);
+            }
             lastAuthReport = now;
+        }
+    } else if (dwStatusCode >= 200 && dwStatusCode < 300) {
+        /* Reported from evidence, once. The startup banner says what the agent
+         * is about to do; this says the hub actually took it. */
+        static bool everAccepted = false;
+        if (!everAccepted) {
+            everAccepted = true;
+            printf("[+] The hub accepted this endpoint's first telemetry batch (HTTP %lu).\n", dwStatusCode);
+        }
+        if (config->verbose) {
+            printf("[*] Telemetry POST status: HTTP %lu\n", dwStatusCode);
         }
     } else if (config->verbose || !bResults || dwStatusCode != 200) {
         printf("[*] Telemetry POST status: HTTP %lu (WinHTTP: %d, Err: %lu)\n", dwStatusCode, bResults, GetLastError());

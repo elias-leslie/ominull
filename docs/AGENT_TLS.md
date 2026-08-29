@@ -200,12 +200,71 @@ Enrolment did not change shape. The bootstrap script still passes `--key` to
 the binary but never the registration, `Service_MigrateKeyToFile` runs on every
 service start and repairs an endpoint enrolled before this existed.
 
+## Which endpoint is calling (v1.5.0)
+
+TLS proves the hub to the agent. Until v1.5.0 nothing proved the agent to the
+hub. The API key is issued per *tenant*, not per host, so every agent on the
+fleet carries the same one — and the hub believed the `endpoint_id` in the
+request body. A key lifted from any endpoint could therefore post telemetry as
+any other host, read another host's configuration, or take its update
+descriptor. That was not a transport problem, so encrypting the transport did
+not fix it.
+
+Enrolment now issues each endpoint a certificate from the hub's own CA, with the
+endpoint id as the common name.
+
+| Platform | Material | Presented by |
+|---|---|---|
+| Linux | `/etc/ominull/client.crt` + `client.key` (`0600`) | `curl --cert/--key` |
+| macOS | `/opt/ominull/client.crt` + `client.key` (`0600`) | `curl --cert/--key`, paths in the plist |
+| Windows | `client.pfx` beside the binary, SYSTEM + Administrators | `WINHTTP_OPTION_CLIENT_CERT_CONTEXT` |
+
+Windows needs the PKCS#12 form because WinHTTP wants a certificate context that
+already has its private key attached, and `PFXImportCertStore` is the only way
+to build one from a file. The archive has no password: it is written where only
+SYSTEM and Administrators can read it, and a password stored beside the thing it
+protects would add nothing. `PKCS12_NO_PERSIST_KEY` keeps the key in the
+process's memory instead of leaving a container in the machine key store on
+every load.
+
+On the hub, `endpointIdentityOK` refuses any request whose `endpoint_id`
+disagrees with the common name in a verified client certificate — 403, on
+`/api/v1/events` and `/api/v1/agent/config` alike. The name comes from
+`r.TLS.VerifiedChains`, never `PeerCertificates`: the latter is what the client
+sent, the former is what the hub verified. `authMiddleware` deletes an inbound
+`X-Client-CN` before setting its own, so the header cannot be used to claim an
+identity the handshake did not establish.
+
+Two deliberate softnesses, both about being able to migrate a live fleet:
+
+- The listener runs `VerifyClientCertIfGiven`, not `RequireAndVerifyClientCert`.
+  A presented certificate is fully verified either way; what "if given" buys is
+  that an endpoint which has not enrolled one yet keeps reporting instead of
+  being cut off by a hub it can no longer reach to be told to enrol.
+  `--require-client-certs` closes that, and the safe order is: ship
+  certificates, confirm every endpoint presents one, then require them.
+- An enrolment that fails warns and carries on rather than aborting the install.
+  A host with a trust anchor and no running agent is worse than one reporting
+  under the API key alone.
+
+`TestClientCertificateBindsARequestToOneEndpoint` covers reporting as itself,
+being refused as another host, the same binding on the update descriptor, and a
+forged `X-Client-CN` changing nothing.
+`TestClientCertificateFromAnotherCAIsRefused` covers a certificate from a
+foreign CA and the `--require-client-certs` handshake.
+
+```bash
+# What an enrolled endpoint does on every request.
+curl --cacert /etc/ominull/ca.crt \
+     --cert /etc/ominull/client.crt --key /etc/ominull/client.key \
+     -H "X-API-Key: $TENANT_KEY" -d '{"type":"telemetry","endpoint_id":"<its own id>","events":[]}' \
+     https://<hub-ip>:9443/api/v1/events
+
+# The same call naming a different host: 403, certificate does not name this endpoint.
+```
+
 ## Still open
 
-- **No client certificates.** `pkg/pki` can issue them and `/api/v1/pki/enroll`
-  serves them, but the fleet authenticates with the tenant API key over a
-  verified channel rather than with mTLS. The key is no longer exposed on the
-  wire, which was the reason mTLS would have been urgent.
 - **The hub still accepts the API key on its plain listener.** Closing that means
   running with `--listen ""`, which an operator can do once every endpoint has
   moved across, but it is not the default while the console and CLI use it.

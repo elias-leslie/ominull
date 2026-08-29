@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"software.sslmate.com/src/go-pkcs12"
 )
 
 type Manager struct {
@@ -138,6 +141,25 @@ type ClientCertBundle struct {
 	CertPEM []byte `json:"cert_pem"`
 	KeyPEM  []byte `json:"key_pem"`
 	CAPEM   []byte `json:"ca_pem"`
+	// PFXBase64 is the same material as PKCS#12, for Windows. WinHTTP wants a
+	// certificate context that already has its private key attached, and the
+	// only way to build one of those from a file is PFXImportCertStore, which
+	// takes PKCS#12 and nothing else. The archive has no password: it is
+	// written to a file only SYSTEM and Administrators can read, and a password
+	// stored beside it would protect nothing.
+	PFXBase64 string `json:"pfx_base64,omitempty"`
+}
+
+// ClientCAPool returns the pool a TLS listener verifies agent certificates
+// against. It is the hub's own CA and nothing else - the fleet's certificates
+// come from here, so a client certificate signed by any other authority,
+// including a publicly trusted one, is not an Ominull endpoint.
+func (m *Manager) ClientCAPool() *x509.CertPool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	pool := x509.NewCertPool()
+	pool.AddCert(m.caCert)
+	return pool
 }
 
 func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, error) {
@@ -179,10 +201,23 @@ func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, er
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})
 
+	leaf, err := x509.ParseCertificate(derBytes)
+	if err != nil {
+		return nil, err
+	}
+	// Modern encoders default to AES; the legacy RC2/3DES profile is what
+	// PFXImportCertStore accepts everywhere, and this archive exists only to be
+	// read back by that call.
+	pfx, err := pkcs12.LegacyRC2.Encode(clientKey, leaf, []*x509.Certificate{m.caCert}, "")
+	if err != nil {
+		return nil, fmt.Errorf("encoding the PKCS#12 form of the client certificate: %w", err)
+	}
+
 	return &ClientCertBundle{
-		CertPEM: certPEM,
-		KeyPEM:  keyPEM,
-		CAPEM:   m.caPEM,
+		CertPEM:   certPEM,
+		KeyPEM:    keyPEM,
+		CAPEM:     m.caPEM,
+		PFXBase64: base64.StdEncoding.EncodeToString(pfx),
 	}, nil
 }
 

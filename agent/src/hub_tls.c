@@ -230,6 +230,13 @@ static bool Preflight(const AGENT_CONFIG* config) {
                                   WINHTTP_FLAG_SECURE);
     if (!hRequest) goto done;
 
+    /* The preflight needs the client certificate too. A hub started with
+     * --require-client-certs asks for one during the handshake, and it is the
+     * handshake this request exists to complete - without it the preflight
+     * would fail and the agent would report the hub as unverifiable when the
+     * real problem is that it never introduced itself. */
+    Hub_AttachClientCert(hRequest, config);
+
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
         char reason[256];
         snprintf(reason, sizeof(reason),
@@ -274,5 +281,120 @@ bool Hub_TransportReady(const AGENT_CONFIG* config) {
         return false;
     }
     lastOk = now;
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Client identity
+ *
+ * The API key proves membership of a tenant, not identity: every agent on the
+ * tenant carries the same one, so a key lifted from any endpoint can be used to
+ * report as any other. The certificate below is what separates the two. It is
+ * issued to this endpoint's id at enrolment, and the hub refuses telemetry
+ * whose endpoint_id disagrees with the name in the certificate it was sent
+ * under.
+ *
+ * The archive has no password. It is written to a file only SYSTEM and
+ * Administrators can read, and a password stored beside the thing it protects
+ * would only make the code longer. PKCS12_NO_PERSIST_KEY keeps the private key
+ * in this process's memory rather than adding a container to the machine key
+ * store on every load; the CRYPT_MACHINE_KEYSET fallback is for hosts too old
+ * to support that.
+ * ------------------------------------------------------------------------- */
+
+#define CLIENT_CERT_RETRY_MS 60000
+
+static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
+    HANDLE hFile = CreateFileA(pfxPath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return NULL;
+
+    DWORD size = GetFileSize(hFile, NULL);
+    if (size == INVALID_FILE_SIZE || size == 0 || size > 64 * 1024) {
+        CloseHandle(hFile);
+        return NULL;
+    }
+    BYTE* raw = (BYTE*)malloc(size);
+    if (!raw) {
+        CloseHandle(hFile);
+        return NULL;
+    }
+    DWORD got = 0;
+    BOOL read = ReadFile(hFile, raw, size, &got, NULL);
+    CloseHandle(hFile);
+    if (!read || got == 0) {
+        free(raw);
+        return NULL;
+    }
+
+    CRYPT_DATA_BLOB blob;
+    blob.cbData = got;
+    blob.pbData = raw;
+
+    HCERTSTORE store = PFXImportCertStore(&blob, L"", PKCS12_NO_PERSIST_KEY);
+    if (!store) store = PFXImportCertStore(&blob, NULL, PKCS12_NO_PERSIST_KEY);
+    if (!store) store = PFXImportCertStore(&blob, L"", CRYPT_MACHINE_KEYSET);
+    SecureZeroMemory(raw, got);
+    free(raw);
+    if (!store) return NULL;
+
+    /* Only a certificate that arrived with its key is usable: WinHTTP needs the
+     * context to be able to sign the handshake, and a bare certificate in the
+     * archive would be accepted here and then fail silently at connect time. */
+    PCCERT_CONTEXT found = CertFindCertificateInStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                                      0, CERT_FIND_HAS_PRIVATE_KEY, NULL, NULL);
+    PCCERT_CONTEXT out = found ? CertDuplicateCertificateContext(found) : NULL;
+    if (found) CertFreeCertificateContext(found);
+    /* The store is closed but not forced: the duplicated context holds a
+     * reference to it, and with PKCS12_NO_PERSIST_KEY that reference is what
+     * keeps the in-memory private key alive. */
+    CertCloseStore(store, 0);
+    return out;
+}
+
+/* Hub_AttachClientCert gives the request this endpoint's certificate when one
+ * has been issued. It is deliberately not fatal when there is none: an endpoint
+ * enrolled before certificates existed, or one whose enrolment was interrupted,
+ * keeps reporting under the API key alone rather than falling off the fleet.
+ * The hub decides whether that is still acceptable - started with
+ * --require-client-certs it refuses the handshake, and the failure is then the
+ * hub's to report rather than a silent local downgrade. */
+/* Whether a certificate was loaded and attached to at least one request. The
+ * refusal message reads differently when there is one: a 403 from a hub that
+ * has seen this endpoint's certificate is about which endpoint it claims to be,
+ * not about the key. */
+static bool g_clientCertLoaded = false;
+
+bool Hub_HasClientCert(void) { return g_clientCertLoaded; }
+
+bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
+    static PCCERT_CONTEXT cached = NULL;
+    static DWORD lastAttempt = 0;
+    static bool complained = false;
+
+    if (!Hub_UsesTLS(config) || !config->client_pfx_path[0]) return false;
+
+    if (!cached) {
+        DWORD now = GetTickCount();
+        if (lastAttempt != 0 && (now - lastAttempt) < CLIENT_CERT_RETRY_MS) return false;
+        lastAttempt = now;
+        cached = LoadClientCertFromPFX(config->client_pfx_path);
+        if (!cached) {
+            if (!complained) {
+                complained = true;
+                fprintf(stderr, "[!] No usable client certificate at %s; reporting under the API "
+                                "key alone. Re-run enrolment to get one.\n", config->client_pfx_path);
+            }
+            return false;
+        }
+        complained = false;
+        g_clientCertLoaded = true;
+        printf("[+] Identity: client certificate loaded from %s\n", config->client_pfx_path);
+    }
+
+    if (!WinHttpSetOption((HINTERNET)hRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+                          (LPVOID)cached, sizeof(CERT_CONTEXT))) {
+        return false;
+    }
     return true;
 }

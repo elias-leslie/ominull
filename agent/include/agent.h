@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.4.5"
+#define OMINULL_AGENT_VERSION "1.5.0"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -32,6 +32,10 @@ typedef struct _AGENT_CONFIG {
      * command line. Set, it is what the service registration carries; empty,
      * the key is still inline and Service_MigrateKeyToFile will move it. */
     char key_path[260];
+    /* This endpoint's own certificate and key as a PKCS#12 archive, planted by
+     * enrolment. Presented on every hub connection so the hub can tell which
+     * endpoint is reporting; the API key alone only proves tenant membership. */
+    char client_pfx_path[260];
     bool is_service;
     bool verbose;
     /* Opt-in to a cleartext hub. Off by default: without it the agent refuses
@@ -76,6 +80,12 @@ void Update_CheckStartup(const AGENT_CONFIG* config);
 bool Hub_TransportReady(const AGENT_CONFIG* config);
 bool Hub_VerifyRequestPin(void* hRequest, const AGENT_CONFIG* config);
 bool Hub_UsesTLS(const AGENT_CONFIG* config);
+// Attaches this endpoint's client certificate to a request before it is sent.
+// Returns false when there is none, which is not an error: the agent then
+// reports under the API key alone and the hub decides whether to accept that.
+bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config);
+// True once a client certificate has been loaded and attached to a request.
+bool Hub_HasClientCert(void);
 // Splits a hub URL into host, port and scheme. port is WinHTTP's INTERNET_PORT,
 // spelled as the WORD it is so this header stays usable without winhttp.h.
 void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BOOL* isHttps);

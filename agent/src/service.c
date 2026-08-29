@@ -530,6 +530,11 @@ static int BuildServiceCommandLine(const AGENT_CONFIG* config, const char* binar
         if (m < 0 || (size_t)(n + m) >= cap) return -1;
         n += m;
     }
+    if (config->client_pfx_path[0]) {
+        int m = snprintf(out + n, cap - n, " --client-pfx \"%s\"", config->client_pfx_path);
+        if (m < 0 || (size_t)(n + m) >= cap) return -1;
+        n += m;
+    }
     if (config->verbose) {
         int m = snprintf(out + n, cap - n, " --verbose");
         if (m < 0 || (size_t)(n + m) >= cap) return -1;

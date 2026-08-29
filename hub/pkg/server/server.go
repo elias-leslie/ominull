@@ -112,6 +112,13 @@ type TLSOptions struct {
 	// includes localhost, its own interface addresses and the host in --hub-url;
 	// this covers the cases it cannot see, such as a floating VIP.
 	Hosts []string
+	// RequireClientCerts refuses a TLS handshake from anything that cannot
+	// present a certificate this hub's CA signed. Off by default, because
+	// turning it on before every endpoint has one takes the fleet offline: the
+	// listener stops answering, and an agent cannot be told to enrol by a hub
+	// it can no longer reach. The safe order is to ship certificates, confirm
+	// every endpoint is presenting one, and only then require them.
+	RequireClientCerts bool
 }
 
 // SetTLS installs the HTTPS configuration. Call it before Start.
@@ -364,6 +371,24 @@ func (s *Server) Start(addr string) error {
 func (s *Server) tlsConfig() (*tls.Config, error) {
 	base := &tls.Config{MinVersion: tls.VersionTLS12}
 
+	// Client certificates are verified whenever one is offered, and required
+	// only when an operator says so. VerifyClientCertIfGiven is not a weaker
+	// setting than RequireAndVerify for the thing that matters: a presented
+	// certificate is still checked against the hub's own CA, so a forged one is
+	// rejected at the handshake either way. What the "if given" part buys is a
+	// fleet that can be migrated - an endpoint without a certificate yet keeps
+	// reporting, and handleEvents can see the difference and say so.
+	if s.pki != nil {
+		base.ClientCAs = s.pki.ClientCAPool()
+		base.ClientAuth = tls.VerifyClientCertIfGiven
+		if s.tlsOpts.RequireClientCerts {
+			base.ClientAuth = tls.RequireAndVerifyClientCert
+			log.Printf("[+] TLS client certificates: required (agents without one are refused at the handshake)")
+		}
+	} else if s.tlsOpts.RequireClientCerts {
+		return nil, fmt.Errorf("--require-client-certs needs the hub PKI, which failed to initialize")
+	}
+
 	if s.tlsOpts.CertFile != "" || s.tlsOpts.KeyFile != "" {
 		if s.tlsOpts.CertFile == "" || s.tlsOpts.KeyFile == "" {
 			return nil, fmt.Errorf("--tls-cert and --tls-key must be given together")
@@ -447,8 +472,34 @@ func (s *Server) Close() error {
 	return err
 }
 
+// clientCertCN returns the common name from a client certificate the TLS stack
+// has already verified against the hub CA, or "" when the request arrived
+// without one. It reads only VerifiedChains: r.TLS.PeerCertificates holds
+// whatever the peer sent, verified or not, and trusting that would make the
+// check worthless.
+func clientCertCN(r *http.Request) string {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+		return ""
+	}
+	leaf := r.TLS.VerifiedChains[0][0]
+	return leaf.Subject.CommonName
+}
+
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every header below this line is an assertion by the hub about who the
+		// caller is, and handlers act on them. Clear whatever the client sent
+		// first. Most were overwritten on every path that reaches next() and so
+		// could not be forged, but X-Tenant-ID was not: the admin path never
+		// sets it, so an inbound one survived. Not an escalation on its own -
+		// the caller already held the admin key - but the invariant is worth
+		// stating once here rather than re-deriving it per path.
+		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN"} {
+			r.Header.Del(h)
+		}
+		if cn := clientCertCN(r); cn != "" {
+			r.Header.Set("X-Client-CN", cn)
+		}
 		// 1. Check Bearer JWT Token
 		authHeader := r.Header.Get("Authorization")
 		if strings.HasPrefix(authHeader, "Bearer ") {
@@ -680,6 +731,12 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	endpointID := strings.TrimSpace(r.URL.Query().Get("endpoint_id"))
 	if endpointID == "" {
 		http.Error(w, `{"error":"endpoint_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	// Same binding as the telemetry route. This one hands back an update
+	// descriptor, so answering it for an endpoint the caller cannot prove it is
+	// tells whoever asked which release that host is about to install.
+	if !s.endpointIdentityOK(w, r, endpointID) {
 		return
 	}
 	ep, err := s.store.GetEndpoint(endpointID)
@@ -925,19 +982,29 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Hostname string `json:"hostname"`
-		IP       string `json:"ip"`
+		// EndpointID is what the certificate is issued to. It becomes the
+		// common name, and the hub matches it against the endpoint id in every
+		// later request - so this, not the hostname, is the identity being
+		// minted. Hostname stays for callers that predate it.
+		EndpointID string `json:"endpoint_id"`
+		Hostname   string `json:"hostname"`
+		IP         string `json:"ip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if req.Hostname == "" {
-		req.Hostname = "ominull-endpoint"
+	name := strings.TrimSpace(req.EndpointID)
+	if name == "" {
+		name = strings.TrimSpace(req.Hostname)
+	}
+	if name == "" {
+		http.Error(w, `{"error":"endpoint_id is required: a certificate with no endpoint to name authenticates nothing"}`, http.StatusBadRequest)
+		return
 	}
 
-	bundle, err := s.pki.IssueClientCert(req.Hostname, req.IP)
+	bundle, err := s.pki.IssueClientCert(name, req.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1352,6 +1419,30 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// endpointIdentityOK decides whether a caller may act as endpointID.
+//
+// The API key says which tenant is calling; it does not say which endpoint,
+// because every endpoint in a tenant carries the same key. Until client
+// certificates existed, the endpoint id in the request body was simply
+// believed, so anyone holding the key could post telemetry as any host, read
+// another host's configuration, or take its update descriptor. A verified
+// client certificate is the first thing the hub has that actually names the
+// caller, so where one is present the body has to agree with it.
+//
+// A request without a certificate is still accepted: the fleet has to be able
+// to migrate onto certificates while it is still reporting. That is what
+// --require-client-certs closes, once every endpoint has one.
+func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endpointID string) bool {
+	cn := r.Header.Get("X-Client-CN")
+	if cn == "" || cn == endpointID {
+		return true
+	}
+	log.Printf("[!] %s presented a certificate for %q and asked to act as %q; refused.",
+		r.RemoteAddr, cn, endpointID)
+	http.Error(w, "the client certificate does not name this endpoint", http.StatusForbidden)
+	return false
+}
+
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Role")
 	tenantID := "default"
@@ -1368,6 +1459,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := json.Unmarshal(bodyBytes, &batch); err == nil && batch.EndpointID != "" {
+			if !s.endpointIdentityOK(w, r, batch.EndpointID) {
+				return
+			}
 			ip, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
 				ip = r.RemoteAddr

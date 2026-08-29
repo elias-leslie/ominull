@@ -26,7 +26,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.4.5"
+const defaultAgentVersion = "1.5.0"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
@@ -40,6 +40,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
 	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert")
 	tlsHosts := flag.String("tls-hosts", "", "Comma-separated extra SANs for the self-issued certificate (e.g. a VIP the hub cannot see)")
+	requireClientCerts := flag.Bool("require-client-certs", false, "Refuse agents that cannot present a certificate signed by this hub's CA. Turn on only once every endpoint has one: the listener stops answering the rest, and an agent cannot be told to enrol by a hub it can no longer reach.")
 	flag.Parse()
 
 	resolvedAgentVersion := *agentVersion
@@ -74,10 +75,11 @@ func main() {
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{
-		Listen:   *tlsListen,
-		CertFile: *tlsCert,
-		KeyFile:  *tlsKey,
-		Hosts:    splitList(*tlsHosts),
+		Listen:             *tlsListen,
+		CertFile:           *tlsCert,
+		KeyFile:            *tlsKey,
+		Hosts:              splitList(*tlsHosts),
+		RequireClientCerts: *requireClientCerts,
 	})
 	srv.SetAgentHubURL(*agentHubURL)
 	go func() {
@@ -86,15 +88,27 @@ func main() {
 		}
 	}()
 
+	// --listen may be ":9999" or "127.0.0.1:9999". Pasting "localhost" in front
+	// of the second form printed "http://localhost127.0.0.1:9999", a URL nobody
+	// can paste anywhere.
+	consoleHost := *listenAddr
+	if strings.HasPrefix(consoleHost, ":") {
+		consoleHost = "localhost" + consoleHost
+	}
 	log.Printf("[+] Bundled agent release:      v%s (endpoints below this are offered an update)", resolvedAgentVersion)
-	log.Printf("[+] Bootstrap script endpoint: http://localhost%s/bootstrap.ps1", *listenAddr)
-	log.Printf("[+] Multi-Tenant REST API:    http://localhost%s/api/v1/", *listenAddr)
+	log.Printf("[+] Bootstrap script endpoint: http://%s/bootstrap.ps1", consoleHost)
+	log.Printf("[+] Multi-Tenant REST API:    http://%s/api/v1/", consoleHost)
 	if *tlsListen != "" {
 		agentTarget := *agentHubURL
 		if agentTarget == "" {
 			agentTarget = *hubURL
 		}
 		log.Printf("[+] Agent TLS transport:      %s (enrolment writes %q into agent config)", *tlsListen, agentTarget)
+		if *requireClientCerts {
+			log.Printf("[+] Agent authentication:     client certificate required, verified against the hub CA")
+		} else {
+			log.Printf("[*] Agent authentication:     client certificate verified when offered, API key otherwise. Set --require-client-certs once every endpoint presents one.")
+		}
 		if agentTarget == "" || !strings.HasPrefix(agentTarget, "https://") {
 			log.Printf("[!] Agents are being enrolled against %q, which is not an https:// URL. Telemetry and the API key will cross the network in the clear; set --agent-hub-url to this hub's TLS address.", agentTarget)
 		}

@@ -1,6 +1,7 @@
 #include "../include/agent.h"
 
 #define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
+#define OMINULL_DEFAULT_PFX_PATH "C:\\Program Files\\Ominull\\client.pfx"
 
 /* ReadKeyFile loads the API key written beside the binary at enrolment. The
  * file holds the key and nothing else; trailing whitespace is tolerated because
@@ -35,6 +36,9 @@ static void PrintUsage(const char* prog) {
     printf("  --key-file <path>    Read the API key from a file instead of the command line.\n");
     printf("                       --install rewrites --key into this form; a service command\n");
     printf("                       line is readable through `sc qc` by any logged-on user.\n");
+    printf("  --client-pfx <path>  PKCS#12 archive holding this endpoint's own certificate and key\n");
+    printf("                       (default %s). Presented to the hub so it can\n", OMINULL_DEFAULT_PFX_PATH);
+    printf("                       tell this endpoint from any other holding the same tenant key.\n");
     printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
 }
 
@@ -44,6 +48,7 @@ int main(int argc, char* argv[]) {
     strcpy(config.hub_url, "https://10.0.0.58:9443");
     strcpy(config.api_key, "<provision-via-bootstrap>");
     strcpy(config.ca_path, OMINULL_DEFAULT_CA_PATH);
+    strcpy(config.client_pfx_path, OMINULL_DEFAULT_PFX_PATH);
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-home");
 
@@ -90,6 +95,8 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
         } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
             strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
+        } else if (strcmp(argv[i], "--client-pfx") == 0 && i + 1 < argc) {
+            strncpy(config.client_pfx_path, argv[++i], sizeof(config.client_pfx_path) - 1);
         } else if (strcmp(argv[i], "--key-file") == 0 && i + 1 < argc) {
             strncpy(config.key_path, argv[++i], sizeof(config.key_path) - 1);
         } else if (strcmp(argv[i], "--allow-plaintext") == 0) {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"software.sslmate.com/src/go-pkcs12"
 
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
@@ -91,6 +94,11 @@ func TestBootstrapGenerators(t *testing.T) {
 				`--hub $AgentHubURL`,
 				`--ca "$InstallDir\ca.crt"`,
 				`$AgentHubURL = "https://10.0.0.57:9443"`,
+				"/api/v1/pki/enroll",
+				`$PfxPath = "$InstallDir\client.pfx"`,
+				`--client-pfx "$PfxPath"`,
+				"--id $EndpointID",
+				`icacls.exe $PfxPath /inheritance:r`,
 			},
 		},
 		{
@@ -105,6 +113,11 @@ func TestBootstrapGenerators(t *testing.T) {
 				"--hub $AGENT_HUB_URL",
 				"--ca $CA_PATH",
 				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
+				"/api/v1/pki/enroll",
+				`CLIENT_KEY="/etc/ominull/client.key"`,
+				"--client-cert $CLIENT_CERT --client-key $CLIENT_KEY",
+				"--id $ENDPOINT_ID",
+				`chmod 600 "$CLIENT_KEY"`,
 			},
 		},
 		{
@@ -118,6 +131,10 @@ func TestBootstrapGenerators(t *testing.T) {
 				"<string>$ENDPOINT_ID</string>",
 				"<string>$CA_PATH</string>",
 				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
+				"/api/v1/pki/enroll",
+				"<string>$CLIENT_CERT</string>",
+				"<string>$CLIENT_KEY</string>",
+				`chmod 600 "$CLIENT_KEY"`,
 			},
 		},
 	} {
@@ -134,6 +151,13 @@ func TestBootstrapGenerators(t *testing.T) {
 				if !strings.Contains(body, want) {
 					t.Errorf("bootstrap script is missing %q:\n%s", want, body)
 				}
+			}
+			// The private key the enrolment writes is the endpoint's identity.
+			// Every generator has to close the file it lands in: on the two
+			// unix platforms with chmod, on Windows by dropping inheritance.
+			// A world-readable key would make the certificate decorative.
+			if strings.Contains(body, "CLIENT_KEY") && !strings.Contains(body, `chmod 600 "$CLIENT_KEY"`) {
+				t.Errorf("bootstrap script writes a client key it does not restrict:\n%s", body)
 			}
 			// The generators used to hand-build the Windows binPath, which
 			// dropped the --service flag the SCM entry point needs. Registration
@@ -836,5 +860,209 @@ func TestTelemetryMACReachesAssetIdentity(t *testing.T) {
 	}
 	if assets[0].IP != "10.0.4.77" {
 		t.Errorf("asset did not follow the endpoint to its new address: %q", assets[0].IP)
+	}
+}
+
+// mtlsListener serves the routes an agent uses over a TLS listener configured
+// exactly as Start would configure it, so the handshake being tested is the
+// real one and not a synthesized r.TLS.
+func mtlsListener(t *testing.T, srv *Server) string {
+	t.Helper()
+	tlsCfg, err := srv.tlsConfig()
+	if err != nil {
+		t.Fatalf("tlsConfig failed: %v", err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/events", srv.authMiddleware(srv.handleEvents))
+	mux.HandleFunc("/api/v1/agent/config", srv.authMiddleware(srv.handleAgentConfig))
+	go func() { _ = http.Serve(ln, mux) }()
+	return "https://" + ln.Addr().String()
+}
+
+// agentClient dials the hub the way an enrolled agent does: pinned to the hub's
+// CA, presenting the certificate it was issued. A nil cert is the endpoint that
+// has not enrolled an identity yet.
+func agentClient(t *testing.T, srv *Server, cert *tls.Certificate) *http.Client {
+	t.Helper()
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(srv.pki.GetCAPEM()) {
+		t.Fatalf("hub CA PEM did not parse")
+	}
+	cfg := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	if cert != nil {
+		cfg.Certificates = []tls.Certificate{*cert}
+	}
+	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+}
+
+func issueAgentCert(t *testing.T, m *pki.Manager, endpointID string) *tls.Certificate {
+	t.Helper()
+	bundle, err := m.IssueClientCert(endpointID, "10.0.0.9")
+	if err != nil {
+		t.Fatalf("IssueClientCert(%q) failed: %v", endpointID, err)
+	}
+	cert, err := tls.X509KeyPair(bundle.CertPEM, bundle.KeyPEM)
+	if err != nil {
+		t.Fatalf("the bundle issued for %q is not a usable key pair: %v", endpointID, err)
+	}
+	return &cert
+}
+
+func postTelemetryAs(t *testing.T, c *http.Client, base, endpointID string, extra map[string]string) (int, error) {
+	t.Helper()
+	body := []byte(`{"type":"telemetry","endpoint_id":"` + endpointID + `","hostname":"h","os":"Linux","events":[]}`)
+	req, err := http.NewRequest("POST", base+"/api/v1/events", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("X-API-Key", "mock_tenant_token")
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// The API key is shared by every agent on a tenant, so on its own it says which
+// tenant is calling and nothing about which host. This is the test that the
+// certificate closes that gap: holding the key is no longer enough to report as
+// - or read the update descriptor of - a host you are not.
+func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0"})
+	base := mtlsListener(t, srv)
+
+	own := issueAgentCert(t, srv.pki, "linux-alpha")
+	client := agentClient(t, srv, own)
+
+	// 1. Reporting as itself is what the certificate is for.
+	if code, err := postTelemetryAs(t, client, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+		t.Fatalf("an endpoint reporting under its own certificate got %d (err %v); want 200", code, err)
+	}
+
+	// 2. Reporting as a different host is refused, even holding a valid key and
+	// a valid certificate. This is the impersonation the binding exists to stop.
+	code, err := postTelemetryAs(t, client, base, "linux-beta", nil)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if code != http.StatusForbidden {
+		t.Errorf("an endpoint reported as another host and got %d; want 403", code)
+	}
+
+	// 3. The same binding covers the update descriptor, which would otherwise
+	// tell any key holder which release a named host is about to install.
+	req, _ := http.NewRequest("GET", base+"/api/v1/agent/config?endpoint_id=linux-beta", nil)
+	req.Header.Set("X-API-Key", "mock_tenant_token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("agent/config request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("agent/config for another endpoint returned %d; want 403", resp.StatusCode)
+	}
+
+	// 4. The identity comes from the handshake and not from a header. A caller
+	// that sets X-Client-CN by hand must not be able to name itself: the
+	// middleware strips it, so this is a request with no certificate at all and
+	// the endpoint it claims is simply believed - the pre-certificate behaviour
+	// the fleet is being migrated off, not an impersonation route.
+	plain := agentClient(t, srv, nil)
+	if code, err := postTelemetryAs(t, plain, base, "linux-beta", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
+		t.Fatalf("an endpoint without a certificate got %d (err %v); want 200 while the fleet migrates", code, err)
+	}
+	if code, err := postTelemetryAs(t, plain, base, "linux-alpha", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
+		t.Fatalf("a forged X-Client-CN changed the outcome: got %d (err %v)", code, err)
+	}
+}
+
+// A certificate is only an identity if the hub decides who may mint one. These
+// are the two ways that could fail: trusting an anchor that is not the hub's,
+// and letting an endpoint with no certificate through after certificates were
+// made mandatory.
+func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0"})
+	base := mtlsListener(t, srv)
+
+	// A second PKI stands in for any other authority - a public one, or an
+	// attacker's own. It can mint a certificate naming any endpoint it likes;
+	// what it cannot do is get that certificate accepted here.
+	otherPKI, err := pki.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("second PKI failed: %v", err)
+	}
+	forged := issueAgentCert(t, otherPKI, "linux-alpha")
+	if _, err := postTelemetryAs(t, agentClient(t, srv, forged), base, "linux-alpha", nil); err == nil {
+		t.Fatalf("a certificate from a foreign CA was accepted")
+	}
+
+	// With certificates required, an endpoint that has none is refused at the
+	// handshake rather than reaching a handler.
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", RequireClientCerts: true})
+	strict := mtlsListener(t, srv)
+	if _, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err == nil {
+		t.Fatalf("--require-client-certs let an endpoint with no certificate through")
+	}
+	own := issueAgentCert(t, srv.pki, "linux-alpha")
+	if code, err := postTelemetryAs(t, agentClient(t, srv, own), strict, "linux-alpha", nil); err != nil || code != http.StatusOK {
+		t.Fatalf("an enrolled endpoint got %d (err %v) from a hub requiring certificates; want 200", code, err)
+	}
+}
+
+// The Windows agent cannot use the PEM pair: WinHTTP wants a certificate
+// context that already has its key attached, and PFXImportCertStore is the only
+// way to build one from a file. So the bundle has to carry a PKCS#12 archive,
+// and it has to hold the same identity as the PEM beside it.
+func TestClientBundleCarriesAPKCS12ArchiveForWindows(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	bundle, err := srv.pki.IssueClientCert("win11-alpha", "10.0.0.9")
+	if err != nil {
+		t.Fatalf("IssueClientCert failed: %v", err)
+	}
+	if bundle.PFXBase64 == "" {
+		t.Fatalf("no PKCS#12 archive in the bundle; the Windows agent has nothing to present")
+	}
+	der, err := base64.StdEncoding.DecodeString(bundle.PFXBase64)
+	if err != nil {
+		t.Fatalf("pfx_base64 does not decode: %v", err)
+	}
+	// DecodeChain, not Decode: the archive carries the issuing CA alongside the
+	// leaf and its key, which is what lets PFXImportCertStore build a chain on a
+	// host that has not been given the CA any other way.
+	key, cert, ca, err := pkcs12.DecodeChain(der, "")
+	if err != nil {
+		t.Fatalf("the archive does not open with an empty password, which is what the agent uses: %v", err)
+	}
+	if len(ca) == 0 {
+		t.Errorf("the archive carries no issuing CA, so the imported certificate would not chain")
+	}
+	if key == nil {
+		t.Errorf("the archive has no private key, so WinHTTP could not sign a handshake with it")
+	}
+	if cert.Subject.CommonName != "win11-alpha" {
+		t.Errorf("the archive names %q; the hub binds requests to %q", cert.Subject.CommonName, "win11-alpha")
 	}
 }

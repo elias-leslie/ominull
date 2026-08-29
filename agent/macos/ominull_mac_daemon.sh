@@ -12,6 +12,15 @@ ENDPOINT_ID="${5:-macos-$(hostname -s)}"
 # this file and nothing else - not the system keychain, which any admin-installed
 # anchor could widen without anyone noticing.
 CA_PATH="${6:-/opt/ominull/ca.crt}"
+# This endpoint's own certificate, issued by the hub at enrolment. Presenting it
+# is what lets the hub tell one endpoint from another: the API key is shared by
+# every agent on the tenant, so on its own it proves membership and not identity.
+# Both halves have to be readable before either is passed to curl - handing curl
+# a --cert it cannot open fails the request outright, which would turn a
+# half-finished enrolment into a host that has stopped reporting rather than one
+# that has simply not started presenting a certificate yet.
+CLIENT_CERT="${7:-/opt/ominull/client.crt}"
+CLIENT_KEY="${8:-/opt/ominull/client.key}"
 IS_ISOLATED="false"
 ATTEMPTED_VERSION=""
 # Bounded retry, not a single shot: a dropped download would otherwise wedge this
@@ -60,6 +69,9 @@ PUBKEY
 HUB_CURL_ARGS=()
 if [[ "$HUB_URL" == https://* ]]; then
     HUB_CURL_ARGS=(--cacert "$CA_PATH" --proto "=https" --proto-redir "=https")
+    if [[ -r "$CLIENT_CERT" && -r "$CLIENT_KEY" ]]; then
+        HUB_CURL_ARGS+=(--cert "$CLIENT_CERT" --key "$CLIENT_KEY")
+    fi
 fi
 
 hub_curl() {
@@ -178,6 +190,7 @@ hub_path() {
 HUB_STATUS_MARKER="OMINULL_HTTP:"
 HUB_REJECT_LAST=0
 HUB_REJECT_STATUS=""
+HUB_EVER_ACCEPTED=""
 
 report_hub_rejection() {
     local status="$1" now
@@ -186,6 +199,12 @@ report_hub_rejection() {
             if [[ -n "$HUB_REJECT_STATUS" ]]; then
                 echo "[+] The hub is accepting telemetry again (HTTP ${status:-none})."
                 HUB_REJECT_STATUS=""
+            elif [[ -z "$HUB_EVER_ACCEPTED" && -n "$status" ]]; then
+                # Reported from evidence rather than at startup: a daemon that
+                # says it is connected before it has posted anything tells an
+                # operator nothing about whether it can reach the hub.
+                HUB_EVER_ACCEPTED=1
+                echo "[+] The hub accepted this endpoint's first telemetry batch (HTTP $status)."
             fi
             return 1
             ;;
@@ -193,7 +212,12 @@ report_hub_rejection() {
 
     now=$(date +%s)
     if [[ "$status" != "$HUB_REJECT_STATUS" ]] || (( now - HUB_REJECT_LAST >= 60 )); then
-        if [[ "$status" == "401" || "$status" == "403" ]]; then
+        if [[ "$status" == "403" && -r "$CLIENT_CERT" ]]; then
+            # 403 while presenting a certificate is the identity check and not
+            # the key: the hub compares the name in the certificate against the
+            # endpoint id being reported and refuses the two disagreeing.
+            echo "[!] The hub refused this endpoint's telemetry with HTTP $status. It reports as \"$ENDPOINT_ID\", which is not the endpoint named by $CLIENT_CERT; re-enrol or correct the id in the LaunchDaemon plist. Nothing is being recorded until it is fixed."
+        elif [[ "$status" == "401" || "$status" == "403" ]]; then
             echo "[!] The hub refused this endpoint's telemetry with HTTP $status. The API key in the LaunchDaemon plist is not one it accepts; nothing is being recorded until it is fixed."
         else
             echo "[!] The hub refused this endpoint's telemetry with HTTP $status; nothing is being recorded."
@@ -295,10 +319,15 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.4.5)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.0)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
+    if [[ -r "$CLIENT_CERT" && -r "$CLIENT_KEY" ]]; then
+        echo "[+] Identity: client certificate $CLIENT_CERT"
+    else
+        echo "[+] Identity: API key only (no client certificate at $CLIENT_CERT)"
+    fi
 else
     echo "[+] Hub trust: NONE - cleartext transport"
 fi
@@ -361,7 +390,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.4.5 (PF)",
+  "driver_version": "1.5.0 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }

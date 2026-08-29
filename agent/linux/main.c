@@ -17,7 +17,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.4.5"
+#define OMINULL_LINUX_AGENT_VERSION "1.5.0"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -57,6 +57,13 @@ typedef struct {
     char primary_ip[64];
     char primary_mac[32];
     char ca_path[256];
+    /* The certificate this endpoint proves its identity with. The API key says
+     * which tenant is calling and every endpoint in a tenant carries the same
+     * one, so without this the hub has to take the endpoint id in the body on
+     * trust. Optional: a fleet has to be able to migrate onto certificates
+     * while it is still reporting. */
+    char client_cert_path[256];
+    char client_key_path[256];
     bool verbose;
     bool auto_update;
     bool allow_plaintext;
@@ -81,6 +88,9 @@ static void PrintUsage(const char* prog) {
     printf("  %s --hub <url> --key <api_key> [--ca <path>] [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
     printf("\nOptions:\n");
     printf("  --ca <path>        CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
+    printf("  --client-cert <p>  Certificate this endpoint identifies itself with, and --client-key\n");
+    printf("                     its private key. Enrolment issues both; without them the hub has\n");
+    printf("                     only the tenant API key, which every endpoint shares.\n");
     printf("  --allow-plaintext  Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
     printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
 }
@@ -139,13 +149,33 @@ static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
 }
 
 /* The curl flags that make a hub connection verifiable: trust this CA and no
- * other, and refuse to follow a redirect off TLS. Without --proto a redirect
- * to http:// would hand the API key over in the clear on the next hop. */
+ * other, refuse to follow a redirect off TLS, and present this endpoint's own
+ * certificate. Without --proto a redirect to http:// would hand the API key
+ * over in the clear on the next hop. */
+#define HUB_CURL_ARGS_LEN 1024
 static void HubCurlSecurityArgs(const LINUX_AGENT_CONFIG* config, char* out, size_t outLen) {
-    if (HubUsesTLS(config)) {
-        snprintf(out, outLen, "--cacert \"%s\" --proto =https --proto-redir =https", config->ca_path);
-    } else {
+    if (!HubUsesTLS(config)) {
         out[0] = '\0';
+        return;
+    }
+
+    /* The client certificate is added only when both halves are present and
+     * readable. Passing --cert for a file curl cannot open fails the request
+     * outright, which would turn a half-finished enrolment into an endpoint
+     * that has stopped reporting rather than one that has not started
+     * presenting a certificate yet.
+     *
+     * One snprintf per case rather than an append: the paths are bounded by the
+     * config struct, so a single call has a maximum length the compiler can
+     * check against HUB_CURL_ARGS_LEN. Appending to the first string leaves it
+     * unable to prove anything about what is left. */
+    if (config->client_cert_path[0] && config->client_key_path[0] &&
+        access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
+        snprintf(out, outLen,
+                 "--cacert \"%s\" --proto =https --proto-redir =https --cert \"%s\" --key \"%s\"",
+                 config->ca_path, config->client_cert_path, config->client_key_path);
+    } else {
+        snprintf(out, outLen, "--cacert \"%s\" --proto =https --proto-redir =https", config->ca_path);
     }
 }
 
@@ -614,10 +644,10 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
      * package from being fetched from anyone but the hub in the first place,
      * so a hostile path cannot even spend the endpoint's bandwidth or learn
      * which version it is on. */
-    char curlSec[320];
+    char curlSec[HUB_CURL_ARGS_LEN];
     HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
 
-    char script[3584];
+    char script[5120];
     int n = snprintf(script, sizeof(script),
         "#!/bin/sh\n"
         "set -e\n"
@@ -669,21 +699,33 @@ static long SplitHubStatus(char* resp) {
 /* Returns true when the batch was refused, and says so at most once a minute:
  * a rejection repeats every heartbeat, and a line every few seconds would bury
  * the reason it started. */
-static bool ReportHubRejection(long status) {
+static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
     static time_t lastReport = 0;
     static long lastStatus = 0;
+    static bool accepted = false;
 
     if (status == 0 || (status >= 200 && status < 300)) {
         if (lastStatus != 0) {
             printf("[+] The hub is accepting telemetry again (HTTP %ld).\n", status);
             lastStatus = 0;
+        } else if (!accepted && status != 0) {
+            accepted = true;
+            printf("[+] The hub accepted this endpoint's first telemetry batch (HTTP %ld).\n", status);
         }
         return false;
     }
 
     time_t now = time(NULL);
     if (status != lastStatus || now - lastReport >= 60) {
-        if (status == 401 || status == 403) {
+        if (status == 403 && config->client_cert_path[0] && access(config->client_cert_path, R_OK) == 0) {
+            /* 403 while presenting a certificate is the identity check, not the
+             * key: the hub compares the name in the certificate against the
+             * endpoint id being reported and refuses the two disagreeing. The
+             * usual cause is --id having been changed after enrolment. */
+            printf("[!] The hub refused this endpoint's telemetry with HTTP %ld. It reports as \"%s\", "
+                   "which is not the endpoint named by %s; re-enrol or correct --id. Nothing is being "
+                   "recorded until it is fixed.\n", status, config->endpoint_id, config->client_cert_path);
+        } else if (status == 401 || status == 403) {
             printf("[!] The hub refused this endpoint's telemetry with HTTP %ld. The API key in "
                    "--key is not one it accepts; nothing is being recorded until it is fixed.\n", status);
         } else {
@@ -759,7 +801,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 
     snprintf(jsonBuf + offset, bufCap - offset, "]}");
 
-    char curlSec[320];
+    char curlSec[HUB_CURL_ARGS_LEN];
     HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
 
     /* -sS rather than -s, and stderr is no longer discarded. A rejected
@@ -791,7 +833,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         pclose(fp);
         if (rBytes > 0) {
             long status = SplitHubStatus(respBuf);
-            if (!ReportHubRejection(status)) {
+            if (!ReportHubRejection(config, status)) {
                 SyncQuarantinedPeers(respBuf);
                 ApplyAgentUpdate(config, respBuf);
             }
@@ -831,6 +873,10 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
         } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--client-cert") == 0 && i + 1 < argc) {
+            strncpy(config.client_cert_path, argv[++i], sizeof(config.client_cert_path) - 1);
+        } else if (strcmp(argv[i], "--client-key") == 0 && i + 1 < argc) {
+            strncpy(config.client_key_path, argv[++i], sizeof(config.client_key_path) - 1);
         } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
             strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
         } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
@@ -863,6 +909,12 @@ int main(int argc, char* argv[]) {
     printf("  Hub Endpoint:  %s\n", config.hub_url);
     if (HubUsesTLS(&config)) {
         printf("  Hub Trust:     TLS, pinned to %s\n", config.ca_path);
+        if (config.client_cert_path[0] && access(config.client_cert_path, R_OK) == 0) {
+            printf("  Identity:      client certificate %s\n", config.client_cert_path);
+        } else {
+            printf("  Identity:      tenant API key only (no client certificate; the hub cannot tell\n");
+            printf("                 this endpoint apart from any other holding the same key)\n");
+        }
     } else {
         printf("  Hub Trust:     NONE - cleartext transport%s\n",
                config.allow_plaintext ? " (--allow-plaintext)" : " (will refuse to report)");
@@ -877,7 +929,12 @@ int main(int argc, char* argv[]) {
     printf("[+] Initializing Linux eBPF Subsystem & Socket Flow Sniffer...\n");
     printf("[+] Attached eBPF TC classifier program: ominull_tc_egress\n");
     printf("[+] Active eBPF maps: ominull_rules_v4, ominull_isolation\n");
-    printf("[+] Connected and continuously streaming high-fidelity flow telemetry to Hub: %s\n", config.hub_url);
+    /* Says what is about to happen, not what has happened. This line used to
+     * read "Connected and continuously streaming", printed before a single
+     * request had been made - so a host that could not reach the hub at all
+     * announced a working connection and then went quiet. The hub's first
+     * acceptance is reported by ReportHubRejection, from evidence. */
+    printf("[+] Streaming flow telemetry to Hub: %s\n", config.hub_url);
 
     LINUX_FLOW_EVENT flows[MAX_FLOWS_PER_BATCH];
     size_t flowCount = CollectActiveFlows(flows, MAX_FLOWS_PER_BATCH);
