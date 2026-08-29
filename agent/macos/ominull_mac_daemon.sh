@@ -129,7 +129,21 @@ hub_pin_ok() {
         *[!0-9.]*) sni=(-servername "$host") ;;
     esac
 
+    # The probe has to introduce itself like any other request. A hub started
+    # with --client-certs required asks for a certificate during this handshake
+    # too, and s_client with none to offer sends an empty one - which the hub
+    # rejects and logs as "client didn't provide a certificate". The pin still
+    # passed, because the server's certificate arrives before the client's is
+    # asked for, but a hub log filling with that line trains an operator to
+    # ignore the one message that means an endpoint really has lost its
+    # identity.
+    local pincert=()
+    if [[ -r "$CLIENT_CERT" && -r "$CLIENT_KEY" ]]; then
+        pincert=(-cert "$CLIENT_CERT" -key "$CLIENT_KEY")
+    fi
+
     leaf=$(/usr/bin/openssl s_client -connect "$host:$port" ${sni[@]+"${sni[@]}"} \
+               ${pincert[@]+"${pincert[@]}"} \
                -showcerts </dev/null 2>/dev/null | /usr/bin/openssl x509 2>/dev/null)
     if [[ -z "$leaf" ]]; then
         report_transport_refusal "no TLS handshake with $host:$port, so the hub could not prove its identity."
@@ -319,7 +333,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.7)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.8)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -390,7 +404,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.5.7 (PF)",
+  "driver_version": "1.5.8 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
