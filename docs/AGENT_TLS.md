@@ -282,6 +282,29 @@ to take a release — the failure mode a self-updater exists to prevent. Fixed i
 v1.5.3; the downloader now reports the WinHTTP error instead of returning a bare
 false, because a silent `goto done` is what hid it.
 
+### Where the key lives is part of the handshake (v1.5.4)
+
+Answering the request is not enough; the answer has to be signable. The Windows
+agent imported the archive with `PKCS12_NO_PERSIST_KEY`, which keeps the private
+key in the process and leaves nothing behind — tidy, and unusable. Schannel will
+not sign a client handshake with an ephemeral key handle it did not open itself,
+so `WinHttpSendRequest` failed with `ERROR_WINHTTP_SECURE_FAILURE` (12175).
+
+12175 is reported as "the hub's CA has to be installed", so the endpoint that
+was holding a valid certificate said it could not verify the hub. It was not the
+CA. It was never the CA. The endpoint had introduced itself in a voice the
+handshake could not hear.
+
+The archive is now imported into the machine keyset and the certificate is filed
+in the LocalMachine `MY` store; every later start finds it there rather than
+importing again, so there is one key container per identity and not one per
+service start. `CryptAcquireCertificatePrivateKey` confirms the match before the
+store copy is trusted — a `MY` entry can outlive its container — and an expired
+certificate is skipped rather than presented, because presenting one fails the
+handshake where having none falls back to the API key.
+
+Linux and macOS were never affected: curl reads the PEM key from disk each time.
+
 `TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll` pins each mode to the
 handshake behaviour it implies. The difference is invisible until an agent that
 cannot answer meets one.

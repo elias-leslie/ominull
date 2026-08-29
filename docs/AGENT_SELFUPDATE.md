@@ -255,7 +255,7 @@ gcc -O2 -Wall -Wextra -o /tmp/d agent/tests/test_der_sig.c && /tmp/d
 gcc -O2 -Wall -Wextra -o /tmp/a agent/linux/main.c            # must be warning-free
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/w.exe \
   agent/src/{main,hub_client,hub_tls,service,driver_client,updater}.c \
-  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
+  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
 bash -n agent/macos/ominull_mac_daemon.sh
 scripts/version.sh check
 gitleaks detect --source .

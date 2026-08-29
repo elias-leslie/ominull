@@ -64,7 +64,7 @@ x86_64-w64-mingw32-gcc \
   "$ROOT_DIR/agent/src/service.c" \
   "$ROOT_DIR/agent/src/updater.c" \
   -o "$BUILD_DIR/ominulld.exe" \
-  -lwinhttp -lws2_32 -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
+  -lwinhttp -lws2_32 -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
 
 echo "[+] Built: $BUILD_DIR/ominulld.exe"
 file "$BUILD_DIR/ominulld.exe"

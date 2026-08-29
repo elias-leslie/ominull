@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.5.3"
+VERSION="1.5.4"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.5.3
+Version: 1.5.4
 Section: security
 Priority: optional
 Architecture: amd64
@@ -128,7 +128,7 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         "${ROOT_DIR}/agent/src/service.c" \
         "${ROOT_DIR}/agent/src/driver_client.c" \
         "${ROOT_DIR}/agent/src/updater.c" \
-        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
+        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
     cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
 elif [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
     echo "  [!] mingw-w64 not installed; packaging the previously built ominulld.exe"

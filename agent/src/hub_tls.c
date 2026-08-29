@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
+#include <ncrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -231,7 +232,7 @@ static bool Preflight(const AGENT_CONFIG* config) {
     if (!hRequest) goto done;
 
     /* The preflight needs the client certificate too. A hub started with
-     * --require-client-certs asks for one during the handshake, and it is the
+     * --client-certs required asks for one during the handshake, and it is the
      * handshake this request exists to complete - without it the preflight
      * would fail and the agent would report the hub as unverifiable when the
      * real problem is that it never introduced itself. */
@@ -305,13 +306,74 @@ bool Hub_TransportReady(const AGENT_CONFIG* config) {
  *
  * The archive has no password. It is written to a file only SYSTEM and
  * Administrators can read, and a password stored beside the thing it protects
- * would only make the code longer. PKCS12_NO_PERSIST_KEY keeps the private key
- * in this process's memory rather than adding a container to the machine key
- * store on every load; the CRYPT_MACHINE_KEYSET fallback is for hosts too old
- * to support that.
+ * would only make the code longer.
+ *
+ * The key has to be persisted. PKCS12_NO_PERSIST_KEY looks like the tidy choice
+ * - the key lives in this process and no container is left behind - but
+ * schannel cannot sign a client handshake with an ephemeral key handle it did
+ * not open itself, and the connection fails with ERROR_WINHTTP_SECURE_FAILURE
+ * (12175). That reads exactly like a bad CA, which is what it was mistaken for:
+ * an endpoint holding a perfectly good certificate reported it could not verify
+ * the hub. So the archive is imported into the machine keyset once and the
+ * certificate is filed in the LocalMachine MY store, and every later start
+ * finds it there instead of importing again. One container, not one per start.
  * ------------------------------------------------------------------------- */
 
 #define CLIENT_CERT_RETRY_MS 60000
+
+/* FindInMachineStore looks for a certificate already filed for this endpoint.
+ * CERT_FIND_HAS_PRIVATE_KEY is not enough on its own - the MY store can hold a
+ * certificate whose container was removed - so the match is confirmed by
+ * actually acquiring the key. */
+static PCCERT_CONTEXT FindInMachineStore(const char* endpointID) {
+    if (!endpointID || !endpointID[0]) return NULL;
+
+    HCERTSTORE my = CertOpenStore(CERT_STORE_PROV_SYSTEM_A, 0, 0,
+                                  CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG,
+                                  "MY");
+    if (!my) return NULL;
+
+    PCCERT_CONTEXT out = NULL;
+    PCCERT_CONTEXT cur = NULL;
+    while ((cur = CertFindCertificateInStore(my, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
+                                             CERT_FIND_HAS_PRIVATE_KEY, NULL, cur)) != NULL) {
+        char name[128] = {0};
+        CertGetNameStringA(cur, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, name, sizeof(name));
+        if (_stricmp(name, endpointID) != 0) continue;
+
+        /* An expired certificate is worse than none: it fails the handshake
+         * instead of falling back to the API key. Leave it for re-enrolment. */
+        if (CertVerifyTimeValidity(NULL, cur->pCertInfo) != 0) continue;
+
+        NCRYPT_KEY_HANDLE key = 0;
+        DWORD keySpec = 0;
+        BOOL owned = FALSE;
+        if (CryptAcquireCertificatePrivateKey(cur, CRYPT_ACQUIRE_SILENT_FLAG, NULL,
+                                              &key, &keySpec, &owned)) {
+            if (owned) {
+                if (keySpec == CERT_NCRYPT_KEY_SPEC) NCryptFreeObject(key);
+                else CryptReleaseContext((HCRYPTPROV)key, 0);
+            }
+            out = CertDuplicateCertificateContext(cur);
+            CertFreeCertificateContext(cur);
+            break;
+        }
+    }
+
+    CertCloseStore(my, 0);
+    return out;
+}
+
+/* FileInMachineStore keeps the imported certificate where the next start can
+ * find it. A failure here is survivable - the context in hand still works for
+ * this process - so it is not reported as an error. */
+static void FileInMachineStore(PCCERT_CONTEXT cert) {
+    HCERTSTORE my = CertOpenStore(CERT_STORE_PROV_SYSTEM_A, 0, 0,
+                                  CERT_SYSTEM_STORE_LOCAL_MACHINE, "MY");
+    if (!my) return;
+    CertAddCertificateContextToStore(my, cert, CERT_STORE_ADD_REPLACE_EXISTING, NULL);
+    CertCloseStore(my, 0);
+}
 
 static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
     HANDLE hFile = CreateFileA(pfxPath, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -340,9 +402,12 @@ static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
     blob.cbData = got;
     blob.pbData = raw;
 
-    HCERTSTORE store = PFXImportCertStore(&blob, L"", PKCS12_NO_PERSIST_KEY);
-    if (!store) store = PFXImportCertStore(&blob, NULL, PKCS12_NO_PERSIST_KEY);
-    if (!store) store = PFXImportCertStore(&blob, L"", CRYPT_MACHINE_KEYSET);
+    /* Machine keyset first: the agent runs as LocalSystem and the key has to
+     * outlive the import for schannel to use it. CRYPT_USER_KEYSET is the
+     * fallback for a console run by an operator who is not SYSTEM. */
+    HCERTSTORE store = PFXImportCertStore(&blob, L"", CRYPT_MACHINE_KEYSET);
+    if (!store) store = PFXImportCertStore(&blob, NULL, CRYPT_MACHINE_KEYSET);
+    if (!store) store = PFXImportCertStore(&blob, L"", CRYPT_USER_KEYSET);
     SecureZeroMemory(raw, got);
     free(raw);
     if (!store) return NULL;
@@ -354,10 +419,8 @@ static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
                                                       0, CERT_FIND_HAS_PRIVATE_KEY, NULL, NULL);
     PCCERT_CONTEXT out = found ? CertDuplicateCertificateContext(found) : NULL;
     if (found) CertFreeCertificateContext(found);
-    /* The store is closed but not forced: the duplicated context holds a
-     * reference to it, and with PKCS12_NO_PERSIST_KEY that reference is what
-     * keeps the in-memory private key alive. */
     CertCloseStore(store, 0);
+    if (out) FileInMachineStore(out);
     return out;
 }
 
@@ -366,7 +429,7 @@ static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
  * enrolled before certificates existed, or one whose enrolment was interrupted,
  * keeps reporting under the API key alone rather than falling off the fleet.
  * The hub decides whether that is still acceptable - started with
- * --require-client-certs it refuses the handshake, and the failure is then the
+ * --client-certs required it refuses the handshake, and the failure is then the
  * hub's to report rather than a silent local downgrade. */
 /* Whether a certificate was loaded and attached to at least one request. The
  * refusal message reads differently when there is one: a 403 from a hub that
@@ -415,7 +478,11 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
             return false;
         }
         lastAttempt = now;
-        cached = LoadClientCertFromPFX(config->client_pfx_path);
+        /* The store copy is preferred over the archive: it is the one whose key
+         * schannel can actually use, and reaching for it first means a restart
+         * does not import a second container for the same identity. */
+        cached = FindInMachineStore(config->endpoint_id);
+        if (!cached) cached = LoadClientCertFromPFX(config->client_pfx_path);
         if (!cached) {
             if (!complained) {
                 complained = true;
