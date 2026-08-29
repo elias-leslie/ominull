@@ -146,7 +146,12 @@ int main(int argc, char* argv[]) {
 
     if (doConsole) {
         printf("[*] Starting Ominull Agent in Console Mode (PID: %lu)...\n", GetCurrentProcessId());
-        printf("[*] Connecting to Hub at: %s (Key: %s)\n", config.hub_url, config.api_key);
+        /* The key is not echoed. This is the interactive path, so the line
+         * lands wherever the operator redirected the console - and a support
+         * transcript is the last place the fleet's tenant credential should
+         * end up. Where it came from is the part that is actually diagnostic. */
+        printf("[*] Connecting to Hub at: %s (key: %s)\n", config.hub_url,
+               config.key_path[0] ? config.key_path : "supplied on the command line");
         if (Hub_UsesTLS(&config)) {
             printf("[*] Hub trust: TLS, pinned to %s\n", config.ca_path);
         } else {

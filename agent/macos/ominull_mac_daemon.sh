@@ -3,6 +3,20 @@ set -u
 
 HUB_URL="${1:-https://10.0.0.58:9443}"
 API_KEY="${2:-<provision-via-bootstrap>}"
+# The second argument may be the key or the path to a file holding it. `ps` on
+# macOS shows every argument of every process to every local account, and a
+# LaunchDaemon's arguments are on screen for as long as it runs - so the key
+# passed inline was the fleet's shared tenant credential, permanently readable
+# by anyone with a shell on this Mac. A path is not a secret; the file is 0600.
+API_KEY_FILE=""
+if [[ -f "$API_KEY" && -r "$API_KEY" ]]; then
+    API_KEY_FILE="$API_KEY"
+    API_KEY="$(head -n 1 "$API_KEY_FILE" | tr -d '\r\n')"
+    if [[ -z "$API_KEY" ]]; then
+        echo "[-] API key file $API_KEY_FILE holds no key on its first line." >&2
+        exit 1
+    fi
+fi
 ROLE_TAG="${3:-workstation}"
 LOCATION_ID="${4:-loc-home}"
 # Endpoint identity is pinned at enrolment when supplied. Deriving it from the hostname
@@ -74,8 +88,19 @@ if [[ "$HUB_URL" == https://* ]]; then
     fi
 fi
 
+# The credential reaches curl through a pipe rather than an argument, for the
+# same reason the key itself is read from a file: -H "X-API-Key: ..." put it in
+# `ps` output on every heartbeat, once per request, for every local account to
+# read. curl's own config syntax quotes the value, so the two characters that
+# syntax reserves are escaped on the way in.
+hub_curl_credentials() {
+    local escaped
+    escaped="$(printf '%s' "$API_KEY" | sed -e 's/[\\"]/\\&/g')"
+    printf 'header = "X-API-Key: %s"\n' "$escaped"
+}
+
 hub_curl() {
-    curl ${HUB_CURL_ARGS[@]+"${HUB_CURL_ARGS[@]}"} "$@"
+    curl -K <(hub_curl_credentials) ${HUB_CURL_ARGS[@]+"${HUB_CURL_ARGS[@]}"} "$@"
 }
 
 LAST_TRANSPORT_COMPLAINT=0
@@ -298,8 +323,8 @@ apply_agent_update() {
         set -e
         printf '%s\n' "$OMINULL_RELEASE_PUBKEY" > "$UPDATE_DIR/release.pub"
         chmod 600 "$UPDATE_DIR/release.pub"
-        hub_curl -fsSL -m 300 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz" "${HUB_URL}${pkg_path}"
-        hub_curl -fsSL -m 60 -H "X-API-Key: $API_KEY" -o "$UPDATE_DIR/agent.tar.gz.sig" "${HUB_URL}${sig_path}"
+        hub_curl -fsSL -m 300 -o "$UPDATE_DIR/agent.tar.gz" "${HUB_URL}${pkg_path}"
+        hub_curl -fsSL -m 60 -o "$UPDATE_DIR/agent.tar.gz.sig" "${HUB_URL}${sig_path}"
         echo "$sha  $UPDATE_DIR/agent.tar.gz" | shasum -a 256 -c -
         /usr/bin/openssl dgst -sha256 -verify "$UPDATE_DIR/release.pub" \
             -signature "$UPDATE_DIR/agent.tar.gz.sig" "$UPDATE_DIR/agent.tar.gz"
@@ -333,7 +358,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.8)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.1)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -404,7 +429,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.5.8 (PF)",
+  "driver_version": "1.6.1 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -422,9 +447,14 @@ JSON
     # body arrives, the exit status is 0, and a daemon the hub is refusing looks
     # exactly like a healthy one in this log. -f would report it but discard the
     # body, and the body is what carries the agent_update descriptor.
-    RESPONSE=$(hub_curl -sSL -m 5 -w "\n${HUB_STATUS_MARKER}%{http_code}" -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
-        -d "$PAYLOAD" \
-        "$HUB_URL/api/v1/events?api_key=$API_KEY" || true)
+    # The body goes down stdin, not into an argument: the payload carries every
+    # process path this daemon observed, and `ps` would put all of it on screen
+    # for every local account. The key is gone from the URL for the same reason
+    # it left the argument list - a query string is copied into every access log
+    # on the path, and the header already carries it.
+    RESPONSE=$(printf '%s' "$PAYLOAD" | hub_curl -sSL -m 5 -w "\n${HUB_STATUS_MARKER}%{http_code}" \
+        -X POST -H "Content-Type: application/json" --data-binary @- \
+        "$HUB_URL/api/v1/events" || true)
     HUB_STATUS=$(printf '%s' "$RESPONSE" | sed -n "s/^${HUB_STATUS_MARKER}//p" | tail -1)
     RESPONSE=${RESPONSE%%$'\n'${HUB_STATUS_MARKER}*}
 
@@ -439,7 +469,7 @@ JSON
     apply_agent_update "$RESPONSE"
 
     # 4. Check Dynamic Host Network Isolation Status
-    NEW_ISOLATED=$(hub_curl -sSL -m 5 -H "X-API-Key: $API_KEY" "$HUB_URL/api/v1/endpoints?api_key=$API_KEY" | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
+    NEW_ISOLATED=$(hub_curl -sSL -m 5 "$HUB_URL/api/v1/endpoints" | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
     if [[ "$NEW_ISOLATED" == "true" && "$IS_ISOLATED" != "true" ]]; then
         echo "[!] Threat Nullification: ACTIVATING MACOS PACKET FILTER ISOLATION..."
         /opt/ominull/pf_engine.sh isolate 10.0.0.58 2>/dev/null || /opt/ominull/pf_engine.sh isolate 10.0.0.57 2>/dev/null || true

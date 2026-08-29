@@ -18,7 +18,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.5.8"
+#define OMINULL_LINUX_AGENT_VERSION "1.6.1"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -65,6 +65,13 @@ typedef struct {
      * while it is still reporting. */
     char client_cert_path[256];
     char client_key_path[256];
+    /* Where api_key was read from, when it came from a file rather than an
+     * argument. Every argument of every process is world-readable through
+     * /proc/<pid>/cmdline, so a key passed with --key is a key any account on
+     * this host can lift out of `ps` - and it is the tenant key, shared by the
+     * whole fleet. --key stays for the installer, which has no other channel;
+     * the daemon that runs afterwards should be given a path. */
+    char key_path[256];
     bool verbose;
     bool auto_update;
     bool allow_plaintext;
@@ -83,11 +90,51 @@ typedef struct {
     uint64_t bytes_out;
 } LINUX_FLOW_EVENT;
 
+/* ReadKeyFile takes the first line of a file as the API key. A file is the only
+ * channel that keeps the credential off the command line, and the mode is
+ * checked because a 0644 key file would give back exactly the exposure the
+ * file was introduced to remove. */
+static bool ReadKeyFile(const char* path, char* out, size_t cap) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("[!] Cannot read the API key file %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH)) {
+        printf("[!] API key file %s is readable beyond its owner; tighten it to 0600.\n", path);
+    }
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        printf("[!] Cannot open the API key file %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    char line[512] = {0};
+    char* got = fgets(line, sizeof(line), f);
+    fclose(f);
+    if (!got) {
+        printf("[!] API key file %s is empty.\n", path);
+        return false;
+    }
+    size_t n = strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
+                     line[n - 1] == ' ' || line[n - 1] == '\t')) {
+        line[--n] = '\0';
+    }
+    if (!line[0]) {
+        printf("[!] API key file %s holds no key on its first line.\n", path);
+        return false;
+    }
+    snprintf(out, cap, "%s", line);
+    return true;
+}
+
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
-    printf("  %s --hub <url> --key <api_key> [--ca <path>] [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
+    printf("  %s --hub <url> --key-file <path> [--ca <path>] [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
     printf("\nOptions:\n");
+    printf("  --key-file <path>  Read the tenant API key from a file instead of --key. Prefer this:\n");
+    printf("                     an argument is world-readable through /proc/<pid>/cmdline.\n");
     printf("  --ca <path>        CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
     printf("  --client-cert <p>  Certificate this endpoint identifies itself with, and --client-key\n");
     printf("                     its private key. Enrolment issues both; without them the hub has\n");
@@ -154,6 +201,15 @@ static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
  * certificate. Without --proto a redirect to http:// would hand the API key
  * over in the clear on the next hop. */
 #define HUB_CURL_ARGS_LEN 1024
+#define OMINULL_STR_(x) #x
+#define OMINULL_STR(x) OMINULL_STR_(x)
+
+/* The hub answers a rejected batch with a status and a body, and curl reports
+ * both as success. The marker splits the status back off the response and
+ * makes a refusal visible, because an agent whose credentials the hub no
+ * longer accepts is otherwise indistinguishable, in its own log, from one
+ * that is working. */
+#define HUB_STATUS_MARKER "OMINULL_HTTP:"
 static void HubCurlSecurityArgs(const LINUX_AGENT_CONFIG* config, char* out, size_t outLen) {
     if (!HubUsesTLS(config)) {
         out[0] = '\0';
@@ -421,6 +477,166 @@ static int RunTool(const char* const argv[]) {
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* HubCurlSecurityArgv is the argument-vector form of HubCurlSecurityArgs. The
+ * string form still builds the updater's shell script, where the paths come
+ * from this endpoint's own config file and a shell is genuinely wanted; the
+ * heartbeat has neither property and takes this one. */
+static void HubCurlSecurityArgv(const LINUX_AGENT_CONFIG* config,
+                                const char* argv[], int* n, int cap) {
+    if (!HubUsesTLS(config)) return;
+    if (*n + 6 > cap) return;
+    argv[(*n)++] = "--cacert";
+    argv[(*n)++] = config->ca_path;
+    argv[(*n)++] = "--proto";
+    argv[(*n)++] = "=https";
+    argv[(*n)++] = "--proto-redir";
+    argv[(*n)++] = "=https";
+    if (config->client_cert_path[0] && config->client_key_path[0] &&
+        access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
+        if (*n + 4 > cap) return;
+        argv[(*n)++] = "--cert";
+        argv[(*n)++] = config->client_cert_path;
+        argv[(*n)++] = "--key";
+        argv[(*n)++] = config->client_key_path;
+    }
+}
+
+/* AppendCurlConfigHeader writes one `header = "..."` line in curl's own
+ * configuration syntax, escaping the two characters that syntax reserves. */
+static void AppendCurlConfigHeader(char* out, size_t cap, size_t* len,
+                                   const char* name, const char* value) {
+    if (!value || !value[0]) return;
+    size_t o = *len;
+    const char* prefix = "header = \"";
+    for (const char* q = prefix; *q && o + 2 < cap; q++) out[o++] = *q;
+    for (const char* q = name; *q && o + 2 < cap; q++) out[o++] = *q;
+    if (o + 3 < cap) { out[o++] = ':'; out[o++] = ' '; }
+    for (const char* q = value; *q && o + 3 < cap; q++) {
+        if (*q == '"' || *q == '\\') out[o++] = '\\';
+        out[o++] = *q;
+    }
+    if (o + 3 < cap) { out[o++] = '"'; out[o++] = '\n'; }
+    out[o] = '\0';
+    *len = o;
+}
+
+/* HUB_CURL_CONFIG_FD is where the child finds the credential file curl reads
+ * with -K. It is a pipe, not a file: the key is written into the child and is
+ * never on the filesystem and never in an argument vector. */
+#define HUB_CURL_CONFIG_FD 3
+
+/* RunHubCurl posts one JSON body to the hub and returns the response.
+ *
+ * Two things are deliberate here and both were wrong before.
+ *
+ * There is no shell. The body was interpolated into a command line inside
+ * single quotes and handed to popen(), and the body carries process paths
+ * observed on this host. Any local user could name a directory
+ * `x'; command; #`, run something from it that opened a socket, and have this
+ * daemon run `command` as root on the next heartbeat. The path is escaped for
+ * JSON - which does not escape an apostrophe, because JSON has no reason to.
+ *
+ * The credentials are not arguments. `X-API-Key` was on the curl command line,
+ * so the tenant key - the credential the whole fleet shares - was readable out
+ * of /proc/<pid>/cmdline by every account on the box for as long as the request
+ * lasted. It goes down a pipe the child reads with -K instead.
+ *
+ * stderr is left alone: a refused certificate has to stay visible in the
+ * journal, and that is the one failure this agent must not swallow. */
+static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
+                       const char* body, char* out, size_t outCap) {
+    if (out && outCap) out[0] = '\0';
+
+    char cfg[1024];
+    size_t cfgLen = 0;
+    cfg[0] = '\0';
+    AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "Content-Type", "application/json");
+    AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "X-API-Key", config->api_key);
+    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
+        AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "CF-Access-Client-Id", config->cf_client_id);
+        AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "CF-Access-Client-Secret", config->cf_client_secret);
+    }
+
+    const char* argv[32];
+    int n = 0;
+    argv[n++] = "curl";
+    argv[n++] = "-sS";
+    HubCurlSecurityArgv(config, argv, &n, 28);
+    argv[n++] = "-m";
+    argv[n++] = "5";
+    argv[n++] = "-w";
+    argv[n++] = "\n" HUB_STATUS_MARKER "%{http_code}";
+    argv[n++] = "-X";
+    argv[n++] = "POST";
+    argv[n++] = "-K";
+    argv[n++] = "/dev/fd/" OMINULL_STR(HUB_CURL_CONFIG_FD);
+    argv[n++] = "--data-binary";
+    argv[n++] = "@-";
+    argv[n++] = url;
+    argv[n] = NULL;
+
+    int cfgPipe[2], bodyPipe[2], outPipe[2];
+    if (pipe(cfgPipe) < 0) return false;
+    if (pipe(bodyPipe) < 0) { close(cfgPipe[0]); close(cfgPipe[1]); return false; }
+    if (pipe(outPipe) < 0) {
+        close(cfgPipe[0]); close(cfgPipe[1]);
+        close(bodyPipe[0]); close(bodyPipe[1]);
+        return false;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(cfgPipe[0]); close(cfgPipe[1]);
+        close(bodyPipe[0]); close(bodyPipe[1]);
+        close(outPipe[0]); close(outPipe[1]);
+        return false;
+    }
+    if (pid == 0) {
+        close(cfgPipe[1]); close(bodyPipe[1]); close(outPipe[0]);
+        if (dup2(bodyPipe[0], STDIN_FILENO) < 0) _exit(127);
+        if (dup2(outPipe[1], STDOUT_FILENO) < 0) _exit(127);
+        if (cfgPipe[0] != HUB_CURL_CONFIG_FD) {
+            if (dup2(cfgPipe[0], HUB_CURL_CONFIG_FD) < 0) _exit(127);
+            close(cfgPipe[0]);
+        }
+        if (bodyPipe[0] > HUB_CURL_CONFIG_FD) close(bodyPipe[0]);
+        if (outPipe[1] > HUB_CURL_CONFIG_FD) close(outPipe[1]);
+        execvp(argv[0], (char* const*)argv);
+        _exit(127);
+    }
+
+    close(cfgPipe[0]); close(bodyPipe[0]); close(outPipe[1]);
+
+    /* SIGPIPE is ignored process-wide, so a curl that dies before reading the
+     * body is a short write here rather than a dead daemon. */
+    (void)!write(cfgPipe[1], cfg, cfgLen);
+    close(cfgPipe[1]);
+
+    size_t bodyLen = body ? strlen(body) : 0;
+    size_t written = 0;
+    while (written < bodyLen) {
+        ssize_t w = write(bodyPipe[1], body + written, bodyLen - written);
+        if (w <= 0) break;
+        written += (size_t)w;
+    }
+    close(bodyPipe[1]);
+
+    size_t got = 0;
+    if (out && outCap > 1) {
+        while (got < outCap - 1) {
+            ssize_t r = read(outPipe[0], out + got, outCap - 1 - got);
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        out[got] = '\0';
+    }
+    close(outPipe[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+    return got > 0;
 }
 
 static void ApplyMeshQuarantineRule(const char* ip, bool block) {
@@ -749,7 +965,6 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
  * is otherwise indistinguishable, in its own log, from one that is working: it
  * posts every few seconds, curl exits 0, and nothing is ever recorded. The only
  * place the truth shows up is the hub's last_seen. */
-#define HUB_STATUS_MARKER "OMINULL_HTTP:"
 
 static long SplitHubStatus(char* resp) {
     char* marker = strstr(resp, "\n" HUB_STATUS_MARKER);
@@ -864,42 +1079,15 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 
     snprintf(jsonBuf + offset, bufCap - offset, "]}");
 
-    char curlSec[HUB_CURL_ARGS_LEN];
-    HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
+    char url[sizeof(config->hub_url) + 32];
+    snprintf(url, sizeof(url), "%s/api/v1/events", config->hub_url);
 
-    /* -sS rather than -s, and stderr is no longer discarded. A rejected
-     * certificate is the one failure this agent must not swallow, and it used
-     * to look identical to the hub being down.
-     *
-     * -w appends the status code, because curl without -f treats a 401 as a
-     * successful request: the body arrives, the exit code is 0, and an agent
-     * the hub is refusing looks exactly like a healthy one from here. Adding -f
-     * instead would throw the body away, and the body is what carries the
-     * agent_update descriptor. */
-    char cmd[bufCap + 2048];
-    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
-        snprintf(cmd, sizeof(cmd),
-            "curl -sS %s -m 5 -w '\\n" HUB_STATUS_MARKER "%%{http_code}' -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\"",
-            curlSec, config->api_key, config->cf_client_id, config->cf_client_secret, jsonBuf, config->hub_url
-        );
-    } else {
-        snprintf(cmd, sizeof(cmd),
-            "curl -sS %s -m 5 -w '\\n" HUB_STATUS_MARKER "%%{http_code}' -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\"",
-            curlSec, config->api_key, jsonBuf, config->hub_url
-        );
-    }
-
-    FILE* fp = popen(cmd, "r");
-    if (fp) {
-        char respBuf[4096] = {0};
-        size_t rBytes = fread(respBuf, 1, sizeof(respBuf) - 1, fp);
-        pclose(fp);
-        if (rBytes > 0) {
-            long status = SplitHubStatus(respBuf);
-            if (!ReportHubRejection(config, status)) {
-                SyncQuarantinedPeers(respBuf);
-                ApplyAgentUpdate(config, respBuf);
-            }
+    char respBuf[4096] = {0};
+    if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
+        long status = SplitHubStatus(respBuf);
+        if (!ReportHubRejection(config, status)) {
+            SyncQuarantinedPeers(respBuf);
+            ApplyAgentUpdate(config, respBuf);
         }
     }
 
@@ -926,6 +1114,8 @@ int main(int argc, char* argv[]) {
             strncpy(config.hub_url, argv[++i], sizeof(config.hub_url) - 1);
         } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
             strncpy(config.api_key, argv[++i], sizeof(config.api_key) - 1);
+        } else if (strcmp(argv[i], "--key-file") == 0 && i + 1 < argc) {
+            strncpy(config.key_path, argv[++i], sizeof(config.key_path) - 1);
         } else if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
             strncpy(config.endpoint_id, argv[++i], sizeof(config.endpoint_id) - 1);
         } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
@@ -960,6 +1150,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    /* A key file wins over --key: a unit that carries both is one mid-migration,
+     * and the file is the channel being migrated to. */
+    if (config.key_path[0] && !ReadKeyFile(config.key_path, config.api_key, sizeof(config.api_key))) {
+        fprintf(stderr, "[-] --key-file %s could not be read; refusing to start without a credential.\n",
+                config.key_path);
+        return 1;
+    }
+
     struct utsname sysInfo;
     uname(&sysInfo);
 
@@ -970,6 +1168,8 @@ int main(int argc, char* argv[]) {
     printf("  Hostname:      %s\n", config.hostname);
     printf("  Kernel / OS:   %s %s (%s)\n", sysInfo.sysname, sysInfo.release, sysInfo.machine);
     printf("  Hub Endpoint:  %s\n", config.hub_url);
+    printf("  Credential:    %s\n", config.key_path[0] ? config.key_path
+                                                       : "--key (visible in /proc/<pid>/cmdline; prefer --key-file)");
     if (HubUsesTLS(&config)) {
         printf("  Hub Trust:     TLS, pinned to %s\n", config.ca_path);
         if (config.client_cert_path[0] && access(config.client_cert_path, R_OK) == 0) {
@@ -988,6 +1188,9 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
+    /* The heartbeat writes its body into a child's stdin. A child that exits
+     * first would otherwise take the daemon down with a SIGPIPE. */
+    signal(SIGPIPE, SIG_IGN);
 
     printf("[+] Initializing Linux eBPF Subsystem & Socket Flow Sniffer...\n");
     printf("[+] Attached eBPF TC classifier program: ominull_tc_egress\n");

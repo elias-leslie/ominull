@@ -258,10 +258,13 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         return false;
     }
 
-    char pathStr[512] = {0};
-    snprintf(pathStr, sizeof(pathStr), "/api/v1/events?api_key=%s", config->api_key);
+    /* The key travels in the X-API-Key header below and nowhere else. It used
+     * to be repeated in the query string, which put the credential the whole
+     * fleet shares into every access log, proxy log and browser-style referrer
+     * on the path to the hub - a URL is not a private channel, and the header
+     * was already carrying it. */
     WCHAR wPath[512] = {0};
-    MultiByteToWideChar(CP_UTF8, 0, pathStr, -1, wPath, 512);
+    MultiByteToWideChar(CP_UTF8, 0, "/api/v1/events", -1, wPath, 512);
 
     HINTERNET hRequest = WinHttpOpenRequest(
         hConnect,

@@ -273,8 +273,16 @@ fi
 # The .deb upgrade path reads this same file and leaves it untouched, so an endpoint
 # enrolled here keeps its hub URL, key and CA path when it later self-updates.
 echo -e "\033[90m[+] Writing enrolment config...\033[0m"
+# The key goes in a file of its own and the unit carries the path. Everything in
+# OMINULL_ARGS becomes the daemon's argv, and /proc/<pid>/cmdline is readable by
+# every account on the host - so a key written here would be the tenant
+# credential, shared by the whole fleet, on display in ps output for as long
+# as the agent runs.
+umask 077
+printf '%%s\n' "$API_KEY" > /etc/ominull/agent.key
+chmod 600 /etc/ominull/agent.key
 cat << CONF > /etc/ominull/agent.conf
-OMINULL_ARGS=--hub $AGENT_HUB_URL --key $API_KEY --role $ROLE_TAG --location $LOCATION_ID --id $ENDPOINT_ID --ca $CA_PATH --client-cert $CLIENT_CERT --client-key $CLIENT_KEY%s
+OMINULL_ARGS=--hub $AGENT_HUB_URL --key-file /etc/ominull/agent.key --role $ROLE_TAG --location $LOCATION_ID --id $ENDPOINT_ID --ca $CA_PATH --client-cert $CLIENT_CERT --client-key $CLIENT_KEY%s
 CONF
 chmod 600 /etc/ominull/agent.conf
 
@@ -386,6 +394,13 @@ else
     echo -e "\033[33m[!] Identity enrolment failed; the daemon will report under the API key alone.\033[0m"
 fi
 
+# Same reason as the Linux unit: a LaunchDaemon's ProgramArguments are visible
+# to every local account through ps for the life of the daemon. The plist below
+# names the file; the daemon reads the key out of it.
+umask 077
+printf '%%s\n' "$API_KEY" > /opt/ominull/agent.key
+chmod 600 /opt/ominull/agent.key
+
 echo -e "\033[90m[+] Configuring macOS LaunchDaemon Service...\033[0m"
 cat << PLIST > /Library/LaunchDaemons/dev.ominull.daemon.plist
 <?xml version="1.0" encoding="UTF-8"?>
@@ -399,7 +414,7 @@ cat << PLIST > /Library/LaunchDaemons/dev.ominull.daemon.plist
         <string>/bin/bash</string>
         <string>/opt/ominull/ominull_mac_daemon.sh</string>
         <string>$AGENT_HUB_URL</string>
-        <string>$API_KEY</string>
+        <string>/opt/ominull/agent.key</string>
         <string>$ROLE_TAG</string>
         <string>$LOCATION_ID</string>
         <string>$ENDPOINT_ID</string>

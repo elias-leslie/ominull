@@ -176,6 +176,36 @@ func TestBootstrapGenerators(t *testing.T) {
 			if strings.Contains(body, "CLIENT_KEY") && !strings.Contains(body, `chmod 600 "$CLIENT_KEY"`) {
 				t.Errorf("bootstrap script writes a client key it does not restrict:\n%s", body)
 			}
+			// The tenant key must reach the endpoint, but never as an
+			// argument to the long-running daemon: every argument of every
+			// process is world-readable (/proc/<pid>/cmdline on Linux, ps on
+			// macOS, `sc qc` on Windows), so a key in the service definition is
+			// a key any local account can lift - and it is the credential the
+			// whole fleet shares. Each generator has to plant a 0600 file and
+			// register the path.
+			switch tc.name {
+			case "bash":
+				if !strings.Contains(body, "--key-file /etc/ominull/agent.key") {
+					t.Errorf("linux unit does not take the key from a file:\n%s", body)
+				}
+				if strings.Contains(body, "OMINULL_ARGS=--hub $AGENT_HUB_URL --key $API_KEY") {
+					t.Errorf("linux unit puts the tenant key in the daemon's argv:\n%s", body)
+				}
+				if !strings.Contains(body, "chmod 600 /etc/ominull/agent.key") {
+					t.Errorf("linux key file is not restricted to its owner:\n%s", body)
+				}
+			case "macos":
+				if !strings.Contains(body, "<string>/opt/ominull/agent.key</string>") {
+					t.Errorf("launchd plist does not name a key file:\n%s", body)
+				}
+				if strings.Contains(body, "<string>$API_KEY</string>") {
+					t.Errorf("launchd plist puts the tenant key in ProgramArguments:\n%s", body)
+				}
+				if !strings.Contains(body, "chmod 600 /opt/ominull/agent.key") {
+					t.Errorf("macos key file is not restricted to its owner:\n%s", body)
+				}
+			}
+
 			// The generators used to hand-build the Windows binPath, which
 			// dropped the --service flag the SCM entry point needs. Registration
 			// goes through the agent's own installer now.
