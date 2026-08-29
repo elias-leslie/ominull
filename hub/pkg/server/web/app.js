@@ -46,6 +46,8 @@
   var ANOMALY_PAGE = 100;
   /* The hub answers GET /api/v1/events with at most this many rows. */
   var EVENT_PAGE = 100;
+  /* And GET /api/v1/threat-intel/iocs with at most this many. */
+  var IOC_PAGE = 200;
 
   /* Renders a page-limited length honestly: "100+" when the page came back
      full, because the real total is not knowable from it. */
@@ -1166,11 +1168,15 @@
     var stats = assetStats();
     if (state.section === "discovery") {
       var cov = state.coverage || {};
+      var covered = (cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) > 0;
       return [
-        { label: "Discovered", value: String(cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) },
-        { label: "Managed", value: String(cov.total_managed !== undefined ? cov.total_managed : stats.agented) },
-        { label: "Unmanaged", value: String(cov.total_unmanaged !== undefined ? cov.total_unmanaged : stats.noagent), tone: "warn" },
-        { label: "Coverage", value: (cov.coverage_percent !== undefined ? cov.coverage_percent : 0) + "%" },
+        /* Every figure here is scoped to the sweep. Before one has run they are
+           undefined rather than zero, and an em dash says so - "0 managed"
+           beside an Assets view reporting four is just wrong. */
+        { label: "Discovered", value: String(covered ? cov.total_discovered : 0) },
+        { label: "Managed", value: covered ? String(cov.total_managed || 0) : "\u2014" },
+        { label: "Unmanaged", value: covered ? String(cov.total_unmanaged || 0) : "\u2014", tone: "warn" },
+        { label: "Coverage", value: covered ? (cov.coverage_percent || 0) + "%" : "\u2014" },
         { label: "Deduced from flow", value: String(inferredCount()) },
         { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" }
       ];
@@ -1202,7 +1208,9 @@
         { label: "Policy groups", value: String(state.policyGroups.length) },
         { label: "Active", value: String(state.policyGroups.filter(function (g) { return g.active; }).length) },
         { label: "Exclusions", value: String(state.exclusions.length) },
-        { label: "Indicators", value: String(state.iocs.length) },
+        /* The hub returns at most IOC_PAGE indicators; the tile said 200 whether
+           the feeds held 200 or 200,000. */
+        { label: "Indicators", value: capped(state.iocs.length, IOC_PAGE) },
         { label: "Mesh quarantined", value: String(state.meshPeers.length), tone: state.meshPeers.length ? "crit" : "" },
         { label: "Isolated hosts", value: String(stats.quarantined), tone: stats.quarantined ? "crit" : "" }
       ];
@@ -1925,15 +1933,25 @@
           ];
         })));
 
+    /* Coverage is a ratio over what the sweep found, so before any sweep it is
+       not zero - there is nothing to take a ratio of. Printing "Managed 0" and
+       "0% covered" next to an Assets view reporting four managed endpoints made
+       the two screens contradict each other over the same fleet. */
+    var discovered = cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length;
+    var swept = discovered > 0;
+
     var covBody = h("div", { cls: "card-body" },
-      h("dl", { cls: "kv" },
-        h("dt", { text: "Discovered" }), h("dd", {}, h("b", { text: String(cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) })),
-        h("dt", { text: "Managed" }), h("dd", { text: String(cov.total_managed || 0) }),
-        h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
-        h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: (cov.coverage_percent || 0) + "%" })),
-        h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
-        h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }),
-        h("dt", { text: "Named by flow" }), h("dd", {}, h("b", { text: String(inferredCount()) }))));
+      swept
+        ? h("dl", { cls: "kv" },
+            h("dt", { text: "Discovered" }), h("dd", {}, h("b", { text: String(discovered) })),
+            h("dt", { text: "Managed" }), h("dd", { text: String(cov.total_managed || 0) }),
+            h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
+            h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: (cov.coverage_percent || 0) + "%" })),
+            h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
+            h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }),
+            h("dt", { text: "Named by flow" }), h("dd", {}, h("b", { text: String(inferredCount()) })))
+        : h("div", { cls: "empty", text: "No sweep has run, so there is nothing to measure coverage against. " +
+            "The fleet's agented hosts are on the Assets view; a sweep is what finds the ones without an agent." }));
 
     var inf = state.inference || {};
     var infBody = h("div", { cls: "card-body" });
@@ -3256,7 +3274,9 @@
       if (state.query) sub += " \u00b7 \u201c" + state.query + "\u201d";
     } else if (state.section === "discovery") {
       var cov = state.coverage || {};
-      sub = "/ " + (cov.coverage_percent || 0) + "% covered";
+      sub = (cov.total_discovered || state.scanAssets.length)
+        ? "/ " + (cov.coverage_percent || 0) + "% covered"
+        : "/ no sweep yet";
     } else if (state.section === "topology") {
       sub = "/ " + state.topoWindow + " window";
     } else if (state.demo) {
