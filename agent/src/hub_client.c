@@ -344,7 +344,21 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         }
     }
 
-    if (config->verbose || !bResults || dwStatusCode != 200) {
+    /* Rate-limited, and specific about a rejected credential. A hub that is
+     * refusing this endpoint repeats the refusal on every heartbeat, so an
+     * unthrottled line would bury the one that says when it started - and
+     * "HTTP 401" on its own reads like a transient hub problem rather than a
+     * key this endpoint will never authenticate with again. */
+    if (dwStatusCode == 401 || dwStatusCode == 403) {
+        static DWORD lastAuthReport = 0;
+        DWORD now = GetTickCount();
+        if (lastAuthReport == 0 || now - lastAuthReport >= 60000) {
+            printf("[!] The hub refused this endpoint's telemetry with HTTP %lu. The API key in "
+                   "--key-file is not one it accepts; nothing is being recorded until it is fixed.\n",
+                   dwStatusCode);
+            lastAuthReport = now;
+        }
+    } else if (config->verbose || !bResults || dwStatusCode != 200) {
         printf("[*] Telemetry POST status: HTTP %lu (WinHTTP: %d, Err: %lu)\n", dwStatusCode, bResults, GetLastError());
     }
 

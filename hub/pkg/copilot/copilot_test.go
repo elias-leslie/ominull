@@ -71,3 +71,99 @@ func TestCopilotLifecycle(t *testing.T) {
 		t.Errorf("config update failed: %+v", cfg)
 	}
 }
+
+// TestUnreachableProviderIsReportedAsDegraded is the honesty contract. The
+// engine answers from a built-in rule set when the configured model cannot be
+// reached, and that answer is confident, formatted like the real thing, and
+// entirely generic. Reporting it as the model's work - which is what shipped
+// through v1.4.4 - tells an operator a model looked at their alert when nothing
+// did, so what must never regress is the label, not the fallback.
+func TestUnreachableProviderIsReportedAsDegraded(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "copilot_degraded.db"))
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer store.Close()
+
+	// Port 1 on the loopback: nothing listens, and it fails immediately rather
+	// than making the test wait out a timeout.
+	engine := New(store, Config{
+		Provider:    ProviderLocalOllama,
+		OllamaURL:   "http://127.0.0.1:1",
+		OllamaModel: "llama3.2",
+	})
+
+	resp, err := engine.HandleChat(context.Background(), "what is happening on the network?")
+	if err != nil {
+		t.Fatalf("HandleChat failed: %v", err)
+	}
+	if resp.Reply == "" {
+		t.Fatal("expected a rule-set answer rather than nothing")
+	}
+	if !resp.Degraded {
+		t.Error("an unreachable provider was not reported as degraded")
+	}
+	if resp.Provider != string(ProviderRuleBased) {
+		t.Errorf("a rule-set answer was attributed to %q", resp.Provider)
+	}
+	if resp.Notice == "" {
+		t.Error("degraded answer carries no explanation of why")
+	}
+
+	// The same has to hold for an investigation, which reads even more like
+	// analysis than a chat reply does.
+	report, err := engine.Investigate(context.Background(), storage.AnomalyAlert{
+		ID: "alert-degraded", Title: "beaconing", Severity: "HIGH",
+	})
+	if err != nil {
+		t.Fatalf("Investigate failed: %v", err)
+	}
+	if !report.Degraded || report.Provider != string(ProviderRuleBased) {
+		t.Errorf("investigation attributed to %q, degraded=%v", report.Provider, report.Degraded)
+	}
+
+	// A provider that answers must be reported as itself, or the flag is
+	// useless noise.
+	engine.UpdateConfig(Config{Provider: ProviderRuleBased})
+	plain, err := engine.HandleChat(context.Background(), "status")
+	if err != nil {
+		t.Fatalf("HandleChat failed: %v", err)
+	}
+	if plain.Degraded {
+		t.Error("the rule set answering as the configured provider is not a degradation")
+	}
+}
+
+// TestUnreachableProviderDegradesBeforeTheHubGivesUp pins the other half of the
+// live failure. The hub's WriteTimeout is 30s; the copilot's HTTP client used
+// to allow 45s, so a provider that never answered outlived the response and the
+// console got an empty body after exactly thirty seconds instead of the
+// fallback. What matters is not the exact numbers but that a dead provider
+// resolves well inside the window the hub will hold a response open for.
+func TestUnreachableProviderDegradesBeforeTheHubGivesUp(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "copilot_timeout.db"))
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer store.Close()
+
+	// TEST-NET-1: routable nowhere, so this blackholes in connect rather than
+	// being refused - the shape of the real failure, where the configured
+	// address simply did not exist on the network.
+	engine := New(store, Config{
+		Provider:    ProviderLocalOllama,
+		OllamaURL:   "http://192.0.2.1:11434",
+		OllamaModel: "llama3.2",
+	})
+
+	start := time.Now()
+	answer := engine.Ask(context.Background(), "system", "status")
+	elapsed := time.Since(start)
+
+	if elapsed > 15*time.Second {
+		t.Errorf("a blackholed provider took %s to degrade; the hub closes the response at 30s", elapsed)
+	}
+	if !answer.Degraded || answer.Provider != ProviderRuleBased {
+		t.Errorf("expected a labelled rule-set answer, got provider=%q degraded=%v", answer.Provider, answer.Degraded)
+	}
+}

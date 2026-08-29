@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -48,9 +49,9 @@ func New(store *storage.Store, cfg Config) *Engine {
 	if cfg.Provider == "" {
 		cfg.Provider = ProviderRuleBased
 	}
-	if cfg.OllamaURL == "" {
-		cfg.OllamaURL = "http://10.0.0.39:11434"
-	}
+	// No default URL. A built-in address that happens not to answer is the
+	// same failure as none at all, except that it looks configured.
+
 	if cfg.OllamaModel == "" {
 		cfg.OllamaModel = "llama3.2"
 	}
@@ -64,7 +65,24 @@ func New(store *storage.Store, cfg Config) *Engine {
 	return &Engine{
 		config: cfg,
 		store:  store,
-		client: &http.Client{Timeout: 45 * time.Second},
+		// Both numbers are bounded by the hub's 30s WriteTimeout, and that is
+		// the point. At the 45s this used to use, a provider that never
+		// answered outlived the response the operator was waiting for: the hub
+		// closed the connection at 30s with nothing written, so the console got
+		// an empty reply rather than the degradation notice. Twenty seconds
+		// leaves room to serialise the answer.
+		//
+		// The dial timeout matters more than the total. An unroutable provider
+		// address - the state this deployment was actually in - hangs in
+		// connect, and three seconds is the difference between a copilot that
+		// degrades visibly and one that looks frozen.
+		client: &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+				TLSHandshakeTimeout: 5 * time.Second,
+			},
+		},
 	}
 }
 
@@ -80,25 +98,96 @@ func (e *Engine) UpdateConfig(cfg Config) {
 	e.config = cfg
 }
 
-func (e *Engine) Generate(ctx context.Context, systemPrompt string, prompt string) (string, error) {
+// Answer is what the copilot actually produced, as opposed to what it was
+// configured to produce. The distinction matters: when the configured model is
+// unreachable the engine answers from a small built-in rule set instead, and
+// that answer is confident, formatted like the real thing, and completely
+// generic. Reporting the configured provider as the author of it - which is
+// what shipped before - tells an operator a model looked at their alert when
+// nothing did.
+type Answer struct {
+	Text string
+	// Provider and Model describe what wrote Text, not what was configured.
+	Provider ProviderType
+	Model    string
+	// Degraded is set when the configured provider could not answer. Reason
+	// says why, in a sentence meant to be shown to whoever asked.
+	Degraded bool
+	Reason   string
+}
+
+// Ask runs a prompt through the configured provider and reports which one
+// answered. Callers that only want the text can use Generate.
+func (e *Engine) Ask(ctx context.Context, systemPrompt string, prompt string) Answer {
 	e.mu.RLock()
 	cfg := e.config
 	e.mu.RUnlock()
 
+	var text string
+	var err error
+
 	switch cfg.Provider {
+	case ProviderRuleBased:
+		text, _ = e.generateHeuristic(systemPrompt, prompt)
+		return Answer{Text: text, Provider: ProviderRuleBased, Model: string(ProviderRuleBased)}
 	case ProviderLocalOllama:
-		return e.generateOllama(ctx, cfg, systemPrompt, prompt)
+		if strings.TrimSpace(cfg.OllamaURL) == "" {
+			return e.fallback(cfg, systemPrompt, prompt, "no ollama_url is set")
+		}
+		text, err = e.generateOllama(ctx, cfg, systemPrompt, prompt)
 	case ProviderGemini:
-		if cfg.GeminiAPIKey != "" {
-			return e.generateGemini(ctx, cfg, systemPrompt, prompt)
+		if cfg.GeminiAPIKey == "" {
+			return e.fallback(cfg, systemPrompt, prompt, "no Gemini API key is set")
 		}
+		text, err = e.generateGemini(ctx, cfg, systemPrompt, prompt)
 	case ProviderOpenAI:
-		if cfg.OpenAIAPIKey != "" {
-			return e.generateOpenAI(ctx, cfg, systemPrompt, prompt)
+		if cfg.OpenAIAPIKey == "" {
+			return e.fallback(cfg, systemPrompt, prompt, "no OpenAI API key is set")
 		}
+		text, err = e.generateOpenAI(ctx, cfg, systemPrompt, prompt)
+	default:
+		return e.fallback(cfg, systemPrompt, prompt, fmt.Sprintf("%q is not a provider this hub knows", cfg.Provider))
 	}
 
-	return e.generateHeuristic(systemPrompt, prompt)
+	if err != nil {
+		return e.fallback(cfg, systemPrompt, prompt, err.Error())
+	}
+	if strings.TrimSpace(text) == "" {
+		return e.fallback(cfg, systemPrompt, prompt, "it returned an empty completion")
+	}
+	return Answer{Text: text, Provider: cfg.Provider, Model: modelFor(cfg)}
+}
+
+// fallback answers from the rule set and says so. It never reports the
+// configured provider as the author.
+func (e *Engine) fallback(cfg Config, systemPrompt, prompt, reason string) Answer {
+	text, _ := e.generateHeuristic(systemPrompt, prompt)
+	return Answer{
+		Text:     text,
+		Provider: ProviderRuleBased,
+		Model:    string(ProviderRuleBased),
+		Degraded: true,
+		Reason: fmt.Sprintf("%s (%s) did not answer: %s. This reply came from the built-in rule set, "+
+			"not from a model, and is generic.", cfg.Provider, modelFor(cfg), reason),
+	}
+}
+
+func modelFor(cfg Config) string {
+	switch cfg.Provider {
+	case ProviderLocalOllama:
+		return cfg.OllamaModel
+	case ProviderGemini:
+		return cfg.GeminiModel
+	case ProviderOpenAI:
+		return cfg.OpenAIModel
+	}
+	return string(cfg.Provider)
+}
+
+// Generate is the text-only form, kept for callers that have nothing to do with
+// a degradation notice.
+func (e *Engine) Generate(ctx context.Context, systemPrompt string, prompt string) (string, error) {
+	return e.Ask(ctx, systemPrompt, prompt).Text, nil
 }
 
 func (e *Engine) generateOllama(ctx context.Context, cfg Config, systemPrompt string, prompt string) (string, error) {
@@ -120,15 +209,19 @@ func (e *Engine) generateOllama(ctx context.Context, cfg Config, systemPrompt st
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	// Failures are returned, not swallowed. Falling back in here is what made
+	// an unreachable Ollama indistinguishable from a working one: the caller
+	// got a confident answer and no indication of where it came from. Ask owns
+	// the fallback now, and labels it.
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		// Fallback to heuristic on connection refusal
-		return e.generateHeuristic(systemPrompt, prompt)
+		return "", fmt.Errorf("cannot reach %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return e.generateHeuristic(systemPrompt, prompt)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return "", fmt.Errorf("%s answered HTTP %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var ollamaResp struct {
@@ -249,14 +342,20 @@ func (e *Engine) generateHeuristic(systemPrompt string, prompt string) (string, 
 /* HIGH-LEVEL COPILOT WORKFLOWS */
 
 type InvestigationReport struct {
-	AlertID         string   `json:"alert_id"`
-	Title           string   `json:"title"`
-	Severity        string   `json:"severity"`
-	Summary         string   `json:"summary"`
-	MitreTechniques []string `json:"mitre_techniques"`
-	RootCause       string   `json:"root_cause"`
-	Remediation     []string `json:"remediation"`
+	AlertID         string    `json:"alert_id"`
+	Title           string    `json:"title"`
+	Severity        string    `json:"severity"`
+	Summary         string    `json:"summary"`
+	MitreTechniques []string  `json:"mitre_techniques"`
+	RootCause       string    `json:"root_cause"`
+	Remediation     []string  `json:"remediation"`
 	GeneratedAt     time.Time `json:"generated_at"`
+	// Same contract as ChatResponse: an investigation written by the rule set
+	// reads exactly like one written by a model, so it has to say which it is.
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Degraded bool   `json:"degraded"`
+	Notice   string `json:"notice,omitempty"`
 }
 
 func (e *Engine) Investigate(ctx context.Context, alert storage.AnomalyAlert) (*InvestigationReport, error) {
@@ -266,16 +365,17 @@ func (e *Engine) Investigate(ctx context.Context, alert storage.AnomalyAlert) (*
 		alert.Title, alert.AnomalyType, alert.Severity, alert.Hostname, alert.EndpointID, alert.DstIP, alert.DstPort, alert.ProcessPath, alert.Details,
 	)
 
-	llmText, err := e.Generate(ctx, sysPrompt, userPrompt)
-	if err != nil {
-		return nil, err
-	}
+	answer := e.Ask(ctx, sysPrompt, userPrompt)
 
 	return &InvestigationReport{
 		AlertID:         alert.ID,
 		Title:           alert.Title,
 		Severity:        alert.Severity,
-		Summary:         llmText,
+		Summary:         answer.Text,
+		Provider:        string(answer.Provider),
+		Model:           answer.Model,
+		Degraded:        answer.Degraded,
+		Notice:          answer.Reason,
 		MitreTechniques: []string{"T1071.001", "T1041", "T1059"},
 		RootCause:       fmt.Sprintf("Outlier telemetry matching %s on %s", alert.AnomalyType, alert.Hostname),
 		Remediation: []string{
@@ -292,27 +392,28 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Reply       string    `json:"reply"`
-	Timestamp   time.Time `json:"timestamp"`
-	Model       string    `json:"model"`
-	Provider    string    `json:"provider"`
+	Reply     string    `json:"reply"`
+	Timestamp time.Time `json:"timestamp"`
+	// Model and Provider name what wrote Reply. When Degraded is set that is
+	// the built-in rule set rather than the configured model, and Notice says
+	// why - a console showing the reply without it would be presenting a
+	// generic canned answer as analysis.
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	Degraded bool   `json:"degraded"`
+	Notice   string `json:"notice,omitempty"`
 }
 
 func (e *Engine) HandleChat(ctx context.Context, msg string) (*ChatResponse, error) {
-	e.mu.RLock()
-	cfg := e.config
-	e.mu.RUnlock()
-
 	sysPrompt := "You are Ominull Threat Copilot, an expert cybersecurity assistant embedded in the Ominull platform. Answer questions concisely and authoritatively."
-	reply, err := e.Generate(ctx, sysPrompt, msg)
-	if err != nil {
-		return nil, err
-	}
+	answer := e.Ask(ctx, sysPrompt, msg)
 
 	return &ChatResponse{
-		Reply:     reply,
+		Reply:     answer.Text,
 		Timestamp: time.Now().UTC(),
-		Model:     string(cfg.Provider),
-		Provider:  string(cfg.Provider),
+		Model:     answer.Model,
+		Provider:  string(answer.Provider),
+		Degraded:  answer.Degraded,
+		Notice:    answer.Reason,
 	}, nil
 }

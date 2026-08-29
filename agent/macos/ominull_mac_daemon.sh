@@ -167,6 +167,43 @@ hub_path() {
     printf '%s' "/download/${1##*/download/}"
 }
 
+# The hub answers a rejected batch with a status and a body, and curl calls that
+# success. report_hub_rejection makes the refusal visible: an endpoint whose
+# credentials the hub no longer accepts is otherwise indistinguishable, in this
+# log, from one that is working - it posts every few seconds, curl exits 0, and
+# nothing is written. The only place it shows is the hub's last_seen column.
+#
+# Rate-limited to once a minute, because a rejection repeats on every heartbeat
+# and a line every few seconds would bury the one that says when it started.
+HUB_STATUS_MARKER="OMINULL_HTTP:"
+HUB_REJECT_LAST=0
+HUB_REJECT_STATUS=""
+
+report_hub_rejection() {
+    local status="$1" now
+    case "$status" in
+        ""|2??)
+            if [[ -n "$HUB_REJECT_STATUS" ]]; then
+                echo "[+] The hub is accepting telemetry again (HTTP ${status:-none})."
+                HUB_REJECT_STATUS=""
+            fi
+            return 1
+            ;;
+    esac
+
+    now=$(date +%s)
+    if [[ "$status" != "$HUB_REJECT_STATUS" ]] || (( now - HUB_REJECT_LAST >= 60 )); then
+        if [[ "$status" == "401" || "$status" == "403" ]]; then
+            echo "[!] The hub refused this endpoint's telemetry with HTTP $status. The API key in the LaunchDaemon plist is not one it accepts; nothing is being recorded until it is fixed."
+        else
+            echo "[!] The hub refused this endpoint's telemetry with HTTP $status; nothing is being recorded."
+        fi
+        HUB_REJECT_LAST=$now
+        HUB_REJECT_STATUS="$status"
+    fi
+    return 0
+}
+
 # apply_agent_update installs a newer agent when the hub offers one, and only
 # after proving the package is genuine. Any failure leaves the running agent
 # exactly as it is.
@@ -258,7 +295,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.4.4)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.4.5)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -324,7 +361,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.4.4 (PF)",
+  "driver_version": "1.4.5 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -337,9 +374,24 @@ JSON
     # stderr is deliberately not discarded: a rejected certificate is the one
     # failure this daemon must not swallow, and it used to look exactly like the
     # hub being unreachable.
-    RESPONSE=$(hub_curl -sSL -m 5 -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+    #
+    # -w appends the status, because curl without -f calls a 401 a success: the
+    # body arrives, the exit status is 0, and a daemon the hub is refusing looks
+    # exactly like a healthy one in this log. -f would report it but discard the
+    # body, and the body is what carries the agent_update descriptor.
+    RESPONSE=$(hub_curl -sSL -m 5 -w "\n${HUB_STATUS_MARKER}%{http_code}" -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
         -d "$PAYLOAD" \
         "$HUB_URL/api/v1/events?api_key=$API_KEY" || true)
+    HUB_STATUS=$(printf '%s' "$RESPONSE" | sed -n "s/^${HUB_STATUS_MARKER}//p" | tail -1)
+    RESPONSE=${RESPONSE%%$'\n'${HUB_STATUS_MARKER}*}
+
+    # A refused batch carries no descriptor and no isolation state worth acting
+    # on, so the rest of this pass is skipped rather than run against an error
+    # body. The loop's own cadence is kept.
+    if report_hub_rejection "$HUB_STATUS"; then
+        sleep 3
+        continue
+    fi
 
     apply_agent_update "$RESPONSE"
 

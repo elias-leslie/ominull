@@ -17,7 +17,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.4.4"
+#define OMINULL_LINUX_AGENT_VERSION "1.4.5"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -650,6 +650,52 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
     (void)rc;
 }
 
+/* The hub answers a rejected batch with a status and a body, and curl reports
+ * both as success. These two split the status back off the response and make a
+ * refusal visible, because an agent whose credentials the hub no longer accepts
+ * is otherwise indistinguishable, in its own log, from one that is working: it
+ * posts every few seconds, curl exits 0, and nothing is ever recorded. The only
+ * place the truth shows up is the hub's last_seen. */
+#define HUB_STATUS_MARKER "OMINULL_HTTP:"
+
+static long SplitHubStatus(char* resp) {
+    char* marker = strstr(resp, "\n" HUB_STATUS_MARKER);
+    if (!marker) return 0;
+    long status = strtol(marker + 1 + strlen(HUB_STATUS_MARKER), NULL, 10);
+    *marker = '\0';   /* leave the caller the body alone */
+    return status;
+}
+
+/* Returns true when the batch was refused, and says so at most once a minute:
+ * a rejection repeats every heartbeat, and a line every few seconds would bury
+ * the reason it started. */
+static bool ReportHubRejection(long status) {
+    static time_t lastReport = 0;
+    static long lastStatus = 0;
+
+    if (status == 0 || (status >= 200 && status < 300)) {
+        if (lastStatus != 0) {
+            printf("[+] The hub is accepting telemetry again (HTTP %ld).\n", status);
+            lastStatus = 0;
+        }
+        return false;
+    }
+
+    time_t now = time(NULL);
+    if (status != lastStatus || now - lastReport >= 60) {
+        if (status == 401 || status == 403) {
+            printf("[!] The hub refused this endpoint's telemetry with HTTP %ld. The API key in "
+                   "--key is not one it accepts; nothing is being recorded until it is fixed.\n", status);
+        } else {
+            printf("[!] The hub refused this endpoint's telemetry with HTTP %ld; nothing is being "
+                   "recorded.\n", status);
+        }
+        lastReport = now;
+        lastStatus = status;
+    }
+    return true;
+}
+
 static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     /* Checked before the batch is built, not after it fails: the payload and
      * the header that authenticates it are the things being protected. */
@@ -718,16 +764,22 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 
     /* -sS rather than -s, and stderr is no longer discarded. A rejected
      * certificate is the one failure this agent must not swallow, and it used
-     * to look identical to the hub being down. */
+     * to look identical to the hub being down.
+     *
+     * -w appends the status code, because curl without -f treats a 401 as a
+     * successful request: the body arrives, the exit code is 0, and an agent
+     * the hub is refusing looks exactly like a healthy one from here. Adding -f
+     * instead would throw the body away, and the body is what carries the
+     * agent_update descriptor. */
     char cmd[bufCap + 2048];
     if (config->cf_client_id[0] && config->cf_client_secret[0]) {
         snprintf(cmd, sizeof(cmd),
-            "curl -sS %s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\"",
+            "curl -sS %s -m 5 -w '\\n" HUB_STATUS_MARKER "%%{http_code}' -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -H \"CF-Access-Client-Id: %s\" -H \"CF-Access-Client-Secret: %s\" -d '%s' \"%s/api/v1/events\"",
             curlSec, config->api_key, config->cf_client_id, config->cf_client_secret, jsonBuf, config->hub_url
         );
     } else {
         snprintf(cmd, sizeof(cmd),
-            "curl -sS %s -m 5 -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\"",
+            "curl -sS %s -m 5 -w '\\n" HUB_STATUS_MARKER "%%{http_code}' -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: %s\" -d '%s' \"%s/api/v1/events\"",
             curlSec, config->api_key, jsonBuf, config->hub_url
         );
     }
@@ -738,8 +790,11 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         size_t rBytes = fread(respBuf, 1, sizeof(respBuf) - 1, fp);
         pclose(fp);
         if (rBytes > 0) {
-            SyncQuarantinedPeers(respBuf);
-            ApplyAgentUpdate(config, respBuf);
+            long status = SplitHubStatus(respBuf);
+            if (!ReportHubRejection(status)) {
+                SyncQuarantinedPeers(respBuf);
+                ApplyAgentUpdate(config, respBuf);
+            }
         }
     }
 
