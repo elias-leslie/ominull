@@ -41,6 +41,10 @@
 
   /* ------------------------------------------------------------------ dom */
 
+  /* Matches the hub's page size for /api/v1/anomalies. A full page means "this
+     many or more", never "exactly this many". */
+  var ANOMALY_PAGE = 100;
+
   function h(tag, props) {
     var el = document.createElement(tag);
     if (props) {
@@ -222,6 +226,9 @@
     inference: null,
     coverage: null,
     anomalies: [],
+    // True when the last fetch came back a full page, so the count on the
+    // badge is a floor rather than a total.
+    anomaliesCapped: false,
     updateStatus: null,
     meshPeers: [],
     policyGroups: [],
@@ -2029,11 +2036,45 @@
     var occupied = [];
     nodes.forEach(function (n) {
       var pt = pos[n.id];
+      if (pt) occupied.push({ x0: pt.x - pt.r, x1: pt.x + pt.r, y0: pt.y - pt.r, y1: pt.y + pt.r });
+    });
+
+    /* Node captions get the same treatment as the port labels below: drawn
+       only where they can be read. A subnet sweep puts a couple of hundred
+       nodes on this graph, and captioning all of them turned the ring into a
+       band of overlapping text with no readable name anywhere in it - the
+       managed hosts, which are the point of the view, buried among addresses.
+       Nothing is lost by dropping one: every node keeps its hover title and
+       the side panel names whatever is selected.
+
+       Order decides who keeps a caption when two collide, so it runs from most
+       to least worth naming: the selection, then the hosts the fleet actually
+       manages, then the busiest. */
+    var captionOrder = nodes.slice().sort(function (a, b) {
+      var sa = a.id === state.topoSelected ? 0 : 1;
+      var sb = b.id === state.topoSelected ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      // Anything the fleet knows by name outranks a bare address.
+      var ka = nodeKind(a) === "unmanaged" ? 1 : 0;
+      var kb = nodeKind(b) === "unmanaged" ? 1 : 0;
+      if (ka !== kb) return ka - kb;
+      return ((pos[b.id] && pos[b.id].r) || 0) - ((pos[a.id] && pos[a.id].r) || 0);
+    });
+    var showCaption = {};
+    var captionBoxes = [];
+    captionOrder.forEach(function (n) {
+      var pt = pos[n.id];
       if (!pt) return;
       var text = n.label || n.id;
       var half = Math.max(pt.r, text.length * 2.6);
-      occupied.push({ x0: pt.x - pt.r, x1: pt.x + pt.r, y0: pt.y - pt.r, y1: pt.y + pt.r });
-      occupied.push({ x0: pt.x - half, x1: pt.x + half, y0: pt.y + pt.r + 4, y1: pt.y + pt.r + 15 });
+      var box = { x0: pt.x - half, x1: pt.x + half, y0: pt.y + pt.r + 4, y1: pt.y + pt.r + 15 };
+      for (var i = 0; i < captionBoxes.length; i++) {
+        var o = captionBoxes[i];
+        if (box.x0 < o.x1 + 2 && box.x1 > o.x0 - 2 && box.y0 < o.y1 + 2 && box.y1 > o.y0 - 2) return;
+      }
+      captionBoxes.push(box);
+      occupied.push(box);
+      showCaption[n.id] = true;
     });
     function labelIsClear(x, y) {
       for (var i = 0; i < occupied.length; i++) {
@@ -2091,10 +2132,12 @@
           (n.quiet ? " \u00b7 quiet in this window" : "")
       }));
       nodeLayer.appendChild(circle);
-      labelLayer.appendChild(s("text", {
-        "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
-        text: n.label || n.id
-      }));
+      if (showCaption[n.id]) {
+        labelLayer.appendChild(s("text", {
+          "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
+          text: n.label || n.id
+        }));
+      }
     });
 
     svg.appendChild(edgeLayer);
@@ -2220,21 +2263,51 @@
         return Math.max(Number(p.bytes_in) || 0, Number(p.bytes_out) || 0);
       }).concat([1]));
       var n = timeline.length;
-      var svg = s("svg", { "class": "chart", viewBox: "0 0 " + (n * 8) + " 132", preserveAspectRatio: "none", role: "img", "aria-label": "Bandwidth over time" });
+      /* The bars are laid out across a fixed 100-unit width and scaled to the
+         bucket count, rather than eight units per bucket. With the six buckets
+         the hub returns, the old form stretched each three-unit bar across a
+         quarter of the card - a chart of six blocks, unreadable as a series. */
+      var W = 100;
+      var slot = W / n;
+      var barW = slot * 0.3;
+      var maxBlocks = Math.max.apply(null, timeline.map(function (p) { return Number(p.blocks) || 0; }).concat([1]));
+      var svg = s("svg", { "class": "chart", viewBox: "0 0 " + W + " 132", preserveAspectRatio: "none", role: "img", "aria-label": "Bandwidth and blocked flows over time" });
       timeline.forEach(function (p, i) {
-        var hi = Math.max(1, Math.round(((Number(p.bytes_in) || 0) / maxB) * 60));
-        var ho = Math.max(1, Math.round(((Number(p.bytes_out) || 0) / maxB) * 60));
-        svg.appendChild(s("rect", { "class": "series-in", x: i * 8, y: 62 - hi, width: 3, height: hi }));
-        svg.appendChild(s("rect", { "class": "series-out", x: i * 8 + 3.5, y: 62 - ho, width: 3, height: ho }));
-        var hb = Math.min(60, (Number(p.blocks) || 0) * 4);
-        if (hb) svg.appendChild(s("rect", { "class": "series-block", x: i * 8, y: 66, width: 6.5, height: hb }));
+        var bin = Number(p.bytes_in) || 0;
+        var bout = Number(p.bytes_out) || 0;
+        /* A bucket with no traffic draws nothing. The one-pixel floor the old
+           chart used drew a bar for silence, which is the state most worth
+           being able to see. */
+        var hi = bin ? Math.max(1, Math.round((bin / maxB) * 60)) : 0;
+        var ho = bout ? Math.max(1, Math.round((bout / maxB) * 60)) : 0;
+        var x0 = i * slot + slot * 0.15;
+        if (hi) svg.appendChild(s("rect", { "class": "series-in", x: x0, y: 62 - hi, width: barW, height: hi }));
+        if (ho) svg.appendChild(s("rect", { "class": "series-out", x: x0 + barW + slot * 0.1, y: 62 - ho, width: barW, height: ho }));
+        var blocks = Number(p.blocks) || 0;
+        // Scaled against the busiest bucket, not a fixed four units per block,
+        // which flattened anything past fifteen into the same full-height bar.
+        if (blocks) {
+          var hb = Math.max(2, Math.round((blocks / maxBlocks) * 55));
+          svg.appendChild(s("rect", { "class": "series-block", x: x0, y: 66, width: barW * 2 + slot * 0.1, height: hb }));
+        }
       });
-      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 63, x2: n * 8, y2: 63 }));
+      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 63, x2: W, y2: 63 }));
+
+      /* Bucket times as HTML under the chart rather than SVG text: the chart is
+         drawn with preserveAspectRatio="none" so it can fill the card, and any
+         text inside it would be stretched with the bars. Without these the
+         series had no time axis at all. */
+      var ticks = h("div", { cls: "chart-ticks" });
+      timeline.forEach(function (p) {
+        ticks.appendChild(h("span", { text: String(p.timestamp || "") }));
+      });
+
       chartCard = card("Bandwidth and blocks",
-        h("div", { cls: "card-body" }, svg,
+        h("div", { cls: "card-body" }, svg, ticks,
           h("div", { cls: "legend" },
             h("span", { text: "above the axis: bytes in / bytes out" }),
-            h("span", { text: "below: blocked flows" }))));
+            h("span", { text: "below: blocked flows" }),
+            h("span", { text: "ten-minute buckets, last hour" }))));
     } else {
       chartCard = card("Bandwidth and blocks", h("div", { cls: "empty", text: "No timeline in this window." }));
     }
@@ -3050,9 +3123,18 @@
 
     $("hub-version").textContent = HUB_VERSION ? "hub " + HUB_VERSION : "";
 
+    /* The hub returns at most ANOMALY_PAGE unacknowledged anomalies, so a full
+       page is a floor and not a count. Printing it as one turned "at least a
+       hundred open" into a confident "100", which is the number an operator
+       then reasons about. */
     var pip = $("alert-count");
-    pip.textContent = String(state.anomalies.length);
-    pip.setAttribute("data-n", String(state.anomalies.length));
+    var open = state.anomalies.length;
+    var capped = !!state.anomaliesCapped;
+    pip.textContent = capped ? open + "+" : String(open);
+    pip.setAttribute("data-n", String(open));
+    pip.setAttribute("title", capped
+      ? "At least " + open + " open anomalies; the hub returns one page at a time."
+      : open + " open " + (open === 1 ? "anomaly" : "anomalies"));
 
     var health = $("health");
     var hstate = state.lastError ? "down" : (assetStats().offline > 0 ? "degraded" : "ok");
@@ -3179,7 +3261,11 @@
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/anomalies").then(function (d) {
-        state.anomalies = arrayOf(d).filter(function (a) { return !a.acknowledged; });
+        var page = arrayOf(d);
+        /* Recorded before the acknowledged ones are filtered out: a full page
+           means the hub had more to give, whatever survives the filter. */
+        state.anomaliesCapped = page.length >= ANOMALY_PAGE;
+        state.anomalies = page.filter(function (a) { return !a.acknowledged; });
       }),
       request("/api/v1/agents/update-status").then(function (d) { state.updateStatus = d || null; }),
       request("/api/v1/mesh/quarantined").then(function (d) { state.meshPeers = arrayOf(d); })

@@ -1723,15 +1723,70 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 		eRows.Close()
 	}
 
-	// 6. Generate 6-point timeline trend
+	// 6. Bandwidth over the last hour, in ten-minute buckets, measured.
+	//
+	// This used to be the all-time totals divided by six with a fixed slope
+	// added - so the console drew a tidy declining trend that no traffic had
+	// produced, and drew blocked-flow bars above a "0 BLOCKED" figure it had
+	// just rendered from the same response. A console that invents a number is
+	// worse than one that shows none: the invented one is acted on.
+	//
+	// Empty buckets are emitted as zeros rather than skipped. A gap in the
+	// series is itself the finding - an endpoint that stopped reporting - and
+	// dropping it would redraw the chart as though the quiet ten minutes had
+	// never happened.
 	now := time.Now().UTC()
-	for i := 5; i >= 0; i-- {
-		t := now.Add(-time.Duration(i*10) * time.Minute)
+	const bucketMinutes = 10
+	const buckets = 6
+	// The last bucket is the one in progress, so the series ends at "now" rather
+	// than ten minutes short of it. Anchoring on now-60m instead put the most
+	// recent traffic in a bucket past the end of the chart, where it was simply
+	// not drawn.
+	windowStart := now.Truncate(bucketMinutes * time.Minute).Add(-time.Duration((buckets-1)*bucketMinutes) * time.Minute)
+
+	type bucketRow struct {
+		in, out, blocks int64
+	}
+	measured := make(map[int64]bucketRow, buckets)
+
+	// The bucket index is computed in SQL so one indexed scan of the window
+	// replaces six queries. strftime('%s') is seconds since the epoch, which
+	// integer-divides into the bucket a row belongs to - but only after the
+	// timestamp is trimmed to whole seconds: these are stored as RFC3339 with
+	// nanosecond precision, and SQLite's date functions return NULL for more
+	// than three fractional digits rather than an error. The WHERE clause still
+	// compares the untouched column, so the index on (tenant_id, timestamp) is
+	// what selects the window.
+	timelineQuery := `SELECT CAST(strftime('%s', substr(timestamp, 1, 19) || 'Z') AS INTEGER) / ? AS bucket,
+		COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
+		COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0)
+		FROM events WHERE timestamp >= ?`
+	timelineArgs := []interface{}{bucketMinutes * 60, windowStart}
+	if tenantID != "" {
+		timelineQuery += " AND tenant_id = ?"
+		timelineArgs = append(timelineArgs, tenantID)
+	}
+	timelineQuery += " GROUP BY bucket"
+
+	if tRows, err := s.db.Query(timelineQuery, timelineArgs...); err == nil {
+		for tRows.Next() {
+			var bucket int64
+			var row bucketRow
+			if err := tRows.Scan(&bucket, &row.in, &row.out, &row.blocks); err == nil {
+				measured[bucket] = row
+			}
+		}
+		tRows.Close()
+	}
+
+	for i := 0; i < buckets; i++ {
+		t := windowStart.Add(time.Duration(i*bucketMinutes) * time.Minute)
+		row := measured[t.Unix()/(bucketMinutes*60)]
 		summary.BandwidthTimeline = append(summary.BandwidthTimeline, BandwidthDataPoint{
 			Timestamp: t.Format("15:04"),
-			BytesIn:   summary.TotalBytesIn/6 + int64(i*128000),
-			BytesOut:  summary.TotalBytesOut/6 + int64(i*64000),
-			Blocks:    summary.TotalBlocks/6 + int64(i*2),
+			BytesIn:   row.in,
+			BytesOut:  row.out,
+			Blocks:    row.blocks,
 		})
 	}
 

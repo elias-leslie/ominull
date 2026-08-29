@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.5.1"
+#define OMINULL_AGENT_VERSION "1.5.2"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -122,6 +122,10 @@ void Service_EnsureRecovery(void);
 bool Service_SpawnRestart(void);
 int Service_WaitStoppedAndStart(void);
 bool Service_Uninstall(void);
+// True when the installed service is registered to run the binary at path. The
+// updater checks it before installing over that binary from a console session,
+// which would otherwise upgrade a service nobody asked to upgrade.
+bool Service_OwnsBinary(const char* path);
 void RunAgentLoop(AGENT_CONFIG* config);
 
 #endif // OMINULL_AGENT_H

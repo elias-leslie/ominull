@@ -300,6 +300,14 @@ void Update_CheckStartup(const AGENT_CONFIG* config) {
     UpdateMarkerPath(marker, sizeof(marker));
     if (!marker[0]) return;
 
+    /* Same reason as the guard in Update_Apply: this is the service's bookkeeping.
+     * A console session reading it counts its own start as a failed start of the
+     * service, and on the third one rolls the service's binary back underneath a
+     * process still running the new build. Debugging with --console must not
+     * decide whether an update sticks. */
+    PathIn(dir, "ominulld.exe", cur, sizeof(cur));
+    if (config && !config->is_service && Service_OwnsBinary(cur)) return;
+
     FILE* f = fopen(marker, "r");
     if (!f) return;
     char version[64] = {0};
@@ -313,7 +321,6 @@ void Update_CheckStartup(const AGENT_CONFIG* config) {
         return;
     }
 
-    PathIn(dir, "ominulld.exe", cur, sizeof(cur));
     PathIn(dir, "ominulld.old", old, sizeof(old));
     attempts++;
     if (attempts >= UPDATE_MAX_ATTEMPTS) {
@@ -455,6 +462,20 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     PathIn(dir, "ominulld.exe", curExe, sizeof(curExe));
     PathIn(dir, "ominulld.old", oldExe, sizeof(oldExe));
     UpdateMarkerPath(marker, sizeof(marker));
+
+    /* A console session must not install over the service's binary. The swap
+     * below replaces the file the SCM starts next time while the service keeps
+     * running the image it already loaded, so an operator who ran --console to
+     * find out why something was failing would have upgraded the service by
+     * accident - and left it reporting an old version from a binary that is no
+     * longer on disk. Seen on a live endpoint, which is why this check exists.
+     * A portable console copy elsewhere on disk still updates itself. */
+    if (!config->is_service && Service_OwnsBinary(curExe)) {
+        printf("[!] Not installing agent v%s: %s is the binary the %s service runs, and this is a "
+               "console session. The service updates itself; restart it to take this release.\n",
+               version, curExe, SERVICE_NAME);
+        return;
+    }
 
     RemoveDirTree(stage);
     if (!CreateDirectoryA(stage, NULL)) {

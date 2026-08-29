@@ -672,6 +672,54 @@ bool Service_Install(const AGENT_CONFIG* config) {
     return true;
 }
 
+/* Service_OwnsBinary reports whether the installed service runs the binary at
+ * path. It exists so a console session cannot quietly replace a service's
+ * installation: the updater swaps the binary on disk and exits, and run from a
+ * console that swap lands on the file the SCM will start next time while the
+ * service carries on running the image it already has. An operator debugging a
+ * service with --console would have upgraded it by accident, with nothing to
+ * say so until the next restart.
+ *
+ * The comparison is on the first token of the binPath, unquoted, case
+ * insensitively - Windows paths are not case sensitive and the registration
+ * quotes the path because Program Files contains a space. */
+bool Service_OwnsBinary(const char* path) {
+    if (!path || !path[0]) return false;
+
+    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!schSCManager) return false;
+    SC_HANDLE schService = OpenServiceA(schSCManager, SERVICE_NAME, SERVICE_QUERY_CONFIG);
+    if (!schService) {
+        CloseServiceHandle(schSCManager);
+        return false;
+    }
+
+    bool owns = false;
+    DWORD needed = 0;
+    QueryServiceConfigA(schService, NULL, 0, &needed);
+    if (needed > 0) {
+        LPQUERY_SERVICE_CONFIGA cfg = (LPQUERY_SERVICE_CONFIGA)malloc(needed);
+        if (cfg && QueryServiceConfigA(schService, cfg, needed, &needed) && cfg->lpBinaryPathName) {
+            const char* p = cfg->lpBinaryPathName;
+            char exe[MAX_PATH] = {0};
+            size_t n = 0;
+            if (*p == '"') {
+                p++;
+                while (*p && *p != '"' && n + 1 < sizeof(exe)) exe[n++] = *p++;
+            } else {
+                while (*p && *p != ' ' && n + 1 < sizeof(exe)) exe[n++] = *p++;
+            }
+            exe[n] = '\0';
+            owns = (_stricmp(exe, path) == 0);
+        }
+        free(cfg);
+    }
+
+    CloseServiceHandle(schService);
+    CloseServiceHandle(schSCManager);
+    return owns;
+}
+
 bool Service_Uninstall(void) {
     SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!schSCManager) return false;

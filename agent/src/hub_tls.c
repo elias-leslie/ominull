@@ -405,7 +405,15 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
 
     if (!cached) {
         DWORD now = GetTickCount();
-        if (lastAttempt != 0 && (now - lastAttempt) < CLIENT_CERT_RETRY_MS) return false;
+        /* Between retries there is still nothing to present, and the request
+         * still has to say so - leaving it undeclared here made every request
+         * but the first in each retry window fail with 12044 and succeed only
+         * on the resend, which is a wasted round trip per heartbeat and a
+         * handshake error in the hub's log for each one. */
+        if (lastAttempt != 0 && (now - lastAttempt) < CLIENT_CERT_RETRY_MS) {
+            DeclareNoClientCert((HINTERNET)hRequest);
+            return false;
+        }
         lastAttempt = now;
         cached = LoadClientCertFromPFX(config->client_pfx_path);
         if (!cached) {

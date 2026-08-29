@@ -122,3 +122,78 @@ func init() {
 	// Suppress unneeded warnings
 	os.Setenv("SQLITE_TMPDIR", os.TempDir())
 }
+
+// The bandwidth timeline used to be the all-time totals divided by six with a
+// fixed slope added, which drew a tidy declining trend no traffic had produced
+// and blocked-flow bars above a "0 blocked" figure taken from the same
+// response. These are the properties that make it a measurement: the bytes are
+// the bytes that were reported, a quiet bucket reads zero rather than borrowing
+// from a busy one, and traffic older than the window is not folded in.
+func TestBandwidthTimelineMeasuresTrafficRatherThanInventingIt(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "timeline.db"))
+	if err != nil {
+		t.Fatalf("storage init failed: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateTenant(Tenant{ID: "t-tl", Name: "Timeline", APIKey: "k-tl", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := store.UpsertEndpoint(Endpoint{ID: "ep-tl", TenantID: "t-tl", Hostname: "h", OS: "Linux"}); err != nil {
+		t.Fatalf("UpsertEndpoint failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	ev := func(at time.Time, action string, in, out int64) Event {
+		return Event{
+			TenantID: "t-tl", EndpointID: "ep-tl", Timestamp: at, Layer: "TC", Action: action,
+			Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.2", DstIP: "10.0.0.3",
+			SrcPort: 1, DstPort: 443, BytesIn: in, BytesOut: out, Country: "US", ProcessPath: "p",
+		}
+	}
+	// Two flows five minutes ago, one of them blocked, and one flow well
+	// outside the window that must not appear anywhere in the series.
+	for _, e := range []Event{
+		ev(now.Add(-5*time.Minute), "PERMIT", 1000, 500),
+		ev(now.Add(-5*time.Minute), "BLOCK", 200, 0),
+		ev(now.Add(-6*time.Hour), "PERMIT", 999999, 999999),
+	} {
+		if err := store.InsertEvent(e); err != nil {
+			t.Fatalf("InsertEvent failed: %v", err)
+		}
+	}
+
+	sum, err := store.GetAnalyticsSummary("t-tl")
+	if err != nil {
+		t.Fatalf("GetAnalyticsSummary failed: %v", err)
+	}
+	if len(sum.BandwidthTimeline) != 6 {
+		t.Fatalf("timeline has %d buckets, want 6", len(sum.BandwidthTimeline))
+	}
+
+	var in, out, blocks int64
+	quiet := 0
+	for _, p := range sum.BandwidthTimeline {
+		in += p.BytesIn
+		out += p.BytesOut
+		blocks += p.Blocks
+		if p.BytesIn == 0 && p.BytesOut == 0 && p.Blocks == 0 {
+			quiet++
+		}
+	}
+	if in != 1200 || out != 500 {
+		t.Errorf("timeline totals are %d in / %d out; the window holds 1200 in / 500 out", in, out)
+	}
+	if blocks != 1 {
+		t.Errorf("timeline reports %d blocked flows; one flow in the window was blocked", blocks)
+	}
+	if quiet == 0 {
+		t.Errorf("every bucket carries traffic, but only one ten-minute window had any: %+v", sum.BandwidthTimeline)
+	}
+
+	// The chart sits directly under a "blocked" figure from the same response.
+	// The two disagreeing is what made the old series obviously invented.
+	if sum.TotalBlocks < blocks {
+		t.Errorf("the timeline shows %d blocked flows and the summary %d; the chart contradicts the figure above it", blocks, sum.TotalBlocks)
+	}
+}

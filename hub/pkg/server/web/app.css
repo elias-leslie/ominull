@@ -1618,6 +1618,23 @@ p.pending {
   color: var(--warn);
 }
 
+/* The chart's time axis. One cell per bucket, aligned with the bars above by
+   sharing their count rather than their pixel positions - the chart stretches
+   to the card, and so does this. */
+.chart-ticks {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  margin-top: var(--s-1);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+.chart-ticks span {
+  text-align: center;
+}
+
 /* ------------------------------------------------------- command palette */
 
 .palette-wrap {
