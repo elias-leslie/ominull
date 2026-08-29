@@ -221,8 +221,16 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         }
 
         const char* comma = (i == count - 1) ? "" : ",";
-        unsigned long long bIn = 1420 + ((e->ProcessId * 37) % 4096);
-        unsigned long long bOut = 512 + ((e->ProcessId * 19) % 2048);
+        /* Zero, because this agent has no byte counter to read. These were
+         * 1420 + (pid * 37 % 4096) and 512 + (pid * 19 % 2048): arithmetic on
+         * the process id, sent as measured traffic and added up on the console
+         * as bandwidth. On this fleet the Windows endpoint is the busiest
+         * reporter, so most of the bytes the dashboard printed came from here.
+         * The WFP driver could supply real counts; the user-mode socket
+         * fallback cannot, and a flow it cannot measure is reported as
+         * unmeasured. */
+        unsigned long long bIn = 0;
+        unsigned long long bOut = 0;
         int written = snprintf(jsonBuf + offset, jsonCapacity - offset,
             "{\"layer\":\"%s\",\"action\":\"%s\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%llu,\"bytes_out\":%llu,\"process_path\":\"%s\",\"process_id\":%llu}%s",
             EventTypeToString(e->EventType),

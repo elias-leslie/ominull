@@ -358,7 +358,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.5)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.6)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -404,8 +404,12 @@ while true; do
         if (dst[1] != "" && dst[2] != "" && dst[1] != "0.0.0.0" && dst[1] != "127.0.0.1") {
             if (!first) printf ",";
             first = 0;
-            b_in = 1420 + (pid * 37 % 4096);
-            b_out = 512 + (pid * 19 % 2048);
+            # Zero, not a hash of the pid. These were
+            # 1420 + (pid * 37 % 4096) and 512 + (pid * 19 % 2048), sent as
+            # measured traffic and totalled on the console as bandwidth. lsof
+            # reports which sockets are open, not how much has crossed them.
+            b_in = 0;
+            b_out = 0;
             proc_path = (cmd ~ /^\//) ? cmd : ("/Applications/" cmd);
             printf "{\"layer\":\"PF_SOCKET\",\"action\":\"PERMIT\",\"direction\":\"OUTBOUND\",\"protocol\":%s,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%d,\"dst_port\":%d,\"bytes_in\":%d,\"bytes_out\":%d,\"process_path\":\"%s\",\"process_id\":%d}", (proto == "TCP" ? 6 : 17), src[1], dst[1], src[2], dst[2], b_in, b_out, proc_path, pid;
         }
@@ -429,7 +433,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.6.5 (PF)",
+  "driver_version": "1.6.6 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }

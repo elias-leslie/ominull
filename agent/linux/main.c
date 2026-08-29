@@ -18,7 +18,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.6.5"
+#define OMINULL_LINUX_AGENT_VERSION "1.6.6"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -427,8 +427,19 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
             snprintf(ev->process_path, sizeof(ev->process_path), "/usr/sbin/kernel");
         }
 
-        ev->bytes_in = (rxQueue > 0) ? rxQueue : (1024 + (inode % 4096));
-        ev->bytes_out = (txQueue > 0) ? txQueue : (512 + (inode % 2048));
+        /* The queue depths from /proc/net/tcp, and zero when there are none.
+         *
+         * The fallback here used to be 1024 + (inode % 4096) in and
+         * 512 + (inode % 2048) out - a hash of the socket inode, reported as a
+         * measurement and totalled on the console as bandwidth. Zero is the
+         * honest answer for a flow this path cannot measure; the hub no longer
+         * substitutes anything for it either.
+         *
+         * What is reported when they are non-zero is a point-in-time queue
+         * depth, not a cumulative byte count for the flow. It is a real
+         * reading, which is why it is kept, but it is not the same quantity. */
+        ev->bytes_in = rxQueue;
+        ev->bytes_out = txQueue;
 
         count++;
     }
