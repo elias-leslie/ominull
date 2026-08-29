@@ -26,7 +26,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.5.0"
+const defaultAgentVersion = "1.5.1"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
@@ -40,7 +40,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
 	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert")
 	tlsHosts := flag.String("tls-hosts", "", "Comma-separated extra SANs for the self-issued certificate (e.g. a VIP the hub cannot see)")
-	requireClientCerts := flag.Bool("require-client-certs", false, "Refuse agents that cannot present a certificate signed by this hub's CA. Turn on only once every endpoint has one: the listener stops answering the rest, and an agent cannot be told to enrol by a hub it can no longer reach.")
+	clientCerts := flag.String("client-certs", "optional", "How agents identify themselves: off (never asked - no endpoint can be told from another holding the same tenant key), optional (verified when presented, endpoints without one still report), required (refused at the handshake without one; only once every endpoint has one).")
 	flag.Parse()
 
 	resolvedAgentVersion := *agentVersion
@@ -73,13 +73,18 @@ func main() {
 	}
 	log.Printf("[+] Cryptographic Master API Key Active: %s", resolvedAdminKey)
 
+	clientCertMode, err := server.ParseClientCertMode(*clientCerts)
+	if err != nil {
+		log.Fatalf("[-] %v", err)
+	}
+
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{
-		Listen:             *tlsListen,
-		CertFile:           *tlsCert,
-		KeyFile:            *tlsKey,
-		Hosts:              splitList(*tlsHosts),
-		RequireClientCerts: *requireClientCerts,
+		Listen:      *tlsListen,
+		CertFile:    *tlsCert,
+		KeyFile:     *tlsKey,
+		Hosts:       splitList(*tlsHosts),
+		ClientCerts: clientCertMode,
 	})
 	srv.SetAgentHubURL(*agentHubURL)
 	go func() {
@@ -104,10 +109,13 @@ func main() {
 			agentTarget = *hubURL
 		}
 		log.Printf("[+] Agent TLS transport:      %s (enrolment writes %q into agent config)", *tlsListen, agentTarget)
-		if *requireClientCerts {
+		switch clientCertMode {
+		case server.ClientCertsRequired:
 			log.Printf("[+] Agent authentication:     client certificate required, verified against the hub CA")
-		} else {
-			log.Printf("[*] Agent authentication:     client certificate verified when offered, API key otherwise. Set --require-client-certs once every endpoint presents one.")
+		case server.ClientCertsOff:
+			log.Printf("[!] Agent authentication:     tenant API key only. No certificate is asked for, so any agent holding the key can report as any endpoint. Move to --client-certs optional once the fleet can answer the request.")
+		default:
+			log.Printf("[*] Agent authentication:     client certificate verified when offered, API key otherwise. Set --client-certs required once every endpoint presents one.")
 		}
 		if agentTarget == "" || !strings.HasPrefix(agentTarget, "https://") {
 			log.Printf("[!] Agents are being enrolled against %q, which is not an https:// URL. Telemetry and the API key will cross the network in the clear; set --agent-hub-url to this hub's TLS address.", agentTarget)

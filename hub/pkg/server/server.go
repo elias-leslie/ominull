@@ -112,13 +112,57 @@ type TLSOptions struct {
 	// includes localhost, its own interface addresses and the host in --hub-url;
 	// this covers the cases it cannot see, such as a floating VIP.
 	Hosts []string
-	// RequireClientCerts refuses a TLS handshake from anything that cannot
-	// present a certificate this hub's CA signed. Off by default, because
-	// turning it on before every endpoint has one takes the fleet offline: the
-	// listener stops answering, and an agent cannot be told to enrol by a hub
-	// it can no longer reach. The safe order is to ship certificates, confirm
-	// every endpoint is presenting one, and only then require them.
-	RequireClientCerts bool
+	// ClientCerts is how far the listener goes in asking agents to identify
+	// themselves: ClientCertsOff, ClientCertsOptional (the default) or
+	// ClientCertsRequired.
+	//
+	// The three exist because the middle setting is not as harmless as it
+	// looks. "Verify if given" still makes the listener *ask*, and an agent
+	// that has no certificate has to answer the request with an empty one.
+	// curl does. WinHTTP does not: it fails the handshake with
+	// ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED unless the caller explicitly says
+	// there is no certificate, so turning this on took every Windows endpoint
+	// off the fleet at once - and off a hub they then could not reach to be
+	// given a certificate by. Agents from v1.5.1 answer correctly; Off is what
+	// gets a fleet with older ones back, and what an operator reaches for if
+	// this ever happens again.
+	//
+	// Required is the end state, and only after every endpoint is confirmed to
+	// be presenting a certificate: past that point the listener stops answering
+	// the ones that are not.
+	ClientCerts ClientCertMode
+}
+
+// ClientCertMode is how the TLS listener treats agent certificates.
+type ClientCertMode string
+
+const (
+	// ClientCertsOff does not ask for one. No endpoint can be told apart from
+	// another holding the same tenant key; it exists to recover a fleet whose
+	// agents cannot survive being asked.
+	ClientCertsOff ClientCertMode = "off"
+	// ClientCertsOptional asks, verifies whatever is presented against the
+	// hub's own CA, and lets an endpoint that has none through. This is what
+	// makes a migration possible.
+	ClientCertsOptional ClientCertMode = "optional"
+	// ClientCertsRequired refuses the handshake without one.
+	ClientCertsRequired ClientCertMode = "required"
+)
+
+// ParseClientCertMode maps the flag value, defaulting an empty one to optional.
+func ParseClientCertMode(v string) (ClientCertMode, error) {
+	switch ClientCertMode(strings.TrimSpace(strings.ToLower(v))) {
+	case "":
+		return ClientCertsOptional, nil
+	case ClientCertsOff:
+		return ClientCertsOff, nil
+	case ClientCertsOptional:
+		return ClientCertsOptional, nil
+	case ClientCertsRequired:
+		return ClientCertsRequired, nil
+	default:
+		return "", fmt.Errorf("--client-certs must be off, optional or required (got %q)", v)
+	}
 }
 
 // SetTLS installs the HTTPS configuration. Call it before Start.
@@ -371,22 +415,33 @@ func (s *Server) Start(addr string) error {
 func (s *Server) tlsConfig() (*tls.Config, error) {
 	base := &tls.Config{MinVersion: tls.VersionTLS12}
 
-	// Client certificates are verified whenever one is offered, and required
-	// only when an operator says so. VerifyClientCertIfGiven is not a weaker
-	// setting than RequireAndVerify for the thing that matters: a presented
-	// certificate is still checked against the hub's own CA, so a forged one is
-	// rejected at the handshake either way. What the "if given" part buys is a
-	// fleet that can be migrated - an endpoint without a certificate yet keeps
-	// reporting, and handleEvents can see the difference and say so.
+	// How far the listener goes in asking an agent to name itself. "Optional"
+	// is not a weaker setting than "required" for the thing that matters: a
+	// presented certificate is verified against the hub's own CA either way, so
+	// a forged one is refused at the handshake. What it buys is a fleet that can
+	// be migrated - an endpoint without a certificate yet keeps reporting, and
+	// endpointIdentityOK can tell the two apart. "Off" does not ask at all, and
+	// exists because asking is not free: see ClientCerts.
+	mode := s.tlsOpts.ClientCerts
+	if mode == "" {
+		mode = ClientCertsOptional
+	}
 	if s.pki != nil {
-		base.ClientCAs = s.pki.ClientCAPool()
-		base.ClientAuth = tls.VerifyClientCertIfGiven
-		if s.tlsOpts.RequireClientCerts {
+		switch mode {
+		case ClientCertsOff:
+			base.ClientAuth = tls.NoClientCert
+			log.Printf("[!] TLS client certificates: not requested. Every agent holding the tenant key can report as any endpoint.")
+		case ClientCertsRequired:
+			base.ClientCAs = s.pki.ClientCAPool()
 			base.ClientAuth = tls.RequireAndVerifyClientCert
 			log.Printf("[+] TLS client certificates: required (agents without one are refused at the handshake)")
+		default:
+			base.ClientCAs = s.pki.ClientCAPool()
+			base.ClientAuth = tls.VerifyClientCertIfGiven
+			log.Printf("[+] TLS client certificates: verified when offered; agents without one still report")
 		}
-	} else if s.tlsOpts.RequireClientCerts {
-		return nil, fmt.Errorf("--require-client-certs needs the hub PKI, which failed to initialize")
+	} else if mode == ClientCertsRequired {
+		return nil, fmt.Errorf("--client-certs required needs the hub PKI, which failed to initialize")
 	}
 
 	if s.tlsOpts.CertFile != "" || s.tlsOpts.KeyFile != "" {

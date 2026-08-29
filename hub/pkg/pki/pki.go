@@ -95,11 +95,11 @@ func (m *Manager) initOrLoadCA() error {
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:  []string{"Ominull Enterprise Trust Network"},
-			CommonName:    "Ominull Autonomous Root CA",
-			Country:       []string{"US"},
-			Province:      []string{"Security"},
-			Locality:      []string{"ZeroTrust"},
+			Organization: []string{"Ominull Enterprise Trust Network"},
+			CommonName:   "Ominull Autonomous Root CA",
+			Country:      []string{"US"},
+			Province:     []string{"Security"},
+			Locality:     []string{"ZeroTrust"},
 		},
 		NotBefore:             time.Now().Add(-10 * time.Minute),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
@@ -183,10 +183,10 @@ func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, er
 			Organization: []string{"Ominull Enrolled Fleet"},
 			CommonName:   hostname,
 		},
-		NotBefore:    time.Now().Add(-10 * time.Minute),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour), // 1 year
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		NotBefore:   time.Now().Add(-10 * time.Minute),
+		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // 1 year
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 
 	if ip := net.ParseIP(ipStr); ip != nil {

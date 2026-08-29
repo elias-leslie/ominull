@@ -51,15 +51,15 @@ type DiscoveredAsset struct {
 }
 
 type ScanStatus struct {
-	ID          string      `json:"id"`
-	Subnet      string      `json:"subnet"`
-	Profile     ScanProfile `json:"profile"`
-	Status      string      `json:"status"` // "running", "completed", "failed"
-	Progress    int         `json:"progress"`
-	FoundCount  int         `json:"found_count"`
-	TotalHosts  int         `json:"total_hosts"`
-	StartTime   time.Time   `json:"start_time"`
-	EndTime     time.Time   `json:"end_time,omitempty"`
+	ID         string      `json:"id"`
+	Subnet     string      `json:"subnet"`
+	Profile    ScanProfile `json:"profile"`
+	Status     string      `json:"status"` // "running", "completed", "failed"
+	Progress   int         `json:"progress"`
+	FoundCount int         `json:"found_count"`
+	TotalHosts int         `json:"total_hosts"`
+	StartTime  time.Time   `json:"start_time"`
+	EndTime    time.Time   `json:"end_time,omitempty"`
 }
 
 type CoverageSummary struct {
@@ -72,11 +72,11 @@ type CoverageSummary struct {
 }
 
 type Scanner struct {
-	store       *storage.Store
-	customSigs  []DeviceSignature
-	activeScans map[string]*ScanStatus
+	store        *storage.Store
+	customSigs   []DeviceSignature
+	activeScans  map[string]*ScanStatus
 	cachedAssets map[string]DiscoveredAsset
-	mu          sync.RWMutex
+	mu           sync.RWMutex
 }
 
 func New(store *storage.Store) *Scanner {
@@ -206,34 +206,62 @@ var aggressivePorts = append(standardPorts, []int{
 
 func getServiceName(port int) string {
 	switch port {
-	case 21: return "FTP"
-	case 22: return "SSH"
-	case 23: return "Telnet"
-	case 25: return "SMTP"
-	case 53: return "DNS"
-	case 80, 8000, 8080, 8081: return "HTTP"
-	case 88: return "Kerberos"
-	case 135: return "MSRPC"
-	case 139, 445: return "SMB / NetBIOS"
-	case 389: return "LDAP"
-	case 443, 8443: return "HTTPS / TLS"
-	case 1433: return "MSSQL"
-	case 1521: return "Oracle DB"
-	case 3306: return "MySQL"
-	case 3389: return "RDP"
-	case 5000, 5001: return "Synology DSM / UPnP"
-	case 5432: return "PostgreSQL"
-	case 5555: return "Android ADB"
-	case 5900: return "VNC"
-	case 5985, 5986: return "WinRM"
-	case 6379: return "Redis DB"
-	case 8008, 8009: return "Google Cast / DIAL"
-	case 9100: return "JetDirect Printer"
-	case 9200, 9300: return "Elasticsearch"
-	case 9999: return "Ominull Hub Control"
-	case 10250: return "Kubelet API"
-	case 27017: return "MongoDB"
-	default: return fmt.Sprintf("TCP/%d", port)
+	case 21:
+		return "FTP"
+	case 22:
+		return "SSH"
+	case 23:
+		return "Telnet"
+	case 25:
+		return "SMTP"
+	case 53:
+		return "DNS"
+	case 80, 8000, 8080, 8081:
+		return "HTTP"
+	case 88:
+		return "Kerberos"
+	case 135:
+		return "MSRPC"
+	case 139, 445:
+		return "SMB / NetBIOS"
+	case 389:
+		return "LDAP"
+	case 443, 8443:
+		return "HTTPS / TLS"
+	case 1433:
+		return "MSSQL"
+	case 1521:
+		return "Oracle DB"
+	case 3306:
+		return "MySQL"
+	case 3389:
+		return "RDP"
+	case 5000, 5001:
+		return "Synology DSM / UPnP"
+	case 5432:
+		return "PostgreSQL"
+	case 5555:
+		return "Android ADB"
+	case 5900:
+		return "VNC"
+	case 5985, 5986:
+		return "WinRM"
+	case 6379:
+		return "Redis DB"
+	case 8008, 8009:
+		return "Google Cast / DIAL"
+	case 9100:
+		return "JetDirect Printer"
+	case 9200, 9300:
+		return "Elasticsearch"
+	case 9999:
+		return "Ominull Hub Control"
+	case 10250:
+		return "Kubelet API"
+	case 27017:
+		return "MongoDB"
+	default:
+		return fmt.Sprintf("TCP/%d", port)
 	}
 }
 
@@ -563,19 +591,27 @@ func evaluateWeakpoints(ports []PortInfo, isManaged bool, osGuess string) ([]str
 			highestRisk = "CRITICAL"
 		} else if p.Port == 445 && !isManaged {
 			weakpoints = append(weakpoints, "Exposed SMBv1/v2 Service without Agent Nullification (Lateral Movement Target)")
-			if highestRisk != "CRITICAL" { highestRisk = "HIGH" }
+			if highestRisk != "CRITICAL" {
+				highestRisk = "HIGH"
+			}
 		} else if p.Port == 3389 && !isManaged {
 			weakpoints = append(weakpoints, "Exposed RDP Remote Desktop Service (Brute-Force / BlueKeep Target)")
-			if highestRisk != "CRITICAL" { highestRisk = "HIGH" }
+			if highestRisk != "CRITICAL" {
+				highestRisk = "HIGH"
+			}
 		} else if p.Port == 5900 {
 			weakpoints = append(weakpoints, "Cleartext VNC Remote Framebuffer Exposed")
-			if highestRisk != "CRITICAL" && highestRisk != "HIGH" { highestRisk = "MEDIUM" }
+			if highestRisk != "CRITICAL" && highestRisk != "HIGH" {
+				highestRisk = "MEDIUM"
+			}
 		}
 	}
 
 	if len(ports) > 10 && !isManaged {
 		weakpoints = append(weakpoints, "Broad Attack Surface (>10 Active Listening Ports)")
-		if highestRisk != "CRITICAL" { highestRisk = "HIGH" }
+		if highestRisk != "CRITICAL" {
+			highestRisk = "HIGH"
+		}
 	}
 
 	if len(weakpoints) == 0 {
@@ -685,18 +721,18 @@ func (s *Scanner) TrainSignature(ip, actualName, vendor, category string) (*Devi
 	}
 
 	newSig := DeviceSignature{
-		ID:              fmt.Sprintf("sig-custom-%d", time.Now().UnixNano()/1000),
-		Name:            actualName,
-		Vendor:          vendor,
-		Category:        category,
-		OUIPrefixes:     []string{prefix},
-		ExpectedTTL:     []int{asset.TTL},
-		ExpectedPorts:   openPorts,
-		BannerPatterns:  bannerPats,
-		MinAppDeltaMs:   asset.AppDeltaMs * 0.5,
-		MaxAppDeltaMs:   asset.AppDeltaMs * 2.0,
-		ConfidenceBase:  0.98,
-		IsCustom:        true,
+		ID:             fmt.Sprintf("sig-custom-%d", time.Now().UnixNano()/1000),
+		Name:           actualName,
+		Vendor:         vendor,
+		Category:       category,
+		OUIPrefixes:    []string{prefix},
+		ExpectedTTL:    []int{asset.TTL},
+		ExpectedPorts:  openPorts,
+		BannerPatterns: bannerPats,
+		MinAppDeltaMs:  asset.AppDeltaMs * 0.5,
+		MaxAppDeltaMs:  asset.AppDeltaMs * 2.0,
+		ConfidenceBase: 0.98,
+		IsCustom:       true,
 	}
 
 	s.customSigs = append([]DeviceSignature{newSig}, s.customSigs...)

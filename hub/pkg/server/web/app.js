@@ -2623,9 +2623,18 @@
       chat.appendChild(h("div", { cls: "empty", text: "Ask about a host, an alert, or the fleet. The drawer stays open over whatever you are looking at." }));
     }
     state.chat.forEach(function (m) {
-      chat.appendChild(h("div", { cls: "msg", "data-who": m.who },
+      var node = h("div", { cls: "msg", "data-who": m.who },
         h("div", { cls: "who", text: m.who === "you" ? "You" : "Copilot" }),
-        h("pre", { text: m.text })));
+        h("pre", { text: m.text }));
+      /* Say who wrote it. A degraded answer comes from the built-in rule set and
+         reads exactly like a model's, so the reply alone cannot be trusted to
+         mean the configured provider was reached. */
+      if (m.who === "copilot" && (m.source || m.notice)) {
+        node.appendChild(h("div", { cls: "msg-src", "data-degraded": m.degraded ? "true" : "false" },
+          h("span", { text: m.source || "" }),
+          m.notice ? h("span", { text: m.notice }) : null));
+      }
+      chat.appendChild(node);
     });
     if (state.chatBusy) chat.appendChild(h("div", { cls: "empty", text: "Thinking\u2026" }));
     drawerEl.appendChild(h("div", { cls: "drawer-body" }, chat));
@@ -2644,6 +2653,18 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  /* "ollama \u00b7 llama3.2", or "built-in rules" when the configured provider
+     could not be reached. The hub already reports both; the console used to
+     drop them and show the answer as though it had come from the model. */
+  function copilotSource(res) {
+    if (!res) return "";
+    if (res.degraded) return "built-in rules";
+    var parts = [];
+    if (res.provider) parts.push(res.provider);
+    if (res.model) parts.push(res.model);
+    return parts.join(" \u00b7 ");
+  }
+
   function submitChat() {
     if (!chatInput) return;
     var text = chatInput.value.trim();
@@ -2658,7 +2679,13 @@
     renderDrawer();
     request("/api/v1/copilot/chat", "POST", { message: text }).then(function (res) {
       state.chatBusy = false;
-      state.chat.push({ who: "copilot", text: (res && res.reply) || "(no reply)" });
+      state.chat.push({
+        who: "copilot",
+        text: (res && res.reply) || "(no reply)",
+        source: copilotSource(res),
+        notice: (res && res.notice) || "",
+        degraded: !!(res && res.degraded)
+      });
       renderDrawer();
     }).catch(function (e) {
       state.chatBusy = false;

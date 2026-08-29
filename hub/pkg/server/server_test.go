@@ -1018,7 +1018,7 @@ func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
 
 	// With certificates required, an endpoint that has none is refused at the
 	// handshake rather than reaching a handler.
-	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", RequireClientCerts: true})
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
 	strict := mtlsListener(t, srv)
 	if _, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err == nil {
 		t.Fatalf("--require-client-certs let an endpoint with no certificate through")
@@ -1064,5 +1064,60 @@ func TestClientBundleCarriesAPKCS12ArchiveForWindows(t *testing.T) {
 	}
 	if cert.Subject.CommonName != "win11-alpha" {
 		t.Errorf("the archive names %q; the hub binds requests to %q", cert.Subject.CommonName, "win11-alpha")
+	}
+}
+
+// Whether the listener *asks* for a certificate is a separate decision from
+// what it does with one, and it is not a free one: a TLS CertificateRequest has
+// to be answered, and WinHTTP fails the handshake outright rather than
+// answering it with an empty certificate. Turning "optional" on therefore took
+// every Windows endpoint on the fleet offline at once - and off a hub they then
+// could not reach to be given a certificate by. This pins the three modes to
+// the handshake behaviour each one implies, because the difference between them
+// is invisible until an agent that cannot answer meets one.
+func TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		mode     ClientCertMode
+		want     tls.ClientAuthType
+		wantPool bool
+	}{
+		{ClientCertsOff, tls.NoClientCert, false},
+		{"", tls.VerifyClientCertIfGiven, true},
+		{ClientCertsOptional, tls.VerifyClientCertIfGiven, true},
+		{ClientCertsRequired, tls.RequireAndVerifyClientCert, true},
+	} {
+		srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: tc.mode})
+		cfg, err := srv.tlsConfig()
+		if err != nil {
+			t.Fatalf("%q: tlsConfig failed: %v", tc.mode, err)
+		}
+		if cfg.ClientAuth != tc.want {
+			t.Errorf("%q: ClientAuth is %v, want %v", tc.mode, cfg.ClientAuth, tc.want)
+		}
+		if (cfg.ClientCAs != nil) != tc.wantPool {
+			t.Errorf("%q: ClientCAs pool present = %v, want %v", tc.mode, cfg.ClientCAs != nil, tc.wantPool)
+		}
+	}
+
+	// Off is a recovery setting, not a spelling mistake: an unrecognized value
+	// has to stop the hub rather than quietly pick one of the three.
+	for _, bad := range []string{"yes", "true", "require", "optionall"} {
+		if _, err := ParseClientCertMode(bad); err == nil {
+			t.Errorf("ParseClientCertMode(%q) was accepted", bad)
+		}
+	}
+	for in, want := range map[string]ClientCertMode{
+		"":          ClientCertsOptional,
+		"OFF":       ClientCertsOff,
+		" required": ClientCertsRequired,
+	} {
+		got, err := ParseClientCertMode(in)
+		if err != nil || got != want {
+			t.Errorf("ParseClientCertMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
 	}
 }

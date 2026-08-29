@@ -202,4 +202,3 @@ func ResolveASN(ipStr string) (string, string) {
 	rec := ResolveGeoIP(ipStr)
 	return rec.ASN, rec.Org
 }
-

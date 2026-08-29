@@ -238,13 +238,22 @@ static bool Preflight(const AGENT_CONFIG* config) {
     Hub_AttachClientCert(hRequest, config);
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
-        char reason[256];
-        snprintf(reason, sizeof(reason),
-                 "the TLS handshake with %s was rejected (WinHTTP error %lu). The hub's CA has to be "
-                 "installed in the machine trust store for the connection to be made at all.",
-                 host, GetLastError());
-        ReportRefusal(reason);
-        goto done;
+        DWORD sendErr = GetLastError();
+        /* One resend, only for the hub asking who this is. Anything else is a
+         * real handshake failure and is reported as one. */
+        if (!Hub_RetryWithoutClientCert(hRequest, sendErr) ||
+            !WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
+            char reason[320];
+            snprintf(reason, sizeof(reason),
+                     "the TLS handshake with %s was rejected (WinHTTP error %lu).%s",
+                     host, sendErr,
+                     sendErr == ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED
+                         ? " The hub asked this endpoint for a certificate and it has none it could offer."
+                         : " The hub's CA has to be installed in the machine trust store for the"
+                           " connection to be made at all.");
+            ReportRefusal(reason);
+            goto done;
+        }
     }
     if (!WinHttpReceiveResponse(hRequest, NULL)) goto done;
 
@@ -367,12 +376,32 @@ static bool g_clientCertLoaded = false;
 
 bool Hub_HasClientCert(void) { return g_clientCertLoaded; }
 
+/* DeclareNoClientCert answers a certificate request this endpoint cannot
+ * satisfy. It is not optional and it is not a no-op.
+ *
+ * A hub that verifies certificates when they are offered still *asks* for one
+ * during the handshake, and the request has to be answered. curl answers it
+ * with an empty certificate list and carries on. WinHTTP does not: it fails the
+ * handshake with ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED (12044) and reports it
+ * as a TLS failure, which reads exactly like a CA problem. Setting the client
+ * certificate option to WINHTTP_NO_CLIENT_CERT_CONTEXT is how a caller says
+ * "there is no certificate, proceed" - and without it, turning the hub's
+ * verification on took every Windows endpoint off the fleet at once, onto a hub
+ * they could no longer reach to be given a certificate by. */
+static void DeclareNoClientCert(HINTERNET hRequest) {
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+                     WINHTTP_NO_CLIENT_CERT_CONTEXT, 0);
+}
+
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
     static PCCERT_CONTEXT cached = NULL;
     static DWORD lastAttempt = 0;
     static bool complained = false;
 
-    if (!Hub_UsesTLS(config) || !config->client_pfx_path[0]) return false;
+    if (!Hub_UsesTLS(config) || !config->client_pfx_path[0]) {
+        DeclareNoClientCert((HINTERNET)hRequest);
+        return false;
+    }
 
     if (!cached) {
         DWORD now = GetTickCount();
@@ -385,6 +414,7 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
                 fprintf(stderr, "[!] No usable client certificate at %s; reporting under the API "
                                 "key alone. Re-run enrolment to get one.\n", config->client_pfx_path);
             }
+            DeclareNoClientCert((HINTERNET)hRequest);
             return false;
         }
         complained = false;
@@ -394,7 +424,20 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
 
     if (!WinHttpSetOption((HINTERNET)hRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
                           (LPVOID)cached, sizeof(CERT_CONTEXT))) {
+        DeclareNoClientCert((HINTERNET)hRequest);
         return false;
     }
+    return true;
+}
+
+/* Hub_RetryWithoutClientCert is the second half of the same guarantee. Setting
+ * the option before the send covers the request this agent builds; a redirect,
+ * a renegotiation, or a hub that asks only on some connections can still
+ * produce 12044 afterwards. The caller then resends once with the option set,
+ * which is the sequence Microsoft documents, rather than reporting a transport
+ * failure for a question it could have answered. */
+bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
+    if (err != ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) return false;
+    DeclareNoClientCert((HINTERNET)hRequest);
     return true;
 }

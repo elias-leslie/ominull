@@ -317,6 +317,22 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         0
     );
 
+    /* A hub that verifies certificates asks for one during the handshake, and
+     * WinHTTP fails the send rather than answering an ask it cannot satisfy.
+     * Resend once having said there is none; the hub accepts an endpoint that
+     * has not enrolled an identity yet. */
+    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+        bResults = WinHttpSendRequest(
+            hRequest,
+            WINHTTP_NO_ADDITIONAL_HEADERS,
+            0,
+            jsonBuf,
+            (DWORD)strlen(jsonBuf),
+            (DWORD)strlen(jsonBuf),
+            0
+        );
+    }
+
     DWORD dwStatusCode = 0;
     if (bResults) {
         bResults = WinHttpReceiveResponse(hRequest, NULL);

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.5.0"
+#define OMINULL_AGENT_VERSION "1.5.1"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -86,6 +86,10 @@ bool Hub_UsesTLS(const AGENT_CONFIG* config);
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config);
 // True once a client certificate has been loaded and attached to a request.
 bool Hub_HasClientCert(void);
+// Answers a certificate request that arrived after the send. Returns true when
+// err was ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED and the request has been told
+// there is no certificate, so the caller should send it once more.
+bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err);
 // Splits a hub URL into host, port and scheme. port is WinHTTP's INTERNET_PORT,
 // spelled as the WORD it is so this header stays usable without winhttp.h.
 void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BOOL* isHttps);

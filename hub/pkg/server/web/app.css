@@ -1601,6 +1601,23 @@ p.pending {
   color: var(--ink-2);
 }
 
+/* Which engine actually wrote the answer. An answer from the built-in rule set
+   reads exactly like one from a model, so without this line the console shows a
+   confident reply and nothing to say the configured provider never answered. */
+.msg .msg-src {
+  margin-top: var(--s-2);
+  font-size: var(--t-1);
+  color: var(--ink-3);
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.msg .msg-src[data-degraded="true"] {
+  color: var(--warn);
+}
+
 /* ------------------------------------------------------- command palette */
 
 .palette-wrap {

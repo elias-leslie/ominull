@@ -101,11 +101,11 @@ type Engine struct {
 	onAutoIsolate  IsolateFunc
 	eventsChan     <-chan storage.Event
 	mu             sync.Mutex
-	portHistory    map[string][]portAccess               // endpointID -> accesses
-	bwTracker      map[string]*bandwidthStats            // endpoint:process -> bandwidth stats
-	beaconTracker  map[string]*beaconWindow              // endpoint:dstIP:process -> beacon window
-	lateralTargets map[string]map[string]time.Time       // endpointID -> targetIP -> timestamp
-	alertCooldown  map[string]time.Time                  // alertKey -> last triggered time
+	portHistory    map[string][]portAccess         // endpointID -> accesses
+	bwTracker      map[string]*bandwidthStats      // endpoint:process -> bandwidth stats
+	beaconTracker  map[string]*beaconWindow        // endpoint:dstIP:process -> beacon window
+	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
+	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
 	cancel         context.CancelFunc
 }
 
@@ -688,4 +688,3 @@ func isPrivateIP(ipStr string) bool {
 	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
 }
-
