@@ -145,7 +145,7 @@ try {
     Write-Host "[+] Endpoint certificate installed ($PfxPath)." -ForegroundColor Green
 } catch {
     # Not fatal. The hub accepts an endpoint that presents no certificate until
-    # it is started with --require-client-certs, and stopping here would leave a
+    # it is started with --client-certs required, and stopping here would leave a
     # host with a trust anchor and no agent running at all.
     Remove-Item $PfxPath -Force -ErrorAction SilentlyContinue
     Write-Host "[!] Identity enrolment failed: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -233,7 +233,7 @@ chmod +x "$INSTALL_DIR/bin/ominulld"
 #
 # Failure is reported and survived rather than fatal: the hub accepts an
 # endpoint that presents no certificate until it is started with
-# --require-client-certs, and stopping here would leave a host with a trust
+# --client-certs required, and stopping here would leave a host with a trust
 # anchor, a daemon on disk and nothing running.
 echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
 json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
@@ -348,7 +348,7 @@ chmod +x "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
 # tenant, so it proves membership and not identity; the certificate issued here
 # is what the hub tells one endpoint from another by. A failure is survived: the
 # hub accepts an endpoint with no certificate until it is started with
-# --require-client-certs, and stopping here would leave a Mac with a trust
+# --client-certs required, and stopping here would leave a Mac with a trust
 # anchor and no daemon.
 echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
 json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }

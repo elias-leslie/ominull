@@ -1021,7 +1021,7 @@ func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
 	strict := mtlsListener(t, srv)
 	if _, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err == nil {
-		t.Fatalf("--require-client-certs let an endpoint with no certificate through")
+		t.Fatalf("--client-certs required let an endpoint with no certificate through")
 	}
 	own := issueAgentCert(t, srv.pki, "linux-alpha")
 	if code, err := postTelemetryAs(t, agentClient(t, srv, own), strict, "linux-alpha", nil); err != nil || code != http.StatusOK {

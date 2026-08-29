@@ -61,7 +61,7 @@ func TestCopilotLifecycle(t *testing.T) {
 	}
 
 	// 3. Test Config Update
-	engine.UpdateConfig(Config{
+	_ = engine.UpdateConfig(Config{
 		Provider:    ProviderLocalOllama,
 		OllamaURL:   "http://10.0.0.39:11434",
 		OllamaModel: "llama3.2",
@@ -124,7 +124,7 @@ func TestUnreachableProviderIsReportedAsDegraded(t *testing.T) {
 
 	// A provider that answers must be reported as itself, or the flag is
 	// useless noise.
-	engine.UpdateConfig(Config{Provider: ProviderRuleBased})
+	_ = engine.UpdateConfig(Config{Provider: ProviderRuleBased})
 	plain, err := engine.HandleChat(context.Background(), "status")
 	if err != nil {
 		t.Fatalf("HandleChat failed: %v", err)
@@ -165,5 +165,32 @@ func TestUnreachableProviderDegradesBeforeTheHubGivesUp(t *testing.T) {
 	}
 	if !answer.Degraded || answer.Provider != ProviderRuleBased {
 		t.Errorf("expected a labelled rule-set answer, got provider=%q degraded=%v", answer.Provider, answer.Degraded)
+	}
+}
+
+// A copilot configuration used to live only in the running process, so an
+// operator who selected a provider through the API had it silently replaced by
+// the compiled-in default at the next hub restart. This deployment went back to
+// pointing at an unroutable placeholder that way, twice, with nothing in the
+// logs to say a setting had been discarded.
+func TestConfigurationSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.New(filepath.Join(dir, "copilot.db"))
+	if err != nil {
+		t.Fatalf("storage init failed: %v", err)
+	}
+	defer store.Close()
+
+	engine := New(store, Config{Provider: ProviderLocalOllama, OllamaURL: "http://192.0.2.1:11434"})
+	if err := engine.UpdateConfig(Config{Provider: ProviderRuleBased}); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+
+	// A second engine over the same store is what a restart looks like. The
+	// compiled-in argument is deliberately the old placeholder: a stored
+	// setting has to outrank it, or configuring the copilot means nothing.
+	restarted := New(store, Config{Provider: ProviderLocalOllama, OllamaURL: "http://192.0.2.1:11434"})
+	if got := restarted.GetConfig().Provider; got != ProviderRuleBased {
+		t.Errorf("after a restart the copilot reports provider %q; the operator selected %q", got, ProviderRuleBased)
 	}
 }

@@ -3,6 +3,8 @@ package deployer
 import (
 	"bytes"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -129,7 +131,9 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 		Timeout:         10 * time.Second,
 	}
 
-	targetAddr := fmt.Sprintf("%s:%d", req.TargetIP, req.Port)
+	// Bracketing is JoinHostPort's job; "%s:%d" silently produces an
+	// unreachable address for an IPv6 target rather than failing loudly.
+	targetAddr := net.JoinHostPort(req.TargetIP, strconv.Itoa(req.Port))
 	client, err := ssh.Dial("tcp", targetAddr, sshConfig)
 	if err != nil {
 		d.failJob(jobID, fmt.Sprintf("SSH connection failed to %s: %v", targetAddr, err))

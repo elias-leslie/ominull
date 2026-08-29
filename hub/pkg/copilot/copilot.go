@@ -45,7 +45,26 @@ type Engine struct {
 	client *http.Client
 }
 
+// configSettingKey is where a configured copilot lives between hub restarts.
+// It used to live only in memory, so an operator who configured a provider
+// through /api/v1/copilot/config had it silently reverted to the compiled-in
+// default by the next restart - which is how this deployment ended up pointed
+// at an unroutable placeholder again after being set to the rule set.
+const configSettingKey = "copilot.config"
+
 func New(store *storage.Store, cfg Config) *Engine {
+	// A stored configuration is an operator's decision and outranks whatever
+	// the caller compiled in. Anything unreadable is ignored rather than
+	// fatal: a copilot is not worth refusing to start the hub over.
+	if store != nil {
+		if raw, err := store.GetSetting(configSettingKey); err == nil && raw != "" {
+			var stored Config
+			if json.Unmarshal([]byte(raw), &stored) == nil && stored.Provider != "" {
+				cfg = stored
+			}
+		}
+	}
+
 	if cfg.Provider == "" {
 		cfg.Provider = ProviderRuleBased
 	}
@@ -92,10 +111,23 @@ func (e *Engine) GetConfig() Config {
 	return e.config
 }
 
-func (e *Engine) UpdateConfig(cfg Config) {
+// UpdateConfig applies a configuration and persists it, so the setting survives
+// the next restart. A store that will not take it is reported: the caller has
+// asked for a change that would silently come undone, and telling them is the
+// only way they find out before it does.
+func (e *Engine) UpdateConfig(cfg Config) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.config = cfg
+	e.mu.Unlock()
+
+	if e.store == nil {
+		return nil
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return e.store.SetSetting(configSettingKey, string(raw))
 }
 
 // Answer is what the copilot actually produced, as opposed to what it was

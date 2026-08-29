@@ -148,8 +148,25 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
                                  WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
 
-    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) goto done;
-    if (!WinHttpReceiveResponse(hRequest, NULL)) goto done;
+    /* The same CertificateRequest that the heartbeat has to answer applies here.
+     * A download that stays silent about its certificate - even to say it has
+     * none - loses the handshake with 12044, and the endpoint sits on the
+     * release it already has while every heartbeat keeps succeeding. That is
+     * exactly how a fleet stops taking updates without ever looking offline. */
+    Hub_AttachClientCert(hRequest, config);
+
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
+        DWORD sendErr = GetLastError();
+        if (!Hub_RetryWithoutClientCert(hRequest, sendErr) ||
+            !WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
+            printf("[!] Update download of %s could not be sent (WinHTTP error %lu)\n", path, sendErr);
+            goto done;
+        }
+    }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        printf("[!] Update download of %s got no response (WinHTTP error %lu)\n", path, GetLastError());
+        goto done;
+    }
     if (!Hub_VerifyRequestPin(hRequest, config)) goto done;
 
     {

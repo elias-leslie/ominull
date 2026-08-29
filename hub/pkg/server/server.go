@@ -1486,7 +1486,7 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 //
 // A request without a certificate is still accepted: the fleet has to be able
 // to migrate onto certificates while it is still reporting. That is what
-// --require-client-certs closes, once every endpoint has one.
+// --client-certs required closes, once every endpoint has one.
 func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endpointID string) bool {
 	cn := r.Header.Get("X-Client-CN")
 	if cn == "" || cn == endpointID {
@@ -2746,7 +2746,14 @@ func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.copilot.UpdateConfig(cfg)
+		// A configuration that cannot be stored is not a configuration: it
+		// lasts until the next restart and then reverts without telling
+		// anyone. Report it rather than answering 200 with the new settings.
+		if err := s.copilot.UpdateConfig(cfg); err != nil {
+			log.Printf("[-] Copilot configuration could not be persisted: %v", err)
+			http.Error(w, `{"error":"the configuration was applied to the running hub but could not be stored, and will revert at the next restart"}`, http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(s.copilot.GetConfig())
 		return

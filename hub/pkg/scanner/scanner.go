@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -404,7 +405,10 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 	if profile != ProfilePassive {
 		for _, port := range ports {
 			t0 := time.Now()
-			addr := fmt.Sprintf("%s:%d", ip, port)
+			// net.JoinHostPort, not "%s:%d": an IPv6 literal has to be bracketed
+			// before it is a dialable address, and "fe80::1:445" is neither an
+			// address nor an error - it is a host that never answers.
+			addr := net.JoinHostPort(ip, strconv.Itoa(port))
 			conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
 			if err != nil {
 				continue

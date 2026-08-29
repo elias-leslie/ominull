@@ -235,23 +235,62 @@ sent, the former is what the hub verified. `authMiddleware` deletes an inbound
 `X-Client-CN` before setting its own, so the header cannot be used to claim an
 identity the handshake did not establish.
 
-Two deliberate softnesses, both about being able to migrate a live fleet:
+`--client-certs` has three settings, because *whether the listener asks* turned
+out to be a separate decision from what it does with an answer:
 
-- The listener runs `VerifyClientCertIfGiven`, not `RequireAndVerifyClientCert`.
-  A presented certificate is fully verified either way; what "if given" buys is
-  that an endpoint which has not enrolled one yet keeps reporting instead of
-  being cut off by a hub it can no longer reach to be told to enrol.
-  `--require-client-certs` closes that, and the safe order is: ship
-  certificates, confirm every endpoint presents one, then require them.
-- An enrolment that fails warns and carries on rather than aborting the install.
-  A host with a trust anchor and no running agent is worse than one reporting
-  under the API key alone.
+| Setting | Handshake | Use |
+|---|---|---|
+| `off` | never asks | recovery: a fleet whose agents cannot survive being asked |
+| `optional` (default) | asks, verifies what is presented, accepts none | migrating a live fleet |
+| `required` | refuses without one | the end state, once every endpoint presents one |
+
+`optional` is not a weaker setting than `required` for the thing that matters —
+a presented certificate is verified against the hub's CA either way, so a forged
+one is refused at the handshake. What it buys is an endpoint that has not
+enrolled yet still reporting, instead of being cut off by a hub it can no longer
+reach to be told to enrol.
+
+An enrolment that fails warns and carries on rather than aborting the install,
+for the same reason: a host with a trust anchor and no running agent is worse
+than one reporting under the API key alone.
+
+### Asking is not free (v1.5.1)
+
+`optional` still makes the listener send a TLS CertificateRequest, and the ask
+has to be answered. curl answers it with an empty certificate and carries on,
+which is why Linux and macOS never noticed. WinHTTP does not: it fails the
+handshake with `ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED` (12044) and reports it
+as a TLS failure, which reads exactly like a CA problem.
+
+So v1.5.0 took the Windows endpoint off the fleet the moment the hub came up —
+and onto a hub it could then not reach to be given the certificate that would
+have fixed it. The recovery was `--client-certs off`, which is why that setting
+exists.
+
+`WINHTTP_OPTION_CLIENT_CERT_CONTEXT` set to `WINHTTP_NO_CLIENT_CERT_CONTEXT` is
+how a WinHTTP caller says "there is none, proceed". The agent sets it on every
+request that has no certificate to offer — including between load attempts,
+which was missed first time round and cost a failed send and a resend on every
+heartbeat — and resends once if a 12044 arrives after the send anyway.
+
+Every WinHTTP request the agent makes has to say this, not just the heartbeat.
+The update downloader had its own handle and never did, so from v1.5.0 onward a
+Windows endpoint kept heartbeating (the heartbeat resends) while every package
+download lost the handshake before it could report a status. The endpoint looked
+online, current in every way the console shows, and quietly stopped being able
+to take a release — the failure mode a self-updater exists to prevent. Fixed in
+v1.5.3; the downloader now reports the WinHTTP error instead of returning a bare
+false, because a silent `goto done` is what hid it.
+
+`TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll` pins each mode to the
+handshake behaviour it implies. The difference is invisible until an agent that
+cannot answer meets one.
 
 `TestClientCertificateBindsARequestToOneEndpoint` covers reporting as itself,
 being refused as another host, the same binding on the update descriptor, and a
 forged `X-Client-CN` changing nothing.
 `TestClientCertificateFromAnotherCAIsRefused` covers a certificate from a
-foreign CA and the `--require-client-certs` handshake.
+foreign CA and the `--client-certs required` handshake.
 
 ```bash
 # What an enrolled endpoint does on every request.
