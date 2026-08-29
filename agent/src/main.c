@@ -40,6 +40,7 @@ static void PrintUsage(const char* prog) {
     printf("                       (default %s). Presented to the hub so it can\n", OMINULL_DEFAULT_PFX_PATH);
     printf("                       tell this endpoint from any other holding the same tenant key.\n");
     printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
+    printf("  --version            Print the version and exit.\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -116,9 +117,23 @@ int main(int argc, char* argv[]) {
             config.allow_plaintext = true;
         } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
             config.verbose = true;
+        } else if (strcmp(argv[i], "--version") == 0) {
+            printf("%s\n", OMINULL_AGENT_VERSION);
+            return 0;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             PrintUsage(argv[0]);
             return 0;
+        } else {
+            /* Unrecognised arguments stop the agent instead of being ignored.
+             *
+             * Ignoring one meant `ominulld.exe --version` - not an option until
+             * now - started a full agent under the compiled-in defaults, with
+             * no service supervising it. An option missing its value lands here
+             * too, so --key-file with nothing after it stops rather than
+             * running on with the placeholder key. */
+            fprintf(stderr, "[-] %s: unrecognised argument, or an option missing its value.\n", argv[i]);
+            fprintf(stderr, "    Nothing was started. Run with --help for the accepted options.\n");
+            return 2;
         }
     }
 

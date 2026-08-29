@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.6.7"
+VERSION="1.6.8"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.6.7
+Version: 1.6.8
 Section: security
 Priority: optional
 Architecture: amd64
@@ -105,7 +105,35 @@ KillMode=process
 WantedBy=multi-user.target
 DEB_SERVICE
 
-dpkg-deb --build "${DEB_DIR}" "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
+# Root, not the build account.
+#
+# dpkg-deb records whatever owns the build tree, and the build tree is owned by
+# whoever ran this script. Every .deb before this one shipped /opt/ominull/bin/
+# ominulld and /etc/systemd/system/ominull-agent.service owned by uid 1000, so
+# on any endpoint that has a uid-1000 user - which is the first account created
+# on a Debian or Ubuntu install - that user owned the root daemon's binary and
+# its unit file, and the unit arrived group-writable at 0664. Rewriting
+# ExecStart, or simply overwriting the binary and waiting for the next restart,
+# was a local user's path to root on every Linux endpoint in the fleet.
+chmod 644 "${DEB_DIR}/etc/systemd/system/ominull-agent.service"
+find "${DEB_DIR}" -type d -exec chmod 755 {} +
+dpkg-deb --root-owner-group --build "${DEB_DIR}" "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
+
+# Nothing in the package may be owned by anyone but root, or writable by anyone
+# but root. A build that regresses this ships a privilege escalation, so it is
+# checked here rather than discovered on an endpoint.
+bad_owner="$(dpkg-deb -c "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" | awk '$2 != "root/root"')"
+if [ -n "${bad_owner}" ]; then
+    echo "[-] These package members are not owned by root/root:" >&2
+    echo "${bad_owner}" >&2
+    exit 1
+fi
+bad_mode="$(dpkg-deb -c "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" | awk '$1 ~ /^[^d].......w./')"
+if [ -n "${bad_mode}" ]; then
+    echo "[-] These package members are group- or world-writable:" >&2
+    echo "${bad_mode}" >&2
+    exit 1
+fi
 rm -rf "${DIST_DIR}/deb-build"
 echo "  [+] Created: ${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
 
@@ -183,7 +211,14 @@ sc.exe start ominulld
 Write-Host "[+] Ominull Windows Agent installed and started successfully!" -ForegroundColor Green
 WIN_INSTALL
 
-(cd "${DIST_DIR}" && tar -czf "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz" -C "${WIN_DIR}" .)
+# Root-owned and not writable by anyone else, for the same reason the .deb is.
+# A tar extracted by root restores the ownership recorded in it, and these
+# archives recorded the build account with group-writable modes: a launchd
+# plist or a service binary that a local group can rewrite is that group's path
+# to root on the endpoint. launchd refuses a group-writable plist outright, so
+# this was also a latent enrolment failure.
+chmod -R go-w "${WIN_DIR}"
+(cd "${DIST_DIR}" && tar --owner=root --group=root --numeric-owner -czf "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz" -C "${WIN_DIR}" .)
 rm -rf "${WIN_DIR}"
 echo "  [+] Created: ${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz"
 
@@ -225,7 +260,17 @@ cat << 'MAC_PLIST' > "${MAC_DIR}/dev.ominull.daemon.plist"
 </plist>
 MAC_PLIST
 
-(cd "${DIST_DIR}" && tar -czf "${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz" -C "${MAC_DIR}" .)
+chmod -R go-w "${MAC_DIR}"
+(cd "${DIST_DIR}" && tar --owner=root --group=root --numeric-owner -czf "${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz" -C "${MAC_DIR}" .)
+
+for archive in "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz" "${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz"; do
+    bad="$(tar -tvzf "${archive}" | awk '$2 != "0/0" || $1 ~ /^[^d].......w./')"
+    if [ -n "${bad}" ]; then
+        echo "[-] ${archive} carries members not owned by root or writable by others:" >&2
+        echo "${bad}" >&2
+        exit 1
+    fi
+done
 rm -rf "${MAC_DIR}"
 echo "  [+] Created: ${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz"
 

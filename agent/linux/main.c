@@ -18,7 +18,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.6.7"
+#define OMINULL_LINUX_AGENT_VERSION "1.6.8"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -141,6 +141,7 @@ static void PrintUsage(const char* prog) {
     printf("                     only the tenant API key, which every endpoint shares.\n");
     printf("  --allow-plaintext  Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
     printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
+    printf("  --version          Print the version and exit.\n");
 }
 
 /* ---------------------------------------------------------------------------
@@ -1149,15 +1150,32 @@ int main(int argc, char* argv[]) {
             config.auto_update = false;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             config.verbose = true;
+        } else if (strcmp(argv[i], "--version") == 0) {
+            printf("%s\n", OMINULL_LINUX_AGENT_VERSION);
+            return 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             PrintUsage(argv[0]);
             return 0;
-        } else if (argv[i][0] != '-') {
+        } else if (argv[i][0] != '-' && i <= 4) {
             // Positional fallback: 1=hub, 2=key, 3=role, 4=id
             if (i == 1) strncpy(config.hub_url, argv[i], sizeof(config.hub_url) - 1);
             else if (i == 2) strncpy(config.api_key, argv[i], sizeof(config.api_key) - 1);
             else if (i == 3) strncpy(config.role_tag, argv[i], sizeof(config.role_tag) - 1);
             else if (i == 4) strncpy(config.endpoint_id, argv[i], sizeof(config.endpoint_id) - 1);
+        } else {
+            /* An argument this daemon does not understand stops it.
+             *
+             * It used to be ignored, and ignoring one starts a full agent under
+             * whatever the defaults are. Running `ominulld --version` - which
+             * was not an option either - did exactly that: no version printed,
+             * and a second daemon reporting from the endpoint under a default
+             * configuration, which is how an agent ends up alive for hours with
+             * nothing supervising it. An option missing its value lands here
+             * too, so `--key-file` with nothing after it stops rather than
+             * silently keeping the placeholder key. */
+            fprintf(stderr, "[-] %s: unrecognised argument, or an option missing its value.\n", argv[i]);
+            fprintf(stderr, "    Nothing was started. Run with --help for the accepted options.\n");
+            return 2;
         }
     }
 

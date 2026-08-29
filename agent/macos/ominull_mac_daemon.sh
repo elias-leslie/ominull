@@ -1,6 +1,20 @@
 #!/bin/bash
 set -u
 
+# Kept in step with the banner and the reported driver_version by
+# scripts/version.sh, which owns every site the release version appears in.
+AGENT_VERSION="1.6.8"
+
+# Answered before anything else is parsed. The arguments below are positional,
+# so without this "--version" is read as the hub URL and the daemon starts
+# against a hub of that name instead of printing anything - the same trap the
+# Linux and Windows agents had, where an unrecognised argument silently
+# launched an unsupervised agent.
+if [[ "${1:-}" == "--version" ]]; then
+    echo "${AGENT_VERSION}"
+    exit 0
+fi
+
 HUB_URL="${1:-https://10.0.0.58:9443}"
 API_KEY="${2:-<provision-via-bootstrap>}"
 # The second argument may be the key or the path to a file holding it. `ps` on
@@ -358,7 +372,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.7)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.8)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -370,6 +384,33 @@ if [[ "$HUB_URL" == https://* ]]; then
 else
     echo "[+] Hub trust: NONE - cleartext transport"
 fi
+
+# pf_engine runs the packet filter helper, and refuses to run it unless root
+# owns it and nobody else can write it.
+#
+# This daemon runs as root, so whatever it executes runs as root. The helper is
+# downloaded by the installer, and on this fleet it was found owned by a local
+# account: anyone who could write that file owned the next isolation event. The
+# check is here as well as in the installer because the file outlives the
+# install - an upgrade, a restore or a stray editor can hand it back.
+pf_engine() {
+    local helper="/opt/ominull/pf_engine.sh"
+    local meta
+    if ! meta=$(stat -f '%Su %Lp' "$helper" 2>/dev/null); then
+        echo "[-] $helper is missing; isolation cannot be applied." >&2
+        return 1
+    fi
+    local owner="${meta%% *}" mode="${meta##* }"
+    if [[ "$owner" != "root" ]]; then
+        echo "[-] $helper is owned by $owner, not root. Refusing to run it as root." >&2
+        return 1
+    fi
+    if (( (8#$mode & 8#022) != 0 )); then
+        echo "[-] $helper is mode $mode: writable by group or other. Refusing to run it as root." >&2
+        return 1
+    fi
+    "$helper" "$@"
+}
 
 while true; do
     if ! hub_transport_ready; then
@@ -433,7 +474,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.6.7 (PF)",
+  "driver_version": "1.6.8 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -476,11 +517,11 @@ JSON
     NEW_ISOLATED=$(hub_curl -sSL -m 5 "$HUB_URL/api/v1/endpoints" | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
     if [[ "$NEW_ISOLATED" == "true" && "$IS_ISOLATED" != "true" ]]; then
         echo "[!] Threat Nullification: ACTIVATING MACOS PACKET FILTER ISOLATION..."
-        /opt/ominull/pf_engine.sh isolate 10.0.0.58 2>/dev/null || /opt/ominull/pf_engine.sh isolate 10.0.0.57 2>/dev/null || true
+        pf_engine isolate 10.0.0.58 2>/dev/null || pf_engine isolate 10.0.0.57 2>/dev/null || true
         IS_ISOLATED="true"
     elif [[ "$NEW_ISOLATED" == "false" && "$IS_ISOLATED" == "true" ]]; then
         echo "[+] Threat Neutralized: REMOVING MACOS PACKET FILTER ISOLATION..."
-        /opt/ominull/pf_engine.sh unisolate 2>/dev/null || true
+        pf_engine unisolate 2>/dev/null || true
         IS_ISOLATED="false"
     fi
 

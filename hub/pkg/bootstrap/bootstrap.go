@@ -238,7 +238,13 @@ systemctl stop ominull-agent.service 2>/dev/null || true
 systemctl disable --now ominulld.service ominull.service 2>/dev/null || true
 mkdir -p "$INSTALL_DIR/bin"
 curl -fsSL %s "$HUB_URL/download/ominulld" -o "$INSTALL_DIR/bin/ominulld"
-chmod +x "$INSTALL_DIR/bin/ominulld"
+# Root-owned and writable by root alone. chmod +x on its own left the file
+# owned by whoever ran the installer and, under a umask of 002, writable by
+# that account's group - and this is the binary systemd starts as root. Anyone
+# who could rewrite it had root on the next restart, which the agent performs
+# on every self-update.
+chown root:root "$INSTALL_DIR/bin/ominulld"
+chmod 755 "$INSTALL_DIR/bin/ominulld"
 
 # This endpoint's own identity. The API key is shared by every agent on the
 # tenant, so it proves membership and not identity; the certificate issued here
@@ -364,7 +370,11 @@ security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain 
 echo -e "\033[90m[+] Downloading macOS Packet Filter Engine and Daemon...\033[0m"
 curl -fsSL %s "$HUB_URL/download/pf_engine.sh" -o "$INSTALL_DIR/pf_engine.sh"
 curl -fsSL %s "$HUB_URL/download/ominull_mac_daemon.sh" -o "$INSTALL_DIR/ominull_mac_daemon.sh"
-chmod +x "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
+# Root-owned and writable by root alone. Both are run as root by the LaunchDaemon,
+# and chmod +x alone left them owned by whoever ran the installer - on this fleet
+# pf_engine.sh was found owned by a local account, which is that account's root.
+chown root:wheel "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
+chmod 755 "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
 
 # This endpoint's own identity. The API key is shared by every agent on the
 # tenant, so it proves membership and not identity; the certificate issued here

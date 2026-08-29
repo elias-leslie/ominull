@@ -24,6 +24,7 @@ version_sites() {
 hub bundled agent|hub/cmd/main.go|(?<=defaultAgentVersion = ")[^"]+
 linux agent|agent/linux/main.c|(?<=OMINULL_LINUX_AGENT_VERSION ")[^"]+
 windows/portable agent|agent/include/agent.h|(?<=OMINULL_AGENT_VERSION ")[^"]+
+macos daemon --version|agent/macos/ominull_mac_daemon.sh|(?<=^AGENT_VERSION=")[^"]+
 macos daemon banner|agent/macos/ominull_mac_daemon.sh|(?<=Telemetry Daemon \(v)[0-9]+\.[0-9]+\.[0-9]+
 macos daemon telemetry|agent/macos/ominull_mac_daemon.sh|(?<="driver_version": ")[0-9]+\.[0-9]+\.[0-9]+
 package builder|scripts/build-packages.sh|(?<=^VERSION=")[^"]+
@@ -65,6 +66,7 @@ cmd_bump() {
     sed -i "s/defaultAgentVersion = \"${old}\"/defaultAgentVersion = \"${new}\"/" "${ROOT_DIR}/hub/cmd/main.go"
     sed -i "s/OMINULL_LINUX_AGENT_VERSION \"${old}\"/OMINULL_LINUX_AGENT_VERSION \"${new}\"/" "${ROOT_DIR}/agent/linux/main.c"
     sed -i "s/OMINULL_AGENT_VERSION \"[0-9.]*\"/OMINULL_AGENT_VERSION \"${new}\"/" "${ROOT_DIR}/agent/include/agent.h"
+    sed -i "s/^AGENT_VERSION=\"[0-9.]*\"/AGENT_VERSION=\"${new}\"/" "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh"
     sed -i "s/Telemetry Daemon (v[0-9.]*)/Telemetry Daemon (v${new})/" "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh"
     sed -i "s/\"driver_version\": \"[0-9.]* (PF)\"/\"driver_version\": \"${new} (PF)\"/" "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh"
     sed -i "s/^VERSION=\"${old}\"/VERSION=\"${new}\"/" "${ROOT_DIR}/scripts/build-packages.sh"

@@ -125,6 +125,11 @@ func TestBootstrapGenerators(t *testing.T) {
 				"--client-cert $CLIENT_CERT --client-key $CLIENT_KEY",
 				"--id $ENDPOINT_ID",
 				`chmod 600 "$CLIENT_KEY"`,
+				// systemd starts this binary as root, so an installer that
+				// leaves it owned by the account that ran the install leaves a
+				// local path to root behind it.
+				`chown root:root "$INSTALL_DIR/bin/ominulld"`,
+				`chmod 755 "$INSTALL_DIR/bin/ominulld"`,
 			},
 		},
 		{
@@ -141,6 +146,9 @@ func TestBootstrapGenerators(t *testing.T) {
 				"<string>$CLIENT_CERT</string>",
 				"<string>$CLIENT_KEY</string>",
 				`chmod 600 "$CLIENT_KEY"`,
+				// Both are executed as root by the LaunchDaemon.
+				`chown root:wheel "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"`,
+				`chmod 755 "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"`,
 			},
 		},
 	} {

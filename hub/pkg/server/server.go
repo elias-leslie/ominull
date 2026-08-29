@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1228,9 +1229,41 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, bundle)
 }
 
+// downloadable names the files /download/ will serve.
+//
+// The route is unauthenticated by necessity - a bootstrap script fetches the
+// agent before the endpoint has any credential, and an agent taking an update
+// fetches the package the same way - and on a published hub that makes the
+// whole directory an anonymous file share. filepath.Base already stopped a
+// caller escaping it, but nothing stopped one reading whatever else the
+// directory happened to hold, and it is the directory an operator drops files
+// into. This is the list of things a client is actually told to fetch:
+// the signed release artifacts, and the five payloads the bootstrap scripts
+// name. Anything else is not found, whether or not it is on disk.
+var (
+	downloadArtifact = regexp.MustCompile(`^ominull-agent(_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|-(windows|macos)-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz)(\.sig|\.sha256)?$`)
+	downloadPayloads = map[string]bool{
+		"ominulld":              true,
+		"ominulld.exe":          true,
+		"ominull_wfp_user.exe":  true,
+		"ominull_mac_daemon.sh": true,
+		"pf_engine.sh":          true,
+	}
+)
+
+func downloadAllowed(name string) bool {
+	return downloadPayloads[name] || downloadArtifact.MatchString(name)
+}
+
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/download/")
 	filename = filepath.Base(filename)
+
+	if !downloadAllowed(filename) {
+		log.Printf("[!] %s asked for %q from the download directory, which is not a released artifact.", clientIP(r), filename)
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
 
 	path := filepath.Join(s.binaryDir, filename)
 	if _, err := os.Stat(path); os.IsNotExist(err) {

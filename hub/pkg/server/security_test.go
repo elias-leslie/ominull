@@ -715,3 +715,56 @@ func keysOf(m map[string]responseEntry) []string {
 	}
 	return out
 }
+
+// The download route is the one route no credential reaches, because a machine
+// being enrolled has none yet. That makes the binary directory an anonymous file
+// share unless the route knows what it is meant to serve.
+func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
+	serve := []string{
+		"ominull-agent_1.6.7_amd64.deb",
+		"ominull-agent_1.6.7_amd64.deb.sig",
+		"ominull-agent_1.6.7_amd64.deb.sha256",
+		"ominull-agent-windows-1.6.7.tar.gz",
+		"ominull-agent-windows-1.6.7.tar.gz.sig",
+		"ominull-agent-macos-1.6.7.tar.gz",
+		"ominull-agent-macos-1.6.7.tar.gz.sha256",
+		"ominulld",
+		"ominulld.exe",
+		"ominull_wfp_user.exe",
+		"ominull_mac_daemon.sh",
+		"pf_engine.sh",
+	}
+	for _, name := range serve {
+		if !downloadAllowed(name) {
+			t.Errorf("%q is a released artifact or a bootstrap payload and must still be served", name)
+		}
+	}
+
+	refuse := []string{
+		// The hub binary, its Windows build, and the operator tooling: not
+		// secret, but not something an anonymous caller is invited to take.
+		"ominull-hub",
+		"ominull-hub.exe",
+		"ominullctl.exe",
+		// Anything an operator leaves in the directory. This is the case the
+		// list exists for: the directory is a working directory.
+		"admin.key",
+		"ominull.db",
+		"notes.txt",
+		".env",
+		// Near-misses on the artifact pattern.
+		"ominull-agent_1.6.7_amd64.deb.bak",
+		"ominull-agent-linux-1.6.7.tar.gz",
+		"ominull-agent_v1.6.7_amd64.deb",
+		"ominull-agent-windows-1.6.7.tar.gz.key",
+		// Traversal, which filepath.Base already flattened; the flattened form
+		// must not be servable either.
+		"ca.key",
+		"shadow",
+	}
+	for _, name := range refuse {
+		if downloadAllowed(name) {
+			t.Errorf("%q is not a released artifact and must not be served anonymously", name)
+		}
+	}
+}
