@@ -1,8 +1,10 @@
 package server
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"io/fs"
 	"mime"
@@ -44,6 +46,12 @@ var (
 const (
 	adminKeyPlaceholder   = "{{ADMIN_KEY}}"
 	hubVersionPlaceholder = "{{HUB_VERSION}}"
+	// cspNoncePlaceholder marks the two inline scripts the document needs: the
+	// serve-time configuration and the pre-paint theme selection. Both have to
+	// run before app.js does, so neither can move into a file, and a content
+	// security policy that allows every inline script would allow an injected
+	// one too. A per-response nonce allows exactly these two.
+	cspNoncePlaceholder = "{{CSP_NONCE}}"
 )
 
 func loadConsole() {
@@ -94,13 +102,30 @@ func consoleContentType(name string) string {
 	return "application/octet-stream"
 }
 
-// consoleDocument renders index.html with the serve-time substitutions applied.
-func consoleDocument(adminKey, hubVersion string) []byte {
+// consoleDocument renders index.html with the serve-time substitutions applied
+// and returns the script nonce the caller must name in the Content-Security-Policy
+// header for that response.
+func consoleDocument(adminKey, hubVersion string) ([]byte, string) {
 	consoleOnce.Do(loadConsole)
+	nonce := newCSPNonce()
 	html := string(consoleIndex)
 	html = strings.ReplaceAll(html, adminKeyPlaceholder, jsStringEscape(adminKey))
 	html = strings.ReplaceAll(html, hubVersionPlaceholder, jsStringEscape(hubVersion))
-	return []byte(html)
+	html = strings.ReplaceAll(html, cspNoncePlaceholder, nonce)
+	return []byte(html), nonce
+}
+
+// newCSPNonce is 128 bits of randomness per response. Reusing one across
+// responses would let an attacker who saw one document authorise a script in
+// the next.
+func newCSPNonce() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		// Without a nonce the policy still holds; the inline scripts simply do
+		// not run, which fails visibly rather than silently opening the policy.
+		return ""
+	}
+	return base64.RawStdEncoding.EncodeToString(raw[:])
 }
 
 // jsStringEscape makes a value safe to drop inside a double-quoted JavaScript
@@ -174,6 +199,7 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setConsoleSecurityHeaders(w, "")
 	w.Header().Set("Content-Type", asset.contentType)
 	w.Header().Set("ETag", asset.etag)
 	// Revalidate every load: the console ships with the binary, so a hub

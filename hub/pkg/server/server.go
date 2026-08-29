@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,9 +31,25 @@ import (
 	"ominull/hub/pkg/threatintel"
 )
 
+// upgrader decides which browsers may open a hub websocket.
+//
+// Agents are not browsers and send no Origin header, so they are unaffected by
+// any policy here. A browser always sends one, and the same-origin rule is what
+// stops a page on another site from opening this socket in a logged-in
+// operator's browser and driving it with credentials the browser attaches on
+// its own. "return true" - the value it shipped with - is the setting that
+// turns that off.
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow cross-origin connection for endpoints
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // not a browser
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
 	},
 }
 
@@ -57,6 +74,10 @@ type Server struct {
 	clientsMu  sync.RWMutex
 	clients    map[string]*Client // endpointID -> Client
 	eventsChan chan storage.Event
+
+	// throttle bounds online credential guessing across every route that
+	// accepts a key: the console gate, the REST API and the websocket.
+	throttle *authThrottle
 }
 
 type Client struct {
@@ -178,6 +199,9 @@ func (s *Server) SetTLS(opts TLSOptions) {
 // exactly as it did before there was a TLS listener at all.
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
+	if s.deployer != nil {
+		s.deployer.SetAgentHubURL(u)
+	}
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
@@ -213,6 +237,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		agentVersion: agentVersion,
 		clients:      make(map[string]*Client),
 		eventsChan:   eventsChan,
+		throttle:     newAuthThrottle(),
 	}
 	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
 		_ = s.store.SetEndpointIsolation(endpointID, true)
@@ -239,28 +264,48 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Access Denied: Service Tokens are restricted to agent telemetry and API endpoints only.", http.StatusForbidden)
 		return
 	}
+	setConsoleSecurityHeaders(w, "")
+
+	// The gate hands out the admin key to anyone who can present it, so it is
+	// the one page worth guessing at. Throttle it by source address.
+	addr := clientIP(r)
+	if s.throttle.blocked(addr) {
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write(consoleGate())
+		return
+	}
+
 	// The console embeds the admin API key at serve-time, so it is only rendered
 	// for callers who can already present a valid admin credential.
 	provided := strings.TrimSpace(r.URL.Query().Get("key"))
 	if provided == "" {
 		provided = strings.TrimSpace(r.Header.Get("X-API-Key"))
 	}
-	if provided != s.adminKey {
+	ok := secretEqual(provided, s.adminKey)
+	if !ok {
 		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
 			if claims, err := auth.ValidateJWT(strings.TrimPrefix(authHeader, "Bearer "), s.adminKey); err == nil && claims != nil {
-				provided = s.adminKey
+				ok = true
 			}
 		}
 	}
-	if provided != s.adminKey {
+	if !ok {
+		if provided != "" && s.throttle.fail(addr) {
+			log.Printf("[!] %s has failed the console gate %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(consoleGate())
 		return
 	}
+	s.throttle.succeed(addr)
+	doc, nonce := consoleDocument(s.adminKey, s.agentVersion)
+	setConsoleSecurityHeaders(w, nonce)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(consoleDocument(s.adminKey, s.agentVersion))
+	w.Write(doc)
 }
 
 func (s *Server) Start(addr string) error {
@@ -290,11 +335,11 @@ func (s *Server) Start(addr string) error {
 	// 3. Multi-Tenant REST API & Hierarchy
 	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
 	mux.HandleFunc("/api/v1/locations", s.authMiddleware(s.handleLocations))
-	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(s.handleTenants))
+	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(requireAdmin(s.handleTenants)))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
-	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(s.handleAgentsUpdateStatus))
+	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
 	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
@@ -311,7 +356,7 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
 	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
-	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(s.handleThreatIntelSync))
+	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
 	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
@@ -324,35 +369,50 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
 
 	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
-	mux.HandleFunc("/api/v1/scanner/scan", s.authMiddleware(s.handleScannerScan))
-	mux.HandleFunc("/api/v1/scanner/status", s.authMiddleware(s.handleScannerStatus))
-	mux.HandleFunc("/api/v1/scanner/results", s.authMiddleware(s.handleScannerResults))
-	mux.HandleFunc("/api/v1/scanner/coverage", s.authMiddleware(s.handleScannerCoverage))
-	mux.HandleFunc("/api/v1/scanner/feedback", s.authMiddleware(s.handleScannerFeedback))
+	// Discovery is an operator tool end to end: it sweeps a subnet from the
+	// hub and hands back an inventory of everything on it, agented or not.
+	// None of it is reachable by an agent, and the tenant key is on every
+	// agent, so none of it is reachable with the tenant key.
+	mux.HandleFunc("/api/v1/scanner/scan", s.authMiddleware(requireAdmin(s.handleScannerScan)))
+	mux.HandleFunc("/api/v1/scanner/status", s.authMiddleware(requireAdmin(s.handleScannerStatus)))
+	mux.HandleFunc("/api/v1/scanner/results", s.authMiddleware(requireAdmin(s.handleScannerResults)))
+	mux.HandleFunc("/api/v1/scanner/coverage", s.authMiddleware(requireAdmin(s.handleScannerCoverage)))
+	mux.HandleFunc("/api/v1/scanner/feedback", s.authMiddleware(requireAdmin(s.handleScannerFeedback)))
 
 	// 8. Visual Communications Topology Graph API
-	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(s.handleTopologyGraph))
+	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
 
 	// 8b. Unified asset graph and flow inference
 	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
-	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(s.handleAssetCorrect))
-	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(s.handleInferenceStatus))
-	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(s.handleInferenceRun))
+	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(requireAdmin(s.handleAssetCorrect)))
+	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(requireAdmin(s.handleInferenceStatus)))
+	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(requireAdmin(s.handleInferenceRun)))
 
 	// 9. Remote Push-Deployment Engine API
-	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(s.handleDeployerPush))
-	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(s.handleDeployerStatus))
-	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(s.handleDeployerJobs))
+	// The push deployer opens an SSH session to an arbitrary address with
+	// credentials from the request body and runs an installer on the far end.
+	// That is an operator capability in every sense; the job logs it hands back
+	// are the far host's output, so reading them is one too.
+	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(requireAdmin(s.handleDeployerPush)))
+	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(requireAdmin(s.handleDeployerStatus)))
+	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(requireAdmin(s.handleDeployerJobs)))
 
 	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
-	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(s.handleMeshQuarantine))
-	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(s.handleMeshUnquarantine))
+	// Mesh quarantine is broadcast to the whole fleet and lands in a
+	// privileged firewall command on every agent that receives it. Nothing
+	// with that reach is driven by a credential that ships to endpoints.
+	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.handleMeshQuarantine)))
+	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.handleMeshUnquarantine)))
 	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
 
 	// 11. Autonomous Security Copilot API
-	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(s.handleCopilotChat))
-	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(s.handleCopilotInvestigate))
-	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(s.handleCopilotConfig))
+	// The copilot answers with fleet context and dials whatever backend its
+	// configuration names, carrying that context to it. Both halves are
+	// operator-only: the question surface because of what it discloses, the
+	// configuration because of where it can be pointed.
+	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(requireAdmin(s.handleCopilotChat)))
+	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(requireAdmin(s.handleCopilotInvestigate)))
+	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(requireAdmin(s.handleCopilotConfig)))
 
 	// Both listeners share one mux. Which port a request arrived on decides
 	// whether it was encrypted, never what it is allowed to do - an endpoint
@@ -573,6 +633,17 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// 2. Check X-API-Key Header and Query Param
+		//
+		// An address that has just spent a minute presenting wrong keys is not
+		// told which of them was close. The check is before the comparison so a
+		// locked-out caller cannot keep sampling response times either.
+		addr := clientIP(r)
+		if s.throttle.blocked(addr) {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
+			return
+		}
+
 		keys := []string{
 			strings.TrimSpace(r.Header.Get("X-API-Key")),
 			strings.TrimSpace(r.URL.Query().Get("api_key")),
@@ -582,7 +653,8 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if key == "" {
 				continue
 			}
-			if key == s.adminKey {
+			if secretEqual(key, s.adminKey) {
+				s.throttle.succeed(addr)
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
 				next(w, r)
@@ -590,6 +662,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 			tenant, err := s.store.GetTenantByAPIKey(key)
 			if err == nil && tenant != nil {
+				s.throttle.succeed(addr)
 				r.Header.Set("X-Role", "tenant")
 				r.Header.Set("X-Tenant-ID", tenant.ID)
 				r.Header.Set("X-Username", tenant.Name)
@@ -598,8 +671,10 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		http.Error(w, `{"error":"invalid or missing api key"}`, http.StatusUnauthorized)
-		return
+		if s.throttle.fail(addr) {
+			log.Printf("[!] %s has failed API authentication %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
+		}
+		writeJSONError(w, http.StatusUnauthorized, "invalid or missing api key")
 	}
 }
 
@@ -957,9 +1032,58 @@ func contains(list []string, target string) bool {
 // hubURL, while the agent it installs is pointed at the TLS transport the hub
 // was configured to advertise.
 func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (bootstrap.Options, bool) {
+	addr := clientIP(r)
+	if s.throttle.blocked(addr) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
+		return bootstrap.Options{}, false
+	}
 	key := r.URL.Query().Get("key")
-	if key == "" || key != s.adminKey {
-		http.Error(w, `{"error":"valid admin key required"}`, http.StatusUnauthorized)
+	if !secretEqual(key, s.adminKey) {
+		if key != "" && s.throttle.fail(addr) {
+			log.Printf("[!] %s has failed bootstrap authentication %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
+		}
+		writeJSONError(w, http.StatusUnauthorized, "valid admin key required")
+		return bootstrap.Options{}, false
+	}
+	s.throttle.succeed(addr)
+
+	// What the installer is authorised by and what it leaves behind are two
+	// different credentials, and used to be the same one.
+	//
+	// The admin key authorises generating this script. It was then written
+	// straight into the agent's configuration file on the endpoint, so every
+	// host in the fleet held the hub's admin key in a file on disk for the life
+	// of the install: one compromised endpoint could isolate the whole fleet,
+	// read every tenant's key and push an agent release. The agent needs a
+	// credential to report telemetry, and that is the tenant key - which is
+	// what least privilege meant here all along.
+	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tenant, err := s.store.GetTenant(tenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "could not resolve the enrolment tenant: "+err.Error())
+		return bootstrap.Options{}, false
+	}
+	if tenant == nil || strings.TrimSpace(tenant.APIKey) == "" {
+		writeJSONError(w, http.StatusBadRequest,
+			"tenant "+tenantID+" has no API key to enrol against; create it through /api/v1/tenants first")
+		return bootstrap.Options{}, false
+	}
+	if secretEqual(tenant.APIKey, s.adminKey) {
+		// Started without --admin-key, the hub adopts the default tenant's key
+		// as the admin key and the two are one credential. Nothing here can fix
+		// that, but an operator should not have to infer it.
+		log.Printf("[!] Tenant %q's API key is also this hub's admin key, so the agent this installer enrols will hold admin. Start the hub with a --admin-key distinct from the tenant key.", tenantID)
+	}
+
+	// One certificate, once. The script cannot be replayed into a second
+	// identity and is worthless an hour after it was generated.
+	enrollToken, err := s.store.CreateEnrollmentToken(r.URL.Query().Get("endpoint_id"), storage.EnrollmentTokenTTL)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "could not mint an enrolment token: "+err.Error())
 		return bootstrap.Options{}, false
 	}
 
@@ -978,14 +1102,15 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 	}
 
 	return bootstrap.Options{
-		HubURL:         hubURL,
-		AgentHubURL:    s.agentHubURL,
-		TenantAPIKey:   key,
-		CFClientID:     cfID,
-		CFClientSecret: cfSecret,
-		LocationID:     r.URL.Query().Get("location"),
-		RoleTag:        r.URL.Query().Get("role"),
-		EndpointID:     r.URL.Query().Get("endpoint_id"),
+		HubURL:          hubURL,
+		AgentHubURL:     s.agentHubURL,
+		TenantAPIKey:    tenant.APIKey,
+		EnrollmentToken: enrollToken,
+		CFClientID:      cfID,
+		CFClientSecret:  cfSecret,
+		LocationID:      r.URL.Query().Get("location"),
+		RoleTag:         r.URL.Query().Get("role"),
+		EndpointID:      r.URL.Query().Get("endpoint_id"),
 	}, true
 }
 
@@ -1044,6 +1169,11 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 		EndpointID string `json:"endpoint_id"`
 		Hostname   string `json:"hostname"`
 		IP         string `json:"ip"`
+		// EnrollmentToken is the single-use credential a generated installer
+		// carries. The header form is preferred; this exists because a shell
+		// installer already builds a JSON body and adding a field to it is one
+		// less thing to get wrong than adding a header.
+		EnrollmentToken string `json:"enrollment_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1055,18 +1185,43 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 		name = strings.TrimSpace(req.Hostname)
 	}
 	if name == "" {
-		http.Error(w, `{"error":"endpoint_id is required: a certificate with no endpoint to name authenticates nothing"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required: a certificate with no endpoint to name authenticates nothing")
 		return
+	}
+
+	// Who is allowed to be issued a certificate in this name.
+	//
+	// The certificate is the whole of the hub's endpoint identity: with
+	// --client-certs required it is what separates one endpoint from another,
+	// and endpointIdentityOK refuses a request whose certificate names someone
+	// else. None of that means anything if the route mints a certificate for
+	// any name on request - and it did, to anyone the middleware authenticated,
+	// which includes every agent in the fleet holding the shared tenant key.
+	//
+	// So: an operator (the admin credential) may enrol anything, and an
+	// installer presents a single-use token the hub minted for this enrolment
+	// when the operator generated the bootstrap script.
+	if r.Header.Get("X-Role") != "admin" {
+		token := strings.TrimSpace(r.Header.Get("X-Enrollment-Token"))
+		if token == "" {
+			token = strings.TrimSpace(req.EnrollmentToken)
+		}
+		if err := s.store.ConsumeEnrollmentToken(token, name); err != nil {
+			log.Printf("[!] %s asked for a certificate naming %q without a usable enrolment token: %v",
+				clientIP(r), name, err)
+			writeJSONError(w, http.StatusForbidden, "certificate enrolment needs the admin credential or a valid single-use enrolment token: "+err.Error())
+			return
+		}
 	}
 
 	bundle, err := s.pki.IssueClientCert(name, req.IP)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(bundle)
+	log.Printf("[+] Issued a client certificate for endpoint %q to %s.", name, clientIP(r))
+	writeJSON(w, http.StatusOK, bundle)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -1084,24 +1239,53 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	addr := clientIP(r)
+	if s.throttle.blocked(addr) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+		return
+	}
+
 	apiKey := r.URL.Query().Get("key")
 	if apiKey == "" {
 		apiKey = r.Header.Get("X-API-Key")
 	}
 
 	var tenantID string
-	if apiKey == s.adminKey {
+	isAdmin := secretEqual(apiKey, s.adminKey)
+	if isAdmin {
 		tenantID = "admin-tenant"
 	} else {
 		t, err := s.store.GetTenantByAPIKey(apiKey)
 		if err != nil || t == nil {
+			if s.throttle.fail(addr) {
+				log.Printf("[!] %s has failed websocket authentication %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		tenantID = t.ID
 	}
+	s.throttle.succeed(addr)
 
+	// The socket claims an endpoint id and then writes telemetry under it for
+	// as long as it stays open, so it is bound by the same rule as the REST
+	// telemetry route rather than trusting the query string. Without this, the
+	// websocket was a way around every certificate check on /api/v1/events.
 	endpointID := r.URL.Query().Get("endpoint_id")
+	cn := clientCertCN(r)
+	if cn != "" {
+		if endpointID != "" && endpointID != cn {
+			log.Printf("[!] %s opened a websocket with a certificate for %q and claimed endpoint %q; refused.", addr, cn, endpointID)
+			http.Error(w, "the client certificate does not name this endpoint", http.StatusForbidden)
+			return
+		}
+		endpointID = cn
+	} else if s.tlsOpts.ClientCerts == ClientCertsRequired && !isAdmin {
+		log.Printf("[!] %s opened a websocket with no verified client certificate while --client-certs is required; refused.", addr)
+		http.Error(w, "this hub requires a client certificate to report as an endpoint", http.StatusForbidden)
+		return
+	}
 	if endpointID == "" {
 		endpointID = uuid.New().String()
 	}
@@ -1185,7 +1369,7 @@ func (s *Server) SendCommand(endpointID string, cmd CommandMessage) error {
 	client, ok := s.clients[endpointID]
 	s.clientsMu.RUnlock()
 
-	if !ok {
+	if !ok || client.Conn == nil {
 		return fmt.Errorf("endpoint %s is offline or disconnected", endpointID)
 	}
 
@@ -1276,14 +1460,28 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		AllowIPs   []string `json:"allow_ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if !s.endpointInScope(w, r, req.EndpointID) {
+		return
+	}
+	// The allow list is a pinhole through a default-deny rule and reaches the
+	// agent's firewall layer. Only addresses belong in it.
+	allowIPs := make([]string, 0, len(req.AllowIPs))
+	for _, raw := range req.AllowIPs {
+		ip, err := validateIP(raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "allow_ips: "+err.Error())
+			return
+		}
+		allowIPs = append(allowIPs, ip)
 	}
 
 	cmd := CommandMessage{
 		Type: "ISOLATE",
 		Payload: map[string]interface{}{
-			"allow_ips": req.AllowIPs,
+			"allow_ips": allowIPs,
 		},
 	}
 
@@ -1299,13 +1497,11 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		Action:    "ISOLATE_HOST",
 		Resource:  req.EndpointID,
 		Details:   "Host network isolation enabled at ring-0",
-		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		IPAddress: clientIP(r),
 		Timestamp: time.Now().UTC(),
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"isolated","endpoint_id":"` + req.EndpointID + `"}`))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "isolated", "endpoint_id": req.EndpointID})
 }
 
 func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
@@ -1318,7 +1514,10 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 		EndpointID string `json:"endpoint_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.endpointInScope(w, r, req.EndpointID) {
 		return
 	}
 
@@ -1338,13 +1537,11 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 		Action:    "UNISOLATE_HOST",
 		Resource:  req.EndpointID,
 		Details:   "Host network isolation lifted",
-		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		IPAddress: clientIP(r),
 		Timestamp: time.Now().UTC(),
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"unisolated","endpoint_id":"` + req.EndpointID + `"}`))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unisolated", "endpoint_id": req.EndpointID})
 }
 
 func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
@@ -1374,14 +1571,28 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		req.Scope = "all"
 	}
 
+	allowIPs := make([]string, 0, len(req.AllowIPs))
+	for _, raw := range req.AllowIPs {
+		ip, err := validateIP(raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "allow_ips: "+err.Error())
+			return
+		}
+		allowIPs = append(allowIPs, ip)
+	}
+	cmd := CommandMessage{
+		Type:    "ISOLATE",
+		Payload: map[string]interface{}{"allow_ips": allowIPs},
+	}
+
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
-		for _, id := range req.IDs {
+		ids, ok := s.scopedEndpointIDs(w, r, req.IDs)
+		if !ok {
+			return
+		}
+		for _, id := range ids {
 			s.store.SetEndpointIsolation(id, true)
-			cmd := CommandMessage{
-				Type:    "ISOLATE",
-				Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
-			}
 			_ = s.SendCommand(id, cmd)
 			count++
 		}
@@ -1389,19 +1600,10 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		var err error
 		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, true)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		cmd := CommandMessage{
-			Type:    "ISOLATE",
-			Payload: map[string]interface{}{"allow_ips": req.AllowIPs},
-		}
-		s.clientsMu.RLock()
-		for id := range s.clients {
-			_ = s.SendCommand(id, cmd)
-		}
-		s.clientsMu.RUnlock()
+		s.broadcastToTenant(tenantID, cmd)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1440,11 +1642,16 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 		req.Scope = "all"
 	}
 
+	cmd := CommandMessage{Type: "UNISOLATE"}
+
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
-		for _, id := range req.IDs {
+		ids, ok := s.scopedEndpointIDs(w, r, req.IDs)
+		if !ok {
+			return
+		}
+		for _, id := range ids {
 			s.store.SetEndpointIsolation(id, false)
-			cmd := CommandMessage{Type: "UNISOLATE"}
 			_ = s.SendCommand(id, cmd)
 			count++
 		}
@@ -1452,16 +1659,10 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 		var err error
 		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, false)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		cmd := CommandMessage{Type: "UNISOLATE"}
-		s.clientsMu.RLock()
-		for id := range s.clients {
-			_ = s.SendCommand(id, cmd)
-		}
-		s.clientsMu.RUnlock()
+		s.broadcastToTenant(tenantID, cmd)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1489,13 +1690,146 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 // --client-certs required closes, once every endpoint has one.
 func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endpointID string) bool {
 	cn := r.Header.Get("X-Client-CN")
-	if cn == "" || cn == endpointID {
+	if cn != "" {
+		if cn == endpointID {
+			return true
+		}
+		log.Printf("[!] %s presented a certificate for %q and asked to act as %q; refused.",
+			clientIP(r), cn, endpointID)
+		writeJSONError(w, http.StatusForbidden, "the client certificate does not name this endpoint")
+		return false
+	}
+
+	// No certificate on this connection. Whether that is allowed is not a
+	// property of the request - it is the fleet-wide setting.
+	//
+	// The TLS listener enforces --client-certs required at the handshake, but
+	// the plain listener has no handshake to enforce it in, and both listeners
+	// share one mux. So an operator who had moved the fleet to "required" still
+	// had an agent-facing route on :9999 that took an endpoint id out of a
+	// request body and believed it, reachable by anything holding the tenant
+	// key - which is every endpoint. Requiring the certificate here is what
+	// makes the setting mean the same thing on both ports.
+	//
+	// The admin credential is exempt: an operator posting on behalf of an
+	// endpoint (a CLI, a test) is not an endpoint claiming to be one.
+	if s.tlsOpts.ClientCerts == ClientCertsRequired && r.Header.Get("X-Role") != "admin" {
+		log.Printf("[!] %s asked to act as %q over a connection with no verified client certificate while --client-certs is required; refused.",
+			clientIP(r), endpointID)
+		writeJSONError(w, http.StatusForbidden,
+			"this hub requires a client certificate to report as an endpoint; reach it on the TLS listener with the certificate issued to this endpoint id")
+		return false
+	}
+	return true
+}
+
+// endpointInScope reports whether the caller is allowed to act on this
+// endpoint, and answers the request itself when it is not.
+//
+// Isolation is the sharpest control the hub has: it cuts a host off the
+// network, and lifting it puts a quarantined host back on. Both routes took an
+// endpoint id out of the request body and acted on it without ever asking whose
+// endpoint it was, so any tenant could isolate - or release - any host in any
+// other tenant. The tenant scoping the listing routes already did is the same
+// rule; it just was not applied here.
+// The bulk routes scoped the database write to the caller's tenant and then
+// sent the command to every open socket, so one tenant isolating its own hosts
+// cut every host on the hub off the network - including hosts in tenants it
+// cannot see. The registry knows which tenant each client belongs to; it just
+// was not being asked.
+// callerTenantScope is the tenant a broadcast should be confined to: none for
+// an operator, the caller's own for a tenant credential.
+func callerTenantScope(r *http.Request) string {
+	if r.Header.Get("X-Role") == "tenant" {
+		return r.Header.Get("X-Tenant-ID")
+	}
+	return ""
+}
+
+// broadcastToTenant sends a command to every connected endpoint in scope.
+//
+// It snapshots the registry under the read lock and sends outside it. Every
+// call site used to hold clientsMu.RLock across SendCommand, which takes the
+// same read lock again - and a Go RWMutex read lock is not reentrant. A writer
+// (any agent connecting or disconnecting) queueing between the two acquisitions
+// blocks the inner RLock, while the writer waits for the outer one to drop:
+// the hub's whole websocket registry stops, permanently. This is the same
+// shape that took the storage package's lock down in production.
+func (s *Server) broadcastToTenant(tenantID string, cmd CommandMessage) int {
+	sent := 0
+	for _, id := range s.clientsInScope(tenantID) {
+		if s.SendCommand(id, cmd) == nil {
+			sent++
+		}
+	}
+	return sent
+}
+
+// clientsInScope snapshots the ids a broadcast should reach. Separated out so
+// the selection can be asserted on without opening real sockets, and so the
+// snapshot is unmistakably the only thing done under the lock.
+func (s *Server) clientsInScope(tenantID string) []string {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	targets := make([]string, 0, len(s.clients))
+	for id, c := range s.clients {
+		if tenantID != "" && c.TenantID != tenantID {
+			continue
+		}
+		targets = append(targets, id)
+	}
+	return targets
+}
+
+// scopedEndpointIDs filters an explicit id list to the ones the caller owns and
+// answers the request if any of them are not. Refusing the whole call rather
+// than quietly skipping is deliberate: a bulk isolate that silently did nine of
+// ten hosts reads as a success.
+func (s *Server) scopedEndpointIDs(w http.ResponseWriter, r *http.Request, ids []string) ([]string, bool) {
+	if r.Header.Get("X-Role") == "admin" {
+		return ids, true
+	}
+	tenantID := r.Header.Get("X-Tenant-ID")
+	for _, id := range ids {
+		ep, err := s.store.GetEndpoint(id)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return nil, false
+		}
+		if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {
+			log.Printf("[!] %s (tenant %q) asked to act on endpoint %q in a bulk request; it is not in scope, so the whole request is refused.",
+				clientIP(r), tenantID, id)
+			writeJSONError(w, http.StatusNotFound, "one or more endpoints are not in this scope")
+			return nil, false
+		}
+	}
+	return ids, true
+}
+
+func (s *Server) endpointInScope(w http.ResponseWriter, r *http.Request, endpointID string) bool {
+	if strings.TrimSpace(endpointID) == "" {
+		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
+		return false
+	}
+	if r.Header.Get("X-Role") == "admin" {
 		return true
 	}
-	log.Printf("[!] %s presented a certificate for %q and asked to act as %q; refused.",
-		r.RemoteAddr, cn, endpointID)
-	http.Error(w, "the client certificate does not name this endpoint", http.StatusForbidden)
-	return false
+	tenantID := r.Header.Get("X-Tenant-ID")
+	ep, err := s.store.GetEndpoint(endpointID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	// One answer for "no such endpoint" and "not yours": telling them apart
+	// turns the route into an oracle for which endpoint ids exist.
+	if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {
+		log.Printf("[!] %s (tenant %q) asked to act on endpoint %q, which is not in its scope; refused.",
+			clientIP(r), tenantID, endpointID)
+		writeJSONError(w, http.StatusNotFound, "no such endpoint in this scope")
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -1750,11 +2084,7 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 				"rule": rule,
 			},
 		}
-		s.clientsMu.RLock()
-		for id := range s.clients {
-			_ = s.SendCommand(id, cmd)
-		}
-		s.clientsMu.RUnlock()
+		s.broadcastToTenant(callerTenantScope(r), cmd)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -1820,16 +2150,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	addr := clientIP(r)
+	if s.throttle.blocked(addr) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if req.Username == "admin" && req.Password == s.adminKey {
+	if req.Username == "admin" && secretEqual(req.Password, s.adminKey) {
+		s.throttle.succeed(addr)
 		token, err := auth.GenerateJWT(auth.Claims{
 			UserID:   "usr-admin",
 			Username: "admin",
@@ -1849,7 +2187,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			Action:    "LOGIN",
 			Resource:  "auth",
 			Details:   "Admin user logged in via master key",
-			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+			IPAddress: clientIP(r),
 			Timestamp: time.Now().UTC(),
 		})
 
@@ -1862,7 +2200,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
+	if s.throttle.fail(addr) {
+		log.Printf("[!] %s has failed console login %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
+	}
+	writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 }
 
 func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
@@ -2012,11 +2353,7 @@ func (s *Server) handlePolicyGroups(w http.ResponseWriter, r *http.Request) {
 				"action":   g.Action,
 			},
 		}
-		s.clientsMu.RLock()
-		for epID := range s.clients {
-			_ = s.SendCommand(epID, cmd)
-		}
-		s.clientsMu.RUnlock()
+		s.broadcastToTenant(callerTenantScope(r), cmd)
 
 		_ = s.store.RecordAudit(storage.AuditEntry{
 			ID:        uuid.New().String(),
@@ -2176,11 +2513,7 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 				"action":   "PERMIT",
 			},
 		}
-		s.clientsMu.RLock()
-		for epID := range s.clients {
-			_ = s.SendCommand(epID, cmd)
-		}
-		s.clientsMu.RUnlock()
+		s.broadcastToTenant(callerTenantScope(r), cmd)
 
 		_ = s.store.RecordAudit(storage.AuditEntry{
 			ID:        uuid.New().String(),
@@ -2297,6 +2630,15 @@ func (s *Server) handleScannerScan(w http.ResponseWriter, r *http.Request) {
 	if req.Subnet == "" {
 		req.Subnet = "10.0.0.0/24"
 	}
+	// The sweep materialises one address at a time before probing anything, so
+	// the prefix decides how much memory a single request body can ask for. A
+	// /8 is sixteen million of them.
+	subnet, err := validateSubnet(req.Subnet)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Subnet = subnet
 	prof := scanner.ScanProfile(req.Profile)
 	if prof == "" {
 		prof = scanner.ProfileStandard
@@ -2413,7 +2755,14 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	assets, err := s.store.ListAssets(r.URL.Query().Get("tenant_id"))
+	// The tenant to filter by is the caller's, not the caller's choice: read
+	// from the query string, a tenant could ask for the whole asset graph by
+	// leaving it empty.
+	tenantID := r.URL.Query().Get("tenant_id")
+	if r.Header.Get("X-Role") != "admin" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+	assets, err := s.store.ListAssets(tenantID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2595,9 +2944,32 @@ func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req MeshQuarantineRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetIP == "" {
-		http.Error(w, "invalid request: target_ip is required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	// Every field below is broadcast to the fleet and applied by an agent
+	// running as root. The hub is the only place that sees all of them before
+	// they fan out, so it is where they are checked: a target_ip that is not an
+	// address has no meaning here and no safe interpretation there.
+	targetIP, err := validateIP(req.TargetIP)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "target_ip: "+err.Error())
+		return
+	}
+	req.TargetIP = targetIP
+	targetMAC, err := validateMAC(req.TargetMAC)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "target_mac: "+err.Error())
+		return
+	}
+	req.TargetMAC = targetMAC
+	if strings.TrimSpace(req.Subnet) != "" {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(req.Subnet)); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "subnet: not a CIDR subnet")
+			return
+		}
+		req.Subnet = strings.TrimSpace(req.Subnet)
 	}
 	if req.Reason == "" {
 		req.Reason = "Unmanaged/rogue lateral threat quarantine"
@@ -2619,11 +2991,7 @@ func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
 			"reason":     req.Reason,
 		},
 	}
-	s.clientsMu.RLock()
-	for id := range s.clients {
-		_ = s.SendCommand(id, cmd)
-	}
-	s.clientsMu.RUnlock()
+	s.broadcastToTenant("", cmd)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2639,9 +3007,15 @@ func (s *Server) handleMeshUnquarantine(w http.ResponseWriter, r *http.Request) 
 	}
 	var req MeshQuarantineRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetIP == "" {
-		http.Error(w, "invalid request: target_ip is required", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid request: target_ip is required")
 		return
 	}
+	targetIP, err := validateIP(req.TargetIP)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "target_ip: "+err.Error())
+		return
+	}
+	req.TargetIP = targetIP
 
 	if err := s.store.RemoveQuarantinedPeer(req.TargetIP); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2655,11 +3029,7 @@ func (s *Server) handleMeshUnquarantine(w http.ResponseWriter, r *http.Request) 
 			"action":    "ALLOW",
 		},
 	}
-	s.clientsMu.RLock()
-	for id := range s.clients {
-		_ = s.SendCommand(id, cmd)
-	}
-	s.clientsMu.RUnlock()
+	s.broadcastToTenant("", cmd)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2744,27 +3114,42 @@ func (s *Server) handleCopilotInvestigate(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.copilot.GetConfig())
+		// Provider keys go out redacted. The route is admin-only, but a
+		// credential that never needs to leave the hub should not, and the
+		// console only ever needs to know whether one is set.
+		writeJSON(w, http.StatusOK, s.copilot.GetConfig().Redacted())
 		return
 	}
 	if r.Method == http.MethodPost {
 		var cfg copilot.Config
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// A console that read the redacted form and posted it back must not
+		// erase the keys it was never shown.
+		cfg = cfg.MergeSecrets(s.copilot.GetConfig())
+		// The hub dials this URL from inside the management network and sends
+		// it whatever fleet context the question needed, so it is checked
+		// rather than taken: an absolute http(s) URL, nothing else.
+		if strings.TrimSpace(cfg.OllamaURL) != "" {
+			normalized, err := validateHTTPURL(cfg.OllamaURL)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "ollama_url: "+err.Error())
+				return
+			}
+			cfg.OllamaURL = normalized
 		}
 		// A configuration that cannot be stored is not a configuration: it
 		// lasts until the next restart and then reverts without telling
 		// anyone. Report it rather than answering 200 with the new settings.
 		if err := s.copilot.UpdateConfig(cfg); err != nil {
 			log.Printf("[-] Copilot configuration could not be persisted: %v", err)
-			http.Error(w, `{"error":"the configuration was applied to the running hub but could not be stored, and will revert at the next restart"}`, http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "the configuration was applied to the running hub but could not be stored, and will revert at the next restart")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.copilot.GetConfig())
+		writeJSON(w, http.StatusOK, s.copilot.GetConfig().Redacted())
 		return
 	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }

@@ -179,6 +179,11 @@ sudo dpkg -i /tmp/ominull.deb
 curl -s http://10.0.0.58:9999/bootstrap.sh?key=<your-admin-key> | sudo bash
 ```
 
+> The admin key authorises **generating** the installer; it is not what the
+> installer leaves on the endpoint. The generated script carries the tenant key
+> (`?tenant=<id>`, default `default`) as the agent's runtime credential, plus a
+> single-use enrolment token for the endpoint's own certificate.
+
 #### 2. Windows 11 / Server 2025
 ```powershell
 # In an Administrative PowerShell:
@@ -237,30 +242,37 @@ ominull-cli agent-update all 1.2.0             # Push a specific release fleet-w
 
 ## 6. REST API Reference
 
-All administrative API endpoints require the master or tenant authentication header:
-`X-API-Key: <OMINULL_API_KEY>`
+Every route authenticates with `X-API-Key: <key>`, and which key decides what it
+can reach. The **admin** key is an operator's; the **tenant** key is what an
+enrolled agent carries, so it is on every endpoint in the fleet and is scoped to
+what an agent legitimately does. Routes marked **admin** below refuse a tenant
+key with `403`. Tenant-scoped routes act only on the calling tenant's own
+endpoints; an endpoint id belonging to another tenant answers `404`.
 
-| Endpoint | Method | Description |
-| :--- | :--- | :--- |
-| `/api/v1/hierarchy` | `GET` | Retrieve multi-tenant org hierarchy and location metrics |
-| `/api/v1/endpoints` | `GET` | List all registered endpoints, OS info, and online status |
-| `/api/v1/events` | `GET/POST` | Query telemetry event stream or ingest agent batch |
-| `/api/v1/isolate` | `POST` | Enforce ring-0 host quarantine on managed endpoint |
-| `/api/v1/unisolate` | `POST` | Restore network connectivity on quarantined endpoint |
-| `/api/v1/scanner/scan` | `POST` | Launch standard or aggressive subnet discovery sweep |
-| `/api/v1/scanner/results` | `GET` | List discovered subnet assets, open ports, and weakpoints |
-| `/api/v1/scanner/feedback`| `POST` | Submit ground-truth device fingerprint training |
-| `/api/v1/mesh/quarantine` | `POST` | Enforce subnet-wide lateral mesh drop for rogue host |
-| `/api/v1/mesh/unquarantine` | `POST` | Lift subnet-wide lateral mesh quarantine |
-| `/api/v1/mesh/quarantined` | `GET` | List all active mesh-quarantined peer IPs |
-| `/api/v1/topology/graph` | `GET` | Retrieve visual communications topology graph nodes & edges |
-| `/api/v1/deployer/push` | `POST` | Dispatch 1-click SSH push-deployment job |
-| `/api/v1/agents/update` | `POST` | Publish an agent release to one endpoint or the whole fleet (admin only) |
-| `/api/v1/agents/update-status` | `GET` | Report fleet agent-version currency and pending update jobs |
-| `/api/v1/agent/config` | `GET` | Agent-facing poll returning the update package URL when outdated |
-| `/api/v1/copilot/chat` | `POST` | Natural-language query interface with Threat Copilot |
-| `/api/v1/copilot/investigate` | `POST` | Autonomous AI forensic investigation of an alert |
-| `/api/v1/copilot/config` | `GET/POST` | Retrieve or configure active LLM provider backend |
+| Endpoint | Method | Credential | Description |
+| :--- | :--- | :--- | :--- |
+| `/api/v1/hierarchy` | `GET` | tenant-scoped | Retrieve multi-tenant org hierarchy and location metrics |
+| `/api/v1/endpoints` | `GET` | tenant-scoped | List registered endpoints, OS info, and online status |
+| `/api/v1/events` | `GET/POST` | tenant-scoped | Query telemetry event stream or ingest agent batch |
+| `/api/v1/endpoints/isolate` | `POST` | tenant-scoped | Enforce ring-0 host quarantine on a managed endpoint |
+| `/api/v1/endpoints/unisolate` | `POST` | tenant-scoped | Restore network connectivity on a quarantined endpoint |
+| `/api/v1/tenants` | `GET/POST` | **admin** | List or create tenants (the response carries tenant API keys) |
+| `/api/v1/scanner/scan` | `POST` | **admin** | Launch a subnet discovery sweep (capped at 65536 addresses) |
+| `/api/v1/scanner/results` | `GET` | **admin** | List discovered subnet assets, open ports, and weakpoints |
+| `/api/v1/scanner/feedback`| `POST` | **admin** | Submit ground-truth device fingerprint training |
+| `/api/v1/mesh/quarantine` | `POST` | **admin** | Enforce subnet-wide lateral mesh drop for a rogue host |
+| `/api/v1/mesh/unquarantine` | `POST` | **admin** | Lift subnet-wide lateral mesh quarantine |
+| `/api/v1/mesh/quarantined` | `GET` | tenant-scoped | List all active mesh-quarantined peer IPs |
+| `/api/v1/topology/graph` | `GET` | **admin** | Retrieve the fleet-wide communications topology graph |
+| `/api/v1/deployer/push` | `POST` | **admin** | Dispatch a 1-click SSH push-deployment job |
+| `/api/v1/agents/update` | `POST` | **admin** | Publish an agent release to one endpoint or the whole fleet |
+| `/api/v1/agents/update-status` | `GET` | **admin** | Report fleet agent-version currency and pending update jobs |
+| `/api/v1/agent/config` | `GET` | agent | Agent-facing poll returning the update package URL when outdated |
+| `/api/v1/pki/ca.crt` | `GET` | none | The hub CA an agent pins |
+| `/api/v1/pki/enroll` | `POST` | **admin** or enrolment token | Issue this endpoint's client certificate |
+| `/api/v1/copilot/chat` | `POST` | **admin** | Natural-language query interface with Threat Copilot |
+| `/api/v1/copilot/investigate` | `POST` | **admin** | Autonomous AI forensic investigation of an alert |
+| `/api/v1/copilot/config` | `GET/POST` | **admin** | Retrieve or configure the LLM provider backend (keys are redacted on read) |
 
 ---
 

@@ -30,11 +30,22 @@ type Options struct {
 	// deployment working unchanged.
 	AgentHubURL string
 
-	TenantAPIKey   string
-	CFClientID     string
-	CFClientSecret string
-	LocationID     string
-	RoleTag        string
+	// TenantAPIKey is the runtime credential written into the installed
+	// agent's configuration. It is deliberately the *tenant* key and not the
+	// admin key that authorised this script: the file it lands in stays on the
+	// endpoint for the life of the install, so whatever goes in it is a
+	// credential the fleet holds, and the fleet holding the hub's admin key
+	// makes every endpoint a full operator of the hub.
+	TenantAPIKey string
+	// EnrollmentToken authorises exactly one client-certificate issuance and
+	// then stops working. The API key above cannot do it - it is shared, so a
+	// certificate obtained with it would prove nothing about which endpoint
+	// asked.
+	EnrollmentToken string
+	CFClientID      string
+	CFClientSecret  string
+	LocationID      string
+	RoleTag         string
 	// EndpointID pins the fleet identity. Left empty, the agent derives one from
 	// the hostname, and a renamed host then forks into a second record.
 	EndpointID string
@@ -92,6 +103,7 @@ param (
     [string]$HubURL = "%s",
     [string]$AgentHubURL = "%s",
     [string]$APIKey = "%s",
+    [string]$EnrollToken = "%s",
     [string]$RoleTag = "%s",
     [string]$LocationID = "%s",
     [string]$EndpointID = "%s"
@@ -131,7 +143,7 @@ Write-Host "[+] Testing User-Mode WFP subsystem..." -ForegroundColor Gray
 Write-Host "[+] Enrolling endpoint identity ($EndpointID)..." -ForegroundColor Gray
 $PfxPath = "$InstallDir\client.pfx"
 try {
-    $EnrollHeaders = @{ "X-API-Key" = $APIKey; "Content-Type" = "application/json" }
+    $EnrollHeaders = @{ "X-API-Key" = $APIKey; "X-Enrollment-Token" = $EnrollToken; "Content-Type" = "application/json" }
     foreach ($k in $Headers.Keys) { $EnrollHeaders[$k] = $Headers[$k] }
     $EnrollBody = @{ endpoint_id = $EndpointID; hostname = $env:COMPUTERNAME } | ConvertTo-Json -Compress
     $Bundle = Invoke-RestMethod -Uri "$HubURL/api/v1/pki/enroll" -Method Post -Headers $EnrollHeaders -Body $EnrollBody -UseBasicParsing
@@ -165,7 +177,7 @@ Write-Host "[+] Configuring and starting Ominull Endpoint Service..." -Foregroun
 Write-Host "[SUCCESS] Ominull Endpoint deployed; reporting to $AgentHubURL over TLS." -ForegroundColor Green
 `
 	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.RoleTag, o.LocationID, endpointID,
+		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
 		cfHeadersBlock, cfArgsBlock))
 }
 
@@ -192,6 +204,7 @@ set -euo pipefail
 HUB_URL="%s"
 AGENT_HUB_URL="%s"
 API_KEY="%s"
+ENROLL_TOKEN="%s"
 ROLE_TAG="%s"
 LOCATION_ID="%s"
 INSTALL_DIR="/opt/ominull"
@@ -239,7 +252,7 @@ echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
 json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
 enrol_identity() {
     local json
-    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" -H "Content-Type: application/json" \
         -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname)\"}" \
         "$HUB_URL/api/v1/pki/enroll") || return 1
     # -A because the fields are single base64 lines; without it openssl refuses
@@ -291,7 +304,7 @@ systemctl enable --now ominull-agent.service
 echo -e "\033[32m[SUCCESS] Ominull Linux Service deployed; reporting to $AGENT_HUB_URL over TLS.\033[0m"
 `
 	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.RoleTag, o.LocationID, endpointID,
+		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
 		cfCurlHeader, cfCurlHeader, cfCurlHeader, cfDaemonArg))
 }
 
@@ -314,6 +327,7 @@ set -euo pipefail
 HUB_URL="%s"
 AGENT_HUB_URL="%s"
 API_KEY="%s"
+ENROLL_TOKEN="%s"
 ROLE_TAG="%s"
 LOCATION_ID="%s"
 INSTALL_DIR="/opt/ominull"
@@ -354,7 +368,7 @@ echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
 json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
 enrol_identity() {
     local json
-    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" -H "Content-Type: application/json" \
         -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname -s)\"}" \
         "$HUB_URL/api/v1/pki/enroll") || return 1
     # -A because each field is one long base64 line, which openssl otherwise
@@ -412,6 +426,6 @@ launchctl load -w /Library/LaunchDaemons/dev.ominull.daemon.plist
 echo -e "\033[32m[SUCCESS] Ominull macOS daemon active; reporting to $AGENT_HUB_URL over TLS.\033[0m"
 `
 	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.RoleTag, o.LocationID, endpointID,
+		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
 		cfCurlHeader, cfCurlHeader, cfCurlHeader, cfCurlHeader))
 }

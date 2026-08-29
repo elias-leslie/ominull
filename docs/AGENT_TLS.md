@@ -254,6 +254,39 @@ An enrolment that fails warns and carries on rather than aborting the install,
 for the same reason: a host with a trust anchor and no running agent is worse
 than one reporting under the API key alone.
 
+### Who may be issued one
+
+A certificate is only an identity if not everyone can get one in someone else's
+name. `POST /api/v1/pki/enroll` originally issued to any caller the API
+middleware authenticated, and the credential that authenticates an installer is
+the tenant key — which is on every endpoint in the fleet. Any one host could
+therefore mint a certificate naming any other, and `endpointIdentityOK` would
+then believe it.
+
+Two credentials are accepted now, and nothing else:
+
+- **The admin key.** An operator may enrol anything.
+- **A single-use enrolment token.** The hub mints one when it generates a
+  bootstrap script (`X-Enrollment-Token`, also accepted as `enrollment_token` in
+  the body). It is redeemed by one issuance, expires an hour after it is
+  generated, and — when the operator pinned an endpoint id on the bootstrap URL
+  — will only issue for that id. Redemption is a conditional `UPDATE`, so two
+  installers racing on the same token cannot both win it. Only the digest is
+  stored, so the table is of no use to anyone who reads it.
+
+An installer that is replayed, or one recovered from a host's disk later, is a
+spent token: it cannot enrol a second identity.
+
+The credential the installer leaves *behind* is a separate question, and used to
+have the same answer. The bootstrap route requires the admin key to generate a
+script, and the generated script then wrote that same key into
+`/etc/ominull/agent.conf` (and the Windows key file, and the macOS plist) as the
+agent's runtime credential — so every endpoint held the hub's admin key for the
+life of the install, and one compromised host was a full operator of the hub.
+The script now carries the **tenant** key for the agent to report with, which is
+what least privilege meant here all along. Pass `?tenant=<id>` to choose which;
+it defaults to `default`.
+
 ### Asking is not free (v1.5.1)
 
 `optional` still makes the listener send a TLS CertificateRequest, and the ask

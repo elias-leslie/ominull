@@ -50,17 +50,17 @@ type Endpoint struct {
 	// the OS string is a display label and not a contract - matching on it is
 	// one string change away from silently misrouting a fleet-wide update.
 	// An agent that reports nothing is "none" and is never offered a package.
-	UpdateCapability string    `json:"update_capability"`
-	Status           string    `json:"status"` // online, offline
+	UpdateCapability string `json:"update_capability"`
+	Status           string `json:"status"` // online, offline
 	// CertCN is the common name of the client certificate this endpoint last
 	// reported under, or empty if it has only ever reported under the tenant
 	// API key. It is what tells an operator whether the fleet is ready for
 	// --client-certs required, which otherwise has to be discovered by turning
 	// it on and seeing who falls off.
-	CertCN     string `json:"cert_cn"`
-	IsIsolated bool   `json:"is_isolated"`
-	LastSeenAt       time.Time `json:"last_seen_at"`
-	CreatedAt        time.Time `json:"created_at"`
+	CertCN     string    `json:"cert_cn"`
+	IsIsolated bool      `json:"is_isolated"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type Event struct {
@@ -402,6 +402,18 @@ func (s *Store) initSchema() error {
 	CREATE TABLE IF NOT EXISTS settings (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
+	);
+
+	-- One-shot credentials that authorise a single certificate enrolment.
+	-- Only the digest is stored: a token read out of this table is of no use
+	-- to whoever read it, which is the point of it being here rather than the
+	-- token itself.
+	CREATE TABLE IF NOT EXISTS enrollment_tokens (
+		token_hash TEXT PRIMARY KEY,
+		endpoint_id TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		expires_at DATETIME NOT NULL,
+		used_at DATETIME
 	);
 
 	CREATE TABLE IF NOT EXISTS agent_update_jobs (

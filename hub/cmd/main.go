@@ -63,15 +63,26 @@ func main() {
 	defer store.Close()
 
 	resolvedAdminKey := *adminKey
+	adoptedTenantKey := false
 	if resolvedAdminKey == "" {
 		if t, err := store.GetTenant("default"); err == nil && t != nil {
 			resolvedAdminKey = t.APIKey
+			adoptedTenantKey = true
 		}
 	}
 	if resolvedAdminKey == "" {
 		resolvedAdminKey = os.Getenv("OMINULL_ADMIN_KEY")
+		adoptedTenantKey = false
 	}
-	log.Printf("[+] Cryptographic Master API Key Active: %s", resolvedAdminKey)
+	// A fingerprint, not the key. This line used to print the admin credential
+	// in full on every start, into a journal that is readable by more accounts
+	// than the key is - and into any log shipper pointed at it. The digest is
+	// enough to tell one key from another across a rotation, which is the only
+	// thing an operator reads it for.
+	log.Printf("[+] Admin API key active: %s (fingerprint, not the key)", server.KeyFingerprint(resolvedAdminKey))
+	if adoptedTenantKey {
+		log.Printf("[!] No --admin-key was given, so the default tenant's API key is being used as the admin key. Agents are enrolled with the tenant key, so on this hub every endpoint holds an admin credential. Pass a distinct --admin-key.")
+	}
 
 	clientCertMode, err := server.ParseClientCertMode(*clientCerts)
 	if err != nil {

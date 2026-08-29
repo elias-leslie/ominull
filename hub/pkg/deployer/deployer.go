@@ -26,6 +26,13 @@ type DeployRequest struct {
 	Role       string `json:"role"`
 	HubURL     string `json:"hub_url"`
 	APIKey     string `json:"api_key"`
+	// HostKeyFingerprint pins the SSH host key for this target, in the
+	// "SHA256:..." form ssh-keyscan and OpenSSH print. Supplied, it must match
+	// or the connection is refused. Omitted, the hub uses the key it recorded
+	// the first time it reached this address and refuses a change.
+	HostKeyFingerprint string `json:"host_key_fingerprint"`
+	// EndpointID pins the fleet identity the installed agent reports under.
+	EndpointID string `json:"endpoint_id"`
 }
 
 type DeployJobStatus struct {
@@ -40,11 +47,22 @@ type DeployJobStatus struct {
 }
 
 type Deployer struct {
-	store    *storage.Store
-	hubURL   string
-	adminKey string
-	jobs     map[string]*DeployJobStatus
-	mu       sync.RWMutex
+	store *storage.Store
+	// hubURL is where the installed agent's installer fetches the CA and the
+	// binaries from; agentHubURL is the transport the agent itself then uses.
+	// They differ on any hub published through a proxy, and enrolling against
+	// the wrong one puts telemetry on the cleartext listener.
+	hubURL      string
+	agentHubURL string
+	adminKey    string
+	jobs        map[string]*DeployJobStatus
+	mu          sync.RWMutex
+}
+
+// SetAgentHubURL mirrors the hub's --agent-hub-url so a pushed enrolment writes
+// the same transport into the agent's config as a hand-run bootstrap does.
+func (d *Deployer) SetAgentHubURL(u string) {
+	d.agentHubURL = u
 }
 
 func New(store *storage.Store, hubURL, adminKey string) *Deployer {
@@ -103,6 +121,17 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 	d.updateJobStatus(jobID, "running", fmt.Sprintf("[%s] Connecting to %s@%s:%d via SSH...", time.Now().Format("15:04:05"), req.Username, req.TargetIP, req.Port))
 
 	// 1. Establish SSH Client Configuration
+	// The credentials in this request, the installer that follows and the
+	// endpoint's whole enrolment go down this connection. Accepting any host
+	// key - which ssh.InsecureIgnoreHostKey does, and which is what shipped -
+	// means anything that can answer on that address gets all of it and can
+	// return an installer of its own.
+	hostKeyCheck, recordKey, err := d.hostKeyCallback(req)
+	if err != nil {
+		d.failJob(jobID, err.Error())
+		return
+	}
+
 	authMethods := make([]ssh.AuthMethod, 0)
 	if req.Password != "" {
 		authMethods = append(authMethods, ssh.Password(req.Password))
@@ -127,7 +156,7 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 	sshConfig := &ssh.ClientConfig{
 		User:            req.Username,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCheck,
 		Timeout:         10 * time.Second,
 	}
 
@@ -141,7 +170,11 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 	}
 	defer client.Close()
 
-	d.appendLog(jobID, fmt.Sprintf("[%s] SSH connection established successfully.", time.Now().Format("15:04:05")))
+	if fp := recordKey(); fp != "" {
+		d.appendLog(jobID, fmt.Sprintf("[%s] Recorded the host key for %s on first contact: %s. A change from this will be refused.", time.Now().Format("15:04:05"), targetAddr, fp))
+	}
+
+	d.appendLog(jobID, fmt.Sprintf("[%s] SSH connection established and the host key verified.", time.Now().Format("15:04:05")))
 
 	// 2. OS Probe & Command Construction
 	targetOS := req.OS
@@ -166,17 +199,31 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 
 	d.appendLog(jobID, fmt.Sprintf("[%s] Target OS identified as [%s]. Constructing bootstrap payload...", time.Now().Format("15:04:05"), strings.ToUpper(targetOS)))
 
+	// The installer is generated here and streamed down the SSH connection,
+	// not fetched by the target over HTTP.
+	//
+	// What it replaces was `curl -sSL "<hub>/bootstrap.sh?..." | sudo bash`:
+	// no key, so the hub answered 401 and the target piped that error page into
+	// a root shell; no -f, so curl reported success either way; and the URL came
+	// out of the request body, so the caller chose which server the target
+	// executed code from. The script is authorised here, where the credentials
+	// already are, and crosses one channel that is already authenticated and
+	// host-key verified.
+	script, err := d.renderInstaller(targetOS, req)
+	if err != nil {
+		d.failJob(jobID, fmt.Sprintf("Could not prepare the installer: %v", err))
+		return
+	}
+
 	var bootstrapCmd string
 	switch targetOS {
 	case "windows":
-		bootstrapCmd = fmt.Sprintf(`powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "iwr -UseBasicParsing '%s/bootstrap.ps1?role=%s&location=%s' | iex"`, req.HubURL, req.Role, req.LocationID)
-	case "macos":
-		bootstrapCmd = fmt.Sprintf(`curl -sSL "%s/bootstrap.mac.sh?role=%s&location=%s" | sudo bash`, req.HubURL, req.Role, req.LocationID)
-	default: // Linux
-		bootstrapCmd = fmt.Sprintf(`curl -sSL "%s/bootstrap.sh?role=%s&location=%s" | sudo bash`, req.HubURL, req.Role, req.LocationID)
+		bootstrapCmd = `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -Command -`
+	default: // Linux and macOS
+		bootstrapCmd = `sudo -n sh -s`
 	}
 
-	d.appendLog(jobID, fmt.Sprintf("[%s] Executing bootstrap command on remote target...", time.Now().Format("15:04:05")))
+	d.appendLog(jobID, fmt.Sprintf("[%s] Streaming the generated installer to the remote target...", time.Now().Format("15:04:05")))
 
 	// 3. Execute Remote Bootstrap Command
 	session, err := client.NewSession()
@@ -189,6 +236,7 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 	var stdoutBuf, stderrBuf bytes.Buffer
 	session.Stdout = &stdoutBuf
 	session.Stderr = &stderrBuf
+	session.Stdin = strings.NewReader(script)
 
 	cmdErr := session.Run(bootstrapCmd)
 	stdoutStr := stdoutBuf.String()

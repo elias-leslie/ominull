@@ -77,6 +77,15 @@ func TestBootstrapGenerators(t *testing.T) {
 	// pointed at plain HTTP is the defect this checks for.
 	srv.SetAgentHubURL("https://10.0.0.57:9443")
 
+	// The credential a generated installer leaves behind on the endpoint is the
+	// tenant key, never the admin key that authorised generating it. Written
+	// into the agent's config, the admin key would give every host in the fleet
+	// full operator control of the hub for the life of the install.
+	defaultTenant, err := store.GetTenant("default")
+	if err != nil || defaultTenant == nil {
+		t.Fatalf("default tenant should exist: %v", err)
+	}
+
 	for _, tc := range []struct {
 		name    string
 		path    string
@@ -88,7 +97,6 @@ func TestBootstrapGenerators(t *testing.T) {
 			path:    "/bootstrap.ps1",
 			handler: srv.handleBootstrapPS1,
 			want: []string{
-				"mock_admin_token",
 				"/api/v1/pki/ca.crt",
 				`Cert:\LocalMachine\Root`,
 				`--hub $AgentHubURL`,
@@ -106,7 +114,6 @@ func TestBootstrapGenerators(t *testing.T) {
 			path:    "/bootstrap.sh",
 			handler: srv.handleBootstrapSH,
 			want: []string{
-				"mock_admin_token",
 				"ominulld.service",
 				"/api/v1/pki/ca.crt",
 				`CA_PATH="/etc/ominull/ca.crt"`,
@@ -125,7 +132,6 @@ func TestBootstrapGenerators(t *testing.T) {
 			path:    "/bootstrap.mac.sh",
 			handler: srv.handleBootstrapMac,
 			want: []string{
-				"mock_admin_token",
 				"/api/v1/pki/ca.crt",
 				`CA_PATH="$INSTALL_DIR/ca.crt"`,
 				"<string>$ENDPOINT_ID</string>",
@@ -147,6 +153,17 @@ func TestBootstrapGenerators(t *testing.T) {
 				t.Fatalf("expected 200, got %d", w.Code)
 			}
 			body := w.Body.String()
+			if strings.Contains(body, "mock_admin_token") {
+				t.Errorf("bootstrap script carries the hub admin key onto the endpoint:\n%s", body)
+			}
+			if !strings.Contains(body, defaultTenant.APIKey) {
+				t.Errorf("bootstrap script does not carry the tenant key the agent reports with:\n%s", body)
+			}
+			// The certificate credential is separate, single-use, and has to
+			// reach the enrolment call.
+			if !strings.Contains(body, "X-Enrollment-Token") {
+				t.Errorf("bootstrap script enrols without a single-use enrolment token:\n%s", body)
+			}
 			for _, want := range tc.want {
 				if !strings.Contains(body, want) {
 					t.Errorf("bootstrap script is missing %q:\n%s", want, body)

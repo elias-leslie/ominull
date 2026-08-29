@@ -105,6 +105,37 @@ func New(store *storage.Store, cfg Config) *Engine {
 	}
 }
 
+// RedactedSecret stands in for a provider credential the hub holds but will
+// not hand back. It is also accepted on the way in, and means "leave the one
+// you have alone" - without that, a console that reads the configuration and
+// writes it back would erase the key it never saw.
+const RedactedSecret = "__redacted__"
+
+// Redacted is the configuration as it may be disclosed. A provider API key is a
+// billable credential belonging to whoever pasted it in; the configuration
+// route used to return both of them verbatim to any caller it authenticated.
+func (c Config) Redacted() Config {
+	if c.GeminiAPIKey != "" {
+		c.GeminiAPIKey = RedactedSecret
+	}
+	if c.OpenAIAPIKey != "" {
+		c.OpenAIAPIKey = RedactedSecret
+	}
+	return c
+}
+
+// MergeSecrets resolves the placeholders in an incoming configuration against
+// the one currently in force.
+func (c Config) MergeSecrets(prev Config) Config {
+	if c.GeminiAPIKey == RedactedSecret {
+		c.GeminiAPIKey = prev.GeminiAPIKey
+	}
+	if c.OpenAIAPIKey == RedactedSecret {
+		c.OpenAIAPIKey = prev.OpenAIAPIKey
+	}
+	return c
+}
+
 func (e *Engine) GetConfig() Config {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

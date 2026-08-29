@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #include "../include/release_key.h"
 
@@ -380,19 +381,67 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
     return count;
 }
 
+/* IsIPLiteral accepts only a bare IPv4 or IPv6 address.
+ *
+ * Every peer in the hub's quarantine list is a string the hub was given by an
+ * API caller, and it ends up naming a host in a firewall rule this daemon
+ * applies as root. There is exactly one thing it can legitimately be. */
+static bool IsIPLiteral(const char* s) {
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (!s || !s[0]) return false;
+    return inet_pton(AF_INET, s, &v4) == 1 || inet_pton(AF_INET6, s, &v6) == 1;
+}
+
+/* RunTool executes one command with an explicit argument vector and waits for
+ * it, returning its exit status or -1.
+ *
+ * No shell is involved, which is the point. The mesh rules were applied by
+ * building an iptables command line as a string and handing it to system(),
+ * so a peer address containing a semicolon, a pipe or a $( ) was not an
+ * address at all - it was a command, run as root, on every Linux endpoint the
+ * hub broadcasts its quarantine list to. Nothing in the string reaches a
+ * shell here, so nothing in it can be interpreted as anything but an
+ * argument. */
+static int RunTool(const char* const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        /* iptables -C writes to stderr for a rule that is simply not there,
+         * which is the ordinary case on every heartbeat. */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        execvp(argv[0], (char* const*)argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 static void ApplyMeshQuarantineRule(const char* ip, bool block) {
     if (!ip || !ip[0]) return;
-    char cmd[256];
+    if (!IsIPLiteral(ip)) return;   /* callers log; this is the backstop */
+
+    /* An IPv6 peer needs the v6 table; iptables refuses the address outright. */
+    const char* tool = strchr(ip, ':') ? "ip6tables" : "iptables";
+
     if (block) {
-        snprintf(cmd, sizeof(cmd), "iptables -C INPUT -s %s -j DROP 2>/dev/null || iptables -I INPUT -s %s -j DROP 2>/dev/null", ip, ip);
-        int r1 = system(cmd); (void)r1;
-        snprintf(cmd, sizeof(cmd), "iptables -C OUTPUT -d %s -j DROP 2>/dev/null || iptables -I OUTPUT -d %s -j DROP 2>/dev/null", ip, ip);
-        int r2 = system(cmd); (void)r2;
+        const char* checkIn[]  = { tool, "-C", "INPUT",  "-s", ip, "-j", "DROP", NULL };
+        const char* addIn[]    = { tool, "-I", "INPUT",  "-s", ip, "-j", "DROP", NULL };
+        const char* checkOut[] = { tool, "-C", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
+        const char* addOut[]   = { tool, "-I", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
+        if (RunTool(checkIn) != 0)  (void)RunTool(addIn);
+        if (RunTool(checkOut) != 0) (void)RunTool(addOut);
     } else {
-        snprintf(cmd, sizeof(cmd), "iptables -D INPUT -s %s -j DROP 2>/dev/null", ip);
-        int r1 = system(cmd); (void)r1;
-        snprintf(cmd, sizeof(cmd), "iptables -D OUTPUT -d %s -j DROP 2>/dev/null", ip);
-        int r2 = system(cmd); (void)r2;
+        const char* delIn[]  = { tool, "-D", "INPUT",  "-s", ip, "-j", "DROP", NULL };
+        const char* delOut[] = { tool, "-D", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
+        (void)RunTool(delIn);
+        (void)RunTool(delOut);
     }
 }
 
@@ -421,6 +470,20 @@ static void SyncQuarantinedPeers(const char* respJson) {
         int idx = 0;
         while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
             ip[idx++] = *p++;
+        }
+        /* Checked here as well as in ApplyMeshQuarantineRule so that a
+         * malformed entry never enters the applied set either - otherwise the
+         * next heartbeat would try to "lift" a rule that was never added.
+         *
+         * Reported rather than dropped in silence: a hub sending something
+         * that is not an address is either running a build that does not
+         * validate it or is not the hub, and both are worth a line in the log.
+         * The value itself is not echoed - it is attacker-controlled text and
+         * this log is read by people and by journald. */
+        if (ip[0] && !IsIPLiteral(ip)) {
+            printf("[!] Hub listed a quarantined peer that is not an IP address; ignoring it.\n");
+            fflush(stdout);
+            continue;
         }
         if (ip[0] && currentCount < MAX_QUARANTINED_PEERS) {
             ApplyMeshQuarantineRule(ip, true);

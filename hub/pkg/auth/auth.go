@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -37,6 +39,15 @@ type Claims struct {
 	ExpiresAt int64  `json:"exp"`
 }
 
+// HashPassword derives a stored verifier from a password.
+//
+// It uses bcrypt, which is deliberately slow and carries its own salt. What it
+// replaces was one round of SHA-256 over salt+password: a correct construction
+// for a message digest and the wrong primitive for a password, because a
+// commodity GPU computes billions of those a second and the salt only stops the
+// attacker from doing every stolen hash at once. The salt return is kept so
+// callers and the users table do not change shape; bcrypt embeds its own, so
+// the value returned here is informational and CheckPassword ignores it.
 func HashPassword(password string) (hash, salt string, err error) {
 	saltBytes := make([]byte, 16)
 	if _, err := rand.Read(saltBytes); err != nil {
@@ -44,17 +55,39 @@ func HashPassword(password string) (hash, salt string, err error) {
 	}
 	salt = hex.EncodeToString(saltBytes)
 
-	h := sha256.New()
-	h.Write([]byte(salt + password))
-	hash = hex.EncodeToString(h.Sum(nil))
-	return hash, salt, nil
+	digest, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return "", "", err
+	}
+	return string(digest), salt, nil
 }
 
+// bcryptCost is the work factor. 12 is roughly a quarter-second per attempt on
+// current hardware: unnoticeable on a login, ruinous on a dictionary.
+const bcryptCost = 12
+
+// CheckPassword verifies a password against a stored verifier.
+//
+// It accepts the legacy hex SHA-256 form as well, so a users table written by
+// an older build still authenticates rather than locking everyone out; those
+// rows should be rehashed on next login by whatever calls this. The legacy
+// comparison stays constant-time.
 func CheckPassword(password, hash, salt string) bool {
+	if strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$") {
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	}
+
 	h := sha256.New()
 	h.Write([]byte(salt + password))
 	expected := hex.EncodeToString(h.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(hash))
+}
+
+// NeedsRehash reports whether a stored verifier is in the superseded format, so
+// a caller that has just verified a password in the legacy form can replace it
+// with a bcrypt one while it still holds the plaintext.
+func NeedsRehash(hash string) bool {
+	return !strings.HasPrefix(hash, "$2a$") && !strings.HasPrefix(hash, "$2b$") && !strings.HasPrefix(hash, "$2y$")
 }
 
 func GenerateJWT(claims Claims, secret string, ttl time.Duration) (string, error) {
