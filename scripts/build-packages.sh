@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.6.1"
+VERSION="1.6.2"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.6.1
+Version: 1.6.2
 Section: security
 Priority: optional
 Architecture: amd64
@@ -118,6 +118,21 @@ mkdir -p "${WIN_DIR}"
 # Build the Windows agent rather than picking up whatever happens to be lying in
 # agent/bin. Shipping the bundle without the binary produced an installer with nothing
 # to install, which is how the fleet ended up unable to take a Windows update at all.
+# mingw-w64's swprintf follows ANSI C, where %s in a *wide* format string means a
+# narrow char*. Handed a wchar_t* it reads the first byte pair as a
+# one-character string and prints that. It compiles without a warning and looks
+# right in review. It shipped an X-API-Key header reading "X-API-Key: T" - the
+# first letter of the key - and went unnoticed for as long as the key was also
+# duplicated in the query string, which is what actually authenticated every
+# Windows heartbeat. %ls means wide under both conventions and is the only form
+# that is correct here.
+bad_wide_format=$(grep -rnE 'L"[^"]*%[-0-9.]*s' "${ROOT_DIR}/agent/src" "${ROOT_DIR}/agent/include" || true)
+if [ -n "${bad_wide_format}" ]; then
+    echo "[-] A wide format string uses %s. Use %ls - %s there is a narrow string to mingw:" >&2
+    echo "${bad_wide_format}" >&2
+    exit 1
+fi
+
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     echo "  [*] Cross-compiling Windows agent (mingw-w64)..."
     x86_64-w64-mingw32-gcc -O2 -Wall -Wextra \

@@ -297,14 +297,20 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     WCHAR wHeaders[1024] = {0};
     WCHAR wKey[128] = {0};
     MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
-    swprintf(wHeaders, 1024, L"X-API-Key: %s\r\nContent-Type: application/json\r\n", wKey);
+    /* %ls, not %s. mingw-w64's swprintf follows ANSI C, where %s in a wide
+     * format string means a narrow char* - handed a wchar_t* it reads the first
+     * byte pair as a one-character string, so this header went out as
+     * "X-API-Key: T". It was never noticed because the key was also duplicated
+     * in the query string, which is what actually authenticated every Windows
+     * heartbeat. Removing the copy from the URL is what exposed it. */
+    swprintf(wHeaders, 1024, L"X-API-Key: %ls\r\nContent-Type: application/json\r\n", wKey);
 
     if (config->cf_client_id[0] && config->cf_client_secret[0]) {
         WCHAR wCfId[128] = {0}, wCfSecret[128] = {0};
         MultiByteToWideChar(CP_UTF8, 0, config->cf_client_id, -1, wCfId, 128);
         MultiByteToWideChar(CP_UTF8, 0, config->cf_client_secret, -1, wCfSecret, 128);
         WCHAR wCfExtra[512];
-        swprintf(wCfExtra, 512, L"CF-Access-Client-Id: %s\r\nCF-Access-Client-Secret: %s\r\n", wCfId, wCfSecret);
+        swprintf(wCfExtra, 512, L"CF-Access-Client-Id: %ls\r\nCF-Access-Client-Secret: %ls\r\n", wCfId, wCfSecret);
         wcscat(wHeaders, wCfExtra);
     }
 

@@ -43,6 +43,19 @@ static void PrintUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+    /* Line-buffered, like the Linux daemon. Block buffering is the default when
+     * stdout is not a console, which is every way this agent is ever actually
+     * read: a service redirect, an SSH pipe, a support transcript. A probe that
+     * is stopped before 4 KB has accumulated prints nothing at all, so the
+     * absence of an error line has meant nothing - and that is exactly the
+     * condition anyone reads this log in.
+     *
+     * Unbuffered, not line-buffered: the Microsoft CRT accepts _IOLBF and then
+     * treats it as full buffering, so asking for lines here would have looked
+     * correct and changed nothing. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     AGENT_CONFIG config;
     ZeroMemory(&config, sizeof(config));
     strcpy(config.hub_url, "https://10.0.0.58:9443");

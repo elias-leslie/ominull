@@ -143,7 +143,9 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
     {
         WCHAR wHeaders[512] = {0}, wKey[128] = {0};
         MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
-        swprintf(wHeaders, 512, L"X-API-Key: %s\r\n", wKey);
+        /* %ls for the same reason as hub_client.c: %s in a wide format is
+         * a narrow string to mingw, and this header carried one character. */
+        swprintf(wHeaders, 512, L"X-API-Key: %ls\r\n", wKey);
         WinHttpAddRequestHeaders(hRequest, wHeaders, (DWORD)-1L,
                                  WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
