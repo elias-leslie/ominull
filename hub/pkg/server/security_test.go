@@ -646,3 +646,72 @@ func TestRequestBodiesAreBounded(t *testing.T) {
 		})
 	}
 }
+
+// The topology graph groups every flow in the window by five columns and holds
+// the store's read lock for the whole of it - about 760ms for the default day
+// on a production-sized database - and the console polls it. What has to hold
+// is that the cache is keyed by the window actually served, that an
+// unrecognised window does not mint an entry of its own, and that it expires.
+func TestTopologyGraphIsCachedPerWindow(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	call := func(window string) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		url := "/api/v1/topology/graph"
+		if window != "" {
+			url += "?window=" + window
+		}
+		req := httptest.NewRequest("GET", url, nil)
+		req.Header.Set("X-Role", "admin")
+		w := httptest.NewRecorder()
+		srv.handleTopologyGraph(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("window %q: expected 200, got %d", window, w.Code)
+		}
+		return w, w.Body.String()
+	}
+
+	call("24h")
+	if len(srv.topology.entries) != 1 {
+		t.Fatalf("one call cached %d entries", len(srv.topology.entries))
+	}
+	// The default and an unrecognised value both serve 24h, so neither may
+	// create a second entry - otherwise the key is attacker-chosen and the
+	// cache is a way to make the hub run the expensive query at will.
+	call("")
+	call("banana")
+	call("../../etc/passwd")
+	if len(srv.topology.entries) != 1 {
+		t.Errorf("windows that all resolve to 24h created %d cache entries: %v",
+			len(srv.topology.entries), keysOf(srv.topology.entries))
+	}
+
+	// A different window is a different question.
+	call("1h")
+	call("7d")
+	if len(srv.topology.entries) != 3 {
+		t.Errorf("three distinct windows produced %d entries: %v",
+			len(srv.topology.entries), keysOf(srv.topology.entries))
+	}
+
+	// And it expires rather than pinning the first answer forever.
+	srv.topology.mu.Lock()
+	entry := srv.topology.entries["24h"]
+	entry.computed = entry.computed.Add(-responseCacheTTL - time.Second)
+	entry.body = []byte(`{"stale":true}`)
+	srv.topology.entries["24h"] = entry
+	srv.topology.mu.Unlock()
+
+	if _, body := call("24h"); strings.Contains(body, `"stale"`) {
+		t.Error("an expired entry was served instead of being recomputed")
+	}
+}
+
+func keysOf(m map[string]responseEntry) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

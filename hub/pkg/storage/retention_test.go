@@ -330,3 +330,66 @@ func TestAnalyticsSummaryIsCachedPerTenant(t *testing.T) {
 		t.Errorf("after the TTL the summary was still stale: got %d, want 7", fresh.TotalEvents)
 	}
 }
+
+// 56% of the byte figures on this fleet's console were the constant 1420/512,
+// substituted for every flow whose agent reported no byte counts - which is
+// every flow from the Windows agent's user-mode fallback. Unlocated flows were
+// recorded as "US", so a security console attributed traffic to a country the
+// GeoIP stage had not placed it in.
+func TestNothingIsInventedOnTheWayIn(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "honest.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertEventsBatch([]Event{
+		{TenantID: "default", EndpointID: "e1", Timestamp: time.Now().UTC(),
+			Layer: "socket", Action: "PERMIT", Direction: "out", Protocol: 6,
+			SrcIP: "10.0.0.1", DstIP: "10.0.0.2", ProcessPath: "/bin/x"},
+		{TenantID: "default", EndpointID: "e1", Timestamp: time.Now().UTC(),
+			Layer: "eBPF_TC", Action: "PERMIT", Direction: "out", Protocol: 6,
+			SrcIP: "10.0.0.1", DstIP: "10.0.0.3", BytesIn: 7, BytesOut: 9,
+			Country: "SE", ProcessPath: "/bin/y"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var in, out int64
+	var country string
+	if err := store.db.QueryRow(
+		"SELECT bytes_in, bytes_out, country FROM events WHERE dst_ip = '10.0.0.2'").
+		Scan(&in, &out, &country); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if in != 0 || out != 0 {
+		t.Errorf("a flow with no reported bytes was stored as %d/%d, want 0/0", in, out)
+	}
+	if country != CountryUnknown {
+		t.Errorf("an unlocated flow was stored as %q, want %q", country, CountryUnknown)
+	}
+
+	// A flow that did report is untouched.
+	if err := store.db.QueryRow(
+		"SELECT bytes_in, bytes_out, country FROM events WHERE dst_ip = '10.0.0.3'").
+		Scan(&in, &out, &country); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if in != 7 || out != 9 || country != "SE" {
+		t.Errorf("a measured flow was altered: %d/%d %q, want 7/9 SE", in, out, country)
+	}
+
+	// And the card names the unknown rather than dressing it as a country.
+	summary, err := store.GetAnalyticsSummary("default")
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	for _, g := range summary.GeoStats {
+		if g.Country == CountryUnknown && g.CountryName != "Unlocated" {
+			t.Errorf("unlocated traffic renders as %q", g.CountryName)
+		}
+		if g.Country == "US" {
+			t.Error("unlocated traffic was attributed to the United States")
+		}
+	}
+}

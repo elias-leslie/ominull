@@ -78,6 +78,8 @@ type Server struct {
 	// throttle bounds online credential guessing across every route that
 	// accepts a key: the console gate, the REST API and the websocket.
 	throttle *authThrottle
+	// topology holds the rendered graph briefly; see responsecache.go.
+	topology responseCache
 }
 
 type Client struct {
@@ -2729,12 +2731,27 @@ func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
 	// pretending it does not exist.
 	windowStr := r.URL.Query().Get("window")
 	windowDuration := 24 * time.Hour
-	if windowStr == "1h" {
+	switch windowStr {
+	case "1h":
 		windowDuration = 1 * time.Hour
-	} else if windowStr == "6h" {
+	case "6h":
 		windowDuration = 6 * time.Hour
-	} else if windowStr == "7d" {
+	case "7d":
 		windowDuration = 7 * 24 * time.Hour
+	default:
+		// Normalised, because the cache key is this string and an unrecognised
+		// window already fell through to 24h. Without this "?window=banana"
+		// would be a cache entry of its own.
+		windowStr = "24h"
+	}
+
+	// The graph is admin-only and takes no tenant, so the window is the whole
+	// key.
+	now := time.Now()
+	if cached := s.topology.get(windowStr, now); cached != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(cached)
+		return
 	}
 
 	topoData, err := s.store.GetTopologyGraph(windowDuration)
@@ -2743,8 +2760,15 @@ func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, err := json.Marshal(topoData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.topology.put(windowStr, body, now)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(topoData)
+	w.Write(body)
 }
 
 /* 8b. UNIFIED ASSET GRAPH + FLOW INFERENCE HANDLERS */

@@ -284,6 +284,10 @@ type TopologyData struct {
 	Metrics TopologyMetrics `json:"metrics"`
 }
 
+// CountryUnknown is where a flow the GeoIP stage could not place is recorded.
+// It used to be recorded as "US".
+const CountryUnknown = "UNKNOWN"
+
 type AnalyticsSummary struct {
 	TotalBytesIn      int64                `json:"total_bytes_in"`
 	TotalBytesOut     int64                `json:"total_bytes_out"`
@@ -375,7 +379,7 @@ func (s *Store) initSchema() error {
 		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
 		name TEXT NOT NULL,
 		city TEXT NOT NULL DEFAULT "",
-		country TEXT NOT NULL DEFAULT "US",
+		country TEXT NOT NULL DEFAULT "UNKNOWN",
 		subnet_cidr TEXT NOT NULL DEFAULT "",
 		created_at DATETIME NOT NULL
 	);
@@ -1208,12 +1212,23 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer stmt.Close()
 
 	for _, ev := range events {
-		if ev.BytesIn == 0 && ev.BytesOut == 0 {
-			ev.BytesIn = 1420
-			ev.BytesOut = 512
-		}
+		// Nothing is invented here any more.
+		//
+		// A flow whose agent reported no byte counts used to be stored as
+		// 1420 in and 512 out. The Windows agent falls back to user-mode socket
+		// telemetry, which has no byte accounting, so on this fleet that was
+		// 212,427 of 374,318 rows - 56% of every byte figure the console
+		// printed, including the bandwidth timeline, the geo ranking and the
+		// top-talkers card, was a constant. The comment on the timeline in
+		// GetAnalyticsSummary says a console that invents a number is worse
+		// than one that shows none, because the invented one is acted on. This
+		// was the same defect one layer down, feeding the same cards.
+		//
+		// An unlocated flow was likewise stored as "US", so traffic the GeoIP
+		// stage could not place was attributed to a country on a security
+		// console. It is recorded as unknown, and the card names it that.
 		if ev.Country == "" {
-			ev.Country = "US"
+			ev.Country = CountryUnknown
 		}
 		_, _ = stmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
@@ -1910,7 +1925,8 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		return byCountry[i].bytesIn+byCountry[i].bytesOut > byCountry[j].bytesIn+byCountry[j].bytesOut
 	})
 	countryNames := map[string]string{
-		"US": "United States", "DE": "Germany", "GB": "United Kingdom", "NL": "Netherlands",
+		CountryUnknown: "Unlocated",
+		"US":           "United States", "DE": "Germany", "GB": "United Kingdom", "NL": "Netherlands",
 		"FR": "France", "CN": "China", "RU": "Russia", "JP": "Japan", "SG": "Singapore",
 		"AU": "Australia", "CA": "Canada", "CH": "Switzerland", "SE": "Sweden", "PL": "Poland",
 		"KR": "South Korea", "BR": "Brazil", "IN": "India", "LOCAL": "Internal LAN",
