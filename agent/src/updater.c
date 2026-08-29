@@ -271,8 +271,9 @@ static bool ReadWholeFile(const char* path, unsigned char** out, size_t* outLen)
  * binary the agent records the attempt; the new build clears the record once it
  * is running. If it starts but keeps failing, the count climbs and the previous
  * binary is put back. This covers a build that runs badly. A build so broken
- * the SCM cannot launch it at all is caught by the recovery action registered
- * in Service_Install, which restores the same file from outside the process. */
+ * the SCM cannot launch it at all never reaches this code, and is caught
+ * instead by the recovery script Service_EnsureRecovery writes, which restores
+ * the same file from outside the process. */
 static void UpdateMarkerPath(char* out, size_t cap) {
     char dir[MAX_PATH];
     if (!InstallDir(dir, sizeof(dir))) { out[0] = '\0'; return; }
@@ -321,7 +322,11 @@ void Update_CheckStartup(const AGENT_CONFIG* config) {
             printf("[!] Update to v%s failed %d times; restored the previous agent binary.\n", version, attempts);
         }
         DeleteFileA(marker);
-        ExitProcess(1);   /* let the SCM restart into the binary just restored */
+        /* Come back into the binary just restored. The helper is spawned from
+         * this process's own module path, which the restore above has already
+         * pointed back at the previous build. */
+        if (config && config->is_service) Service_SpawnRestart();
+        ExitProcess(1);
     }
 
     f = fopen(marker, "w");
@@ -329,7 +334,6 @@ void Update_CheckStartup(const AGENT_CONFIG* config) {
         fprintf(f, "%s %d\n", version, attempts);
         fclose(f);
     }
-    (void)config;
 }
 
 /* --------------------------------------------------------------- install */
@@ -391,10 +395,10 @@ static void RemoveDirTree(const char* dir) {
  *
  * The running image cannot be overwritten - Windows locks it against write and
  * delete - but it can be renamed, so the swap is: move the running binary aside,
- * move the new one into its place, and exit non-zero. The SCM's recovery action
- * restarts the service from the registered binPath, which now points at the new
- * build. Nothing else registers or reconfigures the service, because the binPath
- * carries this endpoint's key and identity. */
+ * move the new one into its place, hand the restart to a detached helper, and
+ * exit. The service comes back from the registered binPath, which now points at
+ * the new build. Nothing here registers or reconfigures the service, because
+ * that binPath carries this endpoint's key and identity. */
 void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     // Bounded retry, not a single shot: a dropped download would otherwise wedge
     // this endpoint on the offered version until the service restarted, while
@@ -524,7 +528,16 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     }
 
     RemoveDirTree(stage);
-    printf("[+] Agent v%s installed; exiting so the service restarts from the new binary.\n", version);
+    printf("[+] Agent v%s installed; restarting the service into it.\n", version);
+    /* The restart is this agent's own job. A detached helper started here
+     * outlives the exit below, waits for the SCM to report the service stopped
+     * and starts it again - see Service_SpawnRestart for why the SCM's recovery
+     * actions could not be relied on to do it. The non-zero exit is kept so
+     * those actions remain the fallback if the helper never runs. */
+    if (config->is_service && !Service_SpawnRestart()) {
+        printf("[!] Agent v%s is installed but the restart helper did not start; "
+               "the service may need a manual start.\n", version);
+    }
     fflush(stdout);
-    ExitProcess(1);   /* a non-zero exit is what triggers the SCM recovery restart */
+    ExitProcess(1);
 }

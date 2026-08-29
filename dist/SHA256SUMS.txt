@@ -1,3 +1,3 @@
-f199e17680a41def34f76b5375dc456264e993d4b1cab91ff1d8f0ce2cd4d186  ominull-agent_1.4.1_amd64.deb
-d832a69474efd083c5aa7c99a5ade48ab7f7537f45136eda9f9816233b57e9fc  ominull-agent-windows-1.4.1.tar.gz
-3e766ad51658db2ad088329cc94b1d0a52304218f15e294e4c91ee71a7a1150f  ominull-agent-macos-1.4.1.tar.gz
+30f2c1d3a0bbeb20d325fbf53bacccaf7c9177e42ca21a8924d863613ec406a4  ominull-agent_1.4.3_amd64.deb
+dca41ce872a2b5a951e4fb8a6d62ea28d5267f13e14e79b7321e6b494502e410  ominull-agent-windows-1.4.3.tar.gz
+18279583a619bbe82c13023876913b91e2acccdde8af42137e13129a41140d2e  ominull-agent-macos-1.4.3.tar.gz

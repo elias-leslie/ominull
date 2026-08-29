@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.4.1"
+#define OMINULL_AGENT_VERSION "1.4.3"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -84,9 +84,19 @@ void Service_SetConfig(const AGENT_CONFIG* config);
 // place the service's arguments exist: anything left out here - the role, the
 // location, the pinned CA - is simply lost at the next start.
 bool Service_Install(const AGENT_CONFIG* config);
-// Registers the SCM recovery actions self-update relies on. Idempotent, and
-// applied on every start so an in-place upgrade is not left without them.
+// Registers the SCM recovery actions and writes the script the last of them
+// runs. Idempotent, and applied on every start so an in-place upgrade is not
+// left without them.
 void Service_EnsureRecovery(void);
+// Self-update's restart path. A service cannot start itself, so the updater
+// spawns a detached copy of the installed binary in --restart-service mode
+// (Service_SpawnRestart) which waits for the SCM to report the service STOPPED
+// and starts it again (Service_WaitStoppedAndStart, the mode's entry point).
+// This exists because the SCM recovery actions cannot be relied on for it: the
+// failure counter that selects them counts every abnormal exit on the host, so
+// which action runs after an update is decided by unrelated history.
+bool Service_SpawnRestart(void);
+int Service_WaitStoppedAndStart(void);
 bool Service_Uninstall(void);
 void RunAgentLoop(AGENT_CONFIG* config);
 

@@ -140,16 +140,52 @@ The running image is locked against write and delete but can be renamed, so:
    same volume as the target, which is what makes the final rename atomic.
 2. `MoveFileEx(current -> ominulld.old, MOVEFILE_REPLACE_EXISTING)`.
 3. `MoveFileEx(new -> current, MOVEFILE_REPLACE_EXISTING)`.
-4. Exit non-zero. The SCM's recovery action restarts the service from the
-   registered binPath — which still carries this endpoint's key and identity, so
-   nothing re-registers the service.
+4. Spawn `ominulld.exe --restart-service` detached, then exit non-zero.
 5. The new build deletes `ominulld.old` on its first successful start, falling
    back to `MOVEFILE_DELAY_UNTIL_REBOOT` if it is somehow still held.
 
 A service cannot synchronously stop and start itself; that, not the file lock,
-is the real reason this was never built before. Spawning a detached
-`sc stop && sc start` makes the update depend on a process that is about to be
-killed, so the SCM does the restart instead.
+is the real reason this was never built before. The process that would issue the
+start is the one exiting.
+
+#### Why a helper process and not the SCM (v1.4.2)
+
+Through v1.4.1 step 4 was just the non-zero exit, and the restart was left to the
+SCM's recovery actions. That was the wrong mechanism, and it failed in the field
+on both the 1.3.3 → 1.4.0 and the 1.4.0 → 1.4.1 rolls: the Windows endpoint
+installed its update, stopped, and stayed stopped until someone ran `sc start`.
+
+The recovery actions are a *list*, and which entry runs is chosen by a
+per-service failure counter. That counter is not scoped to this update — it
+counts every abnormal exit on the host inside the reset period, including
+crashes and any `taskkill` — and once it runs past the end of the list the SCM
+repeats the last entry rather than starting over. On an endpoint with any
+earlier failure that day, the update's own exit therefore landed on the last
+action, which was the rollback command, not on a restart. Two things about the
+diagnosis are worth writing down because they look like the cause and are not:
+the service does abort correctly (`sc query` shows `WIN32_EXIT_CODE : 1067`),
+and `FAILURE_ACTIONS_ON_NONCRASH_FAILURES` is `TRUE`. Both are necessary; the
+counter is what decides the outcome.
+
+So the restart is explicit now. `Service_SpawnRestart` launches a detached copy
+of the installed binary — the path comes from the running module, so after the
+swap that is the *new* build — with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+| CREATE_BREAKAWAY_FROM_JOB`, falling back without the breakaway flag when a job
+object forbids it. That helper outlives the service process, polls the SCM until
+the service reads `SERVICE_STOPPED`, and calls `StartService`. It treats
+`ERROR_SERVICE_ALREADY_RUNNING` as success, because that means the SCM's own
+recovery restart won the race, which is the outcome either way.
+
+An earlier design note in this file argued the opposite — that a detached
+restarter "makes the update depend on a process that is about to be killed". It
+does not: `CreateProcess` children are not killed when the parent exits, only
+when a job object says so, and that is precisely what the breakaway flag and its
+fallback are for. The SCM's failure counter turned out to be the far less
+predictable dependency.
+
+The exit stays non-zero, so the recovery actions remain as a fallback for the one
+case the helper cannot cover: a binary too broken to run `--restart-service` at
+all.
 
 **`Service_EnsureRecovery` runs on every start, not just at install.**
 `CreateService` returns `ERROR_SERVICE_EXISTS` on an already-registered service,
@@ -162,7 +198,28 @@ Rollback has two layers, because a broken build fails in two different ways:
   new build clears it once running, and after three failures the previous binary
   is restored.
 - A build so broken the SCM cannot launch it: no code of ours ever runs, so the
-  third recovery action restores the file from outside the process.
+  last recovery action restores the file from outside the process. Since v1.4.2
+  that action runs `ominull-recover.bat`, written into the install directory on
+  every start:
+
+  ```bat
+  if exist "<dir>\update.pending" if exist "<dir>\ominulld.old" (
+    move /y "<dir>\ominulld.old" "<dir>\ominulld.exe"
+    del /q "<dir>\update.pending"
+  )
+  "%SystemRoot%\System32\sc.exe" start ominulld
+  ```
+
+  Both guards matter. This is the action the SCM *repeats* once the counter runs
+  off the end of the list, so it has to be safe to run when nothing is wrong; the
+  unconditional `move` that shipped through v1.4.1 turned any unrelated failure
+  into a silent downgrade. The trailing `sc start` is what makes the repeat
+  useful rather than merely harmless. The script and the interpreter are both
+  named by absolute path because the SCM runs this as LocalSystem.
+
+  The reset period dropped from 86400s to 900s at the same time, so the action
+  list is only ever walked by a service that is failing *now*. A binary that
+  cannot start still walks all three actions in about seventy seconds.
 
 ## Traps
 
@@ -172,10 +229,18 @@ Rollback has two layers, because a broken build fails in two different ways:
   perfectly valid handle, so the failure appears only at the point of use. This
   shipped in v1.3.1 and left the Windows agent able to install an update but not
   restart into it. Nothing but running it against a real service catches this.
+- **The SCM failure counter is not yours.** It is per-service but not per-cause:
+  crashes, `taskkill`, and a self-update's own deliberate non-zero exit all
+  increment the same number, and past the end of the action list the SCM repeats
+  the last action instead of restarting. Anything that must happen after a
+  service exits has to happen without consulting it. This is what made the
+  Windows self-update need a manual `sc start`, twice, before v1.4.2.
 - **Test an update from the previous release forward.** Installing the new build
   directly proves nothing: the interesting failure is an old agent meeting a new
   descriptor. The v1.2.0 → v1.3.0 roll was performed entirely by the *old*
-  unverified code path; only v1.3.0 → v1.3.1 exercised the new one.
+  unverified code path; only v1.3.0 → v1.3.1 exercised the new one. It is also
+  why the v1.4.2 restart fix could only be proved by the v1.4.2 → v1.4.3 roll:
+  the 1.4.1 → 1.4.2 hop is executed by the code being replaced.
 - **Never put the signing key, real hostnames, or the launchd label in a tracked
   file.** They belong in the vault.
 - The fleet has one host per platform, so a bad Windows or macOS update means an
@@ -189,8 +254,8 @@ gcc -O2 -Wall -Wextra -o /tmp/t agent/tests/test_dpi.c && /tmp/t
 gcc -O2 -Wall -Wextra -o /tmp/d agent/tests/test_der_sig.c && /tmp/d
 gcc -O2 -Wall -Wextra -o /tmp/a agent/linux/main.c            # must be warning-free
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/w.exe \
-  agent/src/{main,hub_client,service,driver_client,updater}.c \
-  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt
+  agent/src/{main,hub_client,hub_tls,service,driver_client,updater}.c \
+  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
 bash -n agent/macos/ominull_mac_daemon.sh
 scripts/version.sh check
 gitleaks detect --source .
@@ -206,6 +271,12 @@ Build and tests are not runtime evidence. The acceptance test is a real release
 converging the real fleet unattended, plus a deliberately tampered package —
 correct digest, signature from a different key — refused on every platform with
 the running agent left untouched.
+
+"Unattended" is the part that has to be checked deliberately on Windows, because
+the failure it catches looks like success from the hub: the endpoint reports the
+new version only *after* someone starts it. Push the service's failure counter
+past the end of the recovery list first (three `taskkill /f` of `ominulld.exe`
+inside the reset period), then roll the release and touch nothing.
 
 ## Still open
 

@@ -9,6 +9,8 @@ static void PrintUsage(const char* prog) {
     printf("  %s --service --hub <url> --key <api_key>   Run under Service Control Manager\n", prog);
     printf("  %s --install --hub <url> --key <api_key>   Install Windows Service\n", prog);
     printf("  %s --uninstall                             Uninstall Windows Service\n", prog);
+    printf("  %s --restart-service                       Wait for the service to stop, then start it\n", prog);
+    printf("                                             (internal: how self-update restarts itself)\n");
     printf("\nOptions:\n");
     printf("  --ca <path>          CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
     printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
@@ -37,6 +39,7 @@ int main(int argc, char* argv[]) {
     bool doUninstall = false;
     bool doConsole = false;
     bool doService = false;
+    bool doRestart = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--install") == 0) {
@@ -47,6 +50,8 @@ int main(int argc, char* argv[]) {
             doConsole = true;
         } else if (strcmp(argv[i], "--service") == 0) {
             doService = true;
+        } else if (strcmp(argv[i], "--restart-service") == 0) {
+            doRestart = true;
         } else if (strcmp(argv[i], "--hub") == 0 && i + 1 < argc) {
             strncpy(config.hub_url, argv[++i], sizeof(config.hub_url) - 1);
         } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
@@ -73,6 +78,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // The restart helper runs as a detached child of a service that is exiting,
+    // and does nothing but bring that service back. It is checked before every
+    // other mode so a stray --service or --hub on its command line could never
+    // start a second agent alongside the one it is restarting.
+    if (doRestart) {
+        return Service_WaitStoppedAndStart();
+    }
+
     if (doInstall) {
         return Service_Install(&config) ? 0 : 1;
     }
@@ -85,6 +98,10 @@ int main(int argc, char* argv[]) {
     // update, retire the previous binary; if a new build keeps failing to come
     // back, put the previous one back instead.
     if (doConsole || doService) {
+        // Set before the check, not in Service_SetConfig afterwards: a rollback
+        // in Update_CheckStartup restarts the service, and it needs to know
+        // whether there is a service to restart.
+        config.is_service = doService;
         Update_CheckStartup(&config);
     }
 
