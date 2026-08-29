@@ -1177,12 +1177,15 @@ func (s *Store) InsertEvent(ev Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if ev.BytesIn == 0 && ev.BytesOut == 0 {
-		ev.BytesIn = 1420
-		ev.BytesOut = 512
-	}
+	// Nothing is invented here either. This path used to store a flow whose
+	// agent reported no byte counts as 1420 in and 512 out, and an unlocated
+	// flow as "US" - the same two substitutions InsertEventsBatch carried, and
+	// the same reason they are gone: a console that shows an invented number is
+	// worse than one that shows none, because the invented one is acted on.
+	// Only the batch path is live today, so leaving these here left the
+	// fabrication one caller away from coming back.
 	if ev.Country == "" {
-		ev.Country = "US"
+		ev.Country = CountryUnknown
 	}
 
 	_, err := s.db.Exec(

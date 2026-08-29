@@ -92,6 +92,17 @@ api() {
         ${3:+-d "$3"} "${HUB_URL}$2"
 }
 
+# The roll-out phase talks to a running hub. If it cannot, the release stops here
+# rather than continuing to a convergence check that cannot mean anything.
+if ! api GET /api/v1/agents/update-status >/dev/null 2>&1; then
+    echo "[-] The hub at ${HUB_URL} did not answer, so no endpoint can be told about"
+    echo "    v${VERSION}. The packages are built, signed and published, but the fleet"
+    echo "    is still on the previous agent."
+    echo "    Set OMINULL_HUB_URL to this hub's address (the default assumes the hub"
+    echo "    runs on this machine), or re-run with --hub-only if that is intended."
+    exit 1
+fi
+
 echo "[*] Publishing agent v${VERSION} to every outdated endpoint..."
 api POST /api/v1/agents/update "{\"all\":true,\"version\":\"${VERSION}\"}" | jq . 2>/dev/null || true
 
@@ -103,9 +114,29 @@ fi
 # Agents pick the update up on their telemetry heartbeat, install it, and are restarted
 # by the package's postinst; the job only retires once one reports the new version back.
 echo "[*] Waiting for endpoints to report v${VERSION} (up to 5 minutes)..."
+# A hub that does not answer is not a converged fleet. The check used to fall back
+# to '{}' on a failed call, and an empty object has no .outdated, so a length of 0
+# came back and the release announced the whole fleet was on the new version without
+# ever having reached a hub. Silence is now counted, and reported as silence.
+unreachable=0
 for _ in $(seq 1 60); do
-    status="$(api GET /api/v1/agents/update-status || echo '{}')"
-    outdated="$(printf '%s' "${status}" | jq '(.outdated // []) | length' 2>/dev/null || echo "?")"
+    if ! status="$(api GET /api/v1/agents/update-status)"; then
+        unreachable=$((unreachable + 1))
+        if [ "${unreachable}" -ge 3 ]; then
+            echo "[-] The hub at ${HUB_URL} stopped answering during the roll-out."
+            echo "    The fleet's version is unknown; it is not confirmed on v${VERSION}."
+            exit 1
+        fi
+        echo "    Hub did not answer (${unreachable}/3)..."
+        sleep 5
+        continue
+    fi
+    unreachable=0
+    if ! outdated="$(printf '%s' "${status}" | jq -e '(.outdated // []) | length' 2>/dev/null)"; then
+        echo "    Hub answered with something this script could not read; retrying..."
+        sleep 5
+        continue
+    fi
     if [ "${outdated}" = "0" ]; then
         echo "[+] Entire fleet is running agent v${VERSION}."
         exit 0

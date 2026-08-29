@@ -27,12 +27,13 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.6.6"
+const defaultAgentVersion = "1.6.7"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
 	dbPath := flag.String("db", "ominull.db", "Path to SQLite database file")
-	adminKey := flag.String("admin-key", "", "Master Admin API Key (defaults to auto-generated key in DB)")
+	adminKey := flag.String("admin-key", "", "Master Admin API Key. Prefer --admin-key-file: every argument of every process is readable by every local account.")
+	adminKeyFile := flag.String("admin-key-file", "", "File whose first line is the admin API key (mode 0600). Preferred over --admin-key, which puts the credential in /proc/<pid>/cmdline and in systemctl show output.")
 	binaryDir := flag.String("binary-dir", "./build", "Path to directory containing driver and agent binaries")
 	hubURL := flag.String("hub-url", "", "Public Hub URL for bootstrap scripts (e.g. https://omi.example.com)")
 	agentHubURL := flag.String("agent-hub-url", "", "TLS URL enrolled agents report to (e.g. https://10.0.0.58:9443); defaults to --hub-url")
@@ -66,7 +67,23 @@ func main() {
 	}
 	defer store.Close()
 
+	// The hub holds itself to the same rule its agents do: a credential is
+	// never an argument. --admin-key still works, because a deployment that
+	// uses it must keep working across an upgrade, but it warns, and every
+	// generated unit names a file instead.
 	resolvedAdminKey := *adminKey
+	if *adminKeyFile != "" {
+		key, err := readKeyFile(*adminKeyFile)
+		if err != nil {
+			log.Fatalf("[-] --admin-key-file %s: %v", *adminKeyFile, err)
+		}
+		if resolvedAdminKey != "" && resolvedAdminKey != key {
+			log.Printf("[!] Both --admin-key and --admin-key-file were given and they differ. The file wins.")
+		}
+		resolvedAdminKey = key
+	} else if resolvedAdminKey != "" {
+		log.Printf("[!] The admin key was passed as --admin-key, so it is in this process's command line: readable by any local account through /proc/%d/cmdline and printed by systemctl show. Move it to a 0600 file and pass --admin-key-file.", os.Getpid())
+	}
 	adoptedTenantKey := false
 	if resolvedAdminKey == "" {
 		if t, err := store.GetTenant("default"); err == nil && t != nil {
@@ -161,6 +178,28 @@ func main() {
 
 	log.Println("\n[*] Shutting down Ominull Hub gracefully...")
 	srv.Close()
+}
+
+// readKeyFile takes the first line of a file as a credential, and refuses a file
+// any other account can read: a key file that is world-readable is no better
+// than the command line it replaced.
+func readKeyFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("mode is %04o; a credential file must not be readable by group or other (chmod 600 %s)", perm, path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(strings.SplitN(string(raw), "\n", 2)[0])
+	if key == "" {
+		return "", fmt.Errorf("file is empty")
+	}
+	return key, nil
 }
 
 // splitList turns a comma-separated flag value into a trimmed, non-empty slice.

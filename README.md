@@ -143,11 +143,17 @@ ominull/
 cd /srv/workspaces/projects/ominull/hub
 CGO_ENABLED=1 go build -o bin/ominull-hub cmd/main.go
 
-# 2. Start the Hub
+# 2. Put the admin key in a file only this account can read. Passing it as
+#    --admin-key instead puts it in /proc/<pid>/cmdline, which every local
+#    account can read, and in the output of systemctl show.
+install -m 600 /dev/null /etc/ominull/admin.key
+printf '%s\n' "<your-admin-key>" > /etc/ominull/admin.key
+
+# 3. Start the Hub
 ./bin/ominull-hub \
   --listen ":9999" \
   --tls-listen ":9443" \
-  --admin-key "<your-admin-key>" \
+  --admin-key-file "/etc/ominull/admin.key" \
   --hub-url "https://omi.example.com" \
   --agent-hub-url "https://10.0.0.58:9443" \
   --binary-dir "/opt/ominull/bin" \
