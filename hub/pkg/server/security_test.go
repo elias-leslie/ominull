@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -766,5 +767,65 @@ func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
 		if downloadAllowed(name) {
 			t.Errorf("%q is not a released artifact and must not be served anonymously", name)
 		}
+	}
+}
+
+// The audit log is the record of who did what, and it only means anything if
+// the operations worth asking about are in it. Before these, the log covered
+// isolating a single host, logging in, and creating a policy group or an
+// exclusion - so a fleet-wide agent roll-out, a broadcast quarantine, a minted
+// installer carrying the tenant key and an issued certificate all happened
+// without a trace. The live hub's table held three rows.
+func TestPrivilegedOperationsAreAudited(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.SetAgentHubURL("https://10.0.0.57:9443")
+
+	adminReq := func(method, target, body string) *http.Request {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("X-Role", "admin")
+		req.Header.Set("X-Username", "admin")
+		return req
+	}
+
+	// A fleet-wide roll-out. Nothing is scheduled here - the test hub has no
+	// endpoints and no signed packages - and it is still an operator asking
+	// every endpoint in the fleet to replace its agent.
+	srv.handleAgentsUpdate(httptest.NewRecorder(), adminReq("POST", "/api/v1/agents/update", `{"all":true,"version":"9.9.9"}`))
+
+	// A broadcast drop rule, applied by every agent as root.
+	srv.handleMeshQuarantine(httptest.NewRecorder(), adminReq("POST", "/api/v1/mesh/quarantine", `{"target_ip":"10.0.4.99","target_mac":"aa:bb:cc:dd:ee:ff","subnet":"10.0.4.0/24","reason":"test"}`))
+
+	// An installer, which carries the tenant key and a live enrolment token off
+	// the hub. This route verifies the admin key itself rather than passing
+	// through authMiddleware, so it is also the one where a forged X-Username
+	// would land in the record if the identity were not re-established.
+	forged := httptest.NewRequest("GET", "/bootstrap.sh?key=mock_admin_token", nil)
+	forged.Header.Set("X-Username", "someone-else")
+	srv.handleBootstrapSH(httptest.NewRecorder(), forged)
+
+	entries, err := store.ListAuditLogs("", 50)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	seen := map[string]storage.AuditEntry{}
+	for _, e := range entries {
+		seen[e.Action] = e
+	}
+	for _, action := range []string{"AGENT_UPDATE_PUSH", "MESH_QUARANTINE", "BOOTSTRAP_GENERATED"} {
+		if _, ok := seen[action]; !ok {
+			var have []string
+			for k := range seen {
+				have = append(have, k)
+			}
+			sort.Strings(have)
+			t.Errorf("%s left no audit record; the log has %v", action, have)
+		}
+	}
+	if e, ok := seen["MESH_QUARANTINE"]; ok && e.Resource != "10.0.4.99" {
+		t.Errorf("the quarantine record does not name what was quarantined: %q", e.Resource)
+	}
+	if e, ok := seen["BOOTSTRAP_GENERATED"]; ok && e.Username != "admin" {
+		t.Errorf("the actor in the record is %q: a caller named itself in the audit log", e.Username)
 	}
 }

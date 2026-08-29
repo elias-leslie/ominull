@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.6.8"
+AGENT_VERSION="1.6.9"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -372,7 +372,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.8)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.9)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -474,7 +474,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.6.8 (PF)",
+  "driver_version": "1.6.9 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }

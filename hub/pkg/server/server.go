@@ -981,6 +981,12 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	scope := "the named endpoints"
+	if req.All {
+		scope = "the whole fleet"
+	}
+	s.audit(r, "AGENT_UPDATE_PUSH", version, fmt.Sprintf("Queued agent v%s for %s: %d endpoint(s) scheduled, %d could not self-update", version, scope, len(scheduled), len(unsupported)))
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"desired_version": version,
@@ -1053,6 +1059,16 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 	}
 	s.throttle.succeed(addr)
 
+	// These routes verify the admin key here rather than passing through
+	// authMiddleware, so the identity headers the audit log reads are set here
+	// too - and cleared first, because on this path nothing else would stop a
+	// caller naming itself in the record of what it did.
+	for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID"} {
+		r.Header.Del(h)
+	}
+	r.Header.Set("X-Role", "admin")
+	r.Header.Set("X-Username", "admin")
+
 	// What the installer is authorised by and what it leaves behind are two
 	// different credentials, and used to be the same one.
 	//
@@ -1124,6 +1140,10 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The script carries the tenant key and a live enrolment token off the hub.
+	// Generating one is how an endpoint joins the fleet, so it belongs in the
+	// record even though nothing has been installed yet.
+	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Windows installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
 }
@@ -1133,6 +1153,10 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The script carries the tenant key and a live enrolment token off the hub.
+	// Generating one is how an endpoint joins the fleet, so it belongs in the
+	// record even though nothing has been installed yet.
+	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Linux installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
 }
@@ -1142,6 +1166,10 @@ func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The script carries the tenant key and a live enrolment token off the hub.
+	// Generating one is how an endpoint joins the fleet, so it belongs in the
+	// record even though nothing has been installed yet.
+	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a macOS installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(bootstrap.GenerateMacOS(opts)))
 }
@@ -1226,6 +1254,7 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[+] Issued a client certificate for endpoint %q to %s.", name, clientIP(r))
+	s.audit(r, "PKI_ENROLL", name, "Issued a client certificate naming this endpoint; it is what the hub tells this endpoint from any other by")
 	writeJSON(w, http.StatusOK, bundle)
 }
 
@@ -1449,6 +1478,9 @@ func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// The tenant's own key is not in the record. That it now exists is.
+		s.audit(r, "CREATE_TENANT", t.ID, "Created tenant "+t.Name+" and issued it an API key")
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(t)
@@ -1643,6 +1675,8 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		s.broadcastToTenant(tenantID, cmd)
 	}
 
+	s.audit(r, "BULK_ISOLATE", req.Scope+":"+req.Value, fmt.Sprintf("Cut %d endpoint(s) off the network", count))
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1701,6 +1735,8 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 		}
 		s.broadcastToTenant(tenantID, cmd)
 	}
+
+	s.audit(r, "BULK_UNISOLATE", req.Scope+":"+req.Value, fmt.Sprintf("Returned %d endpoint(s) to the network", count))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -2687,6 +2723,8 @@ func (s *Server) handleScannerScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.audit(r, "SCANNER_SWEEP", req.Subnet, "Started a "+string(prof)+" sweep of "+req.Subnet+" (scan "+scanID+")")
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"scan_id": scanID,
@@ -2959,6 +2997,11 @@ func (s *Server) handleDeployerPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The credentials in the request body are not recorded, and nor is the job
+	// output: it is the far host's console. What is recorded is that this hub
+	// opened a session to that address and installed software on it.
+	s.audit(r, "DEPLOYER_PUSH", req.TargetIP, "Opened a remote session to "+req.TargetIP+" as "+req.Username+" and ran the agent installer (job "+jobID+")")
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"job_id":    jobID,
@@ -3052,6 +3095,8 @@ func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcastToTenant("", cmd)
 
+	s.audit(r, "MESH_QUARANTINE", req.TargetIP, "Broadcast a drop rule for "+req.TargetIP+" to every agent in the fleet: "+req.Reason)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "quarantined",
@@ -3089,6 +3134,8 @@ func (s *Server) handleMeshUnquarantine(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 	s.broadcastToTenant("", cmd)
+
+	s.audit(r, "MESH_UNQUARANTINE", req.TargetIP, "Withdrew the fleet-wide drop rule for "+req.TargetIP)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3207,6 +3254,9 @@ func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "the configuration was applied to the running hub but could not be stored, and will revert at the next restart")
 			return
 		}
+		// Where the copilot sends fleet context is worth a record; the
+		// provider key it sends alongside it is not written here.
+		s.audit(r, "COPILOT_CONFIG", string(cfg.Provider), "Pointed the copilot at provider "+string(cfg.Provider)+" ("+cfg.OllamaURL+")")
 		writeJSON(w, http.StatusOK, s.copilot.GetConfig().Redacted())
 		return
 	}
