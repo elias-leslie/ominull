@@ -243,7 +243,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		throttle:     newAuthThrottle(),
 	}
 	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
-		_ = s.store.SetEndpointIsolation(endpointID, true)
+		_ = s.store.SetEndpointIsolation(endpointID, true, nil)
 		cmd := CommandMessage{
 			Type:    "ISOLATE",
 			Payload: map[string]interface{}{"reason": reason},
@@ -1556,7 +1556,7 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 
 	_ = s.SendCommand(req.EndpointID, cmd)
 
-	s.store.SetEndpointIsolation(req.EndpointID, true)
+	s.store.SetEndpointIsolation(req.EndpointID, true, allowIPs)
 
 	_ = s.store.RecordAudit(storage.AuditEntry{
 		ID:        uuid.New().String(),
@@ -1596,7 +1596,7 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 
 	_ = s.SendCommand(req.EndpointID, cmd)
 
-	s.store.SetEndpointIsolation(req.EndpointID, false)
+	s.store.SetEndpointIsolation(req.EndpointID, false, nil)
 
 	_ = s.store.RecordAudit(storage.AuditEntry{
 		ID:        uuid.New().String(),
@@ -1661,13 +1661,13 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, id := range ids {
-			s.store.SetEndpointIsolation(id, true)
+			s.store.SetEndpointIsolation(id, true, allowIPs)
 			_ = s.SendCommand(id, cmd)
 			count++
 		}
 	} else {
 		var err error
-		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, true)
+		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, true, allowIPs)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1722,13 +1722,13 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, id := range ids {
-			s.store.SetEndpointIsolation(id, false)
+			s.store.SetEndpointIsolation(id, false, nil)
 			_ = s.SendCommand(id, cmd)
 			count++
 		}
 	} else {
 		var err error
-		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, false)
+		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, false, nil)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1992,9 +1992,28 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// What this endpoint should be enforcing, on the reply to the
+			// request it already makes every few seconds.
+			//
+			// Isolation used to be delivered only as a WebSocket command, and
+			// the WebSocket route was never registered on the mux - so
+			// SendCommand had no client to write to and returned "offline or
+			// disconnected" every time. The hub set is_isolated, wrote the
+			// audit row and answered 200 "isolated"; the endpoint was never
+			// told, and kept talking. Only macOS ever learned, and only because
+			// it polled /api/v1/endpoints for itself.
+			isolated, allowIPs, isoErr := s.store.GetEndpointIsolation(batch.EndpointID)
+			if isoErr != nil {
+				log.Printf("[-] Could not read isolation state for %s: %v", batch.EndpointID, isoErr)
+			}
+			if allowIPs == nil {
+				allowIPs = []string{}
+			}
 			resp := map[string]interface{}{
-				"status":            "ok",
-				"quarantined_peers": qIPs,
+				"status":              "ok",
+				"quarantined_peers":   qIPs,
+				"is_isolated":         isolated,
+				"isolation_allow_ips": allowIPs,
 			}
 			if target, outdated := s.pendingAgentUpdate(batch.EndpointID, batch.DriverVersion); outdated {
 				if pkg, ok := updatePackageFor(batch.UpdateCapability, batch.OS); ok {

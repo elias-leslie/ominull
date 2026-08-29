@@ -829,3 +829,74 @@ func TestPrivilegedOperationsAreAudited(t *testing.T) {
 		t.Errorf("the actor in the record is %q: a caller named itself in the audit log", e.Username)
 	}
 }
+
+// Isolation has to reach the endpoint, and the only channel that reaches every
+// endpoint is the reply to the telemetry it is already sending.
+//
+// The command channel it used to travel on was a WebSocket route that was never
+// registered on the mux, so SendCommand had no client to write to: the hub set
+// is_isolated, wrote the audit row and answered 200 "isolated" while the
+// endpoint went on talking to the whole network. Only macOS ever found out, and
+// only because it made a second request for the entire fleet list to read one
+// boolean about itself.
+func TestIsolationReachesTheEndpointOnItsHeartbeat(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	const id = "linux-victim"
+	batch := `{"type":"telemetry","endpoint_id":"` + id + `","hostname":"victim","os":"Linux","events":[]}`
+
+	beat := func() map[string]interface{} {
+		w := call(srv, srv.handleEvents, "POST", "/api/v1/events", "mock_admin_token", batch)
+		if w.Code != http.StatusOK {
+			t.Fatalf("telemetry rejected: %d %s", w.Code, w.Body.String())
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("reply is not JSON: %v", err)
+		}
+		return got
+	}
+
+	// Registers the endpoint, and says it is free.
+	if got := beat(); got["is_isolated"] != false {
+		t.Fatalf("a fresh endpoint was told it is isolated: %v", got["is_isolated"])
+	}
+
+	// Cut it off, with something it may still reach.
+	if err := store.SetEndpointIsolation(id, true, []string{"10.0.4.10", "10.0.4.11"}); err != nil {
+		t.Fatalf("SetEndpointIsolation: %v", err)
+	}
+	got := beat()
+	if got["is_isolated"] != true {
+		t.Errorf("an isolated endpoint was not told on its heartbeat: %v", got)
+	}
+	allow, _ := got["isolation_allow_ips"].([]interface{})
+	if len(allow) != 2 || allow[0] != "10.0.4.10" || allow[1] != "10.0.4.11" {
+		t.Errorf("the allow list did not survive to the endpoint: %v", got["isolation_allow_ips"])
+	}
+
+	// Releasing it clears the allow list. A list left behind is a hole in the
+	// next isolation, which would be a quarantine with a door in it that
+	// nothing in the console shows.
+	if err := store.SetEndpointIsolation(id, false, nil); err != nil {
+		t.Fatalf("SetEndpointIsolation: %v", err)
+	}
+	got = beat()
+	if got["is_isolated"] != false {
+		t.Errorf("a released endpoint was still told it is isolated: %v", got)
+	}
+	if allow, _ := got["isolation_allow_ips"].([]interface{}); len(allow) != 0 {
+		t.Errorf("the allow list outlived the isolation: %v", got["isolation_allow_ips"])
+	}
+
+	// The state is read back from storage, not from whatever the endpoint
+	// happened to send, so it survives a hub restart.
+	isolated, ips, err := store.GetEndpointIsolation(id)
+	if err != nil {
+		t.Fatalf("GetEndpointIsolation: %v", err)
+	}
+	if isolated || len(ips) != 0 {
+		t.Errorf("stored state disagrees with what was served: isolated=%v allow=%v", isolated, ips)
+	}
+}

@@ -108,7 +108,7 @@ func TestStorageLifecycle(t *testing.T) {
 	}
 
 	// 4. Host Isolation State Toggle
-	if err := store.SetEndpointIsolation(ep.ID, true); err != nil {
+	if err := store.SetEndpointIsolation(ep.ID, true, nil); err != nil {
 		t.Fatalf("SetEndpointIsolation failed: %v", err)
 	}
 

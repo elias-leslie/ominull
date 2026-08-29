@@ -38,10 +38,25 @@ DEFINE_GUID(OMINULL_PROVIDER_USER_GUID,
 
 static HANDLE g_hEngine = NULL;
 
-DWORD Wfp_Init() {
+/* Wfp_Init opens the filtering engine.
+ *
+ * dynamicSession decides what happens to the filters when this process goes
+ * away. The standalone tool wants them gone - it is a diagnostic, it exits
+ * immediately, and a dynamic session is the only thing that stops `isolate`
+ * from being a no-op that flushes itself on the way out. The agent wants the
+ * opposite: isolation has to survive a crash or a restart of the service, the
+ * way the Linux agent's iptables chains do, and be reconciled against the hub
+ * on the next heartbeat rather than silently lifted by a killed process.
+ *
+ * Recovery, if the agent is gone and a host is still cut off:
+ *   ominull_wfp_user.exe unisolate
+ */
+DWORD Wfp_Init(int dynamicSession) {
     FWPM_SESSION0 session;
     memset(&session, 0, sizeof(session));
-    session.flags = FWPM_SESSION_FLAG_DYNAMIC; // Auto-cleanup on abnormal termination
+    if (dynamicSession) {
+        session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+    }
 
     DWORD status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_DEFAULT, NULL, &session, &g_hEngine);
     if (status != ERROR_SUCCESS) {
@@ -58,7 +73,7 @@ DWORD Wfp_Init() {
     sublayer.weight = 0xFF00; // High priority
 
     status = FwpmSubLayerAdd0(g_hEngine, &sublayer, NULL);
-    if (status != ERROR_SUCCESS && status != FWP_E_ALREADY_EXISTS) {
+    if (status != ERROR_SUCCESS && status != (DWORD)FWP_E_ALREADY_EXISTS) {
         printf("[-] FwpmSubLayerAdd0 failed: 0x%08lX\n", (unsigned long)status);
         return status;
     }
@@ -224,7 +239,7 @@ DWORD Wfp_UnisolateHost() {
 
     // Deleting sublayer flushes all isolation and dynamic rules atomically
     DWORD status = FwpmSubLayerDeleteByKey0(g_hEngine, &OMINULL_SUBLAYER_USER_GUID);
-    if (status == ERROR_SUCCESS || status == FWP_E_SUBLAYER_NOT_FOUND) {
+    if (status == ERROR_SUCCESS || status == (DWORD)FWP_E_SUBLAYER_NOT_FOUND) {
         printf("[+] SUCCESS: Host network isolation removed. Normal connectivity restored.\n");
     } else {
         printf("[-] FwpmSubLayerDeleteByKey0 returned: 0x%08lX\n", (unsigned long)status);
@@ -280,6 +295,34 @@ DWORD Wfp_BlockIP(const char* ipStr) {
     return status;
 }
 
+/* Wfp_ApplyState makes the engine match one description of what this host should
+ * be enforcing, and is the only entry point the agent uses.
+ *
+ * It rebuilds rather than diffs: deleting the sublayer drops every filter in it
+ * atomically, and the set is small enough that reasoning about which individual
+ * filter to add or remove would cost more than it saves. It runs only when the
+ * hub's answer actually changes, so the moment where nothing is enforced is not
+ * on the steady-state path. */
+DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
+                     const char* const* blockedIPs, int blockedCount) {
+    if (!g_hEngine) return ERROR_INVALID_HANDLE;
+
+    /* Flushes the sublayer and recreates it empty. */
+    Wfp_UnisolateHost();
+
+    if (isolate) {
+        DWORD status = Wfp_IsolateHost(hubIpStr);
+        if (status != ERROR_SUCCESS) return status;
+    }
+    for (int i = 0; i < blockedCount; i++) {
+        if (blockedIPs[i] && blockedIPs[i][0]) {
+            Wfp_BlockIP(blockedIPs[i]);
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+#ifndef OMINULL_WFP_EMBEDDED
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("Ominull Windows Zero-Friction User-Mode WFP Engine\n");
@@ -291,7 +334,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    DWORD status = Wfp_Init();
+    DWORD status = Wfp_Init(1);
     if (status != ERROR_SUCCESS) {
         return 1;
     }
@@ -318,3 +361,4 @@ int main(int argc, char* argv[]) {
     Wfp_Close();
     return 0;
 }
+#endif /* OMINULL_WFP_EMBEDDED */

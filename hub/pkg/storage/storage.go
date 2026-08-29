@@ -611,6 +611,11 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN installed_software TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN update_capability TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN cert_cn TEXT DEFAULT ''",
+		// The isolation allow list used to exist only inside a WebSocket
+		// command payload. That channel was never registered, so the list was
+		// built, validated and dropped. It is stored here because the agent now
+		// reads its isolation state from its own heartbeat reply.
+		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
@@ -855,30 +860,64 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	return s.upsertAssetFromEndpointLocked(ep)
 }
 
-func (s *Store) SetEndpointIsolation(id string, isIsolated bool) error {
+// SetEndpointIsolation records whether an endpoint is cut off, and what it may
+// still reach while it is.
+//
+// The allow list is stored rather than only broadcast: an endpoint applies
+// isolation from its own heartbeat reply, so the list has to survive until the
+// next heartbeat, a hub restart, and an endpoint that was offline when the
+// order was given. Releasing an endpoint clears it - a stale allow list is a
+// hole in the next isolation.
+func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	val := 0
+	allow := ""
 	if isIsolated {
 		val = 1
+		allow = strings.Join(allowIPs, ",")
 	}
-	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = ? WHERE id = ?", val, id)
+	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ? WHERE id = ?", val, allow, id)
 	return err
 }
 
-func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, isIsolated bool) (int64, error) {
+// GetEndpointIsolation reads back what an endpoint should be enforcing. It is
+// deliberately narrow: the heartbeat path needs these two columns on every
+// request from every endpoint, and nothing else from the row.
+func (s *Store) GetEndpointIsolation(id string) (bool, []string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var isoInt int
+	var allow string
+	err := s.db.QueryRow("SELECT is_isolated, COALESCE(isolation_allow_ips, '') FROM endpoints WHERE id = ?", id).Scan(&isoInt, &allow)
+	if err != nil {
+		return false, nil, err
+	}
+	var ips []string
+	for _, part := range strings.Split(allow, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			ips = append(ips, part)
+		}
+	}
+	return isoInt != 0, ips, nil
+}
+
+func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, isIsolated bool, allowIPs []string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	val := 0
+	allow := ""
 	if isIsolated {
 		val = 1
+		allow = strings.Join(allowIPs, ",")
 	}
 
-	baseQuery := "UPDATE endpoints SET is_isolated = ?"
+	baseQuery := "UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ?"
 	var args []interface{}
-	args = append(args, val)
+	args = append(args, val, allow)
 
 	switch scope {
 	case "all":

@@ -71,6 +71,194 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
     return count;
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Enforcing what the hub decided.
+ *
+ * The hub used to deliver isolation as a WebSocket command, and the WebSocket
+ * route was never registered on its mux - so the command had no transport, the
+ * console showed an endpoint as cut off, and this agent was never told. It
+ * arrives on the heartbeat reply now, next to the quarantined-peer list, and is
+ * reconciled every beat so a host that was down when it was released still
+ * comes back.
+ * ------------------------------------------------------------------------- */
+
+#define MAX_BLOCKED_PEERS 64
+#define PEER_ADDR_LEN 64
+
+/* HubAddressLiteral reduces the configured hub URL to an IPv4 literal.
+ *
+ * Isolation must leave a hole for the hub or it can never be lifted, and the
+ * hole is written as an address, so a name is resolved here while this host can
+ * still resolve names. */
+static bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap) {
+    const char* p = strstr(config->hub_url, "://");
+    p = p ? p + 3 : config->hub_url;
+
+    char host[256] = {0};
+    size_t i = 0;
+    while (*p && *p != ':' && *p != '/' && i < sizeof(host) - 1) host[i++] = *p++;
+    host[i] = '\0';
+    if (!host[0]) return false;
+
+    struct in_addr probe;
+    if (inet_pton(AF_INET, host, &probe) == 1) {
+        _snprintf(out, cap, "%s", host);
+        out[cap - 1] = '\0';
+        return true;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;          /* the filters are v4; a v6-only hub has no hole */
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return false;
+
+    bool ok = false;
+    char buf[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, buf, sizeof(buf))) {
+        _snprintf(out, cap, "%s", buf);
+        out[cap - 1] = '\0';
+        ok = true;
+    }
+    freeaddrinfo(res);
+    return ok;
+}
+
+static bool IsIPv4Literal(const char* s) {
+    struct in_addr v4;
+    return s && s[0] && inet_pton(AF_INET, s, &v4) == 1;
+}
+
+/* ParseAddressArray pulls the entries of a flat "key":["a","b"] array. */
+static int ParseAddressArray(const char* json, const char* key,
+                             char out[][PEER_ADDR_LEN], int maxOut) {
+    char needle[64];
+    _snprintf(needle, sizeof(needle), "\"%s\":[", key);
+    needle[sizeof(needle) - 1] = '\0';
+    const char* p = strstr(json, needle);
+    if (!p) return 0;
+    p += strlen(needle);
+
+    int count = 0;
+    while (*p && *p != ']' && count < maxOut) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '"')) p++;
+        if (*p == ']' || !*p) break;
+        char ip[PEER_ADDR_LEN] = {0};
+        int idx = 0;
+        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
+            ip[idx++] = *p++;
+        }
+        if (!ip[0]) continue;
+        /* Not echoed: it is attacker-controlled text on its way to a log. */
+        if (!IsIPv4Literal(ip)) {
+            printf("[!] Hub sent an entry in %s that is not an IPv4 address; ignoring it.\n", key);
+            continue;
+        }
+        _snprintf(out[count], PEER_ADDR_LEN, "%s", ip);
+        out[count][PEER_ADDR_LEN - 1] = '\0';
+        count++;
+    }
+    return count;
+}
+
+/* SyncEnforcement reconciles isolation and the mesh block list against the hub's
+ * answer. The kernel driver is preferred when one is loaded; the user-mode
+ * filtering engine is what runs on an endpoint without it, which on this fleet
+ * is all of them. */
+static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const char* respJson) {
+    static bool known = false;
+    static bool appliedIsolated = false;
+    static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+    static int appliedPeerCount = 0;
+    static bool engineReady = false;
+    static bool engineTried = false;
+
+    if (!respJson) return;
+    const char* p = strstr(respJson, "\"is_isolated\":");
+    if (!p) return;                     /* an older hub; nothing to obey */
+    p += strlen("\"is_isolated\":");
+    while (*p == ' ') p++;
+    bool wantIsolated = (strncmp(p, "true", 4) == 0);
+
+    char peers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+    int peerCount = ParseAddressArray(respJson, "quarantined_peers", peers, MAX_BLOCKED_PEERS);
+
+    char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+    int allowCount = ParseAddressArray(respJson, "isolation_allow_ips", allow, MAX_BLOCKED_PEERS);
+
+    bool changed = !known || wantIsolated != appliedIsolated || peerCount != appliedPeerCount;
+    for (int i = 0; !changed && i < peerCount; i++) {
+        if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
+    }
+    if (!changed) return;
+
+    char hubIP[64] = {0};
+    if (wantIsolated && !HubAddressLiteral(config, hubIP, sizeof(hubIP))) {
+        /* Refused on purpose. An isolation with no hole for the hub can never
+         * be lifted by the hub - it is not a quarantine, it is a host taken off
+         * the network by a failed name lookup. The order stands and is retried
+         * on the next beat. */
+        printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
+               "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
+        return;
+    }
+
+    if (hDriver != INVALID_HANDLE_VALUE) {
+        uint32_t hubAddr = 0;
+        if (hubIP[0]) {
+            struct in_addr a;
+            if (inet_pton(AF_INET, hubIP, &a) == 1) hubAddr = ntohl(a.s_addr);
+        }
+        if (Driver_SetIsolation(hDriver, wantIsolated, hubAddr, 9443)) {
+            printf(wantIsolated
+                   ? "[!] Threat Nullification: host isolated at ring-0. Permitted: hub %s.\n"
+                   : "[+] Threat neutralized: ring-0 host isolation lifted.%s\n",
+                   wantIsolated ? hubIP : "");
+        } else {
+            printf("[-] The kernel driver refused the isolation change.\n");
+            return;
+        }
+    } else {
+        if (!engineTried) {
+            engineTried = true;
+            /* Not a dynamic session: isolation has to outlive a restart of this
+             * service the way the Linux agent's chains do. */
+            engineReady = (Wfp_Init(0) == ERROR_SUCCESS);
+            if (!engineReady) {
+                printf("[-] The user-mode filtering engine would not open, so isolation cannot be "
+                       "enforced on this host. Administrator rights are required.\n");
+            }
+        }
+        if (!engineReady) return;
+
+        const char* blocked[MAX_BLOCKED_PEERS];
+        for (int i = 0; i < peerCount; i++) blocked[i] = peers[i];
+
+        if (Wfp_ApplyState(hubIP, wantIsolated ? 1 : 0, blocked, peerCount) != ERROR_SUCCESS) {
+            printf("[-] The user-mode filtering engine refused the change; state not applied.\n");
+            return;
+        }
+        if (wantIsolated) {
+            printf("[!] Threat Nullification: host isolated. Permitted: hub %s, DHCP, loopback. "
+                   "%d peer block(s) in force.\n", hubIP, peerCount);
+            if (allowCount > 0) {
+                printf("[!] The hub sent %d isolation allow-list address(es); this engine enforces "
+                       "the hub pinhole only, so they are not in force on this host.\n", allowCount);
+            }
+        } else {
+            printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
+        }
+    }
+
+    appliedIsolated = wantIsolated;
+    memcpy(appliedPeers, peers, sizeof(peers));
+    appliedPeerCount = peerCount;
+    known = true;
+    fflush(stdout);
+}
+
 void RunAgentLoop(AGENT_CONFIG* config) {
     HANDLE hDriver = Driver_Open();
     if (hDriver == INVALID_HANDLE_VALUE) {
@@ -116,6 +304,8 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             // release is published. Update_Apply verifies it against the
             // pinned release key before anything is installed, and does not
             // return if the swap succeeds.
+            SyncEnforcement(config, hDriver, hubResponse);
+
             Update_Apply(config, hubResponse);
         }
 
@@ -129,6 +319,10 @@ void RunAgentLoop(AGENT_CONFIG* config) {
     if (hDriver != INVALID_HANDLE_VALUE) {
         Driver_Close(hDriver);
     }
+    /* The engine handle is closed, not the filters: the session is not dynamic,
+     * so an isolated host stays isolated across a restart of this service and is
+     * reconciled against the hub on the next beat. */
+    Wfp_Close();
 }
 
 static void WINAPI ServiceMain(DWORD argc, LPSTR *argv) {

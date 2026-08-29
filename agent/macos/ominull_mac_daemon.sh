@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.6.9"
+AGENT_VERSION="1.7.0"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -50,6 +50,9 @@ CA_PATH="${6:-/opt/ominull/ca.crt}"
 CLIENT_CERT="${7:-/opt/ominull/client.crt}"
 CLIENT_KEY="${8:-/opt/ominull/client.key}"
 IS_ISOLATED="false"
+# A sentinel, not an empty list: the first beat must reconcile unconditionally,
+# which is what picks up state applied before this daemon restarted.
+APPLIED_PEERS="__unreconciled__"
 ATTEMPTED_VERSION=""
 # Bounded retry, not a single shot: a dropped download would otherwise wedge this
 # host on the offered version until launchd restarted the daemon, while retrying
@@ -372,7 +375,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.6.9)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.0)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -393,6 +396,29 @@ fi
 # account: anyone who could write that file owned the next isolation event. The
 # check is here as well as in the installer because the file outlives the
 # install - an upgrade, a restore or a stray editor can hand it back.
+# hub_address_literal reduces HUB_URL to an address.
+#
+# Isolation has to leave a hole for the hub or it can never be lifted. This used
+# to be the literal 10.0.0.58 with 10.0.0.57 as a fallback - the placeholder
+# addresses the public repository substitutes for the real ones - so isolating a
+# Mac on this fleet would have pinholed a host that is not the hub and stranded
+# it with no way back. It comes from the configured hub URL now.
+hub_address_literal() {
+    local host="${HUB_URL#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    [[ -z "$host" ]] && return 1
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf '%s' "$host"
+        return 0
+    fi
+    local resolved
+    resolved=$(dscacheutil -q host -a name "$host" 2>/dev/null | awk '/^ip_address:/ {print $2; exit}')
+    [[ -z "$resolved" ]] && resolved=$(host -t A "$host" 2>/dev/null | awk '/has address/ {print $4; exit}')
+    [[ -z "$resolved" ]] && return 1
+    printf '%s' "$resolved"
+}
+
 pf_engine() {
     local helper="/opt/ominull/pf_engine.sh"
     local meta
@@ -474,7 +500,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.6.9 (PF)",
+  "driver_version": "1.7.0 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -513,16 +539,44 @@ JSON
 
     apply_agent_update "$RESPONSE"
 
-    # 4. Check Dynamic Host Network Isolation Status
-    NEW_ISOLATED=$(hub_curl -sSL -m 5 "$HUB_URL/api/v1/endpoints" | grep -o "\"id\":\"$ENDPOINT_ID\"[^\}]*\"is_isolated\":[a-z]*" | grep -o "true\|false" || echo "$IS_ISOLATED")
-    if [[ "$NEW_ISOLATED" == "true" && "$IS_ISOLATED" != "true" ]]; then
-        echo "[!] Threat Nullification: ACTIVATING MACOS PACKET FILTER ISOLATION..."
-        pf_engine isolate 10.0.0.58 2>/dev/null || pf_engine isolate 10.0.0.57 2>/dev/null || true
-        IS_ISOLATED="true"
-    elif [[ "$NEW_ISOLATED" == "false" && "$IS_ISOLATED" == "true" ]]; then
-        echo "[+] Threat Neutralized: REMOVING MACOS PACKET FILTER ISOLATION..."
-        pf_engine unisolate 2>/dev/null || true
-        IS_ISOLATED="false"
+    # 4. Enforce what the hub decided: isolation, and the mesh peer list.
+    #
+    # Both come off the heartbeat reply now. Isolation used to need a second
+    # request to /api/v1/endpoints, which handed every agent the whole fleet
+    # list to find one boolean about itself; the quarantined-peer list was in
+    # this reply all along and this agent ignored it, so a mesh quarantine
+    # reached the Linux endpoints and no Mac.
+    NEW_ISOLATED=$(printf '%s' "$RESPONSE" | sed -n 's/.*"is_isolated":\([a-z]*\).*/\1/p' | head -1)
+    [[ "$NEW_ISOLATED" == "true" || "$NEW_ISOLATED" == "false" ]] || NEW_ISOLATED="$IS_ISOLATED"
+
+    NEW_PEERS=$(printf '%s' "$RESPONSE" \
+        | sed -n 's/.*"quarantined_peers":\[\([^]]*\)\].*/\1/p' \
+        | tr -d '" ' | tr ',' '\n' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | tr '\n' ' ')
+    NEW_PEERS="${NEW_PEERS% }"
+
+    if [[ "$NEW_ISOLATED" != "$IS_ISOLATED" || "$NEW_PEERS" != "$APPLIED_PEERS" ]]; then
+        if [[ "$NEW_ISOLATED" == "true" ]]; then
+            if HUB_IP=$(hub_address_literal); then
+                echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, DHCP, DNS, loopback."
+                # shellcheck disable=SC2086
+                pf_engine sync 1 "$HUB_IP" $NEW_PEERS || true
+                IS_ISOLATED="true"
+                APPLIED_PEERS="$NEW_PEERS"
+            else
+                # Refused deliberately: an isolation with no hole for the hub can
+                # never be lifted by the hub. The order stands and is retried on
+                # the next beat.
+                echo "[-] Isolation ordered, but the hub address could not be resolved from $HUB_URL. Refusing to isolate: this host could not be released afterwards." >&2
+            fi
+        else
+            [[ "$IS_ISOLATED" == "true" ]] && echo "[+] Threat neutralized: lifting host isolation."
+            HUB_IP=$(hub_address_literal || true)
+            # shellcheck disable=SC2086
+            pf_engine sync 0 "$HUB_IP" $NEW_PEERS || true
+            IS_ISOLATED="false"
+            APPLIED_PEERS="$NEW_PEERS"
+        fi
     fi
 
     sleep 3

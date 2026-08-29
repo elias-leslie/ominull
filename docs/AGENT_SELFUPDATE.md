@@ -253,9 +253,10 @@ cd hub && go test -race ./...
 gcc -O2 -Wall -Wextra -o /tmp/t agent/tests/test_dpi.c && /tmp/t
 gcc -O2 -Wall -Wextra -o /tmp/d agent/tests/test_der_sig.c && /tmp/d
 gcc -O2 -Wall -Wextra -o /tmp/a agent/linux/main.c            # must be warning-free
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/w.exe \
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -DOMINULL_WFP_EMBEDDED -o /tmp/w.exe \
   agent/src/{main,hub_client,hub_tls,service,driver_client,updater}.c \
-  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
+  agent/windows/wfp_user.c \
+  -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt -lfwpuclnt -lole32
 bash -n agent/macos/ominull_mac_daemon.sh
 scripts/version.sh check
 gitleaks detect --source .

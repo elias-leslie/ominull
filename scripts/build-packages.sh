@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.6.9"
+VERSION="1.7.0"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.6.9
+Version: 1.7.0
 Section: security
 Priority: optional
 Architecture: amd64
@@ -163,7 +163,10 @@ fi
 
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     echo "  [*] Cross-compiling Windows agent (mingw-w64)..."
-    x86_64-w64-mingw32-gcc -O2 -Wall -Wextra \
+    # -DOMINULL_WFP_EMBEDDED drops wfp_user.c's own main(); the same file is also
+    # built standalone as ominull_wfp_user.exe, which stays the recovery tool for
+    # a host left isolated with no agent running.
+    x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -DOMINULL_WFP_EMBEDDED \
         -o "${ROOT_DIR}/agent/bin/ominulld.exe" \
         "${ROOT_DIR}/agent/src/main.c" \
         "${ROOT_DIR}/agent/src/hub_client.c" \
@@ -171,7 +174,8 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         "${ROOT_DIR}/agent/src/service.c" \
         "${ROOT_DIR}/agent/src/driver_client.c" \
         "${ROOT_DIR}/agent/src/updater.c" \
-        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
+        "${ROOT_DIR}/agent/windows/wfp_user.c" \
+        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt -lfwpuclnt -lole32
     cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
 elif [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
     echo "  [!] mingw-w64 not installed; packaging the previously built ominulld.exe"

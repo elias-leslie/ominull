@@ -55,7 +55,7 @@ file "$BUILD_DIR/ominullctl.exe"
 
 echo "[*] Compiling endpoint service agent (ominulld.exe)..."
 x86_64-w64-mingw32-gcc \
-  -Wall -O2 \
+  -Wall -O2 -DOMINULL_WFP_EMBEDDED \
   -I"$INC_DIR" \
   "$ROOT_DIR/agent/src/main.c" \
   "$ROOT_DIR/agent/src/driver_client.c" \
@@ -63,8 +63,9 @@ x86_64-w64-mingw32-gcc \
   "$ROOT_DIR/agent/src/hub_tls.c" \
   "$ROOT_DIR/agent/src/service.c" \
   "$ROOT_DIR/agent/src/updater.c" \
+  "$ROOT_DIR/agent/windows/wfp_user.c" \
   -o "$BUILD_DIR/ominulld.exe" \
-  -lwinhttp -lws2_32 -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
+  -lwinhttp -lws2_32 -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt -lfwpuclnt -lole32
 
 echo "[+] Built: $BUILD_DIR/ominulld.exe"
 file "$BUILD_DIR/ominulld.exe"

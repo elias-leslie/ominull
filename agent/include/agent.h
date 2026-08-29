@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.6.9"
+#define OMINULL_AGENT_VERSION "1.7.0"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -48,6 +48,16 @@ HANDLE Driver_Open(void);
 void Driver_Close(HANDLE hDevice);
 bool Driver_StreamEvents(HANDLE hDevice, OMINULL_EVENT* outEvent);
 bool Driver_SetIsolation(HANDLE hDevice, bool enable, uint32_t allowHubIP, uint16_t allowHubPort);
+
+/* The user-mode filtering engine, in agent/windows/wfp_user.c. It is what
+ * enforces isolation on a host with no kernel driver loaded - which is every
+ * endpoint running the portable agent, so on this fleet it is the path that
+ * actually runs. Linked into the agent as well as built as the standalone
+ * ominull_wfp_user.exe recovery tool. */
+DWORD Wfp_Init(int dynamicSession);
+void Wfp_Close(void);
+DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
+                     const char* const* blockedIPs, int blockedCount);
 
 // Hub communication & networking.
 //
