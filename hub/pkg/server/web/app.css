@@ -529,6 +529,12 @@ a {
 .topbar {
   display: flex;
   align-items: center;
+  /* Wraps rather than overflows. Without this the window selector, the search
+     field and the version block are laid out past the right edge on a narrow
+     viewport and render on top of each other - the search field ended up
+     drawn over the 1H/6H/24H/7D buttons, with both unusable. */
+  flex-wrap: wrap;
+  row-gap: var(--s-2);
   gap: var(--s-2);
   padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line);
@@ -1806,7 +1812,7 @@ p.pending {
 .topo-canvas svg {
   display: block;
   width: 100%;
-  height: 560px;
+  height: clamp(420px, calc(100vh - 215px), 900px);
 }
 
 .topo-canvas .edge {
@@ -2102,7 +2108,9 @@ p.pending {
     border-top: 0;
   }
   .omni {
-    min-width: 0;
+    /* min-width, not 0: below this the field is a bare icon with nothing to
+       say what it does. It is allowed to shrink, and the row wraps instead. */
+    min-width: 128px;
   }
   .omni .fill {
     display: none;

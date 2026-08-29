@@ -319,7 +319,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.5)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.5.6)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -390,7 +390,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.5.5 (PF)",
+  "driver_version": "1.5.6 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }

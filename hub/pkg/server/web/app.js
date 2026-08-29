@@ -1992,14 +1992,7 @@
     });
     if (!ordered.length) return {};
 
-    /* 900x560, not 900x420. The outer ring carries most of the nodes, and on
-       the shorter box its rows sat close enough that captions collided out of
-       existence - the graph was dense because the canvas was short, not
-       because the network is. */
-    var W = 900, H = 560, cx = W / 2, cy = H / 2;
-    var pos = {};
     var hub = ordered[0];
-    pos[hub.id] = { x: cx, y: cy, r: 13 };
 
     var neighbours = [];
     var outer = [];
@@ -2010,14 +2003,86 @@
       (touches ? neighbours : outer).push(n);
     });
 
+    /* Rings have to be sized and, past a point, multiplied. Fixed radii put 120
+       nodes of diameter 18 onto a circle giving each 8 units of arc, so they
+       overlapped into a solid band that could be neither read nor clicked.
+       Growing one ring instead just shrinks every node when the whole thing is
+       scaled to fit, so the outer nodes spill onto further rings once the
+       current one is full - the box grows slowly, and the nodes stay big enough
+       to aim at.
+
+       ELLIPSE_RATIO is matched to the panel the graph is drawn in, which is
+       roughly twice as wide as it is tall. Round rings in a wide box are fitted
+       by height and leave the width empty, and everything is scaled down to
+       suit the dimension that ran out first - which is how a graph ends up
+       correct, uncrowded and still unreadable. PERIMETER_K, sqrt((1+r^2)/2), is
+       the factor between an ellipse's semi-major axis and the radius of a
+       circle with the same perimeter, so ring capacity stays honest when the
+       ratio changes. */
+    var ELLIPSE_RATIO = 0.58;
+    var PERIMETER_K = Math.sqrt((1 + ELLIPSE_RATIO * ELLIPSE_RATIO) / 2);
+    var ringCapacity = function (a, nodeR) {
+      return Math.max(1, Math.floor((2 * Math.PI * PERIMETER_K * a) / (nodeR * 2 + 4)));
+    };
+
+    var innerA = 150;
+    while (neighbours.length > ringCapacity(innerA, 9)) innerA += 40;
+
+    /* Each outer ring starts far enough out to clear the one inside it. */
+    var rings = [];
+    var remaining = outer.length;
+    var a = Math.max(340, innerA + 150);
+    while (remaining > 0) {
+      var cap = Math.min(remaining, ringCapacity(a, 8));
+      rings.push({ a: a, take: cap });
+      remaining -= cap;
+      a += 120;
+    }
+    var maxA = rings.length ? rings[rings.length - 1].a : innerA;
+
+    var W = Math.round(2 * (maxA + 90));
+    var H = Math.round(2 * (maxA * ELLIPSE_RATIO + 75));
+    var cx = W / 2, cy = H / 2;
+    var pos = {};
+    pos[hub.id] = { x: cx, y: cy, r: 13 };
+
+    /* Equal arc, not equal angle. Stepping the parametric angle evenly around a
+       flattened ellipse bunches nodes at the left and right ends, where the
+       curve is tightest - the same crowding the ring sizing above exists to
+       prevent, reintroduced by the placement. Walking a sampled arc-length
+       table spaces them by the distance actually between them. */
     var place = function (list, radiusX, radiusY, phase, r) {
-      list.forEach(function (n, i) {
-        var a = phase + (i / Math.max(1, list.length)) * Math.PI * 2;
-        pos[n.id] = { x: cx + Math.cos(a) * radiusX, y: cy + Math.sin(a) * radiusY, r: r };
+      var n = list.length;
+      if (!n) return;
+
+      var SAMPLES = 720;
+      var cum = [0];
+      var px = radiusX, py = 0;
+      for (var k = 1; k <= SAMPLES; k++) {
+        var t = (k / SAMPLES) * Math.PI * 2;
+        var qx = Math.cos(t) * radiusX, qy = Math.sin(t) * radiusY;
+        cum.push(cum[k - 1] + Math.hypot(qx - px, qy - py));
+        px = qx; py = qy;
+      }
+      var total = cum[SAMPLES];
+
+      var at = 0;
+      list.forEach(function (node, i) {
+        var want = (i / n) * total;
+        while (at < SAMPLES && cum[at + 1] < want) at++;
+        var ang = phase + ((at / SAMPLES) * Math.PI * 2);
+        pos[node.id] = { x: cx + Math.cos(ang) * radiusX, y: cy + Math.sin(ang) * radiusY, r: r };
       });
     };
-    place(neighbours, 150, 150, -Math.PI / 2, 9);
-    place(outer, 340, 240, -Math.PI / 2 + 0.35, 8);
+    place(neighbours, innerA, innerA * ELLIPSE_RATIO, -Math.PI / 2, 9);
+
+    var cursor = 0;
+    rings.forEach(function (ring, idx) {
+      /* Each ring is offset a little so nodes do not line up into spokes. */
+      place(outer.slice(cursor, cursor + ring.take), ring.a, ring.a * ELLIPSE_RATIO,
+            -Math.PI / 2 + 0.35 + idx * 0.4, 8);
+      cursor += ring.take;
+    });
     return { pos: pos, width: W, height: H };
   }
 
