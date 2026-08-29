@@ -141,6 +141,18 @@ func TestBootstrapGenerators(t *testing.T) {
 			if strings.Contains(body, "sc.exe create") {
 				t.Errorf("bootstrap script hand-builds the service binPath instead of using --install:\n%s", body)
 			}
+			// A generated script may hand the key to --install, which stores it
+			// in a SYSTEM-only file. What it must never do is write a --service
+			// command line itself: that is the registration `sc qc` shows to any
+			// logged-on user, and the key would ride along in it.
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					continue
+				}
+				if strings.Contains(line, "--service") && strings.Contains(line, "--key") {
+					t.Errorf("bootstrap script registers a --service command line carrying the key: %q", line)
+				}
+			}
 		})
 	}
 }

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.4.3"
+#define OMINULL_AGENT_VERSION "1.4.4"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -28,6 +28,10 @@ typedef struct _AGENT_CONFIG {
      * against this file, so it lives beside the binary rather than under a
      * path an upgrade replaces. */
     char ca_path[260];
+    /* Where api_key was read from, when it came from a file rather than the
+     * command line. Set, it is what the service registration carries; empty,
+     * the key is still inline and Service_MigrateKeyToFile will move it. */
+    char key_path[260];
     bool is_service;
     bool verbose;
     /* Opt-in to a cleartext hub. Off by default: without it the agent refuses
@@ -84,6 +88,12 @@ void Service_SetConfig(const AGENT_CONFIG* config);
 // place the service's arguments exist: anything left out here - the role, the
 // location, the pinned CA - is simply lost at the next start.
 bool Service_Install(const AGENT_CONFIG* config);
+// Moves an inline --key out of the service command line into a file only
+// SYSTEM and Administrators can read, and rewrites the registration to point at
+// it. Called on every service start: the binPath is not rewritten by an
+// upgrade, so an endpoint enrolled before this existed has to repair itself.
+// No-op once config->key_path is set.
+void Service_MigrateKeyToFile(const AGENT_CONFIG* config);
 // Registers the SCM recovery actions and writes the script the last of them
 // runs. Idempotent, and applied on every start so an in-place upgrade is not
 // left without them.

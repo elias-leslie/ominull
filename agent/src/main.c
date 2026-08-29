@@ -2,6 +2,25 @@
 
 #define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
 
+/* ReadKeyFile loads the API key written beside the binary at enrolment. The
+ * file holds the key and nothing else; trailing whitespace is tolerated because
+ * an operator repairing one by hand will leave a newline behind. */
+static bool ReadKeyFile(const char* path, char* out, size_t cap) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(out, 1, cap - 1, f);
+    int truncated = (n == cap - 1) && (fgetc(f) != EOF);
+    fclose(f);
+    out[n] = '\0';
+    while (n > 0 && (unsigned char)out[n - 1] <= ' ') out[--n] = '\0';
+    if (truncated) {
+        fprintf(stderr, "[-] The key in %s is longer than this agent can hold; refusing a "
+                        "truncated key rather than failing authentication later.\n", path);
+        return false;
+    }
+    return n > 0;
+}
+
 static void PrintUsage(const char* prog) {
     printf("Ominull Endpoint Agent (v%s)\n", OMINULL_AGENT_VERSION);
     printf("Usage:\n");
@@ -13,6 +32,9 @@ static void PrintUsage(const char* prog) {
     printf("                                             (internal: how self-update restarts itself)\n");
     printf("\nOptions:\n");
     printf("  --ca <path>          CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
+    printf("  --key-file <path>    Read the API key from a file instead of the command line.\n");
+    printf("                       --install rewrites --key into this form; a service command\n");
+    printf("                       line is readable through `sc qc` by any logged-on user.\n");
     printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
 }
 
@@ -68,6 +90,8 @@ int main(int argc, char* argv[]) {
             strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
         } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
             strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
+        } else if (strcmp(argv[i], "--key-file") == 0 && i + 1 < argc) {
+            strncpy(config.key_path, argv[++i], sizeof(config.key_path) - 1);
         } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
             config.allow_plaintext = true;
         } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -76,6 +100,14 @@ int main(int argc, char* argv[]) {
             PrintUsage(argv[0]);
             return 0;
         }
+    }
+
+    // --key-file wins over --key: a registration that carries both is one being
+    // migrated, and the file is the copy that is actually protected.
+    if (config.key_path[0] && !ReadKeyFile(config.key_path, config.api_key, sizeof(config.api_key))) {
+        fprintf(stderr, "[-] Cannot read the API key from %s. Enrolment writes it; without it "
+                        "this agent has no identity to report under.\n", config.key_path);
+        return 1;
     }
 
     // The restart helper runs as a detached child of a service that is exiting,

@@ -169,6 +169,37 @@ own CA verifies it, a different CA does not, and trusting nothing does not
 either. `TestServerCertificateReuseAndReissue` covers the leaf surviving a
 restart and being replaced when it stops covering the hub's address.
 
+## Where the key lives at rest
+
+TLS took the API key off the wire. It was still sitting in the clear at each
+endpoint, and on Windows it was sitting somewhere readable.
+
+| Platform | Location | Mode |
+|---|---|---|
+| Linux | `/etc/ominull/agent.conf` (`OMINULL_ARGS`) | `0600 root:root` |
+| macOS | the LaunchDaemon plist | `0600 root:wheel` |
+| Windows | `agent.key` beside the binary, `--key-file` in the binPath | SYSTEM + Administrators, inheritance off |
+
+Windows is the one that had to change. Until v1.4.4 the key was an argument in
+the service registration, and a service registration is not private: `sc qc`
+needs only `SERVICE_QUERY_CONFIG`, which the default DACL grants to Interactive
+Users, so any logged-on account could read it. The SCM also writes the whole
+binPath into a System event log 7045 record at install, and nothing can redact
+that afterwards — which is why moving the key is only half the fix and rotating
+it is the other half.
+
+`Service_Install` now writes the key to a file and registers `--key-file`
+instead. Program Files alone is not enough: it is administrator-*write* but
+user-*read*, so the file gets an explicit `D:P(A;;FA;;;SY)(A;;FA;;;BA)` — SYSTEM
+and Administrators, inheritance broken. If that DACL cannot be applied the file
+is deleted and the install fails, because a key file believed private and
+readable by everyone is worse than the command line it replaced.
+
+Enrolment did not change shape. The bootstrap script still passes `--key` to
+`--install`; the installer is what moves it. And because self-update replaces
+the binary but never the registration, `Service_MigrateKeyToFile` runs on every
+service start and repairs an endpoint enrolled before this existed.
+
 ## Still open
 
 - **No client certificates.** `pkg/pki` can issue them and `/api/v1/pki/enroll`

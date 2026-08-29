@@ -3,6 +3,8 @@
 #include <iphlpapi.h>
 #include <psapi.h>
 #include <errno.h>
+#include <sddl.h>
+#include <aclapi.h>
 #include "../include/agent.h"
 
 static SERVICE_STATUS g_ServiceStatus;
@@ -167,6 +169,10 @@ void Service_SetConfig(const AGENT_CONFIG* config) {
     // Repair the recovery configuration on every start, so a service that was
     // upgraded in place rather than reinstalled still has what self-update needs.
     Service_EnsureRecovery();
+    // Same reasoning for the key: self-update replaces the binary and never the
+    // registration, so an endpoint enrolled before --key-file existed still has
+    // the key on its command line until a new build moves it.
+    Service_MigrateKeyToFile(config);
     if (config) {
         g_Config = *config;
         g_Config.is_service = true;
@@ -421,6 +427,173 @@ int Service_WaitStoppedAndStart(void) {
     return rc;
 }
 
+/* --------------------------------------------------------------- the key ---
+ *
+ * The tenant API key used to live on the service command line, and a service
+ * command line is not private. `sc qc ominulld` needs only SERVICE_QUERY_CONFIG,
+ * which the default service DACL grants to Interactive Users, so any logged-on
+ * account could read it; and the SCM writes the whole binPath into a System
+ * event log 7045 record when the service is installed, where it stays for the
+ * life of the log. Linux and macOS never had this - /etc/ominull/agent.conf and
+ * the LaunchDaemon plist are both 0600 root - so this brings Windows level with
+ * them: the key goes in a file, the command line carries the path.
+ *
+ * Program Files is not enough on its own. It is writable only by
+ * administrators, but it is *readable* by Users, so the key file gets an
+ * explicit DACL of SYSTEM and Administrators with inheritance switched off. */
+
+#define AGENT_KEY_FILE "agent.key"
+
+static bool WriteProtectedFile(const char* path, const char* data) {
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[-] Cannot write %s (Error: %lu)\n", path, GetLastError());
+        return false;
+    }
+    DWORD len = (DWORD)strlen(data), wrote = 0;
+    BOOL ok = WriteFile(h, data, len, &wrote, NULL) && wrote == len;
+    CloseHandle(h);
+    if (!ok) {
+        DeleteFileA(path);
+        return false;
+    }
+
+    /* D:P drops inherited access - without the P this file would keep the
+     * Users read entry it inherits from Program Files, which is the whole
+     * problem being fixed. FA to SY and BA leaves SYSTEM (the account the
+     * service runs as) and administrators, and nobody else. */
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL)) {
+        fprintf(stderr, "[-] Cannot build the key file DACL (Error: %lu)\n", GetLastError());
+        DeleteFileA(path);
+        return false;
+    }
+
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = NULL;
+    DWORD rc = ERROR_INVALID_PARAMETER;
+    if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
+        rc = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, dacl, NULL);
+    }
+    LocalFree(sd);
+
+    if (rc != ERROR_SUCCESS) {
+        /* An unprotected key file is worse than none: it would be readable by
+         * everyone *and* believed safe. Leave nothing behind. */
+        fprintf(stderr, "[-] Cannot restrict %s (Error: %lu); not leaving a readable key on disk.\n",
+                path, rc);
+        DeleteFileA(path);
+        return false;
+    }
+    return true;
+}
+
+/* BuildServiceCommandLine writes the binPath. It is the only place the
+ * service's configuration exists - ServiceMain gets the SCM's argv, not this
+ * one - so anything omitted here is silently lost at the next start. It once
+ * carried only the hub URL and the key, which dropped the role and location an
+ * operator enrolled with.
+ *
+ * The quoting matters: paths under Program Files contain a space. */
+static int BuildServiceCommandLine(const AGENT_CONFIG* config, const char* binaryPath,
+                                   char* out, size_t cap) {
+    int n;
+    if (config->key_path[0]) {
+        n = snprintf(out, cap,
+                     "\"%s\" --service --hub %s --key-file \"%s\" --role %s --location %s --id %s --ca \"%s\"",
+                     binaryPath, config->hub_url, config->key_path,
+                     config->role_tag[0] ? config->role_tag : "workstation",
+                     config->location_id[0] ? config->location_id : "loc-home",
+                     config->endpoint_id, config->ca_path);
+    } else {
+        n = snprintf(out, cap,
+                     "\"%s\" --service --hub %s --key %s --role %s --location %s --id %s --ca \"%s\"",
+                     binaryPath, config->hub_url, config->api_key,
+                     config->role_tag[0] ? config->role_tag : "workstation",
+                     config->location_id[0] ? config->location_id : "loc-home",
+                     config->endpoint_id, config->ca_path);
+    }
+    if (n < 0 || (size_t)n >= cap) return -1;
+
+    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
+        int m = snprintf(out + n, cap - n, " --cf-id %s --cf-secret %s",
+                         config->cf_client_id, config->cf_client_secret);
+        if (m < 0 || (size_t)(n + m) >= cap) return -1;
+        n += m;
+    }
+    if (config->allow_plaintext) {
+        int m = snprintf(out + n, cap - n, " --allow-plaintext");
+        if (m < 0 || (size_t)(n + m) >= cap) return -1;
+        n += m;
+    }
+    if (config->verbose) {
+        int m = snprintf(out + n, cap - n, " --verbose");
+        if (m < 0 || (size_t)(n + m) >= cap) return -1;
+        n += m;
+    }
+    return n;
+}
+
+/* StoreKeyBesideBinary writes the running key into the install directory and
+ * reports the path it used. */
+static bool StoreKeyBesideBinary(const AGENT_CONFIG* config, char* outPath, size_t cap) {
+    char binaryPath[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) return false;
+    char* slash = strrchr(binaryPath, '\\');
+    if (!slash) return false;
+    *slash = '\0';
+    snprintf(outPath, cap, "%s\\%s", binaryPath, AGENT_KEY_FILE);
+    return WriteProtectedFile(outPath, config->api_key);
+}
+
+void Service_MigrateKeyToFile(const AGENT_CONFIG* config) {
+    if (!config || config->key_path[0]) return;   /* already off the command line */
+    if (!config->api_key[0]) return;
+
+    AGENT_CONFIG moved = *config;
+    if (!StoreKeyBesideBinary(config, moved.key_path, sizeof(moved.key_path))) {
+        fprintf(stderr, "[!] Could not move the API key off the service command line; "
+                        "it stays readable through `sc qc %s`.\n", SERVICE_NAME);
+        return;
+    }
+
+    char binaryPath[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) return;
+
+    char cmdLine[MAX_PATH * 4];
+    if (BuildServiceCommandLine(&moved, binaryPath, cmdLine, sizeof(cmdLine)) < 0) {
+        fprintf(stderr, "[!] Service command line would be truncated; leaving the registration alone.\n");
+        return;
+    }
+
+    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!schSCManager) return;
+    SC_HANDLE schService = OpenServiceA(schSCManager, SERVICE_NAME,
+                                        SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+    if (!schService) {
+        CloseServiceHandle(schSCManager);
+        return;
+    }
+
+    if (ChangeServiceConfigA(schService, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                             cmdLine, NULL, NULL, NULL, NULL, NULL, NULL)) {
+        /* The key is out of the live configuration from here. The 7045 record
+         * the SCM wrote at install still holds the old one, and nothing can
+         * redact that - the key it names has to be rotated. */
+        printf("[+] Moved the API key out of the service command line into %s.\n", moved.key_path);
+    } else {
+        fprintf(stderr, "[!] Could not rewrite the service command line (Error: %lu); "
+                        "the key stays readable through `sc qc %s`.\n", GetLastError(), SERVICE_NAME);
+    }
+
+    CloseServiceHandle(schService);
+    CloseServiceHandle(schSCManager);
+}
+
 bool Service_Install(const AGENT_CONFIG* config) {
     if (!config) return false;
 
@@ -429,29 +602,24 @@ bool Service_Install(const AGENT_CONFIG* config) {
         return false;
     }
 
-    /* The SCM command line is the only place the service's configuration
-     * exists - ServiceMain gets SCM's argv, not this one - so everything the
-     * running agent needs has to be written here. It used to carry only the hub
-     * URL and the key, which silently dropped the role and location an operator
-     * enrolled with; the CA path would have gone the same way, leaving a
-     * service that could not verify the hub it was installed to talk to.
-     *
-     * The quoting matters: a CA path under Program Files contains a space, and
-     * an unquoted one would be parsed as two arguments. */
-    char cmdLine[MAX_PATH * 4];
-    int n = snprintf(cmdLine, sizeof(cmdLine),
-                     "\"%s\" --service --hub %s --key %s --role %s --location %s --id %s --ca \"%s\"",
-                     binaryPath, config->hub_url, config->api_key,
-                     config->role_tag[0] ? config->role_tag : "workstation",
-                     config->location_id[0] ? config->location_id : "loc-home",
-                     config->endpoint_id, config->ca_path);
-    if (n > 0 && (size_t)n < sizeof(cmdLine) &&
-        config->cf_client_id[0] && config->cf_client_secret[0]) {
-        snprintf(cmdLine + n, sizeof(cmdLine) - n, " --cf-id %s --cf-secret %s",
-                 config->cf_client_id, config->cf_client_secret);
+    /* Enrolment hands the key on the command line, because that is the only
+     * channel an installer has. It stops there: the key goes straight into a
+     * protected file and the registration carries the path. An install that
+     * cannot protect the file is a failed install - registering the key inline
+     * as a fallback would quietly reintroduce exactly what this removes. */
+    AGENT_CONFIG stored = *config;
+    if (!stored.key_path[0] && stored.api_key[0]) {
+        if (!StoreKeyBesideBinary(config, stored.key_path, sizeof(stored.key_path))) {
+            fprintf(stderr, "[-] Cannot store the API key privately; refusing to register the "
+                            "service with the key on its command line.\n");
+            return false;
+        }
     }
-    if (config->allow_plaintext) {
-        strncat(cmdLine, " --allow-plaintext", sizeof(cmdLine) - strlen(cmdLine) - 1);
+
+    char cmdLine[MAX_PATH * 4];
+    if (BuildServiceCommandLine(&stored, binaryPath, cmdLine, sizeof(cmdLine)) < 0) {
+        fprintf(stderr, "[-] Service command line would be truncated; not registering.\n");
+        return false;
     }
 
     SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);

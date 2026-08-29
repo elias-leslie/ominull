@@ -17,7 +17,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.4.3"
+#define OMINULL_LINUX_AGENT_VERSION "1.4.4"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the

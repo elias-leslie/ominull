@@ -117,7 +117,9 @@ Write-Host "[+] Testing User-Mode WFP subsystem..." -ForegroundColor Gray
 Write-Host "[+] Configuring and starting Ominull Endpoint Service..." -ForegroundColor Gray
 # Register through the agent's own installer: it owns the binPath, including the
 # --service flag the SCM entry point requires and the --ca path the agent pins
-# the hub against.
+# the hub against. It also moves the key given below into a SYSTEM-only file and
+# registers --key-file instead, so the key never reaches the service command
+# line, which sc qc exposes to any logged-on user.
 & "$InstallDir\ominulld.exe" --uninstall 2>$null | Out-Null
 & "$InstallDir\ominulld.exe" --install --hub $AgentHubURL --key $APIKey --role $RoleTag --location $LocationID --ca "$InstallDir\ca.crt"%s
 & sc.exe start ominulld 2>&1 | Out-Null
