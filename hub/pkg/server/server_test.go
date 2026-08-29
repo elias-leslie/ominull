@@ -1121,3 +1121,55 @@ func TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll(t *testing.T) {
 		}
 	}
 }
+
+// TestTheConsoleCanSeeWhichEndpointsAreCertificateBound covers the reading an
+// operator has to take before turning --client-certs required on. Without it
+// the only way to find out who would fall off the fleet is to turn it on and
+// watch.
+func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	defer srv.Close()
+
+	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0"})
+	base := mtlsListener(t, srv)
+
+	// One endpoint reports under a certificate, one under the key alone.
+	bound := agentClient(t, srv, issueAgentCert(t, srv.pki, "linux-alpha"))
+	if code, err := postTelemetryAs(t, bound, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+		t.Fatalf("certificate holder got %d (err %v); want 200", code, err)
+	}
+	plain := agentClient(t, srv, nil)
+	if code, err := postTelemetryAs(t, plain, base, "linux-beta", nil); err != nil || code != http.StatusOK {
+		t.Fatalf("key-only endpoint got %d (err %v); want 200", code, err)
+	}
+
+	byID := func() map[string]string {
+		eps, err := store.ListEndpoints("")
+		if err != nil {
+			t.Fatalf("listing endpoints: %v", err)
+		}
+		out := map[string]string{}
+		for _, e := range eps {
+			out[e.ID] = e.CertCN
+		}
+		return out
+	}
+
+	seen := byID()
+	if seen["linux-alpha"] != "linux-alpha" {
+		t.Errorf("an endpoint that reported under its certificate shows cert_cn %q; want %q", seen["linux-alpha"], "linux-alpha")
+	}
+	if seen["linux-beta"] != "" {
+		t.Errorf("an endpoint that never presented a certificate shows cert_cn %q; want empty", seen["linux-beta"])
+	}
+
+	// An endpoint that stops presenting one has to stop showing one, or the
+	// console keeps reporting a binding that is no longer being enforced.
+	if code, err := postTelemetryAs(t, plain, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+		t.Fatalf("the same endpoint reporting without a certificate got %d (err %v); want 200", code, err)
+	}
+	if cn := byID()["linux-alpha"]; cn != "" {
+		t.Errorf("an endpoint that stopped presenting a certificate still shows cert_cn %q; want empty", cn)
+	}
+}

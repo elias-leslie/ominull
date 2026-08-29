@@ -52,7 +52,13 @@ type Endpoint struct {
 	// An agent that reports nothing is "none" and is never offered a package.
 	UpdateCapability string    `json:"update_capability"`
 	Status           string    `json:"status"` // online, offline
-	IsIsolated       bool      `json:"is_isolated"`
+	// CertCN is the common name of the client certificate this endpoint last
+	// reported under, or empty if it has only ever reported under the tenant
+	// API key. It is what tells an operator whether the fleet is ready for
+	// --client-certs required, which otherwise has to be discovered by turning
+	// it on and seeing who falls off.
+	CertCN     string `json:"cert_cn"`
+	IsIsolated bool   `json:"is_isolated"`
 	LastSeenAt       time.Time `json:"last_seen_at"`
 	CreatedAt        time.Time `json:"created_at"`
 }
@@ -388,6 +394,7 @@ func (s *Store) initSchema() error {
 		update_capability TEXT DEFAULT "",
 		status TEXT NOT NULL,
 		is_isolated INTEGER NOT NULL DEFAULT 0,
+		cert_cn TEXT DEFAULT "",
 		last_seen_at DATETIME NOT NULL,
 		created_at DATETIME NOT NULL
 	);
@@ -580,6 +587,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN role_tag TEXT DEFAULT 'workstation'",
 		"ALTER TABLE endpoints ADD COLUMN installed_software TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN update_capability TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN cert_cn TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
@@ -905,6 +913,19 @@ func (s *Store) GetSetting(key string) (string, error) {
 	return val, err
 }
 
+// SetEndpointCertCN records the certificate an endpoint reported under, or
+// clears it when the endpoint reports without one. It is written on every
+// check-in rather than only on change: a fleet that quietly stopped presenting
+// certificates would otherwise keep showing the last one it ever sent, which is
+// the reading an operator would act on before turning --client-certs required
+// on and taking the fleet down.
+func (s *Store) SetEndpointCertCN(endpointID, cn string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE endpoints SET cert_cn = ? WHERE id = ?", cn, endpointID)
+	return err
+}
+
 func (s *Store) SetSetting(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -986,12 +1007,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1006,7 +1027,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 		if err := rows.Scan(
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
-			&ep.Status, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1023,12 +1044,12 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
-		&ep.Status, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1795,12 +1816,17 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 	summary.DiurnalBaseline = baseline
 	summary.DiurnalLive = live
 
-	// 8. Top Network Talkers (Processes by flow count and bandwidth)
+	// 8. Top Network Talkers.
+	//
+	// Ranked by bytes, because bytes is what the card prints. Ranking by flow
+	// count and printing bytes put the list out of order on its own numbers -
+	// a process with 5.1 MB sat above one with 6.2 MB - which reads as a broken
+	// table rather than as a different question being answered.
 	var ttQuery string
 	if tenantID != "" {
-		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles WHERE tenant_id = ? GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
+		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles WHERE tenant_id = ? GROUP BY process_name ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 10"
 	} else {
-		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
+		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles GROUP BY process_name ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 10"
 	}
 	ttRows, err := s.db.Query(ttQuery, args...)
 	if err == nil {
@@ -1814,12 +1840,14 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 		ttRows.Close()
 	}
 
-	// 9. GeoIP Country Distribution & Threat Metrics
+	// 9. GeoIP Country Distribution & Threat Metrics. Ranked by bytes for the
+	// same reason as the talkers above; the flow count is carried alongside so
+	// nothing is lost.
 	var geoQuery string
 	if tenantID != "" {
-		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events WHERE tenant_id = ? GROUP BY country ORDER BY COUNT(*) DESC LIMIT 12"
+		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events WHERE tenant_id = ? GROUP BY country ORDER BY SUM(bytes_in + bytes_out) DESC LIMIT 12"
 	} else {
-		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events GROUP BY country ORDER BY COUNT(*) DESC LIMIT 12"
+		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events GROUP BY country ORDER BY SUM(bytes_in + bytes_out) DESC LIMIT 12"
 	}
 	gRows, err := s.db.Query(geoQuery, args...)
 	if err == nil {

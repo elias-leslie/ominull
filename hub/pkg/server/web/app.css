@@ -1806,7 +1806,7 @@ p.pending {
 .topo-canvas svg {
   display: block;
   width: 100%;
-  height: 420px;
+  height: 560px;
 }
 
 .topo-canvas .edge {
@@ -2120,4 +2120,17 @@ p.pending {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* How an agented endpoint proved who it is. Muted when it holds a certificate
+   - that is the expected state and should not compete with the row - and
+   warning-coloured when it is reporting under the tenant key alone, because
+   that is the row an operator has to act on before requiring certificates. */
+.auth {
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+.auth[data-bound="false"] {
+  color: var(--warn);
 }

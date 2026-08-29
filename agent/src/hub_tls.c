@@ -456,17 +456,27 @@ static void DeclareNoClientCert(HINTERNET hRequest) {
                      WINHTTP_NO_CLIENT_CERT_CONTEXT, 0);
 }
 
+/* g_cached is the certificate this process presents. It is file scope rather
+ * than a function static because Hub_RetryWithoutClientCert has to be able to
+ * put it down: a certificate that loses handshakes is worse than none. */
+static PCCERT_CONTEXT g_cached = NULL;
+
+/* Set once a certificate has proved it cannot complete a handshake. Without it
+ * the retry window would reload the same unusable certificate every minute and
+ * pay a failed send for it on every request. Re-enrolment is followed by a
+ * restart, which is when it is worth trying again. */
+static bool g_certUnusable = false;
+
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
-    static PCCERT_CONTEXT cached = NULL;
     static DWORD lastAttempt = 0;
     static bool complained = false;
 
-    if (!Hub_UsesTLS(config) || !config->client_pfx_path[0]) {
+    if (!Hub_UsesTLS(config) || !config->client_pfx_path[0] || g_certUnusable) {
         DeclareNoClientCert((HINTERNET)hRequest);
         return false;
     }
 
-    if (!cached) {
+    if (!g_cached) {
         DWORD now = GetTickCount();
         /* Between retries there is still nothing to present, and the request
          * still has to say so - leaving it undeclared here made every request
@@ -481,9 +491,9 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
         /* The store copy is preferred over the archive: it is the one whose key
          * schannel can actually use, and reaching for it first means a restart
          * does not import a second container for the same identity. */
-        cached = FindInMachineStore(config->endpoint_id);
-        if (!cached) cached = LoadClientCertFromPFX(config->client_pfx_path);
-        if (!cached) {
+        g_cached = FindInMachineStore(config->endpoint_id);
+        if (!g_cached) g_cached = LoadClientCertFromPFX(config->client_pfx_path);
+        if (!g_cached) {
             if (!complained) {
                 complained = true;
                 fprintf(stderr, "[!] No usable client certificate at %s; reporting under the API "
@@ -498,7 +508,7 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
     }
 
     if (!WinHttpSetOption((HINTERNET)hRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
-                          (LPVOID)cached, sizeof(CERT_CONTEXT))) {
+                          (LPVOID)g_cached, sizeof(CERT_CONTEXT))) {
         DeclareNoClientCert((HINTERNET)hRequest);
         return false;
     }
@@ -510,9 +520,36 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
  * a renegotiation, or a hub that asks only on some connections can still
  * produce 12044 afterwards. The caller then resends once with the option set,
  * which is the sequence Microsoft documents, rather than reporting a transport
- * failure for a question it could have answered. */
+ * failure for a question it could have answered.
+ *
+ * It also covers the opposite failure, which cost this project two releases: a
+ * certificate that is present, valid, and unusable. Whatever the reason - a key
+ * schannel cannot sign with, a container removed underneath the store entry, an
+ * algorithm the host has since disabled - the handshake fails, and every request
+ * fails the same way, including the download of the release that would fix it.
+ * An endpoint must never be able to lock itself out of its own updates. So a
+ * secure-channel failure on a request that offered a certificate puts that
+ * certificate down and retries without it: the endpoint drops to the API key,
+ * says so once, and stays reachable. If the hub is in --client-certs required
+ * the retry is refused too and the endpoint goes visibly offline, which is the
+ * correct outcome - it is no longer able to prove who it is. */
 bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
-    if (err != ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) return false;
-    DeclareNoClientCert((HINTERNET)hRequest);
-    return true;
+    if (err == ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) {
+        DeclareNoClientCert((HINTERNET)hRequest);
+        return true;
+    }
+
+    if (err == ERROR_WINHTTP_SECURE_FAILURE && g_cached) {
+        fprintf(stderr, "[!] The client certificate this endpoint holds cannot complete a TLS "
+                        "handshake (WinHTTP error %lu); dropping it and reporting under the API "
+                        "key alone. Re-run enrolment to replace it.\n", err);
+        CertFreeCertificateContext(g_cached);
+        g_cached = NULL;
+        g_clientCertLoaded = false;
+        g_certUnusable = true;
+        DeclareNoClientCert((HINTERNET)hRequest);
+        return true;
+    }
+
+    return false;
 }

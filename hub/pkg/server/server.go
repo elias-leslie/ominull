@@ -1540,6 +1540,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				CreatedAt:        time.Now().UTC(),
 			})
 
+			// Record how this endpoint authenticated, not just that it did.
+			// UpsertEndpoint deliberately does not carry it: the certificate is
+			// a property of the connection, not of the batch, and an endpoint
+			// that stops presenting one has to stop showing one.
+			if err := s.store.SetEndpointCertCN(batch.EndpointID, r.Header.Get("X-Client-CN")); err != nil {
+				log.Printf("[-] Could not record the certificate identity for %s: %v", batch.EndpointID, err)
+			}
+
 			for i := range batch.Events {
 				batch.Events[i].TenantID = tenantID
 				batch.Events[i].EndpointID = batch.EndpointID

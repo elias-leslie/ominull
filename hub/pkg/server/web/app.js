@@ -44,6 +44,12 @@
   /* Matches the hub's page size for /api/v1/anomalies. A full page means "this
      many or more", never "exactly this many". */
   var ANOMALY_PAGE = 100;
+  /* The hub answers GET /api/v1/events with at most this many rows. */
+  var EVENT_PAGE = 100;
+
+  /* Renders a page-limited length honestly: "100+" when the page came back
+     full, because the real total is not knowable from it. */
+  function capped(n, page) { return n >= page ? String(page) + "+" : String(n); }
 
   function h(tag, props) {
     var el = document.createElement(tag);
@@ -223,6 +229,7 @@
     endpoints: [],
     assetGraph: [],
     scanAssets: [],
+    locations: [],
     inference: null,
     coverage: null,
     anomalies: [],
@@ -1018,6 +1025,7 @@
     quarantined: { label: "Quarantined", test: function (a) { return a.isolated || a.meshed; } },
     outdated: { label: "Agent outdated", test: function (a) { return a.stale; } },
     risky: { label: "Risky ports", test: function (a) { return a.riskyPorts > 0; } },
+    keyonly: { label: "Key only, no cert", test: function (a) { return a.evidence.agent && !(a.endpoint && a.endpoint.cert_cn); } },
     offline: { label: "Offline", test: function (a) { return a.evidence.agent && !a.online; } }
   };
 
@@ -1050,7 +1058,11 @@
       quarantined: count(function (x) { return x.isolated || x.meshed; }),
       outdated: count(function (x) { return x.stale; }),
       risky: count(function (x) { return x.riskyPorts > 0; }),
-      offline: count(function (x) { return x.evidence.agent && !x.online; })
+      offline: count(function (x) { return x.evidence.agent && !x.online; }),
+      /* An agented asset reporting under the tenant API key alone cannot be
+         told from any other endpoint holding the same key. This is the number
+         that has to reach zero before --client-certs required is safe. */
+      keyOnly: count(function (x) { return x.evidence.agent && !(x.endpoint && x.endpoint.cert_cn); })
     };
   }
 
@@ -1104,6 +1116,7 @@
       { id: "noagent", label: "No agent", value: stats.noagent, tone: stats.noagent ? "warn" : "" },
       { id: "quarantined", label: "Quarantined", value: stats.quarantined, tone: stats.quarantined ? "crit" : "" },
       { id: "outdated", label: "Agent outdated", value: stats.outdated, tone: stats.outdated ? "warn" : "" },
+      { id: "keyonly", label: "Key only, no cert", value: stats.keyOnly, tone: stats.keyOnly ? "warn" : "" },
       { id: "risky", label: "Risky ports", value: stats.risky, tone: stats.risky ? "warn" : "" }
     ];
 
@@ -1128,6 +1141,21 @@
       if (spark) tile.appendChild(spark);
       strip.appendChild(tile);
     });
+  }
+
+  /* Prefers a location's declared CIDR, falls back to a /24 around a managed
+     endpoint's address, and only then to the demo subnet. */
+  function suggestedSubnet() {
+    var locs = arrayOf(state.locations);
+    for (var i = 0; i < locs.length; i++) {
+      if (locs[i] && locs[i].subnet_cidr) return locs[i].subnet_cidr;
+    }
+    for (var j = 0; j < state.assets.length; j++) {
+      var ip = state.assets[j].ip || "";
+      var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(ip);
+      if (m) return m[1] + "." + m[2] + "." + m[3] + ".0/24";
+    }
+    return "10.0.4.0/24";
   }
 
   function inferredCount() {
@@ -1182,9 +1210,15 @@
     if (state.section === "audit") {
       return [
         { label: "Audit entries", value: String(state.audit.length) },
-        { label: "Recent events", value: String(state.events.length) },
-        { label: "Open alerts", value: String(state.anomalies.length), tone: state.anomalies.length ? "warn" : "" },
-        { label: "Blocked flows", value: String(state.events.filter(function (e) { return e.action === "BLOCK"; }).length), tone: "crit" },
+        /* These two are pages, not totals - the hub returns at most EVENT_PAGE
+           events and ANOMALY_PAGE alerts. Rendering the page size as a count
+           made a busy fleet and a quiet one read identically at 100. */
+        { label: "Recent events", value: capped(state.events.length, EVENT_PAGE) },
+        { label: "Open alerts", value: capped(state.anomalies.length, ANOMALY_PAGE), tone: state.anomalies.length ? "warn" : "" },
+        /* Blocked flows comes from the analytics summary, which counts them
+           all; counting BLOCKs inside the page would have reported at most the
+           page size no matter how many there were. */
+        { label: "Blocked flows", value: String((state.analytics && state.analytics.total_blocks) || 0), tone: (state.analytics && state.analytics.total_blocks) ? "crit" : "" },
         { label: "Assets known", value: String(stats.total) },
         { label: "Agented", value: String(stats.agented) }
       ];
@@ -1666,6 +1700,24 @@
       ? h("span", { cls: "ago", text: asset.ports.length + (asset.riskyPorts ? " \u00b7 " + asset.riskyPorts + " risky" : "") })
       : h("span", { cls: "dim-3", text: asset.scan ? "0" : "\u2014" });
 
+    /* The Identity column says what the host is; for an agented one it also has
+       to say who the hub believes it is. An endpoint reporting under the tenant
+       key alone is indistinguishable from any other holding that key, and an
+       operator has no other place to see that before turning
+       --client-certs required on. */
+    var identityCell = h("td", { cls: "dim" }, h("span", { text: asset.identity }));
+    if (asset.endpoint) {
+      var cn = asset.endpoint.cert_cn || "";
+      identityCell.appendChild(document.createTextNode(" "));
+      identityCell.appendChild(h("span", {
+        cls: "auth", "data-bound": cn ? "true" : "false",
+        title: cn
+          ? "Last reported under client certificate \u201c" + cn + "\u201d"
+          : "Reports under the tenant API key alone. Any agent holding that key can report as this endpoint.",
+        text: cn ? "\u00b7 cert" : "\u00b7 key only"
+      }));
+    }
+
     /* Cell order must match the header in renderAssets():
        select \u00b7 Asset \u00b7 Address \u00b7 Identity \u00b7 Known by \u00b7 State \u00b7 Exposure \u00b7
        Agent \u00b7 Last seen \u00b7 menu */
@@ -1690,7 +1742,7 @@
       h("td", {}, check),
       nameCell,
       h("td", {}, h("span", { cls: "ip", text: asset.ip || "\u2014" })),
-      h("td", { cls: "dim" }, h("span", { text: asset.identity })),
+      identityCell,
       h("td", {}, evidenceStrip(asset)),
       h("td", {}, stateBadge(asset.state)),
       h("td", {}, exposure),
@@ -1821,7 +1873,12 @@
     var view = $("view");
     var cov = state.coverage || {};
 
-    var subnetInput = h("input", { type: "text", id: "scan-subnet", value: "10.0.4.0/24", placeholder: "10.0.4.0/24" });
+    /* The hub knows the network it is on - the location carries a CIDR and
+       every managed endpoint carries an address. Defaulting the field to a
+       demo subnet meant the first scan an operator ran on a real deployment
+       swept a network that does not exist and reported nothing found. */
+    var defaultSubnet = suggestedSubnet();
+    var subnetInput = h("input", { type: "text", id: "scan-subnet", value: defaultSubnet, placeholder: defaultSubnet });
     var profileSel = h("select", { id: "scan-profile" },
       h("option", { value: "quick", text: "Quick" }),
       h("option", { value: "standard", text: "Standard" }),
@@ -1935,7 +1992,11 @@
     });
     if (!ordered.length) return {};
 
-    var W = 900, H = 420, cx = W / 2, cy = H / 2;
+    /* 900x560, not 900x420. The outer ring carries most of the nodes, and on
+       the shorter box its rows sat close enough that captions collided out of
+       existence - the graph was dense because the canvas was short, not
+       because the network is. */
+    var W = 900, H = 560, cx = W / 2, cy = H / 2;
     var pos = {};
     var hub = ordered[0];
     pos[hub.id] = { x: cx, y: cy, r: 13 };
@@ -1955,8 +2016,8 @@
         pos[n.id] = { x: cx + Math.cos(a) * radiusX, y: cy + Math.sin(a) * radiusY, r: r };
       });
     };
-    place(neighbours, 150, 118, -Math.PI / 2, 9);
-    place(outer, 330, 175, -Math.PI / 2 + 0.35, 8);
+    place(neighbours, 150, 150, -Math.PI / 2, 9);
+    place(outer, 340, 240, -Math.PI / 2 + 0.35, 8);
     return { pos: pos, width: W, height: H };
   }
 
@@ -2076,13 +2137,19 @@
       occupied.push(box);
       showCaption[n.id] = true;
     });
-    function labelIsClear(x, y) {
+    function boxIsClear(box) {
       for (var i = 0; i < occupied.length; i++) {
         var o = occupied[i];
-        if (x > o.x0 - 9 && x < o.x1 + 9 && y > o.y0 - 7 && y < o.y1 + 7) return false;
+        if (box.x0 < o.x1 + 2 && box.x1 > o.x0 - 2 && box.y0 < o.y1 + 2 && box.y1 > o.y0 - 2) return false;
       }
       return true;
     }
+
+    /* The flow an edge has to carry before it is worth naming: the 24th
+       heaviest, so a small graph labels everything and a large one labels the
+       traffic that matters. */
+    var pairFlows = Object.keys(pairs).map(function (k) { return pairs[k].flow; }).sort(function (x, y) { return y - x; });
+    var labelFloor = pairFlows.length > 24 ? pairFlows[23] : 0;
 
     Object.keys(pairs).sort().forEach(function (id) {
       var p = pairs[id];
@@ -2103,11 +2170,23 @@
         }
       }));
       var lx = (a.x + b.x) / 2, ly = (a.y + b.y) / 2 - 3;
-      if (p.topPort && labelIsClear(lx, ly)) {
-        labelLayer.appendChild(s("text", {
-          "class": "elabel", x: lx, y: ly, "text-anchor": "middle",
-          text: String(p.topPort)
-        }));
+      /* Two rules, and the graph needs both. Only edges that carry enough flow
+         to be worth naming get a label at all - 241 of them, most reading
+         "443", is not information. And a label that is drawn has to claim the
+         space it occupies, or the next one lands on top of it; testing a bare
+         midpoint against other labels' boxes let every one of them through. */
+      var worthLabelling = id === state.topoEdgeSelected || p.flow >= labelFloor;
+      if (p.topPort && worthLabelling) {
+        var txt = String(p.topPort);
+        var lhalf = txt.length * 2.6 + 1;
+        var lbox = { x0: lx - lhalf, x1: lx + lhalf, y0: ly - 5, y1: ly + 3 };
+        if (boxIsClear(lbox)) {
+          occupied.push(lbox);
+          labelLayer.appendChild(s("text", {
+            "class": "elabel", x: lx, y: ly, "text-anchor": "middle",
+            text: txt
+          }));
+        }
       }
     });
 
@@ -2317,7 +2396,7 @@
       h("div", { cls: "card-body" },
         talkers.length
           ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
-              function (t) { return t.process || "\u2014"; },
+              function (t) { return (t.process || "\u2014") + " \u00b7 " + (Number(t.flow_count) || 0) + " flows"; },
               function (t) { return bytes(t.total_bytes); })
           : h("div", { cls: "empty", text: "No process attribution yet." })));
 
@@ -2325,8 +2404,8 @@
     var geoCard = card("Destinations by country",
       h("div", { cls: "card-body" },
         geo.length
-          ? barList(geo, function (g) { return Number(g.flow_count) || 0; },
-              function (g) { return (g.country_name || g.country) + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
+          ? barList(geo, function (g) { return Number(g.total_bytes) || 0; },
+              function (g) { return (g.country_name || g.country) + " \u00b7 " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
               function (g) { return bytes(g.total_bytes); })
           : h("div", { cls: "empty", text: "No geo data." })));
 
@@ -3260,6 +3339,10 @@
       request("/api/v1/assets").then(function (d) { state.assetGraph = arrayOf(d); }),
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
+      /* Only used to seed the discovery scan field, but it is the hub's own
+         answer to "what network is this", which beats guessing from an
+         address. */
+      request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
       request("/api/v1/anomalies").then(function (d) {
         var page = arrayOf(d);
         /* Recorded before the acknowledged ones are filtered out: a full page
