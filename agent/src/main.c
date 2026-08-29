@@ -71,6 +71,13 @@ int main(int argc, char* argv[]) {
         return Service_Uninstall() ? 0 : 1;
     }
 
+    // Runs before either mode starts: if this process is the result of an
+    // update, retire the previous binary; if a new build keeps failing to come
+    // back, put the previous one back instead.
+    if (doConsole || doService) {
+        Update_CheckStartup(&config);
+    }
+
     if (doConsole) {
         printf("[*] Starting Ominull Agent in Console Mode (PID: %lu)...\n", GetCurrentProcessId());
         printf("[*] Connecting to Hub at: %s (Key: %s)\n", config.hub_url, config.api_key);

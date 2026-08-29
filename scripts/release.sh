@@ -15,6 +15,8 @@
 #   OMINULL_DEPLOY_CMD  Command that ships build output to the hub host. Defaults to
 #                       scripts/deploy_remote.sh, which is deployment-specific and
 #                       therefore untracked; see deploy_remote.sh.example.
+#   OMINULL_SIGNING_KEY Release signing key, from the operations vault. Required:
+#                       agents refuse any package that is not signed with it.
 #
 set -euo pipefail
 
@@ -60,6 +62,13 @@ if [ "${DO_HUB}" -eq 1 ]; then
 
     echo "[*] Building cross-platform agent packages..."
     "${ROOT_DIR}/scripts/build-packages.sh"
+
+    # Agents verify every package against a key compiled into them and install
+    # nothing that fails, and the hub refuses to advertise a release with no
+    # signature beside it. So signing is not a release step that can be skipped
+    # - an unsigned build is one the fleet will simply never take.
+    echo "[*] Signing packages with the release key..."
+    "${ROOT_DIR}/scripts/sign-release.sh"
 
     echo "[*] Shipping hub build and agent packages to the hub host..."
     if [ -x "${DEPLOY_CMD}" ]; then
@@ -107,6 +116,7 @@ done
 
 echo "[!] Fleet did not fully converge within the timeout. Remaining:"
 api GET /api/v1/agents/update-status | jq '.outdated' 2>/dev/null || true
-echo "    Platforms without self-update (Windows/macOS) need the SSH push-deployer:"
+echo "    Endpoints still on an agent from before self-update shipped need one manual"
+echo "    push to get onto a build that can update itself:"
 echo "    scripts/ominull-cli deploy <ip> <user> <password>"
 exit 1

@@ -76,9 +76,15 @@ type TelemetryBatchMessage struct {
 	// of forking a second one. The Linux and macOS agents have always sent
 	// this field; until 1.2.0 the hub had nowhere to put it and encoding/json
 	// discarded it, which left every agented asset keyed on address alone.
-	MAC           string          `json:"mac"`
-	DriverVersion string          `json:"driver_version"`
-	Events        []storage.Event `json:"events"`
+	MAC           string `json:"mac"`
+	DriverVersion string `json:"driver_version"`
+	// UpdateCapability is the package format the agent can install for
+	// itself. Deciding that from the reported OS string was always fragile -
+	// that string is a display label, and v1.2.0 changed the Windows one from
+	// a hardcoded literal to a detected value - so the agent states it
+	// outright. Absent means "none", which is what a pre-1.3.0 agent sends.
+	UpdateCapability string          `json:"update_capability"`
+	Events           []storage.Event `json:"events"`
 }
 
 type CommandMessage struct {
@@ -370,8 +376,8 @@ func (s *Server) desiredAgentVersion() string {
 	return s.agentVersion
 }
 
-// agentPackageURL builds the download URL for an agent package of the given version.
-func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
+// downloadBase is the URL prefix agents fetch packages from.
+func (s *Server) downloadBase(r *http.Request) string {
 	baseURL := strings.TrimSuffix(s.hubURL, "/")
 	if baseURL == "" {
 		scheme := "http"
@@ -383,14 +389,93 @@ func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
 		}
 		baseURL = scheme + "://" + r.Host
 	}
+	return baseURL
+}
+
+// agentPackageName is the on-disk filename of an agent package. Signature and
+// digest sidecars hang off it, so name resolution has exactly one home.
+func agentPackageName(version, pkg string) string {
 	switch pkg {
 	case "windows":
-		return baseURL + "/download/ominull-agent-windows-" + version + ".tar.gz"
+		return "ominull-agent-windows-" + version + ".tar.gz"
 	case "macos":
-		return baseURL + "/download/ominull-agent-macos-" + version + ".tar.gz"
+		return "ominull-agent-macos-" + version + ".tar.gz"
 	default:
-		return baseURL + "/download/ominull-agent_" + version + "_amd64.deb"
+		return "ominull-agent_" + version + "_amd64.deb"
 	}
+}
+
+// agentPackageURL builds the download URL for an agent package of the given version.
+func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
+	return s.downloadBase(r) + "/download/" + agentPackageName(version, pkg)
+}
+
+// agentUpdateDescriptor assembles everything an agent needs to fetch a release
+// and prove it is genuine before installing it.
+//
+// It fails closed. Both the digest and the detached signature must be on disk
+// beside the package or no descriptor is produced at all. Agents verify against
+// a public key compiled into them rather than anything the hub serves, so an
+// unsigned release is one every agent would refuse anyway; advertising it just
+// turns a release mistake into a fleet of failed downloads. Catching it here
+// means an unsigned release shows up as "not offered" in one place instead of
+// as an install failure on every endpoint.
+func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (map[string]string, bool) {
+	name := agentPackageName(version, pkg)
+	if _, err := os.Stat(filepath.Join(s.binaryDir, name)); err != nil {
+		return nil, false
+	}
+	raw, err := os.ReadFile(filepath.Join(s.binaryDir, name+".sha256"))
+	if err != nil {
+		return nil, false
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 || len(fields[0]) != 64 {
+		return nil, false
+	}
+	if _, err := os.Stat(filepath.Join(s.binaryDir, name+".sig")); err != nil {
+		return nil, false
+	}
+	base := s.downloadBase(r)
+	return map[string]string{
+		"version":   version,
+		"package":   pkg,
+		"url":       base + "/download/" + name,
+		"signature": base + "/download/" + name + ".sig",
+		"sha256":    fields[0],
+	}, true
+}
+
+// agentPackageForCapability maps what an agent says it can install onto the
+// package the hub serves. An agent that claims nothing is offered nothing.
+func agentPackageForCapability(capability string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(capability)) {
+	case "deb":
+		return "deb", true
+	case "pkg":
+		return "macos", true
+	case "exe":
+		return "windows", true
+	}
+	return "", false
+}
+
+// updatePackageFor resolves the package an endpoint can install for itself.
+//
+// The reported capability is authoritative. An endpoint that has never
+// reported one is running an agent from before the field existed, and the only
+// such agent that can install anything is the Linux one - so the legacy
+// fallback covers precisely that case and nothing else. A pre-1.3.0 Windows or
+// macOS agent cannot act on a descriptor at all, and is honestly reported as
+// needing the push-deployer rather than handed a package it will ignore.
+func updatePackageFor(capability, osName string) (string, bool) {
+	if pkg, ok := agentPackageForCapability(capability); ok {
+		return pkg, true
+	}
+	if strings.TrimSpace(capability) == "" && agentPackageKind(osName) == "deb" && strings.Contains(strings.ToLower(osName), "linux") {
+		return "deb", true
+	}
+	return "", false
 }
 
 // agentPackageKind maps a reported OS string onto the packaging flavour the hub serves.
@@ -455,18 +540,25 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		"update_available": outdated,
 	}
 	if outdated {
-		pkg := agentPackageKind(ep.OS)
+		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability, ep.OS)
+		if !selfInstallable {
+			pkg = agentPackageKind(ep.OS)
+		}
 		resp["update_version"] = desired
 		resp["package"] = pkg
 		resp["update_url"] = s.agentPackageURL(r, desired, pkg)
+		if desc, signed := s.agentUpdateDescriptor(r, desired, pkg); signed {
+			resp["sha256"] = desc["sha256"]
+			resp["signature_url"] = desc["signature"]
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
 // handleAgentsUpdate lets an operator push a new agent version to endpoints.
-// Linux endpoints self-update over their existing hub connection; other platforms
-// are reported back as requiring the SSH/WinRM push-deployer.
+// Endpoints that report an update capability self-update over their existing hub
+// connection; the rest are reported back as requiring the SSH/WinRM push-deployer.
 func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Role") != "admin" {
 		http.Error(w, `{"error":"admin role required"}`, http.StatusForbidden)
@@ -518,13 +610,22 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		if compareVersions(ep.DriverVersion, version) >= 0 {
 			continue // already up to date
 		}
-		if strings.Contains(strings.ToLower(ep.OS), "linux") {
-			if err := s.store.RequestAgentUpdate(ep.ID, version); err == nil {
-				scheduled = append(scheduled, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "from": ep.DriverVersion, "to": version})
-			}
+		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability, ep.OS)
+		if !selfInstallable {
+			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "endpoint reports no self-update capability; use the SSH/WinRM push-deployer"})
 			continue
 		}
-		unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "self-update not supported on this platform yet; use the SSH/WinRM push-deployer"})
+		// Refuse to queue a job for a release the endpoint could never install.
+		// The agent verifies the signature itself and would reject it, so an
+		// unsigned release must surface here as one clear answer rather than as
+		// a queued job that quietly never completes.
+		if _, signed := s.agentUpdateDescriptor(r, version, pkg); !signed {
+			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "no signed " + agentPackageName(version, pkg) + " on the hub; sign the release with scripts/sign-release.sh and redeploy"})
+			continue
+		}
+		if err := s.store.RequestAgentUpdate(ep.ID, version); err == nil {
+			scheduled = append(scheduled, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "from": ep.DriverVersion, "to": version})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1130,18 +1231,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				ip = batch.IP
 			}
 			s.store.UpsertEndpoint(storage.Endpoint{
-				ID:            batch.EndpointID,
-				TenantID:      tenantID,
-				LocationID:    batch.LocationID,
-				RoleTag:       batch.Role,
-				Hostname:      batch.Hostname,
-				OS:            batch.OS,
-				IP:            ip,
-				MAC:           batch.MAC,
-				DriverVersion: batch.DriverVersion,
-				Status:        "online",
-				LastSeenAt:    time.Now().UTC(),
-				CreatedAt:     time.Now().UTC(),
+				ID:               batch.EndpointID,
+				TenantID:         tenantID,
+				LocationID:       batch.LocationID,
+				RoleTag:          batch.Role,
+				Hostname:         batch.Hostname,
+				OS:               batch.OS,
+				IP:               ip,
+				MAC:              batch.MAC,
+				DriverVersion:    batch.DriverVersion,
+				UpdateCapability: batch.UpdateCapability,
+				Status:           "online",
+				LastSeenAt:       time.Now().UTC(),
+				CreatedAt:        time.Now().UTC(),
 			})
 
 			for i := range batch.Events {
@@ -1186,11 +1288,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				"quarantined_peers": qIPs,
 			}
 			if target, outdated := s.pendingAgentUpdate(batch.EndpointID, batch.DriverVersion); outdated {
-				pkg := agentPackageKind(batch.OS)
-				resp["agent_update"] = map[string]string{
-					"version": target,
-					"package": pkg,
-					"url":     s.agentPackageURL(r, target, pkg),
+				if pkg, ok := updatePackageFor(batch.UpdateCapability, batch.OS); ok {
+					if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {
+						resp["agent_update"] = desc
+					}
 				}
 			}
 

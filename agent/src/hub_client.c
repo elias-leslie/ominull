@@ -153,9 +153,13 @@ static const char* EventTypeToString(uint32_t evtType) {
     }
 }
 
-bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count) {
+bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
+                            char* respOut, size_t respCap) {
     if (!config) {
         return false;
+    }
+    if (respOut && respCap > 0) {
+        respOut[0] = '\0';
     }
 
     // Parse host and port from hub_url (e.g. https://omi.example.com or http://10.0.0.58:9999)
@@ -204,7 +208,7 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
      * records the agent's claims at confidence 1.0, so a literal string here
      * would enter the asset model as ground truth and outrank a real scan. */
     int offset = snprintf(jsonBuf, jsonCapacity,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"events\":[",
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"exe\",\"events\":[",
         config->endpoint_id, loc, role, config->hostname,
         config->os_version, config->primary_ip, config->primary_mac,
         OMINULL_AGENT_VERSION
@@ -336,6 +340,24 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         if (bResults) {
             DWORD dwSize = sizeof(dwStatusCode);
             WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
+
+            /* Keep the body. Until now it was discarded, which is why this
+             * agent never noticed the update descriptor the hub has been
+             * sending it all along. */
+            if (respOut && respCap > 1) {
+                size_t used = 0;
+                for (;;) {
+                    DWORD avail = 0;
+                    if (!WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0) break;
+                    DWORD want = (DWORD)(respCap - 1 - used);
+                    if (want == 0) break;
+                    if (avail < want) want = avail;
+                    DWORD got = 0;
+                    if (!WinHttpReadData(hRequest, respOut + used, want, &got) || got == 0) break;
+                    used += got;
+                }
+                respOut[used] = '\0';
+            }
         }
     }
 

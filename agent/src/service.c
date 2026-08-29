@@ -104,16 +104,23 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             size_t socketCount = PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
             batchCount += socketCount;
 
-            Hub_SendTelemetryBatch(config, eventBatch, batchCount);
+            char hubResponse[4096];
+            Hub_SendTelemetryBatch(config, eventBatch, batchCount, hubResponse, sizeof(hubResponse));
             batchCount = 0;
             lastFlush = now;
+
+            // The hub answers with an agent_update descriptor when a newer
+            // release is published. Update_Apply verifies it against the
+            // pinned release key before anything is installed, and does not
+            // return if the swap succeeds.
+            Update_Apply(config, hubResponse);
         }
 
         Sleep(100);
     }
 
     if (batchCount > 0) {
-        Hub_SendTelemetryBatch(config, eventBatch, batchCount);
+        Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0);
     }
 
     if (hDriver != INVALID_HANDLE_VALUE) {
@@ -156,6 +163,9 @@ static void WINAPI ServiceMain(DWORD argc, LPSTR *argv) {
 // from the registered binPath, so without this the service ran with an empty hub URL
 // and key and could never report telemetry.
 void Service_SetConfig(const AGENT_CONFIG* config) {
+    // Repair the recovery configuration on every start, so a service that was
+    // upgraded in place rather than reinstalled still has what self-update needs.
+    Service_EnsureRecovery();
     if (config) {
         g_Config = *config;
         g_Config.is_service = true;
@@ -168,6 +178,79 @@ void Service_Run(void) {
         {NULL, NULL}
     };
     StartServiceCtrlDispatcherA(ServiceTable);
+}
+
+// Service_EnsureRecovery registers the SCM recovery actions the self-update
+// path depends on, and does it every time the agent starts rather than only at
+// install.
+//
+// A service cannot synchronously stop and start itself, and spawning a detached
+// "sc stop && sc start" makes the update depend on a process that is about to be
+// killed. Instead the agent exits non-zero after swapping the binary and the SCM
+// restarts it from the registered binPath - which still carries this endpoint's
+// key and identity, so nothing re-registers the service.
+//
+// Registering this only at install time would have left every service upgraded
+// in place without any of it: CreateService returns ERROR_SERVICE_EXISTS on an
+// already-installed service, so --install never reaches the configuration. An
+// agent that cannot restart itself cannot finish an update, so this is applied
+// on every start and repairs itself.
+void Service_EnsureRecovery(void) {
+    char binaryPath[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) return;
+
+    char installDir[MAX_PATH];
+    snprintf(installDir, sizeof(installDir), "%s", binaryPath);
+    char* slash = strrchr(installDir, '\\');
+    if (slash) *slash = '\0';
+
+    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!schSCManager) return;
+    // SERVICE_START is required alongside SERVICE_CHANGE_CONFIG, not optional:
+    // the recovery actions include SC_ACTION_RESTART, and the SCM checks that
+    // the caller may actually start the service before it will record an action
+    // that starts it. Without it ChangeServiceConfig2 fails with
+    // ERROR_ACCESS_DENIED even for LocalSystem - OpenService still hands back a
+    // perfectly valid handle, so the failure surfaces only at the point of use.
+    SC_HANDLE schService = OpenServiceA(schSCManager, SERVICE_NAME,
+                                        SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_CONFIG);
+    if (!schService) {
+        CloseServiceHandle(schSCManager);
+        return;
+    }
+
+    // The third action is the outer safety net: if a new binary is so broken
+    // the SCM cannot start it at all, no code of ours ever runs to notice, so
+    // the rollback has to come from outside the process.
+    char rollback[MAX_PATH * 2];
+    snprintf(rollback, sizeof(rollback),
+             "cmd.exe /c move /y \"%s\\ominulld.old\" \"%s\\ominulld.exe\"", installDir, installDir);
+
+    SC_ACTION actions[3];
+    actions[0].Type = SC_ACTION_RESTART;     actions[0].Delay = 5000;
+    actions[1].Type = SC_ACTION_RESTART;     actions[1].Delay = 5000;
+    actions[2].Type = SC_ACTION_RUN_COMMAND; actions[2].Delay = 60000;
+
+    SERVICE_FAILURE_ACTIONSA fa;
+    ZeroMemory(&fa, sizeof(fa));
+    fa.dwResetPeriod = 86400;
+    fa.lpCommand = rollback;
+    fa.cActions = 3;
+    fa.lpsaActions = actions;
+    if (!ChangeServiceConfig2A(schService, SERVICE_CONFIG_FAILURE_ACTIONS, &fa)) {
+        fprintf(stderr, "[!] Could not register service recovery actions (Error: %lu); "
+                        "self-update will install but not restart itself.\n", GetLastError());
+    }
+
+    // Without this flag the SCM applies recovery only to crashes, not to a
+    // clean non-zero exit - which is exactly how the updater signals that the
+    // binary has been replaced.
+    SERVICE_FAILURE_ACTIONS_FLAG faFlag;
+    faFlag.fFailureActionsOnNonCrashFailures = TRUE;
+    ChangeServiceConfig2A(schService, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &faFlag);
+
+    CloseServiceHandle(schService);
+    CloseServiceHandle(schSCManager);
 }
 
 bool Service_Install(const char* hubUrl, const char* apiKey) {
@@ -205,12 +288,18 @@ bool Service_Install(const char* hubUrl, const char* apiKey) {
         DWORD err = GetLastError();
         CloseServiceHandle(schSCManager);
         if (err == ERROR_SERVICE_EXISTS) {
+            // Still apply the recovery configuration. Returning here without it
+            // is how an in-place upgrade ends up with a service that installs
+            // updates but can never restart into them.
             printf("[*] Service already installed.\n");
+            Service_EnsureRecovery();
             return true;
         }
         fprintf(stderr, "[-] CreateService failed (Error: %lu)\n", err);
         return false;
     }
+
+    Service_EnsureRecovery();
 
     printf("[+] Service installed successfully: %s\n", SERVICE_NAME);
     CloseServiceHandle(schService);

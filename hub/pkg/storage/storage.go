@@ -34,21 +34,27 @@ type Location struct {
 }
 
 type Endpoint struct {
-	ID                string    `json:"id"`
-	TenantID          string    `json:"tenant_id"`
-	LocationID        string    `json:"location_id"`
-	LocationName      string    `json:"location_name"`
-	Hostname          string    `json:"hostname"`
-	OS                string    `json:"os"`
-	IP                string    `json:"ip"`
-	MAC               string    `json:"mac"`
-	RoleTag           string    `json:"role_tag"`
-	InstalledSoftware string    `json:"installed_software"`
-	DriverVersion     string    `json:"driver_version"`
-	Status            string    `json:"status"` // online, offline
-	IsIsolated        bool      `json:"is_isolated"`
-	LastSeenAt        time.Time `json:"last_seen_at"`
-	CreatedAt         time.Time `json:"created_at"`
+	ID                string `json:"id"`
+	TenantID          string `json:"tenant_id"`
+	LocationID        string `json:"location_id"`
+	LocationName      string `json:"location_name"`
+	Hostname          string `json:"hostname"`
+	OS                string `json:"os"`
+	IP                string `json:"ip"`
+	MAC               string `json:"mac"`
+	RoleTag           string `json:"role_tag"`
+	InstalledSoftware string `json:"installed_software"`
+	DriverVersion     string `json:"driver_version"`
+	// UpdateCapability is the package format this endpoint can install for
+	// itself: "deb", "pkg", "exe", or "none". The agent reports it, because
+	// the OS string is a display label and not a contract - matching on it is
+	// one string change away from silently misrouting a fleet-wide update.
+	// An agent that reports nothing is "none" and is never offered a package.
+	UpdateCapability string    `json:"update_capability"`
+	Status           string    `json:"status"` // online, offline
+	IsIsolated       bool      `json:"is_isolated"`
+	LastSeenAt       time.Time `json:"last_seen_at"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type Event struct {
@@ -57,7 +63,7 @@ type Event struct {
 	EndpointID  string    `json:"endpoint_id"`
 	Timestamp   time.Time `json:"timestamp"`
 	Layer       string    `json:"layer"`
-	Action      string    `json:"action"` // PERMIT, BLOCK
+	Action      string    `json:"action"`    // PERMIT, BLOCK
 	Direction   string    `json:"direction"` // INBOUND, OUTBOUND
 	Protocol    uint8     `json:"protocol"`
 	SrcIP       string    `json:"src_ip"`
@@ -130,8 +136,8 @@ type AnomalyAlert struct {
 type IOC struct {
 	ID         string    `json:"id"`
 	Value      string    `json:"value"`
-	Type       string    `json:"type"` // "ipv4", "cidr", "domain", "hash"
-	Source     string    `json:"source"` // "feodo", "emerging_threats", "custom"
+	Type       string    `json:"type"`        // "ipv4", "cidr", "domain", "hash"
+	Source     string    `json:"source"`      // "feodo", "emerging_threats", "custom"
 	ThreatType string    `json:"threat_type"` // "c2", "malware_dist", "scanner"
 	Confidence int       `json:"confidence"`
 	Active     bool      `json:"active"`
@@ -147,8 +153,8 @@ type Rule struct {
 	Value      string    `json:"value"`
 	Port       uint16    `json:"port"`
 	Protocol   string    `json:"protocol"` // "tcp", "udp", "any"
-	Action     string    `json:"action"` // "BLOCK", "PERMIT"
-	Scope      string    `json:"scope"` // "all", "platform", "department", "ids", "group"
+	Action     string    `json:"action"`   // "BLOCK", "PERMIT"
+	Scope      string    `json:"scope"`    // "all", "platform", "department", "ids", "group"
 	ScopeValue string    `json:"scope_value"`
 	Active     bool      `json:"active"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -161,10 +167,10 @@ type PolicyGroup struct {
 	ScopeValue  string    `json:"scope_value"` // tenant_id, location_id, endpoint_id, or role
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
-	Schedule    string    `json:"schedule"`    // "all", "business_hours", "off_hours"
-	Criteria    string    `json:"criteria"`    // JSON string: {"os":"windows","role":"db-server","subnet":"10.0.0.0/24","process":"powershell"}
-	Action      string    `json:"action"`      // BLOCK, PERMIT, ISOLATE, ALERT, THROTTLE
-	RuleType    string    `json:"rule_type"`   // "ip", "cidr", "process", "port", "domain"
+	Schedule    string    `json:"schedule"`  // "all", "business_hours", "off_hours"
+	Criteria    string    `json:"criteria"`  // JSON string: {"os":"windows","role":"db-server","subnet":"10.0.0.0/24","process":"powershell"}
+	Action      string    `json:"action"`    // BLOCK, PERMIT, ISOLATE, ALERT, THROTTLE
+	RuleType    string    `json:"rule_type"` // "ip", "cidr", "process", "port", "domain"
 	RuleValue   string    `json:"rule_value"`
 	Port        uint16    `json:"port"`
 	Protocol    string    `json:"protocol"`
@@ -256,13 +262,13 @@ type TopologyEdge struct {
 }
 
 type TopologyMetrics struct {
-	TotalNodes          int `json:"total_nodes"`
-	TotalEdges          int `json:"total_edges"`
-	AnomalousEdgeCount  int `json:"anomalous_edge_count"`
-	ManagedNodesCount   int `json:"managed_nodes_count"`
-	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
-	QuietNodesCount     int `json:"quiet_nodes_count"`
-	InferredNodesCount  int `json:"inferred_nodes_count"`
+	TotalNodes          int    `json:"total_nodes"`
+	TotalEdges          int    `json:"total_edges"`
+	AnomalousEdgeCount  int    `json:"anomalous_edge_count"`
+	ManagedNodesCount   int    `json:"managed_nodes_count"`
+	UnmanagedNodesCount int    `json:"unmanaged_nodes_count"`
+	QuietNodesCount     int    `json:"quiet_nodes_count"`
+	InferredNodesCount  int    `json:"inferred_nodes_count"`
 	WindowLabel         string `json:"window_label"`
 }
 
@@ -379,6 +385,7 @@ func (s *Store) initSchema() error {
 		role_tag TEXT DEFAULT "workstation",
 		installed_software TEXT DEFAULT "",
 		driver_version TEXT NOT NULL,
+		update_capability TEXT DEFAULT "",
 		status TEXT NOT NULL,
 		is_isolated INTEGER NOT NULL DEFAULT 0,
 		last_seen_at DATETIME NOT NULL,
@@ -572,6 +579,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN mac TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN role_tag TEXT DEFAULT 'workstation'",
 		"ALTER TABLE endpoints ADD COLUMN installed_software TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN update_capability TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
@@ -785,8 +793,8 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	}
 
 	query := `
-	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		hostname=excluded.hostname,
 		os=excluded.os,
@@ -797,13 +805,14 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		location_id=CASE WHEN excluded.location_id != '' THEN excluded.location_id ELSE endpoints.location_id END,
 		location_name=CASE WHEN excluded.location_name != '' THEN excluded.location_name ELSE endpoints.location_name END,
 		driver_version=excluded.driver_version,
+		update_capability=CASE WHEN excluded.update_capability != '' THEN excluded.update_capability ELSE endpoints.update_capability END,
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
 	if _, err := s.db.Exec(
 		query,
 		ep.ID, ep.TenantID, ep.LocationID, ep.LocationName, ep.Hostname, ep.OS, ep.IP, ep.MAC,
-		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion,
+		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion, ep.UpdateCapability,
 		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt,
 	); err != nil {
 		return err
@@ -977,12 +986,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -996,7 +1005,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 		var isoInt int
 		if err := rows.Scan(
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
-			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion,
+			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.Status, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -1014,11 +1023,11 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
-		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion,
+		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.Status, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 	)
 	if err == sql.ErrNoRows {

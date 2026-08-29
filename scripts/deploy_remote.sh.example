@@ -29,7 +29,14 @@ scp "${ROOT_DIR}/build/ominull-hub" "${PROXMOX_HOST}:/tmp/ominull-hub"
 ssh "${PROXMOX_HOST}" "pct push ${LXC_VMID} /tmp/ominull-hub /tmp/ominull-hub.new && pct exec ${LXC_VMID} -- bash -c 'chmod +x /tmp/ominull-hub.new && mv -f /tmp/ominull-hub.new ${REMOTE_BIN_DIR}/ominull-hub'"
 
 echo "[*] 4. Publishing v${VERSION} agent packages into the hub download directory..."
-for pkg in "ominull-agent_${VERSION}_amd64.deb" "ominull-agent-windows-${VERSION}.tar.gz" "ominull-agent-macos-${VERSION}.tar.gz"; do
+# The .sig and .sha256 sidecars ship with the package, not as an afterthought.
+# Agents verify a release against a key compiled into them and install nothing
+# that fails, and the hub refuses to advertise a package with no signature
+# beside it - so a package published without its sidecars is simply invisible
+# to the fleet.
+for pkg in "ominull-agent_${VERSION}_amd64.deb" "ominull-agent_${VERSION}_amd64.deb.sig" "ominull-agent_${VERSION}_amd64.deb.sha256" \
+           "ominull-agent-windows-${VERSION}.tar.gz" "ominull-agent-windows-${VERSION}.tar.gz.sig" "ominull-agent-windows-${VERSION}.tar.gz.sha256" \
+           "ominull-agent-macos-${VERSION}.tar.gz" "ominull-agent-macos-${VERSION}.tar.gz.sig" "ominull-agent-macos-${VERSION}.tar.gz.sha256"; do
     if [ -f "${ROOT_DIR}/dist/${pkg}" ]; then
         scp "${ROOT_DIR}/dist/${pkg}" "${PROXMOX_HOST}:/tmp/${pkg}"
         ssh "${PROXMOX_HOST}" "pct push ${LXC_VMID} /tmp/${pkg} ${REMOTE_BIN_DIR}/${pkg} && rm -f /tmp/${pkg}"

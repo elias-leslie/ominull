@@ -11,8 +11,24 @@
 #include <arpa/inet.h>
 #include <sys/utsname.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
 
-#define OMINULL_LINUX_AGENT_VERSION "1.2.0"
+#include "../include/release_key.h"
+
+#define OMINULL_LINUX_AGENT_VERSION "1.3.3"
+
+// Where a downloaded release is staged before it is verified and installed.
+// This must be a directory only root can write. The previous implementation
+// staged in /tmp under a name derived from the advertised version - fully
+// predictable, in a world-writable directory, then installed as root with
+// dpkg, whose maintainer scripts also run as root. That gave any local user
+// two ways to become root: plant the file, or win the race between the
+// download finishing and dpkg opening it. Verifying the download does not fix
+// that on its own; the file has to live somewhere unprivileged users cannot
+// reach between the check and the install.
+#define OMINULL_UPDATE_DIR "/var/lib/ominull/updates"
 #define MAX_FLOWS_PER_BATCH 64
 #define MAX_PATH_LEN 512
 
@@ -358,23 +374,121 @@ static bool IsSafeToken(const char* s, bool allowUrlChars) {
     return true;
 }
 
-// ApplyAgentUpdate installs a newer agent package when the hub offers one on a telemetry
-// heartbeat. The install runs detached: dpkg's prerm stops this very daemon, so a child
-// of the current process would be torn down mid-install.
+// IsHexDigest reports whether a string is exactly a SHA-256 hex digest.
+static bool IsHexDigest(const char* s) {
+    size_t n = 0;
+    for (; s[n]; n++) {
+        if (!isxdigit((unsigned char)s[n])) return false;
+    }
+    return n == 64;
+}
+
+// HubPathOf takes only the path from a descriptor URL, and only if it points at
+// the hub's package route.
+//
+// The agent fetches that path from the hub it is already configured to talk to
+// and ignores the advertised host entirely. Behind a reverse proxy the hub
+// legitimately advertises a different host than the agent dials, so matching on
+// the host would break valid deployments - and ignoring it is strictly safer
+// anyway, because then no hub response can point the download somewhere else.
+static const char* HubPathOf(const char* url) {
+    const char* path = strstr(url, "://");
+    path = path ? strchr(path + 3, '/') : (url[0] == '/' ? url : NULL);
+    if (!path || strncmp(path, "/download/", 10) != 0) return NULL;
+    if (!IsSafeToken(path, true)) return NULL;
+    return path;
+}
+
+// PrepareUpdateDir creates the staging directory and refuses to use one that
+// anybody but root can write to.
+//
+// Everything downstream depends on this: the package, its signature and the
+// pinned public key all land here, and the whole point is that no unprivileged
+// process can touch them between verification and install. A directory that
+// already exists with the wrong owner or mode is treated as hostile rather
+// than corrected, because the safe response to "something else made this" is
+// to stop.
+static bool PrepareUpdateDir(void) {
+    mkdir("/var/lib/ominull", 0755);
+    if (mkdir(OMINULL_UPDATE_DIR, 0700) != 0 && errno != EEXIST) {
+        printf("[!] Cannot create %s: %s\n", OMINULL_UPDATE_DIR, strerror(errno));
+        return false;
+    }
+
+    struct stat st;
+    if (lstat(OMINULL_UPDATE_DIR, &st) != 0) {
+        printf("[!] Cannot stat %s: %s\n", OMINULL_UPDATE_DIR, strerror(errno));
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        printf("[!] Refusing to stage an update in %s: it must be a root-owned directory "
+               "that is not group- or world-writable.\n", OMINULL_UPDATE_DIR);
+        return false;
+    }
+    return true;
+}
+
+// WriteStagedFile writes one file into the staging directory.
+//
+// O_NOFOLLOW and O_EXCL-on-fresh-create matter even here: the directory should
+// be unreachable to other users, so a symlink in it means an assumption has
+// already been broken and the write must not proceed through it.
+static bool WriteStagedFile(const char* name, const char* content, mode_t mode) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", OMINULL_UPDATE_DIR, name);
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
+    if (fd < 0) {
+        printf("[!] Cannot write %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    size_t len = strlen(content);
+    ssize_t written = write(fd, content, len);
+    if (close(fd) != 0 || written < 0 || (size_t)written != len) {
+        printf("[!] Short write to %s\n", path);
+        unlink(path);
+        return false;
+    }
+    return true;
+}
+
+// ApplyAgentUpdate installs a newer agent package when the hub offers one on a
+// telemetry heartbeat.
+//
+// Nothing is installed that has not been proved genuine first. The package is
+// checked against the digest the hub advertised, and then - the check that
+// actually matters - against a detached ECDSA P-256 signature verified with the
+// release public key compiled into this binary. That key does not come from the
+// hub, so a compromised hub, or anyone on the plain-HTTP path between agent and
+// hub, can serve any bytes they like and none of them will be installed.
+//
+// The install itself runs detached: dpkg's prerm stops this very daemon, so a
+// child of the current process would be torn down mid-install.
 static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJson) {
+    // Bounded retry, not a single shot. Everything that can go wrong before the
+    // install - a dropped download, a hub restarting mid-fetch - would otherwise
+    // wedge this endpoint on the offered version until the daemon restarted,
+    // because one attempt is all it would ever make. Retrying without a bound is
+    // the opposite failure: a package that can never verify would be fetched
+    // every heartbeat forever.
     static char attemptedVersion[64] = {0};
+    static int attempts = 0;
 
     if (!config->auto_update || !respJson) return;
     const char* block = strstr(respJson, "\"agent_update\"");
     if (!block) return;
 
-    char version[64] = {0}, pkg[32] = {0}, url[512] = {0};
+    char version[64] = {0}, pkg[32] = {0}, url[512] = {0}, sigUrl[512] = {0}, sha256[80] = {0};
     if (!ExtractJsonString(block, "version", version, sizeof(version))) return;
     if (!ExtractJsonString(block, "url", url, sizeof(url))) return;
     ExtractJsonString(block, "package", pkg, sizeof(pkg));
 
-    if (strcmp(attemptedVersion, version) == 0) return; // already tried this release
-    snprintf(attemptedVersion, sizeof(attemptedVersion), "%s", version);
+    if (strcmp(attemptedVersion, version) != 0) {
+        snprintf(attemptedVersion, sizeof(attemptedVersion), "%s", version);
+        attempts = 0;
+    }
+    if (attempts >= 3) return;
+    attempts++;
 
     if (pkg[0] && strcmp(pkg, "deb") != 0) {
         printf("[!] Hub offers agent v%s as a '%s' package; this daemon only self-installs .deb.\n", version, pkg);
@@ -385,37 +499,71 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         return;
     }
 
-    // Take only the path from the descriptor and fetch it from the hub this daemon is
-    // already configured to talk to. The hub advertises its public URL, which behind a
-    // reverse proxy is legitimately a different host than the agent dials, so matching
-    // on the host would break valid deployments; ignoring the host entirely is also
-    // strictly safer, because no hub response can redirect the download elsewhere.
-    const char* path = strstr(url, "://");
-    path = path ? strchr(path + 3, '/') : (url[0] == '/' ? url : NULL);
-    if (!path || strncmp(path, "/download/", 10) != 0) {
-        printf("[!] Rejected agent update v%s: '%s' is not a hub package path.\n", version, url);
+    // No signature, no install. A hub that cannot produce one is offering a
+    // package this agent has no way to trust, and there is no degraded mode
+    // worth having here - an unverified root install is the thing being
+    // prevented, not an inconvenience to work around.
+    if (!ExtractJsonString(block, "signature", sigUrl, sizeof(sigUrl)) ||
+        !ExtractJsonString(block, "sha256", sha256, sizeof(sha256))) {
+        printf("[!] Rejected agent update v%s: the hub offered it without a signature and digest.\n", version);
         return;
     }
-    if (!IsSafeToken(path, true) || !IsSafeToken(version, false)) {
+    if (!IsHexDigest(sha256)) {
+        printf("[!] Rejected agent update v%s: advertised digest is not a SHA-256 hex string.\n", version);
+        return;
+    }
+    if (!IsSafeToken(version, false)) {
         printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
         return;
     }
 
-    char fetchURL[800];
-    snprintf(fetchURL, sizeof(fetchURL), "%s%s", config->hub_url, path);
+    const char* pkgPath = HubPathOf(url);
+    const char* sigPath = HubPathOf(sigUrl);
+    if (!pkgPath || !sigPath) {
+        printf("[!] Rejected agent update v%s: package or signature is not on a hub download path.\n", version);
+        return;
+    }
 
-    char debPath[128];
-    snprintf(debPath, sizeof(debPath), "/tmp/ominull-agent_%s_amd64.deb", version);
+    if (!PrepareUpdateDir()) return;
+    if (!WriteStagedFile("release.pub", OMINULL_RELEASE_PUBKEY_PEM, 0600)) return;
 
-    printf("[*] Hub published agent v%s (running v%s); fetching %s\n",
-           version, OMINULL_LINUX_AGENT_VERSION, fetchURL);
+    printf("[*] Hub published agent v%s (running v%s); fetching and verifying before install.\n",
+           version, OMINULL_LINUX_AGENT_VERSION);
     fflush(stdout);
 
-    char cmd[2048];
+    // The updater runs as a script in the staging directory rather than as an
+    // inline shell command so that every step is written down in one auditable
+    // place, and `set -e` guarantees a failed download, a wrong digest or a bad
+    // signature stops before dpkg is ever reached.
+    char script[3072];
+    int n = snprintf(script, sizeof(script),
+        "#!/bin/sh\n"
+        "set -e\n"
+        "D=%s\n"
+        "exec >>/var/log/ominull-update.log 2>&1\n"
+        "echo \"=== $(date -u '+%%Y-%%m-%%dT%%H:%%M:%%SZ') updating to v%s ===\"\n"
+        "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
+        "curl -fsSL -m 300 -o \"$D/agent.deb\" \"%s%s\"\n"
+        "curl -fsSL -m 60 -o \"$D/agent.deb.sig\" \"%s%s\"\n"
+        "echo \"%s  $D/agent.deb\" | sha256sum -c -\n"
+        "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/agent.deb.sig\" \"$D/agent.deb\"\n"
+        "echo \"[+] v%s verified against the pinned release key; installing\"\n"
+        "dpkg -i \"$D/agent.deb\"\n"
+        "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
+        "systemctl restart ominull-agent.service\n",
+        OMINULL_UPDATE_DIR, version,
+        config->hub_url, pkgPath,
+        config->hub_url, sigPath,
+        sha256, version);
+    if (n < 0 || n >= (int)sizeof(script)) {
+        printf("[!] Rejected agent update v%s: updater script would be truncated.\n", version);
+        return;
+    }
+    if (!WriteStagedFile("apply.sh", script, 0700)) return;
+
+    char cmd[256];
     snprintf(cmd, sizeof(cmd),
-        "setsid nohup sh -c 'curl -fsSL -m 300 -o \"%s\" \"%s\" && dpkg -i \"%s\"; rm -f \"%s\"; "
-        "systemctl restart ominull-agent.service' >/dev/null 2>&1 </dev/null &",
-        debPath, fetchURL, debPath, debPath);
+             "setsid nohup sh %s/apply.sh >/dev/null 2>&1 </dev/null &", OMINULL_UPDATE_DIR);
     int rc = system(cmd);
     (void)rc;
 }
@@ -432,7 +580,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
     if (!jsonBuf) return;
 
     int offset = snprintf(jsonBuf, bufCap,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"events\":[",
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"events\":[",
         config->endpoint_id,
         config->location_id[0] ? config->location_id : "loc-home",
         config->role_tag[0] ? config->role_tag : "workstation",

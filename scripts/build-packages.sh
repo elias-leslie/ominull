@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.2.0"
+VERSION="1.3.3"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,10 +27,11 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.2.0
+Version: 1.3.3
 Section: security
 Priority: optional
 Architecture: amd64
+Depends: curl, openssl
 Maintainer: Ominull Project <secops@example.com>
 Description: Ominull Linux Kernel Threat Nullification & Flow Telemetry Agent
  Ominull provides microsecond ring-0 / eBPF network flow filtering,
@@ -45,6 +46,15 @@ cat << 'DEB_POSTINST' > "${DEB_DIR}/DEBIAN/postinst"
 #!/bin/sh
 set -e
 mkdir -p /etc/ominull
+
+# Releases are staged here and nowhere else. It must be root-owned and closed
+# to everyone else: the agent downloads a package here, verifies its signature
+# and then installs it as root, so a directory any local user could write to
+# would let them swap the file between the check and the install.
+mkdir -p /var/lib/ominull/updates
+chown root:root /var/lib/ominull /var/lib/ominull/updates
+chmod 700 /var/lib/ominull/updates
+
 if [ ! -f /etc/ominull/agent.conf ]; then
     cat << 'CONF' > /etc/ominull/agent.conf
 # Ominull agent runtime arguments. Written once at install and preserved on upgrade.
@@ -116,7 +126,8 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         "${ROOT_DIR}/agent/src/hub_client.c" \
         "${ROOT_DIR}/agent/src/service.c" \
         "${ROOT_DIR}/agent/src/driver_client.c" \
-        -lws2_32 -lwinhttp -liphlpapi -ladvapi32
+        "${ROOT_DIR}/agent/src/updater.c" \
+        -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt
     cp "${ROOT_DIR}/agent/bin/ominulld.exe" "${WIN_DIR}/"
 elif [ -f "${ROOT_DIR}/agent/bin/ominulld.exe" ]; then
     echo "  [!] mingw-w64 not installed; packaging the previously built ominulld.exe"

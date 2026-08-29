@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -225,6 +228,153 @@ func seedEndpoint(t *testing.T, store *storage.Store, id, osName, version string
 	}
 }
 
+// seedSignedRelease puts a package and its digest and signature sidecars in the
+// hub's binary directory. The hub only checks that they are present - agents do
+// the cryptography - so the contents here stand in for a real release.
+func seedSignedRelease(t *testing.T, dir, name string) {
+	t.Helper()
+	body := []byte("package-bytes-for-" + name)
+	sum := sha256.Sum256(body)
+	for suffix, content := range map[string][]byte{
+		"":        body,
+		".sha256": []byte(hex.EncodeToString(sum[:]) + "  " + name + "\n"),
+		".sig":    []byte("detached-signature"),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name+suffix), content, 0o644); err != nil {
+			t.Fatalf("seeding %s%s: %v", name, suffix, err)
+		}
+	}
+}
+
+// seedEndpointWithCapability registers an endpoint that reports what package
+// format it can install for itself.
+func seedEndpointWithCapability(t *testing.T, store *storage.Store, id, osName, version, capability string) {
+	t.Helper()
+	if err := store.UpsertEndpoint(storage.Endpoint{
+		ID:               id,
+		TenantID:         "default",
+		Hostname:         id,
+		OS:               osName,
+		IP:               "10.0.4.21",
+		DriverVersion:    version,
+		UpdateCapability: capability,
+		Status:           "online",
+		LastSeenAt:       time.Now().UTC(),
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seeding endpoint %s failed: %v", id, err)
+	}
+}
+
+// An endpoint is offered a package because it said it can install one, not
+// because its OS string looked a certain way. That string is a display label -
+// v1.2.0 changed the Windows one - so matching on it was one release away from
+// misrouting a fleet-wide update.
+func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
+	cases := []struct {
+		name       string
+		capability string
+		osName     string
+		wantPkg    string
+		wantOK     bool
+	}{
+		{"reported deb", "deb", "Linux 6.8.0-40-generic", "deb", true},
+		{"reported exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows", true},
+		{"reported pkg", "pkg", "macOS 14.8 (x86_64)", "macos", true},
+		{"capability outranks a misleading OS string", "exe", "Linux 6.8.0-40-generic", "windows", true},
+		{"explicit none is offered nothing", "none", "Linux 6.8.0-40-generic", "", false},
+		{"unknown capability is offered nothing", "msi", "Windows 11", "", false},
+		// The only agent that shipped before the field existed and can still
+		// install something is the Linux one, so that is the whole of the
+		// legacy fallback.
+		{"legacy linux agent still self-updates", "", "Linux 6.8.0-40-generic", "deb", true},
+		{"legacy windows agent needs the push-deployer", "", "Windows 11 Enterprise (x86_64)", "", false},
+		{"legacy macos agent needs the push-deployer", "", "macOS Sonoma 14.8.9 (x86_64)", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pkg, ok := updatePackageFor(c.capability, c.osName)
+			if ok != c.wantOK || pkg != c.wantPkg {
+				t.Errorf("updatePackageFor(%q, %q) = (%q, %v), want (%q, %v)",
+					c.capability, c.osName, pkg, ok, c.wantPkg, c.wantOK)
+			}
+		})
+	}
+}
+
+// The hub must never advertise a release it cannot prove is genuine. Agents
+// verify against a key compiled into them and would refuse it anyway, so an
+// unsigned release has to surface as one clear answer here rather than as a
+// failed install on every endpoint.
+func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	req := httptest.NewRequest("POST", "/api/v1/events", nil)
+
+	// 1. Nothing on disk at all.
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+		t.Error("Expected no descriptor when the package is not on the hub")
+	}
+
+	// 2. The package alone is not enough.
+	name := "ominull-agent_1.1.0_amd64.deb"
+	if err := os.WriteFile(filepath.Join(srv.binaryDir, name), []byte("package"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+		t.Error("Expected no descriptor for a package with no digest or signature")
+	}
+
+	// 3. A digest without a signature is still refused: a digest served by the
+	//    same host that serves the package proves nothing about who built it.
+	if err := os.WriteFile(filepath.Join(srv.binaryDir, name+".sha256"),
+		[]byte(strings.Repeat("a", 64)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+		t.Error("Expected no descriptor for a package with a digest but no signature")
+	}
+
+	// 4. An operator push reports the missing signature instead of queueing a
+	//    job that could never complete.
+	body, _ := json.Marshal(map[string]interface{}{"all": true})
+	pushReq := httptest.NewRequest("POST", "/api/v1/agents/update", bytes.NewReader(body))
+	pushReq.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleAgentsUpdate)(w, pushReq)
+	var push struct {
+		Scheduled   []map[string]string `json:"scheduled"`
+		Unsupported []map[string]string `json:"unsupported"`
+	}
+	json.NewDecoder(w.Body).Decode(&push)
+	if len(push.Scheduled) != 0 {
+		t.Errorf("Expected nothing scheduled for an unsigned release, got %v", push.Scheduled)
+	}
+	if len(push.Unsupported) != 1 || !strings.Contains(push.Unsupported[0]["reason"], "no signed") {
+		t.Errorf("Expected the unsigned release named as the reason, got %v", push.Unsupported)
+	}
+
+	// 5. With the signature in place the release is offered, and it carries
+	//    everything an agent needs to verify it.
+	if err := os.WriteFile(filepath.Join(srv.binaryDir, name+".sig"), []byte("sig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	desc, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb")
+	if !ok {
+		t.Fatal("Expected a descriptor once the package is signed")
+	}
+	for _, key := range []string{"version", "package", "url", "signature", "sha256"} {
+		if desc[key] == "" {
+			t.Errorf("Descriptor is missing %q: %v", key, desc)
+		}
+	}
+	if !strings.HasSuffix(desc["signature"], ".deb.sig") {
+		t.Errorf("Expected the signature URL to point at the .sig sidecar, got %q", desc["signature"])
+	}
+}
+
 func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -290,6 +440,7 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
 	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
 	seedEndpoint(t, store, "win-exec-01", "Windows 11 Enterprise (x86_64)", "1.0.0")
 	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (eBPF/TC)")
@@ -314,7 +465,10 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 		t.Errorf("Expected 400 for a downgrade request, got %d", w.Code)
 	}
 
-	// 3. An admin push schedules Linux endpoints and flags the rest for the push-deployer.
+	// 3. An admin push schedules endpoints that can install the package and
+	//    flags the rest for the push-deployer. The Windows endpoint here
+	//    reports no capability, so it is correctly left out: its agent could
+	//    not act on a descriptor even if one were sent.
 	body, _ = json.Marshal(map[string]interface{}{"all": true})
 	req = httptest.NewRequest("POST", "/api/v1/agents/update", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
@@ -368,6 +522,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
 	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
 	if err := store.RequestAgentUpdate("linux-web-01", "1.1.0"); err != nil {
 		t.Fatalf("queueing update failed: %v", err)
@@ -376,13 +531,14 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	postTelemetry := func(version string) map[string]interface{} {
 		t.Helper()
 		batch, _ := json.Marshal(map[string]interface{}{
-			"type":           "telemetry",
-			"endpoint_id":    "linux-web-01",
-			"hostname":       "linux-web-01",
-			"os":             "Linux 6.8.0-40-generic",
-			"ip":             "10.0.4.20",
-			"driver_version": version,
-			"events":         []storage.Event{},
+			"type":              "telemetry",
+			"endpoint_id":       "linux-web-01",
+			"hostname":          "linux-web-01",
+			"os":                "Linux 6.8.0-40-generic",
+			"ip":                "10.0.4.20",
+			"driver_version":    version,
+			"update_capability": "deb",
+			"events":            []storage.Event{},
 		})
 		req := httptest.NewRequest("POST", "/api/v1/events", bytes.NewReader(batch))
 		req.Header.Set("X-API-Key", "mock_admin_token")
@@ -404,6 +560,12 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	}
 	if update["version"] != "1.1.0" || update["package"] != "deb" {
 		t.Errorf("Unexpected agent_update payload: %v", update)
+	}
+	// The descriptor has to carry proof, not just a URL. An agent that is only
+	// told where to fetch from has no way to tell a genuine release from
+	// whatever an attacker on the path substituted for it.
+	if update["sha256"] == nil || update["signature"] == nil {
+		t.Errorf("Expected the descriptor to carry a digest and signature URL, got %v", update)
 	}
 
 	// 2. The job stays pending until the agent reports the new version.

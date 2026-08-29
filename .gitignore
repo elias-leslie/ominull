@@ -10,6 +10,10 @@ Release/
 dist/*.deb
 dist/*.tar.gz
 dist/*.zip
+# Release signatures and digests are build output, produced by
+# scripts/sign-release.sh from a key that lives in the ops vault.
+dist/*.sig
+dist/*.sha256
 dist/*.exe
 dist/deb-build/
 dist/win-build/
