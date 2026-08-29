@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/storage"
@@ -26,7 +27,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.6.2"
+const defaultAgentVersion = "1.6.3"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
@@ -40,6 +41,9 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
 	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert")
 	tlsHosts := flag.String("tls-hosts", "", "Comma-separated extra SANs for the self-issued certificate (e.g. a VIP the hub cannot see)")
+	retentionDays := flag.Int("retention-days", 14, "Days of raw flow telemetry to keep (0 disables pruning). Nothing pruned it before, and the file only ever grew.")
+	alertRetentionDays := flag.Int("alert-retention-days", 30, "Days of anomaly alerts and alerts to keep (0 disables pruning).")
+	auditRetentionDays := flag.Int("audit-retention-days", 365, "Days of audit log to keep (0 disables pruning). Kept far longer than telemetry: it is small, and it is the record of who did what.")
 	clientCerts := flag.String("client-certs", "optional", "How agents identify themselves: off (never asked - no endpoint can be told from another holding the same tenant key), optional (verified when presented, endpoints without one still report), required (refused at the handshake without one; only once every endpoint has one).")
 	flag.Parse()
 
@@ -88,6 +92,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("[-] %v", err)
 	}
+
+	// Retention runs from here rather than inside the server so it is tied to
+	// the store's lifetime, and it prunes once immediately: a hub that has been
+	// running without it has the whole backlog to clear, and the disk it is
+	// filling does not necessarily have another hour in it.
+	retention := storage.RetentionPolicy{
+		Events:        time.Duration(*retentionDays) * 24 * time.Hour,
+		AnomalyAlerts: time.Duration(*alertRetentionDays) * 24 * time.Hour,
+		Alerts:        time.Duration(*alertRetentionDays) * 24 * time.Hour,
+		AuditLogs:     time.Duration(*auditRetentionDays) * 24 * time.Hour,
+	}
+	stopRetention := store.StartRetention(retention, time.Hour)
+	defer stopRetention()
+	log.Printf("[+] Retention: telemetry %dd, alerts %dd, audit %dd (0 = keep everything)",
+		*retentionDays, *alertRetentionDays, *auditRetentionDays)
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{

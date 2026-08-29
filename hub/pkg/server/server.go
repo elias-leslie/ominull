@@ -428,10 +428,11 @@ func (s *Server) Start(addr string) error {
 		}
 		s.tlsServer = &http.Server{
 			Addr:         s.tlsOpts.Listen,
-			Handler:      mux,
+			Handler:      limitRequestBodies(mux),
 			TLSConfig:    tlsCfg,
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
 		}
 		listeners++
 		log.Printf("[+] Ominull Hub listening on %s over TLS (agent transport)", s.tlsOpts.Listen)
@@ -441,9 +442,10 @@ func (s *Server) Start(addr string) error {
 	if addr != "" {
 		s.httpServer = &http.Server{
 			Addr:         addr,
-			Handler:      mux,
+			Handler:      limitRequestBodies(mux),
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
 		}
 		listeners++
 		log.Printf("[+] Ominull Hub listening on %s in the clear (Admin Key configured)", addr)

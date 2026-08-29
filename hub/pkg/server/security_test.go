@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -552,5 +553,96 @@ func TestBulkIsolationIsScopedToTheOwningTenant(t *testing.T) {
 		`{"scope":"all","allow_ips":["10.0.0.1; rm -rf /"]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("bulk isolate accepted a non-address in allow_ips: got %d\n%s", w.Code, w.Body.String())
+	}
+}
+
+// A throttle that remembers every address that ever failed is a way to exhaust
+// the hub's memory from off the network: one entry per source, removed only if
+// that same source is seen again, and an attacker with a /64 has more addresses
+// than the hub has bytes.
+func TestFailedAuthTrackingIsBounded(t *testing.T) {
+	throttle := newAuthThrottle()
+	throttle.maxTracked = 64
+	throttle.window = 20 * time.Millisecond
+	throttle.lockout = 20 * time.Millisecond
+
+	for i := 0; i < 5000; i++ {
+		throttle.fail(fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256))
+	}
+	if len(throttle.failures) > throttle.maxTracked {
+		t.Fatalf("throttle tracks %d addresses with a cap of %d", len(throttle.failures), throttle.maxTracked)
+	}
+
+	// An address still inside its lockout survives the sweep; the cap must not
+	// be a way to buy back an address that is being refused.
+	throttle.window = time.Minute
+	throttle.lockout = time.Minute
+	for i := 0; i < throttle.limit; i++ {
+		throttle.fail("203.0.113.9")
+	}
+	if !throttle.blocked("203.0.113.9") {
+		t.Fatal("an address that just passed the limit should be refused")
+	}
+	for i := 0; i < 5000; i++ {
+		throttle.fail(fmt.Sprintf("198.51.%d.%d", i/256%256, i%256))
+	}
+	if !throttle.blocked("203.0.113.9") {
+		t.Fatal("sweeping for the cap released an address that was still locked out")
+	}
+	if len(throttle.failures) > throttle.maxTracked {
+		t.Fatalf("throttle tracks %d addresses with a cap of %d", len(throttle.failures), throttle.maxTracked)
+	}
+}
+
+// Nothing bounded a request body. ReadTimeout caps how long a request may take,
+// not how much it may carry, and /api/v1/auth/login reads one before any
+// credential is checked - so a single unauthenticated request could make the
+// hub buffer until it died, taking every endpoint's command channel with it.
+func TestRequestBodiesAreBounded(t *testing.T) {
+	var read int64
+	handler := limitRequestBodies(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, err := io.Copy(io.Discard, r.Body)
+		read = n
+		if err != nil {
+			http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name  string
+		path  string
+		size  int64
+		allow bool
+	}{
+		{"login accepts a real credential", "/api/v1/auth/login", 512, true},
+		{"login refuses a flood", "/api/v1/auth/login", maxRequestBody + 1, false},
+		{"telemetry accepts a large batch", "/api/v1/events", maxRequestBody + 1, true},
+		{"telemetry refuses a flood", "/api/v1/events", maxTelemetryBody + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read = 0
+			body := bytes.NewReader(bytes.Repeat([]byte("a"), int(tc.size)))
+			req := httptest.NewRequest("POST", tc.path, body)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if tc.allow {
+				if w.Code != http.StatusOK {
+					t.Fatalf("a %d-byte body on %s was refused with %d", tc.size, tc.path, w.Code)
+				}
+				if read != tc.size {
+					t.Fatalf("handler saw %d of %d bytes", read, tc.size)
+				}
+				return
+			}
+			if w.Code == http.StatusOK {
+				t.Fatalf("a %d-byte body on %s was accepted in full", tc.size, tc.path)
+			}
+			if read >= tc.size {
+				t.Fatalf("handler buffered all %d bytes before the limit stopped it", read)
+			}
+		})
 	}
 }

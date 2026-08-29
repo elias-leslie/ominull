@@ -194,6 +194,14 @@ type authThrottle struct {
 	limit    int
 	window   time.Duration
 	lockout  time.Duration
+	// maxTracked bounds the map. Without it the throttle is itself a way to
+	// exhaust the hub's memory: every distinct source address that ever fails
+	// once leaves an entry behind, entries are only removed when that same
+	// address is seen again, and an attacker with a /64 has more addresses than
+	// the hub has bytes. Past the cap the hub sweeps what has expired and, if
+	// that is not enough, stops tracking new addresses rather than growing -
+	// the addresses already being refused stay refused.
+	maxTracked int
 }
 
 type failureWindow struct {
@@ -204,15 +212,57 @@ type failureWindow struct {
 
 func newAuthThrottle() *authThrottle {
 	return &authThrottle{
-		failures: make(map[string]*failureWindow),
-		limit:    20,
-		window:   time.Minute,
-		lockout:  time.Minute,
+		failures:   make(map[string]*failureWindow),
+		limit:      20,
+		window:     time.Minute,
+		lockout:    time.Minute,
+		maxTracked: 8192,
 	}
 }
 
 // blocked reports whether this address is currently in a lockout, and takes the
 // opportunity to forget addresses nobody is failing from any more.
+// makeRoomLocked frees a slot at the cap. It first drops every address that is
+// neither inside its failure window nor serving a lockout, and if that frees
+// nothing it evicts the stalest entry that is not currently blocked.
+//
+// Evicting rather than refusing matters: an attacker who can reach the cap
+// would otherwise be able to switch the throttle off for everybody else by
+// filling it with addresses that each fail once. An address actually serving a
+// lockout is never evicted, so the ones being refused stay refused.
+//
+// The caller holds the mutex.
+func (t *authThrottle) makeRoomLocked(now time.Time) {
+	freed := false
+	for addr, f := range t.failures {
+		if now.Before(f.blockedTill) {
+			continue
+		}
+		if now.Sub(f.windowStart) <= t.window {
+			continue
+		}
+		delete(t.failures, addr)
+		freed = true
+	}
+	if freed {
+		return
+	}
+
+	stalest := ""
+	var stalestAt time.Time
+	for addr, f := range t.failures {
+		if now.Before(f.blockedTill) {
+			continue
+		}
+		if stalest == "" || f.windowStart.Before(stalestAt) {
+			stalest, stalestAt = addr, f.windowStart
+		}
+	}
+	if stalest != "" {
+		delete(t.failures, stalest)
+	}
+}
+
 func (t *authThrottle) blocked(addr string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -238,6 +288,12 @@ func (t *authThrottle) fail(addr string) bool {
 	now := time.Now()
 	f, ok := t.failures[addr]
 	if !ok || now.Sub(f.windowStart) > t.window {
+		if !ok && len(t.failures) >= t.maxTracked {
+			t.makeRoomLocked(now)
+			if len(t.failures) >= t.maxTracked {
+				return false
+			}
+		}
 		t.failures[addr] = &failureWindow{count: 1, windowStart: now}
 		return false
 	}
@@ -256,4 +312,39 @@ func (t *authThrottle) succeed(addr string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.failures, addr)
+}
+
+// Request body limits.
+//
+// Nothing here read a body with a bound on it. http.Server's ReadTimeout caps
+// how long a request may take, not how much it may carry, so a client on a LAN
+// could hand any handler as many gigabytes as it could push in thirty seconds
+// and the hub would buffer all of it - json.Decoder and io.ReadAll both grow
+// until they are done or the process is killed. /api/v1/auth/login takes a body
+// before any credential is checked, so that reach did not even need a key: one
+// unauthenticated request could take the hub down, and with it every endpoint's
+// only way to be told it is quarantined.
+const (
+	// maxTelemetryBody is the batch endpoint. Agents cap their own payload well
+	// below this; the headroom is for a busy endpoint after a long outage.
+	maxTelemetryBody = 8 << 20
+	// maxRequestBody is everything else. No other route has a reason to accept
+	// a megabyte, let alone more.
+	maxRequestBody = 1 << 20
+)
+
+// limitRequestBodies bounds what any handler can be made to buffer. It wraps
+// the mux rather than each route, because the one that matters is whichever
+// route nobody remembered to wrap.
+func limitRequestBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody {
+			limit := int64(maxRequestBody)
+			if r.URL.Path == "/api/v1/events" {
+				limit = maxTelemetryBody
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
 }

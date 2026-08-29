@@ -1911,52 +1911,75 @@ func (s *Store) GetDiurnalProfiles(tenantID string) (map[int]int64, map[int]int6
 	return s.diurnalProfilesLocked(tenantID)
 }
 
+// diurnalProfilesLocked returns hourly activity for the last day against the
+// average of the seven days before it.
+//
+// Both halves were wrong. The live series ran
+// strftime('%H', timestamp) over the whole events table, and the column holds
+// Go's time.String() form ("2026-08-29 03:08:08.215796299 +0000 UTC"), which
+// SQLite's date functions answer with NULL rather than an error - so every hour
+// came back empty and the "live" curve had been flat zero for as long as it has
+// existed. The baseline was not measured at all: it was a hardcoded
+// business-hours weight table scaled by the total row count, so the chart drew
+// a plausible working day that no traffic had produced. The comment on the
+// bandwidth timeline in the caller says a console that invents a number is
+// worse than one that shows none. This was the same defect, in the same
+// response, left standing.
+//
+// It is also no longer a full table scan on every console poll. Both queries
+// are bounded by timestamp, which is what idx_events_tenant_time indexes.
 func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]int64, error) {
 	baseline := make(map[int]int64)
 	live := make(map[int]int64)
-
-	// Workstation standard business diurnal profile (low at night 00:00-06:00, peak 09:00-17:00, taper 18:00-23:00)
-	weights := []float64{
-		0.05, 0.03, 0.02, 0.02, 0.04, 0.10, // 00:00 - 05:00
-		0.25, 0.60, 0.90, 1.00, 0.95, 0.90, // 06:00 - 11:00
-		0.85, 0.95, 1.00, 0.95, 0.85, 0.70, // 12:00 - 17:00
-		0.45, 0.30, 0.20, 0.15, 0.10, 0.08, // 18:00 - 23:00
-	}
-
-	var totalCount int64
-	_ = s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&totalCount)
-	scale := float64(totalCount) / 12.0
-	if scale < 10 {
-		scale = 50
-	}
-
 	for hr := 0; hr < 24; hr++ {
-		baseline[hr] = int64(weights[hr] * scale)
+		baseline[hr] = 0
 		live[hr] = 0
 	}
 
-	var query string
-	var args []interface{}
-	if tenantID != "" {
-		query = "SELECT strftime('%H', timestamp) as hr, count(*) FROM events WHERE tenant_id = ? GROUP BY hr"
-		args = append(args, tenantID)
-	} else {
-		query = "SELECT strftime('%H', timestamp) as hr, count(*) FROM events GROUP BY hr"
-	}
+	now := time.Now().UTC()
+	liveFrom := now.Add(-24 * time.Hour)
+	const baselineDays = 7
+	baselineFrom := liveFrom.Add(-baselineDays * 24 * time.Hour)
 
-	rows, err := s.db.Query(query, args...)
-	if err == nil {
+	// substr trims the fractional seconds and the zone, which is the only form
+	// SQLite will parse here.
+	hourly := func(from, to time.Time) map[int]int64 {
+		out := make(map[int]int64)
+		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
+			FROM events WHERE timestamp >= ? AND timestamp < ?`
+		args := []interface{}{from, to}
+		if tenantID != "" {
+			query += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+		query += " GROUP BY hr"
+
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return out
+		}
+		defer rows.Close()
 		for rows.Next() {
-			var hrStr string
+			var hr sql.NullInt64
 			var count int64
-			if err := rows.Scan(&hrStr, &count); err == nil {
-				var hr int
-				if _, err := fmt.Sscanf(hrStr, "%d", &hr); err == nil && hr >= 0 && hr < 24 {
-					live[hr] = count
-				}
+			if err := rows.Scan(&hr, &count); err != nil {
+				continue
+			}
+			if hr.Valid && hr.Int64 >= 0 && hr.Int64 < 24 {
+				out[int(hr.Int64)] = count
 			}
 		}
-		rows.Close()
+		return out
+	}
+
+	for hr, n := range hourly(liveFrom, now) {
+		live[hr] = n
+	}
+	// The baseline is a typical day, so the seven-day totals are divided back
+	// down to one. A hub with less history than that reports the zeros it has
+	// rather than a curve it has not measured.
+	for hr, n := range hourly(baselineFrom, liveFrom) {
+		baseline[hr] = n / baselineDays
 	}
 
 	return baseline, live, nil
