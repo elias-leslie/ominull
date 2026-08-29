@@ -332,8 +332,9 @@ type AuditEntry struct {
 }
 
 type Store struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db        *sql.DB
+	mu        sync.RWMutex
+	analytics analyticsCache
 }
 
 func New(dbPath string) (*Store, error) {
@@ -574,6 +575,12 @@ func (s *Store) initSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
+	-- timestamp on its own. The two composite indexes above lead on a scope
+	-- column, so an operator query - which has no tenant filter - could not use
+	-- either one and every time-bounded read fell back to a full scan: the
+	-- bandwidth timeline and both halves of the diurnal profile were each
+	-- re-reading the whole events table to answer a question about one day.
+	CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
@@ -1641,6 +1648,23 @@ func (s *Store) UpsertIOCsBatch(iocs []IOC) error {
 }
 
 func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) {
+	// Checked before the store lock is taken, not inside it: the point is to
+	// keep repeat polls off that lock entirely, and the cache has a lock of its
+	// own that no other method reaches.
+	now := time.Now()
+	if cached := s.analytics.get(tenantID, now); cached != nil {
+		return cached, nil
+	}
+
+	summary, err := s.analyticsSummaryUncached(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	s.analytics.put(tenantID, summary, now)
+	return summary, nil
+}
+
+func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1652,34 +1676,61 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 		BandwidthTimeline: make([]BandwidthDataPoint, 0),
 	}
 
-	// 1. Totals from events
+	// 1, 2 and 9 in one pass over events.
+	//
+	// These were three separate full scans of the same table: the totals, the
+	// country counts, and the geo card's bytes-and-threats by country. Every
+	// row carries a country (NOT NULL, defaulted), so grouping by it partitions
+	// the table - the totals are the column sums of the same result, and both
+	// cards are orderings of it. On the production database each scan was
+	// costing about a third of a second through the pure-Go sqlite driver, and
+	// the console polls this endpoint; three of them were two thirds of a
+	// second spent re-reading the same 340k rows to answer the same question
+	// three ways, all of it under the read lock.
+	type countryRow struct {
+		country                  string
+		count, bytesIn, bytesOut int64
+		blocks, permits          int64
+	}
+	var byCountry []countryRow
+
 	var queryEvents string
 	var args []interface{}
+	queryEvents = `SELECT country, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
+		COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0)
+		FROM events`
 	if tenantID != "" {
-		queryEvents = "SELECT COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0) FROM events WHERE tenant_id = ?"
+		queryEvents += " WHERE tenant_id = ?"
 		args = append(args, tenantID)
-	} else {
-		queryEvents = "SELECT COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0) FROM events"
 	}
-	_ = s.db.QueryRow(queryEvents, args...).Scan(&summary.TotalEvents, &summary.TotalBytesIn, &summary.TotalBytesOut, &summary.TotalBlocks, &summary.TotalPermits)
+	queryEvents += " GROUP BY country"
 
-	// 2. Country aggregation
-	var queryCountry string
-	if tenantID != "" {
-		queryCountry = "SELECT country, COUNT(*) FROM events WHERE tenant_id = ? GROUP BY country ORDER BY COUNT(*) DESC LIMIT 10"
-	} else {
-		queryCountry = "SELECT country, COUNT(*) FROM events GROUP BY country ORDER BY COUNT(*) DESC LIMIT 10"
-	}
-	cRows, err := s.db.Query(queryCountry, args...)
-	if err == nil {
-		for cRows.Next() {
-			var c string
-			var count int64
-			if err := cRows.Scan(&c, &count); err == nil && c != "" {
-				summary.Countries[c] = count
+	if rows, err := s.db.Query(queryEvents, args...); err == nil {
+		for rows.Next() {
+			var r countryRow
+			if err := rows.Scan(&r.country, &r.count, &r.bytesIn, &r.bytesOut, &r.blocks, &r.permits); err == nil {
+				byCountry = append(byCountry, r)
+				summary.TotalEvents += r.count
+				summary.TotalBytesIn += r.bytesIn
+				summary.TotalBytesOut += r.bytesOut
+				summary.TotalBlocks += r.blocks
+				summary.TotalPermits += r.permits
 			}
 		}
-		cRows.Close()
+		rows.Close()
+	}
+
+	// The countries card is the ten busiest by flow count.
+	sort.Slice(byCountry, func(i, j int) bool { return byCountry[i].count > byCountry[j].count })
+	for i, r := range byCountry {
+		if i >= 10 {
+			break
+		}
+		if r.country == "" {
+			continue
+		}
+		summary.Countries[r.country] = r.count
 	}
 
 	// 3. Process aggregation
@@ -1852,35 +1903,34 @@ func (s *Store) GetAnalyticsSummary(tenantID string) (*AnalyticsSummary, error) 
 		ttRows.Close()
 	}
 
-	// 9. GeoIP Country Distribution & Threat Metrics. Ranked by bytes for the
-	// same reason as the talkers above; the flow count is carried alongside so
-	// nothing is lost.
-	var geoQuery string
-	if tenantID != "" {
-		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events WHERE tenant_id = ? GROUP BY country ORDER BY SUM(bytes_in + bytes_out) DESC LIMIT 12"
-	} else {
-		geoQuery = "SELECT country, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0) FROM events GROUP BY country ORDER BY SUM(bytes_in + bytes_out) DESC LIMIT 12"
+	// 9. GeoIP country distribution and threat metrics: the same scan as above,
+	// ordered by bytes rather than by flow count. Ranked by bytes because that
+	// is the number the card prints.
+	sort.Slice(byCountry, func(i, j int) bool {
+		return byCountry[i].bytesIn+byCountry[i].bytesOut > byCountry[j].bytesIn+byCountry[j].bytesOut
+	})
+	countryNames := map[string]string{
+		"US": "United States", "DE": "Germany", "GB": "United Kingdom", "NL": "Netherlands",
+		"FR": "France", "CN": "China", "RU": "Russia", "JP": "Japan", "SG": "Singapore",
+		"AU": "Australia", "CA": "Canada", "CH": "Switzerland", "SE": "Sweden", "PL": "Poland",
+		"KR": "South Korea", "BR": "Brazil", "IN": "India", "LOCAL": "Internal LAN",
 	}
-	gRows, err := s.db.Query(geoQuery, args...)
-	if err == nil {
-		countryNames := map[string]string{
-			"US": "United States", "DE": "Germany", "GB": "United Kingdom", "NL": "Netherlands",
-			"FR": "France", "CN": "China", "RU": "Russia", "JP": "Japan", "SG": "Singapore",
-			"AU": "Australia", "CA": "Canada", "CH": "Switzerland", "SE": "Sweden", "PL": "Poland",
-			"KR": "South Korea", "BR": "Brazil", "IN": "India", "LOCAL": "Internal LAN",
+	for i, r := range byCountry {
+		if i >= 12 {
+			break
 		}
-		for gRows.Next() {
-			var gs GeoCountryStat
-			if err := gRows.Scan(&gs.Country, &gs.FlowCount, &gs.TotalBytes, &gs.ThreatCount); err == nil {
-				if name, ok := countryNames[gs.Country]; ok {
-					gs.CountryName = name
-				} else {
-					gs.CountryName = gs.Country
-				}
-				summary.GeoStats = append(summary.GeoStats, gs)
-			}
+		gs := GeoCountryStat{
+			Country:     r.country,
+			FlowCount:   r.count,
+			TotalBytes:  r.bytesIn + r.bytesOut,
+			ThreatCount: r.blocks,
 		}
-		gRows.Close()
+		if name, ok := countryNames[gs.Country]; ok {
+			gs.CountryName = name
+		} else {
+			gs.CountryName = gs.Country
+		}
+		summary.GeoStats = append(summary.GeoStats, gs)
 	}
 
 	return summary, nil
