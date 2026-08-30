@@ -3344,6 +3344,7 @@
   }
 
   function openRoute(key) {
+    if (state.routeKey !== key) closeRoute();
     state.routeKey = key;
     renderRoute();
     /* The full view shows this asset's recent flows, which only the Traffic and
@@ -3373,7 +3374,12 @@
   }
 
   function renderRoute() {
-    if (routeEl && routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    var previousScrollTop = 0;
+    if (routeEl) {
+      var prevBody = routeEl.querySelector(".route-body");
+      if (prevBody) previousScrollTop = prevBody.scrollTop;
+      if (routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    }
     routeEl = null;
     if (!state.routeKey) return;
 
@@ -3452,6 +3458,10 @@
       ? h("div", {}, alerts.map(function (a) { return alertCardNode(a, true); }))
       : h("div", { cls: "empty", text: "No open alert on this asset." }), null, true);
 
+    var routeBody = h("div", { cls: "route-body" }, idCard, agentCard, card("Observed exposure", portsBody),
+      ep ? baselineEndpointCard(asset) : null,
+      card("Evidence", evBody), flowCard, alertCard);
+
     routeEl = h("div", { cls: "route", role: "dialog", "aria-label": "Asset " + asset.name },
       h("div", { cls: "route-head" },
         h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Back", on: { click: closeRoute } }, icon("i-close")),
@@ -3469,11 +3479,12 @@
             }
           }
         })),
-      h("div", { cls: "route-body" }, idCard, agentCard, card("Observed exposure", portsBody),
-        ep ? baselineEndpointCard(asset) : null,
-        card("Evidence", evBody), flowCard, alertCard));
+      routeBody);
 
     document.body.appendChild(routeEl);
+    if (previousScrollTop > 0) {
+      routeBody.scrollTop = previousScrollTop;
+    }
   }
 
   /* -------------------------------------------------------------- drawers */
@@ -3555,6 +3566,11 @@
   function renderDrawer() {
     if (!drawerEl) return;
     var wasOpen = drawerEl.childNodes.length > 0;
+    var previousScrollTop = 0;
+    if (openDrawer === "alerts") {
+      var prevBody = drawerEl.querySelector(".drawer-body");
+      if (prevBody) previousScrollTop = prevBody.scrollTop;
+    }
     clear(drawerEl);
 
     if (openDrawer === "alerts") {
@@ -3570,6 +3586,9 @@
         state.anomalies.forEach(function (a) { body.appendChild(alertCardNode(a, false)); });
       }
       drawerEl.appendChild(body);
+      if (previousScrollTop > 0) {
+        body.scrollTop = previousScrollTop;
+      }
       return;
     }
 
@@ -4105,6 +4124,9 @@
   function renderBody() {
     var view = $("view");
     var scrollTop = view.scrollTop;
+    var scrollLeft = view.scrollLeft;
+    var tblWrap = view.querySelector(".tblwrap");
+    var tblScrollLeft = tblWrap ? tblWrap.scrollLeft : 0;
 
     if (state.section === "assets") renderAssets();
     else if (state.section === "discovery") renderDiscovery();
@@ -4115,6 +4137,11 @@
     else if (state.section === "access") renderAccess();
 
     view.scrollTop = scrollTop;
+    view.scrollLeft = scrollLeft;
+    if (tblScrollLeft > 0) {
+      var newTbl = view.querySelector(".tblwrap");
+      if (newTbl) newTbl.scrollLeft = tblScrollLeft;
+    }
 
     Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
       b.setAttribute("aria-current", b.getAttribute("data-section") === state.section ? "true" : "false");
