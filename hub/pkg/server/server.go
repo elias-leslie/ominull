@@ -71,6 +71,9 @@ type Server struct {
 	httpServer   *http.Server
 	tlsServer    *http.Server
 	tlsOpts      TLSOptions
+	// access verifies Cloudflare Access assertions when the hub sits behind
+	// Access. nil means it is not configured, which is the default.
+	access *accessVerifier
 
 	clientsMu  sync.RWMutex
 	clients    map[string]*Client // endpointID -> Client
@@ -200,6 +203,27 @@ func (s *Server) SetTLS(opts TLSOptions) {
 // by agents at another - the TLS listener whose certificate they pin. Left
 // empty, enrolment falls back to the published URL and the deployment behaves
 // exactly as it did before there was a TLS listener at all.
+// SetAccess turns on Cloudflare Access verification for the console. Passing a
+// zero AccessOptions leaves it off.
+func (s *Server) SetAccess(opts AccessOptions) error {
+	v, err := newAccessVerifier(opts, s.store.GetOperatorRole)
+	if err != nil {
+		return err
+	}
+	if v != nil {
+		if err := s.store.EnsureBootstrapAdmin(opts.BootstrapAdmin); err != nil {
+			return fmt.Errorf("seeding the bootstrap administrator: %w", err)
+		}
+	}
+	s.access = v
+	return nil
+}
+
+// AccessConfigured reports whether Access identity is in use, so startup can say
+// so plainly rather than leaving an operator guessing why the key is or is not
+// being asked for.
+func (s *Server) AccessConfigured() bool { return s.access != nil }
+
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
 	if s.deployer != nil {
@@ -300,18 +324,39 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if provided == "" {
 		provided = strings.TrimSpace(r.Header.Get("X-API-Key"))
 	}
-	ok := secretEqual(provided, s.adminKey)
+	// heldAdminKey is tracked separately from "may see the console", because it
+	// decides whether the served document carries the admin key. Only a caller
+	// who already has that key is handed it back; an operator identified by
+	// Access gets a session cookie scoped to their own role instead. Otherwise
+	// granting someone the auditor role would still post them the credential
+	// that runs the entire fleet.
+	heldAdminKey := secretEqual(provided, s.adminKey)
+	ok := heldAdminKey
+	viewer := accessOperator{Email: "admin", Role: auth.RoleAdmin}
+
+	// An operator who already signed in through Cloudflare Access does not have
+	// to present the admin key as well. The signed assertion is checked, never
+	// the plaintext identity header, because this hub also answers directly on
+	// the LAN where any caller could assert whatever address it liked.
+	var operator accessOperator
 	if !ok {
-		if c, err := r.Cookie(consoleSessionCookie); err == nil && c.Value != "" {
-			if claims, err := auth.ValidateJWT(c.Value, s.adminKey); err == nil && claims != nil {
-				ok = true
-			}
+		if op, viaAccess := s.access.Verify(r); viaAccess {
+			ok = true
+			operator = op
+			viewer = op
+		}
+	}
+	if !ok {
+		if op, viaCookie := s.consoleSession(r); viaCookie {
+			ok = true
+			viewer = op
 		}
 	}
 	if !ok {
 		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
 			if claims, err := auth.ValidateJWT(strings.TrimPrefix(authHeader, "Bearer "), s.adminKey); err == nil && claims != nil {
 				ok = true
+				viewer = accessOperator{Email: claims.Username, Role: claims.Role}
 			}
 		}
 	}
@@ -326,10 +371,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	s.throttle.succeed(addr)
 
-	// Whoever just proved they hold the key gets a cookie, so the next request
-	// does not have to carry it at all.
-	if secretEqual(provided, s.adminKey) {
-		s.setConsoleSession(w, r)
+	// Whoever just proved who they are gets a cookie, so the next request does
+	// not have to carry a credential at all.
+	if heldAdminKey || operator.Email != "" {
+		s.setConsoleSession(w, r, operator)
 	}
 	// The credential is in this URL. Send the browser to a clean one before
 	// rendering anything, so the address that ends up in history, in a bookmark
@@ -339,7 +384,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, nonce := consoleDocument(s.adminKey, s.agentVersion)
+	// The key is embedded only for the caller who already presented it. Everyone
+	// else authenticates their API calls with the session cookie, which carries
+	// their role and stops working the moment an admin revokes them.
+	embeddedKey := ""
+	if heldAdminKey {
+		embeddedKey = s.adminKey
+	}
+	doc, nonce := consoleDocument(embeddedKey, s.agentVersion, viewer)
 	setConsoleSecurityHeaders(w, nonce)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -355,10 +407,51 @@ const consoleSessionCookie = "ominull_console"
 // working session, not a second credential with a long life of its own.
 const consoleSessionTTL = 12 * time.Hour
 
-func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request) {
+// consoleSession resolves the signed session cookie back to the operator it was
+// issued to.
+//
+// The role is re-read from the operator list on every request rather than taken
+// from the token. A token is valid for twelve hours, and "you are an admin for
+// the rest of the day" is the wrong answer to someone being demoted or removed
+// at ten in the morning. The cookie proves who you are; the table decides what
+// that is currently worth.
+//
+// The cookie is SameSite=Strict, so it does not accompany a request another site
+// caused the browser to make: it authenticates the console's own calls without
+// becoming a way for a page elsewhere to act as the operator.
+func (s *Server) consoleSession(r *http.Request) (accessOperator, bool) {
+	c, err := r.Cookie(consoleSessionCookie)
+	if err != nil || c.Value == "" {
+		return accessOperator{}, false
+	}
+	claims, err := auth.ValidateJWT(c.Value, s.adminKey)
+	if err != nil || claims == nil {
+		return accessOperator{}, false
+	}
+	// A session minted for the admin key itself names no person. It carries the
+	// authority of the key that was presented, which cannot be revoked from the
+	// console, only rotated.
+	if !strings.Contains(claims.Username, "@") {
+		return accessOperator{Email: claims.Username, Role: claims.Role}, true
+	}
+	role, listed := s.store.GetOperatorRole(claims.Username)
+	if !listed {
+		return accessOperator{}, false
+	}
+	return accessOperator{Email: claims.Username, Role: role}, true
+}
+
+func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request, operator accessOperator) {
+	// An operator identified by Access is named in the session, so the audit log
+	// records the person rather than the role. Presenting the admin key directly
+	// is anonymous by construction - it says what was held, not who held it.
+	username, role := "admin", auth.RoleAdmin
+	if operator.Email != "" {
+		username, role = operator.Email, operator.Role
+	}
 	token, err := auth.GenerateJWT(auth.Claims{
-		Username: "admin",
-		Role:     auth.RoleAdmin,
+		Username: username,
+		Role:     role,
 	}, s.adminKey, consoleSessionTTL)
 	if err != nil {
 		return
@@ -387,103 +480,7 @@ func (s *Server) Start(addr string) error {
 	// of its own rather than on any console request.
 	go s.inference.Start(context.Background())
 
-	mux := http.NewServeMux()
-
-	// 0. Embedded operator console: the gated document at "/", plus the
-	// stylesheet, script and fonts it loads. Asset paths are registered
-	// individually so "/" keeps its own not-found behaviour.
-	mux.HandleFunc("/", s.handleDashboard)
-	for _, assetPath := range consoleAssetPaths() {
-		mux.HandleFunc(assetPath, s.handleConsoleAsset)
-	}
-
-	// 1. Static Bootstrap & Binary Downloads
-	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
-	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
-	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
-	mux.HandleFunc("/download/", s.handleDownload)
-
-	// 3. Multi-Tenant REST API & Hierarchy
-	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
-	mux.HandleFunc("/api/v1/locations", s.authMiddleware(s.handleLocations))
-	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(requireAdmin(s.handleTenants)))
-	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
-	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
-	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
-	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
-	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
-	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
-	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
-	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
-	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
-
-	// 4. Dynamic Group Policy, Exclusions & Profiling API
-	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
-	mux.HandleFunc("/api/v1/exclusions", s.authMiddleware(s.handleExclusions))
-	mux.HandleFunc("/api/v1/exclusions/toggle", s.authMiddleware(s.handleToggleExclusion))
-	mux.HandleFunc("/api/v1/anomalies", s.authMiddleware(s.handleAnomalies))
-	mux.HandleFunc("/api/v1/anomalies/acknowledge", s.authMiddleware(s.handleAcknowledgeAnomaly))
-	mux.HandleFunc("/api/v1/policy-groups", s.authMiddleware(s.handlePolicyGroups))
-	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
-	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
-	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
-	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
-	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
-	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
-
-	// 5. RBAC Auth & Audit Logging API
-	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
-	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
-
-	// 6. Autonomous PKI & Mutual TLS
-	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
-	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
-
-	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
-	// Discovery is an operator tool end to end: it sweeps a subnet from the
-	// hub and hands back an inventory of everything on it, agented or not.
-	// None of it is reachable by an agent, and the tenant key is on every
-	// agent, so none of it is reachable with the tenant key.
-	mux.HandleFunc("/api/v1/scanner/scan", s.authMiddleware(requireAdmin(s.handleScannerScan)))
-	mux.HandleFunc("/api/v1/scanner/status", s.authMiddleware(requireAdmin(s.handleScannerStatus)))
-	mux.HandleFunc("/api/v1/scanner/results", s.authMiddleware(requireAdmin(s.handleScannerResults)))
-	mux.HandleFunc("/api/v1/scanner/coverage", s.authMiddleware(requireAdmin(s.handleScannerCoverage)))
-	mux.HandleFunc("/api/v1/scanner/feedback", s.authMiddleware(requireAdmin(s.handleScannerFeedback)))
-
-	// 8. Visual Communications Topology Graph API
-	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
-
-	// 8b. Unified asset graph and flow inference
-	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
-	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(requireAdmin(s.handleAssetCorrect)))
-	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(requireAdmin(s.handleInferenceStatus)))
-	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(requireAdmin(s.handleInferenceRun)))
-
-	// 9. Remote Push-Deployment Engine API
-	// The push deployer opens an SSH session to an arbitrary address with
-	// credentials from the request body and runs an installer on the far end.
-	// That is an operator capability in every sense; the job logs it hands back
-	// are the far host's output, so reading them is one too.
-	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(requireAdmin(s.handleDeployerPush)))
-	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(requireAdmin(s.handleDeployerStatus)))
-	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(requireAdmin(s.handleDeployerJobs)))
-
-	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
-	// Mesh quarantine is broadcast to the whole fleet and lands in a
-	// privileged firewall command on every agent that receives it. Nothing
-	// with that reach is driven by a credential that ships to endpoints.
-	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.handleMeshQuarantine)))
-	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.handleMeshUnquarantine)))
-	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
-
-	// 11. Autonomous Security Copilot API
-	// The copilot answers with fleet context and dials whatever backend its
-	// configuration names, carrying that context to it. Both halves are
-	// operator-only: the question surface because of what it discloses, the
-	// configuration because of where it can be pointed.
-	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(requireAdmin(s.handleCopilotChat)))
-	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(requireAdmin(s.handleCopilotInvestigate)))
-	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(requireAdmin(s.handleCopilotConfig)))
+	mux := s.routes()
 
 	// Both listeners share one mux. Which port a request arrived on decides
 	// whether it was encrypted, never what it is allowed to do - an endpoint
@@ -675,6 +672,17 @@ func clientCertCN(r *http.Request) string {
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every path below establishes a role and then calls through here, so a
+		// read-only role is enforced once for the whole API rather than route by
+		// route. A route added tomorrow is covered without anyone remembering to
+		// cover it.
+		proceed := func(w http.ResponseWriter, r *http.Request) {
+			if !roleAllows(r.Header.Get("X-Role"), r.Method) {
+				writeJSONError(w, http.StatusForbidden, "this role can read the fleet but not change it")
+				return
+			}
+			next(w, r)
+		}
 		// Every header below this line is an assertion by the hub about who the
 		// caller is, and handlers act on them. Clear whatever the client sent
 		// first. Most were overwritten on every path that reaches next() and so
@@ -700,12 +708,25 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				if claims.TenantID != "" {
 					r.Header.Set("X-Tenant-ID", claims.TenantID)
 				}
-				next(w, r)
+				proceed(w, r)
 				return
 			}
 		}
 
-		// 2. Check X-API-Key Header and Query Param
+		// 2. Check the console session cookie
+		//
+		// The console no longer hands the admin key to everyone it renders for,
+		// so an operator who signed in through Cloudflare Access has nothing to
+		// put in X-API-Key. The cookie is that operator's credential, and it is
+		// signed by the hub, so it cannot be minted by the browser holding it.
+		if op, ok := s.consoleSession(r); ok {
+			r.Header.Set("X-Role", op.Role)
+			r.Header.Set("X-Username", op.Email)
+			proceed(w, r)
+			return
+		}
+
+		// 3. Check X-API-Key Header and Query Param
 		//
 		// An address that has just spent a minute presenting wrong keys is not
 		// told which of them was close. The check is before the comparison so a
@@ -730,7 +751,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				s.throttle.succeed(addr)
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
-				next(w, r)
+				proceed(w, r)
 				return
 			}
 			tenant, err := s.store.GetTenantByAPIKey(key)
@@ -739,7 +760,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("X-Role", "tenant")
 				r.Header.Set("X-Tenant-ID", tenant.ID)
 				r.Header.Set("X-Username", tenant.Name)
-				next(w, r)
+				proceed(w, r)
 				return
 			}
 		}
@@ -3357,4 +3378,115 @@ func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+// Handler exposes the request table for tests.
+func (s *Server) Handler() http.Handler { return limitRequestBodies(s.routes()) }
+
+// routes builds the request table. It is a method rather than a block inside
+// Start so a test can exercise the real one: what these handlers are wrapped in
+// is as much a security property as what they do, and a test that called a
+// handler directly would prove nothing about the middleware in front of it.
+func (s *Server) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// 0. Embedded operator console: the gated document at "/", plus the
+	// stylesheet, script and fonts it loads. Asset paths are registered
+	// individually so "/" keeps its own not-found behaviour.
+	mux.HandleFunc("/", s.handleDashboard)
+	for _, assetPath := range consoleAssetPaths() {
+		mux.HandleFunc(assetPath, s.handleConsoleAsset)
+	}
+
+	// 1. Static Bootstrap & Binary Downloads
+	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
+	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
+	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
+	mux.HandleFunc("/download/", s.handleDownload)
+
+	// 3. Multi-Tenant REST API & Hierarchy
+	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
+	mux.HandleFunc("/api/v1/locations", s.authMiddleware(s.handleLocations))
+	mux.HandleFunc("/api/v1/tenants", s.authMiddleware(requireAdmin(s.handleTenants)))
+	mux.HandleFunc("/api/v1/operators", s.authMiddleware(requireAdmin(s.handleOperators)))
+	mux.HandleFunc("/api/v1/operators/remove", s.authMiddleware(requireAdmin(s.handleOperatorRemove)))
+	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
+	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
+	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
+	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
+	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
+	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
+	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
+	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
+	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
+
+	// 4. Dynamic Group Policy, Exclusions & Profiling API
+	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
+	mux.HandleFunc("/api/v1/exclusions", s.authMiddleware(s.handleExclusions))
+	mux.HandleFunc("/api/v1/exclusions/toggle", s.authMiddleware(s.handleToggleExclusion))
+	mux.HandleFunc("/api/v1/anomalies", s.authMiddleware(s.handleAnomalies))
+	mux.HandleFunc("/api/v1/anomalies/acknowledge", s.authMiddleware(s.handleAcknowledgeAnomaly))
+	mux.HandleFunc("/api/v1/policy-groups", s.authMiddleware(s.handlePolicyGroups))
+	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
+	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
+	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
+	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
+	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
+	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
+
+	// 5. RBAC Auth & Audit Logging API
+	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
+
+	// 6. Autonomous PKI & Mutual TLS
+	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
+	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
+
+	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
+	// Discovery is an operator tool end to end: it sweeps a subnet from the
+	// hub and hands back an inventory of everything on it, agented or not.
+	// None of it is reachable by an agent, and the tenant key is on every
+	// agent, so none of it is reachable with the tenant key.
+	mux.HandleFunc("/api/v1/scanner/scan", s.authMiddleware(requireAdmin(s.handleScannerScan)))
+	mux.HandleFunc("/api/v1/scanner/status", s.authMiddleware(requireAdmin(s.handleScannerStatus)))
+	mux.HandleFunc("/api/v1/scanner/results", s.authMiddleware(requireAdmin(s.handleScannerResults)))
+	mux.HandleFunc("/api/v1/scanner/coverage", s.authMiddleware(requireAdmin(s.handleScannerCoverage)))
+	mux.HandleFunc("/api/v1/scanner/feedback", s.authMiddleware(requireAdmin(s.handleScannerFeedback)))
+
+	// 8. Visual Communications Topology Graph API
+	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
+
+	// 8b. Unified asset graph and flow inference
+	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
+	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(requireAdmin(s.handleAssetCorrect)))
+	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(requireAdmin(s.handleInferenceStatus)))
+	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(requireAdmin(s.handleInferenceRun)))
+
+	// 9. Remote Push-Deployment Engine API
+	// The push deployer opens an SSH session to an arbitrary address with
+	// credentials from the request body and runs an installer on the far end.
+	// That is an operator capability in every sense; the job logs it hands back
+	// are the far host's output, so reading them is one too.
+	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(requireAdmin(s.handleDeployerPush)))
+	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(requireAdmin(s.handleDeployerStatus)))
+	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(requireAdmin(s.handleDeployerJobs)))
+
+	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
+	// Mesh quarantine is broadcast to the whole fleet and lands in a
+	// privileged firewall command on every agent that receives it. Nothing
+	// with that reach is driven by a credential that ships to endpoints.
+	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.handleMeshQuarantine)))
+	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.handleMeshUnquarantine)))
+	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
+
+	// 11. Autonomous Security Copilot API
+	// The copilot answers with fleet context and dials whatever backend its
+	// configuration names, carrying that context to it. Both halves are
+	// operator-only: the question surface because of what it discloses, the
+	// configuration because of where it can be pointed.
+	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(requireAdmin(s.handleCopilotChat)))
+	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(requireAdmin(s.handleCopilotInvestigate)))
+	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(requireAdmin(s.handleCopilotConfig)))
+
+	return mux
 }

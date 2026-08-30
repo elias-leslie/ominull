@@ -27,7 +27,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.7.7"
+const defaultAgentVersion = "1.7.8"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
@@ -45,6 +45,9 @@ func main() {
 	retentionDays := flag.Int("retention-days", 14, "Days of raw flow telemetry to keep (0 disables pruning). Nothing pruned it before, and the file only ever grew.")
 	alertRetentionDays := flag.Int("alert-retention-days", 30, "Days of anomaly alerts and alerts to keep (0 disables pruning).")
 	auditRetentionDays := flag.Int("audit-retention-days", 365, "Days of audit log to keep (0 disables pruning). Kept far longer than telemetry: it is small, and it is the record of who did what.")
+	accessTeam := flag.String("access-team", "", "Cloudflare Access team name (the <team> in <team>.cloudflareaccess.com). Set with --access-aud to let an operator who has already signed in through Access open the console without also presenting the admin key.")
+	accessAUD := flag.String("access-aud", "", "The Access application's Application Audience (AUD) tag. Pinned on every assertion: without it, a token minted for any other Access application in the same team would open this console.")
+	accessAdmin := flag.String("access-bootstrap-admin", "", "Email guaranteed to hold the admin role at startup. Everyone else is granted and revoked in the console; this flag only makes sure there is someone who can open it in the first place, and it never demotes an existing administrator.")
 	clientCerts := flag.String("client-certs", "optional", "How agents identify themselves: off (never asked - no endpoint can be told from another holding the same tenant key), optional (verified when presented, endpoints without one still report), required (refused at the handshake without one; only once every endpoint has one).")
 	flag.Parse()
 
@@ -134,6 +137,13 @@ func main() {
 		ClientCerts: clientCertMode,
 	})
 	srv.SetAgentHubURL(*agentHubURL)
+	if err := srv.SetAccess(server.AccessOptions{
+		Team:           *accessTeam,
+		AUD:            *accessAUD,
+		BootstrapAdmin: *accessAdmin,
+	}); err != nil {
+		log.Fatalf("[-] Cloudflare Access: %v", err)
+	}
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
 			log.Fatalf("[-] Hub server error: %v", err)
@@ -146,6 +156,18 @@ func main() {
 	consoleHost := *listenAddr
 	if strings.HasPrefix(consoleHost, ":") {
 		consoleHost = "localhost" + consoleHost
+	}
+	if srv.AccessConfigured() {
+		admins, err := store.CountAdmins()
+		if err != nil {
+			log.Fatalf("[-] Counting administrators: %v", err)
+		}
+		if admins == 0 {
+			log.Printf("[!] Cloudflare Access is configured but no operator holds the admin role, so nobody can sign in through it and nobody can grant it from the console. Restart once with --access-bootstrap-admin <your email>.")
+		}
+		log.Printf("[+] Console sign-in:          Cloudflare Access identity, checked against the operator list (%d administrator(s)), plus the admin key for direct access", admins)
+	} else {
+		log.Printf("[*] Console sign-in:          admin key only. Behind Cloudflare Access, set --access-team, --access-aud and --access-bootstrap-admin so an operator does not have to type a fleet-wide credential into a browser.")
 	}
 	log.Printf("[+] Bundled agent release:      v%s (endpoints below this are offered an update)", resolvedAgentVersion)
 	log.Printf("[+] Bootstrap script endpoint: http://%s/bootstrap.ps1", consoleHost)

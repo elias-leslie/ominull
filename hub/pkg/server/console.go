@@ -45,6 +45,8 @@ var (
 // the key lives in the served HTML and never in a tracked file.
 const (
 	adminKeyPlaceholder   = "{{ADMIN_KEY}}"
+	operatorPlaceholder   = "{{OPERATOR}}"
+	rolePlaceholder       = "{{OPERATOR_ROLE}}"
 	hubVersionPlaceholder = "{{HUB_VERSION}}"
 	// cspNoncePlaceholder marks the two inline scripts the document needs: the
 	// serve-time configuration and the pre-paint theme selection. Both have to
@@ -105,12 +107,17 @@ func consoleContentType(name string) string {
 // consoleDocument renders index.html with the serve-time substitutions applied
 // and returns the script nonce the caller must name in the Content-Security-Policy
 // header for that response.
-func consoleDocument(adminKey, hubVersion string) ([]byte, string) {
+func consoleDocument(adminKey, hubVersion string, viewer accessOperator) ([]byte, string) {
 	consoleOnce.Do(loadConsole)
 	nonce := newCSPNonce()
 	html := string(consoleIndex)
 	html = strings.ReplaceAll(html, adminKeyPlaceholder, jsStringEscape(adminKey))
 	html = strings.ReplaceAll(html, hubVersionPlaceholder, jsStringEscape(hubVersion))
+	// Who the console thinks it is rendering for. The console hides what this
+	// operator cannot use; the hub refuses it regardless, because a hidden
+	// button is a courtesy and not a control.
+	html = strings.ReplaceAll(html, operatorPlaceholder, jsStringEscape(viewer.Email))
+	html = strings.ReplaceAll(html, rolePlaceholder, jsStringEscape(viewer.Role))
 	html = strings.ReplaceAll(html, cspNoncePlaceholder, nonce)
 	return []byte(html), nonce
 }

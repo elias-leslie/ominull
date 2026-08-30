@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -597,6 +598,13 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_alerts_tenant_time ON alerts(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
+
+	CREATE TABLE IF NOT EXISTS operators (
+		email TEXT PRIMARY KEY,
+		role TEXT NOT NULL,
+		created_by TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL
+	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -2941,4 +2949,148 @@ func (s *Store) IsPeerQuarantined(ip string) bool {
 		return false
 	}
 	return count > 0
+}
+
+// Operators are the people allowed to sign in to the console with an identity
+// rather than with the admin key.
+//
+// Cloudflare Access decides who reaches the origin at all; this table decides
+// who gets to run the fleet once they are there. Keeping them apart means
+// widening an Access policy - or pointing a second Access application at this
+// hub - cannot by itself hand anyone admin.
+
+// Operator is one person and the role they hold.
+type Operator struct {
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// OperatorRoles are the roles an operator may hold, in descending order of
+// reach. They mirror the roles the auth package already defines.
+var OperatorRoles = []string{"admin", "analyst", "auditor"}
+
+// ErrLastAdmin is returned rather than allowing the change that would leave the
+// console with no administrator. The admin key still opens it, so this is not a
+// hard lockout - but recovering that way means going to the hub host, and an
+// operator should not be able to do it to themselves with one click.
+var ErrLastAdmin = errors.New("this is the only administrator left; promote someone else first")
+
+func validOperatorRole(role string) bool {
+	for _, r := range OperatorRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+func normaliseEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// GetOperatorRole returns the role held by an email address, if any.
+func (s *Store) GetOperatorRole(email string) (string, bool) {
+	var role string
+	err := s.db.QueryRow("SELECT role FROM operators WHERE email = ?", normaliseEmail(email)).Scan(&role)
+	if err != nil {
+		return "", false
+	}
+	return role, true
+}
+
+// ListOperators returns every operator, administrators first.
+func (s *Store) ListOperators() ([]Operator, error) {
+	rows, err := s.db.Query(`
+		SELECT email, role, created_by, created_at FROM operators
+		ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'analyst' THEN 1 ELSE 2 END, email`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []Operator{}
+	for rows.Next() {
+		var o Operator
+		if err := rows.Scan(&o.Email, &o.Role, &o.CreatedBy, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// CountAdmins reports how many operators hold admin.
+func (s *Store) CountAdmins() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM operators WHERE role = 'admin'").Scan(&n)
+	return n, err
+}
+
+// UpsertOperator adds an operator or changes their role. Demoting the last
+// administrator is refused.
+func (s *Store) UpsertOperator(email, role, createdBy string) error {
+	email = normaliseEmail(email)
+	role = strings.ToLower(strings.TrimSpace(role))
+	if email == "" || !strings.Contains(email, "@") {
+		return errors.New("an operator is identified by an email address")
+	}
+	if !validOperatorRole(role) {
+		return fmt.Errorf("%q is not a role (%s)", role, strings.Join(OperatorRoles, ", "))
+	}
+
+	if role != "admin" {
+		current, wasListed := s.GetOperatorRole(email)
+		if wasListed && current == "admin" {
+			admins, err := s.CountAdmins()
+			if err != nil {
+				return err
+			}
+			if admins <= 1 {
+				return ErrLastAdmin
+			}
+		}
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO operators (email, role, created_by, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(email) DO UPDATE SET role = excluded.role`,
+		email, role, createdBy, time.Now())
+	return err
+}
+
+// DeleteOperator removes an operator. Removing the last administrator is
+// refused, for the same reason demoting them is.
+func (s *Store) DeleteOperator(email string) error {
+	email = normaliseEmail(email)
+	role, listed := s.GetOperatorRole(email)
+	if !listed {
+		return nil
+	}
+	if role == "admin" {
+		admins, err := s.CountAdmins()
+		if err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	_, err := s.db.Exec("DELETE FROM operators WHERE email = ?", email)
+	return err
+}
+
+// EnsureBootstrapAdmin makes sure the named address holds admin, so a hub can be
+// brought up with an operator already able to sign in. It is idempotent, and it
+// never demotes anyone.
+func (s *Store) EnsureBootstrapAdmin(email string) error {
+	email = normaliseEmail(email)
+	if email == "" {
+		return nil
+	}
+	if role, listed := s.GetOperatorRole(email); listed && role == "admin" {
+		return nil
+	}
+	return s.UpsertOperator(email, "admin", "bootstrap")
 }

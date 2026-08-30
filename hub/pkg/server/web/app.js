@@ -17,6 +17,13 @@
   var CFG = window.OMINULL || {};
   var API_KEY = CFG.key || "";
   var HUB_VERSION = CFG.version || "";
+  /* Who the hub rendered this document for. The key is only embedded when the
+     operator unlocked the console with it; signing in through Cloudflare Access
+     leaves it empty and the session cookie carries the role instead. */
+  var OPERATOR = CFG.operator || "";
+  var ROLE = CFG.role || "admin";
+  var IS_ADMIN = ROLE === "admin";
+  var READ_ONLY = ROLE === "auditor";
 
   var THEMES = ["graphite", "bunker", "ash", "phosphor"];
   var THEME_NAMES = {
@@ -35,6 +42,11 @@
     { id: "policy", label: "Policy" },
     { id: "audit", label: "Audit" }
   ];
+
+  /* Managing who can sign in is an administrator's section. It is appended
+     rather than declared inline so the command palette and the rail agree about
+     what exists without either of them testing the role again. */
+  if (IS_ADMIN) SECTIONS.push({ id: "access", label: "Access" });
 
   var IS_MAC = /mac|iphone|ipad/i.test(navigator.userAgent);
   var MOD_LABEL = IS_MAC ? "\u2318K" : "Ctrl K";
@@ -244,6 +256,9 @@
     exclusions: [],
     iocs: [],
     audit: [],
+    operators: [],
+    operatorRoles: ["admin", "analyst", "auditor"],
+    you: "",
     events: [],
     analytics: null,
     topology: null,
@@ -280,9 +295,16 @@
 
   function request(path, method, body) {
     if (state.demo) return demoResponse(path, method, body);
+    /* An empty X-API-Key is a failed credential as far as the hub is concerned,
+       and failed credentials are throttled by source address. When there is no
+       key the session cookie is the credential, so send nothing rather than
+       something wrong. */
+    var headers = { "Content-Type": "application/json" };
+    if (API_KEY) headers["X-API-Key"] = API_KEY;
     var opts = {
       method: method || "GET",
-      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" }
+      headers: headers,
+      credentials: "same-origin"
     };
     if (body) opts.body = JSON.stringify(body);
     return fetch(apiURL(path), opts).then(function (res) {
@@ -1213,6 +1235,17 @@
         { label: "Indicators", value: capped(state.iocs.length, IOC_PAGE) },
         { label: "Mesh quarantined", value: String(state.meshPeers.length), tone: state.meshPeers.length ? "crit" : "" },
         { label: "Isolated hosts", value: String(stats.quarantined), tone: stats.quarantined ? "crit" : "" }
+      ];
+    }
+    if (state.section === "access") {
+      var admins = state.operators.filter(function (o) { return o.role === "admin"; }).length;
+      return [
+        { label: "Operators", value: String(state.operators.length) },
+        { label: "Administrators", value: String(admins), tone: admins === 1 ? "warn" : "" },
+        { label: "Analysts", value: String(state.operators.filter(function (o) { return o.role === "analyst"; }).length) },
+        { label: "Auditors", value: String(state.operators.filter(function (o) { return o.role === "auditor"; }).length) },
+        { label: "Signed in as", value: state.you || OPERATOR || "admin key" },
+        { label: "Assets known", value: String(stats.total) }
       ];
     }
     if (state.section === "audit") {
@@ -2624,6 +2657,109 @@
       card("Audit trail", simpleTable(["Age", "Actor", "Action", "Resource", "Details", "From"], rows))));
   }
 
+  /* Roles, in the words an operator uses about people rather than the words the
+     hub uses about routes. */
+  var ROLE_LABELS = {
+    admin: "Administrator",
+    analyst: "Analyst",
+    auditor: "Auditor"
+  };
+  var ROLE_NOTES = {
+    admin: "Runs the fleet. Isolates hosts, pushes agents, and manages this list.",
+    analyst: "Investigates and responds. Isolates hosts and works alerts, but cannot change who signs in.",
+    auditor: "Reads everything, changes nothing. Every request that is not a read is refused."
+  };
+
+  function roleName(r) { return ROLE_LABELS[r] || r || "\u2014"; }
+
+  function renderAccess() {
+    var view = $("view");
+    clear(view);
+
+    var emailInput = h("input", {
+      type: "text", id: "op-email", placeholder: "name@example.com",
+      autocomplete: "off", spellcheck: "false"
+    });
+    var roleSel = h("select", { id: "op-role" });
+    state.operatorRoles.forEach(function (r) {
+      roleSel.appendChild(h("option", { value: r, text: roleName(r) }));
+    });
+    roleSel.value = "analyst";
+
+    var note = h("p", { cls: "pending", text: ROLE_NOTES[roleSel.value] || "" });
+    roleSel.addEventListener("change", function () {
+      note.textContent = ROLE_NOTES[roleSel.value] || "";
+    });
+
+    function grant() {
+      var email = (emailInput.value || "").trim();
+      if (!email) { toast("An operator is identified by an email address", "warn"); return; }
+      request("/api/v1/operators", "POST", { email: email, role: roleSel.value })
+        .then(function () {
+          toast(email + " is now " + roleName(roleSel.value).toLowerCase(), "ok");
+          emailInput.value = "";
+          refresh();
+        })
+        .catch(function (e) { toast("Could not grant access: " + e.message, "crit"); });
+    }
+    emailInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); grant(); }
+    });
+
+    var grantCard = card("Grant access",
+      h("div", { cls: "card-body" },
+        h("div", { cls: "form-row" },
+          h("label", { cls: "field" }, h("span", { text: "Email" }), emailInput),
+          h("label", { cls: "field" }, h("span", { text: "Role" }), roleSel),
+          h("button", { cls: "btn btn-primary", type: "button", text: "Grant", on: { click: grant } })),
+        note,
+        h("p", { cls: "pending", text: "The address must match the one the identity provider returns. Granting a role here does not admit anyone on its own: Cloudflare Access still decides who reaches this hub, and this list decides what they are once they do." })));
+
+    var rows = state.operators.map(function (op) {
+      var isYou = op.email === state.you;
+
+      var sel = h("select", {});
+      state.operatorRoles.forEach(function (r) {
+        sel.appendChild(h("option", { value: r, text: roleName(r) }));
+      });
+      sel.value = op.role;
+      sel.addEventListener("change", function () {
+        var next = sel.value;
+        request("/api/v1/operators", "POST", { email: op.email, role: next })
+          .then(function () { toast(op.email + " is now " + roleName(next).toLowerCase(), "ok"); refresh(); })
+          .catch(function (e) {
+            sel.value = op.role;
+            toast("Could not change the role: " + e.message, "crit");
+          });
+      });
+
+      return [
+        h("span", { cls: "ip", text: op.email }),
+        sel,
+        h("span", { cls: "dim-3", text: isYou ? "you" : (op.created_by || "\u2014") }),
+        h("span", { cls: "ago", text: op.created_at ? ago(parseTime(op.created_at)) : "\u2014" }),
+        h("button", {
+          cls: "mini", type: "button", text: "Remove",
+          on: {
+            click: function () {
+              request("/api/v1/operators/remove", "POST", { email: op.email })
+                .then(function () {
+                  toast("Removed " + op.email + (isYou ? " \u2014 that was your own access" : ""), isYou ? "warn" : "ok");
+                  refresh();
+                })
+                .catch(function (e) { toast("Could not remove: " + e.message, "crit"); });
+            }
+          }
+        })
+      ];
+    });
+
+    var listCard = card("Operators",
+      simpleTable(["Email", "Role", "Granted by", "Added", ""], rows));
+
+    view.appendChild(h("div", { cls: "pad stack" }, listCard, grantCard));
+  }
+
   /* --------------------------------------------------------- full route */
 
   var routeEl = null;
@@ -3385,6 +3521,7 @@
     else if (state.section === "traffic") renderTraffic();
     else if (state.section === "policy") renderPolicy();
     else if (state.section === "audit") renderAudit();
+    else if (state.section === "access") renderAccess();
 
     view.scrollTop = scrollTop;
 
@@ -3444,6 +3581,13 @@
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
+    if (state.section === "access" && IS_ADMIN) {
+      jobs.push(request("/api/v1/operators").then(function (d) {
+        state.operators = arrayOf(d && d.operators);
+        if (d && Array.isArray(d.roles) && d.roles.length) state.operatorRoles = d.roles;
+        state.you = (d && d.you) || "";
+      }));
+    }
     if (state.section === "audit") {
       jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
       jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
@@ -3497,6 +3641,15 @@
       if (themePop) closeThemePop();
       else openThemePop();
     });
+
+    if (IS_ADMIN) $("rail-access").removeAttribute("hidden");
+
+    /* An operator who signed in as themselves should be able to see who the
+       console thinks they are without opening a section to find out. */
+    if (OPERATOR && OPERATOR !== "admin") {
+      $("signed-in").textContent = OPERATOR + (READ_ONLY ? " \u00b7 read only" : "");
+      $("signed-in").title = "Signed in as " + OPERATOR + " (" + roleName(ROLE).toLowerCase() + ")";
+    }
 
     Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
       b.addEventListener("click", function () { go(b.getAttribute("data-section")); });

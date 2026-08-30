@@ -9,7 +9,7 @@
 <script nonce="{{CSP_NONCE}}">
 /* Serve-time substitution. The hub replaces these two tokens before it writes
    the document; they are template placeholders, never checked-in values. */
-window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}" };
+window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "{{OPERATOR}}", role: "{{OPERATOR_ROLE}}" };
 </script>
 <script nonce="{{CSP_NONCE}}">
 /* Apply the stored theme before first paint so the console never flashes Ash
@@ -47,6 +47,9 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}" };
   </symbol>
   <symbol id="i-audit" viewBox="0 0 24 24">
     <path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/>
+  </symbol>
+  <symbol id="i-access" viewBox="0 0 24 24">
+    <circle cx="9" cy="9" r="3.2"/><path d="M3.8 19c.6-3 2.7-4.6 5.2-4.6s4.6 1.6 5.2 4.6"/><path d="M15.5 8.5h5M18.5 8.5v4"/>
   </symbol>
   <symbol id="i-alert" viewBox="0 0 24 24">
     <path d="M12 3a5 5 0 0 0-5 5c0 5-2 6-2 6h14s-2-1-2-6a5 5 0 0 0-5-5z"/><path d="M10.5 19a2 2 0 0 0 3 0"/>
@@ -147,6 +150,14 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}" };
       <span class="tip" aria-hidden="true">Audit</span>
       <span class="sr">Audit</span>
     </button>
+    <!-- Removed from the rail entirely for anyone who is not an administrator.
+         The hub refuses the routes behind it regardless; hiding the button keeps
+         the console from offering a door that will not open. -->
+    <button class="rail-btn" type="button" data-section="access" aria-current="false" id="rail-access" hidden>
+      <svg class="ic"><use href="#i-access"/></svg>
+      <span class="tip" aria-hidden="true">Access</span>
+      <span class="sr">Access</span>
+    </button>
 
     <span class="rail-gap"></span>
 
@@ -174,6 +185,8 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}" };
       </button>
 
       <span id="topbar-actions"></span>
+
+      <span class="ver" id="signed-in" title="Signed in as"></span>
 
       <span class="ver" id="hub-version" title="Hub build"></span>
 
