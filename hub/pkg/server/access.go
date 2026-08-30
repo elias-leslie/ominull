@@ -50,6 +50,10 @@ const accessJWKSTTL = time.Hour
 // turn into a stream of outbound requests.
 const accessJWKSMinRefresh = time.Minute
 
+// accessRefusalLogEvery rate-limits the line explaining why an assertion was
+// refused, so a stream of invalid tokens cannot fill the journal.
+const accessRefusalLogEvery = time.Minute
+
 // AccessOptions configures Cloudflare Access verification. Team and AUD are the
 // deployment's own identifiers, so they are given at run time and never live in
 // the repository. Who holds which role is managed in the console and stored in
@@ -77,6 +81,7 @@ type accessVerifier struct {
 	keys        map[string]*rsa.PublicKey
 	fetchedAt   time.Time
 	lastAttempt time.Time
+	lastRefusal time.Time
 
 	client *http.Client
 }
@@ -121,6 +126,20 @@ func (a *accessVerifier) Verify(r *http.Request) (accessOperator, bool) {
 	}
 	claims, err := a.verifyToken(raw)
 	if err != nil {
+		// A refused assertion is silent from the operator's side: Access says
+		// they signed in, the hub shows them the gate, and nothing anywhere says
+		// why. The commonest cause is a mistyped --access-aud, which no amount of
+		// retrying fixes. Rate-limited because an attacker posting junk tokens
+		// must not be able to write the journal full.
+		a.mu.Lock()
+		quiet := time.Since(a.lastRefusal) < accessRefusalLogEvery
+		if !quiet {
+			a.lastRefusal = time.Now()
+		}
+		a.mu.Unlock()
+		if !quiet {
+			log.Printf("[!] A Cloudflare Access assertion was refused: %v. If this is every sign-in, check that --access-aud matches this application's Application Audience tag and that --access-team names the right team.", err)
+		}
 		return accessOperator{}, false
 	}
 	email := strings.ToLower(strings.TrimSpace(claims.Email))
