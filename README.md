@@ -1,9 +1,9 @@
-# Ominull: Autonomous CyberOps & Ring-0 Threat Nullification Platform
+# Ominull™: Autonomous CyberOps & Ring-0 Threat Nullification Platform
 
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](file:///srv/workspaces/projects/ominull/hub)
 [![C Standard](https://img.shields.io/badge/C-C11-00599C?style=flat&logo=c)](file:///srv/workspaces/projects/ominull/agent)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-informational)](#system-architecture)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](file:///srv/workspaces/projects/ominull/LICENSE)
+[![License](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE)
 
 **Ominull** is an enterprise-grade, ultra-lean kernel network security and autonomous Incident Response (IR) platform. It unifies microsecond ring-0 enforcement, in-flight Deep Packet Inspection (DPI), statistical behavioral anomaly detection, subnet quarantine mesh isolation, automated 1-click push-deployment, and an embedded 24/7 AI CyberOps Copilot into a single self-contained architecture.
 
@@ -345,4 +345,11 @@ gcc -O2 -Wall -Wextra -o /tmp/test_dpi /srv/workspaces/projects/ominull/agent/te
 
 ## 10. License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Ominull™ is released under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`).
+
+- **Free for non-commercial use** — individuals, schools and universities, academic research, and non-profits, in production, forever.
+- **Free for everyone to evaluate, develop and test.** Non-production use is not restricted, so a business can try it before deciding.
+- **A commercial licence is required** for production use by or for a business, and for offering Ominull to third parties as part of a product or service. Email <eliasleslie@gmail.com>.
+- **Every version becomes Apache 2.0** two years after it is published. That grant is written into the licence and cannot be withdrawn.
+
+Versions published before 30 August 2026 remain under the Apache License, Version 2.0.

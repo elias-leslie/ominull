@@ -21,6 +21,8 @@ rm -rf "${DEB_DIR}"
 mkdir -p "${DEB_DIR}/DEBIAN"
 mkdir -p "${DEB_DIR}/opt/ominull/bin"
 mkdir -p "${DEB_DIR}/etc/systemd/system"
+mkdir -p "${DEB_DIR}/usr/share/doc/ominull-agent"
+cp "${ROOT_DIR}/LICENSE" "${DEB_DIR}/usr/share/doc/ominull-agent/LICENSE"
 
 cp "${ROOT_DIR}/agent/bin/ominull-agent" "${DEB_DIR}/opt/ominull/bin/ominulld"
 chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
@@ -142,6 +144,7 @@ echo "[*] Packaging Windows Agent bundle..."
 WIN_DIR="${DIST_DIR}/win-build"
 rm -rf "${WIN_DIR}"
 mkdir -p "${WIN_DIR}"
+cp "${ROOT_DIR}/LICENSE" "${WIN_DIR}/LICENSE"
 
 # Build the Windows agent rather than picking up whatever happens to be lying in
 # agent/bin. Shipping the bundle without the binary produced an installer with nothing
@@ -252,6 +255,7 @@ echo "[*] Packaging macOS Agent bundle..."
 MAC_DIR="${DIST_DIR}/mac-build"
 rm -rf "${MAC_DIR}"
 mkdir -p "${MAC_DIR}"
+cp "${ROOT_DIR}/LICENSE" "${MAC_DIR}/LICENSE"
 
 if [ -f "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" ]; then
     cp "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" "${MAC_DIR}/"

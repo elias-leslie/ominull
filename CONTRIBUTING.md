@@ -17,4 +17,14 @@ Instructions for building the Go Hub, C agents, and running automated test suite
 
 ## Licensing
 
-By submitting a pull request, you agree that your contribution will be licensed under the [Apache License, Version 2.0](LICENSE).
+Ominull™ is released under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`): free for non-commercial production use and for everyone's evaluation, development and testing, with a commercial licence required for business production use. Each version converts to Apache 2.0 two years after it is published.
+
+By submitting a pull request, you agree that:
+
+1. You own the copyright in your contribution, or have the right to submit it.
+2. Your contribution is licensed to the project under the terms of the [LICENSE](LICENSE) file.
+3. You grant Elias Leslie a perpetual, irrevocable, worldwide, royalty-free right to relicense your contribution under any other licence terms, including a commercial licence.
+
+Point 3 exists so the project can keep the arrangement that funds it — free for the uses listed in the README, licensed commercially for the rest — without having to track down every past contributor. It does not take anything from you: you keep the copyright in your own work and may use it however you like.
+
+If you would rather not grant that, open an issue describing the change instead of a pull request and it can be implemented independently.
