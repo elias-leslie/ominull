@@ -54,6 +54,11 @@ const accessJWKSMinRefresh = time.Minute
 // refused, so a stream of invalid tokens cannot fill the journal.
 const accessRefusalLogEvery = time.Minute
 
+// accessAcceptLogEvery does the same for the line that records a verified
+// assertion. Every console request carries one, so without a limit a single
+// operator with the page open would write a line every five seconds.
+const accessAcceptLogEvery = 5 * time.Minute
+
 // AccessOptions configures Cloudflare Access verification. Team and AUD are the
 // deployment's own identifiers, so they are given at run time and never live in
 // the repository. Who holds which role is managed in the console and stored in
@@ -77,11 +82,12 @@ type accessVerifier struct {
 	// effect on their next request instead of at the next restart.
 	lookup func(email string) (string, bool)
 
-	mu          sync.RWMutex
-	keys        map[string]*rsa.PublicKey
-	fetchedAt   time.Time
-	lastAttempt time.Time
-	lastRefusal time.Time
+	mu           sync.RWMutex
+	keys         map[string]*rsa.PublicKey
+	fetchedAt    time.Time
+	lastAttempt  time.Time
+	lastRefusal  time.Time
+	lastAccepted time.Time
 
 	client *http.Client
 }
@@ -154,6 +160,21 @@ func (a *accessVerifier) Verify(r *http.Request) (accessOperator, bool) {
 		log.Printf("[!] %s signed in through Cloudflare Access but is not in the operator list, so the console was refused.", email)
 		return accessOperator{}, false
 	}
+	// The positive counterpart to the refusal line above. Without it the journal
+	// could say an assertion was rejected but never that one was accepted, so
+	// "is Cloudflare actually forwarding a signed identity, or am I just riding
+	// an old session cookie?" had no answer on the hub at all. Rate-limited the
+	// same way, because every page load carries an assertion.
+	a.mu.Lock()
+	quiet := time.Since(a.lastAccepted) < accessAcceptLogEvery
+	if !quiet {
+		a.lastAccepted = time.Now()
+	}
+	a.mu.Unlock()
+	if !quiet {
+		log.Printf("[+] Cloudflare Access verified %s as %s.", email, role)
+	}
+
 	return accessOperator{Email: email, Role: role}, true
 }
 

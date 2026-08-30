@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ominull Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2314161A'/%3E%3Ccircle cx='8' cy='8' r='4.2' fill='none' stroke='%238FA9E8' stroke-width='1.4'/%3E%3Cpath d='M5 11 11 5' stroke='%238FA9E8' stroke-width='1.4'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v={{HUB_VERSION}}">
 <script nonce="{{CSP_NONCE}}">
 /* Serve-time substitution. The hub replaces these two tokens before it writes
    the document; they are template placeholders, never checked-in values. */
@@ -209,6 +209,6 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
-<script src="app.js"></script>
+<script src="app.js?v={{HUB_VERSION}}"></script>
 </body>
 </html>

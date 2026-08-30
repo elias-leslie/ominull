@@ -217,6 +217,16 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 	// Revalidate every load: the console ships with the binary, so a hub
 	// upgrade must not leave an operator on a cached stylesheet from the
 	// previous build.
+	//
+	// This alone was not enough. An operator on a hub that had just shipped a
+	// new console section clicked it and nothing happened, because the browser
+	// had served the previous build's script without asking - "no-cache" asks
+	// for revalidation, and something between the browser and here did not do
+	// it. The document, which is never cached, therefore asks for the script
+	// and the stylesheet by a URL carrying the running version: a hub upgrade
+	// changes the URL, and a URL the browser has never seen cannot be answered
+	// from a cache. The query string is not part of r.URL.Path, so this handler
+	// resolves the asset exactly as before.
 	w.Header().Set("Cache-Control", "no-cache")
 
 	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, asset.etag) {
