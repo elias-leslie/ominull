@@ -713,6 +713,15 @@ kbd {
   color: var(--ink);
 }
 
+/* A tile holding an address rather than a count: smaller, wrapped, and kept
+   inside its own box. */
+.tile[data-len="long"] .v {
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .tile[data-tone="warn"] .v {
   color: var(--warn);
 }

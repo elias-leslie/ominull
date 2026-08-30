@@ -1132,8 +1132,16 @@
 
     if (state.section !== "assets") {
       sectionSummary().forEach(function (t) {
-        strip.appendChild(h("div", { cls: "tile", "data-static": "true", "data-tone": t.tone || "" },
-          h("div", { cls: "v", text: t.value }),
+        /* Tiles were built for counts. An email address in one ran past its own
+           box and into the tile beside it, clipped mid-character. The length
+           goes on the element and the stylesheet decides what to do with it -
+           a style attribute here would be a size the theme cannot reach. */
+        var text = String(t.value);
+        strip.appendChild(h("div", {
+          cls: "tile", "data-static": "true", "data-tone": t.tone || "",
+          "data-len": text.length > 12 ? "long" : "", title: text
+        },
+          h("div", { cls: "v", text: text }),
           h("div", { cls: "l", text: t.label })));
       });
       return;
@@ -2774,9 +2782,14 @@
       });
 
       return [
-        h("span", { cls: "ip", text: op.email }),
+        /* "you" belongs against the name, not in the Granted by column - that
+           column answers who granted the role, and overwriting it lost the
+           answer for whoever happened to be reading their own row. */
+        h("span", { cls: "ip" },
+          document.createTextNode(op.email),
+          isYou ? h("span", { cls: "dim-3", text: "  you" }) : document.createTextNode("")),
         sel,
-        h("span", { cls: "dim-3", text: isYou ? "you" : (op.created_by || "\u2014") }),
+        h("span", { cls: "dim-3", text: op.created_by || "\u2014" }),
         h("span", { cls: "ago", text: op.created_at ? ago(parseTime(op.created_at)) : "\u2014" }),
         h("button", {
           cls: "mini", type: "button", text: "Remove",
