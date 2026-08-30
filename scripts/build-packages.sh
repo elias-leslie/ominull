@@ -257,9 +257,15 @@ rm -rf "${MAC_DIR}"
 mkdir -p "${MAC_DIR}"
 cp "${ROOT_DIR}/LICENSE" "${MAC_DIR}/LICENSE"
 
-if [ -f "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" ]; then
-    cp "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" "${MAC_DIR}/"
+# No "if it exists" here. This used to be a bare -f test with no else branch, so
+# a missing source file produced an archive without the daemon and the only
+# complaint came from the gate below - which blames the archive, and sent me
+# looking at tar instead of at the file that was not copied.
+if [ ! -f "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" ]; then
+    echo "  [-] agent/macos/ominull_mac_daemon.sh is missing; there is no macOS agent to package." >&2
+    exit 1
 fi
+cp "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" "${MAC_DIR}/"
 
 # The daemon does not enforce anything itself: it shells out to pf_engine.sh for
 # every isolation and every mesh quarantine. It was never in this archive, so a
@@ -318,9 +324,34 @@ done
 # The macOS daemon enforces nothing on its own; every isolation and every mesh
 # quarantine is a call into pf_engine.sh. An archive without it produces a host
 # that reports itself quarantined and keeps routing, so it is not a release.
+# The listing is taken once, into a variable. Piping tar straight into `grep -q`
+# looks tidier and is a race: grep exits at the first match and closes the pipe,
+# tar dies of SIGPIPE, and `set -o pipefail` reports the whole pipeline as failed
+# - so the gate intermittently claimed a member was missing from an archive that
+# contained it. Whether it fired depended on how much of the listing tar had
+# already written, which is why only the alphabetically early member ever tripped.
+# Two different things can go wrong here and they want different fixes: tar can
+# fail to read the archive, or the archive can genuinely lack a member. Piping
+# tar straight into `grep -q` under `set -o pipefail` reports both as "missing",
+# and reports a tar that merely exited non-zero as a missing member - so the
+# listing is taken first, on its own, and its exit status is judged separately.
+# When this gate does fire it now prints what it saw, because a build gate that
+# refuses to explain itself costs more time than the bug it caught.
+mac_archive="${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz"
+mac_status=0
+mac_members="$(tar -tzf "${mac_archive}" 2>&1)" || mac_status=$?
+if [ "${mac_status}" -ne 0 ]; then
+    echo "[-] could not list ${mac_archive} (tar exited ${mac_status}):" >&2
+    printf '%s\n' "${mac_members}" | sed 's/^/      /' >&2
+    exit 1
+fi
 for required in ./ominull_mac_daemon.sh ./pf_engine.sh; do
-    if ! tar -tzf "${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz" | grep -qx "${required}"; then
+    if ! printf '%s\n' "${mac_members}" | grep -qxF -- "${required}"; then
         echo "[-] ominull-agent-macos-${VERSION}.tar.gz is missing ${required}; the agent could not enforce anything." >&2
+        echo "    staged in ${MAC_DIR}:" >&2
+        ls -la "${MAC_DIR}" 2>&1 | sed 's/^/      /' >&2
+        echo "    archive contains:" >&2
+        printf '%s\n' "${mac_members}" | sed 's/^/      /' >&2
         exit 1
     fi
 done

@@ -347,9 +347,10 @@ gcc -O2 -Wall -Wextra -o /tmp/test_dpi /srv/workspaces/projects/ominull/agent/te
 
 Ominull™ is released under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`).
 
-- **Free for non-commercial use** — individuals, schools and universities, academic research, and non-profits, in production, forever.
+- **Free in production** for individuals on their own machines, for schools and universities teaching and doing academic research, and for non-profits under USD 1M annual revenue.
 - **Free for everyone to evaluate, develop and test.** Non-production use is not restricted, so a business can try it before deciding.
-- **A commercial licence is required** for production use by or for a business, and for offering Ominull to third parties as part of a product or service. Email <eliasleslie@gmail.com>.
+- **A commercial licence is required** for businesses, government and public-sector bodies, larger non-profits, and for anyone using Ominull to deliver a paid service — consulting, managed security, incident response, fractional or virtual CISO work — including at a client who would otherwise qualify above. Email <eliasleslie@gmail.com>.
+- **Ask if the price is the obstacle.** Free and reduced-fee licences are granted on request, case by case.
 - **Every version becomes Apache 2.0** two years after it is published. That grant is written into the licence and cannot be withdrawn.
 
 Versions published before 30 August 2026 remain under the Apache License, Version 2.0.

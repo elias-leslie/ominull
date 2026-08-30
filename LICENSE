@@ -12,23 +12,36 @@ Licensed Work:        Ominull - Autonomous CyberOps and Ring-0 Threat Nullificat
                       This License applies to every version of the Licensed Work
                       published on or after 30 August 2026. Versions published before that
                       date remain available under the Apache License, Version 2.0.
-Additional Use Grant: You may make production use of the Licensed Work for any
-                      non-commercial purpose. Non-commercial means use that is not
-                      primarily intended for, or directed toward, commercial advantage
-                      or monetary compensation. It includes use by an individual for
-                      personal purposes, use by a school, university or other
-                      educational institution for teaching or academic research, and
-                      use by a non-profit or charitable organisation in furtherance of
-                      its charitable purpose.
+Additional Use Grant: You may make production use of the Licensed Work, free of charge:
 
-                      Production use by or on behalf of a business, and any use in
-                      which the Licensed Work is offered to third parties as part of a
-                      product or service, require a commercial licence from the
-                      Licensor.
+                      (a) as an individual, for your own personal purposes;
+
+                      (b) as a school, college, university or other educational
+                      institution, for classroom teaching or academic research; and
+
+                      (c) as a non-profit or charitable organisation whose total annual
+                      revenue is less than USD 1,000,000, in furtherance of its
+                      charitable purpose.
+
+                      This grant does not extend to production use by or on behalf of a
+                      business, of a government or other public-sector body, or of a
+                      non-profit or charitable organisation whose total annual revenue
+                      is USD 1,000,000 or more.
+
+                      Nor does it extend to any use of the Licensed Work in delivering a
+                      service for a fee - including consulting, managed and co-managed
+                      security, incident response, and fractional, virtual or interim
+                      security leadership - whether the Licensed Work is operated by the
+                      party delivering the service or deployed in the environment of the
+                      party being served, and whether or not that party would otherwise
+                      qualify under (a), (b) or (c) above.
 
                       Non-production use - evaluation, development and testing - is
-                      already permitted for everyone by the Terms below, and this grant
-                      does not narrow it.
+                      permitted for everyone by the Terms below, and nothing in this
+                      grant narrows it.
+
+                      The Licensor may grant a free or reduced-fee licence for any use,
+                      on request.
 Change Date:          Two years after the date a given version of the Licensed
                       Work is first published.
 Change License:       Apache License, Version 2.0

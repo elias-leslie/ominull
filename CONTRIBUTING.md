@@ -17,7 +17,7 @@ Instructions for building the Go Hub, C agents, and running automated test suite
 
 ## Licensing
 
-Ominull™ is released under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`): free for non-commercial production use and for everyone's evaluation, development and testing, with a commercial licence required for business production use. Each version converts to Apache 2.0 two years after it is published.
+Ominull™ is released under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`): free in production for individuals, education and small non-profits, and free for everyone to evaluate, develop and test. Businesses, public-sector bodies, larger non-profits, and anyone delivering a paid service with it need a commercial licence. Each version converts to Apache 2.0 two years after it is published. See the [LICENSE](LICENSE) for the exact wording.
 
 By submitting a pull request, you agree that:
 
