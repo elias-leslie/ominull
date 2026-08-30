@@ -362,14 +362,15 @@ func TestRequiredClientCertsApplyToThePlainListener(t *testing.T) {
 	}
 }
 
-// TestConsoleGateDoesNotLeakTheKeyOnwards. The console is unlocked with the key
-// in the query string, so a navigation out of that document would carry it in a
-// Referer header without this.
+// TestConsoleGateDoesNotLeakTheKeyOnwards. The console document embeds the admin
+// key, so a navigation out of it would carry the referring URL onwards without
+// these headers.
 func TestConsoleGateSetsSecurityHeaders(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	r := httptest.NewRequest("GET", "/?key=mock_admin_token", nil)
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-API-Key", "mock_admin_token")
 	w := httptest.NewRecorder()
 	srv.handleDashboard(w, r)
 
@@ -387,6 +388,107 @@ func TestConsoleGateSetsSecurityHeaders(t *testing.T) {
 	}
 	if w.Header().Get("Content-Security-Policy") == "" {
 		t.Errorf("the console is served without a content security policy")
+	}
+}
+
+// TestTheAdminKeyDoesNotSurviveInTheAddressBar.
+//
+// The gate used to be a GET form, so unlocking the console wrote the admin key
+// into the URL - and from there into browser history, into a bookmark, and into
+// the access log of every proxy and CDN on the path. None of those are reachable
+// by purging a cache. A request that still arrives with ?key= is answered with a
+// redirect to a clean URL and a session cookie, so the key stops being part of
+// the address after exactly one request.
+func TestTheAdminKeyDoesNotSurviveInTheAddressBar(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	r := httptest.NewRequest("GET", "/?key=mock_admin_token", nil)
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, r)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("a key in the query string should be redirected away, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/" {
+		t.Errorf("redirect target %q still carries a query string", loc)
+	}
+	if strings.Contains(w.Body.String(), "mock_admin_token") {
+		t.Errorf("the redirect response body contains the admin key")
+	}
+
+	var session *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == consoleSessionCookie {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatalf("no console session cookie was issued, so the operator would have to send the key again")
+	}
+	if !session.HttpOnly {
+		t.Errorf("the console session cookie is readable from script")
+	}
+	if session.SameSite != http.SameSiteStrictMode {
+		t.Errorf("the console session cookie is not SameSite=Strict")
+	}
+	if session.Value == "mock_admin_token" {
+		t.Errorf("the session cookie is the admin key itself rather than a signed assertion")
+	}
+
+	// The cookie alone must now open the console, with no key anywhere.
+	r2 := httptest.NewRequest("GET", "/", nil)
+	r2.AddCookie(session)
+	w2 := httptest.NewRecorder()
+	srv.handleDashboard(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("the session cookie did not open the console: %d", w2.Code)
+	}
+}
+
+// TestTheGateFormPostsRatherThanGets. A GET form puts whatever was typed into
+// the next URL, which is the whole problem the redirect above cleans up after.
+func TestTheGateFormPostsRatherThanGets(t *testing.T) {
+	gate := string(consoleGate())
+	if !strings.Contains(gate, `method="POST"`) {
+		t.Errorf("the console gate form does not post, so the key would land in the URL")
+	}
+
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	body := strings.NewReader("key=mock_admin_token")
+	r := httptest.NewRequest("POST", "/", body)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("a posted admin key did not open the console: %d", w.Code)
+	}
+}
+
+// TestAnInstallerIsNeverCached. The bootstrap scripts carry the tenant key and a
+// live enrolment token, so nothing on the path may keep a copy.
+func TestAnInstallerIsNeverCached(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	for path, handler := range map[string]http.HandlerFunc{
+		"/bootstrap.ps1":    srv.handleBootstrapPS1,
+		"/bootstrap.sh":     srv.handleBootstrapSH,
+		"/bootstrap.mac.sh": srv.handleBootstrapMac,
+	} {
+		r := httptest.NewRequest("GET", path+"?key=mock_admin_token", nil)
+		w := httptest.NewRecorder()
+		handler(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s did not render: %d %s", path, w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control is %q, so a proxy or CDN may keep the credential it carries", path, got)
+		}
 	}
 }
 

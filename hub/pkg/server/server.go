@@ -282,11 +282,32 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	// The console embeds the admin API key at serve-time, so it is only rendered
 	// for callers who can already present a valid admin credential.
-	provided := strings.TrimSpace(r.URL.Query().Get("key"))
+	//
+	// A session cookie is checked first, because the other two ways of arriving
+	// here both put the credential somewhere it outlives the request. The gate
+	// form used to be a GET, so unlocking the console wrote the admin key into
+	// the address bar, and from there into browser history, into the request log
+	// of every proxy on the path, and into whatever the CDN in front records.
+	// Purging a CDN cache does not reach any of those. The key is now accepted
+	// from a POST body, exchanged for a short-lived signed cookie, and a request
+	// that still arrives with ?key= is redirected to a clean URL so it stops
+	// being part of the address.
+	fromQuery := strings.TrimSpace(r.URL.Query().Get("key"))
+	provided := fromQuery
+	if provided == "" && r.Method == http.MethodPost {
+		provided = strings.TrimSpace(r.PostFormValue("key"))
+	}
 	if provided == "" {
 		provided = strings.TrimSpace(r.Header.Get("X-API-Key"))
 	}
 	ok := secretEqual(provided, s.adminKey)
+	if !ok {
+		if c, err := r.Cookie(consoleSessionCookie); err == nil && c.Value != "" {
+			if claims, err := auth.ValidateJWT(c.Value, s.adminKey); err == nil && claims != nil {
+				ok = true
+			}
+		}
+	}
 	if !ok {
 		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
 			if claims, err := auth.ValidateJWT(strings.TrimPrefix(authHeader, "Bearer "), s.adminKey); err == nil && claims != nil {
@@ -304,11 +325,58 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.throttle.succeed(addr)
+
+	// Whoever just proved they hold the key gets a cookie, so the next request
+	// does not have to carry it at all.
+	if secretEqual(provided, s.adminKey) {
+		s.setConsoleSession(w, r)
+	}
+	// The credential is in this URL. Send the browser to a clean one before
+	// rendering anything, so the address that ends up in history, in a bookmark
+	// and in every access log upstream has no key in it.
+	if fromQuery != "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
 	doc, nonce := consoleDocument(s.adminKey, s.agentVersion)
 	setConsoleSecurityHeaders(w, nonce)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(doc)
+}
+
+// consoleSessionCookie carries a short-lived signed assertion that this browser
+// already presented the admin key, so the key itself does not have to travel on
+// every console request.
+const consoleSessionCookie = "ominull_console"
+
+// consoleSessionTTL is deliberately short. The cookie is a convenience for one
+// working session, not a second credential with a long life of its own.
+const consoleSessionTTL = 12 * time.Hour
+
+func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GenerateJWT(auth.Claims{
+		Username: "admin",
+		Role:     auth.RoleAdmin,
+	}, s.adminKey, consoleSessionTTL)
+	if err != nil {
+		return
+	}
+	// Secure is set only when this request actually arrived over TLS. The hub is
+	// reached over https through the public hostname and over plain http on the
+	// LAN, and a Secure cookie on the second would simply never be stored,
+	// leaving the operator stuck retyping the key into the URL.
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	http.SetCookie(w, &http.Cookie{
+		Name:     consoleSessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(consoleSessionTTL / time.Second),
+	})
 }
 
 func (s *Server) Start(addr string) error {
@@ -1145,6 +1213,9 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 	// record even though nothing has been installed yet.
 	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Windows installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// The body is a credential. Nothing between here and the operator may keep
+	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
 }
 
@@ -1158,6 +1229,9 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	// record even though nothing has been installed yet.
 	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Linux installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// The body is a credential. Nothing between here and the operator may keep
+	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
 }
 
@@ -1171,6 +1245,9 @@ func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
 	// record even though nothing has been installed yet.
 	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a macOS installer carrying the tenant key and a single-use enrolment token")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// The body is a credential. Nothing between here and the operator may keep
+	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateMacOS(opts)))
 }
 

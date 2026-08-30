@@ -161,6 +161,11 @@ func jsStringEscape(v string) string {
 // consoleGate is the key-entry page shown before the console is unlocked. It
 // links the same stylesheet as the console, so it is themed and carries no
 // colours of its own.
+//
+// The form posts. As a GET it put the admin key in the query string of the very
+// next request, which is the one place a credential is guaranteed to be written
+// down: browser history, bookmarks, and the access log of every proxy and CDN
+// between the operator and the hub. None of those are reachable by a cache purge.
 func consoleGate() []byte {
 	return []byte(`<!DOCTYPE html>
 <html lang="en" data-theme="ash">
@@ -172,7 +177,7 @@ func consoleGate() []byte {
 </head>
 <body>
 <div class="gate">
-  <form method="GET" action="/">
+  <form method="POST" action="/">
     <h1>Ominull Console</h1>
     <p>Admin API key required.</p>
     <input type="password" name="key" placeholder="Admin API key" autofocus aria-label="Admin API key">
