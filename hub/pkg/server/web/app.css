@@ -2159,3 +2159,164 @@ p.pending {
 .auth[data-bound="false"] {
   color: var(--warn);
 }
+
+/* ----------------------------------------------------------------- sheet */
+
+/* A centred dialog for a decision that needs its facts on screen. It sits
+   above the full-screen route, because the thing it most often asks about is
+   the host that route is showing. */
+
+.scrim-sheet {
+  z-index: 60;
+}
+
+.sheet {
+  position: fixed;
+  z-index: 65;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, calc(100vw - 2 * var(--s-4)));
+  max-height: calc(100vh - 2 * var(--s-4));
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  box-shadow: var(--overlay);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.sheet-head h2 {
+  font-family: var(--f-cond);
+  font-size: var(--t-4);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sheet-head .fill {
+  flex: 1;
+}
+
+.sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-3);
+}
+
+.sheet-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+/* An action that takes something away reads as one before it is clicked. */
+.btn-crit {
+  border-color: var(--crit);
+  color: var(--crit);
+  background: transparent;
+}
+
+.btn-crit:hover {
+  border-color: var(--crit-hot);
+  color: var(--crit-hot);
+}
+
+/* ------------------------------------------------------ isolation baseline */
+
+.note {
+  font-size: var(--t-2);
+  line-height: 1.5;
+  padding: var(--s-2);
+  border-radius: var(--r-c);
+  border-left: 2px solid var(--line);
+  background: var(--raised);
+  color: var(--ink-2);
+}
+
+.note-ok {
+  border-left-color: var(--ok);
+}
+
+.note-warn {
+  border-left-color: var(--warn);
+}
+
+.note-crit {
+  border-left-color: var(--crit);
+  color: var(--ink);
+}
+
+/* The editor's columns are the rule's own shape: what service, to where, and -
+   for a custom rule only - on which protocol and port. Header and rows share
+   the template so the labels stay over the fields they name. */
+.rule-head,
+.rule-row {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr 5.5rem 5.5rem auto;
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.rule-head {
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-3);
+}
+
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.rule-row input[disabled],
+.rule-row select[disabled] {
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+/* A checkbox is not a text field and must not stretch to the width of one. */
+.field-check {
+  justify-content: flex-end;
+}
+
+.field-check input {
+  align-self: flex-start;
+  width: 16px;
+  height: 16px;
+}
+
+.row-acts {
+  display: inline-flex;
+  gap: var(--s-1);
+}
+
+.pad-x {
+  padding: var(--s-3) var(--s-3) 0;
+}
+
+@media (max-width: 640px) {
+  .rule-head {
+    display: none;
+  }
+
+  .rule-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}

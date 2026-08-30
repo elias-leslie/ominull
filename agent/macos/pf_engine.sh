@@ -86,9 +86,16 @@ CONF
 # path by which the host could be released. They sit below it now, and the hub
 # pass is written whenever there is anything to enforce rather than only while
 # isolated.
+# baseline_spec is the resolved baseline policy, flattened by the daemon into
+# records of service|destination|protocol|port separated by commas. The pipe is
+# the field separator because an IPv6 destination is full of colons, and bash 3.2
+# is the reason it is a string at all rather than an array. The literal
+# "__legacy__" means the hub sent no policy - a hub too old to have one - and the
+# built-in permits are kept rather than tightening the floor under a fleet whose
+# hub never asked for it.
 write_state() {
-    local isolated="$1" hub_ip="$2" allow_csv="$3" peers_csv="$4"
-    local peer addr peer_count
+    local isolated="$1" hub_ip="$2" allow_csv="$3" peers_csv="$4" baseline_spec="${5:-__legacy__}"
+    local peer addr peer_count rec b_service b_dest b_proto b_port
     # Deliberately not bash arrays. macOS ships bash 3.2, where ${#arr[@]} and
     # "${arr[@]}" on an *empty* array are treated as unbound under `set -u` -
     # so the array form worked for every host that had a peer quarantined and
@@ -123,11 +130,32 @@ write_state() {
         #    hub reaches it on. Both directions - the request goes out and the
         #    reply comes back in, and the reply is not always part of the state
         #    the request created.
+        #
+        #    Which servers is the baseline policy's business, not this helper's.
+        #    Only the DHCP records go here; the rest of the baseline sits below
+        #    the peer blocks with DNS, so quarantining a rogue resolver still
+        #    wins while quarantining something cannot cost this host its lease.
         if [[ "${isolated}" == "1" ]]; then
-            echo "pass out quick proto udp to any port 67:68"
-            echo "pass in quick proto udp from any port 67:68"
-            echo "pass out quick proto udp to any port 546:547"
-            echo "pass in quick proto udp from any port 546:547"
+            if [[ "${baseline_spec}" == "__legacy__" ]]; then
+                echo "pass out quick proto udp to any port 67:68"
+                echo "pass in quick proto udp from any port 67:68"
+                echo "pass out quick proto udp to any port 546:547"
+                echo "pass in quick proto udp from any port 546:547"
+            else
+                for rec in ${baseline_spec//,/ }; do
+                    # Four pipe-separated fields or it is not a rule. This also
+                    # absorbs the "policy exists and is empty" sentinel, which
+                    # must produce no rules rather than one nonsense rule.
+                    [[ "${rec}" == *"|"*"|"*"|"* ]] || continue
+                    b_service="${rec%%|*}"
+                    [[ "${b_service}" == "dhcp" ]] || continue
+                    rec="${rec#*|}"; b_dest="${rec%%|*}"
+                    rec="${rec#*|}"; b_proto="${rec%%|*}"
+                    b_port="${rec#*|}"
+                    echo "pass out quick proto ${b_proto} to ${b_dest} port ${b_port}"
+                    echo "pass in quick proto ${b_proto} from ${b_dest} port ${b_port}"
+                done
+            fi
         fi
 
         # 4. Mesh quarantine. Applies whether or not this host is isolated.
@@ -138,16 +166,30 @@ write_state() {
         done
 
         if [[ "${isolated}" == "1" ]]; then
-            # 5. DNS, below the peer block on purpose: quarantining a rogue
+            # 5. The rest of the baseline - DNS, NTP, whatever else the policy
+            #    names - below the peer block on purpose: quarantining a rogue
             #    resolver has to beat the rule that lets this host resolve
-            #    names. UDP only, deliberately - a quarantined host needs to be
-            #    able to re-resolve a hub named by DNS, and that is one query.
-            #    Allowing TCP/53 to any host would hand anything on the box a
-            #    general-purpose outbound tunnel through the quarantine, which
-            #    is a much larger hole than the name lookup it was meant to
-            #    permit.
-            echo "pass out quick proto udp to any port 53"
-            echo "pass in quick proto udp from any port 53"
+            #    names.
+            if [[ "${baseline_spec}" == "__legacy__" ]]; then
+                # No policy from this hub. UDP only, deliberately - allowing
+                # TCP/53 to any host would hand anything on the box a
+                # general-purpose outbound tunnel through the quarantine, which
+                # is a much larger hole than the name lookup it was meant to
+                # permit.
+                echo "pass out quick proto udp to any port 53"
+                echo "pass in quick proto udp from any port 53"
+            else
+                for rec in ${baseline_spec//,/ }; do
+                    [[ "${rec}" == *"|"*"|"*"|"* ]] || continue
+                    b_service="${rec%%|*}"
+                    [[ "${b_service}" != "dhcp" ]] || continue
+                    rec="${rec#*|}"; b_dest="${rec%%|*}"
+                    rec="${rec#*|}"; b_proto="${rec%%|*}"
+                    b_port="${rec#*|}"
+                    echo "pass out quick proto ${b_proto} to ${b_dest} port ${b_port}"
+                    echo "pass in quick proto ${b_proto} from ${b_dest} port ${b_port}"
+                done
+            fi
 
             # 6. The hub's allow list - a scoped trust rule, below a peer block
             #    so a quarantine still wins over standing trust that named the
@@ -192,7 +234,7 @@ case "${1:-help}" in
         # notices and repairs itself from the signed archive instead of quietly
         # dropping the list.
         ensure_root
-        ISOLATED=0; HUB_IP=""; ALLOW=""; PEERS=""
+        ISOLATED=0; HUB_IP=""; ALLOW=""; PEERS=""; BASELINE="__legacy__"
         shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -200,10 +242,11 @@ case "${1:-help}" in
                 --hub)      HUB_IP="${2:-}";    shift 2 ;;
                 --allow)    ALLOW="${2:-}";     shift 2 ;;
                 --peers)    PEERS="${2:-}";     shift 2 ;;
+                --baseline) BASELINE="${2:-__legacy__}"; shift 2 ;;
                 *) echo "[-] Unknown option: $1" >&2; exit 1 ;;
             esac
         done
-        write_state "${ISOLATED}" "${HUB_IP}" "${ALLOW}" "${PEERS}"
+        write_state "${ISOLATED}" "${HUB_IP}" "${ALLOW}" "${PEERS}" "${BASELINE}"
         ;;
     sync)
         # sync <0|1 isolated> <hub_ip> [peer ...]

@@ -9,6 +9,11 @@
 #include <string.h>
 #include <wchar.h>
 
+/* For OMINULL_BASELINE_RULE. The baseline policy crosses from the agent into
+ * this engine, so the shape has to be declared in one place - a second copy here
+ * would compile and link and then disagree the first time a field moved. */
+#include "../include/agent.h"
+
 #ifndef FWPM_SESSION_FLAG_DYNAMIC
 #define FWPM_SESSION_FLAG_DYNAMIC 0x00000001
 #endif
@@ -253,6 +258,63 @@ static void UdpRemotePort(FWPM_FILTER_CONDITION0* cond, UINT16 port) {
     cond[1].conditionValue.uint16 = port;
 }
 
+/* ServiceCondition builds the three conditions that name one baseline rule: a
+ * protocol, a remote port and a remote address.
+ *
+ * The port is the remote one in both directions for the same reason UdpRemotePort
+ * uses it - outbound it is the server's port, and inbound, where the remote end
+ * is the server, it is the source port of the reply. Returns the address family
+ * the destination parsed as, or 0 if it did not parse. The byte array backing an
+ * IPv6 condition has to outlive the FwpmFilterAdd0 call, which is why the caller
+ * owns it. */
+static int ServiceCondition(const OMINULL_BASELINE_RULE* rule,
+                            FWPM_FILTER_CONDITION0* cond, FWP_BYTE_ARRAY16* store) {
+    memset(cond, 0, sizeof(cond[0]) * 3);
+
+    int family = AddressCondition(rule->destination, &cond[0], store);
+    if (!family) return 0;
+
+    cond[1].fieldKey = OMINULL_CONDITION_IP_PROTOCOL;
+    cond[1].matchType = FWP_MATCH_EQUAL;
+    cond[1].conditionValue.type = FWP_UINT8;
+    cond[1].conditionValue.uint8 = (strcmp(rule->protocol, "tcp") == 0) ? 6 : 17;
+
+    cond[2].fieldKey = OMINULL_CONDITION_IP_REMOTE_PORT;
+    cond[2].matchType = FWP_MATCH_EQUAL;
+    cond[2].conditionValue.type = FWP_UINT16;
+    cond[2].conditionValue.uint16 = (UINT16)rule->port;
+    return family;
+}
+
+/* AddBaselineRules installs the part of the policy that belongs at one rung of
+ * the ladder. DHCP sits above the peer blocks - a quarantine must not be able to
+ * cost this host the lease that carries the address the hub reaches it on - and
+ * everything else sits below them, so quarantining a rogue resolver still beats
+ * the rule that lets this host resolve names. */
+static DWORD AddBaselineRules(const OMINULL_BASELINE_RULE* baseline, int baselineCount,
+                              int wantDHCP, UINT8 weight) {
+    FWPM_FILTER_CONDITION0 cond[3];
+    FWP_BYTE_ARRAY16 store;
+
+    for (int i = 0; i < baselineCount; i++) {
+        int isDHCP = (strcmp(baseline[i].service, "dhcp") == 0);
+        if (isDHCP != wantDHCP) continue;
+
+        int family = ServiceCondition(&baseline[i], cond, &store);
+        if (!family) continue;             /* not an address; the hub validated it, so this is defensive */
+
+        DWORD status = AddFilterEverywhere(L"Ominull Baseline Permit", FWP_ACTION_PERMIT,
+                                           weight, cond, 3, family);
+        if (status != ERROR_SUCCESS) {
+            printf("[-] Failed to add baseline filter for %s/%s:%d: 0x%08lX\n",
+                   baseline[i].service, baseline[i].destination, baseline[i].port,
+                   (unsigned long)status);
+            return status;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
 /* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.
  *
  * The floor is loopback, the hub, DHCP and DNS - the same four the Linux chains
@@ -260,15 +322,15 @@ static void UdpRemotePort(FWPM_FILTER_CONDITION0* cond, UINT16 port) {
  * platform it runs. What sits above the floor is the hub's allow list, which is
  * the mechanism a scoped trust rule is delivered by.
  *
- * DNS is permitted to any resolver, not to a named one. That is a deliberate
- * and known hole - an isolated host can still talk out over UDP/53 - and it is
- * the price of an isolated host being able to find its own hub by name after a
- * reboot. Narrowing it to the resolvers a host is actually configured with is
- * what the trusted-DNS work exists to do; until then it is stated rather than
- * pretended away. It is UDP only: TCP/53 to any host would be a general-purpose
- * tunnel rather than a name lookup, which is why the same rule was taken back
- * out of the macOS anchor. */
-DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int allowCount) {
+ * DNS and DHCP used to be permitted to *any* destination here. Both were holes
+ * with a justification attached rather than policy, and neither was visible to
+ * whoever clicked Isolate. They are now whatever the baseline policy names, and
+ * the hub resolves that per endpoint. A hub too old to send one leaves
+ * baselineKnown at 0 and the old permits stay, because tightening the floor
+ * under a fleet whose hub never asked for it would cut hosts off. */
+DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int allowCount,
+                      const OMINULL_BASELINE_RULE* baseline, int baselineCount,
+                      int baselineKnown) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     printf("[*] Activating WFP User-Mode Network Isolation (Default-Deny)...\n");
@@ -312,16 +374,23 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
         return status;
     }
 
-    /* 3. DHCP, so the host keeps the address the hub reaches it on. DHCPv6 is a
-     *    different pair of ports (546/547) rather than the same two, so the two
-     *    families get one rule each rather than one rule on four layers. */
-    UdpRemotePort(cond, 67);
-    status = AddFilterEverywhere(L"Ominull DHCP Permit", FWP_ACTION_PERMIT,
-                                 OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V4);
-    if (status == ERROR_SUCCESS) {
-        UdpRemotePort(cond, 547);
-        status = AddFilterEverywhere(L"Ominull DHCPv6 Permit", FWP_ACTION_PERMIT,
-                                     OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V6);
+    /* 3. The DHCP part of the baseline, above the peer blocks: a lease that
+     *    expires because a quarantine named the DHCP server costs this host the
+     *    address the hub reaches it on. */
+    if (baselineKnown) {
+        status = AddBaselineRules(baseline, baselineCount, 1, OMINULL_WEIGHT_PERMIT_DHCP);
+    } else {
+        /* No policy from this hub. DHCPv6 is a different pair of ports
+         * (546/547) rather than the same two, so the two families get one rule
+         * each rather than one rule on four layers. */
+        UdpRemotePort(cond, 67);
+        status = AddFilterEverywhere(L"Ominull DHCP Permit", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V4);
+        if (status == ERROR_SUCCESS) {
+            UdpRemotePort(cond, 547);
+            status = AddFilterEverywhere(L"Ominull DHCPv6 Permit", FWP_ACTION_PERMIT,
+                                         OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V6);
+        }
     }
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add DHCP permit filter: 0x%08lX\n", (unsigned long)status);
@@ -329,11 +398,16 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
         return status;
     }
 
-    /* 4. DNS. Below the peer block on purpose: quarantining a rogue resolver
-     *    has to beat the rule that lets this host resolve names. */
-    UdpRemotePort(cond, 53);
-    status = AddFilterEverywhere(L"Ominull DNS Permit", FWP_ACTION_PERMIT,
-                                 OMINULL_WEIGHT_PERMIT_DNS, cond, 2, OMINULL_FAMILY_BOTH);
+    /* 4. The rest of the baseline - DNS, NTP, whatever else the policy names.
+     *    Below the peer block on purpose: quarantining a rogue resolver has to
+     *    beat the rule that lets this host resolve names. */
+    if (baselineKnown) {
+        status = AddBaselineRules(baseline, baselineCount, 0, OMINULL_WEIGHT_PERMIT_DNS);
+    } else {
+        UdpRemotePort(cond, 53);
+        status = AddFilterEverywhere(L"Ominull DNS Permit", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_DNS, cond, 2, OMINULL_FAMILY_BOTH);
+    }
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add DNS permit filter: 0x%08lX\n", (unsigned long)status);
         FwpmTransactionAbort0(g_hEngine);
@@ -375,8 +449,16 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
         return status;
     }
 
-    printf("[+] Host isolation active (IPv4 and IPv6). Permitted: hub %s, loopback, DHCP, DNS, %d allow-list address(es).\n",
-           hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", allowCount);
+    if (baselineKnown) {
+        printf("[+] Host isolation active (IPv4 and IPv6). Permitted: hub %s, loopback, "
+               "%d baseline rule(s), %d allow-list address(es).\n",
+               hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", baselineCount, allowCount);
+    } else {
+        printf("[+] Host isolation active (IPv4 and IPv6). This hub sends no baseline policy, so the "
+               "built-in floor applies: hub %s, loopback, DHCP and DNS to any destination, "
+               "%d allow-list address(es).\n",
+               hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", allowCount);
+    }
     return ERROR_SUCCESS;
 }
 
@@ -507,7 +589,9 @@ DWORD Wfp_BlockIP(const char* ipStr) {
  * on the steady-state path. */
 DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
                      const char* const* blockedIPs, int blockedCount,
-                     const char* const* allowIPs, int allowCount) {
+                     const char* const* allowIPs, int allowCount,
+                     const OMINULL_BASELINE_RULE* baseline, int baselineCount,
+                     int baselineKnown) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     /* Removes this agent's filters and recreates the sublayer empty. If the
@@ -517,7 +601,8 @@ DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
     if (cleared != ERROR_SUCCESS) return cleared;
 
     if (isolate) {
-        DWORD status = Wfp_IsolateHost(hubIpStr, allowIPs, allowCount);
+        DWORD status = Wfp_IsolateHost(hubIpStr, allowIPs, allowCount,
+                                       baseline, baselineCount, baselineKnown);
         if (status != ERROR_SUCCESS) return status;
     }
     for (int i = 0; i < blockedCount; i++) {
@@ -547,7 +632,11 @@ int main(int argc, char* argv[]) {
 
     if (strcmp(argv[1], "isolate") == 0) {
         const char* hubIp = (argc >= 3) ? argv[2] : "10.0.0.57";
-        Wfp_IsolateHost(hubIp, NULL, 0);
+        /* No hub connection here, so no baseline policy: this is the recovery
+         * tool, and it applies the permissive built-in floor. An operator
+         * isolating a host by hand from its own console wants the floor that
+         * keeps DNS and DHCP working, not an empty policy they cannot see. */
+        Wfp_IsolateHost(hubIp, NULL, 0, NULL, 0, 0);
     } else if (strcmp(argv[1], "unisolate") == 0) {
         Wfp_UnisolateHost();
     } else if (strcmp(argv[1], "block-ip") == 0) {

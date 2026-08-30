@@ -116,6 +116,15 @@ type TelemetryBatchMessage struct {
 	// outright. Absent means "none", which is what a pre-1.3.0 agent sends.
 	UpdateCapability string          `json:"update_capability"`
 	Events           []storage.Event `json:"events"`
+	// ObservedServices is what this host actually uses the network for at the
+	// infrastructure layer - its resolvers, its DHCP server, its time sources -
+	// so the baseline isolation policy can be checked against reality instead
+	// of against an assumption. The agent reports; it never authors.
+	ObservedServices []storage.ObservedService `json:"observed_services"`
+	// Readiness is the endpoint's own answer to "can I still be released after
+	// this?". Absent from agents that predate the check, which is a state the
+	// gate distinguishes from a failing answer.
+	Readiness *storage.Readiness `json:"isolation_readiness"`
 }
 
 type CommandMessage struct {
@@ -1680,12 +1689,20 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		EndpointID string   `json:"endpoint_id"`
 		AllowIPs   []string `json:"allow_ips"`
+		// Force overrides the readiness gate. It is not a flag for getting past
+		// an inconvenient refusal: an operator containing a host that is
+		// actively compromised must not be blocked by a stale probe, and that
+		// decision is recorded under its own action with their name on it.
+		Force bool `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !s.endpointInScope(w, r, req.EndpointID) {
+		return
+	}
+	if !s.guardIsolation(w, r, req.EndpointID, req.Force) {
 		return
 	}
 	// The allow list is a pinhole through a default-deny rule and reaches the
@@ -1783,6 +1800,7 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		Value    string   `json:"value"`
 		IDs      []string `json:"ids"`
 		AllowIPs []string `json:"allow_ips"`
+		Force    bool     `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1807,13 +1825,39 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		Payload: map[string]interface{}{"allow_ips": allowIPs},
 	}
 
-	var count int64
+	// Scope first, gate second. The gate reads an endpoint's readiness report
+	// and answers with its resolvers and its rule set, so running it over
+	// caller-supplied ids before checking who owns them would answer questions
+	// about other tenants' hosts - and would do it in the body of a refusal,
+	// which is the reply nobody reads carefully.
+	var scoped []string
 	if req.Scope == "ids" && len(req.IDs) > 0 {
 		ids, ok := s.scopedEndpointIDs(w, r, req.IDs)
 		if !ok {
 			return
 		}
-		for _, id := range ids {
+		scoped = ids
+	} else {
+		var err error
+		scoped, err = s.store.BulkIsolationTargets(tenantID, req.Scope, req.Value)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	// One refusal stops the whole batch. Isolating nine of ten and reporting
+	// nine is how an operator comes to believe a host is contained when it is
+	// not - and the tenth is the one the hub predicted it could not get back.
+	for _, id := range scoped {
+		if !s.guardIsolation(w, r, id, req.Force) {
+			return
+		}
+	}
+
+	var count int64
+	if req.Scope == "ids" && len(req.IDs) > 0 {
+		for _, id := range scoped {
 			s.store.SetEndpointIsolation(id, true, allowIPs)
 			_ = s.SendCommand(id, cmd)
 			count++
@@ -2108,6 +2152,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[-] Could not record the certificate identity for %s: %v", batch.EndpointID, err)
 			}
 
+			// Only recorded when the agent actually answered. An agent too old
+			// to report must not be recorded as having reported nothing: the
+			// gate treats "never answered" and "answered badly" differently,
+			// and collapsing them would make every old endpoint look ready.
+			if batch.Readiness != nil {
+				if err := s.store.SetEndpointObservations(batch.EndpointID, batch.ObservedServices, *batch.Readiness); err != nil {
+					log.Printf("[-] Could not record isolation readiness for %s: %v", batch.EndpointID, err)
+				}
+			}
+
 			for i := range batch.Events {
 				batch.Events[i].TenantID = tenantID
 				batch.Events[i].EndpointID = batch.EndpointID
@@ -2167,6 +2221,22 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				"quarantined_peers":   qIPs,
 				"is_isolated":         isolated,
 				"isolation_allow_ips": allowIPs,
+			}
+
+			// The baseline the agent should enforce underneath an isolation,
+			// already expanded to destination/protocol/port. Sent on every
+			// beat, isolated or not, so the rules are in place before they are
+			// needed rather than fetched at the moment the host is cut off.
+			//
+			// The key is always present from this hub version. That is what
+			// lets a new agent tell "this hub has a baseline and it is empty"
+			// from "this hub is too old to have one" - and keep its compiled-in
+			// permits in the second case rather than silently tightening the
+			// floor under a fleet whose hub never asked it to.
+			if res, err := s.store.ResolveBaseline(batch.EndpointID); err == nil {
+				resp["isolation_baseline"] = storage.BaselineWireRules(res.Rules)
+			} else {
+				resp["isolation_baseline"] = []storage.BaselineWireRule{}
 			}
 			if target, outdated := s.pendingAgentUpdate(batch.EndpointID, batch.DriverVersion); outdated {
 				if pkg, ok := updatePackageFor(batch.UpdateCapability, batch.OS); ok {
@@ -3479,6 +3549,17 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
+	// The baseline isolation policy: what an isolated host is still allowed to
+	// reach. Reading it is open to any authenticated operator - an analyst
+	// deciding whether to isolate has to be able to see what that would do -
+	// but authoring it is an administrator's job, because a rule here is a
+	// permanent hole in every isolation the policy's scope covers.
+	mux.HandleFunc("/api/v1/baseline/catalogue", s.authMiddleware(s.handleBaselineCatalogue))
+	mux.HandleFunc("/api/v1/baseline/policies", s.authMiddleware(s.baselineWriteGuard(s.handleBaselinePolicies)))
+	mux.HandleFunc("/api/v1/baseline/policies/delete", s.authMiddleware(requireAdmin(s.handleBaselinePolicyDelete)))
+	mux.HandleFunc("/api/v1/baseline/endpoint", s.authMiddleware(s.handleBaselineEndpoint))
+	mux.HandleFunc("/api/v1/baseline/propose", s.authMiddleware(s.handleBaselinePropose))
+
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
 	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))

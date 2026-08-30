@@ -58,6 +58,18 @@ if [ "${DO_HUB}" -eq 1 ]; then
         echo "[*] Compiling C stream-DPI unit tests..."
         gcc -O2 -Wall -Wextra -o "${ROOT_DIR}/agent/bin/test_dpi" "${ROOT_DIR}/agent/tests/test_dpi.c"
         "${ROOT_DIR}/agent/bin/test_dpi"
+        # The baseline parser turns a hub reply into iptables arguments on a host
+        # that is about to be cut off. It compiles the agent in, so it is also a
+        # second compile of main.c under -Wall -Wextra.
+        echo "[*] Compiling baseline isolation policy unit tests..."
+        gcc -O2 -Wall -Wextra -o "${ROOT_DIR}/agent/bin/test_baseline" "${ROOT_DIR}/agent/tests/test_baseline.c"
+        "${ROOT_DIR}/agent/bin/test_baseline"
+        # The macOS ruleset, checked without a Mac. bash -n proves the helper
+        # parses; this proves it writes the right rules in the right order,
+        # which is the part that decides whether an isolated host can be got
+        # back.
+        echo "[*] Checking the macOS pf ruleset the agent generates..."
+        bash "${ROOT_DIR}/agent/tests/test_pf_rules.sh"
     fi
 
     echo "[*] Building cross-platform agent packages..."

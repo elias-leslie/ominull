@@ -153,6 +153,94 @@ static const char* EventTypeToString(uint32_t evtType) {
     }
 }
 
+/* AppendObservations writes the observed-services array and the readiness object
+ * into the telemetry payload.
+ *
+ * GetAdaptersAddresses is asked for the adapters that are up and have a
+ * gateway - the resolvers on a disconnected virtual adapter are not what this
+ * host resolves against, and reporting them would put entries in front of an
+ * operator that no baseline will ever need to cover. GetAdaptersInfo carries the
+ * DHCP server and the DHCP-enabled flag, which the newer call does not expose in
+ * a form this needs. */
+static int AppendObservations(const AGENT_CONFIG* config, char* buf, size_t cap) {
+    int off = _snprintf(buf, cap, ",\"observed_services\":[");
+    const char* sep = "";
+    bool dhcpSeen = false;
+
+    ULONG size = 16384;
+    IP_ADAPTER_ADDRESSES* aa = (IP_ADAPTER_ADDRESSES*)malloc(size);
+    if (aa) {
+        ULONG rc = GetAdaptersAddresses(AF_UNSPEC,
+                                        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                        GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                        NULL, aa, &size);
+        if (rc == ERROR_BUFFER_OVERFLOW) {
+            IP_ADAPTER_ADDRESSES* grown = (IP_ADAPTER_ADDRESSES*)realloc(aa, size);
+            if (grown) {
+                aa = grown;
+                rc = GetAdaptersAddresses(AF_UNSPEC,
+                                          GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                          GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                          NULL, aa, &size);
+            }
+        }
+        if (rc == NO_ERROR) {
+            for (IP_ADAPTER_ADDRESSES* a = aa; a && off < (int)cap - 256; a = a->Next) {
+                if (a->OperStatus != IfOperStatusUp) continue;
+                if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+                for (IP_ADAPTER_DNS_SERVER_ADDRESS* d = a->FirstDnsServerAddress;
+                     d && off < (int)cap - 256; d = d->Next) {
+                    char ip[64] = {0};
+                    if (getnameinfo(d->Address.lpSockaddr, d->Address.iSockaddrLength,
+                                    ip, sizeof(ip), NULL, 0, NI_NUMERICHOST) != 0) continue;
+                    /* A scoped v6 literal arrives as fe80::1%12; the scope is
+                     * local to this host and means nothing in a hub-side policy. */
+                    char* pct = strchr(ip, '%');
+                    if (pct) *pct = '\0';
+                    if (!ip[0]) continue;
+                    off += _snprintf(buf + off, cap - off,
+                                     "%s{\"service\":\"dns\",\"destination\":\"%s\",\"source\":\"adapter configuration\"}",
+                                     sep, ip);
+                    sep = ",";
+                }
+            }
+        }
+        free(aa);
+    }
+
+    ULONG infoSize = 0;
+    if (GetAdaptersInfo(NULL, &infoSize) == ERROR_BUFFER_OVERFLOW && infoSize) {
+        IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)malloc(infoSize);
+        if (info) {
+            if (GetAdaptersInfo(info, &infoSize) == NO_ERROR) {
+                for (IP_ADAPTER_INFO* a = info; a && off < (int)cap - 256; a = a->Next) {
+                    if (!a->DhcpEnabled) continue;
+                    const char* server = a->DhcpServer.IpAddress.String;
+                    if (!server || !server[0] || strcmp(server, "0.0.0.0") == 0) continue;
+                    dhcpSeen = true;
+                    off += _snprintf(buf + off, cap - off,
+                                     "%s{\"service\":\"dhcp\",\"destination\":\"%s\",\"source\":\"dhcp lease\"}",
+                                     sep, server);
+                    sep = ",";
+                }
+            }
+            free(info);
+        }
+    }
+
+    char hubLiteral[64] = {0};
+    if (!HubAddressLiteral(config, hubLiteral, sizeof(hubLiteral))) hubLiteral[0] = '\0';
+
+    off += _snprintf(buf + off, cap - off,
+                     "],\"isolation_readiness\":{\"enforcement_engine\":\"%s\",\"hub_literal\":\"%s\","
+                     "\"address_origin\":\"%s\",\"last_applied\":\"%s\"}",
+                     Agent_EnforcementStatus(),
+                     hubLiteral,
+                     dhcpSeen ? "dhcp" : "static",
+                     Agent_LastAppliedNote());
+    return off;
+}
+
 bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
                             char* respOut, size_t respCap) {
     if (!config) {
@@ -250,7 +338,17 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         }
     }
 
-    snprintf(jsonBuf + offset, jsonCapacity - offset, "]}");
+    offset += snprintf(jsonBuf + offset, jsonCapacity - offset, "]");
+
+    /* Rides on the heartbeat that is already going out: an agent that can report
+     * telemetry can report this, and a second request would be a second thing to
+     * fail - which on this platform has meant an endpoint that looked healthy in
+     * everything the console shows and had quietly stopped being manageable. */
+    char observations[4096];
+    if (AppendObservations(config, observations, sizeof(observations)) > 0) {
+        offset += snprintf(jsonBuf + offset, jsonCapacity - offset, "%s", observations);
+    }
+    snprintf(jsonBuf + offset, jsonCapacity - offset, "}");
 
     // Send HTTP POST via WinHTTP
     HINTERNET hSession = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);

@@ -19,7 +19,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.7.10"
+#define OMINULL_LINUX_AGENT_VERSION "1.7.11"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -719,6 +719,107 @@ static bool HubAddressLiteral(const LINUX_AGENT_CONFIG* config, char* out, size_
     return ok;
 }
 
+/* The baseline isolation policy, as this agent receives it.
+ *
+ * The floor used to carry two permits written into the agent: DNS to any
+ * resolver and DHCP to any server. Both were holes with a justification
+ * attached, and neither was visible to the person clicking Isolate. The hub now
+ * sends the exact set instead - service, destination, protocol and remote port,
+ * already expanded - and this agent enforces that and nothing more.
+ *
+ * baselineKnown is the compatibility hinge. A hub too old to send the key at all
+ * leaves this false, and the legacy blanket permits are kept: tightening the
+ * floor under a fleet whose hub never asked for it would cut hosts off during a
+ * hub upgrade. A hub that sends an empty array is saying "hub and loopback
+ * only", which is a policy, and is obeyed. */
+#define MAX_BASELINE_RULES 64
+
+/* Defined further down with the update descriptor it was written for; the
+ * baseline rules have the same flat shape and reuse it. */
+static bool ExtractJsonString(const char* json, const char* key, char* out, size_t outLen);
+
+
+typedef struct {
+    char service[16];
+    char destination[64];
+    char protocol[8];
+    int  port;
+} BASELINE_RULE;
+
+/* ParseBaselineRules reads the flat object array the hub sends. Returns the
+ * number of usable rules, or -1 when the key is absent entirely - the caller
+ * has to tell "this hub has no baseline" from "this hub's baseline is empty",
+ * because those two mean opposite things for what gets enforced. */
+static int ParseBaselineRules(const char* respJson, BASELINE_RULE* out, int cap) {
+    const char* p = strstr(respJson, "\"isolation_baseline\":[");
+    if (!p) return -1;
+    p += strlen("\"isolation_baseline\":[");
+
+    int count = 0;
+    while (*p && *p != ']') {
+        const char* obj = strchr(p, '{');
+        if (!obj) break;
+        const char* end = strchr(obj, '}');
+        if (!end) break;
+
+        char frag[256];
+        size_t len = (size_t)(end - obj) + 1;
+        if (len >= sizeof(frag)) len = sizeof(frag) - 1;
+        memcpy(frag, obj, len);
+        frag[len] = '\0';
+
+        BASELINE_RULE r;
+        memset(&r, 0, sizeof(r));
+        ExtractJsonString(frag, "service", r.service, sizeof(r.service));
+        ExtractJsonString(frag, "destination", r.destination, sizeof(r.destination));
+        ExtractJsonString(frag, "protocol", r.protocol, sizeof(r.protocol));
+        const char* portKey = strstr(frag, "\"port\":");
+        if (portKey) r.port = atoi(portKey + strlen("\"port\":"));
+
+        p = end + 1;
+
+        /* Everything here becomes an argument to iptables. A hub that sends
+         * something else is either running a build that does not validate its
+         * own policy or is not the hub; the value is never echoed, because this
+         * log is read by people and by journald. */
+        if (!IsIPLiteral(r.destination)) {
+            printf("[!] Hub sent a baseline rule whose destination is not an IP address; ignoring it.\n");
+            fflush(stdout);
+            continue;
+        }
+        if (strcmp(r.protocol, "udp") != 0 && strcmp(r.protocol, "tcp") != 0) {
+            printf("[!] Hub sent a baseline rule for an unsupported protocol; ignoring it.\n");
+            fflush(stdout);
+            continue;
+        }
+        if (r.port < 1 || r.port > 65535) {
+            printf("[!] Hub sent a baseline rule with an out-of-range port; ignoring it.\n");
+            fflush(stdout);
+            continue;
+        }
+        if (count < cap) out[count++] = r;
+    }
+    return count;
+}
+
+/* BaselinePermit writes one permit into both chains for one rule.
+ *
+ * Both directions, because a reply is a new flow rather than part of the
+ * request: this is the same mistake that cost the Windows agent its DHCP lease
+ * when the floor was permitted outbound only. The remote port is the server's
+ * port in both directions, so it is --dport going out and --sport coming back. */
+static void BaselinePermit(const char* tool, const BASELINE_RULE* r) {
+    char portStr[8];
+    snprintf(portStr, sizeof(portStr), "%d", r->port);
+
+    const char* out[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", r->protocol,
+                          "-d", r->destination, "--dport", portStr, "-j", "RETURN", NULL };
+    const char* in[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", r->protocol,
+                          "-s", r->destination, "--sport", portStr, "-j", "RETURN", NULL };
+    (void)RunTool(out);
+    (void)RunTool(in);
+}
+
 /* EnforcementTeardown removes the chains from one table. The unhook is repeated
  * a bounded number of times because a crash loop can leave the jump inserted
  * more than once, and one -D removes one copy. */
@@ -762,7 +863,9 @@ static void EnforcementTeardown(const char* tool) {
  * ip6tables alone would isolate a host that then carried on over IPv6. */
 static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
                              char allow[][64], int allowCount,
-                             char peers[][64], int peerCount) {
+                             char peers[][64], int peerCount,
+                             const BASELINE_RULE* baseline, int baselineCount,
+                             bool baselineKnown) {
     bool v6 = strcmp(tool, "ip6tables") == 0;
 
     const char* newIn[]  = { tool, "-N", OMINULL_CHAIN_IN,  NULL };
@@ -790,13 +893,28 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
 
     /* 3. DHCP, above the peer blocks: a lease that expires because a quarantine
      *    named the DHCP server costs this host the address the hub reaches it
-     *    on, and there is no way back from that either. DHCPv6 is a different
-     *    pair of ports rather than the same two. */
-    const char* dhcpPorts = v6 ? "546:547" : "67:68";
-    const char* dhcpIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", dhcpPorts, "-j", "RETURN", NULL };
-    const char* dhcpOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", dhcpPorts, "-j", "RETURN", NULL };
-    (void)RunTool(dhcpIn);
-    (void)RunTool(dhcpOut);
+     *    on, and there is no way back from that either.
+     *
+     *    Which servers, though, is the baseline policy's business rather than
+     *    this agent's. Only the DHCP rules are placed here - the rest of the
+     *    baseline sits below the peer blocks with DNS, so that quarantining a
+     *    rogue resolver still beats the rule that lets this host resolve names,
+     *    while quarantining something cannot cost it its lease. */
+    if (baselineKnown) {
+        for (int i = 0; i < baselineCount; i++) {
+            if (strcmp(baseline[i].service, "dhcp") != 0) continue;
+            if ((strchr(baseline[i].destination, ':') != NULL) != v6) continue;
+            BaselinePermit(tool, &baseline[i]);
+        }
+    } else {
+        /* No policy from this hub: keep the permit that has always been here.
+         * DHCPv6 is a different pair of ports rather than the same two. */
+        const char* dhcpPorts = v6 ? "546:547" : "67:68";
+        const char* dhcpIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", dhcpPorts, "-j", "RETURN", NULL };
+        const char* dhcpOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", dhcpPorts, "-j", "RETURN", NULL };
+        (void)RunTool(dhcpIn);
+        (void)RunTool(dhcpOut);
+    }
 
     /* 4. Mesh quarantine. Applies whether or not this host is isolated. */
     for (int i = 0; i < peerCount; i++) {
@@ -808,14 +926,24 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
     }
 
     if (isolated) {
-        /* 5. DNS, below the peer block on purpose: quarantining a rogue
-         *    resolver has to beat the rule that lets this host resolve names.
-         *    UDP only - TCP/53 to any host is a general-purpose tunnel rather
-         *    than a name lookup. */
-        const char* dnsIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", "53", "-j", "RETURN", NULL };
-        const char* dnsOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", "53", "-j", "RETURN", NULL };
-        (void)RunTool(dnsIn);
-        (void)RunTool(dnsOut);
+        /* 5. The rest of the baseline - DNS, NTP, whatever else the policy
+         *    names - below the peer block on purpose: quarantining a rogue
+         *    resolver has to beat the rule that lets this host resolve names. */
+        if (baselineKnown) {
+            for (int i = 0; i < baselineCount; i++) {
+                if (strcmp(baseline[i].service, "dhcp") == 0) continue;  /* already placed */
+                if ((strchr(baseline[i].destination, ':') != NULL) != v6) continue;
+                BaselinePermit(tool, &baseline[i]);
+            }
+        } else {
+            /* No policy from this hub: the resolver permit that has always been
+             * here. UDP only - TCP/53 to any host is a general-purpose tunnel
+             * rather than a name lookup. */
+            const char* dnsIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", "53", "-j", "RETURN", NULL };
+            const char* dnsOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", "53", "-j", "RETURN", NULL };
+            (void)RunTool(dnsIn);
+            (void)RunTool(dnsOut);
+        }
 
         /* 6. The hub's allow list - a scoped trust rule, below a peer block so
          *    a quarantine still wins over standing trust that named the peer. */
@@ -876,6 +1004,38 @@ static int ParseAddressList(const char* respJson, const char* key,
     return count;
 }
 
+/* What this agent has actually put in the kernel. At file scope rather than
+ * inside SyncEnforcement because the dead-man timer below has to be able to
+ * rebuild from it - specifically, to lift this host's isolation while leaving
+ * the mesh quarantine it was also holding in place. */
+static bool known = false;              /* nothing reconciled yet this run */
+static bool appliedIsolated = false;
+static char appliedAllow[MAX_ISOLATION_ALLOW][64];
+static int appliedAllowCount = 0;
+static char appliedPeers[MAX_QUARANTINED_PEERS][64];
+static int appliedPeerCount = 0;
+static BASELINE_RULE appliedBaseline[MAX_BASELINE_RULES];
+static int appliedBaselineCount = 0;
+static bool appliedBaselineKnown = false;
+static bool g_ForgetApplied = false;
+static bool g_DeadmanReleased = false;
+
+/* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
+ * host is isolated before it releases itself.
+ *
+ * The readiness gate is a prediction; this is the backstop, and it is what makes
+ * the whole arrangement safe to use. Without it, a defect in the floor means a
+ * host is gone until somebody reaches it out of band. With it, the same defect
+ * means the host comes back after a few minutes and says why - a containment
+ * that did not hold, which is recoverable and loud, rather than an endpoint that
+ * is lost.
+ *
+ * Not 1: a hub restart, a brief network event or a rolling release must not lift
+ * every isolation in the fleet. Beats are three seconds apart, so 100 is five
+ * minutes - long enough to outlast all three, short enough that a person who has
+ * just isolated a host is still watching when it comes back. */
+#define OMINULL_DEADMAN_BEATS 100
+
 /* SyncEnforcement reconciles this host's whole link state - isolation, the
  * mesh peer list and the isolation allow list - against the hub's answer on
  * every heartbeat.
@@ -886,14 +1046,16 @@ static int ParseAddressList(const char* respJson, const char* key,
  * did: a peer the hub has released must have its rule lifted, and an endpoint
  * that was offline when the release happened would otherwise stay blackholed. */
 static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJson) {
-    static bool known = false;              /* nothing reconciled yet this run */
-    static bool appliedIsolated = false;
-    static char appliedAllow[MAX_ISOLATION_ALLOW][64];
-    static int appliedAllowCount = 0;
-    static char appliedPeers[MAX_QUARANTINED_PEERS][64];
-    static int appliedPeerCount = 0;
-
     if (!respJson) return;
+
+    /* The dead-man timer released this host's isolation without the hub's
+     * agreement. Forget what was applied so the next answer is treated as new
+     * and the isolation is re-applied if the hub still wants it. */
+    if (g_ForgetApplied) {
+        known = false;
+        g_ForgetApplied = false;
+    }
+
     const char* p = strstr(respJson, "\"is_isolated\":");
     if (!p) return;                         /* an older hub; nothing to obey */
     p += strlen("\"is_isolated\":");
@@ -905,13 +1067,25 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     char peers[MAX_QUARANTINED_PEERS][64];
     int peerCount = ParseAddressList(respJson, "quarantined_peers", peers, MAX_QUARANTINED_PEERS);
 
+    BASELINE_RULE baseline[MAX_BASELINE_RULES];
+    int baselineCount = ParseBaselineRules(respJson, baseline, MAX_BASELINE_RULES);
+    bool baselineKnown = baselineCount >= 0;
+    if (!baselineKnown) baselineCount = 0;
+
     bool changed = !known || wantIsolated != appliedIsolated
-                   || allowCount != appliedAllowCount || peerCount != appliedPeerCount;
+                   || allowCount != appliedAllowCount || peerCount != appliedPeerCount
+                   || baselineKnown != appliedBaselineKnown || baselineCount != appliedBaselineCount;
     for (int i = 0; !changed && i < allowCount; i++) {
         if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
     for (int i = 0; !changed && i < peerCount; i++) {
         if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
+    }
+    for (int i = 0; !changed && i < baselineCount; i++) {
+        if (strcmp(baseline[i].destination, appliedBaseline[i].destination) != 0
+            || strcmp(baseline[i].protocol, appliedBaseline[i].protocol) != 0
+            || strcmp(baseline[i].service, appliedBaseline[i].service) != 0
+            || baseline[i].port != appliedBaseline[i].port) changed = true;
     }
     if (!changed) return;
 
@@ -929,9 +1103,16 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     }
 
     if (wantIsolated) {
-        printf("[!] Threat Nullification: isolating this host. Permitted: hub %s, DHCP, DNS, loopback"
-               "%s%d allow-listed address(es). %d peer(s) quarantined.\n",
-               hubIP, allowCount ? ", " : " and ", allowCount, peerCount);
+        if (baselineKnown) {
+            printf("[!] Threat Nullification: isolating this host. Permitted: hub %s, loopback, "
+                   "%d baseline rule(s) and %d allow-listed address(es). %d peer(s) quarantined.\n",
+                   hubIP, baselineCount, allowCount, peerCount);
+        } else {
+            printf("[!] Threat Nullification: isolating this host. This hub sends no baseline policy, "
+                   "so the built-in floor applies: hub %s, DHCP and DNS to any destination, loopback, "
+                   "%d allow-listed address(es). %d peer(s) quarantined.\n",
+                   hubIP, allowCount, peerCount);
+        }
     } else if (known && appliedIsolated) {
         printf("[+] Threat neutralized: lifting host isolation. %d peer(s) still quarantined.\n", peerCount);
     } else if (peerCount == 0 && appliedPeerCount > 0) {
@@ -945,8 +1126,10 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
         EnforcementTeardown("iptables");
         EnforcementTeardown("ip6tables");
     } else {
-        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount);
-        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount);
+        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount,
+                         baseline, baselineCount, baselineKnown);
+        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount,
+                         baseline, baselineCount, baselineKnown);
     }
 
     appliedIsolated = wantIsolated;
@@ -954,7 +1137,251 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     appliedAllowCount = allowCount;
     memcpy(appliedPeers, peers, sizeof(peers));
     appliedPeerCount = peerCount;
+    memcpy(appliedBaseline, baseline, sizeof(baseline));
+    appliedBaselineCount = baselineCount;
+    appliedBaselineKnown = baselineKnown;
     known = true;
+}
+
+/* HubContact drives the dead-man timer. Every beat reports whether the hub
+ * answered and accepted; a run of failures while this host is isolated releases
+ * the isolation.
+ *
+ * The release rebuilds rather than tears down: the mesh quarantine this host was
+ * also holding is not this timer's to lift. Only the default-deny that made the
+ * host unreachable goes. */
+static void HubContact(bool accepted) {
+    static int missed = 0;
+
+    if (accepted) {
+        if (g_DeadmanReleased) {
+            printf("[+] The hub is reachable again after a dead-man release. "
+                   "Its current answer decides what this host enforces from here.\n");
+            fflush(stdout);
+            g_DeadmanReleased = false;
+        }
+        missed = 0;
+        return;
+    }
+    if (!appliedIsolated) {
+        missed = 0;                          /* nothing to roll back */
+        return;
+    }
+    if (++missed < OMINULL_DEADMAN_BEATS) return;
+
+    printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. "
+           "Releasing this host's isolation: an isolation the hub cannot lift is not a "
+           "containment, it is a lost endpoint. %d quarantined peer(s) stay blocked.\n",
+           missed, appliedPeerCount);
+    fflush(stdout);
+
+    EnforcementBuild("iptables", false, NULL, appliedAllow, 0,
+                     appliedPeers, appliedPeerCount,
+                     appliedBaseline, appliedBaselineCount, appliedBaselineKnown);
+    EnforcementBuild("ip6tables", false, NULL, appliedAllow, 0,
+                     appliedPeers, appliedPeerCount,
+                     appliedBaseline, appliedBaselineCount, appliedBaselineKnown);
+
+    appliedIsolated = false;
+    g_DeadmanReleased = true;
+    g_ForgetApplied = true;
+    missed = 0;
+}
+
+/* What this host actually uses the network for at the infrastructure layer.
+ *
+ * The hub checks these against the baseline policy before it will let anyone
+ * isolate this endpoint. The agent reports; it never authors. A host that turns
+ * out to resolve against a server nobody put in the policy is a question for a
+ * person, not a rule this agent may write for itself - and this host may be the
+ * compromised one. */
+
+/* CollectAddressesFromFile scans a config file for a keyword followed by
+ * addresses on the same line, which is the shape of resolv.conf, ntp.conf and
+ * chrony.conf alike. Hostnames are skipped rather than resolved: an address is
+ * the only thing that can be compared against a rule, and resolving one here
+ * would mean asking DNS what DNS is. */
+static int CollectAddressesFromFile(const char* path, const char* keyword,
+                                    char out[][64], int cap, int count) {
+    FILE* f = fopen(path, "r");
+    if (!f) return count;
+
+    char line[512];
+    size_t klen = strlen(keyword);
+    while (count < cap && fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == ';') continue;
+        if (strncasecmp(p, keyword, klen) != 0) continue;
+        p += klen;
+        if (*p != ' ' && *p != '\t' && *p != '=') continue;
+
+        /* One line can carry several servers - NTP= in timesyncd.conf does. */
+        while (count < cap) {
+            while (*p == ' ' || *p == '\t' || *p == '=' || *p == ',') p++;
+            if (*p == '\0' || *p == '\n' || *p == '#') break;
+            char tok[64];
+            int i = 0;
+            while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != '\n' && *p != '\r'
+                   && i < (int)sizeof(tok) - 1) {
+                tok[i++] = *p++;
+            }
+            tok[i] = '\0';
+            if (!tok[0]) break;
+            if (!IsIPLiteral(tok)) continue;
+            bool dup = false;
+            for (int j = 0; j < count; j++) {
+                if (strcmp(out[j], tok) == 0) dup = true;
+            }
+            if (!dup) snprintf(out[count++], 64, "%s", tok);
+        }
+    }
+    fclose(f);
+    return count;
+}
+
+/* DHCPServerAddress finds the server this host holds its lease from. Which file
+ * holds it depends on what manages the interface, so all three known layouts
+ * are tried; a host with a static address has none of them and says so. */
+static bool DHCPServerAddress(char* out, size_t cap) {
+    static const char* leaseFiles[] = {
+        "/var/lib/dhcp/dhclient.leases",
+        "/var/lib/dhclient/dhclient.leases",
+        NULL
+    };
+    for (int i = 0; leaseFiles[i]; i++) {
+        FILE* f = fopen(leaseFiles[i], "r");
+        if (!f) continue;
+        char line[512];
+        char last[64] = {0};
+        while (fgets(line, sizeof(line), f)) {
+            const char* p = strstr(line, "dhcp-server-identifier");
+            if (!p) continue;
+            p += strlen("dhcp-server-identifier");
+            while (*p == ' ' || *p == '\t') p++;
+            int j = 0;
+            while (*p && *p != ';' && *p != '\n' && j < (int)sizeof(last) - 1) last[j++] = *p++;
+            last[j] = '\0';
+        }
+        fclose(f);
+        /* The last lease in the file is the current one. */
+        if (last[0] && IsIPLiteral(last)) {
+            snprintf(out, cap, "%s", last);
+            return true;
+        }
+    }
+
+    /* systemd-networkd keeps one lease file per interface index. */
+    DIR* d = opendir("/run/systemd/netif/leases");
+    if (d) {
+        struct dirent* e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char path[512];
+            snprintf(path, sizeof(path), "/run/systemd/netif/leases/%s", e->d_name);
+            FILE* f = fopen(path, "r");
+            if (!f) continue;
+            char line[512];
+            while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, "SERVER_ADDRESS=", 15) != 0) continue;
+                char addr[64] = {0};
+                int j = 0;
+                const char* p = line + 15;
+                while (*p && *p != '\n' && *p != '\r' && j < (int)sizeof(addr) - 1) addr[j++] = *p++;
+                addr[j] = '\0';
+                if (IsIPLiteral(addr)) {
+                    snprintf(out, cap, "%s", addr);
+                    fclose(f);
+                    closedir(d);
+                    return true;
+                }
+            }
+            fclose(f);
+        }
+        closedir(d);
+    }
+    return false;
+}
+
+/* EnforcementEngineStatus answers "can this agent apply rules at all", which is
+ * the check that decides whether an isolation would be a containment or a host
+ * taken off the network with nothing underneath it.
+ *
+ * Probed once. Running it every heartbeat would fork two processes a second for
+ * an answer that changes when a package is installed, and the failure it is
+ * looking for - no iptables, or no privilege to use it - does not come and go. */
+static const char* EnforcementEngineStatus(void) {
+    static char status[128] = {0};
+    if (status[0]) return status;
+
+    const char* v4[] = { "iptables", "-n", "-L", "OUTPUT", NULL };
+    const char* v6[] = { "ip6tables", "-n", "-L", "OUTPUT", NULL };
+    int r4 = RunTool(v4);
+    int r6 = RunTool(v6);
+
+    if (r4 == 127) {
+        snprintf(status, sizeof(status), "iptables is not installed on this host");
+    } else if (r4 != 0) {
+        snprintf(status, sizeof(status), "iptables would not list the OUTPUT chain (exit %d)", r4);
+    } else if (r6 == 127) {
+        snprintf(status, sizeof(status), "ip6tables is not installed, so IPv6 could not be isolated");
+    } else if (r6 != 0) {
+        snprintf(status, sizeof(status), "ip6tables would not list the OUTPUT chain (exit %d)", r6);
+    } else {
+        snprintf(status, sizeof(status), "ok");
+    }
+    return status;
+}
+
+/* AppendObservations writes the observed-services array and the readiness object
+ * into the telemetry payload. Both are appended to the object the hub already
+ * receives rather than sent separately: an agent that can heartbeat can report
+ * this, and a second request would be a second thing to fail. */
+static int AppendObservations(const LINUX_AGENT_CONFIG* config, char* buf, size_t cap,
+                              bool rolledBack) {
+    char resolvers[8][64];
+    int resolverCount = CollectAddressesFromFile("/etc/resolv.conf", "nameserver", resolvers, 8, 0);
+
+    char ntp[8][64];
+    int ntpCount = 0;
+    ntpCount = CollectAddressesFromFile("/etc/systemd/timesyncd.conf", "NTP", ntp, 8, ntpCount);
+    ntpCount = CollectAddressesFromFile("/etc/ntp.conf", "server", ntp, 8, ntpCount);
+    ntpCount = CollectAddressesFromFile("/etc/chrony/chrony.conf", "server", ntp, 8, ntpCount);
+
+    char dhcp[64] = {0};
+    bool haveDHCP = DHCPServerAddress(dhcp, sizeof(dhcp));
+
+    int off = snprintf(buf, cap, ",\"observed_services\":[");
+    const char* sep = "";
+    for (int i = 0; i < resolverCount && off < (int)cap - 256; i++) {
+        off += snprintf(buf + off, cap - off,
+                        "%s{\"service\":\"dns\",\"destination\":\"%s\",\"source\":\"resolv.conf\"}",
+                        sep, resolvers[i]);
+        sep = ",";
+    }
+    for (int i = 0; i < ntpCount && off < (int)cap - 256; i++) {
+        off += snprintf(buf + off, cap - off,
+                        "%s{\"service\":\"ntp\",\"destination\":\"%s\",\"source\":\"time daemon config\"}",
+                        sep, ntp[i]);
+        sep = ",";
+    }
+    if (haveDHCP && off < (int)cap - 256) {
+        off += snprintf(buf + off, cap - off,
+                        "%s{\"service\":\"dhcp\",\"destination\":\"%s\",\"source\":\"dhcp lease\"}",
+                        sep, dhcp);
+    }
+
+    char hubIP[64] = {0};
+    bool haveHub = HubAddressLiteral(config, hubIP, sizeof(hubIP));
+
+    off += snprintf(buf + off, cap - off,
+                    "],\"isolation_readiness\":{\"enforcement_engine\":\"%s\",\"hub_literal\":\"%s\","
+                    "\"address_origin\":\"%s\",\"last_applied\":\"%s\"}",
+                    EnforcementEngineStatus(),
+                    haveHub ? hubIP : "",
+                    haveDHCP ? "dhcp" : "static",
+                    rolledBack ? "released by the dead-man timer after losing contact with the hub" : "");
+    return off;
 }
 
 // ExtractJsonString pulls a flat "key":"value" pair out of a JSON fragment. The hub's
@@ -1307,19 +1734,36 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         }
     }
 
-    snprintf(jsonBuf + offset, bufCap - offset, "]}");
+    offset += snprintf(jsonBuf + offset, bufCap - offset, "]");
+
+    /* What this host uses the network for, and whether it believes it could
+     * still be released after an isolation. Both ride on the heartbeat that is
+     * already going out: an agent that can report telemetry can report this,
+     * and a second request would be a second thing to fail. */
+    char observations[2048];
+    if (AppendObservations(config, observations, sizeof(observations), g_DeadmanReleased) > 0) {
+        offset += snprintf(jsonBuf + offset, bufCap - offset, "%s", observations);
+    }
+    snprintf(jsonBuf + offset, bufCap - offset, "}");
 
     char url[sizeof(config->hub_url) + 32];
     snprintf(url, sizeof(url), "%s/api/v1/events", config->hub_url);
 
-    char respBuf[4096] = {0};
+    /* The reply now carries the resolved baseline as well as the peer list and
+     * the allow list. Four kilobytes truncated it once the policy had a handful
+     * of rules in it, and a truncated reply is not a parse error - it is a
+     * silently shorter enforcement state. */
+    char respBuf[16384] = {0};
+    bool accepted = false;
     if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
         long status = SplitHubStatus(respBuf);
         if (!ReportHubRejection(config, status)) {
+            accepted = true;
             SyncEnforcement(config, respBuf);
             ApplyAgentUpdate(config, respBuf);
         }
     }
+    HubContact(accepted);
 
     free(jsonBuf);
 }

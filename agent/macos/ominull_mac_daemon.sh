@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.7.10"
+AGENT_VERSION="1.7.11"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -54,6 +54,16 @@ IS_ISOLATED="false"
 # which is what picks up state applied before this daemon restarted.
 APPLIED_PEERS="__unreconciled__"
 APPLIED_ALLOW="__unreconciled__"
+APPLIED_BASELINE="__unreconciled__"
+# The dead-man timer. An isolation the hub cannot lift is not a containment, it
+# is a lost endpoint - so a host that has been isolated and has then failed this
+# many consecutive heartbeats releases itself and says so. Beats are three
+# seconds apart, so 100 is five minutes: long enough to outlast a hub restart, a
+# brief network event or a rolling release, and short enough that the person who
+# just isolated the host is still watching when it comes back.
+DEADMAN_BEATS=100
+MISSED_BEATS=0
+DEADMAN_NOTE=""
 ATTEMPTED_VERSION=""
 # The helper repair below runs at most once per daemon start.
 HELPER_REPAIR_TRIED=false
@@ -394,7 +404,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.10)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.11)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -500,6 +510,157 @@ json_ip_list() {
         | sort -u | paste -sd, -
 }
 
+# json_baseline flattens the resolved baseline policy the hub sends into the
+# records pf_engine takes: service|destination|protocol|port, comma separated.
+# The pipe is the field separator because an IPv6 destination is full of colons.
+#
+# Three answers, and they mean different things:
+#   __legacy__  the hub sent no baseline key at all - a hub too old to have a
+#               policy. The built-in permits stay; tightening the floor under a
+#               fleet whose hub never asked for it would cut hosts off.
+#   __none__    the hub sent an empty policy. Hub and loopback only. Obeyed.
+#   records     the policy, as rules.
+#
+# Everything here is re-validated even though the hub validated it: these values
+# are written straight into a pf rule file, and pfctl reads an unexpected entry
+# as syntax rather than as an address.
+json_baseline() {
+    local body records
+    printf '%s' "$1" | grep -q '"isolation_baseline":' || { printf '__legacy__'; return 0; }
+    body=$(printf '%s' "$1" | sed -n 's/.*"isolation_baseline":\[\([^]]*\)\].*/\1/p')
+    records=$(printf '%s' "$body" | tr '}' '\n' | awk '
+        {
+            s = ""; d = ""; p = ""; pt = "";
+            if (match($0, /"service":"[^"]*"/))     s  = substr($0, RSTART+11, RLENGTH-12);
+            if (match($0, /"destination":"[^"]*"/)) d  = substr($0, RSTART+15, RLENGTH-16);
+            if (match($0, /"protocol":"[^"]*"/))    p  = substr($0, RSTART+12, RLENGTH-13);
+            if (match($0, /"port":[0-9]+/))         pt = substr($0, RSTART+7,  RLENGTH-7);
+            if (s == "" || d == "" || pt == "") next;
+            if (p != "udp" && p != "tcp") next;
+            if (pt+0 < 1 || pt+0 > 65535) next;
+            # Interval expressions are deliberately avoided: this awk is not
+            # guaranteed to support them, and a regex that silently never
+            # matched would drop every rule and read as an empty policy.
+            if (d !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && d !~ /^[0-9A-Fa-f:]+$/) next;
+            print s "|" d "|" p "|" pt;
+        }' | paste -sd, -)
+    if [[ -z "$records" ]]; then
+        printf '__none__'
+    else
+        printf '%s' "$records"
+    fi
+}
+
+# observed_services_json reports what this host actually uses the network for at
+# the infrastructure layer, so the hub can check the baseline policy against
+# reality rather than against an assumption. It reports; it never authors.
+observed_services_json() {
+    local sep="" out="[" iface pkt server ns
+    for ns in $(scutil --dns 2>/dev/null | awk '/nameserver\[[0-9]+\]/ {print $3}' | sort -u); do
+        case "$ns" in
+            *:*) ;;
+            *[!0-9.]*) continue ;;
+        esac
+        out="${out}${sep}{\"service\":\"dns\",\"destination\":\"${ns}\",\"source\":\"scutil --dns\"}"
+        sep=","
+    done
+    iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}' | head -1)
+    if [[ -n "$iface" ]]; then
+        pkt=$(ipconfig getpacket "$iface" 2>/dev/null || true)
+        server=$(printf '%s' "$pkt" | awk '/server_identifier/ {print $NF}' | tr -d '{}' | head -1)
+        if [[ -n "$server" ]]; then
+            out="${out}${sep}{\"service\":\"dhcp\",\"destination\":\"${server}\",\"source\":\"ipconfig getpacket\"}"
+            sep=","
+        fi
+    fi
+    printf '%s]' "$out"
+}
+
+# address_origin says whether the DHCP permit is on this host's critical path at
+# all. A statically addressed host does not lose its address when a lease it does
+# not have fails to renew.
+address_origin() {
+    local iface
+    iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}' | head -1)
+    if [[ -n "$iface" ]] && ipconfig getpacket "$iface" >/dev/null 2>&1; then
+        printf 'dhcp'
+    else
+        printf 'static'
+    fi
+}
+
+# enforcement_engine_status answers "can this agent apply rules at all", which is
+# what decides whether an isolation would be a containment or a host taken off
+# the network with nothing underneath it. Computed once: the failures it looks
+# for - no helper, a helper that is not root-owned, a pf that will not enable -
+# do not come and go between heartbeats.
+enforcement_engine_status() {
+    if [[ -n "${ENFORCEMENT_STATUS:-}" ]]; then
+        printf '%s' "$ENFORCEMENT_STATUS"
+        return 0
+    fi
+    local helper="/opt/ominull/pf_engine.sh" meta owner mode
+    if ! meta=$(stat -f '%Su %Lp' "$helper" 2>/dev/null); then
+        ENFORCEMENT_STATUS="the packet filter helper is not installed at $helper"
+    else
+        owner="${meta%% *}"; mode="${meta##* }"
+        if [[ "$owner" != "root" ]]; then
+            ENFORCEMENT_STATUS="the packet filter helper is owned by $owner, not root, so it will not be run"
+        elif (( (8#$mode & 8#022) != 0 )); then
+            ENFORCEMENT_STATUS="the packet filter helper is mode $mode: writable by group or other, so it will not be run"
+        elif ! grep -q -- '--baseline)' "$helper" 2>/dev/null; then
+            ENFORCEMENT_STATUS="the installed packet filter helper predates the baseline policy, so it would apply the old permissive floor"
+        elif ! pfctl -s info >/dev/null 2>&1; then
+            ENFORCEMENT_STATUS="pfctl would not report its state, so pf cannot be driven on this host"
+        else
+            ENFORCEMENT_STATUS="ok"
+        fi
+    fi
+    printf '%s' "$ENFORCEMENT_STATUS"
+}
+
+# deadman_tick is the backstop the readiness gate cannot be. The gate is a
+# prediction made before the host is cut off; this is what happens when the
+# prediction was wrong.
+#
+# Without it, a defect in the isolation floor means a host is gone until somebody
+# reaches it out of band. With it, the same defect means the host comes back
+# after five minutes and reports why - a containment that did not hold, which is
+# recoverable and loud, rather than an endpoint that is lost.
+#
+# The release rebuilds rather than tears down: the mesh quarantine this host was
+# also holding is not this timer's to lift. Only the default-deny goes.
+deadman_tick() {
+    if [[ "$1" == "accepted" ]]; then
+        if [[ -n "$DEADMAN_NOTE" ]]; then
+            echo "[+] The hub is reachable again after a dead-man release. Its current answer decides what this host enforces from here."
+            DEADMAN_NOTE=""
+        fi
+        MISSED_BEATS=0
+        return 0
+    fi
+    if [[ "$IS_ISOLATED" != "true" ]]; then
+        MISSED_BEATS=0
+        return 0
+    fi
+    MISSED_BEATS=$((MISSED_BEATS + 1))
+    (( MISSED_BEATS >= DEADMAN_BEATS )) || return 0
+
+    echo "[!] Isolated, and the hub has not answered for $MISSED_BEATS consecutive heartbeats. Releasing this host's isolation: an isolation the hub cannot lift is not a containment, it is a lost endpoint." >&2
+    if pf_engine apply --isolated 0 --hub "" --allow "" --peers "$APPLIED_PEERS" --baseline "$APPLIED_BASELINE"; then
+        IS_ISOLATED="false"
+        # Forget what was applied so the hub's next answer is treated as new and
+        # the isolation is re-applied if it still wants one.
+        APPLIED_PEERS="__unreconciled__"
+        APPLIED_ALLOW="__unreconciled__"
+        APPLIED_BASELINE="__unreconciled__"
+        DEADMAN_NOTE="released by the dead-man timer after losing contact with the hub"
+    else
+        echo "[-] The dead-man release failed; this host is still isolated and still cannot reach the hub." >&2
+    fi
+    MISSED_BEATS=0
+}
+
 pf_engine() {
     local helper="/opt/ominull/pf_engine.sh"
     local meta
@@ -520,23 +681,36 @@ pf_engine() {
     # exits non-zero, which is indistinguishable at a glance from a rule that
     # failed to load. Say which it is: a stale helper is an upgrade problem and
     # needs a different fix than a pfctl error.
+    # The verb is only half the question. The baseline isolation policy arrived
+    # as a new *option* on an existing verb, and a helper that has `apply)` but
+    # not `--baseline` does not print a usage banner - it hits the unknown-option
+    # arm and exits 1, so the host enforces nothing at all. Both are checked, and
+    # each names a capability rather than a version number.
+    local missing=""
     if ! grep -q "^[[:space:]]*${1}[)|]" "$helper" 2>/dev/null; then
-        echo "[-] $helper does not implement '${1}': it is older than this daemon, so the hub's order cannot be carried out on this host." >&2
+        missing="the '${1}' command"
+    elif [[ "$*" == *--baseline* ]] && ! grep -q -- '--baseline)' "$helper" 2>/dev/null; then
+        missing="the --baseline option, so the isolation floor it applied would be the old permissive one"
+    fi
+    if [[ -n "$missing" ]]; then
+        echo "[-] $helper does not implement $missing: it is older than this daemon, so the hub's order cannot be carried out on this host." >&2
         if [[ "$HELPER_REPAIR_TRIED" == "true" ]]; then
             return 1
         fi
         HELPER_REPAIR_TRIED=true
         repair_pf_engine || return 1
-        grep -q "^[[:space:]]*${1}[)|]" "$helper" 2>/dev/null || {
-            echo "[-] The repaired helper still does not implement '${1}'." >&2
+        if ! grep -q "^[[:space:]]*${1}[)|]" "$helper" 2>/dev/null \
+           || { [[ "$*" == *--baseline* ]] && ! grep -q -- '--baseline)' "$helper" 2>/dev/null; }; then
+            echo "[-] The repaired helper still does not implement $missing." >&2
             return 1
-        }
+        fi
     fi
     "$helper" "$@"
 }
 
 while true; do
     if ! hub_transport_ready; then
+        deadman_tick missed
         sleep 3
         continue
     fi
@@ -597,9 +771,16 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.7.10 (PF)",
+  "driver_version": "1.7.11 (PF)",
   "update_capability": "pkg",
-  "events": $EVENTS_JSON
+  "events": $EVENTS_JSON,
+  "observed_services": $(observed_services_json),
+  "isolation_readiness": {
+    "enforcement_engine": "$(enforcement_engine_status)",
+    "hub_literal": "$(hub_address_literal || true)",
+    "address_origin": "$(address_origin)",
+    "last_applied": "$DEADMAN_NOTE"
+  }
 }
 JSON
 )
@@ -630,9 +811,11 @@ JSON
     # on, so the rest of this pass is skipped rather than run against an error
     # body. The loop's own cadence is kept.
     if report_hub_rejection "$HUB_STATUS"; then
+        deadman_tick missed
         sleep 3
         continue
     fi
+    deadman_tick accepted
 
     apply_agent_update "$RESPONSE"
 
@@ -654,14 +837,30 @@ JSON
     NEW_ALLOW_COUNT=0
     [[ -n "$NEW_ALLOW" ]] && NEW_ALLOW_COUNT=$(printf '%s' "$NEW_ALLOW" | tr ',' '\n' | grep -c .)
 
-    if [[ "$NEW_ISOLATED" != "$IS_ISOLATED" || "$NEW_PEERS" != "$APPLIED_PEERS" || "$NEW_ALLOW" != "$APPLIED_ALLOW" ]]; then
+    # The baseline isolation policy: what this host is still permitted to reach
+    # while it is cut off. It replaces the DNS-and-DHCP-to-anywhere permits that
+    # used to be written into this helper.
+    NEW_BASELINE=$(json_baseline "$RESPONSE")
+    NEW_BASELINE_COUNT=0
+    case "$NEW_BASELINE" in
+        __legacy__|__none__) ;;
+        *) NEW_BASELINE_COUNT=$(printf '%s' "$NEW_BASELINE" | tr ',' '\n' | grep -c .) ;;
+    esac
+
+    if [[ "$NEW_ISOLATED" != "$IS_ISOLATED" || "$NEW_PEERS" != "$APPLIED_PEERS" \
+          || "$NEW_ALLOW" != "$APPLIED_ALLOW" || "$NEW_BASELINE" != "$APPLIED_BASELINE" ]]; then
         if [[ "$NEW_ISOLATED" == "true" ]]; then
             if HUB_IP=$(hub_address_literal); then
-                echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, loopback, DHCP, DNS, $NEW_ALLOW_COUNT allow-listed address(es)."
-                if pf_engine apply --isolated 1 --hub "$HUB_IP" --allow "$NEW_ALLOW" --peers "$NEW_PEERS"; then
+                if [[ "$NEW_BASELINE" == "__legacy__" ]]; then
+                    echo "[!] Threat Nullification: isolating this host. This hub sends no baseline policy, so the built-in floor applies: hub $HUB_IP, loopback, DHCP and DNS to any destination, $NEW_ALLOW_COUNT allow-listed address(es)."
+                else
+                    echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, loopback, $NEW_BASELINE_COUNT baseline rule(s), $NEW_ALLOW_COUNT allow-listed address(es)."
+                fi
+                if pf_engine apply --isolated 1 --hub "$HUB_IP" --allow "$NEW_ALLOW" --peers "$NEW_PEERS" --baseline "$NEW_BASELINE"; then
                     IS_ISOLATED="true"
                     APPLIED_PEERS="$NEW_PEERS"
                     APPLIED_ALLOW="$NEW_ALLOW"
+                    APPLIED_BASELINE="$NEW_BASELINE"
                 else
                     # The order is not recorded as applied, so the next beat
                     # tries again. Swallowing this is what let a Mac report
@@ -677,10 +876,11 @@ JSON
         else
             [[ "$IS_ISOLATED" == "true" ]] && echo "[+] Threat neutralized: lifting host isolation."
             HUB_IP=$(hub_address_literal || true)
-            if pf_engine apply --isolated 0 --hub "$HUB_IP" --allow "" --peers "$NEW_PEERS"; then
+            if pf_engine apply --isolated 0 --hub "$HUB_IP" --allow "" --peers "$NEW_PEERS" --baseline "$NEW_BASELINE"; then
                 IS_ISOLATED="false"
                 APPLIED_PEERS="$NEW_PEERS"
                 APPLIED_ALLOW="$NEW_ALLOW"
+                APPLIED_BASELINE="$NEW_BASELINE"
             else
                 echo "[-] The packet filter helper refused or failed; this host's enforcement state is unchanged. Retrying on the next heartbeat." >&2
             fi

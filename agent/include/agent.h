@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.7.10"
+#define OMINULL_AGENT_VERSION "1.7.11"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -56,9 +56,53 @@ bool Driver_SetIsolation(HANDLE hDevice, bool enable, uint32_t allowHubIP, uint1
  * ominull_wfp_user.exe recovery tool. */
 DWORD Wfp_Init(int dynamicSession);
 void Wfp_Close(void);
+
+/* The baseline isolation policy, as the hub resolves it for this endpoint: what
+ * an isolated host is still permitted to reach, already expanded to destination,
+ * protocol and remote port so nothing is left for an agent to interpret.
+ *
+ * It replaces two permits that used to be compiled in - DNS to any resolver and
+ * DHCP to any server - which were holes with a justification attached, and were
+ * invisible to whoever clicked Isolate. The hub pinhole and loopback stay
+ * compiled in: they are what make an isolation reversible, and an allow-list
+ * someone can empty by accident is a way to lose a host. */
+#define OMINULL_MAX_BASELINE_RULES 64
+
+typedef struct {
+    char service[16];       /* dns, dhcp, ntp, custom - decides precedence only */
+    char destination[64];
+    char protocol[8];       /* udp or tcp */
+    int  port;              /* the remote port, in both directions */
+} OMINULL_BASELINE_RULE;
+
+/* baselineKnown distinguishes a hub that sent no policy from a hub whose policy
+ * is empty. The first keeps the compiled-in permits - tightening the floor under
+ * a fleet whose hub never asked for it would cut hosts off during a hub upgrade.
+ * The second means hub and loopback only, and is obeyed. */
 DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
                      const char* const* blockedIPs, int blockedCount,
-                     const char* const* allowIPs, int allowCount);
+                     const char* const* allowIPs, int allowCount,
+                     const OMINULL_BASELINE_RULE* baseline, int baselineCount,
+                     int baselineKnown);
+
+/* Agent_EnforcementStatus is "ok" or the reason this host could not apply
+ * isolation rules if it were asked to. Reported on every heartbeat: the hub
+ * refuses to isolate an endpoint that says it cannot enforce, because that
+ * isolation would be a default-deny with nothing underneath it.
+ *
+ * Agent_LastAppliedNote carries anything the agent needs to say about the state
+ * it is actually in - notably that the dead-man timer released an isolation the
+ * hub had stopped answering for. */
+const char* Agent_EnforcementStatus(void);
+const char* Agent_LastAppliedNote(void);
+
+/* Reduces the configured hub URL to an address literal. Shared rather than
+ * copied: this is the address the pinhole is written for, and the readiness
+ * report claims the same one - two implementations of it would eventually
+ * disagree, and the disagreement would only show up on a host that had already
+ * been cut off. Returns false when the URL will not reduce, which is the state
+ * that makes an isolation irreversible and is reported as such. */
+bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
 
 // Hub communication & networking.
 //

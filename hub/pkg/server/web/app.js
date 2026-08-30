@@ -255,6 +255,11 @@
     policyGroups: [],
     exclusions: [],
     iocs: [],
+    baselinePolicies: [],
+    baselineServices: [],
+    // Keyed by endpoint id. Resolved on demand rather than for the whole fleet:
+    // it is a per-host answer and only one host is ever on screen.
+    baselineByEndpoint: {},
     audit: [],
     operators: [],
     operatorRoles: ["admin", "analyst", "auditor"],
@@ -313,10 +318,17 @@
           /* The hub answers a refusal as {"error": "..."} written for a person
              to read. Pasting the raw body into a toast showed them the JSON
              around their own answer. */
+          var parsed = null;
           var msg = "";
-          try { msg = (JSON.parse(t) || {}).error || ""; } catch (e) { msg = ""; }
+          try { parsed = JSON.parse(t); msg = (parsed || {}).error || ""; } catch (e) { msg = ""; }
           if (!msg) msg = (t || "").slice(0, 200);
-          throw new Error(msg || "HTTP " + res.status);
+          var err = new Error(msg || "HTTP " + res.status);
+          /* The isolation gate refuses with the whole picture in the body -
+             what is uncovered, what would still be permitted. A caller that
+             only sees the sentence cannot offer the operator the choice. */
+          err.status = res.status;
+          err.body = parsed;
+          throw err;
         });
       }
       var ct = res.headers.get("content-type") || "";
@@ -334,6 +346,34 @@
   /* Demo mode seeds a synthetic fleet so the console can be exercised and
      screenshotted without a live hub. Addresses are 10.0.4.x / 172.16.x by
      repo convention. */
+  /* Mirrors the shipped catalogue in hub/pkg/storage/baseline.go. Demo mode has
+     no hub to ask, and an editor with an empty service list is not a demo of
+     anything. */
+  var DEMO_BASELINE_SERVICES = [
+    { service: "dns", label: "DNS", protocol: "udp", ports: [53], why: "Name resolution." },
+    { service: "dhcp", label: "DHCP", protocol: "udp", ports: [67, 547], broadcast: ["255.255.255.255", "ff02::1:2"], why: "Lease renewal." },
+    { service: "ntp", label: "NTP", protocol: "udp", ports: [123], why: "Clock synchronisation." },
+    { service: "custom", label: "Custom", protocol: "", ports: null, why: "Anything else this network needs." }
+  ];
+
+  var DEMO_BASELINE_POLICIES = [
+    {
+      id: "bp-corp-resolvers", name: "Corporate resolvers", scope: "global", scope_value: "", enabled: true,
+      rules: [
+        { id: "br-1", policy_id: "bp-corp-resolvers", service: "dns", destination: "10.0.4.10" },
+        { id: "br-2", policy_id: "bp-corp-resolvers", service: "dns", destination: "10.0.4.11" },
+        { id: "br-3", policy_id: "bp-corp-resolvers", service: "dhcp", destination: "10.0.4.1" }
+      ]
+    },
+    {
+      id: "bp-cloud", name: "AWS production VPC", scope: "location", scope_value: "loc-cloud", enabled: true,
+      rules: [
+        { id: "br-4", policy_id: "bp-cloud", service: "dns", destination: "172.16.0.2" },
+        { id: "br-5", policy_id: "bp-cloud", service: "ntp", destination: "169.254.169.123" }
+      ]
+    }
+  ];
+
   function demoData() {
     var now = new Date().toISOString();
     var mins = function (m) { return new Date(Date.now() - m * 60000).toISOString(); };
@@ -570,6 +610,8 @@
     return {
       "/api/v1/hierarchy": hierarchy,
       "/api/v1/endpoints": endpoints,
+      "/api/v1/baseline/catalogue": { services: DEMO_BASELINE_SERVICES },
+      "/api/v1/baseline/policies": { policies: DEMO_BASELINE_POLICIES, services: DEMO_BASELINE_SERVICES },
       "/api/v1/assets": demoAssetGraph(),
       "/api/v1/inference/status": {
         last_run: mins(1), inferred_count: DEMO_INFERENCES.length, window: "24h0m0s",
@@ -702,6 +744,10 @@
           resolve(demoMutate(base, body));
           return;
         }
+        if (base === "/api/v1/baseline/endpoint") {
+          resolve(demoBaselineFor(path));
+          return;
+        }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -710,6 +756,68 @@
         resolve(base.indexOf("/coverage") >= 0 || base.indexOf("/summary") >= 0 ? {} : []);
       }, 40);
     });
+  }
+
+  /* One demo host reports a resolver nothing covers, so the refusal path and the
+     override are both reachable without a live fleet. */
+  function demoBaselineFor(path) {
+    var id = new URLSearchParams(path.split("?")[1] || "").get("endpoint_id") || "";
+    var cloud = id.indexOf("prod-") >= 0;
+    /* Read from the live fixture, not the seed, so a policy saved from the
+       editor visibly closes the gap the isolate sheet complained about. */
+    var held = ((DEMO_CACHE || {})["/api/v1/baseline/policies"] || {}).policies || DEMO_BASELINE_POLICIES;
+    var applied = held.filter(function (pl) {
+      if (pl.enabled === false) return false;
+      if (pl.scope === "global") return true;
+      if (pl.scope === "endpoint") return pl.scope_value === id;
+      if (pl.scope === "location") return pl.scope_value === (cloud ? "loc-cloud" : "loc-hq");
+      return false;
+    });
+    var rules = [];
+    applied.forEach(function (pl) { rules = rules.concat(arrayOf(pl.rules)); });
+    var wire = [];
+    rules.forEach(function (r) {
+      var sp = null;
+      DEMO_BASELINE_SERVICES.forEach(function (x) { if (x.service === r.service) sp = x; });
+      if (!sp) return;
+      arrayOf(sp.ports).forEach(function (pt) {
+        if (sp.service === "dhcp" && ((r.destination.indexOf(":") >= 0) !== (pt === 547))) return;
+        wire.push({ service: r.service, destination: r.destination, protocol: sp.protocol, port: pt });
+      });
+    });
+    var observed = cloud
+      ? [{ service: "dns", destination: "172.16.0.2", source: "resolv.conf" },
+         { service: "dns", destination: "1.1.1.1", source: "resolv.conf" },
+         { service: "ntp", destination: "169.254.169.123", source: "timesyncd" }]
+      : [{ service: "dns", destination: "10.0.4.10", source: "resolv.conf" },
+         { service: "dhcp", destination: "10.0.4.1", source: "dhcp lease" }];
+    var covered = {};
+    rules.forEach(function (r) { covered[r.service + "|" + r.destination] = true; });
+    var uncovered = observed.filter(function (o) { return !covered[o.service + "|" + o.destination]; });
+    return {
+      resolution: {
+        endpoint_id: id, rules: rules,
+        policies: applied.map(function (pl) { return pl.name || pl.id; }),
+        observed: observed, uncovered: uncovered,
+        readiness: {
+          enforcement_engine: "ok", hub_literal: "10.0.4.2", address_origin: "dhcp",
+          last_applied: "clear", reported_at: new Date().toISOString()
+        },
+        readiness_reported: true
+      },
+      wire: wire,
+      ready: uncovered.length === 0,
+      blocker: uncovered.length
+        ? "The baseline does not cover services this host is actually using: " +
+          uncovered.map(function (u) { return u.service + " to " + u.destination; }).join(", ") +
+          ". Isolating it would cut those off. Add them to a baseline policy, or override deliberately."
+        : "",
+      warning: "",
+      always_permitted: [
+        { what: "hub pinhole", why: "the only path by which this isolation can be lifted" },
+        { what: "loopback", why: "local software talking to itself" }
+      ]
+    };
   }
 
   /* Demo writes mutate the fixture so an isolate or an acknowledge visibly
@@ -768,6 +876,27 @@
       var st = DEMO_CACHE["/api/v1/inference/status"];
       st.last_run = new Date().toISOString();
       return { status: "completed", inferred_count: arrayOf(st.results).length, detail: st };
+    }
+    if (base === "/api/v1/baseline/policies") {
+      var saved = DEMO_CACHE["/api/v1/baseline/policies"];
+      var incoming = body || {};
+      if (!incoming.id) incoming.id = "bp-" + Date.now();
+      saved.policies = saved.policies.filter(function (pl) { return pl.id !== incoming.id; }).concat([incoming]);
+      return { status: "saved", policy: incoming };
+    }
+    if (base === "/api/v1/baseline/policies/delete") {
+      var held = DEMO_CACHE["/api/v1/baseline/policies"];
+      held.policies = held.policies.filter(function (pl) { return pl.id !== (body && body.id); });
+      return { status: "deleted" };
+    }
+    if (base === "/api/v1/baseline/propose") {
+      var info = demoBaselineFor("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent((body && body.endpoint_id) || ""));
+      return {
+        endpoint_id: body && body.endpoint_id,
+        rules: arrayOf(info.resolution.observed).map(function (o) { return { service: o.service, destination: o.destination }; }),
+        observed: info.resolution.observed,
+        suggested_name: "Baseline for " + (body && body.endpoint_id)
+      };
     }
     if (base === "/api/v1/scanner/scan") return { scan_id: "scan-demo", status: "running" };
     if (base === "/api/v1/agents/update") {
@@ -1387,13 +1516,70 @@
 
   function setIsolation(asset, on) {
     if (!asset.endpoint) { toast("No agent on " + asset.name + " \u2014 use mesh quarantine", "warn"); return; }
-    var path = on ? "/api/v1/endpoints/isolate" : "/api/v1/endpoints/unisolate";
-    var body = { endpoint_id: asset.endpoint.id };
-    if (on) body.allow_ips = [];
-    request(path, "POST", body).then(function () {
-      toast((on ? "Isolated " : "Released ") + asset.name, on ? "crit" : "ok");
+    /* Isolating asks first. Not for ceremony - the question "what can this host
+       still reach once I cut it off" has an answer, and the moment to read it
+       is before the cut, not while standing in front of the machine. Releasing
+       needs no such screen: it only ever gives access back. */
+    if (on) { confirmIsolate(asset); return; }
+    request("/api/v1/endpoints/unisolate", "POST", { endpoint_id: asset.endpoint.id }).then(function () {
+      toast("Released " + asset.name, "ok");
+      refresh();
+    }).catch(function (e) { toast("Release failed: " + e.message, "crit"); });
+  }
+
+  function doIsolate(asset, force) {
+    var body = { endpoint_id: asset.endpoint.id, allow_ips: [] };
+    if (force) body.force = true;
+    request("/api/v1/endpoints/isolate", "POST", body).then(function () {
+      closeSheet();
+      toast("Isolated " + asset.name + (force ? " \u2014 readiness overridden" : ""), "crit");
+      delete state.baselineByEndpoint[asset.endpoint.id];
       refresh();
     }).catch(function (e) { toast("Isolation failed: " + e.message, "crit"); });
+  }
+
+  function confirmIsolate(asset) {
+    request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(asset.endpoint.id))
+      .then(function (info) {
+        state.baselineByEndpoint[asset.endpoint.id] = info || {};
+        openIsolateSheet(asset, info || {});
+      })
+      .catch(function (e) { toast("Could not read the baseline: " + e.message, "crit"); });
+  }
+
+  function openIsolateSheet(asset, info) {
+    var res = info.resolution || {};
+    var uncovered = arrayOf(res.uncovered);
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why" },
+        h("b", { text: asset.name }),
+        document.createTextNode(" keeps only what is listed here. Every other flow, in both directions, stops.")),
+      simpleTable(["Permitted", "Destination", "Wire"], wireRows(info.wire, info.always_permitted)),
+      uncovered.length
+        ? h("div", {},
+            h("p", { cls: "note note-crit", text: "This host is using services the baseline does not cover. Isolating it cuts them off." }),
+            simpleTable(["Not covered", "Destination"], uncovered.map(function (u) {
+              return [h("span", { text: u.service }), h("span", { cls: "ip", text: u.destination })];
+            })))
+        : null,
+      info.blocker && !uncovered.length ? h("p", { cls: "note note-crit", text: info.blocker }) : null,
+      info.warning ? h("p", { cls: "note note-warn", text: info.warning }) : null);
+
+    var confirm = info.ready
+      ? h("button", { cls: "btn btn-primary", type: "button", text: "Isolate", on: { click: function () { doIsolate(asset, false); } } })
+      : h("button", { cls: "btn btn-crit", type: "button", text: "Isolate anyway", on: { click: function () { doIsolate(asset, true); } } });
+
+    var actions = [h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } })];
+    if (!info.ready && IS_ADMIN) {
+      actions.push(h("button", {
+        cls: "btn", type: "button", text: "Fix the baseline",
+        on: { click: function () { proposeBaseline(asset); } }
+      }));
+    }
+    actions.push(confirm);
+
+    openSheet("Isolate " + asset.name, body, actions);
   }
 
   function setMesh(asset, on) {
@@ -1454,12 +1640,48 @@
       .map(function (a) { return a.endpoint.id; });
     if (!ids.length) { toast("Select agented hosts first", "warn"); return; }
     var path = on ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
-    var body = { endpoint_ids: ids };
-    if (on) body.allow_ips = [];
-    request(path, "POST", body).then(function () {
-      toast((on ? "Isolated " : "Released ") + ids.length + " host" + (ids.length === 1 ? "" : "s"), on ? "crit" : "ok");
-      refresh();
-    }).catch(function (e) { toast("Bulk action failed: " + e.message, "crit"); });
+    var send = function (force) {
+      var body = { endpoint_ids: ids };
+      if (on) { body.allow_ips = []; }
+      if (force) body.force = true;
+      return request(path, "POST", body).then(function () {
+        closeSheet();
+        toast((on ? "Isolated " : "Released ") + ids.length + " host" + (ids.length === 1 ? "" : "s"), on ? "crit" : "ok");
+        state.baselineByEndpoint = {};
+        refresh();
+      });
+    };
+    send(false).catch(function (e) {
+      /* The gate refuses the whole batch on one unready host, and says which.
+         A toast would leave the operator guessing which of forty it was. */
+      if (e.status === 409 && e.body) { openBulkBlockedSheet(ids, e.body, send); return; }
+      toast("Bulk action failed: " + e.message, "crit");
+    });
+  }
+
+  function openBulkBlockedSheet(ids, info, send) {
+    var uncovered = arrayOf(info.uncovered);
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "note note-crit", text: info.error || "One of the selected hosts is not ready to be isolated." }),
+      h("p", { cls: "pending", text: "Blocked on " + (info.endpoint_id || "an endpoint") + ". Nothing has been isolated." }),
+      uncovered.length
+        ? simpleTable(["Not covered", "Destination"], uncovered.map(function (u) {
+            return [h("span", { text: u.service }), h("span", { cls: "ip", text: u.destination })];
+          }))
+        : null,
+      h("p", { cls: "pending", text: "Isolating anyway applies to all " + ids.length + " selected host" + (ids.length === 1 ? "" : "s") + " and is recorded as an override." }));
+
+    openSheet("Isolation refused", body, [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-crit", type: "button", text: "Isolate anyway",
+        on: {
+          click: function () {
+            send(true).catch(function (e2) { toast("Bulk action failed: " + e2.message, "crit"); });
+          }
+        }
+      })
+    ]);
   }
 
   function pushAgentUpdates() {
@@ -2559,6 +2781,303 @@
       card("Recent flows", simpleTable(["Age", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
   }
 
+  /* ------------------------------------------------------------- sheet */
+
+  /* One centred dialog. The console had a side drawer and a full-screen route
+     and nothing between them, and "here is exactly what this button is about
+     to do" is a between-sized question. It sits above the route, so Escape
+     closes it first. */
+
+  var sheetEl = null;
+  var sheetScrim = null;
+
+  function closeSheet() {
+    if (sheetEl && sheetEl.parentNode) sheetEl.parentNode.removeChild(sheetEl);
+    if (sheetScrim && sheetScrim.parentNode) sheetScrim.parentNode.removeChild(sheetScrim);
+    sheetEl = null;
+    sheetScrim = null;
+  }
+
+  function openSheet(title, body, actions) {
+    closeSheet();
+    sheetScrim = h("div", { cls: "scrim scrim-sheet", on: { click: closeSheet } });
+    sheetEl = h("div", { cls: "sheet", role: "dialog", "aria-modal": "true", "aria-label": title },
+      h("div", { cls: "sheet-head" },
+        h("h2", { text: title }),
+        h("span", { cls: "fill" }),
+        h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeSheet } }, icon("i-close"))),
+      h("div", { cls: "sheet-body" }, body),
+      h("div", { cls: "sheet-foot" }, actions || []));
+    document.body.appendChild(sheetScrim);
+    document.body.appendChild(sheetEl);
+    var first = sheetEl.querySelector("input, select, button.btn-primary");
+    if (first) first.focus();
+  }
+
+  /* -------------------------------------------------- isolation baseline */
+
+  /* What an isolated host may still reach. Two permits - the hub pinhole and
+     loopback - are compiled into every agent and are deliberately not policy:
+     they are what makes an isolation reversible, and an allow-list an operator
+     can empty by accident is a way to lose a host. Everything else is authored
+     here and shown before the button is pressed. */
+
+  var BASELINE_SCOPES = ["global", "tenant", "location", "endpoint"];
+
+  function baselineSpec(name) {
+    var found = null;
+    state.baselineServices.forEach(function (sp) { if (sp.service === name) found = sp; });
+    return found;
+  }
+
+  function baselineScopeText(p) {
+    return p.scope + (p.scope_value ? " · " + p.scope_value : "");
+  }
+
+  function ruleEditorRow(rule, onRemove) {
+    var svc = h("select", { "aria-label": "Service" });
+    var services = state.baselineServices.length
+      ? state.baselineServices
+      : [{ service: "dns", label: "DNS" }, { service: "dhcp", label: "DHCP" },
+         { service: "ntp", label: "NTP" }, { service: "custom", label: "Custom" }];
+    services.forEach(function (sp) {
+      svc.appendChild(h("option", { value: sp.service, text: sp.label || sp.service }));
+    });
+    svc.value = rule.service || "dns";
+
+    var dst = h("input", { type: "text", value: rule.destination || "", placeholder: "address", "aria-label": "Destination" });
+    var proto = h("select", { "aria-label": "Protocol" },
+      h("option", { value: "udp", text: "udp" }),
+      h("option", { value: "tcp", text: "tcp" }));
+    proto.value = rule.protocol || "udp";
+    var port = h("input", { type: "text", value: rule.port ? String(rule.port) : "", placeholder: "port", "aria-label": "Port" });
+
+    /* A named service carries its own wire details and the hub refuses an
+       attempt to override them; the row shows what they are rather than
+       offering fields that will be rejected. */
+    var sync = function () {
+      var custom = svc.value === "custom";
+      proto.disabled = !custom;
+      port.disabled = !custom;
+      var sp = baselineSpec(svc.value);
+      if (!custom && sp) {
+        proto.value = sp.protocol;
+        port.value = "";
+        port.placeholder = arrayOf(sp.ports).join(", ");
+      } else if (custom) {
+        port.placeholder = "port";
+      }
+    };
+    svc.addEventListener("change", sync);
+    sync();
+
+    var row = h("div", { cls: "rule-row" }, svc, dst, proto, port,
+      h("button", { cls: "mini", type: "button", text: "Remove", on: { click: function () { onRemove(row); } } }));
+    row.readRule = function () {
+      var custom = svc.value === "custom";
+      return {
+        service: svc.value,
+        destination: dst.value.trim(),
+        protocol: custom ? proto.value : "",
+        port: custom ? (parseInt(port.value, 10) || 0) : 0
+      };
+    };
+    return row;
+  }
+
+  function openBaselineEditor(policy, note) {
+    var p = policy || { id: "", name: "", scope: "global", scope_value: "", enabled: true, rules: [] };
+
+    var name = h("input", { type: "text", value: p.name || "", placeholder: "Corporate resolvers" });
+    var scope = h("select", {}, BASELINE_SCOPES.map(function (sc) { return h("option", { value: sc, text: sc }); }));
+    scope.value = p.scope || "global";
+    var scopeValue = h("input", { type: "text", value: p.scope_value || "", placeholder: "tenant, location or endpoint id" });
+    var enabled = h("input", { type: "checkbox" });
+    enabled.checked = p.enabled !== false;
+
+    var list = h("div", { cls: "rule-list" });
+    var addRow = function (r) { list.appendChild(ruleEditorRow(r, function (el) { list.removeChild(el); })); };
+    arrayOf(p.rules).forEach(addRow);
+
+    var syncScope = function () { scopeValue.disabled = scope.value === "global"; };
+    scope.addEventListener("change", syncScope);
+    syncScope();
+
+    var body = h("div", { cls: "stack" },
+      note ? h("p", { cls: "why", text: note }) : null,
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Name" }), name),
+        h("label", { cls: "field" }, h("span", { text: "Scope" }), scope),
+        h("label", { cls: "field" }, h("span", { text: "Applies to" }), scopeValue),
+        h("label", { cls: "field field-check" }, h("span", { text: "Enabled" }), enabled)),
+      h("div", { cls: "rule-head" },
+        h("span", { text: "Service" }), h("span", { text: "Destination" }),
+        h("span", { text: "Protocol" }), h("span", { text: "Port" }), h("span", {})),
+      list,
+      h("div", {}, h("button", {
+        cls: "mini", type: "button", text: "Add rule",
+        on: { click: function () { addRow({ service: "dns", destination: "" }); } }
+      })),
+      h("p", { cls: "pending", text: "Policies at every scope are added together, never overridden. The hub pinhole and loopback are permitted on every isolated host and are not listed here." }));
+
+    openSheet(p.id ? "Edit baseline policy" : "New baseline policy", body, [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-primary", type: "button", text: "Save policy",
+        on: {
+          click: function () {
+            var payload = {
+              id: p.id || "",
+              name: name.value.trim(),
+              scope: scope.value,
+              scope_value: scope.value === "global" ? "" : scopeValue.value.trim(),
+              enabled: enabled.checked,
+              rules: Array.prototype.map.call(list.children, function (row) { return row.readRule(); })
+            };
+            request("/api/v1/baseline/policies", "POST", payload).then(function () {
+              toast("Saved " + (payload.name || "baseline policy"), "ok");
+              state.baselineByEndpoint = {};
+              closeSheet();
+              refresh();
+            }).catch(function (e) { toast("Save failed: " + e.message, "crit"); });
+          }
+        }
+      })
+    ]);
+  }
+
+  function deleteBaselinePolicy(p) {
+    openSheet("Delete baseline policy", h("div", { cls: "stack" },
+      h("p", { cls: "why" },
+        h("b", { text: p.name || p.id }),
+        document.createTextNode(" stops applying immediately. Hosts isolated under it keep the rules already on them until they next check in.")),
+      h("p", { cls: "pending", text: baselineScopeText(p) + " · " + arrayOf(p.rules).length + " rule(s)" })), [
+      h("button", { cls: "btn", type: "button", text: "Keep it", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-crit", type: "button", text: "Delete",
+        on: {
+          click: function () {
+            request("/api/v1/baseline/policies/delete", "POST", { id: p.id }).then(function () {
+              toast("Deleted " + (p.name || p.id), "ok");
+              state.baselineByEndpoint = {};
+              closeSheet();
+              refresh();
+            }).catch(function (e) { toast("Delete failed: " + e.message, "crit"); });
+          }
+        }
+      })
+    ]);
+  }
+
+  function proposeBaseline(asset) {
+    if (!asset.endpoint) return;
+    request("/api/v1/baseline/propose", "POST", { endpoint_id: asset.endpoint.id })
+      .then(function (res) {
+        var rules = arrayOf(res && res.rules);
+        if (!rules.length) {
+          toast(asset.name + " has not reported any service to propose", "warn");
+          return;
+        }
+        openBaselineEditor({
+          id: "", name: "Baseline for " + asset.name, scope: "endpoint",
+          scope_value: asset.endpoint.id, enabled: true, rules: rules
+        }, "Drawn from what this host reported using. Nothing is applied until you save, and you can edit or drop any row first.");
+      })
+      .catch(function (e) { toast("Could not propose: " + e.message, "crit"); });
+  }
+
+  function wireRows(wire, always) {
+    return arrayOf(always).map(function (a) {
+      return [
+        h("span", { text: a.what }),
+        h("span", { cls: "dim-3", text: a.why }),
+        h("span", { cls: "dim-3", text: "always" })
+      ];
+    }).concat(arrayOf(wire).map(function (wr) {
+      return [
+        h("span", { text: wr.service }),
+        h("span", { cls: "ip", text: wr.destination }),
+        h("span", { cls: "ip", text: wr.protocol + "/" + wr.port })
+      ];
+    }));
+  }
+
+  function baselineEndpointCard(asset) {
+    var info = state.baselineByEndpoint[asset.endpoint.id];
+    if (!info) {
+      return card("If isolated", h("div", { cls: "empty", text: "Reading the baseline…" }), null, true);
+    }
+    var res = info.resolution || {};
+    var uncovered = arrayOf(res.uncovered);
+    var observed = arrayOf(res.observed);
+
+    var body = h("div", { cls: "card-body stack" });
+
+    if (info.blocker) body.appendChild(h("p", { cls: "note note-crit", text: info.blocker }));
+    else if (info.warning) body.appendChild(h("p", { cls: "note note-warn", text: info.warning }));
+    else body.appendChild(h("p", { cls: "note note-ok", text: "This host reported that it can still be released after an isolation, and the baseline covers everything it is using." }));
+
+    body.appendChild(simpleTable(["Permitted", "Destination", "Wire"], wireRows(info.wire, info.always_permitted)));
+
+    if (observed.length) {
+      body.appendChild(simpleTable(["Observed", "Destination", "Covered"], observed.map(function (o) {
+        var miss = uncovered.some(function (u) { return u.service === o.service && u.destination === o.destination; });
+        return [
+          h("span", { text: o.service }),
+          h("span", { cls: "ip", text: o.destination }),
+          h("span", { cls: "st", "data-state": miss ? "crit" : "ok" },
+            icon(miss ? "g-quarantine" : "g-online", true),
+            h("span", { text: miss ? "Not covered" : "Covered" }))
+        ];
+      })));
+    } else {
+      body.appendChild(h("div", { cls: "empty", text: "This host has not reported which services it uses." }));
+    }
+
+    var policies = arrayOf(res.policies);
+    body.appendChild(h("p", { cls: "pending", text: policies.length ? "From: " + policies.join(", ") : "No baseline policy covers this host." }));
+
+    var actions = [];
+    if (IS_ADMIN && observed.length) {
+      actions.push(h("button", {
+        cls: "btn", type: "button", text: "Propose from observed",
+        on: { click: function () { proposeBaseline(asset); } }
+      }));
+    }
+    return card("If isolated", body, actions.length ? actions : null, true);
+  }
+
+  function baselineCard() {
+    var rows = state.baselinePolicies.map(function (p) {
+      var rules = arrayOf(p.rules);
+      var summary = rules.map(function (r) { return r.service + " → " + r.destination; }).join(", ");
+      var acts = h("span", { cls: "row-acts" });
+      if (IS_ADMIN) {
+        acts.appendChild(h("button", { cls: "mini", type: "button", text: "Edit", on: { click: function () { openBaselineEditor(p); } } }));
+        acts.appendChild(h("button", { cls: "mini", type: "button", text: "Delete", on: { click: function () { deleteBaselinePolicy(p); } } }));
+      }
+      return [
+        h("span", { text: p.name || p.id }),
+        h("span", { cls: "dim-3", text: baselineScopeText(p) }),
+        h("span", { cls: "ip", text: summary || "—" }),
+        h("span", { cls: "st", "data-state": p.enabled ? "ok" : "idle" },
+          icon(p.enabled ? "g-online" : "g-offline", true),
+          h("span", { text: p.enabled ? "Enabled" : "Off" })),
+        acts
+      ];
+    });
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why pad-x", text: "What a host may still reach while it is isolated. The hub pinhole and loopback are permitted on every isolated host and cannot be removed here; everything else an isolated host can talk to is in this list." }),
+      simpleTable(["Name", "Scope", "Rules", "State", ""], rows));
+
+    var actions = IS_ADMIN ? [h("button", {
+      cls: "btn", type: "button", text: "New policy",
+      on: { click: function () { openBaselineEditor(null); } }
+    })] : null;
+    return card("Isolation baseline", body, actions);
+  }
+
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -2635,6 +3154,7 @@
       }));
 
     view.appendChild(h("div", { cls: "pad stack" },
+      baselineCard(),
       card("Policy groups", groups),
       card("Exclusions", excl),
       card("Threat indicators", iocs, [
@@ -2834,6 +3354,22 @@
         if (state.routeKey) renderRoute();
       }).catch(function () { /* the panel degrades to "nothing recorded" */ });
     }
+    /* Same for the baseline. Waiting for the next refresh tick left "what
+       happens if I isolate this host" reading "Reading the baseline" for five
+       seconds, which is long enough for someone to act without it. */
+    var asset = state.assetByKey[key];
+    if (asset && asset.endpoint) {
+      var epID = asset.endpoint.id;
+      request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
+        state.baselineByEndpoint[epID] = d || {};
+        if (state.routeKey) renderRoute();
+      }).catch(function () { /* the card degrades to the loading line */ });
+      if (!state.baselineServices.length) {
+        request("/api/v1/baseline/catalogue").then(function (d) {
+          state.baselineServices = arrayOf(d && d.services);
+        }).catch(function () { /* the editor falls back to the built-in list */ });
+      }
+    }
   }
 
   function renderRoute() {
@@ -2934,6 +3470,7 @@
           }
         })),
       h("div", { cls: "route-body" }, idCard, agentCard, card("Observed exposure", portsBody),
+        ep ? baselineEndpointCard(asset) : null,
         card("Evidence", evBody), flowCard, alertCard));
 
     document.body.appendChild(routeEl);
@@ -3370,6 +3907,7 @@
     }
 
     if (e.key === "Escape") {
+      if (sheetEl) { closeSheet(); return; }
       if (paletteEl) { closePalette(); return; }
       if (ctxMenu) { closeCtx(); return; }
       if (themePop) { closeThemePop(); return; }
@@ -3593,6 +4131,7 @@
 
   function go(section) {
     state.section = section;
+    closeSheet();
     closeRoute();
     closeDrawer();
     render();
@@ -3630,6 +4169,10 @@
     ];
 
     if (state.section === "policy") {
+      jobs.push(request("/api/v1/baseline/policies").then(function (d) {
+        state.baselinePolicies = arrayOf(d && d.policies);
+        state.baselineServices = arrayOf(d && d.services);
+      }));
       jobs.push(request("/api/v1/policy-groups").then(function (d) { state.policyGroups = arrayOf(d); }));
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
@@ -3650,6 +4193,16 @@
       jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
+    /* The open host's own answer, and the catalogue the editor needs to name a
+       service. Both are small and only fetched while a host is on screen. */
+    if (state.routeKey && state.assetByKey[state.routeKey] && state.assetByKey[state.routeKey].endpoint) {
+      var openEp = state.assetByKey[state.routeKey].endpoint.id;
+      jobs.push(request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(openEp))
+        .then(function (d) { state.baselineByEndpoint[openEp] = d || {}; }));
+      if (!state.baselineServices.length) {
+        jobs.push(request("/api/v1/baseline/catalogue").then(function (d) { state.baselineServices = arrayOf(d && d.services); }));
+      }
+    }
     if (state.section === "discovery" || state.section === "topology" || state.expandedKey || state.routeKey) {
       jobs.push(request("/api/v1/inference/status").then(function (d) { state.inference = d || null; }));
     }

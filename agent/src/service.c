@@ -91,7 +91,7 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
  * Isolation must leave a hole for the hub or it can never be lifted, and the
  * hole is written as an address, so a name is resolved here while this host can
  * still resolve names. */
-static bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap) {
+bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap) {
     const char* p = strstr(config->hub_url, "://");
     p = p ? p + 3 : config->hub_url;
 
@@ -131,6 +131,86 @@ static bool IsIPv4Literal(const char* s) {
     return s && s[0] && inet_pton(AF_INET, s, &v4) == 1;
 }
 
+/* An address literal of either family. The peer and allow lists are IPv4 only
+ * on this platform, but a baseline destination is not: a DHCPv6 server or the
+ * ff02::1:2 relay address are both legitimate entries, and the filter engine
+ * builds conditions for both families. */
+static bool IsIPLiteralAny(const char* s) {
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (!s || !s[0]) return false;
+    if (inet_pton(AF_INET, s, &v4) == 1) return true;
+    return inet_pton(AF_INET6, s, &v6) == 1;
+}
+
+/* JsonStringField pulls one flat "key":"value" out of an object fragment. The
+ * hub's baseline rules have no nesting and no escaping beyond this. */
+static bool JsonStringField(const char* json, const char* key, char* out, size_t outLen) {
+    char needle[48];
+    _snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    needle[sizeof(needle) - 1] = '\0';
+    const char* p = strstr(json, needle);
+    if (!p) return false;
+    p += strlen(needle);
+    size_t idx = 0;
+    while (*p && *p != '"' && idx < outLen - 1) out[idx++] = *p++;
+    out[idx] = '\0';
+    return idx > 0;
+}
+
+/* ParseBaselineRules reads the resolved baseline policy off the heartbeat reply.
+ *
+ * Returns the number of usable rules, or -1 when the key is absent entirely. The
+ * caller has to be able to tell "this hub has no policy" from "this hub's policy
+ * is empty", because they mean opposite things: the first keeps the compiled-in
+ * permits, the second means hub and loopback only. */
+static int ParseBaselineRules(const char* json, OMINULL_BASELINE_RULE* out, int maxOut) {
+    const char* p = strstr(json, "\"isolation_baseline\":[");
+    if (!p) return -1;
+    p += strlen("\"isolation_baseline\":[");
+
+    int count = 0;
+    while (*p && *p != ']') {
+        const char* obj = strchr(p, '{');
+        if (!obj) break;
+        const char* end = strchr(obj, '}');
+        if (!end) break;
+
+        char frag[256];
+        size_t len = (size_t)(end - obj) + 1;
+        if (len >= sizeof(frag)) len = sizeof(frag) - 1;
+        memcpy(frag, obj, len);
+        frag[len] = '\0';
+        p = end + 1;
+
+        OMINULL_BASELINE_RULE r;
+        memset(&r, 0, sizeof(r));
+        JsonStringField(frag, "service", r.service, sizeof(r.service));
+        JsonStringField(frag, "destination", r.destination, sizeof(r.destination));
+        JsonStringField(frag, "protocol", r.protocol, sizeof(r.protocol));
+        const char* portKey = strstr(frag, "\"port\":");
+        if (portKey) r.port = atoi(portKey + strlen("\"port\":"));
+
+        /* Re-validated even though the hub validates it. These values become
+         * filter conditions in the kernel; the value itself is never echoed,
+         * because it is attacker-controlled text on its way to a log. */
+        if (!IsIPLiteralAny(r.destination)) {
+            printf("[!] Hub sent a baseline rule whose destination is not an IP address; ignoring it.\n");
+            continue;
+        }
+        if (strcmp(r.protocol, "udp") != 0 && strcmp(r.protocol, "tcp") != 0) {
+            printf("[!] Hub sent a baseline rule for an unsupported protocol; ignoring it.\n");
+            continue;
+        }
+        if (r.port < 1 || r.port > 65535) {
+            printf("[!] Hub sent a baseline rule with an out-of-range port; ignoring it.\n");
+            continue;
+        }
+        if (count < maxOut) out[count++] = r;
+    }
+    return count;
+}
+
 /* ParseAddressArray pulls the entries of a flat "key":["a","b"] array. */
 static int ParseAddressArray(const char* json, const char* key,
                              char out[][PEER_ADDR_LEN], int maxOut) {
@@ -163,21 +243,83 @@ static int ParseAddressArray(const char* json, const char* key,
     return count;
 }
 
+/* What this agent has actually put in the kernel. At file scope rather than
+ * inside SyncEnforcement because the dead-man timer has to rebuild from it -
+ * specifically, to lift this host's isolation while leaving the mesh quarantine
+ * it was also holding in place. */
+static bool known = false;
+static bool appliedIsolated = false;
+static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+static int appliedPeerCount = 0;
+static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+static int appliedAllowCount = 0;
+static OMINULL_BASELINE_RULE appliedBaseline[OMINULL_MAX_BASELINE_RULES];
+static int appliedBaselineCount = 0;
+static bool appliedBaselineKnown = false;
+static bool engineReady = false;
+static bool engineTried = false;
+static bool g_ForgetApplied = false;
+static char g_DeadmanNote[160] = {0};
+
+/* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
+ * host is isolated before it releases itself.
+ *
+ * The readiness gate is a prediction made before the host is cut off; this is
+ * what happens when the prediction was wrong. Without it, a defect in the floor
+ * means a host is gone until somebody reaches it out of band - and on this
+ * platform "out of band" has meant a hypervisor console twice. With it, the same
+ * defect means the host comes back and says why.
+ *
+ * Not 1: a hub restart, a brief network event or a rolling release must not lift
+ * every isolation in the fleet. This loop flushes every 2500ms, so 120 is five
+ * minutes - long enough to outlast all three, short enough that the person who
+ * just isolated the host is still watching. */
+#define OMINULL_DEADMAN_BEATS 120
+
+/* EnforcementEngineReady probes the filtering engine once and caches the answer.
+ *
+ * It is called from two places that want it for different reasons: the enforcer,
+ * which needs the engine before it can apply anything, and the readiness report,
+ * which has to be able to say "this host could not enforce an isolation" *before*
+ * anyone asks for one. Probing it lazily inside the enforcer only would mean the
+ * first honest answer arrived one beat after it was needed.
+ *
+ * Not a dynamic session: isolation has to outlive a restart of this service the
+ * way the Linux agent's chains do. */
+static bool EnforcementEngineReady(void) {
+    if (engineTried) return engineReady;
+    engineTried = true;
+    engineReady = (Wfp_Init(0) == ERROR_SUCCESS);
+    if (!engineReady) {
+        printf("[-] The user-mode filtering engine would not open, so isolation cannot be "
+               "enforced on this host. Administrator rights are required.\n");
+    }
+    return engineReady;
+}
+
+const char* Agent_EnforcementStatus(void) {
+    return EnforcementEngineReady()
+        ? "ok"
+        : "the user-mode filtering engine would not open; this host cannot enforce an isolation";
+}
+
+const char* Agent_LastAppliedNote(void) { return g_DeadmanNote; }
+
 /* SyncEnforcement reconciles isolation and the mesh block list against the hub's
  * answer. The kernel driver is preferred when one is loaded; the user-mode
  * filtering engine is what runs on an endpoint without it, which on this fleet
  * is all of them. */
 static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const char* respJson) {
-    static bool known = false;
-    static bool appliedIsolated = false;
-    static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
-    static int appliedPeerCount = 0;
-    static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
-    static int appliedAllowCount = 0;
-    static bool engineReady = false;
-    static bool engineTried = false;
-
     if (!respJson) return;
+
+    /* The dead-man timer released this host without the hub's agreement.
+     * Forget what was applied so the next answer is treated as new and the
+     * isolation is re-applied if the hub still wants one. */
+    if (g_ForgetApplied) {
+        known = false;
+        g_ForgetApplied = false;
+    }
+
     const char* p = strstr(respJson, "\"is_isolated\":");
     if (!p) return;                     /* an older hub; nothing to obey */
     p += strlen("\"is_isolated\":");
@@ -190,8 +332,20 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
     char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
     int allowCount = ParseAddressArray(respJson, "isolation_allow_ips", allow, MAX_BLOCKED_PEERS);
 
+    OMINULL_BASELINE_RULE baseline[OMINULL_MAX_BASELINE_RULES];
+    int baselineCount = ParseBaselineRules(respJson, baseline, OMINULL_MAX_BASELINE_RULES);
+    bool baselineKnown = baselineCount >= 0;
+    if (!baselineKnown) baselineCount = 0;
+
     bool changed = !known || wantIsolated != appliedIsolated ||
-                   peerCount != appliedPeerCount || allowCount != appliedAllowCount;
+                   peerCount != appliedPeerCount || allowCount != appliedAllowCount ||
+                   baselineKnown != appliedBaselineKnown || baselineCount != appliedBaselineCount;
+    for (int i = 0; !changed && i < baselineCount; i++) {
+        if (strcmp(baseline[i].destination, appliedBaseline[i].destination) != 0 ||
+            strcmp(baseline[i].protocol, appliedBaseline[i].protocol) != 0 ||
+            strcmp(baseline[i].service, appliedBaseline[i].service) != 0 ||
+            baseline[i].port != appliedBaseline[i].port) changed = true;
+    }
     for (int i = 0; !changed && i < peerCount; i++) {
         if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
     }
@@ -230,17 +384,7 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
             return;
         }
     } else {
-        if (!engineTried) {
-            engineTried = true;
-            /* Not a dynamic session: isolation has to outlive a restart of this
-             * service the way the Linux agent's chains do. */
-            engineReady = (Wfp_Init(0) == ERROR_SUCCESS);
-            if (!engineReady) {
-                printf("[-] The user-mode filtering engine would not open, so isolation cannot be "
-                       "enforced on this host. Administrator rights are required.\n");
-            }
-        }
-        if (!engineReady) return;
+        if (!EnforcementEngineReady()) return;
 
         const char* blocked[MAX_BLOCKED_PEERS];
         for (int i = 0; i < peerCount; i++) blocked[i] = peers[i];
@@ -248,12 +392,18 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
         for (int i = 0; i < allowCount; i++) allowed[i] = allow[i];
 
         if (Wfp_ApplyState(hubIP, wantIsolated ? 1 : 0, blocked, peerCount,
-                           allowed, allowCount) != ERROR_SUCCESS) {
+                           allowed, allowCount, baseline, baselineCount,
+                           baselineKnown ? 1 : 0) != ERROR_SUCCESS) {
             printf("[-] The user-mode filtering engine refused the change; state not applied.\n");
             return;
         }
-        if (wantIsolated) {
-            printf("[!] Threat Nullification: host isolated. Permitted: hub %s, loopback, DHCP, DNS, "
+        if (wantIsolated && baselineKnown) {
+            printf("[!] Threat Nullification: host isolated. Permitted: hub %s, loopback, "
+                   "%d baseline rule(s), %d allow-list address(es). %d peer block(s) in force.\n",
+                   hubIP, baselineCount, allowCount, peerCount);
+        } else if (wantIsolated) {
+            printf("[!] Threat Nullification: host isolated. This hub sends no baseline policy, so "
+                   "the built-in floor applies: hub %s, loopback, DHCP and DNS to any destination, "
                    "%d allow-list address(es). %d peer block(s) in force.\n",
                    hubIP, allowCount, peerCount);
         } else {
@@ -266,8 +416,70 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
     appliedPeerCount = peerCount;
     memcpy(appliedAllow, allow, sizeof(allow));
     appliedAllowCount = allowCount;
+    memcpy(appliedBaseline, baseline, sizeof(baseline));
+    appliedBaselineCount = baselineCount;
+    appliedBaselineKnown = baselineKnown;
     known = true;
     fflush(stdout);
+}
+
+/* HubContact drives the dead-man timer. Every flush reports whether the hub
+ * answered; a run of failures while this host is isolated releases the
+ * isolation.
+ *
+ * The release rebuilds rather than tears down: the mesh quarantine this host was
+ * also holding is not this timer's to lift. Only the default-deny that made the
+ * host unreachable goes.
+ *
+ * The Windows endpoint is the one where this matters most. When an isolation
+ * here cannot be released, the only channel left is the agent's own outbound
+ * pinhole to the hub - and if the floor is what broke, that is gone too. */
+static void HubContact(bool accepted, HANDLE hDriver) {
+    static int missed = 0;
+
+    if (accepted) {
+        if (g_DeadmanNote[0]) {
+            printf("[+] The hub is reachable again after a dead-man release. Its current answer "
+                   "decides what this host enforces from here.\n");
+            g_DeadmanNote[0] = '\0';
+        }
+        missed = 0;
+        return;
+    }
+    if (!appliedIsolated) {
+        missed = 0;
+        return;
+    }
+    if (++missed < OMINULL_DEADMAN_BEATS) return;
+
+    printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
+           "this host's isolation: an isolation the hub cannot lift is not a containment, it is a "
+           "lost endpoint. %d quarantined peer(s) stay blocked.\n", missed, appliedPeerCount);
+    fflush(stdout);
+
+    bool released = false;
+    if (hDriver != INVALID_HANDLE_VALUE) {
+        released = Driver_SetIsolation(hDriver, false, 0, 0);
+    } else if (engineReady) {
+        const char* blocked[MAX_BLOCKED_PEERS];
+        for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
+        released = (Wfp_ApplyState(NULL, 0, blocked, appliedPeerCount, NULL, 0,
+                                   appliedBaseline, appliedBaselineCount,
+                                   appliedBaselineKnown ? 1 : 0) == ERROR_SUCCESS);
+    }
+
+    if (released) {
+        appliedIsolated = false;
+        g_ForgetApplied = true;
+        _snprintf(g_DeadmanNote, sizeof(g_DeadmanNote),
+                  "released by the dead-man timer after losing contact with the hub");
+        g_DeadmanNote[sizeof(g_DeadmanNote) - 1] = '\0';
+    } else {
+        printf("[-] The dead-man release failed; this host is still isolated and still cannot "
+               "reach the hub.\n");
+    }
+    fflush(stdout);
+    missed = 0;
 }
 
 void RunAgentLoop(AGENT_CONFIG* config) {
@@ -306,10 +518,16 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             size_t socketCount = PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
             batchCount += socketCount;
 
-            char hubResponse[4096];
-            Hub_SendTelemetryBatch(config, eventBatch, batchCount, hubResponse, sizeof(hubResponse));
+            /* The reply now carries the resolved baseline policy as well as the
+             * peer list and the allow list. Four kilobytes truncated it once the
+             * policy had a handful of rules in it, and a truncated reply is not
+             * a parse error - it is a silently shorter enforcement state. */
+            char hubResponse[16384];
+            bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
+                                                   hubResponse, sizeof(hubResponse));
             batchCount = 0;
             lastFlush = now;
+            HubContact(accepted, hDriver);
 
             // The hub answers with an agent_update descriptor when a newer
             // release is published. Update_Apply verifies it against the

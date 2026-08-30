@@ -642,7 +642,16 @@ func (s *Store) initSchema() error {
 	// The asset graph is additive: three new tables and their indexes. It
 	// touches nothing above, so an existing hub upgrades without migrating a
 	// single endpoints row.
-	return s.initAssetSchema()
+	if err := s.initAssetSchema(); err != nil {
+		return err
+	}
+
+	// The baseline isolation policy is additive in the same way: two new tables
+	// and two nullable columns on endpoints. A hub that upgrades into it starts
+	// with no policies, which reads as "hub and loopback only" - and the
+	// readiness gate then refuses to isolate anything whose observed services
+	// that does not cover, rather than cutting it off quietly.
+	return s.initBaselineSchema()
 }
 
 func (s *Store) seedDefaults() {
@@ -923,43 +932,75 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 		allow = strings.Join(allowIPs, ",")
 	}
 
-	baseQuery := "UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ?"
-	var args []interface{}
-	args = append(args, val, allow)
+	where, whereArgs := bulkIsolationWhere(tenantID, scope, value)
+	args := append([]interface{}{val, allow}, whereArgs...)
 
-	switch scope {
-	case "all":
-		if tenantID != "" {
-			baseQuery += " WHERE tenant_id = ?"
-			args = append(args, tenantID)
-		}
-	case "client":
-		baseQuery += " WHERE tenant_id = ?"
-		args = append(args, value)
-	case "location":
-		baseQuery += " WHERE location_id = ?"
-		args = append(args, value)
-	case "platform":
-		baseQuery += " WHERE os LIKE ?"
-		args = append(args, "%"+value+"%")
-		if tenantID != "" {
-			baseQuery += " AND tenant_id = ?"
-			args = append(args, tenantID)
-		}
-	case "role":
-		baseQuery += " WHERE role_tag = ?"
-		args = append(args, value)
-		if tenantID != "" {
-			baseQuery += " AND tenant_id = ?"
-			args = append(args, tenantID)
-		}
-	}
-
-	res, err := s.db.Exec(baseQuery, args...)
+	res, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ?"+where, args...)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// bulkIsolationWhere builds the selection shared by SetBulkIsolation and
+// BulkIsolationTargets. They have to agree exactly: the second decides which
+// endpoints the readiness gate is asked about, and the first decides which ones
+// are actually cut off. A drift between them is a host isolated without ever
+// being checked.
+func bulkIsolationWhere(tenantID, scope, value string) (string, []interface{}) {
+	var where string
+	var args []interface{}
+	switch scope {
+	case "all":
+		if tenantID != "" {
+			where = " WHERE tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	case "client":
+		where = " WHERE tenant_id = ?"
+		args = append(args, value)
+	case "location":
+		where = " WHERE location_id = ?"
+		args = append(args, value)
+	case "platform":
+		where = " WHERE os LIKE ?"
+		args = append(args, "%"+value+"%")
+		if tenantID != "" {
+			where += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	case "role":
+		where = " WHERE role_tag = ?"
+		args = append(args, value)
+		if tenantID != "" {
+			where += " AND tenant_id = ?"
+			args = append(args, tenantID)
+		}
+	}
+	return where, args
+}
+
+// BulkIsolationTargets lists the endpoints a bulk isolate would affect, so each
+// one can be put through the readiness gate before any of them is cut off.
+func (s *Store) BulkIsolationTargets(tenantID, scope, value string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	where, args := bulkIsolationWhere(tenantID, scope, value)
+	rows, err := s.db.Query("SELECT id FROM endpoints"+where+" ORDER BY id", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---- Agent version tracking & remote update orchestration ----

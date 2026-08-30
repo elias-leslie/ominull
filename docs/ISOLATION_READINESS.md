@@ -1,6 +1,6 @@
 # Isolation readiness — proving a host can be released before cutting it off
 
-Status: designed, not built. The floor it tests is built and verified as of v1.7.10.
+Status: built as of v1.7.11, on all three platforms and in the console.
 
 ## The problem
 
@@ -21,7 +21,7 @@ Three things make it worse than it sounds:
   other two — the bash 3.2 empty-array bug shipped in v1.7.9 because it does not
   reproduce on the build host's bash 5.
 
-Today the answer is "the maintainers tested it." That is not a control. What follows is.
+Before this, the answer was "the maintainers tested it." That is not a control.
 
 ## The floor, stated as a contract
 
@@ -33,66 +33,107 @@ One definition, enforced identically by all three agents, in this precedence:
   Above the peer blocks so a quarantine cannot sever the release path. The hub also
   refuses to quarantine its own address (409).
 - **loopback** — both directions; local software talking to itself.
-- **DHCP** — both directions. v4 UDP 67:68, v6 UDP 546:547.
-- **DNS** — both directions, UDP only, any resolver. A stated hole (see
-  `docs/TRUST_FABRIC.md`, D2).
+- **DHCP** — both directions, to the servers the baseline names. v4 UDP 67, v6 UDP 547;
+  the remote port is the server port in both directions, because a reply is a new
+  inbound flow. The broadcast fallbacks (`255.255.255.255`, `ff02::1:2`) ride along
+  only when DHCP is permitted at all — a REBIND or DISCOVER after a failed renewal is
+  a broadcast.
+- **DNS** — both directions, UDP only, to the resolvers the baseline names. TCP/53 is
+  deliberately not permitted: that is a general-purpose tunnel, not a lookup.
 - **allow list** — `isolation_allow_ips`, below a peer block so quarantine wins.
 - **deny** — everything else, both directions, both families.
+
+The hub pinhole and loopback are compiled in and cannot be removed from the console.
+Everything between them and the deny comes from the **baseline isolation policy**
+(`docs/TRUST_FABRIC.md`, D2), which is why DNS and DHCP no longer say "any".
 
 ## The gate
 
 ### 1. The endpoint answers, on every heartbeat
 
-The agent reports an `isolation_readiness` object alongside the telemetry it already
-sends. Each check is `ok` or a named reason:
+The agent reports an `isolation_readiness` object and an `observed_services` list
+alongside the telemetry it already sends.
 
-| check | what it establishes | how |
+| field | what it establishes | how |
 |---|---|---|
 | `enforcement_engine` | the agent can apply rules at all | Windows: `FwpmEngineOpen0` succeeds. Linux: `iptables` and `ip6tables` are present and the chains can be created. macOS: the helper exists, is root-owned, implements the verb this daemon calls, and `pf` accepts the anchor. |
-| `hub_literal` | the pinhole can be written | the hub URL reduces to an address literal, and it is the address this heartbeat actually reached. |
-| `address_origin` | whether DHCP is load-bearing here | DHCP-assigned or static. Static means the DHCP permit is not on the critical path; DHCP means it is. |
-| `resolvers` | what the DNS permit is protecting | the resolvers this host is configured with, reported so the hole is visible rather than assumed. |
-| `last_applied` | the rules the agent believes are in the kernel | read back from the kernel, not from the agent's own state — the check that would have caught a half-written anchor. |
+| `hub_literal` | the pinhole can be written | the hub URL reduces to an address literal. |
+| `address_origin` | whether DHCP is load-bearing here | DHCP-assigned or static. Static means the DHCP permit is not on the critical path. |
+| `last_applied` | whether this host let itself out | empty in normal operation; set when the dead-man timer released an isolation, and carrying the reason, so a containment that did not hold says so on the first beat that gets through. |
+| `observed_services` | what the baseline is checked against | the resolvers, DHCP servers and time sources this host actually uses, each with the file or API it was read from. |
 
-`enforcement_engine` and `hub_literal` are required. The rest are informational and
-are shown, not gated on — an operator has to be able to isolate a statically addressed
-host.
+`enforcement_engine` and `hub_literal` are gated on. The rest are shown, not gated —
+an operator has to be able to isolate a statically addressed host.
 
 ### 2. The hub records it
 
-Stored per endpoint with a timestamp. Exposed on the endpoint row and on
-`GET /api/v1/endpoints`.
+Stored per endpoint with the time the hub received it — the hub stamps it, so a wrong
+clock on an endpoint cannot forge a fresh report. Read back through
+`GET /api/v1/baseline/endpoint?endpoint_id=…`, which returns the resolved rule set, the
+wire expansion the agent is handed, what the host observed, and what of that the
+baseline does not cover.
 
 ### 3. The order is refused without it
 
-`POST /api/v1/endpoints/isolate` and the bulk form return **409** when readiness is
-absent, stale (older than one heartbeat interval × 5), or failing, and the body names
-the check that failed and what it means. `"force": true` overrides and is audited as a
-distinct action — an operator containing an actively compromised host must never be
-blocked by a stale probe, but the override has to be a decision someone made, with
-their name on it.
+`POST /api/v1/endpoints/isolate` and the bulk form return **409** when the report is
+stale (older than ten minutes), failing, or when the baseline does not cover a service
+the host is using. The body carries the uncovered list, the rules that would be
+applied, and the readiness object — the refusal is the screen, not a log line.
+`"force": true` overrides and is audited as `ISOLATE_HOST_FORCED` with the reason it
+overrode: an operator containing an actively compromised host must never be blocked by
+a stale probe, but the override has to be a decision someone made, with their name on
+it.
+
+**An endpoint that has never reported is allowed, with a warning**, and audited as
+`ISOLATE_HOST_UNVERIFIED`. This is a deliberate departure from the original design,
+and the reasoning is load-bearing: reporting readiness and honouring the baseline
+arrive in the same agent release and are the same code path. An endpoint that has not
+reported is an endpoint still enforcing the compiled-in floor — DNS and DHCP to any
+destination — so isolating it is exactly as safe as it was before this policy existed,
+and no safer. Refusing would take the Isolate button away from the entire fleet for
+the length of a rollout, during which the only way to contain a host would be an
+override that means nothing.
+
+**Anyone splitting readiness reporting and baseline enforcement into separate releases
+has to revisit this.** The coupling is what makes it sound.
 
 ### 4. The dead-man rollback
 
 The check above is a prediction. This is the backstop, and it is the part that makes
-the whole thing safe: an agent that has applied an isolation and then fails **N
-consecutive heartbeats** lifts the isolation itself, records why, and reports it on the
-first beat it gets through.
+the whole thing safe: an agent that has applied an isolation and then fails N
+consecutive heartbeats lifts **this host's isolation only**, records why, and reports
+it on the first beat it gets through. It rebuilds the rule set rather than tearing it
+down, so a mesh quarantine of a peer survives the rollback.
 
-This inverts the failure. Today, a floor defect means a host is lost until someone
-notices and reaches it out of band. With the rollback, a floor defect means a host
-un-isolates itself after a few minutes and tells you the floor is broken. The worst
-case becomes a containment that did not hold — which is recoverable and loud — rather
-than an endpoint that is gone.
+| platform | beats | interval | window |
+|---|---|---|---|
+| Linux | 100 | 3s | 5 min |
+| macOS | 100 | 3s | 5 min |
+| Windows | 120 | 2500ms | 5 min |
 
-N is deliberately not 1: a hub restart, a brief network event, or a rolling release must
-not lift every quarantine in the fleet. It should be long enough to outlast a hub
-restart and short enough that a person is still in front of the screen.
+This inverts the failure. Without it, a floor defect means a host is lost until someone
+notices and reaches it out of band. With it, a floor defect means a host un-isolates
+itself after five minutes and tells you the floor is broken. The worst case becomes a
+containment that did not hold — recoverable and loud — rather than an endpoint that is
+gone.
 
-### 5. The console states the residual risk
+N is deliberately not 1: a hub restart, a brief network event, or a rolling release
+must not lift every quarantine in the fleet. Five minutes outlasts all three and is
+short enough that the person who just isolated the host is still watching.
 
-The confirm dialog names what stays open at the floor — DNS to any resolver, DHCP to
-any server — and what the endpoint reported. Accepting is accepting those, explicitly.
+### 5. The console shows the rule set, not a warning about it
+
+The Isolate dialog lists every permit that will remain — the two that are always there
+and every baseline rule, expanded to the protocol and port the agent is actually
+handed — and, separately, anything the host reported using that the baseline does not
+cover. When the gate refuses, the dialog is the refusal: it names what is uncovered,
+offers **Fix the baseline** (which opens the policy editor pre-filled from what the
+host reported, for a person to edit and approve) and **Isolate anyway**, which is the
+audited override.
+
+An analyst sees all of it and can isolate and override; only an administrator can
+author a policy. The person deciding whether to cut a host off must not be the one
+person who cannot see the rules.
 
 ## Why the rollback is not enough on its own
 
