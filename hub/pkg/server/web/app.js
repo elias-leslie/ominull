@@ -310,7 +310,13 @@
     return fetch(apiURL(path), opts).then(function (res) {
       if (!res.ok) {
         return res.text().then(function (t) {
-          throw new Error("HTTP " + res.status + (t ? ": " + t.slice(0, 200) : ""));
+          /* The hub answers a refusal as {"error": "..."} written for a person
+             to read. Pasting the raw body into a toast showed them the JSON
+             around their own answer. */
+          var msg = "";
+          try { msg = (JSON.parse(t) || {}).error || ""; } catch (e) { msg = ""; }
+          if (!msg) msg = (t || "").slice(0, 200);
+          throw new Error(msg || "HTTP " + res.status);
         });
       }
       var ct = res.headers.get("content-type") || "";
@@ -2672,53 +2678,76 @@
 
   function roleName(r) { return ROLE_LABELS[r] || r || "\u2014"; }
 
-  function renderAccess() {
-    var view = $("view");
-    clear(view);
+  /* The grant form is built once and reused, like the row filter above it:
+     render() runs on every five-second poll, and a form rebuilt underneath
+     someone loses whatever they had typed into it - mid-address, with no sign
+     of why. */
+  var opEmailInput = null;
+  var opRoleSel = null;
+  var opRoleNote = null;
+  var opGrantCard = null;
 
-    var emailInput = h("input", {
+  function buildGrantCard() {
+    opEmailInput = h("input", {
       type: "text", id: "op-email", placeholder: "name@example.com",
       autocomplete: "off", spellcheck: "false"
     });
-    var roleSel = h("select", { id: "op-role" });
+    opRoleSel = h("select", { id: "op-role" });
     state.operatorRoles.forEach(function (r) {
-      roleSel.appendChild(h("option", { value: r, text: roleName(r) }));
+      opRoleSel.appendChild(h("option", { value: r, text: roleName(r) }));
     });
-    roleSel.value = "analyst";
+    opRoleSel.value = "analyst";
 
-    var note = h("p", { cls: "pending", text: ROLE_NOTES[roleSel.value] || "" });
-    roleSel.addEventListener("change", function () {
-      note.textContent = ROLE_NOTES[roleSel.value] || "";
-    });
-
-    function grant() {
-      var email = (emailInput.value || "").trim();
-      if (!email) { toast("An operator is identified by an email address", "warn"); return; }
-      request("/api/v1/operators", "POST", { email: email, role: roleSel.value })
-        .then(function () {
-          toast(email + " is now " + roleName(roleSel.value).toLowerCase(), "ok");
-          emailInput.value = "";
-          refresh();
-        })
-        .catch(function (e) { toast("Could not grant access: " + e.message, "crit"); });
-    }
-    emailInput.addEventListener("keydown", function (e) {
-      if (e.key === "Enter") { e.preventDefault(); grant(); }
+    opRoleNote = h("p", { cls: "pending", text: ROLE_NOTES[opRoleSel.value] || "" });
+    opRoleSel.addEventListener("change", function () {
+      opRoleNote.textContent = ROLE_NOTES[opRoleSel.value] || "";
     });
 
-    var grantCard = card("Grant access",
+    opEmailInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); grantOperator(); }
+    });
+
+    opGrantCard = card("Grant access",
       h("div", { cls: "card-body" },
         h("div", { cls: "form-row" },
-          h("label", { cls: "field" }, h("span", { text: "Email" }), emailInput),
-          h("label", { cls: "field" }, h("span", { text: "Role" }), roleSel),
-          h("button", { cls: "btn btn-primary", type: "button", text: "Grant", on: { click: grant } })),
-        note,
+          h("label", { cls: "field" }, h("span", { text: "Email" }), opEmailInput),
+          h("label", { cls: "field" }, h("span", { text: "Role" }), opRoleSel),
+          h("button", { cls: "btn btn-primary", type: "button", id: "op-grant", text: "Grant",
+            on: { click: grantOperator } })),
+        opRoleNote,
         h("p", { cls: "pending", text: "The address must match the one the identity provider returns. Granting a role here does not admit anyone on its own: Cloudflare Access still decides who reaches this hub, and this list decides what they are once they do." })));
+  }
+
+  function grantOperator() {
+    var email = (opEmailInput.value || "").trim();
+    var role = opRoleSel.value;
+    if (!email) { toast("An operator is identified by an email address", "warn"); return; }
+    request("/api/v1/operators", "POST", { email: email, role: role })
+      .then(function () {
+        toast(email + " is now " + roleName(role).toLowerCase(), "ok");
+        opEmailInput.value = "";
+        refresh();
+      })
+      .catch(function (e) { toast("Could not grant access: " + e.message, "crit"); });
+  }
+
+  function renderAccess() {
+    var view = $("view");
+
+    /* A five-second poll must not yank an open dropdown out from under a click.
+       Nothing in this section changes on its own - operators change when an
+       administrator changes them - so skipping the rebuild while the focus is
+       inside it costs nothing and keeps the section usable. */
+    if (view.firstChild && view.contains(document.activeElement)) return;
+
+    clear(view);
+
+    if (!opGrantCard) buildGrantCard();
 
     var rows = state.operators.map(function (op) {
       var isYou = op.email === state.you;
 
-      var sel = h("select", {});
+      var sel = h("select", { "aria-label": "Role for " + op.email });
       state.operatorRoles.forEach(function (r) {
         sel.appendChild(h("option", { value: r, text: roleName(r) }));
       });
@@ -2757,7 +2786,7 @@
     var listCard = card("Operators",
       simpleTable(["Email", "Role", "Granted by", "Added", ""], rows));
 
-    view.appendChild(h("div", { cls: "pad stack" }, listCard, grantCard));
+    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard));
   }
 
   /* --------------------------------------------------------- full route */
@@ -3656,6 +3685,9 @@
     });
 
     if (state.demo) toast("Demo mode \u2014 synthetic fleet, no live hub data", "warn");
+    /* Said once, on arrival. The alternative is letting someone select forty
+       hosts and click Isolate to find out. */
+    if (READ_ONLY) toast("Read-only role \u2014 the hub refuses any action taken from this console", "warn");
 
     render();
     refresh();
