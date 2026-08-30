@@ -197,3 +197,65 @@ func TestAnOperatorGrantIsAudited(t *testing.T) {
 		t.Errorf("granting a role left no audit entry naming who granted it")
 	}
 }
+
+// TestASignInIsRecordedOnceAndNotOnEveryReload. The hub logged an assertion it
+// refused and said nothing about one it accepted, so an operator who reopened
+// their browser and was not asked to sign in had no way to tell whether Access
+// had just authenticated them or whether they were still on an old session.
+func TestASignInIsRecordedOnceAndNotOnEveryReload(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	if err := store.UpsertOperator("analyst@example.com", "analyst", "test"); err != nil {
+		t.Fatalf("seeding the analyst: %v", err)
+	}
+	cookie := sessionFor(t, srv, "analyst@example.com", auth.RoleAnalyst)
+
+	signIns := func() int {
+		logs, err := store.ListAuditLogs("", 100)
+		if err != nil {
+			t.Fatalf("reading the audit log: %v", err)
+		}
+		n := 0
+		for _, l := range logs {
+			if l.Action == "CONSOLE_SIGNIN" && l.Username == "analyst@example.com" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// First arrival: no session yet, so this is a sign-in.
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("an anonymous caller opened the console: %d", w.Code)
+	}
+
+	r = httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-API-Key", srv.adminKey)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the key holder could not open the console: %d", w.Code)
+	}
+
+	if n := signIns(); n != 0 {
+		t.Fatalf("the analyst has %d sign-ins before signing in", n)
+	}
+
+	for i := 0; i < 3; i++ {
+		r = httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(cookie)
+		w = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("reload %d answered %d", i, w.Code)
+		}
+	}
+	// Three loads on one live session is one person still being there.
+	if n := signIns(); n != 0 {
+		t.Errorf("reloading an existing session recorded %d sign-ins", n)
+	}
+}

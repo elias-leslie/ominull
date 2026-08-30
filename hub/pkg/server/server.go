@@ -346,11 +346,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			viewer = op
 		}
 	}
-	if !ok {
-		if op, viaCookie := s.consoleSession(r); viaCookie {
-			ok = true
-			viewer = op
-		}
+	// Resolved up front rather than only as a fallback, because whether there
+	// was already a session decides whether this load is a sign-in worth
+	// recording or the same person reloading the page.
+	prior, hadSession := s.consoleSession(r)
+	if !ok && hadSession {
+		ok = true
+		viewer = prior
 	}
 	if !ok {
 		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
@@ -375,6 +377,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// not have to carry a credential at all.
 	if heldAdminKey || operator.Email != "" {
 		s.setConsoleSession(w, r, operator)
+	}
+
+	// A sign-in is a thing that happened, and until now nothing recorded it:
+	// the hub logged an assertion it refused but said nothing about one it
+	// accepted, so "did my Google login actually work, or am I still on an old
+	// session?" had no answer anywhere. Recorded once per sign-in rather than
+	// once per page load - a reload carrying a live session is the same person
+	// still being there, not a new event.
+	if !hadSession || prior.Email != viewer.Email {
+		how := "the admin key"
+		if operator.Email != "" {
+			how = "Cloudflare Access"
+		}
+		log.Printf("[+] %s opened the console via %s as %s.", viewer.Email, how, viewer.Role)
+		s.auditAs(r, viewer.Email, "CONSOLE_SIGNIN", viewer.Email, "Opened the console via "+how+" with the "+viewer.Role+" role")
 	}
 	// The credential is in this URL. Send the browser to a clean one before
 	// rendering anything, so the address that ends up in history, in a bookmark

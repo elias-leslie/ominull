@@ -43,3 +43,22 @@ func (s *Server) audit(r *http.Request, action, resource, details string) {
 		Timestamp: time.Now().UTC(),
 	})
 }
+
+// auditAs records an action for an identity the hub established outside
+// authMiddleware. The console gate is the only caller: it authenticates before
+// the middleware ever runs, so there are no X- headers to read the operator
+// from.
+func (s *Server) auditAs(r *http.Request, username, action, resource, details string) {
+	if username == "" {
+		username = "unknown"
+	}
+	_ = s.store.RecordAudit(storage.AuditEntry{
+		ID:        uuid.New().String(),
+		Username:  username,
+		Action:    action,
+		Resource:  resource,
+		Details:   details,
+		IPAddress: clientIP(r),
+		Timestamp: time.Now().UTC(),
+	})
+}
