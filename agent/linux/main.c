@@ -19,7 +19,7 @@
 
 #include "../include/release_key.h"
 
-#define OMINULL_LINUX_AGENT_VERSION "1.7.8"
+#define OMINULL_LINUX_AGENT_VERSION "1.7.10"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -652,94 +652,6 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
     return got > 0;
 }
 
-static void ApplyMeshQuarantineRule(const char* ip, bool block) {
-    if (!ip || !ip[0]) return;
-    if (!IsIPLiteral(ip)) return;   /* callers log; this is the backstop */
-
-    /* An IPv6 peer needs the v6 table; iptables refuses the address outright. */
-    const char* tool = strchr(ip, ':') ? "ip6tables" : "iptables";
-
-    if (block) {
-        const char* checkIn[]  = { tool, "-C", "INPUT",  "-s", ip, "-j", "DROP", NULL };
-        const char* addIn[]    = { tool, "-I", "INPUT",  "-s", ip, "-j", "DROP", NULL };
-        const char* checkOut[] = { tool, "-C", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
-        const char* addOut[]   = { tool, "-I", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
-        if (RunTool(checkIn) != 0)  (void)RunTool(addIn);
-        if (RunTool(checkOut) != 0) (void)RunTool(addOut);
-    } else {
-        const char* delIn[]  = { tool, "-D", "INPUT",  "-s", ip, "-j", "DROP", NULL };
-        const char* delOut[] = { tool, "-D", "OUTPUT", "-d", ip, "-j", "DROP", NULL };
-        (void)RunTool(delIn);
-        (void)RunTool(delOut);
-    }
-}
-
-#define MAX_QUARANTINED_PEERS 64
-
-// SyncQuarantinedPeers reconciles kernel drop rules against the hub's authoritative
-// peer list on every heartbeat. Reconciling rather than only adding matters: a peer
-// the hub has released must have its rule lifted, and an endpoint that was offline
-// when the release happened would otherwise keep the host blackholed indefinitely.
-static void SyncQuarantinedPeers(const char* respJson) {
-    static char applied[MAX_QUARANTINED_PEERS][64];
-    static int appliedCount = 0;
-
-    if (!respJson) return;
-    const char* p = strstr(respJson, "\"quarantined_peers\":[");
-    if (!p) return;
-    p += 21;
-
-    char current[MAX_QUARANTINED_PEERS][64];
-    int currentCount = 0;
-
-    while (*p && *p != ']') {
-        while (*p && (*p == ' ' || *p == ',' || *p == '"' || *p == '\n' || *p == '\r')) p++;
-        if (*p == ']' || !*p) break;
-        char ip[64] = {0};
-        int idx = 0;
-        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
-            ip[idx++] = *p++;
-        }
-        /* Checked here as well as in ApplyMeshQuarantineRule so that a
-         * malformed entry never enters the applied set either - otherwise the
-         * next heartbeat would try to "lift" a rule that was never added.
-         *
-         * Reported rather than dropped in silence: a hub sending something
-         * that is not an address is either running a build that does not
-         * validate it or is not the hub, and both are worth a line in the log.
-         * The value itself is not echoed - it is attacker-controlled text and
-         * this log is read by people and by journald. */
-        if (ip[0] && !IsIPLiteral(ip)) {
-            printf("[!] Hub listed a quarantined peer that is not an IP address; ignoring it.\n");
-            fflush(stdout);
-            continue;
-        }
-        if (ip[0] && currentCount < MAX_QUARANTINED_PEERS) {
-            ApplyMeshQuarantineRule(ip, true);
-            snprintf(current[currentCount++], sizeof(current[0]), "%s", ip);
-        }
-    }
-
-    // Lift rules for every peer that was blocked on a previous heartbeat but is no
-    // longer on the hub's list.
-    for (int i = 0; i < appliedCount; i++) {
-        bool stillQuarantined = false;
-        for (int j = 0; j < currentCount; j++) {
-            if (strcmp(applied[i], current[j]) == 0) {
-                stillQuarantined = true;
-                break;
-            }
-        }
-        if (!stillQuarantined) {
-            printf("[*] Hub released peer %s; lifting mesh drop rules.\n", applied[i]);
-            ApplyMeshQuarantineRule(applied[i], false);
-        }
-    }
-
-    memcpy(applied, current, sizeof(current));
-    appliedCount = currentCount;
-}
-
 /* ---------------------------------------------------------------------------
  * Host isolation.
  *
@@ -752,9 +664,10 @@ static void SyncQuarantinedPeers(const char* respJson) {
  * is: a host that was down when it was released must still come back.
  * ------------------------------------------------------------------------- */
 
-#define OMINULL_ISO_CHAIN_IN  "OMINULL_ISO_IN"
-#define OMINULL_ISO_CHAIN_OUT "OMINULL_ISO_OUT"
+#define OMINULL_CHAIN_IN  "OMINULL_ISO_IN"
+#define OMINULL_CHAIN_OUT "OMINULL_ISO_OUT"
 #define MAX_ISOLATION_ALLOW 32
+#define MAX_QUARANTINED_PEERS 64
 
 /* HubAddressLiteral reduces the configured hub URL to an address literal.
  *
@@ -806,96 +719,179 @@ static bool HubAddressLiteral(const LINUX_AGENT_CONFIG* config, char* out, size_
     return ok;
 }
 
-/* IsolationTeardown removes the chains from one table. The unhook is repeated a
- * bounded number of times because a crash loop can leave the jump inserted more
- * than once, and one -D removes one copy. */
-static void IsolationTeardown(const char* tool) {
-    const char* unhookIn[]  = { tool, "-D", "INPUT",  "-j", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* unhookOut[] = { tool, "-D", "OUTPUT", "-j", OMINULL_ISO_CHAIN_OUT, NULL };
+/* EnforcementTeardown removes the chains from one table. The unhook is repeated
+ * a bounded number of times because a crash loop can leave the jump inserted
+ * more than once, and one -D removes one copy. */
+static void EnforcementTeardown(const char* tool) {
+    const char* unhookIn[]  = { tool, "-D", "INPUT",  "-j", OMINULL_CHAIN_IN,  NULL };
+    const char* unhookOut[] = { tool, "-D", "OUTPUT", "-j", OMINULL_CHAIN_OUT, NULL };
     for (int i = 0; i < 8 && RunTool(unhookIn) == 0; i++) { }
     for (int i = 0; i < 8 && RunTool(unhookOut) == 0; i++) { }
 
-    const char* flushIn[]  = { tool, "-F", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* flushOut[] = { tool, "-F", OMINULL_ISO_CHAIN_OUT, NULL };
-    const char* dropIn[]   = { tool, "-X", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* dropOut[]  = { tool, "-X", OMINULL_ISO_CHAIN_OUT, NULL };
+    const char* flushIn[]  = { tool, "-F", OMINULL_CHAIN_IN,  NULL };
+    const char* flushOut[] = { tool, "-F", OMINULL_CHAIN_OUT, NULL };
+    const char* dropIn[]   = { tool, "-X", OMINULL_CHAIN_IN,  NULL };
+    const char* dropOut[]  = { tool, "-X", OMINULL_CHAIN_OUT, NULL };
     (void)RunTool(flushIn);
     (void)RunTool(flushOut);
     (void)RunTool(dropIn);
     (void)RunTool(dropOut);
 }
 
-/* IsolationBuild writes the default-deny chains for one address family and hooks
- * them in front of INPUT and OUTPUT.
+/* EnforcementBuild writes this host's whole enforcement state into one ordered
+ * chain per direction, for one address family, and hooks them in front of INPUT
+ * and OUTPUT.
+ *
+ * One chain, in one order, is the point. Isolation used to live in
+ * OMINULL_ISO_IN/OUT while a mesh quarantine was inserted straight into INPUT
+ * and OUTPUT with -I, and both inserted at position 1 - so which of the two
+ * came first depended on which had been written most recently. A peer block
+ * that named the hub could therefore land in front of the hub pinhole and take
+ * away the only path by which the host could ever be released. The Windows
+ * agent gets this right by giving every filter an explicit weight; this is the
+ * same ladder, written as chain order:
+ *
+ *   hub pinhole  >  loopback  >  DHCP  >  peer quarantine  >  DNS  >  allow list  >  deny
+ *
+ * The hub pinhole is above the peer blocks and is written whenever there is
+ * anything to enforce, not only while isolated: quarantining the controller
+ * from an endpoint is not an operation with a way back.
  *
  * Built before hooked, so there is no moment where traffic is evaluated against
  * a chain that has no DROP in it yet. Both families are always built: leaving
  * ip6tables alone would isolate a host that then carried on over IPv6. */
-static void IsolationBuild(const char* tool, const char* hubIP,
-                           char allow[][64], int allowCount) {
+static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
+                             char allow[][64], int allowCount,
+                             char peers[][64], int peerCount) {
     bool v6 = strcmp(tool, "ip6tables") == 0;
 
-    const char* newIn[]  = { tool, "-N", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* newOut[] = { tool, "-N", OMINULL_ISO_CHAIN_OUT, NULL };
+    const char* newIn[]  = { tool, "-N", OMINULL_CHAIN_IN,  NULL };
+    const char* newOut[] = { tool, "-N", OMINULL_CHAIN_OUT, NULL };
     (void)RunTool(newIn);           /* fails when it already exists; ordinary */
     (void)RunTool(newOut);
-    const char* flushIn[]  = { tool, "-F", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* flushOut[] = { tool, "-F", OMINULL_ISO_CHAIN_OUT, NULL };
+    const char* flushIn[]  = { tool, "-F", OMINULL_CHAIN_IN,  NULL };
+    const char* flushOut[] = { tool, "-F", OMINULL_CHAIN_OUT, NULL };
     (void)RunTool(flushIn);
     (void)RunTool(flushOut);
 
-    const char* loIn[]  = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-i", "lo", "-j", "RETURN", NULL };
-    const char* loOut[] = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-o", "lo", "-j", "RETURN", NULL };
-    (void)RunTool(loIn);
-    (void)RunTool(loOut);
-
+    /* 1. The hub, ahead of every block below it. */
     if (hubIP && hubIP[0] && ((strchr(hubIP, ':') != NULL) == v6)) {
-        const char* hubIn[]  = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-s", hubIP, "-j", "RETURN", NULL };
-        const char* hubOut[] = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-d", hubIP, "-j", "RETURN", NULL };
+        const char* hubIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-s", hubIP, "-j", "RETURN", NULL };
+        const char* hubOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", hubIP, "-j", "RETURN", NULL };
         (void)RunTool(hubIn);
         (void)RunTool(hubOut);
     }
 
-    for (int i = 0; i < allowCount; i++) {
-        if ((strchr(allow[i], ':') != NULL) != v6) continue;
-        const char* aIn[]  = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-s", allow[i], "-j", "RETURN", NULL };
-        const char* aOut[] = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-d", allow[i], "-j", "RETURN", NULL };
-        (void)RunTool(aIn);
-        (void)RunTool(aOut);
-    }
+    /* 2. Loopback. */
+    const char* loIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-i", "lo", "-j", "RETURN", NULL };
+    const char* loOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-o", "lo", "-j", "RETURN", NULL };
+    (void)RunTool(loIn);
+    (void)RunTool(loOut);
 
-    /* DHCP and DNS: an isolated host still has to keep its address and still
-     * has to find the hub by name. The same two the WFP isolation config
-     * allows, so the three platforms quarantine to the same shape. */
-    const char* dhcpIn[]  = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-p", "udp", "--sport", "67:68", "-j", "RETURN", NULL };
-    const char* dhcpOut[] = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-p", "udp", "--dport", "67:68", "-j", "RETURN", NULL };
-    const char* dnsIn[]   = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-p", "udp", "--sport", "53", "-j", "RETURN", NULL };
-    const char* dnsOut[]  = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-p", "udp", "--dport", "53", "-j", "RETURN", NULL };
+    /* 3. DHCP, above the peer blocks: a lease that expires because a quarantine
+     *    named the DHCP server costs this host the address the hub reaches it
+     *    on, and there is no way back from that either. DHCPv6 is a different
+     *    pair of ports rather than the same two. */
+    const char* dhcpPorts = v6 ? "546:547" : "67:68";
+    const char* dhcpIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", dhcpPorts, "-j", "RETURN", NULL };
+    const char* dhcpOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", dhcpPorts, "-j", "RETURN", NULL };
     (void)RunTool(dhcpIn);
     (void)RunTool(dhcpOut);
-    (void)RunTool(dnsIn);
-    (void)RunTool(dnsOut);
 
-    const char* denyIn[]  = { tool, "-A", OMINULL_ISO_CHAIN_IN,  "-j", "DROP", NULL };
-    const char* denyOut[] = { tool, "-A", OMINULL_ISO_CHAIN_OUT, "-j", "DROP", NULL };
-    (void)RunTool(denyIn);
-    (void)RunTool(denyOut);
+    /* 4. Mesh quarantine. Applies whether or not this host is isolated. */
+    for (int i = 0; i < peerCount; i++) {
+        if ((strchr(peers[i], ':') != NULL) != v6) continue;
+        const char* pIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-s", peers[i], "-j", "DROP", NULL };
+        const char* pOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", peers[i], "-j", "DROP", NULL };
+        (void)RunTool(pIn);
+        (void)RunTool(pOut);
+    }
 
-    const char* chkIn[]  = { tool, "-C", "INPUT",  "-j", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* hookIn[] = { tool, "-I", "INPUT",  "-j", OMINULL_ISO_CHAIN_IN,  NULL };
-    const char* chkOut[]  = { tool, "-C", "OUTPUT", "-j", OMINULL_ISO_CHAIN_OUT, NULL };
-    const char* hookOut[] = { tool, "-I", "OUTPUT", "-j", OMINULL_ISO_CHAIN_OUT, NULL };
+    if (isolated) {
+        /* 5. DNS, below the peer block on purpose: quarantining a rogue
+         *    resolver has to beat the rule that lets this host resolve names.
+         *    UDP only - TCP/53 to any host is a general-purpose tunnel rather
+         *    than a name lookup. */
+        const char* dnsIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", "53", "-j", "RETURN", NULL };
+        const char* dnsOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", "53", "-j", "RETURN", NULL };
+        (void)RunTool(dnsIn);
+        (void)RunTool(dnsOut);
+
+        /* 6. The hub's allow list - a scoped trust rule, below a peer block so
+         *    a quarantine still wins over standing trust that named the peer. */
+        for (int i = 0; i < allowCount; i++) {
+            if ((strchr(allow[i], ':') != NULL) != v6) continue;
+            const char* aIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-s", allow[i], "-j", "RETURN", NULL };
+            const char* aOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", allow[i], "-j", "RETURN", NULL };
+            (void)RunTool(aIn);
+            (void)RunTool(aOut);
+        }
+
+        /* 7. Default deny. */
+        const char* denyIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-j", "DROP", NULL };
+        const char* denyOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-j", "DROP", NULL };
+        (void)RunTool(denyIn);
+        (void)RunTool(denyOut);
+    }
+
+    const char* chkIn[]  = { tool, "-C", "INPUT",  "-j", OMINULL_CHAIN_IN,  NULL };
+    const char* hookIn[] = { tool, "-I", "INPUT",  "-j", OMINULL_CHAIN_IN,  NULL };
+    const char* chkOut[]  = { tool, "-C", "OUTPUT", "-j", OMINULL_CHAIN_OUT, NULL };
+    const char* hookOut[] = { tool, "-I", "OUTPUT", "-j", OMINULL_CHAIN_OUT, NULL };
     if (RunTool(chkIn) != 0)  (void)RunTool(hookIn);
     if (RunTool(chkOut) != 0) (void)RunTool(hookOut);
 }
 
-/* SyncHostIsolation reconciles this host's link state against the hub's order on
- * every heartbeat. */
-static void SyncHostIsolation(const LINUX_AGENT_CONFIG* config, const char* respJson) {
+/* ParseAddressList pulls a flat JSON array of address literals out of the
+ * heartbeat reply. Anything that is not an address is reported and dropped: a
+ * hub sending something else is either running a build that does not validate
+ * it or is not the hub, and both are worth a line in the log. The value itself
+ * is never echoed - it is attacker-controlled text and this log is read by
+ * people and by journald. */
+static int ParseAddressList(const char* respJson, const char* key,
+                            char out[][64], int cap) {
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\":[", key);
+    const char* p = strstr(respJson, needle);
+    if (!p) return 0;
+    p += strlen(needle);
+
+    int count = 0;
+    while (*p && *p != ']') {
+        while (*p && (*p == ' ' || *p == ',' || *p == '"' || *p == '\n' || *p == '\r')) p++;
+        if (*p == ']' || !*p) break;
+        char ip[64] = {0};
+        int idx = 0;
+        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
+            ip[idx++] = *p++;
+        }
+        if (!ip[0]) continue;
+        if (!IsIPLiteral(ip)) {
+            printf("[!] Hub sent a %s entry that is not an IP address; ignoring it.\n", key);
+            fflush(stdout);
+            continue;
+        }
+        if (count < cap) snprintf(out[count++], 64, "%s", ip);
+    }
+    return count;
+}
+
+/* SyncEnforcement reconciles this host's whole link state - isolation, the
+ * mesh peer list and the isolation allow list - against the hub's answer on
+ * every heartbeat.
+ *
+ * The three used to be reconciled by two functions that did not know about each
+ * other, which is what made their relative order in the kernel accidental.
+ * Reconciling rather than only adding matters for the same reason it always
+ * did: a peer the hub has released must have its rule lifted, and an endpoint
+ * that was offline when the release happened would otherwise stay blackholed. */
+static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJson) {
     static bool known = false;              /* nothing reconciled yet this run */
     static bool appliedIsolated = false;
     static char appliedAllow[MAX_ISOLATION_ALLOW][64];
     static int appliedAllowCount = 0;
+    static char appliedPeers[MAX_QUARANTINED_PEERS][64];
+    static int appliedPeerCount = 0;
 
     if (!respJson) return;
     const char* p = strstr(respJson, "\"is_isolated\":");
@@ -905,64 +901,59 @@ static void SyncHostIsolation(const LINUX_AGENT_CONFIG* config, const char* resp
     bool wantIsolated = (strncmp(p, "true", 4) == 0);
 
     char allow[MAX_ISOLATION_ALLOW][64];
-    int allowCount = 0;
-    const char* a = strstr(respJson, "\"isolation_allow_ips\":[");
-    if (a) {
-        a += strlen("\"isolation_allow_ips\":[");
-        while (*a && *a != ']') {
-            while (*a && (*a == ' ' || *a == ',' || *a == '"')) a++;
-            if (*a == ']' || !*a) break;
-            char ip[64] = {0};
-            int idx = 0;
-            while (*a && *a != '"' && *a != ']' && *a != ',' && idx < (int)sizeof(ip) - 1) {
-                ip[idx++] = *a++;
-            }
-            if (ip[0] && !IsIPLiteral(ip)) {
-                printf("[!] Hub sent an isolation allow entry that is not an IP address; ignoring it.\n");
-                fflush(stdout);
-                continue;
-            }
-            if (ip[0] && allowCount < MAX_ISOLATION_ALLOW) {
-                snprintf(allow[allowCount++], sizeof(allow[0]), "%s", ip);
-            }
-        }
-    }
+    int allowCount = ParseAddressList(respJson, "isolation_allow_ips", allow, MAX_ISOLATION_ALLOW);
+    char peers[MAX_QUARANTINED_PEERS][64];
+    int peerCount = ParseAddressList(respJson, "quarantined_peers", peers, MAX_QUARANTINED_PEERS);
 
-    bool changed = !known || wantIsolated != appliedIsolated || allowCount != appliedAllowCount;
+    bool changed = !known || wantIsolated != appliedIsolated
+                   || allowCount != appliedAllowCount || peerCount != appliedPeerCount;
     for (int i = 0; !changed && i < allowCount; i++) {
         if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
+    for (int i = 0; !changed && i < peerCount; i++) {
+        if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
+    }
     if (!changed) return;
 
+    char hubIP[64] = {0};
+    bool haveHub = HubAddressLiteral(config, hubIP, sizeof(hubIP));
+    if (wantIsolated && !haveHub) {
+        /* Refused, deliberately. An isolation with no hole for the hub can
+         * never be lifted by the hub, so it is not a quarantine - it is a
+         * host taken off the network permanently by a name lookup that
+         * happened to fail. The order stands and is retried next beat. */
+        printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
+               "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
+        fflush(stdout);
+        return;
+    }
+
     if (wantIsolated) {
-        char hubIP[64] = {0};
-        if (!HubAddressLiteral(config, hubIP, sizeof(hubIP))) {
-            /* Refused, deliberately. An isolation with no hole for the hub can
-             * never be lifted by the hub, so it is not a quarantine - it is a
-             * host taken off the network permanently by a name lookup that
-             * happened to fail. The order stands and is retried next beat. */
-            printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
-                   "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
-            fflush(stdout);
-            return;
-        }
         printf("[!] Threat Nullification: isolating this host. Permitted: hub %s, DHCP, DNS, loopback"
-               "%s%d allow-listed address(es).\n", hubIP, allowCount ? ", " : " and ", allowCount);
-        fflush(stdout);
-        IsolationBuild("iptables", hubIP, allow, allowCount);
-        IsolationBuild("ip6tables", hubIP, allow, allowCount);
+               "%s%d allow-listed address(es). %d peer(s) quarantined.\n",
+               hubIP, allowCount ? ", " : " and ", allowCount, peerCount);
+    } else if (known && appliedIsolated) {
+        printf("[+] Threat neutralized: lifting host isolation. %d peer(s) still quarantined.\n", peerCount);
+    } else if (peerCount == 0 && appliedPeerCount > 0) {
+        printf("[+] Mesh quarantine cleared; no enforcement rules remain on this host.\n");
+    } else if (peerCount != appliedPeerCount) {
+        printf("[*] Mesh quarantine updated: %d peer(s).\n", peerCount);
+    }
+    fflush(stdout);
+
+    if (!wantIsolated && peerCount == 0) {
+        EnforcementTeardown("iptables");
+        EnforcementTeardown("ip6tables");
     } else {
-        if (known || appliedIsolated) {
-            printf("[+] Threat neutralized: lifting host isolation.\n");
-        }
-        fflush(stdout);
-        IsolationTeardown("iptables");
-        IsolationTeardown("ip6tables");
+        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount);
+        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount);
     }
 
     appliedIsolated = wantIsolated;
     memcpy(appliedAllow, allow, sizeof(allow));
     appliedAllowCount = allowCount;
+    memcpy(appliedPeers, peers, sizeof(peers));
+    appliedPeerCount = peerCount;
     known = true;
 }
 
@@ -1325,8 +1316,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
     if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
         long status = SplitHubStatus(respBuf);
         if (!ReportHubRejection(config, status)) {
-            SyncQuarantinedPeers(respBuf);
-            SyncHostIsolation(config, respBuf);
+            SyncEnforcement(config, respBuf);
             ApplyAgentUpdate(config, respBuf);
         }
     }

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.7.8"
+#define OMINULL_AGENT_VERSION "1.7.10"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 
@@ -57,7 +57,8 @@ bool Driver_SetIsolation(HANDLE hDevice, bool enable, uint32_t allowHubIP, uint1
 DWORD Wfp_Init(int dynamicSession);
 void Wfp_Close(void);
 DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
-                     const char* const* blockedIPs, int blockedCount);
+                     const char* const* blockedIPs, int blockedCount,
+                     const char* const* allowIPs, int allowCount);
 
 // Hub communication & networking.
 //

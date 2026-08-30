@@ -659,6 +659,44 @@ func hubSANs(hubURL string, extra []string) []string {
 	return append(hosts, extra...)
 }
 
+// hubOwnsAddress reports why an address belongs to this hub, or "" when it does
+// not. Used to refuse orders that would sever the fleet from its controller.
+func (s *Server) hubOwnsAddress(ip string) string {
+	addr := net.ParseIP(ip)
+	if addr == nil {
+		return ""
+	}
+	if addr.IsLoopback() {
+		return "loopback"
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.Equal(addr) {
+				return "a local interface"
+			}
+		}
+	}
+	for label, raw := range map[string]string{"--hub-url": s.hubURL, "--agent-hub-url": s.agentHubURL} {
+		if raw == "" {
+			continue
+		}
+		host := raw
+		for _, scheme := range []string{"https://", "http://"} {
+			host = strings.TrimPrefix(host, scheme)
+		}
+		if slash := strings.IndexByte(host, '/'); slash >= 0 {
+			host = host[:slash]
+		}
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if parsed := net.ParseIP(strings.Trim(host, "[]")); parsed != nil && parsed.Equal(addr) {
+			return label
+		}
+	}
+	return ""
+}
+
 func (s *Server) Close() error {
 	s.ti.Stop()
 	s.detector.Stop()
@@ -3194,6 +3232,16 @@ func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TargetIP = targetIP
+	// A quarantine names an address every agent then drops in both directions.
+	// Naming the hub is the one target with no way back: the fleet would stop
+	// being able to reach the only thing that can lift the rule, so the console
+	// would show a quarantine it could no longer withdraw. Refused here rather
+	// than left to each agent's rule ordering to survive.
+	if why := s.hubOwnsAddress(req.TargetIP); why != "" {
+		writeJSONError(w, http.StatusConflict,
+			"target_ip: "+req.TargetIP+" is this hub's own address ("+why+"). Quarantining it would cut every agent off from the only host that can lift the quarantine.")
+		return
+	}
 	targetMAC, err := validateMAC(req.TargetMAC)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "target_mac: "+err.Error())

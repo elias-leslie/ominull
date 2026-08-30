@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #ifndef FWPM_SESSION_FLAG_DYNAMIC
 #define FWPM_SESSION_FLAG_DYNAMIC 0x00000001
@@ -43,6 +44,9 @@ DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_ADDRESS,    /* b235ae9a-1d64-49b8-a44c-5
 DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_PORT,       /* c35a604d-d22b-4e1a-91b4-68f674ee674b */
     0xc35a604d, 0xd22b, 0x4e1a, 0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b);
 
+DEFINE_GUID(OMINULL_CONDITION_IP_PROTOCOL,          /* 3971ef2b-623e-4f9a-8cb1-6e79b806b9a7 */
+    0x3971ef2b, 0x623e, 0x4f9a, 0x8c, 0xb1, 0x6e, 0x79, 0xb8, 0x06, 0xb9, 0xa7);
+
 DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,           /* d78e1e87-8644-4ea5-9437-d809ecefc971 */
     0xd78e1e87, 0x8644, 0x4ea5, 0x94, 0x37, 0xd8, 0x09, 0xec, 0xef, 0xc9, 0x71);
 
@@ -61,6 +65,8 @@ DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,           /* d78e1e87-8644-4ea5-9437-d
 #define OMINULL_WEIGHT_PERMIT_LOOPBACK 14
 #define OMINULL_WEIGHT_PERMIT_DHCP     13
 #define OMINULL_WEIGHT_BLOCK_PEER      12
+#define OMINULL_WEIGHT_PERMIT_DNS      11
+#define OMINULL_WEIGHT_PERMIT_ALLOW    10
 #define OMINULL_WEIGHT_BLOCK_ALL        0
 
 // Sublayer & Provider GUIDs
@@ -122,7 +128,147 @@ void Wfp_Close() {
     }
 }
 
-DWORD Wfp_IsolateHost(const char* hubIpStr) {
+/* The four ALE layers every rule here is installed on: outbound and inbound,
+ * IPv4 and IPv6.
+ *
+ * Only the two IPv4 layers were ever filtered. An isolated Windows host with
+ * working IPv6 - which is every modern Windows host on a segment that answers a
+ * router solicitation - kept full IPv6 connectivity while the console showed it
+ * quarantined, and anything on the box could step around the quarantine by
+ * preferring an AAAA record. The Linux agent has always built the same chains
+ * under ip6tables as under iptables, and pf's `block drop all` is
+ * address-family agnostic, so Windows was the one platform where isolation was
+ * not isolation.
+ *
+ * The two IPv6 layer GUIDs come from WireGuard-Windows, whose four IPv4 values
+ * are byte-for-byte the ones already verified here against Microsoft's
+ * reference. */
+DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_CONNECT_V6,      /* 4a72393b-319f-44bc-84c3-ba54dcb3b6b4 */
+    0x4a72393b, 0x319f, 0x44bc, 0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4);
+
+DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V6,  /* a3b42c97-9f04-4672-b87e-cee9c483257f */
+    0xa3b42c97, 0x9f04, 0x4672, 0xb8, 0x7e, 0xce, 0xe9, 0xc4, 0x83, 0x25, 0x7f);
+
+#define OMINULL_FAMILY_V4    1
+#define OMINULL_FAMILY_V6    2
+#define OMINULL_FAMILY_BOTH  (OMINULL_FAMILY_V4 | OMINULL_FAMILY_V6)
+
+/* Index order is [family][direction], and direction 0 is always outbound.
+ * ALE_AUTH_CONNECT authorizes an outgoing connection (and the first packet of
+ * outgoing non-TCP traffic); ALE_AUTH_RECV_ACCEPT authorizes an incoming one. */
+static const GUID* const kOminullLayers[2][2] = {
+    { &OMINULL_LAYER_ALE_AUTH_CONNECT_V4, &OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V4 },
+    { &OMINULL_LAYER_ALE_AUTH_CONNECT_V6, &OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V6 },
+};
+
+/* AddFilterEverywhere installs one rule on every layer the caller asks for.
+ *
+ * Every permit in the isolation floor used to go on ALE_AUTH_CONNECT_V4 alone,
+ * while the default-deny went on both IPv4 layers. Outbound-only is not a
+ * floor: a DHCP renewal is a request out and a reply in, and the reply arrives
+ * as a new inbound flow rather than as part of the outbound one, so it met the
+ * inbound block instead. The lease then expires, the host loses the address the
+ * hub reaches it on, and an isolated endpoint that could have been released by
+ * the hub falls off the network for good. The same hole dropped inbound
+ * loopback, which is how local software talks to itself.
+ *
+ * Writing it once is the fix: a rule cannot now be added to one layer and
+ * forgotten on the other three. */
+static DWORD AddFilterEverywhere(const wchar_t* base, FWP_ACTION_TYPE action, UINT8 weight,
+                                 FWPM_FILTER_CONDITION0* conds, UINT32 condCount,
+                                 int families) {
+    static const wchar_t* const famName[2] = { L"IPv4", L"IPv6" };
+    static const wchar_t* const dirName[2] = { L"outbound", L"inbound" };
+
+    for (int f = 0; f < 2; f++) {
+        if (!(families & (f == 0 ? OMINULL_FAMILY_V4 : OMINULL_FAMILY_V6))) continue;
+        for (int d = 0; d < 2; d++) {
+            wchar_t name[192];
+            _snwprintf(name, sizeof(name) / sizeof(name[0]) - 1,
+                       L"%s (%s %s)", base, famName[f], dirName[d]);
+            name[sizeof(name) / sizeof(name[0]) - 1] = L'\0';
+
+            FWPM_FILTER0 filter;
+            memset(&filter, 0, sizeof(filter));
+            filter.layerKey = *kOminullLayers[f][d];
+            filter.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
+            filter.displayData.name = name;
+            filter.action.type = action;
+            filter.weight.type = FWP_UINT8;
+            filter.weight.uint8 = weight;
+            filter.numFilterConditions = condCount;
+            filter.filterCondition = condCount ? conds : NULL;
+
+            UINT64 filterId = 0;
+            DWORD status = FwpmFilterAdd0(g_hEngine, &filter, NULL, &filterId);
+            if (status != ERROR_SUCCESS) return status;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+/* AddressCondition fills in a remote-address match for whichever family the
+ * literal turns out to be, and reports which one that was.
+ *
+ * The v6 form points conditionValue at storage the caller owns, so `store` has
+ * to outlive the FwpmFilterAdd0 call - which is why it is a parameter rather
+ * than a local here. Returns 0 for a literal that is neither. */
+static int AddressCondition(const char* ipStr, FWPM_FILTER_CONDITION0* cond, FWP_BYTE_ARRAY16* store) {
+    struct in_addr a4;
+    struct in6_addr a6;
+
+    memset(cond, 0, sizeof(*cond));
+    cond->fieldKey = OMINULL_CONDITION_IP_REMOTE_ADDRESS;
+    cond->matchType = FWP_MATCH_EQUAL;
+
+    if (ipStr && ipStr[0] && inet_pton(AF_INET, ipStr, &a4) == 1) {
+        cond->conditionValue.type = FWP_UINT32;
+        cond->conditionValue.uint32 = ntohl(a4.s_addr);
+        return OMINULL_FAMILY_V4;
+    }
+    if (ipStr && ipStr[0] && inet_pton(AF_INET6, ipStr, &a6) == 1) {
+        memcpy(store->byteArray16, &a6, sizeof(store->byteArray16));
+        cond->conditionValue.type = FWP_BYTE_ARRAY16_TYPE;
+        cond->conditionValue.byteArray16 = store;
+        return OMINULL_FAMILY_V6;
+    }
+    return 0;
+}
+
+/* UdpRemotePort builds the two conditions that name one UDP service.
+ *
+ * The port is the remote one in both directions on purpose: outbound it is the
+ * server's port, and inbound - where the remote end is the server - it is the
+ * source port of the reply. The protocol condition is not decoration; the port
+ * alone would have permitted the TCP service on the same number as well. */
+static void UdpRemotePort(FWPM_FILTER_CONDITION0* cond, UINT16 port) {
+    memset(cond, 0, sizeof(cond[0]) * 2);
+    cond[0].fieldKey = OMINULL_CONDITION_IP_PROTOCOL;
+    cond[0].matchType = FWP_MATCH_EQUAL;
+    cond[0].conditionValue.type = FWP_UINT8;
+    cond[0].conditionValue.uint8 = 17;                 /* UDP */
+    cond[1].fieldKey = OMINULL_CONDITION_IP_REMOTE_PORT;
+    cond[1].matchType = FWP_MATCH_EQUAL;
+    cond[1].conditionValue.type = FWP_UINT16;
+    cond[1].conditionValue.uint16 = port;
+}
+
+/* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.
+ *
+ * The floor is loopback, the hub, DHCP and DNS - the same four the Linux chains
+ * and the macOS anchor permit, so a quarantined host behaves the same whichever
+ * platform it runs. What sits above the floor is the hub's allow list, which is
+ * the mechanism a scoped trust rule is delivered by.
+ *
+ * DNS is permitted to any resolver, not to a named one. That is a deliberate
+ * and known hole - an isolated host can still talk out over UDP/53 - and it is
+ * the price of an isolated host being able to find its own hub by name after a
+ * reboot. Narrowing it to the resolvers a host is actually configured with is
+ * what the trusted-DNS work exists to do; until then it is stated rather than
+ * pretended away. It is UDP only: TCP/53 to any host would be a general-purpose
+ * tunnel rather than a name lookup, which is why the same rule was taken back
+ * out of the macOS anchor. */
+DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int allowCount) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     printf("[*] Activating WFP User-Mode Network Isolation (Default-Deny)...\n");
@@ -133,137 +279,105 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         return status;
     }
 
-    // Parse Hub IP
-    struct in_addr hubAddr;
-    if (inet_pton(AF_INET, hubIpStr, &hubAddr) != 1) {
-        hubAddr.s_addr = 0;
-    }
-    UINT32 hubIpHostOrder = ntohl(hubAddr.s_addr);
+    FWPM_FILTER_CONDITION0 cond[2];
+    FWP_BYTE_ARRAY16 store;
 
-    // 1. Permit Filter: Hub IP Pin-Hole Outbound
-    if (hubIpHostOrder != 0) {
-        FWPM_FILTER0 permitHub;
-        memset(&permitHub, 0, sizeof(permitHub));
-        permitHub.layerKey = OMINULL_LAYER_ALE_AUTH_CONNECT_V4;
-        permitHub.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-        permitHub.displayData.name = L"Ominull Analyst Hub Pinhole";
-        permitHub.action.type = FWP_ACTION_PERMIT;
-        permitHub.weight.type = FWP_UINT8;
-        permitHub.weight.uint8 = OMINULL_WEIGHT_PERMIT_HUB;
-
-        FWPM_FILTER_CONDITION0 cond;
-        memset(&cond, 0, sizeof(cond));
-        cond.fieldKey = OMINULL_CONDITION_IP_REMOTE_ADDRESS;
-        cond.matchType = FWP_MATCH_EQUAL;
-        cond.conditionValue.type = FWP_UINT32;
-        cond.conditionValue.uint32 = hubIpHostOrder;
-
-        permitHub.numFilterConditions = 1;
-        permitHub.filterCondition = &cond;
-
-        UINT64 filterId = 0;
-        status = FwpmFilterAdd0(g_hEngine, &permitHub, NULL, &filterId);
+    /* 1. The hub. Highest weight of anything here: a peer block that happened
+     *    to name the hub must not be what takes away the only way to release
+     *    this host. */
+    int hubFamily = AddressCondition(hubIpStr, &cond[0], &store);
+    if (hubFamily) {
+        status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_HUB, cond, 1, hubFamily);
         if (status != ERROR_SUCCESS) {
             printf("[-] Failed to add Hub permit filter: 0x%08lX\n", (unsigned long)status);
             FwpmTransactionAbort0(g_hEngine);
             return status;
         }
-        printf("[+] Added Hub pinhole filter (ID: %llu, IP: %s)\n", (unsigned long long)filterId, hubIpStr);
+        printf("[+] Added Hub pinhole filter (IP: %s)\n", hubIpStr);
     }
 
-    // 2. Permit Filter: Local Loopback (127.0.0.1)
-    {
-        FWPM_FILTER0 permitLoopback;
-        memset(&permitLoopback, 0, sizeof(permitLoopback));
-        permitLoopback.layerKey = OMINULL_LAYER_ALE_AUTH_CONNECT_V4;
-        permitLoopback.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-        permitLoopback.displayData.name = L"Ominull Loopback Permit";
-        permitLoopback.action.type = FWP_ACTION_PERMIT;
-        permitLoopback.weight.type = FWP_UINT8;
-        permitLoopback.weight.uint8 = OMINULL_WEIGHT_PERMIT_LOOPBACK;
-
-        FWPM_FILTER_CONDITION0 cond;
-        memset(&cond, 0, sizeof(cond));
-        cond.fieldKey = OMINULL_CONDITION_IP_REMOTE_ADDRESS;
-        cond.matchType = FWP_MATCH_EQUAL;
-        cond.conditionValue.type = FWP_UINT32;
-        cond.conditionValue.uint32 = 0x7F000001; // 127.0.0.1
-
-        permitLoopback.numFilterConditions = 1;
-        permitLoopback.filterCondition = &cond;
-
-        UINT64 filterId = 0;
-        FwpmFilterAdd0(g_hEngine, &permitLoopback, NULL, &filterId);
+    /* 2. Loopback, in both families. */
+    AddressCondition("127.0.0.1", &cond[0], &store);
+    status = AddFilterEverywhere(L"Ominull Loopback Permit", FWP_ACTION_PERMIT,
+                                 OMINULL_WEIGHT_PERMIT_LOOPBACK, cond, 1, OMINULL_FAMILY_V4);
+    if (status == ERROR_SUCCESS) {
+        AddressCondition("::1", &cond[0], &store);
+        status = AddFilterEverywhere(L"Ominull Loopback Permit", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_LOOPBACK, cond, 1, OMINULL_FAMILY_V6);
+    }
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Failed to add loopback permit filter: 0x%08lX\n", (unsigned long)status);
+        FwpmTransactionAbort0(g_hEngine);
+        return status;
     }
 
-    // 3. Permit Filter: DHCP (UDP port 67/68)
-    {
-        FWPM_FILTER0 permitDhcp;
-        memset(&permitDhcp, 0, sizeof(permitDhcp));
-        permitDhcp.layerKey = OMINULL_LAYER_ALE_AUTH_CONNECT_V4;
-        permitDhcp.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-        permitDhcp.displayData.name = L"Ominull DHCP Permit";
-        permitDhcp.action.type = FWP_ACTION_PERMIT;
-        permitDhcp.weight.type = FWP_UINT8;
-        permitDhcp.weight.uint8 = OMINULL_WEIGHT_PERMIT_DHCP;
-
-        FWPM_FILTER_CONDITION0 cond;
-        memset(&cond, 0, sizeof(cond));
-        cond.fieldKey = OMINULL_CONDITION_IP_REMOTE_PORT;
-        cond.matchType = FWP_MATCH_EQUAL;
-        cond.conditionValue.type = FWP_UINT16;
-        cond.conditionValue.uint16 = 67;
-
-        permitDhcp.numFilterConditions = 1;
-        permitDhcp.filterCondition = &cond;
-
-        UINT64 filterId = 0;
-        FwpmFilterAdd0(g_hEngine, &permitDhcp, NULL, &filterId);
+    /* 3. DHCP, so the host keeps the address the hub reaches it on. DHCPv6 is a
+     *    different pair of ports (546/547) rather than the same two, so the two
+     *    families get one rule each rather than one rule on four layers. */
+    UdpRemotePort(cond, 67);
+    status = AddFilterEverywhere(L"Ominull DHCP Permit", FWP_ACTION_PERMIT,
+                                 OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V4);
+    if (status == ERROR_SUCCESS) {
+        UdpRemotePort(cond, 547);
+        status = AddFilterEverywhere(L"Ominull DHCPv6 Permit", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_DHCP, cond, 2, OMINULL_FAMILY_V6);
+    }
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Failed to add DHCP permit filter: 0x%08lX\n", (unsigned long)status);
+        FwpmTransactionAbort0(g_hEngine);
+        return status;
     }
 
-    // 4. Default-Deny Block Filter Outbound
-    {
-        FWPM_FILTER0 blockAllOut;
-        memset(&blockAllOut, 0, sizeof(blockAllOut));
-        blockAllOut.layerKey = OMINULL_LAYER_ALE_AUTH_CONNECT_V4;
-        blockAllOut.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-        blockAllOut.displayData.name = L"Ominull Host Isolation Block All Outbound";
-        blockAllOut.action.type = FWP_ACTION_BLOCK;
-        blockAllOut.weight.type = FWP_UINT8;
-        blockAllOut.weight.uint8 = OMINULL_WEIGHT_BLOCK_ALL; // Catch-all default deny
+    /* 4. DNS. Below the peer block on purpose: quarantining a rogue resolver
+     *    has to beat the rule that lets this host resolve names. */
+    UdpRemotePort(cond, 53);
+    status = AddFilterEverywhere(L"Ominull DNS Permit", FWP_ACTION_PERMIT,
+                                 OMINULL_WEIGHT_PERMIT_DNS, cond, 2, OMINULL_FAMILY_BOTH);
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Failed to add DNS permit filter: 0x%08lX\n", (unsigned long)status);
+        FwpmTransactionAbort0(g_hEngine);
+        return status;
+    }
 
-        UINT64 filterId = 0;
-        status = FwpmFilterAdd0(g_hEngine, &blockAllOut, NULL, &filterId);
+    /* 5. The hub's allow list. Below a peer block, so a mesh quarantine of a
+     *    rogue host still wins over a standing trust rule that named it.
+     *
+     *    The agent parsed this field and then told the operator it could not
+     *    enforce it, which was honest and still meant a Windows endpoint was
+     *    the one platform where a trust rule did nothing. */
+    for (int i = 0; i < allowCount; i++) {
+        int family = AddressCondition(allowIPs[i], &cond[0], &store);
+        if (!family) continue;             /* a CIDR is not this filter's shape */
+        status = AddFilterEverywhere(L"Ominull Isolation Allow", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_ALLOW, cond, 1, family);
         if (status != ERROR_SUCCESS) {
-            printf("[-] Failed to add default block filter: 0x%08lX\n", (unsigned long)status);
+            printf("[-] Failed to add allow-list filter for %s: 0x%08lX\n",
+                   allowIPs[i], (unsigned long)status);
             FwpmTransactionAbort0(g_hEngine);
             return status;
         }
-        printf("[+] Added Default-Deny Outbound Isolation Filter (ID: %llu)\n", (unsigned long long)filterId);
     }
 
-    // 5. Default-Deny Block Filter Inbound
-    {
-        FWPM_FILTER0 blockAllIn;
-        memset(&blockAllIn, 0, sizeof(blockAllIn));
-        blockAllIn.layerKey = OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V4;
-        blockAllIn.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-        blockAllIn.displayData.name = L"Ominull Host Isolation Block All Inbound";
-        blockAllIn.action.type = FWP_ACTION_BLOCK;
-        blockAllIn.weight.type = FWP_UINT8;
-        blockAllIn.weight.uint8 = OMINULL_WEIGHT_BLOCK_ALL;
-
-        UINT64 filterId = 0;
-        FwpmFilterAdd0(g_hEngine, &blockAllIn, NULL, &filterId);
+    /* 6. Default-deny on all four layers, weight zero so everything above it
+     *    wins. */
+    status = AddFilterEverywhere(L"Ominull Host Isolation Block All", FWP_ACTION_BLOCK,
+                                 OMINULL_WEIGHT_BLOCK_ALL, NULL, 0, OMINULL_FAMILY_BOTH);
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Failed to add default block filter: 0x%08lX\n", (unsigned long)status);
+        FwpmTransactionAbort0(g_hEngine);
+        return status;
     }
 
     status = FwpmTransactionCommit0(g_hEngine);
-    if (status == ERROR_SUCCESS) {
-        printf("[+] SUCCESS: Host network is now fully QUARANTINED at User-Mode WFP level.\n");
-    } else {
-        printf("[-] Failed to commit WFP isolation transaction: 0x%08lX\n", (unsigned long)status);
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Failed to commit WFP transaction: 0x%08lX\n", (unsigned long)status);
+        return status;
     }
-    return status;
+
+    printf("[+] Host isolation active (IPv4 and IPv6). Permitted: hub %s, loopback, DHCP, DNS, %d allow-list address(es).\n",
+           hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", allowCount);
+    return ERROR_SUCCESS;
 }
 
 // Wfp_DeleteOwnFilters removes every filter sitting in this agent's sublayer.
@@ -353,39 +467,30 @@ DWORD Wfp_UnisolateHost() {
     return ERROR_SUCCESS;
 }
 
+/* Wfp_BlockIP quarantines one peer, in both directions and in whichever address
+ * family the literal is.
+ *
+ * It used to install a single filter on ALE_AUTH_CONNECT_V4. That blocked this
+ * host from opening a connection to the peer and did nothing whatever about the
+ * peer opening one to this host - so a mesh block placed on a compromised
+ * machine still let that machine reach in. The Linux agent writes the rule into
+ * both its chains and the macOS anchor writes both `block drop out quick to`
+ * and `block drop in quick from`; this is the same rule, finally. */
 DWORD Wfp_BlockIP(const char* ipStr) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
-    struct in_addr addr;
-    if (inet_pton(AF_INET, ipStr, &addr) != 1) {
-        printf("[-] Invalid IPv4 address: %s\n", ipStr);
+    FWPM_FILTER_CONDITION0 cond;
+    FWP_BYTE_ARRAY16 store;
+    int family = AddressCondition(ipStr, &cond, &store);
+    if (!family) {
+        printf("[-] Not an IP address: %s\n", ipStr ? ipStr : "(null)");
         return ERROR_INVALID_PARAMETER;
     }
-    UINT32 ipHostOrder = ntohl(addr.s_addr);
 
-    FWPM_FILTER0 filter;
-    memset(&filter, 0, sizeof(filter));
-    filter.layerKey = OMINULL_LAYER_ALE_AUTH_CONNECT_V4;
-    filter.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-    filter.displayData.name = L"Ominull Dynamic IP Block";
-    filter.action.type = FWP_ACTION_BLOCK;
-    filter.weight.type = FWP_UINT8;
-    filter.weight.uint8 = OMINULL_WEIGHT_BLOCK_PEER;
-
-    FWPM_FILTER_CONDITION0 cond;
-    memset(&cond, 0, sizeof(cond));
-    cond.fieldKey = OMINULL_CONDITION_IP_REMOTE_ADDRESS;
-    cond.matchType = FWP_MATCH_EQUAL;
-    cond.conditionValue.type = FWP_UINT32;
-    cond.conditionValue.uint32 = ipHostOrder;
-
-    filter.numFilterConditions = 1;
-    filter.filterCondition = &cond;
-
-    UINT64 filterId = 0;
-    DWORD status = FwpmFilterAdd0(g_hEngine, &filter, NULL, &filterId);
+    DWORD status = AddFilterEverywhere(L"Ominull Dynamic IP Block", FWP_ACTION_BLOCK,
+                                       OMINULL_WEIGHT_BLOCK_PEER, &cond, 1, family);
     if (status == ERROR_SUCCESS) {
-        printf("[+] SUCCESS: Blocked IP %s (WFP Filter ID: %llu)\n", ipStr, (unsigned long long)filterId);
+        printf("[+] SUCCESS: Blocked IP %s in both directions.\n", ipStr);
     } else {
         printf("[-] Failed to block IP %s: 0x%08lX\n", ipStr, (unsigned long)status);
     }
@@ -401,7 +506,8 @@ DWORD Wfp_BlockIP(const char* ipStr) {
  * hub's answer actually changes, so the moment where nothing is enforced is not
  * on the steady-state path. */
 DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
-                     const char* const* blockedIPs, int blockedCount) {
+                     const char* const* blockedIPs, int blockedCount,
+                     const char* const* allowIPs, int allowCount) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     /* Removes this agent's filters and recreates the sublayer empty. If the
@@ -411,7 +517,7 @@ DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
     if (cleared != ERROR_SUCCESS) return cleared;
 
     if (isolate) {
-        DWORD status = Wfp_IsolateHost(hubIpStr);
+        DWORD status = Wfp_IsolateHost(hubIpStr, allowIPs, allowCount);
         if (status != ERROR_SUCCESS) return status;
     }
     for (int i = 0; i < blockedCount; i++) {
@@ -441,7 +547,7 @@ int main(int argc, char* argv[]) {
 
     if (strcmp(argv[1], "isolate") == 0) {
         const char* hubIp = (argc >= 3) ? argv[2] : "10.0.0.57";
-        Wfp_IsolateHost(hubIp);
+        Wfp_IsolateHost(hubIp, NULL, 0);
     } else if (strcmp(argv[1], "unisolate") == 0) {
         Wfp_UnisolateHost();
     } else if (strcmp(argv[1], "block-ip") == 0) {

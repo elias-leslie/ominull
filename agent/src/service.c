@@ -172,6 +172,8 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
     static bool appliedIsolated = false;
     static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
     static int appliedPeerCount = 0;
+    static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
+    static int appliedAllowCount = 0;
     static bool engineReady = false;
     static bool engineTried = false;
 
@@ -188,9 +190,16 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
     char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
     int allowCount = ParseAddressArray(respJson, "isolation_allow_ips", allow, MAX_BLOCKED_PEERS);
 
-    bool changed = !known || wantIsolated != appliedIsolated || peerCount != appliedPeerCount;
+    bool changed = !known || wantIsolated != appliedIsolated ||
+                   peerCount != appliedPeerCount || allowCount != appliedAllowCount;
     for (int i = 0; !changed && i < peerCount; i++) {
         if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
+    }
+    /* The allow list is part of the applied state now that this engine enforces
+     * it. Leaving it out of the comparison meant editing a trust rule changed
+     * nothing until something else about the host happened to change too. */
+    for (int i = 0; !changed && i < allowCount; i++) {
+        if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
     if (!changed) return;
 
@@ -235,18 +244,18 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
 
         const char* blocked[MAX_BLOCKED_PEERS];
         for (int i = 0; i < peerCount; i++) blocked[i] = peers[i];
+        const char* allowed[MAX_BLOCKED_PEERS];
+        for (int i = 0; i < allowCount; i++) allowed[i] = allow[i];
 
-        if (Wfp_ApplyState(hubIP, wantIsolated ? 1 : 0, blocked, peerCount) != ERROR_SUCCESS) {
+        if (Wfp_ApplyState(hubIP, wantIsolated ? 1 : 0, blocked, peerCount,
+                           allowed, allowCount) != ERROR_SUCCESS) {
             printf("[-] The user-mode filtering engine refused the change; state not applied.\n");
             return;
         }
         if (wantIsolated) {
-            printf("[!] Threat Nullification: host isolated. Permitted: hub %s, DHCP, loopback. "
-                   "%d peer block(s) in force.\n", hubIP, peerCount);
-            if (allowCount > 0) {
-                printf("[!] The hub sent %d isolation allow-list address(es); this engine enforces "
-                       "the hub pinhole only, so they are not in force on this host.\n", allowCount);
-            }
+            printf("[!] Threat Nullification: host isolated. Permitted: hub %s, loopback, DHCP, DNS, "
+                   "%d allow-list address(es). %d peer block(s) in force.\n",
+                   hubIP, allowCount, peerCount);
         } else {
             printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
         }
@@ -255,6 +264,8 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
     appliedIsolated = wantIsolated;
     memcpy(appliedPeers, peers, sizeof(peers));
     appliedPeerCount = peerCount;
+    memcpy(appliedAllow, allow, sizeof(allow));
+    appliedAllowCount = allowCount;
     known = true;
     fflush(stdout);
 }

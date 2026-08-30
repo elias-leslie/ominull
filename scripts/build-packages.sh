@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.7.8"
+VERSION="1.7.10"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.7.8
+Version: 1.7.10
 Section: security
 Priority: optional
 Architecture: amd64
@@ -160,6 +160,27 @@ if [ -n "${bad_wide_format}" ]; then
     echo "${bad_wide_format}" >&2
     exit 1
 fi
+
+# macOS ships bash 3.2, where an *empty* array is treated as unbound: both
+# "${arr[@]}" and ${#arr[@]} abort a script running under `set -u`. Every macOS
+# script here runs under `set -u`, and the empty case is the one that matters
+# most - an empty peer list is the order to lift every quarantine. It shipped
+# once: the anchor was left half-written and the helper exited non-zero on every
+# beat, on the one host in the fleet that could not be tested from this machine.
+# The guarded form ${arr[@]+"${arr[@]}"} is fine and is what the daemon uses.
+bad_bash32_array=$(grep -nE '(\$\{#[A-Za-z_][A-Za-z0-9_]*\[@\]\}|"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}")' \
+    "${ROOT_DIR}/agent/macos/pf_engine.sh" "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" \
+    | grep -v '\[@\]+"' | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true)
+if [ -n "${bad_bash32_array}" ]; then
+    echo "[-] An unguarded bash array expansion in a macOS script. bash 3.2 treats an empty" >&2
+    echo "    array as unbound under 'set -u'; write \${arr[@]+\"\${arr[@]}\"} or avoid the array:" >&2
+    echo "${bad_bash32_array}" >&2
+    exit 1
+fi
+
+for macos_script in "${ROOT_DIR}/agent/macos/pf_engine.sh" "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh"; do
+    bash -n "${macos_script}" || { echo "[-] ${macos_script} does not parse." >&2; exit 1; }
+done
 
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     echo "  [*] Cross-compiling Windows agent (mingw-w64)..."

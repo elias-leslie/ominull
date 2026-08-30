@@ -73,39 +73,94 @@ CONF
 # rule set: blocking a peer silently wiped an active isolation, and blocking a
 # second peer wiped the first. There is one writer now and it always writes the
 # complete set.
+#
+# Rule order is the other half of it. Every pass and block here is `quick`, so
+# the first match wins and the order in this file *is* the precedence. The
+# ladder is the same one the Windows agent expresses as filter weights and the
+# Linux agent as chain order:
+#
+#   hub pinhole  >  loopback  >  DHCP  >  peer quarantine  >  DNS  >  allow list  >  deny
+#
+# The peer blocks used to be written above the hub pinhole, so quarantining the
+# controller - or anything the isolation floor depends on - took away the only
+# path by which the host could be released. They sit below it now, and the hub
+# pass is written whenever there is anything to enforce rather than only while
+# isolated.
 write_state() {
-    local isolated="$1" hub_ip="$2"
-    shift 2
+    local isolated="$1" hub_ip="$2" allow_csv="$3" peers_csv="$4"
+    local peer addr peer_count
+    # Deliberately not bash arrays. macOS ships bash 3.2, where ${#arr[@]} and
+    # "${arr[@]}" on an *empty* array are treated as unbound under `set -u` -
+    # so the array form worked for every host that had a peer quarantined and
+    # died on the one case that matters most, the empty list that means "lift
+    # everything". The anchor was left half-written and this helper exited
+    # non-zero on every beat. These values are address literals validated by the
+    # hub and again by the daemon, so plain word splitting is safe.
+    peer_count=0
+    if [ -n "${peers_csv}" ]; then
+        peer_count=$(printf '%s' "${peers_csv}" | tr ',' '\n' | grep -c .)
+    fi
 
     mkdir -p /etc/pf.anchors
     {
         echo "# Ominull enforcement anchor - generated, do not edit"
-        # `set skip on lo0` would be rejected here: options are only valid in a
-        # main ruleset, not inside an anchor. An explicit quick pass is the
-        # equivalent that an anchor can actually carry.
+
+        # 1. The hub, ahead of every block below it. Written whenever anything
+        #    is being enforced: a peer block that named the controller is not an
+        #    operation with a way back.
+        if [[ -n "${hub_ip}" ]] && { [[ "${isolated}" == "1" ]] || [ "${peer_count}" -gt 0 ]; }; then
+            echo "pass out quick proto tcp to ${hub_ip} keep state"
+            echo "pass in quick proto tcp from ${hub_ip} keep state"
+        fi
+
+        # 2. Loopback. `set skip on lo0` would be rejected here: options are
+        #    only valid in a main ruleset, not inside an anchor. An explicit
+        #    quick pass is the equivalent that an anchor can actually carry.
         echo "pass quick on lo0 all"
-        # Quarantined peers are dropped whether or not this host is isolated.
-        for peer in "$@"; do
+
+        # 3. DHCP, above the peer blocks: a lease that expires because a
+        #    quarantine named the DHCP server costs this host the address the
+        #    hub reaches it on. Both directions - the request goes out and the
+        #    reply comes back in, and the reply is not always part of the state
+        #    the request created.
+        if [[ "${isolated}" == "1" ]]; then
+            echo "pass out quick proto udp to any port 67:68"
+            echo "pass in quick proto udp from any port 67:68"
+            echo "pass out quick proto udp to any port 546:547"
+            echo "pass in quick proto udp from any port 546:547"
+        fi
+
+        # 4. Mesh quarantine. Applies whether or not this host is isolated.
+        for peer in ${peers_csv//,/ }; do
+            [[ -n "${peer}" ]] || continue
             echo "block drop out quick to ${peer}"
             echo "block drop in quick from ${peer}"
         done
+
         if [[ "${isolated}" == "1" ]]; then
-            # The hub pinhole, then the two services a cut-off host still needs
-            # to keep an address and find the hub by name. Same shape as the
-            # Linux chains and the Windows filters.
-            if [[ -n "${hub_ip}" ]]; then
-                echo "pass out quick proto tcp to ${hub_ip} keep state"
-                echo "pass in quick proto tcp from ${hub_ip} keep state"
-            fi
-            echo "pass out quick proto udp to any port 67:68"
-            # UDP only, deliberately. A quarantined host needs to be able to
-            # re-resolve a hub named by DNS, and that is one query. Allowing
-            # TCP/53 to any host would have handed anything on the box a
-            # general-purpose outbound tunnel through the quarantine, which is
-            # a much larger hole than the name lookup it was meant to permit.
+            # 5. DNS, below the peer block on purpose: quarantining a rogue
+            #    resolver has to beat the rule that lets this host resolve
+            #    names. UDP only, deliberately - a quarantined host needs to be
+            #    able to re-resolve a hub named by DNS, and that is one query.
+            #    Allowing TCP/53 to any host would hand anything on the box a
+            #    general-purpose outbound tunnel through the quarantine, which
+            #    is a much larger hole than the name lookup it was meant to
+            #    permit.
             echo "pass out quick proto udp to any port 53"
-            # Not quick: every pass above wins on first match, and this is the
-            # last rule left to match, so it is the default deny.
+            echo "pass in quick proto udp from any port 53"
+
+            # 6. The hub's allow list - a scoped trust rule, below a peer block
+            #    so a quarantine still wins over standing trust that named the
+            #    same address. This was parsed by the hub and delivered to every
+            #    agent, and macOS was the platform that silently ignored it.
+            for addr in ${allow_csv//,/ }; do
+                [[ -n "${addr}" ]] || continue
+                echo "pass out quick to ${addr}"
+                echo "pass in quick from ${addr}"
+            done
+
+            # 7. Not quick: every pass above wins on first match, and this is
+            #    the last rule left to match, so it is the default deny.
             echo "block drop all"
         fi
     } > "${ANCHOR_FILE}"
@@ -117,23 +172,51 @@ write_state() {
     # Loading without error is not evidence the rules are in the kernel. Read
     # them back: an anchor that came out empty when it should be enforcing is
     # exactly the failure this agent used to report as success.
-    if [[ "${isolated}" == "1" ]] || [[ $# -gt 0 ]]; then
+    if [[ "${isolated}" == "1" ]] || [ "${peer_count}" -gt 0 ]; then
         if ! pfctl -a "${ANCHOR_NAME}" -s rules 2>/dev/null | grep -q "block drop"; then
             echo "[-] The ${ANCHOR_NAME} anchor loaded no blocking rules; this host is not enforcing what it was told to." >&2
             return 1
         fi
     fi
+
     return 0
 }
 
 case "${1:-help}" in
+    apply)
+        # apply --isolated <0|1> --hub <ip> [--allow a,b] [--peers x,y]
+        #
+        # A new verb rather than another positional on `sync`, because the
+        # daemon's skew check looks for the verb: an installed helper too old to
+        # carry an allow list does not have `apply)` in it, so the daemon
+        # notices and repairs itself from the signed archive instead of quietly
+        # dropping the list.
+        ensure_root
+        ISOLATED=0; HUB_IP=""; ALLOW=""; PEERS=""
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --isolated) ISOLATED="${2:-0}"; shift 2 ;;
+                --hub)      HUB_IP="${2:-}";    shift 2 ;;
+                --allow)    ALLOW="${2:-}";     shift 2 ;;
+                --peers)    PEERS="${2:-}";     shift 2 ;;
+                *) echo "[-] Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        write_state "${ISOLATED}" "${HUB_IP}" "${ALLOW}" "${PEERS}"
+        ;;
     sync)
         # sync <0|1 isolated> <hub_ip> [peer ...]
+        #
+        # Kept so a daemon older than this helper still works across an upgrade
+        # where the two move independently. It carries no allow list; `apply` is
+        # what the current daemon calls.
         ensure_root
         ISOLATED="${2:-0}"
         HUB_IP="${3:-}"
         shift 3 2>/dev/null || shift $#
-        write_state "${ISOLATED}" "${HUB_IP}" "$@"
+        PEERS=$(printf '%s,' "$@"); PEERS="${PEERS%,}"
+        write_state "${ISOLATED}" "${HUB_IP}" "" "${PEERS}"
         ;;
     isolate)
         ensure_root
@@ -143,7 +226,7 @@ case "${1:-help}" in
             exit 1
         fi
         echo "[*] Activating macOS BSD Packet Filter Isolation (Anchor: ${ANCHOR_NAME})..."
-        write_state 1 "${HUB_IP}"
+        write_state 1 "${HUB_IP}" "" ""
         echo "[+] SUCCESS: macOS Host is now QUARANTINED (Default-Deny active, Hub pinhole to ${HUB_IP})."
         ;;
     unisolate)
@@ -152,7 +235,7 @@ case "${1:-help}" in
         # The anchor stays attached and is emptied. Detaching it would mean
         # reloading the main ruleset on every release, and an empty anchor
         # filters nothing.
-        write_state 0 ""
+        write_state 0 "" "" ""
         echo "[+] SUCCESS: macOS Isolation removed. Normal traffic restored."
         ;;
     block-ip)
@@ -193,8 +276,10 @@ case "${1:-help}" in
     *)
         echo "Ominull macOS Zero-Friction BSD Packet Filter Engine"
         echo "Usage:"
-        echo "  sudo ./pf_engine.sh sync <0|1> <hub_ip> [peer ...]"
+        echo "  sudo ./pf_engine.sh apply --isolated <0|1> --hub <ip> [--allow a,b] [--peers x,y]"
         echo "                                        - Write the whole enforcement state (what the daemon calls)"
+        echo "  sudo ./pf_engine.sh sync <0|1> <hub_ip> [peer ...]"
+        echo "                                        - The same, without an allow list (kept for an older daemon)"
         echo "  sudo ./pf_engine.sh isolate <hub_ip>  - Default-deny quarantine with Hub pinhole"
         echo "  sudo ./pf_engine.sh unisolate         - Lift quarantine and restore traffic"
         echo "  sudo ./pf_engine.sh block-ip <ip>     - Block specific IP address"

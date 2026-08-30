@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.7.8"
+AGENT_VERSION="1.7.10"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -53,6 +53,7 @@ IS_ISOLATED="false"
 # A sentinel, not an empty list: the first beat must reconcile unconditionally,
 # which is what picks up state applied before this daemon restarted.
 APPLIED_PEERS="__unreconciled__"
+APPLIED_ALLOW="__unreconciled__"
 ATTEMPTED_VERSION=""
 # The helper repair below runs at most once per daemon start.
 HELPER_REPAIR_TRIED=false
@@ -393,7 +394,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.8)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.10)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -483,6 +484,20 @@ repair_pf_engine() {
     fi
     echo "[+] Packet filter helper repaired and verified."
     return 0
+}
+
+# json_ip_list reduces one flat JSON array of address literals to a
+# comma-separated list.
+#
+# Anything that is not an address literal is dropped rather than passed on. The
+# helper writes these straight into a pf rule file, so an entry the hub did not
+# validate would be read by pfctl as syntax rather than as an address.
+json_ip_list() {
+    printf '%s' "$1" \
+        | sed -n "s/.*\"$2\":\\[\\([^]]*\\)\\].*/\\1/p" \
+        | tr -d '" ' | tr ',' '\n' \
+        | grep -E '^([0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7})$' \
+        | sort -u | paste -sd, -
 }
 
 pf_engine() {
@@ -582,7 +597,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.7.8 (PF)",
+  "driver_version": "1.7.10 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -631,20 +646,22 @@ JSON
     NEW_ISOLATED=$(printf '%s' "$RESPONSE" | sed -n 's/.*"is_isolated":\([a-z]*\).*/\1/p' | head -1)
     [[ "$NEW_ISOLATED" == "true" || "$NEW_ISOLATED" == "false" ]] || NEW_ISOLATED="$IS_ISOLATED"
 
-    NEW_PEERS=$(printf '%s' "$RESPONSE" \
-        | sed -n 's/.*"quarantined_peers":\[\([^]]*\)\].*/\1/p' \
-        | tr -d '" ' | tr ',' '\n' \
-        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | tr '\n' ' ')
-    NEW_PEERS="${NEW_PEERS% }"
+    NEW_PEERS=$(json_ip_list "$RESPONSE" quarantined_peers)
+    NEW_ALLOW=$(json_ip_list "$RESPONSE" isolation_allow_ips)
+    # grep -c, not wc -l: the list has no trailing newline, so wc counts one
+    # fewer than there are entries and reported "0 allow-listed address(es)"
+    # for a list that had one in it.
+    NEW_ALLOW_COUNT=0
+    [[ -n "$NEW_ALLOW" ]] && NEW_ALLOW_COUNT=$(printf '%s' "$NEW_ALLOW" | tr ',' '\n' | grep -c .)
 
-    if [[ "$NEW_ISOLATED" != "$IS_ISOLATED" || "$NEW_PEERS" != "$APPLIED_PEERS" ]]; then
+    if [[ "$NEW_ISOLATED" != "$IS_ISOLATED" || "$NEW_PEERS" != "$APPLIED_PEERS" || "$NEW_ALLOW" != "$APPLIED_ALLOW" ]]; then
         if [[ "$NEW_ISOLATED" == "true" ]]; then
             if HUB_IP=$(hub_address_literal); then
-                echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, DHCP, DNS, loopback."
-                # shellcheck disable=SC2086
-                if pf_engine sync 1 "$HUB_IP" $NEW_PEERS; then
+                echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, loopback, DHCP, DNS, $NEW_ALLOW_COUNT allow-listed address(es)."
+                if pf_engine apply --isolated 1 --hub "$HUB_IP" --allow "$NEW_ALLOW" --peers "$NEW_PEERS"; then
                     IS_ISOLATED="true"
                     APPLIED_PEERS="$NEW_PEERS"
+                    APPLIED_ALLOW="$NEW_ALLOW"
                 else
                     # The order is not recorded as applied, so the next beat
                     # tries again. Swallowing this is what let a Mac report
@@ -660,10 +677,10 @@ JSON
         else
             [[ "$IS_ISOLATED" == "true" ]] && echo "[+] Threat neutralized: lifting host isolation."
             HUB_IP=$(hub_address_literal || true)
-            # shellcheck disable=SC2086
-            if pf_engine sync 0 "$HUB_IP" $NEW_PEERS; then
+            if pf_engine apply --isolated 0 --hub "$HUB_IP" --allow "" --peers "$NEW_PEERS"; then
                 IS_ISOLATED="false"
                 APPLIED_PEERS="$NEW_PEERS"
+                APPLIED_ALLOW="$NEW_ALLOW"
             else
                 echo "[-] The packet filter helper refused or failed; this host's enforcement state is unchanged. Retrying on the next heartbeat." >&2
             fi
