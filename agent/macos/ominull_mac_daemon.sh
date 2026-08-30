@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.7.0"
+AGENT_VERSION="1.7.6"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -54,6 +54,8 @@ IS_ISOLATED="false"
 # which is what picks up state applied before this daemon restarted.
 APPLIED_PEERS="__unreconciled__"
 ATTEMPTED_VERSION=""
+# The helper repair below runs at most once per daemon start.
+HELPER_REPAIR_TRIED=false
 # Bounded retry, not a single shot: a dropped download would otherwise wedge this
 # host on the offered version until launchd restarted the daemon, while retrying
 # forever would refetch an unverifiable package every heartbeat.
@@ -351,6 +353,22 @@ apply_agent_update() {
         tar -xzf "$UPDATE_DIR/agent.tar.gz" -C "$UPDATE_DIR/extract" ./ominull_mac_daemon.sh
         bash -n "$UPDATE_DIR/extract/ominull_mac_daemon.sh"
 
+        # The helper is upgraded with the daemon, from the same signed archive.
+        # It used to be left at whatever version the original bootstrap wrote,
+        # so a daemon that had learned a new enforcement verb was calling a
+        # helper that did not know it: the host was reported isolated and stayed
+        # on the network. Archives from before the helper was included still
+        # install, they just leave the existing one alone.
+        if tar -xzf "$UPDATE_DIR/agent.tar.gz" -C "$UPDATE_DIR/extract" ./pf_engine.sh 2>/dev/null; then
+            bash -n "$UPDATE_DIR/extract/pf_engine.sh"
+            chown root:wheel "$UPDATE_DIR/extract/pf_engine.sh"
+            chmod 755 "$UPDATE_DIR/extract/pf_engine.sh"
+            mv -f "$UPDATE_DIR/extract/pf_engine.sh" /opt/ominull/pf_engine.sh
+            echo "[+] Packet filter helper updated from the same signed archive."
+        else
+            echo "[!] v$version carries no pf_engine.sh; keeping the installed helper." >&2
+        fi
+
         # Only the script is replaced. The installed LaunchDaemon plist carries
         # this host's pinned endpoint id, hub URL and API key; the one in the
         # package carries placeholders, so overwriting it would change the
@@ -375,7 +393,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.0)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.6)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -419,6 +437,54 @@ hub_address_literal() {
     printf '%s' "$resolved"
 }
 
+# repair_pf_engine reinstalls the packet filter helper from this agent's own
+# signed release archive.
+#
+# Older daemons upgraded themselves and left the helper behind, so a Mac could
+# end up running a current daemon against a helper from its original bootstrap -
+# one that did not implement the verb it was being given. Nothing detected it:
+# the hub recorded the quarantine, the daemon announced it, the helper printed
+# its usage banner, and the host kept routing. A daemon that finds itself in
+# that state now fixes it instead of waiting for someone to notice.
+#
+# The archive is fetched at this daemon's own version, from the hub's download
+# path, and is installed only if the detached signature verifies against the
+# pinned release key - the same trust root as any update. There is no
+# unverified fallback.
+repair_pf_engine() {
+    local helper="/opt/ominull/pf_engine.sh"
+    local archive="ominull-agent-macos-${AGENT_VERSION}.tar.gz"
+
+    [[ "$(id -u)" == "0" ]] || { echo "[!] The packet filter helper is stale, but this daemon is not root and cannot replace it." >&2; return 1; }
+
+    echo "[*] Repairing the packet filter helper from the signed v${AGENT_VERSION} archive."
+    rm -rf "$UPDATE_DIR/repair"
+    mkdir -p "$UPDATE_DIR/repair" || return 1
+    chmod 700 "$UPDATE_DIR/repair" || return 1
+    (
+        set -e
+        printf '%s\n' "$OMINULL_RELEASE_PUBKEY" > "$UPDATE_DIR/repair/release.pub"
+        chmod 600 "$UPDATE_DIR/repair/release.pub"
+        hub_curl -fsSL -m 300 -o "$UPDATE_DIR/repair/agent.tar.gz" "${HUB_URL}/download/${archive}"
+        hub_curl -fsSL -m 60 -o "$UPDATE_DIR/repair/agent.tar.gz.sig" "${HUB_URL}/download/${archive}.sig"
+        /usr/bin/openssl dgst -sha256 -verify "$UPDATE_DIR/repair/release.pub" \
+            -signature "$UPDATE_DIR/repair/agent.tar.gz.sig" "$UPDATE_DIR/repair/agent.tar.gz"
+        tar -xzf "$UPDATE_DIR/repair/agent.tar.gz" -C "$UPDATE_DIR/repair" ./pf_engine.sh
+        bash -n "$UPDATE_DIR/repair/pf_engine.sh"
+        chown root:wheel "$UPDATE_DIR/repair/pf_engine.sh"
+        chmod 755 "$UPDATE_DIR/repair/pf_engine.sh"
+        mv -f "$UPDATE_DIR/repair/pf_engine.sh" "$helper"
+    )
+    local rc=$?
+    rm -rf "$UPDATE_DIR/repair"
+    if [[ $rc -ne 0 ]]; then
+        echo "[-] Could not repair the packet filter helper; this host cannot enforce the hub's decisions. Reinstall the agent bundle." >&2
+        return 1
+    fi
+    echo "[+] Packet filter helper repaired and verified."
+    return 0
+}
+
 pf_engine() {
     local helper="/opt/ominull/pf_engine.sh"
     local meta
@@ -434,6 +500,22 @@ pf_engine() {
     if (( (8#$mode & 8#022) != 0 )); then
         echo "[-] $helper is mode $mode: writable by group or other. Refusing to run it as root." >&2
         return 1
+    fi
+    # A helper that does not implement the subcommand prints its usage banner and
+    # exits non-zero, which is indistinguishable at a glance from a rule that
+    # failed to load. Say which it is: a stale helper is an upgrade problem and
+    # needs a different fix than a pfctl error.
+    if ! grep -q "^[[:space:]]*${1}[)|]" "$helper" 2>/dev/null; then
+        echo "[-] $helper does not implement '${1}': it is older than this daemon, so the hub's order cannot be carried out on this host." >&2
+        if [[ "$HELPER_REPAIR_TRIED" == "true" ]]; then
+            return 1
+        fi
+        HELPER_REPAIR_TRIED=true
+        repair_pf_engine || return 1
+        grep -q "^[[:space:]]*${1}[)|]" "$helper" 2>/dev/null || {
+            echo "[-] The repaired helper still does not implement '${1}'." >&2
+            return 1
+        }
     fi
     "$helper" "$@"
 }
@@ -500,7 +582,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.7.0 (PF)",
+  "driver_version": "1.7.6 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON
 }
@@ -560,9 +642,15 @@ JSON
             if HUB_IP=$(hub_address_literal); then
                 echo "[!] Threat Nullification: isolating this host. Permitted: hub $HUB_IP, DHCP, DNS, loopback."
                 # shellcheck disable=SC2086
-                pf_engine sync 1 "$HUB_IP" $NEW_PEERS || true
-                IS_ISOLATED="true"
-                APPLIED_PEERS="$NEW_PEERS"
+                if pf_engine sync 1 "$HUB_IP" $NEW_PEERS; then
+                    IS_ISOLATED="true"
+                    APPLIED_PEERS="$NEW_PEERS"
+                else
+                    # The order is not recorded as applied, so the next beat
+                    # tries again. Swallowing this is what let a Mac report
+                    # itself quarantined while it was still routing.
+                    echo "[-] The packet filter helper refused or failed; this host is NOT isolated. Retrying on the next heartbeat." >&2
+                fi
             else
                 # Refused deliberately: an isolation with no hole for the hub can
                 # never be lifted by the hub. The order stands and is retried on
@@ -573,9 +661,12 @@ JSON
             [[ "$IS_ISOLATED" == "true" ]] && echo "[+] Threat neutralized: lifting host isolation."
             HUB_IP=$(hub_address_literal || true)
             # shellcheck disable=SC2086
-            pf_engine sync 0 "$HUB_IP" $NEW_PEERS || true
-            IS_ISOLATED="false"
-            APPLIED_PEERS="$NEW_PEERS"
+            if pf_engine sync 0 "$HUB_IP" $NEW_PEERS; then
+                IS_ISOLATED="false"
+                APPLIED_PEERS="$NEW_PEERS"
+            else
+                echo "[-] The packet filter helper refused or failed; this host's enforcement state is unchanged. Retrying on the next heartbeat." >&2
+            fi
         fi
     fi
 

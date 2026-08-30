@@ -12,22 +12,56 @@
 #define FWPM_SESSION_FLAG_DYNAMIC 0x00000001
 #endif
 
-// Layer GUIDs
-DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_CONNECT_V4,
+// Well-known WFP layer and condition identifiers.
+//
+// These are Microsoft's, not ours. They are written out here because
+// mingw-w64's fwpmu.h declares the WFP functions but ships none of the layer
+// or condition GUIDs, and no mingw import library defines them either, so
+// there is nothing to link against - the same reason OpenVPN and
+// WireGuard-Windows carry their own copies.
+//
+// Four of the five values that used to sit here were wrong: invented or
+// mistyped GUIDs that name no layer and no condition WFP has ever heard of.
+// FwpmFilterAdd0 answered FWP_E_CONDITION_NOT_FOUND (0x80320002), the
+// transaction was aborted, and every isolation and every mesh block this agent
+// was ever asked to apply on Windows failed at the first filter while the hub
+// went on showing the endpoint as quarantined. Only the outbound layer was
+// right, which is why the layer was accepted and its condition was not.
+//
+// If one of these is ever edited, check it against the real value first: a
+// wrong GUID here does not fail to compile and does not fail loudly at
+// runtime, it just quietly filters nothing.
+DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_CONNECT_V4,      /* c38d57d1-05a7-4c33-904f-7fbceee60e82 */
     0xc38d57d1, 0x05a7, 0x4c33, 0x90, 0x4f, 0x7f, 0xbc, 0xee, 0xe6, 0x0e, 0x82);
 
-DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-    0xa3b42c97, 0x9f04, 0x4672, 0xb8, 0x1b, 0x99, 0x9c, 0x21, 0x34, 0x5b, 0x52);
+DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V4,  /* e1cd9fe7-f4b5-4273-96c0-592e487b8650 */
+    0xe1cd9fe7, 0xf4b5, 0x4273, 0x96, 0xc0, 0x59, 0x2e, 0x48, 0x7b, 0x86, 0x50);
 
-// Condition GUIDs
-DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_ADDRESS,
-    0xb23a2517, 0xdee, 0x4b6b, 0xae, 0xb3, 0x5c, 0x6e, 0x69, 0xae, 0x67, 0xc1);
+DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_ADDRESS,    /* b235ae9a-1d64-49b8-a44c-5ff3d9095045 */
+    0xb235ae9a, 0x1d64, 0x49b8, 0xa4, 0x4c, 0x5f, 0xf3, 0xd9, 0x09, 0x50, 0x45);
 
-DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_PORT,
-    0xc35a604d, 0xd22b, 0x4e1a, 0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4);
+DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_PORT,       /* c35a604d-d22b-4e1a-91b4-68f674ee674b */
+    0xc35a604d, 0xd22b, 0x4e1a, 0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b);
 
-DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,
-    0xd78de288, 0x7b52, 0x4f62, 0xa6, 0x67, 0x38, 0xd9, 0xf6, 0x94, 0x97, 0x24);
+DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,           /* d78e1e87-8644-4ea5-9437-d809ecefc971 */
+    0xd78e1e87, 0x8644, 0x4ea5, 0x94, 0x37, 0xd8, 0x09, 0xec, 0xef, 0xc9, 0x71);
+
+
+// Filter weights.
+//
+// A FWPM_FILTER0 weight given as FWP_UINT8 is not a 0-255 priority: WFP accepts
+// only 0 through 15 and rejects anything larger with FWP_E_INVALID_WEIGHT
+// (0x80320025). Every filter here used to ask for 0xFF, 0xFE, 0xFD, 0xC0 or
+// 0x10, so FwpmFilterAdd0 refused the first one, the whole transaction was
+// aborted, and not a single filter was ever installed. The agent said the
+// engine had refused the change, the hub went on showing the endpoint as
+// isolated, and the host stayed on the network. Higher still wins; these keep
+// the order the old constants intended.
+#define OMINULL_WEIGHT_PERMIT_HUB      15
+#define OMINULL_WEIGHT_PERMIT_LOOPBACK 14
+#define OMINULL_WEIGHT_PERMIT_DHCP     13
+#define OMINULL_WEIGHT_BLOCK_PEER      12
+#define OMINULL_WEIGHT_BLOCK_ALL        0
 
 // Sublayer & Provider GUIDs
 DEFINE_GUID(OMINULL_SUBLAYER_USER_GUID,
@@ -115,7 +149,7 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         permitHub.displayData.name = L"Ominull Analyst Hub Pinhole";
         permitHub.action.type = FWP_ACTION_PERMIT;
         permitHub.weight.type = FWP_UINT8;
-        permitHub.weight.uint8 = 0xFF; // Top weight
+        permitHub.weight.uint8 = OMINULL_WEIGHT_PERMIT_HUB;
 
         FWPM_FILTER_CONDITION0 cond;
         memset(&cond, 0, sizeof(cond));
@@ -146,7 +180,7 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         permitLoopback.displayData.name = L"Ominull Loopback Permit";
         permitLoopback.action.type = FWP_ACTION_PERMIT;
         permitLoopback.weight.type = FWP_UINT8;
-        permitLoopback.weight.uint8 = 0xFE;
+        permitLoopback.weight.uint8 = OMINULL_WEIGHT_PERMIT_LOOPBACK;
 
         FWPM_FILTER_CONDITION0 cond;
         memset(&cond, 0, sizeof(cond));
@@ -171,7 +205,7 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         permitDhcp.displayData.name = L"Ominull DHCP Permit";
         permitDhcp.action.type = FWP_ACTION_PERMIT;
         permitDhcp.weight.type = FWP_UINT8;
-        permitDhcp.weight.uint8 = 0xFD;
+        permitDhcp.weight.uint8 = OMINULL_WEIGHT_PERMIT_DHCP;
 
         FWPM_FILTER_CONDITION0 cond;
         memset(&cond, 0, sizeof(cond));
@@ -196,7 +230,7 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         blockAllOut.displayData.name = L"Ominull Host Isolation Block All Outbound";
         blockAllOut.action.type = FWP_ACTION_BLOCK;
         blockAllOut.weight.type = FWP_UINT8;
-        blockAllOut.weight.uint8 = 0x10; // Catch-all default deny
+        blockAllOut.weight.uint8 = OMINULL_WEIGHT_BLOCK_ALL; // Catch-all default deny
 
         UINT64 filterId = 0;
         status = FwpmFilterAdd0(g_hEngine, &blockAllOut, NULL, &filterId);
@@ -217,7 +251,7 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
         blockAllIn.displayData.name = L"Ominull Host Isolation Block All Inbound";
         blockAllIn.action.type = FWP_ACTION_BLOCK;
         blockAllIn.weight.type = FWP_UINT8;
-        blockAllIn.weight.uint8 = 0x10;
+        blockAllIn.weight.uint8 = OMINULL_WEIGHT_BLOCK_ALL;
 
         UINT64 filterId = 0;
         FwpmFilterAdd0(g_hEngine, &blockAllIn, NULL, &filterId);
@@ -232,17 +266,79 @@ DWORD Wfp_IsolateHost(const char* hubIpStr) {
     return status;
 }
 
+// Wfp_DeleteOwnFilters removes every filter sitting in this agent's sublayer.
+//
+// A sublayer cannot be deleted while filters still reference it - WFP answers
+// FWP_E_IN_USE - so "delete the sublayer to flush everything atomically" only
+// ever worked on a sublayer that was already empty. Releasing a host from
+// isolation therefore left every block filter in the kernel, and because the
+// teardown returned ERROR_SUCCESS no matter what the delete had said, the agent
+// recorded the release as applied and stopped retrying. The endpoint went on
+// heartbeating through its own hub pinhole, the console showed it released, and
+// it stayed cut off from everything else.
+static DWORD Wfp_DeleteOwnFilters(void) {
+    HANDLE hEnum = NULL;
+
+    // A NULL template enumerates every filter, which is what is wanted here.
+    // A zeroed template is not the same thing: its actionMask is 0, so it
+    // matches no action type and returns nothing at all - a teardown that
+    // enumerated an empty set and then reported that it had cleaned up.
+    DWORD status = FwpmFilterCreateEnumHandle0(g_hEngine, NULL, &hEnum);
+    if (status != ERROR_SUCCESS) return status;
+
+    UINT64 doomed[512];
+    UINT32 doomedCount = 0;
+
+    for (;;) {
+        FWPM_FILTER0** entries = NULL;
+        UINT32 got = 0;
+        status = FwpmFilterEnum0(g_hEngine, hEnum, 64, &entries, &got);
+        if (status != ERROR_SUCCESS || got == 0) {
+            if (entries) FwpmFreeMemory0((void**)&entries);
+            break;
+        }
+        for (UINT32 i = 0; i < got; i++) {
+            if (memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0) {
+                if (doomedCount < (UINT32)(sizeof(doomed) / sizeof(doomed[0]))) {
+                    doomed[doomedCount++] = entries[i]->filterId;
+                }
+            }
+        }
+        FwpmFreeMemory0((void**)&entries);
+        if (got < 64) break;
+    }
+    FwpmFilterDestroyEnumHandle0(g_hEngine, hEnum);
+
+    DWORD firstFailure = ERROR_SUCCESS;
+    for (UINT32 i = 0; i < doomedCount; i++) {
+        DWORD del = FwpmFilterDeleteById0(g_hEngine, doomed[i]);
+        if (del != ERROR_SUCCESS && del != (DWORD)FWP_E_FILTER_NOT_FOUND && firstFailure == ERROR_SUCCESS) {
+            firstFailure = del;
+        }
+    }
+    if (doomedCount > 0) {
+        printf("[*] Removed %lu Ominull filter(s) from the kernel.\n", (unsigned long)doomedCount);
+    }
+    return firstFailure;
+}
+
 DWORD Wfp_UnisolateHost() {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     printf("[*] Removing WFP User-Mode Network Isolation...\n");
 
-    // Deleting sublayer flushes all isolation and dynamic rules atomically
-    DWORD status = FwpmSubLayerDeleteByKey0(g_hEngine, &OMINULL_SUBLAYER_USER_GUID);
-    if (status == ERROR_SUCCESS || status == (DWORD)FWP_E_SUBLAYER_NOT_FOUND) {
-        printf("[+] SUCCESS: Host network isolation removed. Normal connectivity restored.\n");
-    } else {
+    // Filters first, then the sublayer they live in.
+    DWORD status = Wfp_DeleteOwnFilters();
+    if (status != ERROR_SUCCESS) {
+        printf("[-] Could not remove every Ominull filter: 0x%08lX. This host is still filtered.\n",
+               (unsigned long)status);
+        return status;
+    }
+
+    status = FwpmSubLayerDeleteByKey0(g_hEngine, &OMINULL_SUBLAYER_USER_GUID);
+    if (status != ERROR_SUCCESS && status != (DWORD)FWP_E_SUBLAYER_NOT_FOUND) {
         printf("[-] FwpmSubLayerDeleteByKey0 returned: 0x%08lX\n", (unsigned long)status);
+        return status;
     }
 
     // Recreate sublayer for future operations
@@ -253,6 +349,7 @@ DWORD Wfp_UnisolateHost() {
     sublayer.weight = 0xFF00;
     FwpmSubLayerAdd0(g_hEngine, &sublayer, NULL);
 
+    printf("[+] SUCCESS: Host network isolation removed. Normal connectivity restored.\n");
     return ERROR_SUCCESS;
 }
 
@@ -273,7 +370,7 @@ DWORD Wfp_BlockIP(const char* ipStr) {
     filter.displayData.name = L"Ominull Dynamic IP Block";
     filter.action.type = FWP_ACTION_BLOCK;
     filter.weight.type = FWP_UINT8;
-    filter.weight.uint8 = 0xC0;
+    filter.weight.uint8 = OMINULL_WEIGHT_BLOCK_PEER;
 
     FWPM_FILTER_CONDITION0 cond;
     memset(&cond, 0, sizeof(cond));
@@ -307,8 +404,11 @@ DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
                      const char* const* blockedIPs, int blockedCount) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
-    /* Flushes the sublayer and recreates it empty. */
-    Wfp_UnisolateHost();
+    /* Removes this agent's filters and recreates the sublayer empty. If the
+     * kernel would not give them up, say so rather than reporting a release
+     * that did not happen. */
+    DWORD cleared = Wfp_UnisolateHost();
+    if (cleared != ERROR_SUCCESS) return cleared;
 
     if (isolate) {
         DWORD status = Wfp_IsolateHost(hubIpStr);

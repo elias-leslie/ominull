@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="1.7.0"
+VERSION="1.7.6"
 
 echo "[*] Building Cross-Platform Release Packages (v${VERSION})..."
 mkdir -p "${DIST_DIR}"
@@ -27,7 +27,7 @@ chmod 755 "${DEB_DIR}/opt/ominull/bin/ominulld"
 
 cat << 'DEB_CONTROL' > "${DEB_DIR}/DEBIAN/control"
 Package: ominull-agent
-Version: 1.7.0
+Version: 1.7.6
 Section: security
 Priority: optional
 Architecture: amd64
@@ -236,6 +236,20 @@ if [ -f "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" ]; then
     cp "${ROOT_DIR}/agent/macos/ominull_mac_daemon.sh" "${MAC_DIR}/"
 fi
 
+# The daemon does not enforce anything itself: it shells out to pf_engine.sh for
+# every isolation and every mesh quarantine. It was never in this archive, so a
+# Mac ran a current daemon against whatever helper its original bootstrap left
+# on disk - and a daemon that had learned to say "sync" was talking to a helper
+# that only understood "isolate". The hub recorded the quarantine, the daemon
+# announced it, and the host stayed on the network. Ship the helper with the
+# thing that calls it.
+if [ -f "${ROOT_DIR}/agent/macos/pf_engine.sh" ]; then
+    cp "${ROOT_DIR}/agent/macos/pf_engine.sh" "${MAC_DIR}/"
+else
+    echo "  [-] agent/macos/pf_engine.sh is missing; the macOS agent cannot enforce anything without it." >&2
+    exit 1
+fi
+
 cat << 'MAC_PLIST' > "${MAC_DIR}/dev.ominull.daemon.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -272,6 +286,16 @@ for archive in "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz" "${DIST_DIR
     if [ -n "${bad}" ]; then
         echo "[-] ${archive} carries members not owned by root or writable by others:" >&2
         echo "${bad}" >&2
+        exit 1
+    fi
+done
+
+# The macOS daemon enforces nothing on its own; every isolation and every mesh
+# quarantine is a call into pf_engine.sh. An archive without it produces a host
+# that reports itself quarantined and keeps routing, so it is not a release.
+for required in ./ominull_mac_daemon.sh ./pf_engine.sh; do
+    if ! tar -tzf "${DIST_DIR}/ominull-agent-macos-${VERSION}.tar.gz" | grep -qx "${required}"; then
+        echo "[-] ominull-agent-macos-${VERSION}.tar.gz is missing ${required}; the agent could not enforce anything." >&2
         exit 1
     fi
 done
