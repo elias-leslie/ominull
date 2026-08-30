@@ -2742,6 +2742,17 @@
 
     clear(view);
 
+    /* Defence in depth for a section the rail only offers to administrators:
+       the hub refuses these routes to anyone else, and an operator who arrives
+       here anyway should be told why rather than shown a table that fails to
+       load. */
+    if (!IS_ADMIN) {
+      view.appendChild(h("div", { cls: "pad stack" },
+        card("Access", h("div", { cls: "card-body" },
+          h("div", { cls: "empty", text: "Only an administrator can see or change who signs in to this console. You are signed in as " + (OPERATOR || "an operator") + " with the " + roleName(ROLE).toLowerCase() + " role." })))));
+      return;
+    }
+
     if (!opGrantCard) buildGrantCard();
 
     var rows = state.operators.map(function (op) {

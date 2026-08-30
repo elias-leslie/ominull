@@ -315,6 +315,14 @@ a {
   place-items: center;
 }
 
+/* .rail-btn sets display:grid, which beats the user agent's [hidden] rule - so
+   a button hidden in the markup stayed on screen. The Access button is the one
+   that cares: it is offered only to administrators, and everyone else was being
+   shown a door that opens onto 403s. */
+.rail-btn[hidden] {
+  display: none;
+}
+
 .rail-btn:hover {
   background: var(--raised);
   color: var(--ink);
