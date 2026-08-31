@@ -311,6 +311,15 @@
     analytics: null,
     topology: null,
     topoWindow: "24h",
+    /* The graph is reduced before it is drawn; these decide how. */
+    topoScope: "groups",
+    topoGroupBy: "subnet",
+    topoFocus: "notable",
+    topoDrill: "",
+    /* Until the operator touches a control, the scope follows the size of the
+       graph: a small estate is drawn host by host, because collapsing twelve
+       machines into three boxes hides more than it clarifies. */
+    topoAuto: true,
 
     assets: [],
     assetByKey: {},
@@ -2653,6 +2662,207 @@
     return id;
   }
 
+  /* ------------------------------------------------------------ topo view */
+
+  /* Five hundred nodes and four hundred edges drawn as circles on rings is a
+     picture of a network, not a view of one: everything is on screen and
+     nothing can be read. So the graph is reduced before it is drawn.
+
+     By default it answers the question a topology page is actually for - which
+     parts of the estate talk to which other parts - by collapsing hosts into
+     the segment they sit in and drawing traffic between segments. Traffic
+     inside a segment is a count on the box, because "these forty machines in
+     one subnet talk to each other" is the expected case, and drawing it is
+     what produced the dot cloud.
+
+     Nothing is hidden. The header says exactly what was collapsed and what was
+     left out, every control is on the page, and a segment opens to its hosts. */
+
+  var TOPO_HOST_CEILING = 80;
+
+  function topoGroupKey(n, mode) {
+    if (mode === "category") return n.group || (n.type === "threat" ? "External" : "Unclassified");
+    if (mode === "kind") {
+      return { managed: "Agented", unmanaged: "No agent", gateway: "Gateways",
+               isolated: "Quarantined", threat: "External" }[nodeKind(n)] || "Other";
+    }
+    /* Subnet. The /24 a host sits in is the closest thing to "where on the
+       network is this" that the graph holds without asking the hub. */
+    var m = String(n.ip || "").match(/^(\d+)\.(\d+)\.(\d+)\.\d+$/);
+    if (m) return m[1] + "." + m[2] + "." + m[3] + ".0/24";
+    if (n.type === "threat" || n.type === "cloud") return "External";
+    return n.group || "No address";
+  }
+
+  var TOPO_RISK_ORDER = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, CLEAN: 0 };
+
+  /* A host worth drawing on its own even when everything else is collapsed. */
+  function topoNotable(n, hotIDs) {
+    return !!n.is_isolated || n.type === "threat" ||
+      (TOPO_RISK_ORDER[n.risk] || 0) >= 3 || hotIDs[n.id] === true;
+  }
+
+  function buildTopoView(nodes, edges) {
+    var mode = state.topoGroupBy || "subnet";
+
+    /* Hosts on a blocked or unusual link. Those edges are the reason a security
+       graph exists, so their endpoints survive every reduction. */
+    var hot = {};
+    edges.forEach(function (e) {
+      if (e.verdict === "blocked" || e.verdict === "anomalous") { hot[e.source] = true; hot[e.target] = true; }
+    });
+
+    if (state.topoScope === "hosts") {
+      var subset = nodes, note = "";
+      if (state.topoDrill) {
+        subset = nodes.filter(function (n) { return topoGroupKey(n, mode) === state.topoDrill; });
+        note = "The " + subset.length + " host(s) in " + state.topoDrill + ", and the traffic between them.";
+      } else if (state.topoFocus !== "all") {
+        subset = nodes.filter(function (n) { return topoNotable(n, hot); });
+        note = "The " + subset.length + " host(s) that are quarantined, high risk, external, or on a blocked or unusual link. " +
+          (nodes.length - subset.length) + " ordinary host(s) are not drawn.";
+      } else {
+        note = "Every host the graph knows about: " + nodes.length + ".";
+      }
+
+      /* Past the ceiling the circles overlap into a band that can be neither
+         read nor clicked, which is what this page used to do. Rather than
+         refuse - a page that draws nothing is no more use than one that draws
+         everything - it keeps the hosts worth looking at, fills the rest with
+         the busiest, and says exactly how many were left out. */
+      var drawn = subset;
+      if (subset.length > TOPO_HOST_CEILING) {
+        var weight = {};
+        edges.forEach(function (e) {
+          var f = Number(e.flow_count) || 0;
+          weight[e.source] = (weight[e.source] || 0) + f;
+          weight[e.target] = (weight[e.target] || 0) + f;
+        });
+        drawn = subset.slice().sort(function (a, b) {
+          var na = topoNotable(a, hot) ? 0 : 1, nb = topoNotable(b, hot) ? 0 : 1;
+          if (na !== nb) return na - nb;
+          return (weight[b.id] || 0) - (weight[a.id] || 0);
+        }).slice(0, TOPO_HOST_CEILING);
+        note += " More than " + TOPO_HOST_CEILING + " circles cannot be told apart, so this is the " + drawn.length +
+          " that matter most - everything quarantined, high risk, external or on a blocked link first, then the busiest. " +
+          (subset.length - drawn.length) + " quieter host(s) are not drawn.";
+      }
+
+      var keep = {};
+      drawn.forEach(function (n) { keep[n.id] = true; });
+      return {
+        nodes: drawn, grouped: false, note: note,
+        edges: edges.filter(function (e) { return keep[e.source] && keep[e.target]; })
+      };
+    }
+
+    /* ---- collapsed to segments ----------------------------------------- */
+    var groups = {}, keyOf = {};
+    nodes.forEach(function (n) {
+      var k = topoGroupKey(n, mode);
+      keyOf[n.id] = k;
+      var g = groups[k];
+      if (!g) {
+        g = groups[k] = {
+          label: k, members: [], risk: "CLEAN", managed: 0, unmanaged: 0,
+          isolated: 0, threat: 0, quietAll: true, internalFlows: 0, internalBytes: 0
+        };
+      }
+      g.members.push(n);
+      if ((TOPO_RISK_ORDER[n.risk] || 0) > (TOPO_RISK_ORDER[g.risk] || 0)) g.risk = n.risk;
+      if (n.is_isolated) g.isolated++;
+      if (n.type === "threat") g.threat++;
+      if (n.type === "managed") g.managed++; else g.unmanaged++;
+      if (!n.quiet) g.quietAll = false;
+    });
+
+    var gEdges = {};
+    edges.forEach(function (e) {
+      var a = keyOf[e.source], b = keyOf[e.target];
+      if (a === undefined || b === undefined) return;
+      if (a === b) {
+        groups[a].internalFlows += Number(e.flow_count) || 0;
+        groups[a].internalBytes += Number(e.total_bytes) || 0;
+        return;
+      }
+      var lo = a < b ? a : b, hi = a < b ? b : a;
+      var id = "grp:" + lo + " grp:" + hi;
+      var ge = gEdges[id];
+      if (!ge) {
+        ge = gEdges[id] = {
+          source: "grp:" + lo, target: "grp:" + hi, flow_count: 0, total_bytes: 0,
+          verdict: "clean", port: 0, ports: [], pairs: 0
+        };
+      }
+      ge.flow_count += Number(e.flow_count) || 0;
+      ge.total_bytes += Number(e.total_bytes) || 0;
+      ge.pairs++;
+      if (e.verdict === "blocked") ge.verdict = "blocked";
+      else if (e.verdict === "anomalous" && ge.verdict !== "blocked") ge.verdict = "anomalous";
+      arrayOf(e.ports).forEach(function (ps) { ge.ports.push(ps); });
+      if (!ge.port) ge.port = e.port;
+    });
+
+    var gNodes = Object.keys(groups).sort().map(function (k) {
+      var g = groups[k];
+      return {
+        id: "grp:" + k, label: g.label + " (" + g.members.length + ")",
+        type: g.threat ? "threat" : (g.managed >= g.unmanaged ? "managed" : "unmanaged"),
+        ip: "", os: "", role: "", risk: g.risk, group: g.label, evidence: [],
+        is_isolated: g.isolated > 0 && g.isolated === g.members.length,
+        quiet: g.quietAll, _group: g
+      };
+    });
+
+    var bundled = Object.keys(gEdges).length;
+    return {
+      nodes: gNodes, edges: Object.keys(gEdges).sort().map(function (k) { return gEdges[k]; }),
+      grouped: true,
+      note: nodes.length + " hosts collapsed into " + gNodes.length + " segment(s); " +
+        edges.length + " link(s) bundled into " + bundled + ". Traffic inside a segment is counted on the segment rather than drawn. Click one to look inside."
+    };
+  }
+
+  function topoControls() {
+    var bar = h("div", { cls: "topo-bar" });
+    var reset = function () { state.topoAuto = false; state.topoSelected = ""; state.topoEdgeSelected = ""; };
+
+    if (state.topoDrill) {
+      bar.appendChild(h("button", {
+        cls: "mini", type: "button", text: "← All segments",
+        on: { click: function () { state.topoDrill = ""; state.topoScope = "groups"; reset(); render(); } }
+      }));
+      bar.appendChild(h("span", { cls: "crumb", text: state.topoDrill }));
+    } else {
+      [["groups", "Segments"], ["hosts", "Hosts"]].forEach(function (o) {
+        bar.appendChild(h("button", {
+          cls: state.topoScope === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+          on: { click: function () { state.topoScope = o[0]; reset(); render(); } }
+        }));
+      });
+    }
+
+    bar.appendChild(h("span", { cls: "sep" }));
+    bar.appendChild(h("span", { cls: "bar-label", text: "Group by" }));
+    [["subnet", "Subnet"], ["category", "Category"], ["kind", "Coverage"]].forEach(function (o) {
+      bar.appendChild(h("button", {
+        cls: state.topoGroupBy === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+        on: { click: function () { state.topoGroupBy = o[0]; state.topoDrill = ""; reset(); render(); } }
+      }));
+    });
+
+    if (state.topoScope === "hosts" && !state.topoDrill) {
+      bar.appendChild(h("span", { cls: "sep" }));
+      [["notable", "Worth looking at"], ["all", "Everything"]].forEach(function (o) {
+        bar.appendChild(h("button", {
+          cls: state.topoFocus === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+          on: { click: function () { state.topoFocus = o[0]; reset(); render(); } }
+        }));
+      });
+    }
+    return bar;
+  }
+
   function renderTopology() {
     var view = $("view");
     var data = state.topology;
@@ -2663,8 +2873,23 @@
       return;
     }
 
-    var nodes = arrayOf(data.nodes);
-    var edges = arrayOf(data.edges);
+    if (state.topoAuto) {
+      var count = arrayOf(data.nodes).length;
+      state.topoScope = count > TOPO_HOST_CEILING ? "groups" : "hosts";
+      state.topoFocus = count > TOPO_HOST_CEILING ? "notable" : "all";
+    }
+
+    var reduced = buildTopoView(arrayOf(data.nodes), arrayOf(data.edges));
+    var nodes = reduced.nodes;
+    var edges = reduced.edges;
+
+    view.appendChild(topoControls());
+    view.appendChild(h("p", { cls: "topo-note", text: reduced.note }));
+    if (!nodes.length) {
+      view.appendChild(h("div", { cls: "empty", text: "Nothing left to draw with this filter." }));
+      return;
+    }
+
     var layout = layoutTopology(nodes, edges);
     var pos = layout.pos;
 
@@ -2823,9 +3048,11 @@
         }
       });
       circle.appendChild(s("title", {
-        text: (n.label || n.id) + " \u00b7 " + (n.ip || "") +
-          (n.role && n.role !== "unknown" ? " \u00b7 " + n.role : "") +
-          (n.quiet ? " \u00b7 quiet in this window" : "")
+        text: n._group
+          ? n._group.label + " \u00b7 " + n._group.members.length + " host(s) \u00b7 worst risk " + (n._group.risk || "CLEAN") + " \u00b7 click to look inside"
+          : (n.label || n.id) + " \u00b7 " + (n.ip || "") +
+            (n.role && n.role !== "unknown" ? " \u00b7 " + n.role : "") +
+            (n.quiet ? " \u00b7 quiet in this window" : "")
       }));
       nodeLayer.appendChild(circle);
       if (showCaption[n.id]) {
@@ -2876,7 +3103,36 @@
           on: { click: function () { state.topoEdgeSelected = ""; render(); } }
         })));
     } else if (!sel) {
-      side.appendChild(h("p", { cls: "pending", text: "Click a node, or a link to see its ports. Selection is shared with the Assets table \u2014 the graph is a lens, not a destination." }));
+      side.appendChild(h("p", { cls: "pending", text: reduced.grouped
+        ? "Click a segment to see what is in it, or a link to see the ports carrying traffic between two segments."
+        : "Click a node, or a link to see its ports. Selection is shared with the Assets table \u2014 the graph is a lens, not a destination." }));
+    } else if (sel._group) {
+      /* A collapsed segment. The counts that were folded into the box are
+         spelled out here, so nothing disappears by being grouped. */
+      var g = sel._group;
+      var out = Object.keys(pairs).map(function (k) { return pairs[k]; })
+        .filter(function (pr) { return pr.source === sel.id || pr.target === sel.id; });
+      side.appendChild(h("dl", { cls: "kv" },
+        h("dt", { text: "Segment" }), h("dd", {}, h("b", { text: g.label })),
+        h("dt", { text: "Hosts" }), h("dd", { text: String(g.members.length) }),
+        h("dt", { text: "Agented" }), h("dd", { text: g.managed + " of " + g.members.length }),
+        h("dt", { text: "Quarantined" }), h("dd", { text: String(g.isolated) }),
+        h("dt", { text: "Worst risk" }), h("dd", { text: g.risk || "CLEAN" }),
+        h("dt", { text: "Inside the segment" }), h("dd", { text: g.internalFlows + " flow(s) \u00b7 " + bytes(g.internalBytes) + " (counted, not drawn)" }),
+        h("dt", { text: "Segments reached" }), h("dd", {}, h("b", { text: String(out.length) })),
+        h("dt", { text: "Flows out" }), h("dd", { text: String(out.reduce(function (t, pr) { return t + pr.flow; }, 0)) }),
+        h("dt", { text: "Volume out" }), h("dd", { text: bytes(out.reduce(function (t, pr) { return t + pr.bytes; }, 0)) })));
+      side.appendChild(h("div", { cls: "detail-acts" },
+        h("button", {
+          cls: "mini", type: "button", text: "Open this segment",
+          on: {
+            click: function () {
+              state.topoAuto = false;
+              state.topoDrill = g.label; state.topoScope = "hosts";
+              state.topoSelected = ""; state.topoEdgeSelected = ""; render();
+            }
+          }
+        })));
     } else {
       var linked = Object.keys(pairs).map(function (k) { return pairs[k]; })
         .filter(function (p) { return p.source === sel.id || p.target === sel.id; });
@@ -2925,7 +3181,10 @@
       .forEach(function (pair) {
         legend.appendChild(h("span", {}, h("i", { "data-kind": pair[0] }), h("span", { text: pair[1] })));
       });
-    legend.appendChild(h("span", { text: "edge width = flow volume \u00b7 dashed = blocked \u00b7 label = heaviest port per pair \u00b7 hollow = quiet in this window" }));
+    legend.appendChild(h("span", {
+      text: (reduced.grouped ? "one circle = one segment \u00b7 " : "one circle = one host \u00b7 ") +
+        "edge width = flow volume \u00b7 dashed = blocked \u00b7 label = heaviest port per pair \u00b7 hollow = quiet in this window"
+    }));
 
     view.appendChild(h("div", { cls: "topo" }, h("div", { cls: "topo-canvas" }, svg), side));
     view.appendChild(legend);

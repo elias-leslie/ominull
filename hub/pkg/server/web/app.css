@@ -2489,3 +2489,42 @@ p.pending {
 .whyline + .whyline {
   margin-top: 2px;
 }
+
+/* Topology controls. The reduction the graph applies is never implicit: the
+   scope, the grouping and the focus are all buttons on the page, and the line
+   under them says what was collapsed and what was left out. */
+.topo-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+  margin-bottom: var(--s-1);
+}
+
+.topo-bar .bar-label {
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.topo-bar .sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+  margin: 0 var(--s-1);
+}
+
+.mini-on {
+  color: var(--ink);
+  border-color: var(--brand);
+  background: var(--raised);
+}
+
+.topo-note {
+  font-size: var(--t-2);
+  color: var(--ink-3);
+  margin: 0 0 var(--s-2);
+  max-width: 80ch;
+}
