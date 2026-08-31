@@ -164,8 +164,20 @@ static void test_legacy_config(void) {
     unlink(path);
 }
 
+static void test_package_query(void) {
+    char version[64] = {0};
+    check(ParsePackageQuery("installed\t1.7.17\n", version, sizeof(version)),
+          "installed package query was not parsed");
+    check(strcmp(version, "1.7.17") == 0, "package query returned the wrong version");
+    check(!ParsePackageQuery("install ok installed\t1.7.17\n", version, sizeof(version)),
+          "legacy multi-field package query was accepted");
+    check(!ParsePackageQuery("not-installed\t1.7.17\n", version, sizeof(version)),
+          "uninstalled package query was accepted");
+}
+
 int main(void) {
     test_legacy_config();
+    test_package_query();
     make_fixture();
 
     LINUX_FLOW_EVENT events[FIXTURE_SOCKETS];

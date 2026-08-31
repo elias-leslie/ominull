@@ -289,6 +289,14 @@ static bool QuerySocketDiag(const unsigned long* inodes, size_t count,
     return ipv4 && ipv6;
 }
 
+static bool ParsePackageQuery(const char* output, char* version, size_t versionCap) {
+    char state[24] = {0};
+    if (sscanf(output, "%23s %63s", state, version) != 2 || state[0] == '\0' || version[0] == '\0') {
+        return false;
+    }
+    return strcmp(state, "installed") == 0 && strlen(version) < versionCap;
+}
+
 static void DetectPackageProvenance(LINUX_AGENT_CONFIG* config) {
     snprintf(config->install_type, sizeof(config->install_type), "unknown");
     config->package_identifier[0] = '\0';
@@ -301,13 +309,12 @@ static void DetectPackageProvenance(LINUX_AGENT_CONFIG* config) {
     executable[executable_len] = '\0';
     if (strcmp(executable, "/opt/ominull/bin/ominulld") != 0) return;
 
-    FILE* query = popen("dpkg-query -W -f='${Status}\\t${Version}\\n' ominull-agent 2>/dev/null", "r");
+    FILE* query = popen("dpkg-query -W -f='${db:Status-Status}\\t${Version}\\n' ominull-agent 2>/dev/null", "r");
     if (!query) return;
-	char install[16] = {0}, result[16] = {0}, state[16] = {0}, version[64] = {0};
-	int scanned = fscanf(query, "%15s %15s %15s %63s", install, result, state, version);
+	char queryOutput[128] = {0}, version[64] = {0};
+	bool read = fgets(queryOutput, sizeof(queryOutput), query) != NULL;
 	int exit_code = pclose(query);
-	if (exit_code != 0 || scanned != 4 || strcmp(install, "install") != 0 || strcmp(result, "ok") != 0 ||
-	    strcmp(state, "installed") != 0 || version[0] == '\0') return;
+	if (exit_code != 0 || !read || !ParsePackageQuery(queryOutput, version, sizeof(version))) return;
 
     snprintf(config->install_type, sizeof(config->install_type), "deb");
     snprintf(config->package_identifier, sizeof(config->package_identifier), "ominull-agent");
