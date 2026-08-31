@@ -304,11 +304,16 @@ type TopologyData struct {
 const CountryUnknown = "UNKNOWN"
 
 type AnalyticsSummary struct {
-	TotalBytesIn      int64                `json:"total_bytes_in"`
-	TotalBytesOut     int64                `json:"total_bytes_out"`
-	TotalEvents       int64                `json:"total_events"`
-	TotalBlocks       int64                `json:"total_blocks"`
-	TotalPermits      int64                `json:"total_permits"`
+	TotalBytesIn  int64 `json:"total_bytes_in"`
+	TotalBytesOut int64 `json:"total_bytes_out"`
+	TotalEvents   int64 `json:"total_events"`
+	TotalBlocks   int64 `json:"total_blocks"`
+	TotalPermits  int64 `json:"total_permits"`
+	// MeasuredFlowCount is how many of TotalEvents carried a byte count at
+	// all. Neither the Windows nor the macOS collector has one to read, so on
+	// a real fleet the byte totals above are taken from a small fraction of
+	// the traffic and must not be printed as though they covered all of it.
+	MeasuredFlowCount int64                `json:"measured_flow_count"`
 	Countries         map[string]int64     `json:"countries"`
 	TopProcesses      map[string]int64     `json:"top_processes"`
 	SeverityCounts    map[string]int64     `json:"severity_counts"`
@@ -1818,6 +1823,7 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		country                  string
 		count, bytesIn, bytesOut int64
 		blocks, permits          int64
+		measured                 int64
 	}
 	var byCountry []countryRow
 
@@ -1825,7 +1831,8 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	var args []interface{}
 	queryEvents = `SELECT country, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
 		COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0)
+		COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0)
 		FROM events`
 	if tenantID != "" {
 		queryEvents += " WHERE tenant_id = ?"
@@ -1836,13 +1843,14 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	if rows, err := s.db.Query(queryEvents, args...); err == nil {
 		for rows.Next() {
 			var r countryRow
-			if err := rows.Scan(&r.country, &r.count, &r.bytesIn, &r.bytesOut, &r.blocks, &r.permits); err == nil {
+			if err := rows.Scan(&r.country, &r.count, &r.bytesIn, &r.bytesOut, &r.blocks, &r.permits, &r.measured); err == nil {
 				byCountry = append(byCountry, r)
 				summary.TotalEvents += r.count
 				summary.TotalBytesIn += r.bytesIn
 				summary.TotalBytesOut += r.bytesOut
 				summary.TotalBlocks += r.blocks
 				summary.TotalPermits += r.permits
+				summary.MeasuredFlowCount += r.measured
 			}
 		}
 		rows.Close()

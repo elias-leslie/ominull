@@ -735,6 +735,9 @@
       ],
       "/api/v1/analytics/summary": {
         total_bytes_in: 3120000000, total_bytes_out: 7480000000, total_events: 48210,
+        /* The demo stands for a fleet whose collectors can read a byte
+           counter, so every flow in it is a measured one. */
+        measured_flow_count: 48210,
         total_blocks: 318, total_permits: 47892,
         countries: { US: 31200, DE: 4210, NL: 980, SG: 640, GB: 410 },
         top_processes: {},
@@ -1527,7 +1530,7 @@
         { label: "Discovered", value: String(covered ? cov.total_discovered : 0) },
         { label: "Managed", value: covered ? String(cov.total_managed || 0) : "\u2014" },
         { label: "Unmanaged", value: covered ? String(cov.total_unmanaged || 0) : "\u2014", tone: "warn" },
-        { label: "Coverage", value: covered ? (cov.coverage_percent || 0) + "%" : "\u2014" },
+        { label: "Coverage", value: covered ? pct(cov.coverage_percent) : "\u2014" },
         { label: "Deduced from flow", value: String(inferredCount()) },
         { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" }
       ];
@@ -1555,7 +1558,7 @@
         { label: "Permitted", value: String(an.total_permits || 0) },
         { label: "Bytes in", value: bytes(an.total_bytes_in) },
         { label: "Bytes out", value: bytes(an.total_bytes_out) },
-        { label: "Countries", value: String(arrayOf(an.geo_stats).length) }
+        measuredStat({ total_flow_count: an.total_events, measured_flow_count: an.measured_flow_count })
       ];
     }
     if (state.section === "policy") {
@@ -2497,7 +2500,7 @@
             h("dt", { text: "Discovered" }), h("dd", {}, h("b", { text: String(discovered) })),
             h("dt", { text: "Managed" }), h("dd", { text: String(cov.total_managed || 0) }),
             h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
-            h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: (cov.coverage_percent || 0) + "%" })),
+            h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: pct(cov.coverage_percent) })),
             h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
             h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }),
             h("dt", { text: "Named by flow" }), h("dd", {}, h("b", { text: String(inferredCount()) })))
@@ -2911,6 +2914,13 @@
     return bar;
   }
 
+  /* The hub sends a ratio, not a rounded display value. Pasting it straight
+     into the page printed "10.256410256410255%". */
+  function pct(v) {
+    var n = Number(v) || 0;
+    return (n >= 10 || n === 0 ? Math.round(n) : Math.round(n * 10) / 10) + "%";
+  }
+
   function measuredStat(m) {
     var total = Number(m.total_flow_count) || 0;
     var meas = Number(m.measured_flow_count) || 0;
@@ -3282,6 +3292,23 @@
     var an = state.analytics || {};
     clear(view);
 
+    /* Every byte figure on this page is a sum over the flows that reported
+       one. On a fleet where the Windows and macOS collectors have no byte
+       counter to read, that is a small minority of the traffic, and the
+       chart, the two rankings and the totals above are all drawn from it.
+       Saying so once, at the top, costs one line and stops every number
+       below being read as something it is not. */
+    var totalFlows = Number(an.total_events) || 0;
+    var measuredFlows = Number(an.measured_flow_count) || 0;
+    if (totalFlows && measuredFlows < totalFlows) {
+      view.appendChild(h("p", { cls: "topo-note pad-x" }, h("b", { text: measuredFlows === 0
+        ? "None of the " + totalFlows + " flows on record carried a byte count. "
+        : measuredFlows + " of " + totalFlows + " flows carried a byte count. " }),
+        document.createTextNode(measuredFlows === 0
+          ? "Neither the Windows nor the macOS collector has one to read, and the Linux path reports a queue depth rather than a cumulative total. Flow counts on this page are complete; the byte figures are not measurements of this traffic."
+          : "The bandwidth chart, both rankings and the byte totals above are sums over those flows only \u2014 not over the rest.")));
+    }
+
     var timeline = arrayOf(an.bandwidth_timeline);
     var chartCard;
     if (timeline.length) {
@@ -3325,7 +3352,12 @@
          series had no time axis at all. */
       var ticks = h("div", { cls: "chart-ticks" });
       timeline.forEach(function (p) {
-        ticks.appendChild(h("span", { text: String(p.timestamp || "") }));
+        /* The hub labels a bucket "HH:MM". Anything that parses as a date is
+           reduced to the same thing rather than printed as a full ISO string,
+           which is 24 characters in a slot a few characters wide. */
+        var t = String(p.timestamp || "");
+        var d = t.length > 8 ? parseTime(t) : null;
+        ticks.appendChild(h("span", { text: d ? pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) : t }));
       });
 
       chartCard = card("Bandwidth and blocks",
@@ -3344,7 +3376,7 @@
         talkers.length
           ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
               function (t) { return (t.process || "\u2014") + " \u00b7 " + (Number(t.flow_count) || 0) + " flows"; },
-              function (t) { return bytes(t.total_bytes); })
+              function (t) { return Number(t.total_bytes) ? bytes(t.total_bytes) : "not measured"; })
           : h("div", { cls: "empty", text: "No process attribution yet." })));
 
     var geo = arrayOf(an.geo_stats);
@@ -3353,7 +3385,7 @@
         geo.length
           ? barList(geo, function (g) { return Number(g.total_bytes) || 0; },
               function (g) { return (g.country_name || g.country) + " \u00b7 " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
-              function (g) { return bytes(g.total_bytes); })
+              function (g) { return Number(g.total_bytes) ? bytes(g.total_bytes) : "not measured"; })
           : h("div", { cls: "empty", text: "No geo data." })));
 
     var evRows = state.events.slice(0, 60).map(function (e) {
@@ -3366,7 +3398,11 @@
         h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
         h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
         h("span", { cls: "dim", text: e.process_path || e.domain || "\u2014" }),
-        h("span", { cls: "ago", text: bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)) })
+        /* An em dash, not "0 B": this flow reported no byte count, which is
+           not the same claim as no bytes having crossed it. */
+        h("span", { cls: "ago", text: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)
+          ? bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0))
+          : "\u2014", title: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0) ? "" : "not measured on this flow" })
       ];
     });
 
@@ -5115,7 +5151,7 @@
     } else if (state.section === "discovery") {
       var cov = state.coverage || {};
       sub = (cov.total_discovered || state.scanAssets.length)
-        ? "/ " + (cov.coverage_percent || 0) + "% covered"
+        ? "/ " + pct(cov.coverage_percent) + " covered"
         : "/ no sweep yet";
     } else if (state.section === "topology") {
       sub = "/ " + state.topoWindow + " window";
