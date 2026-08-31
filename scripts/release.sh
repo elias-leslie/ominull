@@ -1,165 +1,221 @@
 #!/usr/bin/env bash
+# Canonical Ominull release workflow.
 #
-# Ominull end-to-end release pipeline: version -> build -> hub -> agents.
-#
-# Rolling a code change to the fleet is two hops, and skipping either one leaves the
-# fleet on stale code: the hub has to be running the new build (it is what serves the
-# packages and decides who is outdated), and only then can the agents be told to take
-# it. This script owns both hops so the sequence cannot be run out of order.
-#
-#   release.sh [--version X.Y.Z] [--skip-tests] [--hub-only] [--agents-only] [--no-wait]
-#
-# Environment:
-#   OMINULL_HUB_URL     Hub base URL for the agent roll-out (default http://127.0.0.1:9999)
-#   OMINULL_ADMIN_KEY   Hub admin key (required for --agents-only / the roll-out phase)
-#   OMINULL_DEPLOY_CMD  Command that ships build output to the hub host. Defaults to
-#                       scripts/deploy_remote.sh, which is deployment-specific and
-#                       therefore untracked; see deploy_remote.sh.example.
-#   OMINULL_SIGNING_KEY Release signing key, from the operations vault. Required:
-#                       agents refuse any package that is not signed with it.
-#
+# The order is part of the update contract: build and sign the native artifacts,
+# install the hub package, then ask the running hub to roll the retained fleet.
+# A bridge release may use the transitional Windows archive for legacy agents;
+# a final release must converge on native package provenance.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
+HUB_URL="${OMINULL_HUB_URL:-}"
 DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy_remote.sh}"
 
 VERSION=""
+BRIDGE=0
 SKIP_TESTS=0
 DO_HUB=1
 DO_AGENTS=1
 WAIT_FOR_AGENTS=1
+CANARY_IDS=""
+
+usage() {
+    sed -n '2,8p' "$0"
+    cat <<'EOF'
+
+Options:
+  --version X.Y.Z  release version (otherwise use VERSION)
+  --bridge         transitional release; retain the legacy Windows archive
+  --final          native-package release (default)
+  --canary IDS     comma-separated endpoint IDs; roll these, verify, then roll all
+  --skip-tests     skip local quality tests (never skips signing or live checks)
+  --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
+  --agents-only    skip build/deploy; roll agents against an already-live hub
+  --no-wait        queue the update and return without claiming convergence
+EOF
+}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --version)     VERSION="${2:?--version needs a value}"; shift 2 ;;
-        --skip-tests)  SKIP_TESTS=1; shift ;;
-        --hub-only)    DO_AGENTS=0; shift ;;
+        --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
+        --bridge)
+            [ "${BRIDGE}" -eq 0 ] || { echo "[-] --bridge and --final are mutually exclusive." >&2; exit 2; }
+            BRIDGE=1
+            shift
+            ;;
+        --final)
+            [ "${BRIDGE}" -eq 0 ] || { echo "[-] --bridge and --final are mutually exclusive." >&2; exit 2; }
+            shift
+            ;;
+        --canary) CANARY_IDS="${2:?--canary needs endpoint IDs}"; shift 2 ;;
+        --skip-tests) SKIP_TESTS=1; shift ;;
+        --hub-only) DO_AGENTS=0; shift ;;
         --agents-only) DO_HUB=0; shift ;;
-        --no-wait)     WAIT_FOR_AGENTS=0; shift ;;
-        -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
-        *)             echo "[-] Unknown argument: $1" >&2; exit 1 ;;
+        --no-wait) WAIT_FOR_AGENTS=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "[-] Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
 if [ -n "${VERSION}" ]; then
-    echo "[*] Bumping release version to ${VERSION}..."
     "${ROOT_DIR}/scripts/version.sh" bump "${VERSION}"
 else
-    VERSION="$("${ROOT_DIR}/scripts/version.sh" show)"
-    echo "[*] Releasing Ominull v${VERSION} (no bump requested)."
+    VERSION="$(${ROOT_DIR}/scripts/version.sh show)"
     "${ROOT_DIR}/scripts/version.sh" check
 fi
 
+if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
+    echo "[*] Running retained quality gates."
+    mapfile -t go_files < <(find "${ROOT_DIR}/hub" -name '*.go' -type f -print)
+    if [ "${#go_files[@]}" -gt 0 ]; then
+        if [ "$(gofmt -l "${go_files[@]}")" ]; then
+            echo "[-] gofmt reports unformatted Go files." >&2
+            gofmt -l "${go_files[@]}" >&2
+            exit 1
+        fi
+    fi
+    (cd "${ROOT_DIR}/hub" && go test -race ./... && go vet ./...)
+    node --check "${ROOT_DIR}/hub/pkg/server/web/app.js"
+    bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
+        "${ROOT_DIR}/scripts/deploy_remote.sh.example" \
+        "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
+        "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \
+        "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
+
+    echo "[*] Running Linux collector and isolation feedback loops."
+    mkdir -p "${ROOT_DIR}/build"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_baseline" "${ROOT_DIR}/agent/tests/test_baseline.c" -lcurl
+    "${ROOT_DIR}/build/test_baseline"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_linux_collector" "${ROOT_DIR}/agent/tests/test_linux_collector.c" -lcurl
+    "${ROOT_DIR}/build/test_linux_collector"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_der_sig" "${ROOT_DIR}/agent/tests/test_der_sig.c"
+    "${ROOT_DIR}/build/test_der_sig"
+fi
+
 if [ "${DO_HUB}" -eq 1 ]; then
-    if [ "${SKIP_TESTS}" -eq 0 ]; then
-        echo "[*] Running hub test suite (race detector)..."
-        (cd "${ROOT_DIR}/hub" && go test -race ./...)
-        echo "[*] Compiling C stream-DPI unit tests..."
-        gcc -O2 -Wall -Wextra -o "${ROOT_DIR}/agent/bin/test_dpi" "${ROOT_DIR}/agent/tests/test_dpi.c"
-        "${ROOT_DIR}/agent/bin/test_dpi"
-        # The baseline parser turns a hub reply into iptables arguments on a host
-        # that is about to be cut off. It compiles the agent in, so it is also a
-        # second compile of main.c under -Wall -Wextra.
-        echo "[*] Compiling baseline isolation policy unit tests..."
-        gcc -O2 -Wall -Wextra -o "${ROOT_DIR}/agent/bin/test_baseline" "${ROOT_DIR}/agent/tests/test_baseline.c"
-        "${ROOT_DIR}/agent/bin/test_baseline"
-        # The macOS ruleset, checked without a Mac. bash -n proves the helper
-        # parses; this proves it writes the right rules in the right order,
-        # which is the part that decides whether an isolated host can be got
-        # back.
-        echo "[*] Checking the macOS pf ruleset the agent generates..."
-        bash "${ROOT_DIR}/agent/tests/test_pf_rules.sh"
-    fi
-
-    echo "[*] Building cross-platform agent packages..."
-    "${ROOT_DIR}/scripts/build-packages.sh"
-
-    # Agents verify every package against a key compiled into them and install
-    # nothing that fails, and the hub refuses to advertise a release with no
-    # signature beside it. So signing is not a release step that can be skipped
-    # - an unsigned build is one the fleet will simply never take.
-    echo "[*] Signing packages with the release key..."
-    "${ROOT_DIR}/scripts/sign-release.sh"
-
-    echo "[*] Shipping hub build and agent packages to the hub host..."
-    if [ -x "${DEPLOY_CMD}" ]; then
-        OMINULL_RELEASE_VERSION="${VERSION}" "${DEPLOY_CMD}"
-    else
-        echo "[-] No deploy command at ${DEPLOY_CMD}."
-        echo "    Set OMINULL_DEPLOY_CMD, or copy scripts/deploy_remote.sh.example to"
-        echo "    scripts/deploy_remote.sh and fill in this deployment's hub host."
+    [ -x "${DEPLOY_CMD}" ] || {
+        echo "[-] Deploy hook is missing or not executable: ${DEPLOY_CMD}" >&2
+        echo "    Copy scripts/deploy_remote.sh.example to scripts/deploy_remote.sh and fill only its ignored deployment values." >&2
         exit 1
-    fi
+    }
+    echo "[*] Building native packages for v${VERSION}."
+    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+        "${ROOT_DIR}/scripts/build-packages.sh"
+    echo "[*] Signing native packages for v${VERSION}."
+    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+        "${ROOT_DIR}/scripts/sign-release.sh"
+    echo "[*] Verifying native package lifecycle in an isolated root."
+    OMINULL_RELEASE_VERSION="${VERSION}" \
+        "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
+    echo "[*] Installing hub package first and publishing signed endpoint packages."
+    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+        "${DEPLOY_CMD}"
 fi
 
 if [ "${DO_AGENTS}" -eq 0 ]; then
-    echo "[+] Hub is running v${VERSION}. Agents not rolled (--hub-only)."
+    echo "[+] Hub package v${VERSION} deployed. Agent rollout not requested."
     exit 0
 fi
 
-ADMIN_KEY="${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY to roll the agent fleet}"
+[ -n "${HUB_URL}" ] || {
+    echo "[-] OMINULL_HUB_URL is required for an agent rollout." >&2
+    exit 1
+}
+ADMIN_KEY="${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY for the rollout phase}"
+HEADER_FILE="$(mktemp "${TMPDIR:-/tmp}/ominull-release-header.XXXXXX")"
+chmod 0600 "${HEADER_FILE}"
+printf 'X-API-Key: %s\n' "${ADMIN_KEY}" > "${HEADER_FILE}"
+unset ADMIN_KEY
+cleanup() { rm -f -- "${HEADER_FILE}"; }
+trap cleanup EXIT
+
 api() {
-    curl -fsS -X "$1" -H "X-API-Key: ${ADMIN_KEY}" -H "Content-Type: application/json" \
-        ${3:+-d "$3"} "${HUB_URL}$2"
+    local method="$1" path="$2" body="${3:-}"
+    if [ -n "${body}" ]; then
+        curl -fsS --connect-timeout 5 --max-time 20 -X "${method}" \
+            -H "@${HEADER_FILE}" -H 'Content-Type: application/json' \
+            --data "${body}" "${HUB_URL}${path}"
+    else
+        curl -fsS --connect-timeout 5 --max-time 20 -X "${method}" \
+            -H "@${HEADER_FILE}" "${HUB_URL}${path}"
+    fi
 }
 
-# The roll-out phase talks to a running hub. If it cannot, the release stops here
-# rather than continuing to a convergence check that cannot mean anything.
-if ! api GET /api/v1/agents/update-status >/dev/null 2>&1; then
-    echo "[-] The hub at ${HUB_URL} did not answer, so no endpoint can be told about"
-    echo "    v${VERSION}. The packages are built, signed and published, but the fleet"
-    echo "    is still on the previous agent."
-    echo "    Set OMINULL_HUB_URL to this hub's address (the default assumes the hub"
-    echo "    runs on this machine), or re-run with --hub-only if that is intended."
+api GET /api/v1/agents/update-status >/dev/null || {
+    echo "[-] Live hub did not answer at ${HUB_URL}; no rollout was queued." >&2
     exit 1
-fi
+}
 
-echo "[*] Publishing agent v${VERSION} to every outdated endpoint..."
-api POST /api/v1/agents/update "{\"all\":true,\"version\":\"${VERSION}\"}" | jq . 2>/dev/null || true
+target_json() {
+    jq -cn --arg ids "${1}" '$ids | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))'
+}
 
-if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
-    echo "[+] Roll-out published. Agents apply it on their next telemetry heartbeat."
-    exit 0
-fi
+queue() {
+    local ids="$1" body
+    if [ -n "${ids}" ]; then
+        body="$(jq -cn --arg version "${VERSION}" --argjson ids "$(target_json "${ids}")" \
+            '{endpoint_ids:$ids,version:$version}')"
+    else
+        body="$(jq -cn --arg version "${VERSION}" '{all:true,version:$version}')"
+    fi
+    api POST /api/v1/agents/update "${body}"
+}
 
-# Agents pick the update up on their telemetry heartbeat, install it, and are restarted
-# by the package's postinst; the job only retires once one reports the new version back.
-echo "[*] Waiting for endpoints to report v${VERSION} (up to 5 minutes)..."
-# A hub that does not answer is not a converged fleet. The check used to fall back
-# to '{}' on a failed call, and an empty object has no .outdated, so a length of 0
-# came back and the release announced the whole fleet was on the new version without
-# ever having reached a hub. Silence is now counted, and reported as silence.
-unreachable=0
-for _ in $(seq 1 60); do
-    if ! status="$(api GET /api/v1/agents/update-status)"; then
-        unreachable=$((unreachable + 1))
-        if [ "${unreachable}" -ge 3 ]; then
-            echo "[-] The hub at ${HUB_URL} stopped answering during the roll-out."
-            echo "    The fleet's version is unknown; it is not confirmed on v${VERSION}."
-            exit 1
+wait_for() {
+    local ids="$1" status remaining native
+    local ids_json="[]"
+    if [ -n "${ids}" ]; then ids_json="$(target_json "${ids}")"; fi
+    echo "[*] Waiting for ${ids:-the retained fleet} to report v${VERSION}."
+    for _ in $(seq 1 60); do
+        if ! status="$(api GET /api/v1/agents/update-status 2>/dev/null)"; then
+            echo "    Hub did not answer; retrying."
+            sleep 5
+            continue
         fi
-        echo "    Hub did not answer (${unreachable}/3)..."
+        if [ -n "${ids}" ]; then
+            remaining="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
+                '[.outdated[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
+            if [ "${BRIDGE}" -eq 0 ]; then
+                native="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
+                    '[.provenance_issues[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
+            else
+                native=0
+            fi
+        else
+            remaining="$(printf '%s' "${status}" | jq -r '(.outdated // []) | length')"
+            if [ "${BRIDGE}" -eq 0 ]; then
+                native="$(printf '%s' "${status}" | jq -r '(.provenance_issues // []) | length')"
+            else
+                native=0
+            fi
+        fi
+        if [ "${remaining}" = "0" ] && [ "${native}" = "0" ]; then
+            echo "[+] ${ids:-retained fleet} converged on v${VERSION}; native provenance gate passed."
+            return 0
+        fi
+        echo "    ${remaining} outdated, ${native} provenance issue(s)."
         sleep 5
-        continue
-    fi
-    unreachable=0
-    if ! outdated="$(printf '%s' "${status}" | jq -e '(.outdated // []) | length' 2>/dev/null)"; then
-        echo "    Hub answered with something this script could not read; retrying..."
-        sleep 5
-        continue
-    fi
-    if [ "${outdated}" = "0" ]; then
-        echo "[+] Entire fleet is running agent v${VERSION}."
+    done
+    echo "[-] Rollout did not converge within five minutes." >&2
+    printf '%s\n' "${status}" | jq '{outdated,provenance_issues,retired,pending}' >&2 || true
+    return 1
+}
+
+if [ -n "${CANARY_IDS}" ]; then
+    queue "${CANARY_IDS}" | jq . 2>/dev/null || true
+    if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
+    if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
+        echo "[+] Canary update queued; full-fleet queue deferred by --no-wait."
         exit 0
     fi
-    echo "    ${outdated} endpoint(s) still outdated..."
-    sleep 5
-done
+fi
 
-echo "[!] Fleet did not fully converge within the timeout. Remaining:"
-api GET /api/v1/agents/update-status | jq '.outdated' 2>/dev/null || true
-echo "    Endpoints still on an agent from before self-update shipped need one manual"
-echo "    push to get onto a build that can update itself:"
-echo "    scripts/ominull-cli deploy <ip> <user> <password>"
-exit 1
+queue "" | jq . 2>/dev/null || true
+if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
+    echo "[+] v${VERSION} queued for retained endpoints."
+    exit 0
+fi
+wait_for ""

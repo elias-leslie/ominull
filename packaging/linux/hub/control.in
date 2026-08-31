@@ -1,0 +1,10 @@
+Package: ominull-hub
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: systemd
+Maintainer: Ominull Project <secops@example.invalid>
+Description: Ominull fleet management hub
+ The hub stores telemetry, policy, identity, and release state for Ominull
+ endpoints. Persistent database and PKI data remain outside the package.

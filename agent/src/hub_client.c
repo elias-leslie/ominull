@@ -6,8 +6,122 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <iphlpapi.h>
 #include "../include/agent.h"
+
+/* WinHTTP keeps a connection alive when its response body is drained. The old
+ * heartbeat path opened and closed a session and a connection every 2.5s, so
+ * every beat paid proxy discovery, TCP setup, and TLS session work again. The
+ * service sends telemetry serially, but the updater can share the process, so
+ * keep this small handle pool behind one process lock. Requests remain
+ * short-lived: response and request state never leak between heartbeats. */
+typedef struct {
+    CRITICAL_SECTION lock;
+    HINTERNET session;
+    HINTERNET connect;
+    WCHAR host[128];
+    WORD port;
+    BOOL isHttps;
+} HUB_HTTP_CONTEXT;
+
+static HUB_HTTP_CONTEXT g_http;
+static INIT_ONCE g_httpInit = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK InitializeHubHTTP(PINIT_ONCE initOnce, PVOID parameter, PVOID* context) {
+    (void)initOnce;
+    (void)parameter;
+    (void)context;
+    InitializeCriticalSection(&g_http.lock);
+    return TRUE;
+}
+
+static bool HubHTTPEnter(void) {
+    if (!InitOnceExecuteOnce(&g_httpInit, InitializeHubHTTP, NULL, NULL)) {
+        return false;
+    }
+    EnterCriticalSection(&g_http.lock);
+    return true;
+}
+
+static void HubHTTPDropConnection(void) {
+    if (g_http.connect) {
+        WinHttpCloseHandle(g_http.connect);
+        g_http.connect = NULL;
+    }
+    g_http.host[0] = L'\0';
+    g_http.port = 0;
+    g_http.isHttps = FALSE;
+}
+
+static bool HubHTTPPrepare(const WCHAR* host, WORD port, BOOL isHttps) {
+    if (!g_http.session) {
+        g_http.session = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!g_http.session) {
+            return false;
+        }
+        WinHttpSetTimeouts(g_http.session, 5000, 5000, 10000, 10000);
+    }
+
+    if (g_http.connect && (g_http.port != port || g_http.isHttps != isHttps ||
+                           wcscmp(g_http.host, host) != 0)) {
+        HubHTTPDropConnection();
+    }
+    if (!g_http.connect) {
+        g_http.connect = WinHttpConnect(g_http.session, host, port, 0);
+        if (!g_http.connect) {
+            return false;
+        }
+        wcsncpy(g_http.host, host, sizeof(g_http.host) / sizeof(g_http.host[0]) - 1);
+        g_http.host[sizeof(g_http.host) / sizeof(g_http.host[0]) - 1] = L'\0';
+        g_http.port = port;
+        g_http.isHttps = isHttps;
+    }
+    return true;
+}
+
+static bool HubHTTPReadBody(HINTERNET request, char* out, size_t outCap) {
+    size_t used = 0;
+    char discard[1024];
+
+    if (out && outCap > 0) {
+        out[0] = '\0';
+    }
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            return false;
+        }
+        if (available == 0) {
+            break;
+        }
+
+        char* destination = discard;
+        DWORD wanted = (DWORD)sizeof(discard);
+        bool capture = false;
+        if (out && outCap > 1 && used < outCap - 1) {
+            size_t remaining = outCap - 1 - used;
+            wanted = remaining < available ? (DWORD)remaining : available;
+            destination = out + used;
+            capture = true;
+        } else if (available < wanted) {
+            wanted = available;
+        }
+
+        DWORD received = 0;
+        if (!WinHttpReadData(request, destination, wanted, &received) || received == 0) {
+            return false;
+        }
+        if (capture) {
+            used += received;
+        }
+    }
+    if (out && outCap > 0) {
+        out[used < outCap ? used : outCap - 1] = '\0';
+    }
+    return true;
+}
 
 /* ---------------------------------------------------------------------------
  * Host identity
@@ -128,6 +242,7 @@ void Agent_DetectHostIdentity(AGENT_CONFIG* config) {
     DetectPrimaryAdapter(config->primary_ip, sizeof(config->primary_ip),
                          config->primary_mac, sizeof(config->primary_mac));
     DetectOSVersion(config->os_version, sizeof(config->os_version));
+    Agent_DetectInstallProvenance(config);
 }
 
 
@@ -276,10 +391,11 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
      * records the agent's claims at confidence 1.0, so a literal string here
      * would enter the asset model as ground truth and outrank a real scan. */
     int offset = snprintf(jsonBuf, jsonCapacity,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"exe\",\"events\":[",
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
         config->endpoint_id, loc, role, config->hostname,
         config->os_version, config->primary_ip, config->primary_mac,
-        OMINULL_AGENT_VERSION
+        OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
+        config->registered_package_version, config->provenance_status
     );
 
     for (size_t i = 0; events && i < count; i++) {
@@ -316,7 +432,8 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
          * collector reads TCP Extended Statistics now (see EstatsMeasure), so
          * what travels is the bytes that crossed this flow since the previous
          * poll. Still zero when nothing counted it: a flow ESTATS could not be
-         * enabled on, one seen for the first time, or one the driver produced.
+         * enabled on, or one seen for the first time. The collector reports
+         * zero when no byte counter was available.
          * Zero means "not measured" the whole way up, and the hub reports it as
          * that rather than as an absence of traffic. */
         unsigned long long bIn = e->BytesIn;
@@ -352,19 +469,18 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     }
     snprintf(jsonBuf + offset, jsonCapacity - offset, "}");
 
-    // Send HTTP POST via WinHTTP
-    HINTERNET hSession = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) {
+    // Send HTTP POST via the persistent WinHTTP session/connection.
+    if (!HubHTTPEnter()) {
         free(jsonBuf);
         return false;
     }
 
-    HINTERNET hConnect = WinHttpConnect(hSession, wHost, port, 0);
-    if (!hConnect) {
-        WinHttpCloseHandle(hSession);
+    if (!HubHTTPPrepare(wHost, port, isHttps)) {
+        LeaveCriticalSection(&g_http.lock);
         free(jsonBuf);
         return false;
     }
+    HINTERNET hConnect = g_http.connect;
 
     /* The key travels in the X-API-Key header below and nowhere else. It used
      * to be repeated in the query string, which put the credential the whole
@@ -385,8 +501,8 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     );
 
     if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        HubHTTPDropConnection();
+        LeaveCriticalSection(&g_http.lock);
         free(jsonBuf);
         return false;
     }
@@ -461,24 +577,18 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         }
         if (bResults) {
             DWORD dwSize = sizeof(dwStatusCode);
-            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
+            if (!WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                     WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize,
+                                     WINHTTP_NO_HEADER_INDEX)) {
+                bResults = FALSE;
+            }
 
             /* Keep the body. Until now it was discarded, which is why this
              * agent never noticed the update descriptor the hub has been
-             * sending it all along. */
-            if (respOut && respCap > 1) {
-                size_t used = 0;
-                for (;;) {
-                    DWORD avail = 0;
-                    if (!WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0) break;
-                    DWORD want = (DWORD)(respCap - 1 - used);
-                    if (want == 0) break;
-                    if (avail < want) want = avail;
-                    DWORD got = 0;
-                    if (!WinHttpReadData(hRequest, respOut + used, want, &got) || got == 0) break;
-                    used += got;
-                }
-                respOut[used] = '\0';
+             * sending it all along. Drain the full body even when the caller
+             * does not want it, otherwise WinHTTP cannot reuse this connection. */
+            if (bResults && !HubHTTPReadBody(hRequest, respOut, respCap)) {
+                bResults = FALSE;
             }
         }
     }
@@ -523,8 +633,10 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     }
 
     WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
+    if (!bResults) {
+        HubHTTPDropConnection();
+    }
+    LeaveCriticalSection(&g_http.lock);
     free(jsonBuf);
 
     return (bResults && (dwStatusCode == 200 || dwStatusCode == 204));

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Ominull Agent" Language="1033" Version="@VERSION@"
+           Manufacturer="Ominull Project" UpgradeCode="{A7CFC41E-3A9C-4B5B-9DF6-0A9E2BF05D1D}">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer Ominull Agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Ominull">
+          <Component Id="AgentFiles" Guid="*">
+            <File Id="AgentExe" Source="@AGENT_EXE@" KeyPath="yes" />
+            <File Id="WfpExe" Source="@WFP_EXE@" />
+            <ServiceInstall Id="AgentServiceInstall" Type="ownProcess" Name="ominulld"
+                            DisplayName="Ominull Threat Nullification Service" Start="auto"
+                            ErrorControl="normal" Vital="yes" Account="LocalSystem"
+                            Arguments="--service --config &quot;[CommonAppDataFolder]Ominull\agent.conf&quot;" />
+            <ServiceControl Id="AgentServiceControl" Name="ominulld" Start="install"
+                            Stop="both" Remove="uninstall" Wait="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="Ominull Agent" Level="1">
+      <ComponentRef Id="AgentFiles" />
+    </Feature>
+
+    <CustomAction Id="ClearWfp" FileKey="WfpExe" ExeCommand="uninstall"
+                  Execute="deferred" Return="ignore" Impersonate="no" />
+    <InstallExecuteSequence>
+      <!-- MajorUpgrade uninstalls the old product as part of the same
+           transaction. Do not purge ProgramData identity during that leg;
+           the new MSI must inherit the enrolled endpoint. -->
+      <Custom Action="ClearWfp" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,11 +14,22 @@
 #include <sys/utsname.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <linux/inet_diag.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/sock_diag.h>
+#include <linux/tcp.h>
+#include <curl/curl.h>
 
 #include "../include/release_key.h"
+
+#ifndef OMINULL_PROC_ROOT
+#define OMINULL_PROC_ROOT "/proc"
+#endif
 
 #define OMINULL_LINUX_AGENT_VERSION "1.7.16"
 
@@ -41,6 +53,11 @@
 #define MAX_PATH_LEN 512
 
 static volatile bool g_Running = true;
+static unsigned long g_ProcDescriptorWalks = 0;
+
+static void ProcPath(char* out, size_t outLen, const char* suffix) {
+    snprintf(out, outLen, "%s/%s", OMINULL_PROC_ROOT, suffix);
+}
 
 static void SignalHandler(int signum) {
     (void)signum;
@@ -66,6 +83,11 @@ typedef struct {
      * while it is still reporting. */
     char client_cert_path[256];
     char client_key_path[256];
+    char config_path[256];
+    char install_type[16];
+    char package_identifier[64];
+    char registered_package_version[64];
+    char provenance_status[16];
     /* Where api_key was read from, when it came from a file rather than an
      * argument. Every argument of every process is world-readable through
      * /proc/<pid>/cmdline, so a key passed with --key is a key any account on
@@ -77,6 +99,8 @@ typedef struct {
     bool auto_update;
     bool allow_plaintext;
 } LINUX_AGENT_CONFIG;
+
+static void EnforcementTeardown(const char* tool);
 
 typedef struct {
     char src_ip[64];
@@ -90,6 +114,207 @@ typedef struct {
     uint64_t bytes_in;
     uint64_t bytes_out;
 } LINUX_FLOW_EVENT;
+
+typedef struct {
+    unsigned long inode;
+    uint32_t cookie0;
+    uint32_t cookie1;
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+    bool found;
+} SOCKET_DIAG_RESULT;
+
+typedef struct {
+    unsigned long inode;
+    uint32_t cookie0;
+    uint32_t cookie1;
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+    bool valid;
+} SOCKET_COUNTER;
+
+#define SOCKET_COUNTER_CAP 1024
+static SOCKET_COUNTER g_SocketCounters[SOCKET_COUNTER_CAP];
+
+static size_t SocketCounterSlot(unsigned long inode, uint32_t cookie0, uint32_t cookie1) {
+    uint64_t h = (uint64_t)inode * 11400714819323198485ull;
+    h ^= (uint64_t)cookie0 << 17;
+    h ^= (uint64_t)cookie1 * 0x9e3779b97f4a7c15ull;
+    return (size_t)(h & (SOCKET_COUNTER_CAP - 1));
+}
+
+/* SOCK_DIAG returns cumulative TCP counters. Keep the last reading per socket
+ * cookie and report only the interval delta, so a connection that remains open
+ * across several heartbeats is not counted once per heartbeat. A bounded open
+ * addressing table is enough for the 64-flow wire cap and refuses to alias a
+ * reused inode into an unrelated connection. */
+static uint64_t SocketCounterDelta(unsigned long inode, uint32_t cookie0, uint32_t cookie1,
+                                    uint64_t bytesIn, uint64_t bytesOut, uint64_t* outIn,
+                                    uint64_t* outOut) {
+    size_t start = SocketCounterSlot(inode, cookie0, cookie1);
+    for (size_t probe = 0; probe < SOCKET_COUNTER_CAP; probe++) {
+        SOCKET_COUNTER* slot = &g_SocketCounters[(start + probe) & (SOCKET_COUNTER_CAP - 1)];
+        if (!slot->valid) {
+            slot->valid = true;
+            slot->inode = inode;
+            slot->cookie0 = cookie0;
+            slot->cookie1 = cookie1;
+            slot->bytes_in = bytesIn;
+            slot->bytes_out = bytesOut;
+            *outIn = 0;
+            *outOut = 0;
+            return 1;
+        }
+        if (slot->inode == inode && slot->cookie0 == cookie0 && slot->cookie1 == cookie1) {
+            *outIn = bytesIn >= slot->bytes_in ? bytesIn - slot->bytes_in : 0;
+            *outOut = bytesOut >= slot->bytes_out ? bytesOut - slot->bytes_out : 0;
+            slot->bytes_in = bytesIn;
+            slot->bytes_out = bytesOut;
+            return 1;
+        }
+    }
+    *outIn = 0;
+    *outOut = 0;
+    return 0;
+}
+
+static bool SocketDiagResultFor(const unsigned long* inodes, size_t count,
+                                SOCKET_DIAG_RESULT* results, uint32_t inode,
+                                uint32_t cookie0, uint32_t cookie1,
+                                const struct tcp_info* info, size_t infoLen) {
+    if (infoLen < offsetof(struct tcp_info, tcpi_bytes_received) + sizeof(info->tcpi_bytes_received) ||
+        infoLen < offsetof(struct tcp_info, tcpi_bytes_sent) + sizeof(info->tcpi_bytes_sent)) {
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (inodes[i] != (unsigned long)inode) continue;
+        results[i].inode = inodes[i];
+        results[i].cookie0 = cookie0;
+        results[i].cookie1 = cookie1;
+        results[i].bytes_in = info->tcpi_bytes_received;
+        results[i].bytes_out = info->tcpi_bytes_sent;
+        results[i].found = true;
+        return true;
+    }
+    return false;
+}
+
+/* Query one address family of TCP sockets once and join the result to the
+ * already parsed /proc/net rows by inode. One netlink dump replaces one
+ * per-socket ioctl or helper process and gives real cumulative byte counters
+ * when the kernel exposes them. Unsupported kernels leave the fields
+ * unmeasured (zero). */
+static bool QuerySocketDiagFamily(const unsigned long* inodes, size_t count,
+                                  SOCKET_DIAG_RESULT* results, int family) {
+    if (count == 0) return true;
+
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_INET_DIAG);
+    if (fd < 0) return false;
+
+    struct {
+        struct nlmsghdr header;
+        struct inet_diag_req_v2 request;
+    } query;
+    memset(&query, 0, sizeof(query));
+    query.header.nlmsg_len = NLMSG_LENGTH(sizeof(query.request));
+    query.header.nlmsg_type = SOCK_DIAG_BY_FAMILY;
+    query.header.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    query.header.nlmsg_seq = 1;
+    query.request.sdiag_family = (uint8_t)family;
+    query.request.sdiag_protocol = IPPROTO_TCP;
+    query.request.idiag_ext = (uint8_t)(1U << (INET_DIAG_INFO - 1));
+    query.request.idiag_states = UINT32_MAX;
+
+    bool ok = send(fd, &query, query.header.nlmsg_len, 0) == (ssize_t)query.header.nlmsg_len;
+    if (!ok) {
+        close(fd);
+        return false;
+    }
+
+    unsigned char buffer[65536];
+    bool done = false;
+    while (!done) {
+        ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+        if (received == 0) {
+            ok = false;
+            break;
+        }
+        for (struct nlmsghdr* header = (struct nlmsghdr*)buffer;
+             NLMSG_OK(header, (unsigned int)received);
+             header = NLMSG_NEXT(header, received)) {
+            if (header->nlmsg_type == NLMSG_DONE) {
+                done = true;
+                break;
+            }
+            if (header->nlmsg_type == NLMSG_ERROR) {
+                ok = false;
+                done = true;
+                break;
+            }
+            if (header->nlmsg_type != SOCK_DIAG_BY_FAMILY ||
+                NLMSG_PAYLOAD(header, 0) < sizeof(struct inet_diag_msg)) continue;
+
+            const struct inet_diag_msg* message = NLMSG_DATA(header);
+            size_t attrLen = NLMSG_PAYLOAD(header, 0) - sizeof(*message);
+            struct rtattr* attr = (struct rtattr*)((unsigned char*)message + sizeof(*message));
+            const struct tcp_info* info = NULL;
+            size_t infoLen = 0;
+            for (; RTA_OK(attr, (int)attrLen); attr = RTA_NEXT(attr, attrLen)) {
+                if ((attr->rta_type & NLA_F_NESTED) == 0 && attr->rta_type == INET_DIAG_INFO) {
+                    info = RTA_DATA(attr);
+                    infoLen = RTA_PAYLOAD(attr);
+                    break;
+                }
+            }
+            if (info) {
+                SocketDiagResultFor(inodes, count, results, message->idiag_inode,
+                                    message->id.idiag_cookie[0], message->id.idiag_cookie[1],
+                                    info, infoLen);
+            }
+        }
+    }
+    close(fd);
+    return ok;
+}
+
+static bool QuerySocketDiag(const unsigned long* inodes, size_t count,
+                            SOCKET_DIAG_RESULT* results) {
+    bool ipv4 = QuerySocketDiagFamily(inodes, count, results, AF_INET);
+    bool ipv6 = QuerySocketDiagFamily(inodes, count, results, AF_INET6);
+    return ipv4 && ipv6;
+}
+
+static void DetectPackageProvenance(LINUX_AGENT_CONFIG* config) {
+    snprintf(config->install_type, sizeof(config->install_type), "unknown");
+    config->package_identifier[0] = '\0';
+    config->registered_package_version[0] = '\0';
+    snprintf(config->provenance_status, sizeof(config->provenance_status), "unknown");
+
+    char executable[sizeof(config->client_cert_path)] = {0};
+    ssize_t executable_len = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    if (executable_len <= 0) return;
+    executable[executable_len] = '\0';
+    if (strcmp(executable, "/opt/ominull/bin/ominulld") != 0) return;
+
+    FILE* query = popen("dpkg-query -W -f='${Status}\\t${Version}\\n' ominull-agent 2>/dev/null", "r");
+    if (!query) return;
+	char install[16] = {0}, result[16] = {0}, state[16] = {0}, version[64] = {0};
+	int scanned = fscanf(query, "%15s %15s %15s %63s", install, result, state, version);
+	int exit_code = pclose(query);
+	if (exit_code != 0 || scanned != 4 || strcmp(install, "install") != 0 || strcmp(result, "ok") != 0 ||
+	    strcmp(state, "installed") != 0 || version[0] == '\0') return;
+
+    snprintf(config->install_type, sizeof(config->install_type), "deb");
+    snprintf(config->package_identifier, sizeof(config->package_identifier), "ominull-agent");
+    snprintf(config->registered_package_version, sizeof(config->registered_package_version), "%s", version);
+    snprintf(config->provenance_status, sizeof(config->provenance_status),
+             strcmp(version, OMINULL_LINUX_AGENT_VERSION) == 0 ? "native" : "mismatch");
+}
 
 /* ReadKeyFile takes the first line of a file as the API key. A file is the only
  * channel that keeps the credential off the command line, and the mode is
@@ -129,6 +354,136 @@ static bool ReadKeyFile(const char* path, char* out, size_t cap) {
     return true;
 }
 
+static void SetConfigValue(LINUX_AGENT_CONFIG* config, const char* key, const char* value) {
+    if (strcmp(key, "hub_url") == 0) snprintf(config->hub_url, sizeof(config->hub_url), "%s", value);
+    else if (strcmp(key, "key_path") == 0) snprintf(config->key_path, sizeof(config->key_path), "%s", value);
+    else if (strcmp(key, "endpoint_id") == 0) snprintf(config->endpoint_id, sizeof(config->endpoint_id), "%s", value);
+    else if (strcmp(key, "role_tag") == 0) snprintf(config->role_tag, sizeof(config->role_tag), "%s", value);
+    else if (strcmp(key, "location_id") == 0) snprintf(config->location_id, sizeof(config->location_id), "%s", value);
+    else if (strcmp(key, "ca_path") == 0) snprintf(config->ca_path, sizeof(config->ca_path), "%s", value);
+    else if (strcmp(key, "client_cert_path") == 0) snprintf(config->client_cert_path, sizeof(config->client_cert_path), "%s", value);
+    else if (strcmp(key, "client_key_path") == 0) snprintf(config->client_key_path, sizeof(config->client_key_path), "%s", value);
+    else if (strcmp(key, "cf_client_id") == 0) snprintf(config->cf_client_id, sizeof(config->cf_client_id), "%s", value);
+    else if (strcmp(key, "cf_client_secret") == 0) snprintf(config->cf_client_secret, sizeof(config->cf_client_secret), "%s", value);
+    else if (strcmp(key, "auto_update") == 0) config->auto_update = strcmp(value, "0") != 0;
+    else if (strcmp(key, "allow_plaintext") == 0) config->allow_plaintext = strcmp(value, "1") == 0;
+}
+
+static bool LoadConfigFile(LINUX_AGENT_CONFIG* config, const char* path) {
+    FILE* file = fopen(path, "rb");
+    if (!file) return false;
+    char line[1024];
+    while (fgets(line, sizeof(line), file)) {
+        char* value = strchr(line, '=');
+        if (!value) continue;
+        *value++ = '\0';
+        value[strcspn(value, "\r\n")] = '\0';
+        if (line[0] == '#') continue;
+        SetConfigValue(config, line, value);
+    }
+    fclose(file);
+    return true;
+}
+
+static bool WritePrivateFile(const char* path, const char* data, mode_t mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, mode);
+    if (fd < 0) return false;
+    size_t len = strlen(data), written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, data + written, len - written);
+        if (n <= 0) {
+            close(fd);
+            unlink(path);
+            return false;
+        }
+        written += (size_t)n;
+    }
+    fchmod(fd, mode);
+    return close(fd) == 0;
+}
+
+static bool CopyPrivateFile(const char* source, const char* destination, mode_t mode) {
+    int input = open(source, O_RDONLY | O_NOFOLLOW);
+    if (input < 0) return false;
+    int output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, mode);
+    if (output < 0) {
+        close(input);
+        return false;
+    }
+    char buffer[16384];
+    bool ok = true;
+    for (;;) {
+        ssize_t n = read(input, buffer, sizeof(buffer));
+        if (n == 0) break;
+        if (n < 0) { ok = false; break; }
+        ssize_t offset = 0;
+        while (offset < n) {
+            ssize_t wrote = write(output, buffer + offset, (size_t)(n - offset));
+            if (wrote <= 0) { ok = false; break; }
+            offset += wrote;
+        }
+        if (!ok) break;
+    }
+    fchmod(output, mode);
+    close(input);
+    if (close(output) != 0) ok = false;
+    if (!ok) unlink(destination);
+    return ok;
+}
+
+/* Package-owned enrollment writer. It receives the credential and staged
+ * certificate paths on stdin, so bootstrap never writes a daemon or unit and
+ * never places the tenant key in a privileged process argument. */
+static bool ConfigureFromStdin(void) {
+    char hub[256] = {0}, key[128] = {0}, endpoint[64] = {0};
+    char role[64] = "workstation", location[64] = "loc-home";
+    char caSource[256] = {0}, certSource[256] = {0}, keySource[256] = {0};
+    char cfID[128] = {0}, cfSecret[128] = {0};
+    bool allowPlaintext = false;
+    char line[1024];
+    while (fgets(line, sizeof(line), stdin)) {
+        char* value = strchr(line, '=');
+        if (!value) continue;
+        *value++ = '\0';
+        value[strcspn(value, "\r\n")] = '\0';
+        if (strchr(value, '\r') || strchr(value, '\n')) return false;
+        if (strcmp(line, "hub_url") == 0) snprintf(hub, sizeof(hub), "%s", value);
+        else if (strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
+        else if (strcmp(line, "endpoint_id") == 0) snprintf(endpoint, sizeof(endpoint), "%s", value);
+        else if (strcmp(line, "role_tag") == 0) snprintf(role, sizeof(role), "%s", value);
+        else if (strcmp(line, "location_id") == 0) snprintf(location, sizeof(location), "%s", value);
+        else if (strcmp(line, "ca_source") == 0) snprintf(caSource, sizeof(caSource), "%s", value);
+        else if (strcmp(line, "client_cert_source") == 0) snprintf(certSource, sizeof(certSource), "%s", value);
+        else if (strcmp(line, "client_key_source") == 0) snprintf(keySource, sizeof(keySource), "%s", value);
+        else if (strcmp(line, "cf_client_id") == 0) snprintf(cfID, sizeof(cfID), "%s", value);
+        else if (strcmp(line, "cf_client_secret") == 0) snprintf(cfSecret, sizeof(cfSecret), "%s", value);
+        else if (strcmp(line, "allow_plaintext") == 0) allowPlaintext = strcmp(value, "1") == 0;
+    }
+    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) return false;
+    if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) return false;
+    if (mkdir("/etc/ominull", 0755) != 0 && errno != EEXIST) return false;
+    if (mkdir("/var/lib/ominull", 0755) != 0 && errno != EEXIST) return false;
+    if (mkdir(OMINULL_UPDATE_DIR, 0700) != 0 && errno != EEXIST) return false;
+    if (!WritePrivateFile("/etc/ominull/agent.key", key, 0600)) return false;
+    if (!CopyPrivateFile(caSource, "/etc/ominull/ca.crt", 0644)) return false;
+    if (certSource[0] && !CopyPrivateFile(certSource, "/etc/ominull/client.crt", 0600)) return false;
+    if (keySource[0] && !CopyPrivateFile(keySource, "/etc/ominull/client.key", 0600)) return false;
+
+    char config[2048];
+    int n = snprintf(config, sizeof(config),
+                     "hub_url=%s\nkey_path=/etc/ominull/agent.key\nendpoint_id=%s\nrole_tag=%s\n"
+                     "location_id=%s\nca_path=/etc/ominull/ca.crt\nclient_cert_path=/etc/ominull/client.crt\n"
+                     "client_key_path=/etc/ominull/client.key\ncf_client_id=%s\ncf_client_secret=%s\n"
+                     "auto_update=1\nallow_plaintext=%d\n",
+                     hub, endpoint, role, location, cfID, cfSecret, allowPlaintext ? 1 : 0);
+    if (n < 0 || (size_t)n >= sizeof(config) || !WritePrivateFile("/etc/ominull/agent.conf", config, 0600)) {
+        unlink("/etc/ominull/agent.key");
+        return false;
+    }
+    printf("[+] Package-owned agent configuration installed.\n");
+    return true;
+}
+
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
@@ -143,6 +498,9 @@ static void PrintUsage(const char* prog) {
     printf("  --allow-plaintext  Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
     printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
     printf("  --version          Print the version and exit.\n");
+    printf("  --config <path>    Read package-owned runtime configuration.\n");
+    printf("  --configure-stdin  Install enrollment material from stdin.\n");
+    printf("  --cleanup          Remove Ominull-owned host enforcement state.\n");
 }
 
 /* ---------------------------------------------------------------------------
@@ -203,9 +561,6 @@ static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
  * certificate. Without --proto a redirect to http:// would hand the API key
  * over in the clear on the next hop. */
 #define HUB_CURL_ARGS_LEN 1024
-#define OMINULL_STR_(x) #x
-#define OMINULL_STR(x) OMINULL_STR_(x)
-
 /* The hub answers a rejected batch with a status and a body, and curl reports
  * both as success. The marker splits the status back off the response and
  * makes a refusal visible, because an agent whose credentials the hub no
@@ -286,167 +641,311 @@ static void GetPrimaryNetworkInfo(char* outIp, size_t ipLen, char* outMac, size_
     }
 }
 
-// Find PID and process executable path for a given socket inode
-static bool FindProcessForInode(unsigned long targetInode, uint32_t* outPid, char* outPath, size_t maxPathLen) {
-    DIR* procDir = opendir("/proc");
-    if (!procDir) return false;
+typedef struct {
+    unsigned long inode;
+    uint32_t pid;
+    char path[MAX_PATH_LEN];
+} PROC_SOCKET_OWNER;
 
-    char targetSocketStr[64];
-    snprintf(targetSocketStr, sizeof(targetSocketStr), "socket:[%lu]", targetInode);
+typedef struct {
+    uint32_t pid;
+    unsigned long long start_time;
+    char path[MAX_PATH_LEN];
+    bool valid;
+} PROCESS_PATH_CACHE_ENTRY;
+
+#define PROCESS_PATH_CACHE_CAP 256
+static PROCESS_PATH_CACHE_ENTRY g_ProcessPathCache[PROCESS_PATH_CACHE_CAP];
+
+static bool ReadProcessStartTime(uint32_t pid, unsigned long long* outStart) {
+    char statSuffix[64];
+    char statPath[256];
+    snprintf(statSuffix, sizeof(statSuffix), "%u/stat", pid);
+    ProcPath(statPath, sizeof(statPath), statSuffix);
+
+    FILE* fp = fopen(statPath, "r");
+    if (!fp) return false;
+    char line[1024];
+    bool ok = fgets(line, sizeof(line), fp) != NULL;
+    fclose(fp);
+    if (!ok) return false;
+
+    /* The comm field may contain spaces and ')' characters. The last ')' is
+     * the stable delimiter; field 22 is the twentieth token after state. */
+    char* fields = strrchr(line, ')');
+    if (!fields) return false;
+    fields++;
+    char* save = NULL;
+    char* token = strtok_r(fields, " ", &save);
+    int field = 3;
+    while (token) {
+        if (field == 22) {
+            char* end = NULL;
+            unsigned long long value = strtoull(token, &end, 10);
+            if (end == token) return false;
+            *outStart = value;
+            return true;
+        }
+        field++;
+        token = strtok_r(NULL, " ", &save);
+    }
+    return false;
+}
+
+static bool ReadProcessPath(uint32_t pid, char* outPath, size_t maxPathLen) {
+    char suffix[64];
+    char path[256];
+    snprintf(suffix, sizeof(suffix), "%u/exe", pid);
+    ProcPath(path, sizeof(path), suffix);
+    ssize_t length = readlink(path, outPath, maxPathLen - 1);
+    if (length > 0) {
+        outPath[length] = '\0';
+        return true;
+    }
+
+    snprintf(suffix, sizeof(suffix), "%u/cmdline", pid);
+    ProcPath(path, sizeof(path), suffix);
+    FILE* fp = fopen(path, "r");
+    if (fp) {
+        if (fgets(outPath, (int)maxPathLen, fp)) {
+            outPath[strcspn(outPath, "\r\n\0")] = '\0';
+            fclose(fp);
+            return outPath[0] != '\0';
+        }
+        fclose(fp);
+    }
+    snprintf(outPath, maxPathLen, "process_%u", pid);
+    return false;
+}
+
+static const char* CachedProcessPath(uint32_t pid, char* fallback, size_t fallbackLen) {
+    unsigned long long startTime = 0;
+    bool hasStartTime = ReadProcessStartTime(pid, &startTime);
+    size_t slot = (size_t)pid % PROCESS_PATH_CACHE_CAP;
+    PROCESS_PATH_CACHE_ENTRY* entry = &g_ProcessPathCache[slot];
+    if (entry->valid && entry->pid == pid &&
+        ((!hasStartTime && entry->start_time == 0) ||
+         (hasStartTime && entry->start_time == startTime))) {
+        return entry->path;
+    }
+
+    ReadProcessPath(pid, fallback, fallbackLen);
+    if (hasStartTime) {
+        entry->pid = pid;
+        entry->start_time = startTime;
+        snprintf(entry->path, sizeof(entry->path), "%s", fallback);
+        entry->valid = true;
+        return entry->path;
+    }
+    return fallback;
+}
+
+static bool ParseSocketLink(const char* linkTarget, unsigned long* outInode) {
+    unsigned long inode = 0;
+    char extra = '\0';
+    if (sscanf(linkTarget, "socket:[%lu]%c", &inode, &extra) != 1 || inode == 0) {
+        return false;
+    }
+    *outInode = inode;
+    return true;
+}
+
+static void IndexSocketOwners(const unsigned long* targetInodes, size_t targetCount,
+                              PROC_SOCKET_OWNER* owners) {
+    DIR* procDir = opendir(OMINULL_PROC_ROOT);
+    if (!procDir) return;
 
     struct dirent* procEntry;
     while ((procEntry = readdir(procDir)) != NULL) {
-        if (!isdigit(procEntry->d_name[0])) continue;
+        if (!isdigit((unsigned char)procEntry->d_name[0])) continue;
 
-        uint32_t pid = (uint32_t)atoi(procEntry->d_name);
+        char* end = NULL;
+        unsigned long parsedPid = strtoul(procEntry->d_name, &end, 10);
+        if (end == procEntry->d_name || *end != '\0' || parsedPid > UINT32_MAX) continue;
+        uint32_t pid = (uint32_t)parsedPid;
+
+        char fdSuffix[64];
         char fdDirPath[256];
-        snprintf(fdDirPath, sizeof(fdDirPath), "/proc/%u/fd", pid);
-
+        snprintf(fdSuffix, sizeof(fdSuffix), "%u/fd", pid);
+        ProcPath(fdDirPath, sizeof(fdDirPath), fdSuffix);
         DIR* fdDir = opendir(fdDirPath);
         if (!fdDir) continue;
 
         struct dirent* fdEntry;
-        bool found = false;
+        char pathFallback[MAX_PATH_LEN] = {0};
+        const char* processPath = NULL;
         while ((fdEntry = readdir(fdDir)) != NULL) {
             if (fdEntry->d_name[0] == '.') continue;
 
             char fdLinkPath[512];
             snprintf(fdLinkPath, sizeof(fdLinkPath), "%s/%s", fdDirPath, fdEntry->d_name);
-
             char linkTarget[512];
+            g_ProcDescriptorWalks++;
             ssize_t linkLen = readlink(fdLinkPath, linkTarget, sizeof(linkTarget) - 1);
-            if (linkLen > 0) {
-                linkTarget[linkLen] = '\0';
-                if (strcmp(linkTarget, targetSocketStr) == 0) {
-                    *outPid = pid;
-                    found = true;
+            if (linkLen <= 0) continue;
+            linkTarget[linkLen] = '\0';
 
-                    // Read process exe path
-                    char exeLink[256];
-                    snprintf(exeLink, sizeof(exeLink), "/proc/%u/exe", pid);
-                    ssize_t exeLen = readlink(exeLink, outPath, maxPathLen - 1);
-                    if (exeLen > 0) {
-                        outPath[exeLen] = '\0';
-                    } else {
-                        // Fallback to cmdline
-                        char cmdPath[256];
-                        snprintf(cmdPath, sizeof(cmdPath), "/proc/%u/cmdline", pid);
-                        FILE* cmdFp = fopen(cmdPath, "r");
-                        if (cmdFp) {
-                            if (fgets(outPath, maxPathLen - 1, cmdFp)) {
-                                size_t clen = strlen(outPath);
-                                if (clen > 0 && outPath[clen - 1] == '\n') outPath[clen - 1] = '\0';
-                            } else {
-                                snprintf(outPath, maxPathLen, "process_%u", pid);
-                            }
-                            fclose(cmdFp);
-                        } else {
-                            snprintf(outPath, maxPathLen, "process_%u", pid);
-                        }
-                    }
-                    break;
-                }
+            unsigned long inode = 0;
+            if (!ParseSocketLink(linkTarget, &inode)) continue;
+            for (size_t i = 0; i < targetCount; i++) {
+                if (owners[i].pid != 0 || targetInodes[i] != inode) continue;
+                if (!processPath) processPath = CachedProcessPath(pid, pathFallback, sizeof(pathFallback));
+                owners[i].inode = inode;
+                owners[i].pid = pid;
+                snprintf(owners[i].path, sizeof(owners[i].path), "%s", processPath);
+                break;
             }
         }
         closedir(fdDir);
-
-        if (found) {
-            closedir(procDir);
-            return true;
-        }
     }
-
     closedir(procDir);
-    return false;
 }
 
-// Convert hex string IP in network byte order to standard dotted quad
+// Convert a /proc/net/tcp IPv4 address to standard dotted quad.
 static void ParseHexIPv4(const char* hexStr, char* outIp, size_t maxLen) {
     unsigned int raw = 0;
     if (sscanf(hexStr, "%X", &raw) == 1) {
         struct in_addr addr;
         addr.s_addr = raw; // /proc/net/tcp stores in network byte order on x86
         const char* res = inet_ntop(AF_INET, &addr, outIp, maxLen);
-        if (!res) strncpy(outIp, "0.0.0.0", maxLen - 1);
+        if (!res) {
+            strncpy(outIp, "0.0.0.0", maxLen - 1);
+            outIp[maxLen - 1] = '\0';
+        }
     } else {
         strncpy(outIp, "0.0.0.0", maxLen - 1);
+        outIp[maxLen - 1] = '\0';
     }
 }
 
-// Capture active TCP/UDP socket flows from Linux /proc/net
-static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) {
-    size_t count = 0;
+// /proc/net/tcp6 prints each 32-bit word in host byte order. Decode the words
+// rather than reversing the complete address: reversing all 16 bytes would
+// make the first and last halves change places and corrupt non-loopback peers.
+static bool ParseHexIPv6(const char* hexStr, char* outIp, size_t maxLen) {
+    if (strlen(hexStr) != 32) return false;
 
-    FILE* fp = fopen("/proc/net/tcp", "r");
-    if (!fp) return 0;
-
-    char line[512];
-    // Skip header line
-    if (!fgets(line, sizeof(line), fp)) {
-        fclose(fp);
-        return 0;
+    unsigned char encoded[16];
+    for (size_t i = 0; i < sizeof(encoded); i++) {
+        char byte[3] = {hexStr[i * 2], hexStr[i * 2 + 1], '\0'};
+        char* end = NULL;
+        unsigned long value = strtoul(byte, &end, 16);
+        if (end != byte + 2 || value > 0xff) return false;
+        encoded[i] = (unsigned char)value;
     }
 
-    while (fgets(line, sizeof(line), fp) && count < maxEvents) {
-        // Format: sl local_address rem_address st tx_queue:rx_queue tr tm->when retrnsmt uid timeout inode
+    unsigned char address[16];
+    for (size_t word = 0; word < 4; word++) {
+        for (size_t byte = 0; byte < 4; byte++) {
+            address[word * 4 + byte] = encoded[word * 4 + (3 - byte)];
+        }
+    }
+    if (!inet_ntop(AF_INET6, address, outIp, maxLen)) {
+        if (maxLen > 0) {
+            strncpy(outIp, "::", maxLen - 1);
+            outIp[maxLen - 1] = '\0';
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool IsZeroAddress(const char* hexStr) {
+    for (const char* p = hexStr; *p; p++) {
+        if (*p != '0') return false;
+    }
+    return true;
+}
+
+static bool IsLoopbackAddress(const char* address) {
+    return strcmp(address, "127.0.0.1") == 0 || strcmp(address, "::1") == 0;
+}
+
+// Read one TCP address-family table from /proc/net. The table is read first,
+// then process descriptors are walked once and joined by inode. That keeps
+// descriptor reads proportional to the proc tree, not to socket count.
+static void CollectSocketTable(const char* tableName, bool ipv6,
+                               LINUX_FLOW_EVENT* outEvents, size_t maxEvents,
+                               unsigned long* targetInodes, size_t* count) {
+    char tablePath[256];
+    ProcPath(tablePath, sizeof(tablePath), tableName);
+    FILE* fp = fopen(tablePath, "r");
+    if (!fp) return;
+
+    char line[512];
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return;
+    }
+
+    while (*count < maxEvents && fgets(line, sizeof(line), fp)) {
+        // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
         int sl = 0, state = 0;
         char localAddrHex[64] = {0}, remAddrHex[64] = {0};
         unsigned int localPort = 0, remPort = 0;
         unsigned long inode = 0;
-        unsigned long txQueue = 0, rxQueue = 0;
+        int matched = sscanf(line, "%d: %64[0-9A-Fa-f]:%X %64[0-9A-Fa-f]:%X %X %*X:%*X %*X:%*X %*X %*d %*d %lu",
+                             &sl, localAddrHex, &localPort, remAddrHex, &remPort, &state, &inode);
+        if (matched < 7 || inode == 0 || remPort == 0 || IsZeroAddress(remAddrHex)) continue;
 
-        int matched = sscanf(line, "%d: %64[0-9A-Fa-f]:%X %64[0-9A-Fa-f]:%X %X %lX:%lX %*X:%*X %*X %*d %*d %lu",
-                             &sl, localAddrHex, &localPort, remAddrHex, &remPort, &state, &txQueue, &rxQueue, &inode);
-
-        if (matched < 8 || inode == 0) continue;
-
-        // Skip listening sockets or 0.0.0.0 remote destinations
-        if (remPort == 0 || strcmp(remAddrHex, "00000000") == 0) continue;
-
-        LINUX_FLOW_EVENT* ev = &outEvents[count];
-        memset(ev, 0, sizeof(LINUX_FLOW_EVENT));
-
-        ParseHexIPv4(localAddrHex, ev->src_ip, sizeof(ev->src_ip));
-        ParseHexIPv4(remAddrHex, ev->dst_ip, sizeof(ev->dst_ip));
+        LINUX_FLOW_EVENT* ev = &outEvents[*count];
+        memset(ev, 0, sizeof(*ev));
+        if (ipv6) {
+            if (!ParseHexIPv6(localAddrHex, ev->src_ip, sizeof(ev->src_ip)) ||
+                !ParseHexIPv6(remAddrHex, ev->dst_ip, sizeof(ev->dst_ip))) {
+                continue;
+            }
+        } else {
+            ParseHexIPv4(localAddrHex, ev->src_ip, sizeof(ev->src_ip));
+            ParseHexIPv4(remAddrHex, ev->dst_ip, sizeof(ev->dst_ip));
+        }
         ev->src_port = (uint16_t)localPort;
         ev->dst_port = (uint16_t)remPort;
+        if (IsLoopbackAddress(ev->dst_ip) || IsLoopbackAddress(ev->src_ip)) continue;
+        if (ev->dst_port == 9999 && strcmp(ev->dst_ip, ev->src_ip) == 0) continue;
 
-        // Prevent self-referential telemetry storms on Hub nodes: skip loopback and local port 9999
-        if (strcmp(ev->dst_ip, "127.0.0.1") == 0 || strcmp(ev->src_ip, "127.0.0.1") == 0) continue;
-        if (ev->dst_port == 9999 && (strcmp(ev->dst_ip, ev->src_ip) == 0 || strcmp(ev->dst_ip, "127.0.0.1") == 0)) continue;
-
-        ev->protocol = 6; // TCP
+        ev->protocol = IPPROTO_TCP;
         strncpy(ev->direction, "OUTBOUND", sizeof(ev->direction) - 1);
+        targetInodes[*count] = inode;
+        (*count)++;
+    }
+    fclose(fp);
+}
 
-        // Resolve PID and process binary path
-        uint32_t pid = 0;
-        char procPath[MAX_PATH_LEN] = {0};
-        if (FindProcessForInode(inode, &pid, procPath, sizeof(procPath))) {
-            ev->process_id = pid;
-            snprintf(ev->process_path, sizeof(ev->process_path), "%s", procPath);
-        } else {
-            ev->process_id = 0;
-            snprintf(ev->process_path, sizeof(ev->process_path), "/usr/sbin/kernel");
+// Capture active TCP socket flows from both Linux address families.
+static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) {
+    size_t count = 0;
+    unsigned long targetInodes[MAX_FLOWS_PER_BATCH];
+    PROC_SOCKET_OWNER owners[MAX_FLOWS_PER_BATCH];
+    memset(targetInodes, 0, sizeof(targetInodes));
+    memset(owners, 0, sizeof(owners));
+
+    CollectSocketTable("net/tcp", false, outEvents, maxEvents, targetInodes, &count);
+    CollectSocketTable("net/tcp6", true, outEvents, maxEvents, targetInodes, &count);
+
+    SOCKET_DIAG_RESULT socketStats[MAX_FLOWS_PER_BATCH];
+    memset(socketStats, 0, sizeof(socketStats));
+    (void)QuerySocketDiag(targetInodes, count, socketStats);
+    for (size_t i = 0; i < count; i++) {
+        if (!socketStats[i].found) continue;
+        uint64_t bytesIn = 0, bytesOut = 0;
+        if (SocketCounterDelta(socketStats[i].inode, socketStats[i].cookie0,
+                                socketStats[i].cookie1, socketStats[i].bytes_in,
+                                socketStats[i].bytes_out, &bytesIn, &bytesOut)) {
+            outEvents[i].bytes_in = bytesIn;
+            outEvents[i].bytes_out = bytesOut;
         }
-
-        /* The queue depths from /proc/net/tcp, and zero when there are none.
-         *
-         * The fallback here used to be 1024 + (inode % 4096) in and
-         * 512 + (inode % 2048) out - a hash of the socket inode, reported as a
-         * measurement and totalled on the console as bandwidth. Zero is the
-         * honest answer for a flow this path cannot measure; the hub no longer
-         * substitutes anything for it either.
-         *
-         * What is reported when they are non-zero is a point-in-time queue
-         * depth, not a cumulative byte count for the flow. It is a real
-         * reading, which is why it is kept, but it is not the same quantity. */
-        ev->bytes_in = rxQueue;
-        ev->bytes_out = txQueue;
-
-        count++;
     }
 
-    fclose(fp);
+    IndexSocketOwners(targetInodes, count, owners);
+    for (size_t i = 0; i < count; i++) {
+        if (owners[i].pid != 0) {
+            outEvents[i].process_id = owners[i].pid;
+            snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "%s", owners[i].path);
+        } else {
+            outEvents[i].process_id = 0;
+            snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "/usr/bin/system");
+        }
+    }
     return count;
 }
 
@@ -492,54 +991,6 @@ static int RunTool(const char* const argv[]) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-/* HubCurlSecurityArgv is the argument-vector form of HubCurlSecurityArgs. The
- * string form still builds the updater's shell script, where the paths come
- * from this endpoint's own config file and a shell is genuinely wanted; the
- * heartbeat has neither property and takes this one. */
-static void HubCurlSecurityArgv(const LINUX_AGENT_CONFIG* config,
-                                const char* argv[], int* n, int cap) {
-    if (!HubUsesTLS(config)) return;
-    if (*n + 6 > cap) return;
-    argv[(*n)++] = "--cacert";
-    argv[(*n)++] = config->ca_path;
-    argv[(*n)++] = "--proto";
-    argv[(*n)++] = "=https";
-    argv[(*n)++] = "--proto-redir";
-    argv[(*n)++] = "=https";
-    if (config->client_cert_path[0] && config->client_key_path[0] &&
-        access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
-        if (*n + 4 > cap) return;
-        argv[(*n)++] = "--cert";
-        argv[(*n)++] = config->client_cert_path;
-        argv[(*n)++] = "--key";
-        argv[(*n)++] = config->client_key_path;
-    }
-}
-
-/* AppendCurlConfigHeader writes one `header = "..."` line in curl's own
- * configuration syntax, escaping the two characters that syntax reserves. */
-static void AppendCurlConfigHeader(char* out, size_t cap, size_t* len,
-                                   const char* name, const char* value) {
-    if (!value || !value[0]) return;
-    size_t o = *len;
-    const char* prefix = "header = \"";
-    for (const char* q = prefix; *q && o + 2 < cap; q++) out[o++] = *q;
-    for (const char* q = name; *q && o + 2 < cap; q++) out[o++] = *q;
-    if (o + 3 < cap) { out[o++] = ':'; out[o++] = ' '; }
-    for (const char* q = value; *q && o + 3 < cap; q++) {
-        if (*q == '"' || *q == '\\') out[o++] = '\\';
-        out[o++] = *q;
-    }
-    if (o + 3 < cap) { out[o++] = '"'; out[o++] = '\n'; }
-    out[o] = '\0';
-    *len = o;
-}
-
-/* HUB_CURL_CONFIG_FD is where the child finds the credential file curl reads
- * with -K. It is a pipe, not a file: the key is written into the child and is
- * never on the filesystem and never in an argument vector. */
-#define HUB_CURL_CONFIG_FD 3
-
 /* RunHubCurl posts one JSON body to the hub and returns the response.
  *
  * Two things are deliberate here and both were wrong before.
@@ -558,110 +1009,113 @@ static void AppendCurlConfigHeader(char* out, size_t cap, size_t* len,
  *
  * stderr is left alone: a refused certificate has to stay visible in the
  * journal, and that is the one failure this agent must not swallow. */
+typedef struct {
+    char* data;
+    size_t cap;
+    size_t len;
+    bool overflow;
+} HUB_RESPONSE_BUFFER;
+
+static size_t HubResponseWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    HUB_RESPONSE_BUFFER* response = (HUB_RESPONSE_BUFFER*)userdata;
+    size_t incoming = size * nmemb;
+    if (!response || !response->data || response->cap == 0) return incoming;
+    if (response->len + incoming >= response->cap) {
+        size_t available = response->cap - response->len - 1;
+        if (available > 0) memcpy(response->data + response->len, ptr, available);
+        response->len += available;
+        response->data[response->len] = '\0';
+        response->overflow = true;
+        return incoming;
+    }
+    memcpy(response->data + response->len, ptr, incoming);
+    response->len += incoming;
+    response->data[response->len] = '\0';
+    return incoming;
+}
+
+/* RunHubCurl posts one JSON body without forking. libcurl keeps its connection
+ * cache on this easy handle, so a three-second heartbeat reuses the TLS
+ * connection while each request still gets fresh headers and a bounded body. */
 static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
                        const char* body, char* out, size_t outCap) {
     if (out && outCap) out[0] = '\0';
+    static CURL* curl = NULL;
+    if (!curl) {
+        curl = curl_easy_init();
+        if (!curl) return false;
+    }
 
-    char cfg[1024];
-    size_t cfgLen = 0;
-    cfg[0] = '\0';
-    AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "Content-Type", "application/json");
-    AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "X-API-Key", config->api_key);
+    char apiHeader[256];
+    if (snprintf(apiHeader, sizeof(apiHeader), "X-API-Key: %s", config->api_key) >= (int)sizeof(apiHeader)) {
+        return false;
+    }
+    struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
+    headers = curl_slist_append(headers, apiHeader);
+    if (!headers) return false;
+
     if (config->cf_client_id[0] && config->cf_client_secret[0]) {
-        AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "CF-Access-Client-Id", config->cf_client_id);
-        AppendCurlConfigHeader(cfg, sizeof(cfg), &cfgLen, "CF-Access-Client-Secret", config->cf_client_secret);
-    }
-
-    const char* argv[32];
-    int n = 0;
-    argv[n++] = "curl";
-    argv[n++] = "-sS";
-    HubCurlSecurityArgv(config, argv, &n, 28);
-    argv[n++] = "-m";
-    argv[n++] = "5";
-    argv[n++] = "-w";
-    argv[n++] = "\n" HUB_STATUS_MARKER "%{http_code}";
-    argv[n++] = "-X";
-    argv[n++] = "POST";
-    argv[n++] = "-K";
-    argv[n++] = "/dev/fd/" OMINULL_STR(HUB_CURL_CONFIG_FD);
-    argv[n++] = "--data-binary";
-    argv[n++] = "@-";
-    argv[n++] = url;
-    argv[n] = NULL;
-
-    int cfgPipe[2], bodyPipe[2], outPipe[2];
-    if (pipe(cfgPipe) < 0) return false;
-    if (pipe(bodyPipe) < 0) { close(cfgPipe[0]); close(cfgPipe[1]); return false; }
-    if (pipe(outPipe) < 0) {
-        close(cfgPipe[0]); close(cfgPipe[1]);
-        close(bodyPipe[0]); close(bodyPipe[1]);
-        return false;
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(cfgPipe[0]); close(cfgPipe[1]);
-        close(bodyPipe[0]); close(bodyPipe[1]);
-        close(outPipe[0]); close(outPipe[1]);
-        return false;
-    }
-    if (pid == 0) {
-        close(cfgPipe[1]); close(bodyPipe[1]); close(outPipe[0]);
-        if (dup2(bodyPipe[0], STDIN_FILENO) < 0) _exit(127);
-        if (dup2(outPipe[1], STDOUT_FILENO) < 0) _exit(127);
-        if (cfgPipe[0] != HUB_CURL_CONFIG_FD) {
-            if (dup2(cfgPipe[0], HUB_CURL_CONFIG_FD) < 0) _exit(127);
-            close(cfgPipe[0]);
+        char cfID[256], cfSecret[256];
+        if (snprintf(cfID, sizeof(cfID), "CF-Access-Client-Id: %s", config->cf_client_id) >= (int)sizeof(cfID) ||
+            snprintf(cfSecret, sizeof(cfSecret), "CF-Access-Client-Secret: %s", config->cf_client_secret) >= (int)sizeof(cfSecret)) {
+            curl_slist_free_all(headers);
+            return false;
         }
-        if (bodyPipe[0] > HUB_CURL_CONFIG_FD) close(bodyPipe[0]);
-        if (outPipe[1] > HUB_CURL_CONFIG_FD) close(outPipe[1]);
-        execvp(argv[0], (char* const*)argv);
-        _exit(127);
+        headers = curl_slist_append(headers, cfID);
+        headers = curl_slist_append(headers, cfSecret);
     }
 
-    close(cfgPipe[0]); close(bodyPipe[0]); close(outPipe[1]);
-
-    /* SIGPIPE is ignored process-wide, so a curl that dies before reading the
-     * body is a short write here rather than a dead daemon. */
-    (void)!write(cfgPipe[1], cfg, cfgLen);
-    close(cfgPipe[1]);
-
-    size_t bodyLen = body ? strlen(body) : 0;
-    size_t written = 0;
-    while (written < bodyLen) {
-        ssize_t w = write(bodyPipe[1], body + written, bodyLen - written);
-        if (w <= 0) break;
-        written += (size_t)w;
-    }
-    close(bodyPipe[1]);
-
-    size_t got = 0;
-    if (out && outCap > 1) {
-        while (got < outCap - 1) {
-            ssize_t r = read(outPipe[0], out + got, outCap - 1 - got);
-            if (r <= 0) break;
-            got += (size_t)r;
+    HUB_RESPONSE_BUFFER response = {
+        .data = out, .cap = outCap, .len = 0, .overflow = false
+    };
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)(body ? strlen(body) : 0));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HubResponseWrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "OminullAgent/1.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, HubUsesTLS(config) ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, HubUsesTLS(config) ? 2L : 0L);
+    if (HubUsesTLS(config)) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, config->ca_path);
+        if (config->client_cert_path[0] && config->client_key_path[0] &&
+            access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
+            curl_easy_setopt(curl, CURLOPT_SSLCERT, config->client_cert_path);
+            curl_easy_setopt(curl, CURLOPT_SSLKEY, config->client_key_path);
+        } else {
+            curl_easy_setopt(curl, CURLOPT_SSLCERT, NULL);
+            curl_easy_setopt(curl, CURLOPT_SSLKEY, NULL);
         }
-        out[got] = '\0';
+    } else {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
+        curl_easy_setopt(curl, CURLOPT_SSLCERT, NULL);
+        curl_easy_setopt(curl, CURLOPT_SSLKEY, NULL);
     }
-    close(outPipe[0]);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
-    return got > 0;
+    CURLcode result = curl_easy_perform(curl);
+    long status = 0;
+    if (result == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (out && outCap > 1 && response.len + 1 < outCap) {
+        snprintf(out + response.len, outCap - response.len, "\n" HUB_STATUS_MARKER "%ld", status);
+    } else if (out && outCap > 0) {
+        out[outCap - 1] = '\0';
+    }
+    curl_slist_free_all(headers);
+    return result == CURLE_OK && !response.overflow;
 }
-
 /* ---------------------------------------------------------------------------
  * Host isolation.
  *
- * The hub used to deliver this as a WebSocket command, and the WebSocket route
- * was never registered on its mux - so the command had no transport, the hub
- * answered 200 "isolated", and this daemon was never told. An endpoint that the
- * console showed as cut off went on talking to the whole network. It arrives on
- * the heartbeat reply now, alongside the quarantined-peer list that has always
- * come that way, and is reconciled on every beat for the same reason that list
- * is: a host that was down when it was released must still come back.
+ * Isolation arrives on the authenticated heartbeat reply, alongside the
+ * quarantined-peer list, and is reconciled on every beat: a host that was down
+ * when it was released must still come back.
  * ------------------------------------------------------------------------- */
 
 #define OMINULL_CHAIN_IN  "OMINULL_ISO_IN"
@@ -1689,7 +2143,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
     if (!jsonBuf) return;
 
     int offset = snprintf(jsonBuf, bufCap,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"events\":[",
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
         config->endpoint_id,
         config->location_id[0] ? config->location_id : "loc-home",
         config->role_tag[0] ? config->role_tag : "workstation",
@@ -1697,7 +2151,11 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         osStr,
         config->primary_ip,
         config->primary_mac,
-        OMINULL_LINUX_AGENT_VERSION
+        OMINULL_LINUX_AGENT_VERSION,
+        config->install_type,
+        config->package_identifier,
+        config->registered_package_version,
+        config->provenance_status
     );
 
     for (size_t i = 0; i < flowCount && offset < (int)bufCap - 1024; i++) {
@@ -1715,7 +2173,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         }
 
         int written = snprintf(jsonBuf + offset, bufCap - offset,
-            "{\"layer\":\"eBPF_TC\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u}%s",
+            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u}%s",
             f->direction,
             f->protocol,
             f->src_ip,
@@ -1770,6 +2228,10 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
 
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+	if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+		fprintf(stderr, "[-] Could not initialize in-process TLS transport.\n");
+		return 1;
+	}
 
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
@@ -1779,9 +2241,21 @@ int main(int argc, char* argv[]) {
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-default");
     config.auto_update = true;
+    strcpy(config.config_path, "/etc/ominull/agent.conf");
     gethostname(config.hostname, sizeof(config.hostname) - 1);
     snprintf(config.endpoint_id, sizeof(config.endpoint_id), "linux-%.50s", config.hostname);
     GetPrimaryNetworkInfo(config.primary_ip, sizeof(config.primary_ip), config.primary_mac, sizeof(config.primary_mac));
+
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--config") == 0) {
+            strncpy(config.config_path, argv[i + 1], sizeof(config.config_path) - 1);
+            break;
+        }
+    }
+    LoadConfigFile(&config, config.config_path);
+
+    bool doConfigure = false;
+    bool doCleanup = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--hub") == 0 && i + 1 < argc) {
@@ -1790,6 +2264,12 @@ int main(int argc, char* argv[]) {
             strncpy(config.api_key, argv[++i], sizeof(config.api_key) - 1);
         } else if (strcmp(argv[i], "--key-file") == 0 && i + 1 < argc) {
             strncpy(config.key_path, argv[++i], sizeof(config.key_path) - 1);
+        } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            strncpy(config.config_path, argv[++i], sizeof(config.config_path) - 1);
+        } else if (strcmp(argv[i], "--configure-stdin") == 0) {
+            doConfigure = true;
+        } else if (strcmp(argv[i], "--cleanup") == 0) {
+            doCleanup = true;
         } else if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
             strncpy(config.endpoint_id, argv[++i], sizeof(config.endpoint_id) - 1);
         } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
@@ -1841,6 +2321,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (doConfigure) return ConfigureFromStdin() ? 0 : 1;
+    if (doCleanup) {
+        EnforcementTeardown("iptables");
+        EnforcementTeardown("ip6tables");
+        return 0;
+    }
+
     /* A key file wins over --key: a unit that carries both is one mid-migration,
      * and the file is the channel being migrated to. */
     if (config.key_path[0] && !ReadKeyFile(config.key_path, config.api_key, sizeof(config.api_key))) {
@@ -1848,12 +2335,18 @@ int main(int argc, char* argv[]) {
                 config.key_path);
         return 1;
     }
+	if (!config.api_key[0] || strcmp(config.api_key, "<provision-via-bootstrap>") == 0) {
+		fprintf(stderr, "[-] No enrolled API key is configured; refusing to start.\n");
+		return 1;
+	}
+
+    DetectPackageProvenance(&config);
 
     struct utsname sysInfo;
     uname(&sysInfo);
 
     printf("===============================================================================\n");
-    printf("     OMINULL LINUX THREAT NULLIFICATION ENGINE (eBPF + Socket Telemetry)\n");
+    printf("     OMINULL LINUX AGENT (socket collection + firewall control)\n");
     printf("===============================================================================\n");
     printf("  Endpoint ID:   %s\n", config.endpoint_id);
     printf("  Hostname:      %s\n", config.hostname);
@@ -1883,9 +2376,7 @@ int main(int argc, char* argv[]) {
      * first would otherwise take the daemon down with a SIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
 
-    printf("[+] Initializing Linux eBPF Subsystem & Socket Flow Sniffer...\n");
-    printf("[+] Attached eBPF TC classifier program: ominull_tc_egress\n");
-    printf("[+] Active eBPF maps: ominull_rules_v4, ominull_isolation\n");
+    printf("[+] Initializing Linux socket collection and firewall control...\n");
     /* Says what is about to happen, not what has happened. This line used to
      * read "Connected and continuously streaming", printed before a single
      * request had been made - so a host that could not reach the hub at all
@@ -1907,7 +2398,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("\n[*] Unloading eBPF programs and shutting down gracefully...\n");
+    printf("\n[*] Stopping Linux socket collection and shutting down gracefully...\n");
     return 0;
 }
-

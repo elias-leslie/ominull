@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -43,19 +44,9 @@ func enrolmentPlatforms() []enrolmentPlatform {
 		{
 			key: "linux", label: "Linux", route: "/bootstrap.sh", filename: "ominull-install.sh",
 			generate: bootstrap.GenerateBash,
-			// The URL is quoted. It carries a "?", which is a glob character,
-			// and zsh - the default shell on macOS and on plenty of Linux
-			// installs - refuses an unmatched glob outright: the operator gets
-			// "no matches found" instead of an install.
+			// Quote the URL. The ticket query marker is a shell glob character.
 			oneLiner: func(base, ticket string) string {
 				return fmt.Sprintf("curl -fsSL \"%s/bootstrap.sh?t=%s\" | sudo bash", base, ticket)
-			},
-		},
-		{
-			key: "macos", label: "macOS", route: "/bootstrap.mac.sh", filename: "ominull-install-macos.sh",
-			generate: bootstrap.GenerateMacOS,
-			oneLiner: func(base, ticket string) string {
-				return fmt.Sprintf("curl -fsSL \"%s/bootstrap.mac.sh?t=%s\" | sudo bash", base, ticket)
 			},
 		},
 		{

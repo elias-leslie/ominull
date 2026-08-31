@@ -1581,66 +1581,6 @@ p.pending {
   margin-top: var(--s-2);
 }
 
-.chat {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-  padding: var(--s-3);
-}
-
-.msg {
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  padding: var(--s-2) var(--s-3);
-  font-size: var(--t-3);
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.msg[data-who="you"] {
-  background: var(--raised);
-  border-color: var(--raised);
-}
-
-.msg[data-who="copilot"] {
-  background: var(--ground);
-}
-
-.msg .who {
-  font-family: var(--f-cond);
-  font-size: var(--t-1);
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: var(--s-1);
-}
-
-.msg pre {
-  margin: 0;
-  white-space: pre-wrap;
-  font-family: var(--f-mono);
-  font-size: var(--t-2);
-  color: var(--ink-2);
-}
-
-/* Which engine actually wrote the answer. An answer from the built-in rule set
-   reads exactly like one from a model, so without this line the console shows a
-   confident reply and nothing to say the configured provider never answered. */
-.msg .msg-src {
-  margin-top: var(--s-2);
-  font-size: var(--t-1);
-  color: var(--ink-3);
-  display: flex;
-  gap: var(--s-2);
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-
-.msg .msg-src[data-degraded="true"] {
-  color: var(--warn);
-}
-
 /* The chart's time axis. One cell per bucket, aligned with the bars above by
    sharing their count rather than their pixel positions - the chart stretches
    to the card, and so does this. */

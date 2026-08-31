@@ -60,7 +60,9 @@ func (s *Store) CreateInstallTicket(t InstallTicket, ttl time.Duration) (string,
 	); err != nil {
 		return "", err
 	}
-	_, _ = s.db.Exec(`DELETE FROM install_tickets WHERE expires_at < ? OR used_at IS NOT NULL`, now.Add(-24*time.Hour))
+	if _, err := s.db.Exec(`DELETE FROM install_tickets WHERE expires_at < ? OR used_at IS NOT NULL`, now.Add(-24*time.Hour)); err != nil {
+		return "", fmt.Errorf("pruning install tickets: %w", err)
+	}
 	return token, nil
 }
 
@@ -88,7 +90,11 @@ func (s *Store) ConsumeInstallTicket(token string) (InstallTicket, error) {
 	if err != nil {
 		return InstallTicket{}, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return InstallTicket{}, fmt.Errorf("checking install ticket claim: %w", err)
+	}
+	if n == 0 {
 		// Say which of the three it was, because "spent" and "expired" mean
 		// different things to whoever is standing at the endpoint.
 		var expires time.Time

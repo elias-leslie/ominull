@@ -1,0 +1,17 @@
+[Unit]
+Description=Ominull Fleet Management Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/ominull/hub.env
+ExecStart=/opt/ominull/bin/ominull-hub --config /etc/ominull/hub.env
+Restart=always
+RestartSec=5s
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

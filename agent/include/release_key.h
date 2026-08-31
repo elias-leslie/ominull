@@ -16,14 +16,14 @@
  *
  * Scheme: ECDSA P-256 over SHA-256, DER-encoded detached signature.
  * Chosen because every platform can verify it with what it already ships -
- * the openssl CLI on Linux and macOS, BCrypt CNG on Windows - so signature
+ * the openssl CLI on Linux and BCrypt CNG on Windows - so signature
  * verification adds no runtime dependency to any agent.
  *
  * Rotation: ship the replacement key in a release signed by the outgoing key,
  * let the fleet converge, then retire the old one.
  */
 
-/* SubjectPublicKeyInfo, PEM. Used by the openssl CLI on Linux and macOS. */
+/* SubjectPublicKeyInfo, PEM. Used by the portable release verifier. */
 #define OMINULL_RELEASE_PUBKEY_PEM \
     "-----BEGIN PUBLIC KEY-----\n" \
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F\n" \

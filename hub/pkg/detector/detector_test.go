@@ -133,7 +133,9 @@ func TestDetectorEngine(t *testing.T) {
 		})
 	}
 
-	// 7. Test Suspicious DGA Domain / High-Entropy SNI Anomaly
+	// 7. A novel external destination remains a useful retained signal. Domain
+	// and SNI entropy detection was removed; the event still exercises the
+	// first-seen destination path.
 	engine.Evaluate(storage.Event{
 		TenantID:    "default",
 		EndpointID:  "test-workstation-07",
@@ -142,7 +144,6 @@ func TestDetectorEngine(t *testing.T) {
 		Direction:   "OUTBOUND",
 		DstIP:       "198.51.100.22",
 		DstPort:     443,
-		SNI:         "xj829vbnpqlmz019.xyz",
 		ProcessPath: "/usr/bin/python3",
 		ProcessID:   8888,
 	})
@@ -157,7 +158,6 @@ func TestDetectorEngine(t *testing.T) {
 	foundBwSpike := false
 	foundBeacon := false
 	foundLateral := false
-	foundDGA := false
 	for _, a := range anomalies {
 		if a.AnomalyType == "OFF_HOURS_ACTIVITY" {
 			foundOffHours = true
@@ -170,9 +170,6 @@ func TestDetectorEngine(t *testing.T) {
 		}
 		if a.AnomalyType == "LATERAL_PORT_SWEEP" {
 			foundLateral = true
-		}
-		if a.AnomalyType == "SUSPICIOUS_DGA_DOMAIN" {
-			foundDGA = true
 		}
 	}
 
@@ -187,8 +184,5 @@ func TestDetectorEngine(t *testing.T) {
 	}
 	if !foundLateral {
 		t.Errorf("expected LATERAL_PORT_SWEEP anomaly to be recorded")
-	}
-	if !foundDGA {
-		t.Errorf("expected SUSPICIOUS_DGA_DOMAIN anomaly to be recorded")
 	}
 }

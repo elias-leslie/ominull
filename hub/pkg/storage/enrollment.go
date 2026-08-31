@@ -52,7 +52,9 @@ func (s *Store) CreateEnrollmentToken(endpointID string, ttl time.Duration) (str
 
 	// Expired and spent rows are of no further use; clearing them here keeps
 	// the table from growing without a separate sweep.
-	_, _ = s.db.Exec(`DELETE FROM enrollment_tokens WHERE expires_at < ? OR used_at IS NOT NULL`, now.Add(-24*time.Hour))
+	if _, err := s.db.Exec(`DELETE FROM enrollment_tokens WHERE expires_at < ? OR used_at IS NOT NULL`, now.Add(-24*time.Hour)); err != nil {
+		return "", fmt.Errorf("pruning enrolment tokens: %w", err)
+	}
 
 	return token, nil
 }

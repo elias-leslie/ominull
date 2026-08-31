@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if current="$(dpkg-query -W -f='${Version}' ominull-hub 2>/dev/null)" &&
+   [ -n "${current}" ] && dpkg --compare-versions "${current}" gt "@VERSION@"; then
+    echo "ominull-hub: refusing downgrade from ${current} to @VERSION@" >&2
+    exit 1
+fi

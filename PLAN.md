@@ -1,13 +1,17 @@
 # Project Master Plan: Ominull Enterprise Threat Nullification Platform
+
+> Historical planning record. Superseded product ideas in this file are not
+> supported release behavior. Current scope is the hub plus Linux and Windows
+> agents; see `README.md` and `FEATURE_REDUCTION_COMPANION_PLAN.md`.
 ## Cross-Platform Kernel Network Telemetry, Dynamic Enforcement & Rapid IR System
 
 **Author:** Antigravity AI & System Engineering Team  
 **Date:** 2026-08-27  
-**Status:** Approved / Active Plan  
-**Target Environments:** 
-- **Windows:** Windows 10/11, Windows Server 2019/2022/2025 (x86_64, Windows Filtering Platform & ETW)
-- **Linux:** Debian 11/12, Ubuntu 20.04/22.04/24.04, RHEL/Rocky 8/9 (eBPF / cgroup / tc)
-- **macOS:** macOS 12–15 Sonoma/Sequoia (Apple Silicon & Intel, BSD Packet Filter & Socket Telemetry)
+**Status:** Historical planning record; not supported release scope.
+**Historical target environments:** Windows 10/11, Linux distributions, and macOS. The retained
+release supports the hub plus Linux and Windows agents; kernel-driver, eBPF, PF, macOS, Copilot,
+and policy/rule ideas below are historical only. See `FEATURE_REDUCTION_COMPANION_PLAN.md` and
+`README.md` for current behavior.
 
 ---
 

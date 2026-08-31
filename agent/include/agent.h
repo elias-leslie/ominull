@@ -6,11 +6,13 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include "../../driver/include/ominull_ioctl.h"
 
 #define OMINULL_AGENT_VERSION "1.7.16"
+#define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
+#define OMINULL_DEFAULT_CONFIG_PATH "C:\\ProgramData\\Ominull\\agent.conf"
+#define OMINULL_DEFAULT_KEY_PATH "C:\\ProgramData\\Ominull\\agent.key"
 
 typedef struct _AGENT_CONFIG {
     char hub_url[256];
@@ -28,6 +30,11 @@ typedef struct _AGENT_CONFIG {
      * against this file, so it lives beside the binary rather than under a
      * path an upgrade replaces. */
     char ca_path[260];
+    char config_path[260];
+    char install_type[16];
+    char package_identifier[64];
+    char registered_package_version[64];
+    char provenance_status[16];
     /* Where api_key was read from, when it came from a file rather than the
      * command line. Set, it is what the service registration carries; empty,
      * the key is still inline and Service_MigrateKeyToFile will move it. */
@@ -43,17 +50,45 @@ typedef struct _AGENT_CONFIG {
     bool allow_plaintext;
 } AGENT_CONFIG;
 
-// Driver communication interface
-HANDLE Driver_Open(void);
-void Driver_Close(HANDLE hDevice);
-bool Driver_StreamEvents(HANDLE hDevice, OMINULL_EVENT* outEvent);
-bool Driver_SetIsolation(HANDLE hDevice, bool enable, uint32_t allowHubIP, uint16_t allowHubPort);
+/* Versioned user-mode collection record. It is shared by the Linux socket
+ * collector and Windows socket-table collector; neither platform claims a
+ * privileged event stream. */
+#define OMINULL_EVENT_CONNECT_V4          1
+#define OMINULL_EVENT_CONNECT_V6          2
+#define OMINULL_EVENT_RECV_ACCEPT_V4      3
+#define OMINULL_EVENT_RECV_ACCEPT_V6      4
+#define OMINULL_EVENT_FLOW_ESTABLISHED_V4 5
+#define OMINULL_EVENT_FLOW_ESTABLISHED_V6 6
+#define OMINULL_EVENT_FLOW_CLOSED         7
+#define OMINULL_EVENT_BLOCKED             8
+
+#pragma pack(push, 1)
+typedef struct _OMINULL_EVENT {
+    UINT64 Timestamp;
+    UINT32 EventType;
+    UINT32 Action;
+    UINT64 ProcessId;
+    UINT8  IpVersion;
+    UINT8  Protocol;
+    UINT8  Direction;
+    UINT8  Reserved;
+    UINT16 LocalPort;
+    UINT16 RemotePort;
+    union {
+        struct { UINT32 LocalIp; UINT32 RemoteIp; } Ipv4;
+        struct { UINT8 LocalIp[16]; UINT8 RemoteIp[16]; } Ipv6;
+    } Addr;
+    UINT64 FlowId;
+    WCHAR  ProcessPath[OMINULL_MAX_PATH];
+    UINT64 BytesIn;
+    UINT64 BytesOut;
+} OMINULL_EVENT, *POMINULL_EVENT;
+#pragma pack(pop)
 
 /* The user-mode filtering engine, in agent/windows/wfp_user.c. It is what
- * enforces isolation on a host with no kernel driver loaded - which is every
- * endpoint running the portable agent, so on this fleet it is the path that
- * actually runs. Linked into the agent as well as built as the standalone
- * ominull_wfp_user.exe recovery tool. */
+ * enforces isolation in the user-mode Windows Filtering Platform. Linked into
+ * the agent as well as built as the standalone ominull_wfp_user.exe recovery
+ * tool. */
 DWORD Wfp_Init(int dynamicSession);
 void Wfp_Close(void);
 
@@ -118,12 +153,14 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
 // determined is left empty, which the hub treats as "unknown" instead of
 // recording a guess as ground truth.
 void Agent_DetectHostIdentity(AGENT_CONFIG* config);
+void Agent_DetectInstallProvenance(AGENT_CONFIG* config);
 
 // Self-update. Update_Apply installs a newer agent only after verifying it
 // against the release key compiled into this binary; Update_CheckStartup runs
 // once at startup and restores the previous binary if a new one keeps failing.
 void Update_Apply(const AGENT_CONFIG* config, const char* respJson);
 void Update_CheckStartup(const AGENT_CONFIG* config);
+int Update_RunNativeInstaller(const char* packagePath);
 
 /* Hub transport security. Hub_TransportReady gates every outbound request:
  * it refuses a cleartext hub, refuses a missing CA, and proves the peer really
@@ -152,11 +189,13 @@ void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BO
 // Service dispatcher
 void Service_Run(void);
 void Service_SetConfig(const AGENT_CONFIG* config);
+// Reads enrollment fields from stdin and writes package-owned configuration
+// and private material without putting the tenant key in process arguments.
+bool Service_ConfigureFromStdin(void);
 // Installs the service with the full running configuration. It takes the whole
 // config rather than a hub URL and key because the SCM command line is the only
 // place the service's arguments exist: anything left out here - the role, the
 // location, the pinned CA - is simply lost at the next start.
-bool Service_Install(const AGENT_CONFIG* config);
 // Moves an inline --key out of the service command line into a file only
 // SYSTEM and Administrators can read, and rewrites the registration to point at
 // it. Called on every service start: the binPath is not rewritten by an
@@ -176,7 +215,6 @@ void Service_EnsureRecovery(void);
 // which action runs after an update is decided by unrelated history.
 bool Service_SpawnRestart(void);
 int Service_WaitStoppedAndStart(void);
-bool Service_Uninstall(void);
 // True when the installed service is registered to run the binary at path. The
 // updater checks it before installing over that binary from a console session,
 // which would otherwise upgrade a service nobody asked to upgrade.

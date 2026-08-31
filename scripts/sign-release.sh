@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 KEY="${OMINULL_SIGNING_KEY:-}"
+VERSION="${OMINULL_RELEASE_VERSION:-$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")}"
 
 if [ -z "${KEY}" ]; then
     echo "[-] Set OMINULL_SIGNING_KEY to the release signing key (it lives in the ops vault)." >&2
@@ -34,8 +35,8 @@ fi
 # The pinned public key is the contract. Signing with a key the fleet will not
 # recognise produces packages every agent rejects, which is a fleet-wide outage
 # discovered one endpoint at a time. Catch it here instead.
-embedded="$(sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p' "${ROOT_DIR}/agent/include/release_key.h" \
-    | sed 's/^ *"//; s/\\n" *\\*$//; s/" *\\*$//')"
+embedded="$(sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' "${ROOT_DIR}/agent/include/release_key.h" \
+    | sed -E 's/^[[:space:]]*"//; s/\\n".*$//')"
 signing_pub="$(openssl ec -in "${KEY}" -pubout 2>/dev/null)"
 if [ "${embedded}" != "${signing_pub}" ]; then
     echo "[-] ${KEY} is not the key pinned in agent/include/release_key.h." >&2
@@ -43,12 +44,17 @@ if [ "${embedded}" != "${signing_pub}" ]; then
     exit 1
 fi
 
-shopt -s nullglob
-packages=("${DIST_DIR}"/ominull-agent_*_amd64.deb "${DIST_DIR}"/ominull-agent-windows-*.tar.gz "${DIST_DIR}"/ominull-agent-macos-*.tar.gz)
-if [ ${#packages[@]} -eq 0 ]; then
-    echo "[-] No packages in ${DIST_DIR}; run scripts/build-packages.sh first." >&2
-    exit 1
+packages=(
+    "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
+    "${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
+    "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi"
+)
+if [ "${OMINULL_BRIDGE_RELEASE:-0}" = "1" ]; then
+    packages+=("${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz")
 fi
+for pkg in "${packages[@]}"; do
+    [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
+done
 
 echo "[*] Signing ${#packages[@]} package(s) with the release key..."
 for pkg in "${packages[@]}"; do
@@ -66,5 +72,8 @@ for pkg in "${packages[@]}"; do
     rm -f "${DIST_DIR}/.verify.pub"
     echo "  [+] $(basename "${pkg}").sig  ($(cat "${pkg}.sha256"))"
 done
+
+mapfile -t package_names < <(printf '%s\n' "${packages[@]}" | xargs -n1 basename | sort)
+(cd "${DIST_DIR}" && sha256sum "${package_names[@]}") > "${DIST_DIR}/SHA256SUMS.txt"
 
 echo "[+] All packages signed and verified against the pinned release key."

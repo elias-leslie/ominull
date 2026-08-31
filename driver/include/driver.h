@@ -1,6 +1,0 @@
-#ifndef OMINULL_DRIVER_LEGACY_WRAPPER_H
-#define OMINULL_DRIVER_LEGACY_WRAPPER_H
-
-#include "ominull_driver.h"
-
-#endif // OMINULL_DRIVER_LEGACY_WRAPPER_H

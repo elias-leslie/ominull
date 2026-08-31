@@ -1,0 +1,15 @@
+[Unit]
+Description=Ominull Linux Threat Nullification Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ominull/bin/ominulld --config /etc/ominull/agent.conf
+Restart=always
+RestartSec=5s
+KillMode=process
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

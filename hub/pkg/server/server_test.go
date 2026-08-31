@@ -49,7 +49,7 @@ func TestBootstrapGenerators(t *testing.T) {
 	defer store.Close()
 
 	// 0. Bootstrap must never be minted without the admin key (no defaults, no tenant keys).
-	for _, path := range []string{"/bootstrap.ps1", "/bootstrap.sh", "/bootstrap_mac.sh"} {
+	for _, path := range []string{"/bootstrap.ps1", "/bootstrap.sh"} {
 		for _, name := range []string{"no-key", "wrong-key"} {
 			url := path
 			if name == "wrong-key" {
@@ -62,8 +62,6 @@ func TestBootstrapGenerators(t *testing.T) {
 				srv.handleBootstrapPS1(w, req)
 			case "/bootstrap.sh":
 				srv.handleBootstrapSH(w, req)
-			default:
-				srv.handleBootstrapMac(w, req)
 			}
 			if w.Code != http.StatusUnauthorized {
 				t.Errorf("%s (%s): expected 401 Unauthorized, got %d", path, name, w.Code)
@@ -98,15 +96,12 @@ func TestBootstrapGenerators(t *testing.T) {
 			handler: srv.handleBootstrapPS1,
 			want: []string{
 				"/api/v1/pki/ca.crt",
-				`Cert:\LocalMachine\Root`,
-				`--hub $AgentHubURL`,
-				`--ca "$InstallDir\ca.crt"`,
-				`$AgentHubURL = "https://10.0.0.57:9443"`,
+				`$Package = "ominull-agent-windows-$Version.msi"`,
+				"msiexec.exe",
+				"/qn",
 				"/api/v1/pki/enroll",
-				`$PfxPath = "$InstallDir\client.pfx"`,
-				`--client-pfx "$PfxPath"`,
-				"--id $EndpointID",
-				`icacls.exe $PfxPath /inheritance:r`,
+				"--configure-stdin",
+				"Start-Service -Name ominulld",
 			},
 		},
 		{
@@ -114,41 +109,12 @@ func TestBootstrapGenerators(t *testing.T) {
 			path:    "/bootstrap.sh",
 			handler: srv.handleBootstrapSH,
 			want: []string{
-				"ominulld.service",
+				`PACKAGE="ominull-agent_${VERSION}_amd64.deb"`,
+				"dpkg -i",
 				"/api/v1/pki/ca.crt",
-				`CA_PATH="/etc/ominull/ca.crt"`,
-				"--hub $AGENT_HUB_URL",
-				"--ca $CA_PATH",
-				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
 				"/api/v1/pki/enroll",
-				`CLIENT_KEY="/etc/ominull/client.key"`,
-				"--client-cert $CLIENT_CERT --client-key $CLIENT_KEY",
-				"--id $ENDPOINT_ID",
-				`chmod 600 "$CLIENT_KEY"`,
-				// systemd starts this binary as root, so an installer that
-				// leaves it owned by the account that ran the install leaves a
-				// local path to root behind it.
-				`chown root:root "$INSTALL_DIR/bin/ominulld"`,
-				`chmod 755 "$INSTALL_DIR/bin/ominulld"`,
-			},
-		},
-		{
-			name:    "macos",
-			path:    "/bootstrap.mac.sh",
-			handler: srv.handleBootstrapMac,
-			want: []string{
-				"/api/v1/pki/ca.crt",
-				`CA_PATH="$INSTALL_DIR/ca.crt"`,
-				"<string>$ENDPOINT_ID</string>",
-				"<string>$CA_PATH</string>",
-				`AGENT_HUB_URL="https://10.0.0.57:9443"`,
-				"/api/v1/pki/enroll",
-				"<string>$CLIENT_CERT</string>",
-				"<string>$CLIENT_KEY</string>",
-				`chmod 600 "$CLIENT_KEY"`,
-				// Both are executed as root by the LaunchDaemon.
-				`chown root:wheel "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"`,
-				`chmod 755 "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"`,
+				"--configure-stdin",
+				"systemctl start ominull-agent.service",
 			},
 		},
 	} {
@@ -177,62 +143,43 @@ func TestBootstrapGenerators(t *testing.T) {
 					t.Errorf("bootstrap script is missing %q:\n%s", want, body)
 				}
 			}
-			// The private key the enrolment writes is the endpoint's identity.
-			// Every generator has to close the file it lands in: on the two
-			// unix platforms with chmod, on Windows by dropping inheritance.
-			// A world-readable key would make the certificate decorative.
-			if strings.Contains(body, "CLIENT_KEY") && !strings.Contains(body, `chmod 600 "$CLIENT_KEY"`) {
-				t.Errorf("bootstrap script writes a client key it does not restrict:\n%s", body)
-			}
-			// The tenant key must reach the endpoint, but never as an
-			// argument to the long-running daemon: every argument of every
-			// process is world-readable (/proc/<pid>/cmdline on Linux, ps on
-			// macOS, `sc qc` on Windows), so a key in the service definition is
-			// a key any local account can lift - and it is the credential the
-			// whole fleet shares. Each generator has to plant a 0600 file and
-			// register the path.
+			// The tenant key must reach the package-installed configuration writer,
+			// never the long-running service command line.
 			switch tc.name {
 			case "bash":
-				if !strings.Contains(body, "--key-file /etc/ominull/agent.key") {
-					t.Errorf("linux unit does not take the key from a file:\n%s", body)
+				if strings.Contains(body, "cat << UNIT") || strings.Contains(body, "download/ominulld") {
+					t.Errorf("linux bootstrap owns a service or raw binary path:\n%s", body)
 				}
-				if strings.Contains(body, "OMINULL_ARGS=--hub $AGENT_HUB_URL --key $API_KEY") {
-					t.Errorf("linux unit puts the tenant key in the daemon's argv:\n%s", body)
-				}
-				if !strings.Contains(body, "chmod 600 /etc/ominull/agent.key") {
-					t.Errorf("linux key file is not restricted to its owner:\n%s", body)
-				}
-			case "macos":
-				if !strings.Contains(body, "<string>/opt/ominull/agent.key</string>") {
-					t.Errorf("launchd plist does not name a key file:\n%s", body)
-				}
-				if strings.Contains(body, "<string>$API_KEY</string>") {
-					t.Errorf("launchd plist puts the tenant key in ProgramArguments:\n%s", body)
-				}
-				if !strings.Contains(body, "chmod 600 /opt/ominull/agent.key") {
-					t.Errorf("macos key file is not restricted to its owner:\n%s", body)
-				}
-			}
-
-			// The generators used to hand-build the Windows binPath, which
-			// dropped the --service flag the SCM entry point needs. Registration
-			// goes through the agent's own installer now.
-			if strings.Contains(body, "sc.exe create") {
-				t.Errorf("bootstrap script hand-builds the service binPath instead of using --install:\n%s", body)
-			}
-			// A generated script may hand the key to --install, which stores it
-			// in a SYSTEM-only file. What it must never do is write a --service
-			// command line itself: that is the registration `sc qc` shows to any
-			// logged-on user, and the key would ride along in it.
-			for _, line := range strings.Split(body, "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "#") {
-					continue
-				}
-				if strings.Contains(line, "--service") && strings.Contains(line, "--key") {
-					t.Errorf("bootstrap script registers a --service command line carrying the key: %q", line)
+			case "powershell":
+				if strings.Contains(body, "download/ominulld.exe") || strings.Contains(body, "sc.exe create") {
+					t.Errorf("windows bootstrap owns a raw binary or service path:\n%s", body)
 				}
 			}
 		})
+	}
+}
+
+func TestRemovedFeatureRoutesReturnNotFoundThroughRealMux(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	for _, path := range []string{
+		"/api/v1/copilot",
+		"/api/v1/chat",
+		"/api/v1/rules",
+		"/api/v1/policy-groups",
+		"/api/v1/inference",
+		"/ws",
+		"/bootstrap-macos.sh",
+		"/download/ominull-agent-macos-1.7.16.pkg",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("retired route %s returned %d, want 404", path, w.Code)
+		}
 	}
 }
 
@@ -395,8 +342,8 @@ func TestCompareVersions(t *testing.T) {
 		{"v1.1.0", "1.1.0", 0},
 		// Endpoints decorate the version with their enforcement engine.
 		{"1.1.0 (WFP Callout)", "1.1.0", 0},
-		{"1.1.0 (eBPF/TC)", "1.2.0", -1},
-		{"1.2.0 (PF)", "1.1.0 (eBPF/TC)", 1},
+		{"1.1.0 (linux-socket-v1)", "1.2.0", -1},
+		{"1.2.0 (windows-socket-v1)", "1.1.0 (linux-socket-v1)", 1},
 		// Short and empty forms fall back to zeroes rather than erroring.
 		{"1.1", "1.1.0", 0},
 		{"", "1.1.0", -1},
@@ -412,8 +359,6 @@ func TestCompareVersions(t *testing.T) {
 func TestAgentPackageKind(t *testing.T) {
 	cases := map[string]string{
 		"Windows 11 Enterprise (x86_64)": "windows",
-		"macOS Sonoma 14.8 (x86_64)":     "macos",
-		"Darwin 23.6.0 (arm64)":          "macos",
 		"Linux 6.8.0-40-generic":         "deb",
 		"":                               "deb",
 	}
@@ -493,17 +438,16 @@ func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
 		wantOK     bool
 	}{
 		{"reported deb", "deb", "Linux 6.8.0-40-generic", "deb", true},
-		{"reported exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows", true},
-		{"reported pkg", "pkg", "macOS 14.8 (x86_64)", "macos", true},
-		{"capability outranks a misleading OS string", "exe", "Linux 6.8.0-40-generic", "windows", true},
+		{"reported legacy exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows", true},
+		{"reported native msi", "msi", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows-native", true},
+		{"capability outranks a misleading OS string", "msi", "Linux 6.8.0-40-generic", "windows-native", true},
 		{"explicit none is offered nothing", "none", "Linux 6.8.0-40-generic", "", false},
-		{"unknown capability is offered nothing", "msi", "Windows 11", "", false},
+		{"unknown capability is offered nothing", "msix", "Windows 11", "", false},
 		// The only agent that shipped before the field existed and can still
 		// install something is the Linux one, so that is the whole of the
 		// legacy fallback.
 		{"legacy linux agent still self-updates", "", "Linux 6.8.0-40-generic", "deb", true},
 		{"legacy windows agent needs the push-deployer", "", "Windows 11 Enterprise (x86_64)", "", false},
-		{"legacy macos agent needs the push-deployer", "", "macOS Sonoma 14.8.9 (x86_64)", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -635,7 +579,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 	}
 
 	// 4. An up-to-date endpoint is offered nothing.
-	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (eBPF/TC)")
+	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (linux-socket-v1)")
 	req = httptest.NewRequest("GET", "/api/v1/agent/config?endpoint_id=linux-web-02", nil)
 	req.Header.Set("X-API-Key", "mock_admin_token")
 	w = httptest.NewRecorder()
@@ -657,7 +601,7 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
 	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
 	seedEndpoint(t, store, "win-exec-01", "Windows 11 Enterprise (x86_64)", "1.0.0")
-	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (eBPF/TC)")
+	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (linux-socket-v1)")
 
 	// 1. Tenant keys must not be able to push fleet-wide agent updates.
 	body, _ := json.Marshal(map[string]interface{}{"all": true})
@@ -788,7 +732,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	}
 
 	// 3. Reporting the target version closes the job and stops the offer.
-	resp = postTelemetry("1.1.0 (eBPF/TC)")
+	resp = postTelemetry("1.1.0 (linux-socket-v1)")
 	if _, present := resp["agent_update"]; present {
 		t.Errorf("Expected no agent_update once current, got %v", resp["agent_update"])
 	}
@@ -856,7 +800,7 @@ func TestEndpointOrderIsStableAcrossHeartbeats(t *testing.T) {
 	}
 }
 
-// The Linux and macOS agents have always reported a hardware address, but the
+// The retained agents have always reported a hardware address, but the
 // telemetry struct had no field for it, so encoding/json dropped it on the
 // floor and every agented asset fell back to address-plus-subnet identity.
 // That defeats the point of keying on the MAC: the whole reason to do so is

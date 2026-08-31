@@ -2,7 +2,12 @@
 set -euo pipefail
 
 HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
-API_KEY="${OMINULL_API_KEY:-omi_live_master}"
+API_KEY="${OMINULL_API_KEY:-}"
+
+if [ -z "${API_KEY}" ]; then
+    echo "[-] Set OMINULL_API_KEY before using ominull-cli." >&2
+    exit 2
+fi
 
 call_api() {
     local method="$1"
@@ -81,16 +86,6 @@ case "$cmd" in
         call_api GET "/api/v1/anomalies/alerts" | jq . 2>/dev/null || call_api GET "/api/v1/anomalies/alerts"
         ;;
 
-    investigate)
-        if [ "$#" -lt 1 ]; then
-            echo "Usage: ominull-cli investigate <alert_id>"
-            exit 1
-        fi
-        alert_id="$1"
-        echo "[*] Investigating Alert $alert_id with Autonomous CyberOps Copilot..."
-        call_api POST "/api/v1/copilot/investigate" "{\"alert_id\":\"$alert_id\"}" | jq .
-        ;;
-
     quarantine-mesh)
         if [ "$#" -lt 1 ]; then
             echo "Usage: ominull-cli quarantine-mesh <target_ip> [target_mac] [reason]"
@@ -111,16 +106,6 @@ case "$cmd" in
         tip="$1"
         echo "[*] Lifting Subnet Quarantine Mesh on $tip..."
         call_api POST "/api/v1/mesh/unquarantine" "{\"target_ip\":\"$tip\"}" | jq .
-        ;;
-
-    chat)
-        if [ "$#" -lt 1 ]; then
-            echo "Usage: ominull-cli chat \"<query>\""
-            exit 1
-        fi
-        msg="$*"
-        echo "[*] Asking CyberOps Copilot: \"$msg\"..."
-        call_api POST "/api/v1/copilot/chat" "{\"message\":\"$msg\"}" | jq -r .reply
         ;;
 
     deploy)
@@ -167,10 +152,8 @@ case "$cmd" in
         echo "  assets                       List all discovered subnet assets, OS guesses, weakpoints"
         echo "  train <ip> <name> <v> <cat>  Train / refine dynamic fingerprint engine with ground truth"
         echo "  alerts                       List active behavioral anomaly alerts & outliers"
-        echo "  investigate <alert_id>       Execute autonomous AI forensic triage on an alert"
         echo "  quarantine-mesh <ip>         Enforce subnet-wide lateral mesh drop for rogue host"
         echo "  unquarantine-mesh <ip>       Lift subnet-wide mesh quarantine"
-        echo "  chat \"<query>\"               Query embedded CyberOps Copilot in natural language"
         echo "  deploy <ip> [user] [pass]    Push-deploy agent over SSH to unmanaged asset"
         echo "  agent-versions               Report fleet agent-version currency and pending updates"
         echo "  agent-update <id|all> [ver]  Publish an agent release to outdated endpoints"

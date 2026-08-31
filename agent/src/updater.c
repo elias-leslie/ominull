@@ -364,9 +364,10 @@ void Update_CheckStartup(const AGENT_CONFIG* config) {
 
 /* --------------------------------------------------------------- install */
 
-/* ExtractPackage unpacks the verified tarball with the bsdtar that ships in
- * Windows System32. It only ever runs against bytes whose signature has already
- * been checked. */
+#ifdef OMINULL_BRIDGE_RELEASE
+/* The bridge binary alone can unpack the legacy archive. The final native MSI
+ * binary is built without this path, so its package surface is only Windows
+ * Installer. */
 static bool ExtractPackage(const char* archive, const char* destDir) {
     char sys[MAX_PATH], tarExe[MAX_PATH];
     if (!GetSystemDirectoryA(sys, MAX_PATH)) return false;
@@ -393,6 +394,81 @@ static bool ExtractPackage(const char* archive, const char* destDir) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return code == 0;
+}
+#endif
+
+static bool WaitForInstalledServiceStopped(void) {
+    SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!manager) return false;
+    SC_HANDLE service = OpenServiceA(manager, SERVICE_NAME, SERVICE_QUERY_STATUS | SERVICE_START);
+    if (!service) {
+        CloseServiceHandle(manager);
+        return GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST;
+    }
+    SERVICE_STATUS status;
+    bool stopped = false;
+    for (DWORD waited = 0; waited <= 300000; waited += 250) {
+        if (!QueryServiceStatus(service, &status)) break;
+        if (status.dwCurrentState == SERVICE_STOPPED) {
+            stopped = true;
+            break;
+        }
+        Sleep(250);
+    }
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return stopped;
+}
+
+/* The helper is a copy of the installed executable, so it can wait for SCM to
+ * stop the service while MSI replaces the installed image. MSI owns the
+ * transaction and its rollback; this process only keeps the old service from
+ * racing the package install. */
+int Update_RunNativeInstaller(const char* packagePath) {
+    if (!packagePath || !packagePath[0]) return 1;
+    if (!WaitForInstalledServiceStopped()) {
+        fprintf(stderr, "[-] Native package helper timed out waiting for %s to stop.\n", SERVICE_NAME);
+        return 1;
+    }
+
+    char systemDir[MAX_PATH] = {0};
+    if (!GetSystemDirectoryA(systemDir, sizeof(systemDir))) return 1;
+    char command[MAX_PATH * 3];
+    int n = snprintf(command, sizeof(command),
+                     "\"%s\\msiexec.exe\" /i \"%s\" /qn /norestart REBOOT=ReallySuppress",
+                     systemDir, packagePath);
+    if (n < 0 || (size_t)n >= sizeof(command)) return 1;
+
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                        &startup, &process)) {
+        fprintf(stderr, "[-] Could not launch MSI installer (Error: %lu).\n", GetLastError());
+        return 1;
+    }
+    WaitForSingleObject(process.hProcess, 300000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+	if (exitCode == ERROR_SUCCESS || exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
+		printf("[+] Native MSI installation completed.\n");
+		return 0;
+	}
+	SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+	if (manager) {
+		SC_HANDLE service = OpenServiceA(manager, SERVICE_NAME, SERVICE_START);
+		if (service) {
+			StartServiceA(service, 0, NULL);
+			CloseServiceHandle(service);
+		}
+		CloseServiceHandle(manager);
+	}
+    fprintf(stderr, "[-] Native MSI installation failed with code %lu; MSI rollback retained the prior release.\n", exitCode);
+    return (int)exitCode;
 }
 
 static void RemoveDirTree(const char* dir) {
@@ -448,10 +524,19 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     if (attempts >= 3) return;
     attempts++;
 
-    if (pkg[0] && strcmp(pkg, "windows") != 0) {
-        printf("[!] Hub offers agent v%s as a '%s' package; this agent only self-installs the Windows bundle.\n", version, pkg);
-        return;
-    }
+	#ifdef OMINULL_BRIDGE_RELEASE
+	bool nativePackage = strcmp(pkg, "windows-native") == 0;
+	if (pkg[0] && strcmp(pkg, "windows") != 0 && !nativePackage) {
+		printf("[!] Hub offers agent v%s as a '%s' package; this agent only self-installs Windows packages.\n", version, pkg);
+		return;
+	}
+	#else
+	const bool nativePackage = true;
+	if (strcmp(pkg, "windows-native") != 0) {
+		printf("[!] Hub offers agent v%s as a '%s' package; this agent only self-installs Windows Installer packages.\n", version, pkg);
+		return;
+	}
+	#endif
     /* No signature, no install. There is no degraded mode worth having here:
      * an unverified install running as LocalSystem is the thing being
      * prevented, not an inconvenience to route around. */
@@ -501,8 +586,8 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
         printf("[!] Cannot create the update staging directory %s\n", stage);
         return;
     }
-    PathIn(stage, "agent.tar.gz", archive, sizeof(archive));
-    PathIn(stage, "agent.tar.gz.sig", sigFile, sizeof(sigFile));
+	PathIn(stage, nativePackage ? "agent.msi" : "agent.tar.gz", archive, sizeof(archive));
+	PathIn(stage, nativePackage ? "agent.msi.sig" : "agent.tar.gz.sig", sigFile, sizeof(sigFile));
     PathIn(stage, "ominulld.exe", newExe, sizeof(newExe));
 
     printf("[*] Hub published agent v%s (running v%s); fetching and verifying before install.\n",
@@ -539,13 +624,49 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     free(sigBytes);
     printf("[+] v%s verified against the pinned release key; installing.\n", version);
 
-    if (!ExtractPackage(archive, stage) || GetFileAttributesA(newExe) == INVALID_FILE_ATTRIBUTES) {
-        printf("[!] Agent update v%s: package did not contain ominulld.exe.\n", version);
-        RemoveDirTree(stage);
-        return;
+    if (nativePackage) {
+        char helper[MAX_PATH];
+        PathIn(stage, "ominull-msi-helper.exe", helper, sizeof(helper));
+        char current[MAX_PATH];
+        PathIn(dir, "ominulld.exe", current, sizeof(current));
+        if (!CopyFileA(current, helper, FALSE)) {
+            printf("[!] Agent update v%s: could not stage the MSI helper (Error %lu).\n", version, GetLastError());
+            RemoveDirTree(stage);
+            return;
+        }
+        char command[MAX_PATH * 3];
+        int commandLen = snprintf(command, sizeof(command), "\"%s\" --apply-msi \"%s\"", helper, archive);
+        if (commandLen < 0 || (size_t)commandLen >= sizeof(command)) {
+            RemoveDirTree(stage);
+            return;
+        }
+        STARTUPINFOA startup;
+        PROCESS_INFORMATION process;
+        ZeroMemory(&startup, sizeof(startup));
+        ZeroMemory(&process, sizeof(process));
+        startup.cb = sizeof(startup);
+        if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS,
+                            NULL, NULL, &startup, &process)) {
+            printf("[!] Agent update v%s: could not launch the MSI helper (Error %lu).\n", version, GetLastError());
+            RemoveDirTree(stage);
+            return;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        printf("[+] Agent v%s verified; MSI helper will install it after this service exits.\n", version);
+        fflush(stdout);
+		ExitProcess(0);
     }
 
-    FILE* f = fopen(marker, "w");
+	#ifdef OMINULL_BRIDGE_RELEASE
+	if (!nativePackage && (!ExtractPackage(archive, stage) || GetFileAttributesA(newExe) == INVALID_FILE_ATTRIBUTES)) {
+		printf("[!] Agent update v%s: package did not contain ominulld.exe.\n", version);
+		RemoveDirTree(stage);
+		return;
+	}
+	#endif
+
+	FILE* f = fopen(marker, "w");
     if (f) {
         fprintf(f, "%s 0\n", version);
         fclose(f);

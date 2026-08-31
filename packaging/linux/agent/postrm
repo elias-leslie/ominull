@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = purge ]; then
+    # The hub package deliberately shares the parent directories. Remove only
+    # endpoint-owned files and update state; never remove the hub database,
+    # PKI, hub.env, or release directory on a co-installed host.
+    rm -f /etc/ominull/agent.conf /etc/ominull/agent.key /etc/ominull/ca.crt \
+        /etc/ominull/client.crt /etc/ominull/client.key
+    rm -rf /var/lib/ominull/updates
+    rmdir /etc/ominull 2>/dev/null || true
+    rmdir /var/lib/ominull 2>/dev/null || true
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi

@@ -1,36 +1,50 @@
-# Testing Methodology and Verification Protocol
+# Testing
 
-This document outlines the testing standards, safety requirements, and verification protocols for `ominull.sys`.
+Ominull gates use equal workloads and real runtime paths. A compile-only result
+is not package, service, route, containment, or rollout evidence.
 
-## 1. Isolation & Safety Standard
-Kernel drivers execute with ring-0 privileges. A failure in kernel space triggers a system bugcheck (BSOD).
-- **Target Isolation**: All driver binaries are loaded exclusively on disposable, snapshot-restorable test VMs.
-- **Baseline Snapshots**: A clean VM snapshot is captured prior to testing. VMs are restored rather than repaired.
+## Local gates
 
-## 2. Verification Protocol
-
-### A. Driver Verifier Certification
-The target VM executes with Driver Verifier active against `ominull.sys`:
-```cmd
-verifier.exe /standard /driver ominull.sys
+```bash
+scripts/version.sh check
+(cd hub && go test -race ./... && go vet ./...)
+node --check hub/pkg/server/web/app.js
+bash -n scripts/*.sh
+scripts/build-packages.sh
+OMINULL_RELEASE_VERSION="$(scripts/version.sh show)" scripts/test-package-lifecycle.sh
 ```
-Validation criteria:
-1. Special Pool allocations enabled.
-2. Force IRQL Checking enabled (validating no pageable memory access at DISPATCH_LEVEL).
-3. Pool Tracking enabled.
-4. Zero bugchecks during continuous load, connection inspection, and unload cycles.
 
-### B. WFP Engine Lifetime & Leak Checks
-Driver unload must leave zero residual state in the BFE/WFP subsystem:
-1. Capture pre-load state: `netsh wfp show state file=wfp_before.xml`
-2. Load driver, register callouts, process traffic, unload driver.
-3. Capture post-unload state: `netsh wfp show state file=wfp_after.xml`
-4. Diff `wfp_before.xml` and `wfp_after.xml` to verify 100% clean object destruction (no orphaned filters, callouts, or sublayers).
+The C feedback loops compile with warnings enabled and cover baseline parsing,
+Linux process attribution, socket collection, and release-signature parsing.
+Windows sources are cross-compiled for both bridge and final native modes with
+warnings treated as errors in CI.
 
-### C. Kernel Debugging & WinDbg Drills
-- Kernel debugging enabled via KDNET.
-- Explicit breakpoint validation on `DriverEntry` and `DriverUnload`.
-- Controlled bugcheck inspection drill (`!analyze -v`) for diagnostic verification.
+## Retained capability checks
 
-## 3. Evidence Collection
-All test runs, WinDbg transcripts, and Verifier logs are recorded in the `evidence/` directory.
+Exercise authenticated Linux and Windows telemetry, endpoint heartbeat status,
+scanner and asset provenance, threat-intelligence matching, behavioral alerts,
+baseline readiness, IPv4 and IPv6 isolation, mesh quarantine, dead-man release,
+standalone Windows recovery, mTLS identity, signed update rollback, and native
+package uninstall. Check that accepted telemetry and control responses are
+durable and that errors fail closed.
+
+## Package checks
+
+The lifecycle script runs in an isolated root. It verifies Debian ownership,
+registration, upgrade, downgrade refusal, identity preservation, purge, and
+hub-data/PKI preservation. It extracts the MSI and checks its service metadata,
+uninstall action, recovery tool, and absence of a kernel payload.
+
+## Runtime checks
+
+Run the real hub route through its middleware. Removed paths must return 404;
+tenant keys must fail on admin routes; operator routes must reject malformed
+input. Use a managed headless browser or direct HTTP client for console checks.
+Record status, package provenance, process count, CPU, RSS, database latency,
+and errors during the production observation window.
+
+## Production release
+
+Use `scripts/release.sh`. It installs the signed hub package first, then rolls a
+retained canary and the remaining retained endpoints. Never hand-copy an agent
+binary or bypass a failed signature, lifecycle, rollback, or convergence gate.

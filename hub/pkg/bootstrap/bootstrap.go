@@ -1,456 +1,302 @@
-// Package bootstrap generates the unattended enrolment scripts the hub serves
-// for each platform.
-//
-// Enrolment is where an endpoint learns who the hub is. The script fetches the
-// hub's CA from HubURL, plants it on disk, and configures the agent to reach
-// the hub at AgentHubURL - an https:// URL verified against exactly that CA.
-// From then on nothing the agent does is exposed to an on-path attacker: not
-// the API key, not the telemetry, not the isolation commands.
-//
-// The one moment that is not covered is the fetch itself. An installer that has
-// no CA yet cannot verify the hub it is asking for one, so HubURL should be a
-// channel that is already trusted - a public URL with a publicly-trusted
-// certificate, or a LAN address on a network the operator controls at the time
-// of enrolment. That is trust-on-first-use, and it is the only such moment:
-// every later connection is pinned.
+// Package bootstrap generates unattended enrolment scripts for the retained
+// Linux and Windows agents.
 package bootstrap
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
-// Options describes one enrolment. HubURL is the channel the installer runs
-// against; AgentHubURL is what the installed agent talks to afterwards.
+// Options describes one enrolment. The tenant key and one-use token are
+// rendered into the script; the admin key never crosses this boundary.
 type Options struct {
-	// HubURL is where the installer fetches the CA and the agent binaries.
-	HubURL string
-	// AgentHubURL is the transport the enrolled agent uses. Defaults to HubURL
-	// when the hub was started without --agent-hub-url, which keeps a pre-TLS
-	// deployment working unchanged.
-	AgentHubURL string
-
-	// TenantAPIKey is the runtime credential written into the installed
-	// agent's configuration. It is deliberately the *tenant* key and not the
-	// admin key that authorised this script: the file it lands in stays on the
-	// endpoint for the life of the install, so whatever goes in it is a
-	// credential the fleet holds, and the fleet holding the hub's admin key
-	// makes every endpoint a full operator of the hub.
-	TenantAPIKey string
-	// EnrollmentToken authorises exactly one client-certificate issuance and
-	// then stops working. The API key above cannot do it - it is shared, so a
-	// certificate obtained with it would prove nothing about which endpoint
-	// asked.
+	HubURL          string
+	AgentHubURL     string
+	TenantAPIKey    string
 	EnrollmentToken string
 	CFClientID      string
 	CFClientSecret  string
 	LocationID      string
 	RoleTag         string
-	// EndpointID pins the fleet identity. Left empty, the agent derives one from
-	// the hostname, and a renamed host then forks into a second record.
-	EndpointID string
+	EndpointID      string
+	AgentVersion    string
 }
 
+// Public material pinned in every released agent. The private key stays in the
+// operations vault.
+const releasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F
+0e6k7D05y7jLxXQblk3d7ZirBH3MNJlo7aUbtmlQ2izz/u5wTG2ztJ9TBw==
+-----END PUBLIC KEY-----
+`
+
 func (o Options) normalized() Options {
+	if o.AgentHubURL == "" {
+		o.AgentHubURL = o.HubURL
+	}
 	if o.RoleTag == "" {
 		o.RoleTag = "workstation"
 	}
 	if o.LocationID == "" {
 		o.LocationID = "loc-home"
 	}
-	if o.AgentHubURL == "" {
-		o.AgentHubURL = o.HubURL
+	if o.AgentVersion == "" {
+		o.AgentVersion = "0.0.0"
 	}
 	return o
 }
 
-// curlAuthHeaders returns the Cloudflare Access headers the installer needs to
-// reach a hub published behind a tunnel, or an empty string for a LAN hub.
-func (o Options) curlAuthHeaders() string {
-	if o.CFClientID == "" || o.CFClientSecret == "" {
-		return ""
-	}
-	return fmt.Sprintf(`-H "CF-Access-Client-Id: %s" -H "CF-Access-Client-Secret: %s"`, o.CFClientID, o.CFClientSecret)
+func bashQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "'\"'\"'") + "'"
 }
 
-// GeneratePowerShell returns an automated, zero-friction unattended bootstrap script for Windows.
-func GeneratePowerShell(o Options) string {
-	o = o.normalized()
-
-	cfHeadersBlock := `$Headers = @{}`
-	cfArgsBlock := ""
-	if o.CFClientID != "" && o.CFClientSecret != "" {
-		cfHeadersBlock = fmt.Sprintf(`
-$Headers = @{
-    "CF-Access-Client-Id" = "%s"
-    "CF-Access-Client-Secret" = "%s"
-}`, o.CFClientID, o.CFClientSecret)
-		cfArgsBlock = fmt.Sprintf(` --cf-id "%s" --cf-secret "%s"`, o.CFClientID, o.CFClientSecret)
-	}
-
-	// The certificate is issued to the endpoint id, and the hub compares that
-	// name against the endpoint id in every later request - so the installer has
-	// to pin the same id the agent will report under. Left to derive its own,
-	// the agent would name itself the same way, but nothing would guarantee it.
-	endpointID := o.EndpointID
-	if endpointID == "" {
-		endpointID = "win11-$env:COMPUTERNAME"
-	}
-
-	script := `
-# Ominull Enterprise Automated Endpoint Bootstrap (Windows)
-param (
-    [string]$HubURL = "%s",
-    [string]$AgentHubURL = "%s",
-    [string]$APIKey = "%s",
-    [string]$EnrollToken = "%s",
-    [string]$RoleTag = "%s",
-    [string]$LocationID = "%s",
-    [string]$EndpointID = "%s"
-)
-# Enrolment is not a place to carry on past a failure. A half-installed agent
-# that cannot verify the hub is worse than one that never started, so anything
-# unexpected here stops the script instead of being swallowed.
-$ErrorActionPreference = "Stop"
-%s
-
-$InstallDir = "$env:ProgramFiles\Ominull"
-Write-Host "[+] Initializing Ominull Enterprise Windows Deployment..." -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-Write-Host "[+] Installing Ominull Enterprise Trust Anchor (Root CA)..." -ForegroundColor Gray
-$CertPath = "$InstallDir\ca.crt"
-Invoke-WebRequest -Uri "$HubURL/api/v1/pki/ca.crt" -Headers $Headers -OutFile $CertPath -UseBasicParsing
-# Prove it is a certificate before trusting it. An error page saved to ca.crt
-# would otherwise be imported as an anchor and then pinned by the agent.
-$CaCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-$CaCert.Import($CertPath)
-Import-Certificate -FilePath $CertPath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
-Import-Certificate -FilePath $CertPath -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
-Write-Host "[+] Enterprise Root CA anchored ($($CaCert.Subject))." -ForegroundColor Green
-
-Write-Host "[+] Downloading Ominull Native User-Mode WFP Engine & Daemon..." -ForegroundColor Gray
-Invoke-WebRequest -Uri "$HubURL/download/ominull_wfp_user.exe" -Headers $Headers -OutFile "$InstallDir\ominull_wfp_user.exe" -UseBasicParsing
-Invoke-WebRequest -Uri "$HubURL/download/ominulld.exe" -Headers $Headers -OutFile "$InstallDir\ominulld.exe" -UseBasicParsing
-
-Write-Host "[+] Testing User-Mode WFP subsystem..." -ForegroundColor Gray
-& "$InstallDir\ominull_wfp_user.exe" test
-
-# This endpoint's own identity. The API key above is shared by every agent on the
-# tenant: on its own it proves membership, not identity, so anyone holding it can
-# report as any endpoint. The certificate issued here is what the hub tells them
-# apart by.
-Write-Host "[+] Enrolling endpoint identity ($EndpointID)..." -ForegroundColor Gray
-$PfxPath = "$InstallDir\client.pfx"
-try {
-    $EnrollHeaders = @{ "X-API-Key" = $APIKey; "X-Enrollment-Token" = $EnrollToken; "Content-Type" = "application/json" }
-    foreach ($k in $Headers.Keys) { $EnrollHeaders[$k] = $Headers[$k] }
-    $EnrollBody = @{ endpoint_id = $EndpointID; hostname = $env:COMPUTERNAME } | ConvertTo-Json -Compress
-    $Bundle = Invoke-RestMethod -Uri "$HubURL/api/v1/pki/enroll" -Method Post -Headers $EnrollHeaders -Body $EnrollBody -UseBasicParsing
-    if (-not $Bundle.pfx_base64) { throw "the hub returned no PKCS#12 archive" }
-    [IO.File]::WriteAllBytes($PfxPath, [Convert]::FromBase64String($Bundle.pfx_base64))
-    # The archive carries the private key and has no password, so the file
-    # permissions are the whole protection: SYSTEM and Administrators, nothing
-    # inherited, nobody else. The SIDs are spelled numerically because the group
-    # names differ on a localized Windows.
-    & icacls.exe $PfxPath /inheritance:r /grant "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null
-    Write-Host "[+] Endpoint certificate installed ($PfxPath)." -ForegroundColor Green
-} catch {
-    # Not fatal. The hub accepts an endpoint that presents no certificate until
-    # it is started with --client-certs required, and stopping here would leave a
-    # host with a trust anchor and no agent running at all.
-    Remove-Item $PfxPath -Force -ErrorAction SilentlyContinue
-    Write-Host "[!] Identity enrolment failed: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "[!] The agent will report under the API key alone. Re-run this installer once the hub's PKI is reachable." -ForegroundColor Yellow
+func powershellQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
 }
 
-Write-Host "[+] Configuring and starting Ominull Endpoint Service..." -ForegroundColor Gray
-# Register through the agent's own installer: it owns the binPath, including the
-# --service flag the SCM entry point requires and the --ca path the agent pins
-# the hub against. It also moves the key given below into a SYSTEM-only file and
-# registers --key-file instead, so the key never reaches the service command
-# line, which sc qc exposes to any logged-on user.
-& "$InstallDir\ominulld.exe" --uninstall 2>$null | Out-Null
-& "$InstallDir\ominulld.exe" --install --hub $AgentHubURL --key $APIKey --role $RoleTag --location $LocationID --id $EndpointID --ca "$InstallDir\ca.crt" --client-pfx "$PfxPath"%s
-& sc.exe start ominulld 2>&1 | Out-Null
-
-Write-Host "[SUCCESS] Ominull Endpoint deployed; reporting to $AgentHubURL over TLS." -ForegroundColor Green
-`
-	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
-		cfHeadersBlock, cfArgsBlock))
+func render(t string, values map[string]string) string {
+	for key, value := range values {
+		t = strings.ReplaceAll(t, "__"+key+"__", value)
+	}
+	return strings.TrimSpace(t)
 }
 
-// GenerateBash returns an automated bootstrap script for Debian/Ubuntu/Linux systems.
+// GenerateBash installs the signed native .deb and asks the package-installed
+// binary to write enrollment material. It does not copy a privileged binary or
+// create a service unit.
 func GenerateBash(o Options) string {
 	o = o.normalized()
-
-	cfCurlHeader := o.curlAuthHeaders()
-	cfDaemonArg := ""
+	endpoint := o.EndpointID
+	if endpoint == "" {
+		endpoint = "linux-$(hostname)"
+	}
+	cfBlock := ""
 	if o.CFClientID != "" && o.CFClientSecret != "" {
-		cfDaemonArg = fmt.Sprintf(` --cf-id %s --cf-secret %s`, o.CFClientID, o.CFClientSecret)
+		cfBlock = "cf_client_id=" + bashQuote(o.CFClientID) + "\ncf_client_secret=" + bashQuote(o.CFClientSecret)
 	}
 
-	// Always pinned, never left to the agent to derive: the certificate below is
-	// issued to this name and the hub matches it against the endpoint id in every
-	// later request, so the two have to be decided in one place.
-	endpointID := o.EndpointID
-	if endpointID == "" {
-		endpointID = "$DERIVED_ENDPOINT_ID"
-	}
-
-	script := `#!/bin/bash
+	template := `#!/bin/bash
 set -euo pipefail
-HUB_URL="%s"
-AGENT_HUB_URL="%s"
-API_KEY="%s"
-ENROLL_TOKEN="%s"
-ROLE_TAG="%s"
-LOCATION_ID="%s"
-INSTALL_DIR="/opt/ominull"
-CA_PATH="/etc/ominull/ca.crt"
-CLIENT_CERT="/etc/ominull/client.crt"
-CLIENT_KEY="/etc/ominull/client.key"
-DERIVED_ENDPOINT_ID="linux-$(hostname)"
-ENDPOINT_ID="%s"
 
-echo -e "\033[36m[+] Initializing Ominull Linux Endpoint Deployment...\033[0m"
-mkdir -p "$INSTALL_DIR" /etc/ominull
-
-# The trust anchor is not optional and its fetch is not allowed to fail
-# quietly: the agent verifies the hub against this file and nothing else, so a
-# missing or truncated one leaves an endpoint that cannot report at all. It is
-# checked for being a certificate before anything is trusted, because a 401
-# page written to this path would otherwise become the anchor.
-echo -e "\033[90m[+] Installing Ominull Enterprise Trust Anchor (Root CA)...\033[0m"
-curl -fsSL %s "$HUB_URL/api/v1/pki/ca.crt" -o "$CA_PATH"
-openssl x509 -in "$CA_PATH" -noout -subject
-chmod 644 "$CA_PATH"
-# A copy in the system store lets curl, wget and the package tooling on this
-# host reach the hub too; the agent still pins the file above explicitly.
-mkdir -p /usr/local/share/ca-certificates
-cp "$CA_PATH" /usr/local/share/ca-certificates/ominull-ca.crt
-update-ca-certificates 2>/dev/null || true
-
-echo -e "\033[90m[+] Downloading Ominull daemon...\033[0m"
-systemctl stop ominull-agent.service 2>/dev/null || true
-# Retire units from older installers so an endpoint never runs two agents at once.
-systemctl disable --now ominulld.service ominull.service 2>/dev/null || true
-mkdir -p "$INSTALL_DIR/bin"
-curl -fsSL %s "$HUB_URL/download/ominulld" -o "$INSTALL_DIR/bin/ominulld"
-# Root-owned and writable by root alone. chmod +x on its own left the file
-# owned by whoever ran the installer and, under a umask of 002, writable by
-# that account's group - and this is the binary systemd starts as root. Anyone
-# who could rewrite it had root on the next restart, which the agent performs
-# on every self-update.
-chown root:root "$INSTALL_DIR/bin/ominulld"
-chmod 755 "$INSTALL_DIR/bin/ominulld"
-
-# This endpoint's own identity. The API key is shared by every agent on the
-# tenant, so it proves membership and not identity; the certificate issued here
-# is what the hub tells one endpoint from another by.
-#
-# Failure is reported and survived rather than fatal: the hub accepts an
-# endpoint that presents no certificate until it is started with
-# --client-certs required, and stopping here would leave a host with a trust
-# anchor, a daemon on disk and nothing running.
-echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
-json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
-enrol_identity() {
-    local json
-    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" -H "Content-Type: application/json" \
-        -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname)\"}" \
-        "$HUB_URL/api/v1/pki/enroll") || return 1
-    # -A because the fields are single base64 lines; without it openssl refuses
-    # anything longer than a wrapped line and writes an empty file.
-    printf '%%s' "$json" | json_field cert_pem | openssl base64 -d -A > "$CLIENT_CERT" || return 1
-    printf '%%s' "$json" | json_field key_pem | openssl base64 -d -A > "$CLIENT_KEY" || return 1
-    openssl x509 -in "$CLIENT_CERT" -noout -subject || return 1
-}
-if enrol_identity; then
-    chmod 644 "$CLIENT_CERT"
-    chmod 600 "$CLIENT_KEY"
-    echo -e "\033[32m[+] Endpoint certificate installed.\033[0m"
-else
-    rm -f "$CLIENT_CERT" "$CLIENT_KEY"
-    echo -e "\033[33m[!] Identity enrolment failed; the agent will report under the API key alone.\033[0m"
-fi
-
-# The .deb upgrade path reads this same file and leaves it untouched, so an endpoint
-# enrolled here keeps its hub URL, key and CA path when it later self-updates.
-echo -e "\033[90m[+] Writing enrolment config...\033[0m"
-# The key goes in a file of its own and the unit carries the path. Everything in
-# OMINULL_ARGS becomes the daemon's argv, and /proc/<pid>/cmdline is readable by
-# every account on the host - so a key written here would be the tenant
-# credential, shared by the whole fleet, on display in ps output for as long
-# as the agent runs.
-umask 077
-printf '%%s\n' "$API_KEY" > /etc/ominull/agent.key
-chmod 600 /etc/ominull/agent.key
-cat << CONF > /etc/ominull/agent.conf
-OMINULL_ARGS=--hub $AGENT_HUB_URL --key-file /etc/ominull/agent.key --role $ROLE_TAG --location $LOCATION_ID --id $ENDPOINT_ID --ca $CA_PATH --client-cert $CLIENT_CERT --client-key $CLIENT_KEY%s
-CONF
-chmod 600 /etc/ominull/agent.conf
-
-echo -e "\033[90m[+] Creating systemd service unit...\033[0m"
-cat << UNIT > /etc/systemd/system/ominull-agent.service
-[Unit]
-Description=Ominull Threat Nullification Service
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/ominull/agent.conf
-ExecStart=$INSTALL_DIR/bin/ominulld \$OMINULL_ARGS
-Restart=always
-RestartSec=5
-LimitNOFILE=65535
-KillMode=process
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now ominull-agent.service
-
-echo -e "\033[32m[SUCCESS] Ominull Linux Service deployed; reporting to $AGENT_HUB_URL over TLS.\033[0m"
-`
-	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
-		cfCurlHeader, cfCurlHeader, cfCurlHeader, cfDaemonArg))
-}
-
-// GenerateMacOS returns an automated bootstrap script for macOS systems using native PF.
-func GenerateMacOS(o Options) string {
-	o = o.normalized()
-	cfCurlHeader := o.curlAuthHeaders()
-
-	// The daemon reads its endpoint id from the fifth argument. Pinning it here
-	// rather than leaving the daemon to derive one from the hostname is what
-	// keeps a renamed Mac on the fleet record it already has - and the CA path
-	// that follows it sits in the sixth slot, so the id cannot be skipped.
-	endpointID := o.EndpointID
-	if endpointID == "" {
-		endpointID = "$DERIVED_ENDPOINT_ID"
-	}
-
-	script := `#!/bin/bash
-set -euo pipefail
-HUB_URL="%s"
-AGENT_HUB_URL="%s"
-API_KEY="%s"
-ENROLL_TOKEN="%s"
-ROLE_TAG="%s"
-LOCATION_ID="%s"
-INSTALL_DIR="/opt/ominull"
-CA_PATH="$INSTALL_DIR/ca.crt"
-CLIENT_CERT="$INSTALL_DIR/client.crt"
-CLIENT_KEY="$INSTALL_DIR/client.key"
-DERIVED_ENDPOINT_ID="macos-$(hostname -s)"
-ENDPOINT_ID="%s"
-
-if [[ $EUID -ne 0 ]]; then
-    echo "[-] Error: Run with sudo/root privileges."
+if [ "${EUID}" -ne 0 ]; then
+    echo "[-] Run this installer as root (the one-line form uses sudo)." >&2
     exit 1
 fi
+command -v curl >/dev/null
+command -v openssl >/dev/null
+command -v dpkg >/dev/null
+command -v sha256sum >/dev/null
 
-echo -e "\033[36m[+] Initializing Ominull macOS Zero-Friction Deployment...\033[0m"
-mkdir -p "$INSTALL_DIR"
+HUB_URL=__HUB_URL__
+AGENT_HUB_URL=__AGENT_HUB_URL__
+API_KEY=__API_KEY__
+ENROLL_TOKEN=__ENROLL_TOKEN__
+ROLE_TAG=__ROLE_TAG__
+LOCATION_ID=__LOCATION_ID__
+ENDPOINT_ID=__ENDPOINT_ID__
+VERSION=__VERSION__
+PACKAGE="ominull-agent_${VERSION}_amd64.deb"
+TMP=$(mktemp -d /tmp/ominull-bootstrap.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
 
-# Mandatory, and verified to be a certificate before it is trusted: the daemon
-# validates every hub connection against this file alone.
-echo -e "\033[90m[+] Installing Ominull Enterprise Trust Anchor...\033[0m"
-curl -fsSL %s "$HUB_URL/api/v1/pki/ca.crt" -o "$CA_PATH"
-/usr/bin/openssl x509 -in "$CA_PATH" -noout -subject
-chmod 644 "$CA_PATH"
-security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$CA_PATH" 2>/dev/null || true
-
-echo -e "\033[90m[+] Downloading macOS Packet Filter Engine and Daemon...\033[0m"
-curl -fsSL %s "$HUB_URL/download/pf_engine.sh" -o "$INSTALL_DIR/pf_engine.sh"
-curl -fsSL %s "$HUB_URL/download/ominull_mac_daemon.sh" -o "$INSTALL_DIR/ominull_mac_daemon.sh"
-# Root-owned and writable by root alone. Both are run as root by the LaunchDaemon,
-# and chmod +x alone left them owned by whoever ran the installer - on this fleet
-# pf_engine.sh was found owned by a local account, which is that account's root.
-chown root:wheel "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
-chmod 755 "$INSTALL_DIR/pf_engine.sh" "$INSTALL_DIR/ominull_mac_daemon.sh"
-
-# This endpoint's own identity. The API key is shared by every agent on the
-# tenant, so it proves membership and not identity; the certificate issued here
-# is what the hub tells one endpoint from another by. A failure is survived: the
-# hub accepts an endpoint with no certificate until it is started with
-# --client-certs required, and stopping here would leave a Mac with a trust
-# anchor and no daemon.
-echo -e "\033[90m[+] Enrolling endpoint identity ($ENDPOINT_ID)...\033[0m"
-json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
-enrol_identity() {
-    local json
-    json=$(curl -fsS %s -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" -H "Content-Type: application/json" \
-        -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname -s)\"}" \
-        "$HUB_URL/api/v1/pki/enroll") || return 1
-    # -A because each field is one long base64 line, which openssl otherwise
-    # refuses and silently turns into an empty file.
-    printf '%%s' "$json" | json_field cert_pem | /usr/bin/openssl base64 -d -A > "$CLIENT_CERT" || return 1
-    printf '%%s' "$json" | json_field key_pem | /usr/bin/openssl base64 -d -A > "$CLIENT_KEY" || return 1
-    /usr/bin/openssl x509 -in "$CLIENT_CERT" -noout -subject || return 1
-}
-if enrol_identity; then
-    chmod 644 "$CLIENT_CERT"
-    chmod 600 "$CLIENT_KEY"
-    echo -e "\033[32m[+] Endpoint certificate installed.\033[0m"
-else
-    rm -f "$CLIENT_CERT" "$CLIENT_KEY"
-    echo -e "\033[33m[!] Identity enrolment failed; the daemon will report under the API key alone.\033[0m"
+curl_auth=()
+if [ -n __CF_ID__ ] && [ -n __CF_SECRET__ ]; then
+    curl_auth=(-H "CF-Access-Client-Id: __CF_ID__" -H "CF-Access-Client-Secret: __CF_SECRET__")
 fi
 
-# Same reason as the Linux unit: a LaunchDaemon's ProgramArguments are visible
-# to every local account through ps for the life of the daemon. The plist below
-# names the file; the daemon reads the key out of it.
-umask 077
-printf '%%s\n' "$API_KEY" > /opt/ominull/agent.key
-chmod 600 /opt/ominull/agent.key
+echo "[+] Fetching and validating the Ominull CA."
+curl -fsSL "${curl_auth[@]}" "$HUB_URL/api/v1/pki/ca.crt" -o "$TMP/ca.crt"
+openssl x509 -in "$TMP/ca.crt" -noout -subject >/dev/null
 
-echo -e "\033[90m[+] Configuring macOS LaunchDaemon Service...\033[0m"
-cat << PLIST > /Library/LaunchDaemons/dev.ominull.daemon.plist
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>dev.ominull.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/opt/ominull/ominull_mac_daemon.sh</string>
-        <string>$AGENT_HUB_URL</string>
-        <string>/opt/ominull/agent.key</string>
-        <string>$ROLE_TAG</string>
-        <string>$LOCATION_ID</string>
-        <string>$ENDPOINT_ID</string>
-        <string>$CA_PATH</string>
-        <string>$CLIENT_CERT</string>
-        <string>$CLIENT_KEY</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/ominull.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/ominull.error.log</string>
-</dict>
-</plist>
-PLIST
-chmod 644 /Library/LaunchDaemons/dev.ominull.daemon.plist
+echo "[+] Fetching native package $PACKAGE."
+curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE" -o "$TMP/$PACKAGE"
+curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE.sig" -o "$TMP/$PACKAGE.sig"
+curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE.sha256" -o "$TMP/$PACKAGE.sha256"
+expected=$(awk 'NF { print $1; exit }' "$TMP/$PACKAGE.sha256")
+actual=$(sha256sum "$TMP/$PACKAGE" | awk '{ print $1 }')
+[ "$expected" = "$actual" ]
+cat > "$TMP/release.pub" <<'OMINULL_RELEASE_KEY'
+__PUBLIC_KEY__OMINULL_RELEASE_KEY
+openssl dgst -sha256 -verify "$TMP/release.pub" -signature "$TMP/$PACKAGE.sig" "$TMP/$PACKAGE" >/dev/null
 
-launchctl unload /Library/LaunchDaemons/dev.ominull.daemon.plist 2>/dev/null || true
-launchctl load -w /Library/LaunchDaemons/dev.ominull.daemon.plist
+echo "[+] Installing through dpkg."
+dpkg -i "$TMP/$PACKAGE"
 
-echo -e "\033[32m[SUCCESS] Ominull macOS daemon active; reporting to $AGENT_HUB_URL over TLS.\033[0m"
+json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
+echo "[+] Enrolling endpoint $ENDPOINT_ID."
+bundle=$(curl -fsSL "${curl_auth[@]}" -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" \
+    -H "Content-Type: application/json" -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname)\"}" \
+    "$HUB_URL/api/v1/pki/enroll")
+printf '%s' "$bundle" | json_field cert_pem | openssl base64 -d -A > "$TMP/client.crt"
+printf '%s' "$bundle" | json_field key_pem | openssl base64 -d -A > "$TMP/client.key"
+openssl x509 -in "$TMP/client.crt" -noout -subject >/dev/null
+
+cat <<CONF | /opt/ominull/bin/ominulld --configure-stdin
+hub_url=$AGENT_HUB_URL
+api_key=$API_KEY
+endpoint_id=$ENDPOINT_ID
+role_tag=$ROLE_TAG
+location_id=$LOCATION_ID
+ca_source=$TMP/ca.crt
+client_cert_source=$TMP/client.crt
+client_key_source=$TMP/client.key
+__CF_CONFIG__
+CONF
+
+# The unit and its ownership came from the .deb. Start the already-registered
+# package unit after package-owned configuration is ready; enrollment never
+# creates or edits a service definition.
+systemctl start ominull-agent.service
+echo "[+] Ominull Linux agent installed, enrolled, and started from $PACKAGE."
 `
-	return strings.TrimSpace(fmt.Sprintf(script,
-		o.HubURL, o.AgentHubURL, o.TenantAPIKey, o.EnrollmentToken, o.RoleTag, o.LocationID, endpointID,
-		cfCurlHeader, cfCurlHeader, cfCurlHeader, cfCurlHeader))
+
+	return render(template, map[string]string{
+		"HUB_URL":       bashQuote(o.HubURL),
+		"AGENT_HUB_URL": bashQuote(o.AgentHubURL),
+		"API_KEY":       bashQuote(o.TenantAPIKey),
+		"ENROLL_TOKEN":  bashQuote(o.EnrollmentToken),
+		"ROLE_TAG":      bashQuote(o.RoleTag),
+		"LOCATION_ID":   bashQuote(o.LocationID),
+		"ENDPOINT_ID":   bashQuote(endpoint),
+		"VERSION":       bashQuote(o.AgentVersion),
+		"CF_ID":         bashQuote(o.CFClientID),
+		"CF_SECRET":     bashQuote(o.CFClientSecret),
+		"CF_CONFIG":     cfBlock,
+		"PUBLIC_KEY":    releasePublicKeyPEM,
+	})
+}
+
+// GeneratePowerShell installs the signed native MSI and asks the
+// package-installed binary to write enrollment material. It does not copy a
+// privileged binary or register a service.
+func GeneratePowerShell(o Options) string {
+	o = o.normalized()
+	endpoint := powershellQuote(o.EndpointID)
+	if o.EndpointID == "" {
+		endpoint = `win11-$env:COMPUTERNAME`
+	}
+	cfBlock := ""
+	cfID, cfSecret, cfPresent := "", "", "$false"
+	if o.CFClientID != "" && o.CFClientSecret != "" {
+		cfID, cfSecret, cfPresent = powershellQuote(o.CFClientID), powershellQuote(o.CFClientSecret), "$true"
+		cfBlock = "cf_client_id=" + o.CFClientID + "\ncf_client_secret=" + o.CFClientSecret
+	}
+
+	template := `# Ominull Windows native-package bootstrap
+$ErrorActionPreference = "Stop"
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this installer from an elevated PowerShell."
+}
+$HubURL = __HUB_URL__
+$AgentHubURL = __AGENT_HUB_URL__
+$APIKey = __API_KEY__
+$EnrollToken = __ENROLL_TOKEN__
+$RoleTag = __ROLE_TAG__
+$LocationID = __LOCATION_ID__
+$EndpointID = __ENDPOINT_ID__
+$Version = __VERSION__
+$Package = "ominull-agent-windows-$Version.msi"
+$Temp = Join-Path $env:TEMP ("ominull-bootstrap-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $Temp | Out-Null
+try {
+    $Headers = @{}
+    if (__CF_ID_PRESENT__) {
+        $Headers["CF-Access-Client-Id"] = __CF_ID__
+        $Headers["CF-Access-Client-Secret"] = __CF_SECRET__
+    }
+    $ca = Join-Path $Temp "ca.crt"
+    $msi = Join-Path $Temp $Package
+    $sig = "$msi.sig"
+    $digest = "$msi.sha256"
+    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/api/v1/pki/ca.crt" -OutFile $ca
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ca)
+    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package" -OutFile $msi
+    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package.sig" -OutFile $sig
+    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package.sha256" -OutFile $digest
+    $expected = (Get-Content -LiteralPath $digest | Where-Object { $_.Trim() } | Select-Object -First 1).Split()[0]
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $msi).Hash.ToLowerInvariant()
+    if ($expected.ToLowerInvariant() -ne $actual) { throw "native package digest mismatch" }
+
+    function Convert-DerEcdsaSignatureToP1363([byte[]] $der) {
+        if ($der.Length -lt 8 -or $der[0] -ne 0x30) { throw "invalid release signature" }
+        $offset = 2
+        if ($der[1] -eq 0x81) { $offset = 3 }
+        if ($offset -ge $der.Length -or $der[$offset] -ne 0x02) { throw "invalid release signature" }
+        $rLength = [int]$der[$offset + 1]
+        $rStart = $offset + 2
+        $sTag = $rStart + $rLength
+        if ($sTag + 2 -gt $der.Length -or $der[$sTag] -ne 0x02) { throw "invalid release signature" }
+        $sLength = [int]$der[$sTag + 1]
+        $sStart = $sTag + 2
+        if ($sStart + $sLength -gt $der.Length) { throw "invalid release signature" }
+        while ($rLength -gt 1 -and $der[$rStart] -eq 0) { $rStart++; $rLength-- }
+        while ($sLength -gt 1 -and $der[$sStart] -eq 0) { $sStart++; $sLength-- }
+        if ($rLength -gt 32 -or $sLength -gt 32) { throw "invalid release signature width" }
+        $raw = New-Object byte[] 64
+        [Array]::Copy($der, $rStart, $raw, 32 - $rLength, $rLength)
+        [Array]::Copy($der, $sStart, $raw, 64 - $sLength, $sLength)
+        return ,$raw
+    }
+
+    $releaseECDSA = [System.Security.Cryptography.ECDsa]::Create()
+    try {
+        $releaseParameters = New-Object System.Security.Cryptography.ECParameters
+        $releaseParameters.Curve = [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256
+        $releasePoint = New-Object System.Security.Cryptography.ECPoint
+        $releasePoint.X = [Convert]::FromBase64String("__PUBLIC_KEY_X__")
+        $releasePoint.Y = [Convert]::FromBase64String("__PUBLIC_KEY_Y__")
+        $releaseParameters.Q = $releasePoint
+        $releaseECDSA.ImportParameters($releaseParameters)
+        $releaseHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($msi))
+        $releaseSignature = Convert-DerEcdsaSignatureToP1363 ([IO.File]::ReadAllBytes($sig))
+        if (-not $releaseECDSA.VerifyHash($releaseHash, $releaseSignature)) { throw "native package signature mismatch" }
+    } finally {
+        $releaseECDSA.Dispose()
+    }
+
+    Write-Host "[+] Installing through Windows Installer."
+    $install = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart', 'REBOOT=ReallySuppress') -Wait -PassThru
+    if ($install.ExitCode -ne 0 -and $install.ExitCode -ne 3010) { throw "MSI failed with exit code $($install.ExitCode)" }
+
+    $body = @{ endpoint_id = $EndpointID; hostname = $env:COMPUTERNAME } | ConvertTo-Json -Compress
+    $enrollHeaders = @{ "X-API-Key" = $APIKey; "X-Enrollment-Token" = $EnrollToken; "Content-Type" = "application/json" }
+    foreach ($key in $Headers.Keys) { $enrollHeaders[$key] = $Headers[$key] }
+    $bundle = Invoke-RestMethod -UseBasicParsing -Method Post -Headers $enrollHeaders -Uri "$HubURL/api/v1/pki/enroll" -Body $body
+    if (-not $bundle.pfx_base64) { throw "hub returned no endpoint certificate" }
+    $pfx = Join-Path $Temp "client.pfx"
+    [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($bundle.pfx_base64))
+
+    $config = @"
+hub_url=$AgentHubURL
+api_key=$APIKey
+endpoint_id=$EndpointID
+role_tag=$RoleTag
+location_id=$LocationID
+ca_source=$ca
+client_pfx_source=$pfx
+__CF_CONFIG__
+"@
+    $agent = Join-Path $env:ProgramFiles "Ominull\ominulld.exe"
+    $config | & $agent --configure-stdin
+    if ($LASTEXITCODE -ne 0) { throw "agent configuration failed with exit code $LASTEXITCODE" }
+    Start-Service -Name ominulld
+    Write-Host "[+] Ominull Windows agent installed, enrolled, and started from $Package."
+} finally {
+    Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
+}
+`
+
+	return render(template, map[string]string{
+		"HUB_URL":       powershellQuote(o.HubURL),
+		"AGENT_HUB_URL": powershellQuote(o.AgentHubURL),
+		"API_KEY":       powershellQuote(o.TenantAPIKey),
+		"ENROLL_TOKEN":  powershellQuote(o.EnrollmentToken),
+		"ROLE_TAG":      powershellQuote(o.RoleTag),
+		"LOCATION_ID":   powershellQuote(o.LocationID),
+		"ENDPOINT_ID":   endpoint,
+		"VERSION":       powershellQuote(o.AgentVersion),
+		"CF_ID_PRESENT": cfPresent,
+	 "CF_ID":         cfID,
+	 "CF_SECRET":     cfSecret,
+	 "CF_CONFIG":     cfBlock,
+		"PUBLIC_KEY_X":  "71CpMPEGtyUpx3ZSuvcf+YMiwM1F0e6k7D05y7jLxXQ=",
+		"PUBLIC_KEY_Y":  "G5ZN3e2YqwR9zDSZaO2lG7ZpUNos8/7ucExts7SfUwc=",
+	})
 }

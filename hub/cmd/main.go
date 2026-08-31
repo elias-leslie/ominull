@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +22,7 @@ const banner = `
  | |  | | |\/| || ||  \| | | | | |   | |    
  | |  | | |  | || || |\  | |_| | |___| |___ 
   \____/|_|  |_|___|_| \_|\___/|_____|_____|
-  Universal Kernel Threat Nullification Hub
+  Ominull Fleet Management Hub
 `
 
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
@@ -30,25 +31,33 @@ const banner = `
 const defaultAgentVersion = "1.7.16"
 
 func main() {
-	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
-	dbPath := flag.String("db", "ominull.db", "Path to SQLite database file")
-	adminKey := flag.String("admin-key", "", "Master Admin API Key. Prefer --admin-key-file: every argument of every process is readable by every local account.")
-	adminKeyFile := flag.String("admin-key-file", "", "File whose first line is the admin API key (mode 0600). Preferred over --admin-key, which puts the credential in /proc/<pid>/cmdline and in systemctl show output.")
-	binaryDir := flag.String("binary-dir", "./build", "Path to directory containing driver and agent binaries")
-	hubURL := flag.String("hub-url", "", "Public Hub URL for bootstrap scripts (e.g. https://omi.example.com)")
-	agentHubURL := flag.String("agent-hub-url", "", "TLS URL enrolled agents report to (e.g. https://10.0.0.58:9443); defaults to --hub-url")
-	agentVersion := flag.String("agent-version", defaultAgentVersion, "Agent version bundled with this hub build (offered to outdated endpoints)")
-	tlsListen := flag.String("tls-listen", ":9443", "HTTPS listen address for agent traffic (empty disables TLS)")
-	tlsCert := flag.String("tls-cert", "", "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
-	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert")
-	tlsHosts := flag.String("tls-hosts", "", "Comma-separated extra SANs for the self-issued certificate (e.g. a VIP the hub cannot see)")
-	retentionDays := flag.Int("retention-days", 14, "Days of raw flow telemetry to keep (0 disables pruning). Nothing pruned it before, and the file only ever grew.")
-	alertRetentionDays := flag.Int("alert-retention-days", 30, "Days of anomaly alerts and alerts to keep (0 disables pruning).")
-	auditRetentionDays := flag.Int("audit-retention-days", 365, "Days of audit log to keep (0 disables pruning). Kept far longer than telemetry: it is small, and it is the record of who did what.")
-	accessTeam := flag.String("access-team", "", "Cloudflare Access team name (the <team> in <team>.cloudflareaccess.com). Set with --access-aud to let an operator who has already signed in through Access open the console without also presenting the admin key.")
-	accessAUD := flag.String("access-aud", "", "The Access application's Application Audience (AUD) tag. Pinned on every assertion: without it, a token minted for any other Access application in the same team would open this console.")
-	accessAdmin := flag.String("access-bootstrap-admin", "", "Email guaranteed to hold the admin role at startup. Everyone else is granted and revoked in the console; this flag only makes sure there is someone who can open it in the first place, and it never demotes an existing administrator.")
-	clientCerts := flag.String("client-certs", "optional", "How agents identify themselves: off (never asked - no endpoint can be told from another holding the same tenant key), optional (verified when presented, endpoints without one still report), required (refused at the handshake without one; only once every endpoint has one).")
+	configPath := findConfigArg(os.Args[1:])
+	if configPath != "" {
+		if err := loadConfigEnv(configPath); err != nil {
+			log.Fatalf("[-] --config %s: %v", configPath, err)
+		}
+	}
+	listenAddr := flag.String("listen", envOr("OMINULL_LISTEN", ":9999"), "HTTP listen address")
+	dbPath := flag.String("db", envOr("OMINULL_DB", "ominull.db"), "Path to SQLite database file")
+	adminKey := flag.String("admin-key", envOr("OMINULL_ADMIN_KEY", ""), "Master Admin API Key. Prefer --admin-key-file: every argument of every process is readable by every local account.")
+	adminKeyFile := flag.String("admin-key-file", envOr("OMINULL_ADMIN_KEY_FILE", ""), "File whose first line is the admin API key (mode 0600). Preferred over --admin-key, which puts the credential in /proc/<pid>/cmdline and in systemctl show output.")
+	binaryDir := flag.String("binary-dir", envOr("OMINULL_BINARY_DIR", "./build"), "Path to directory containing signed package artifacts")
+	hubURL := flag.String("hub-url", envOr("OMINULL_HUB_URL", ""), "Public Hub URL for bootstrap scripts (e.g. https://hub.example.invalid)")
+	agentHubURL := flag.String("agent-hub-url", envOr("OMINULL_AGENT_HUB_URL", ""), "TLS URL enrolled agents report to; defaults to --hub-url")
+	agentVersion := flag.String("agent-version", envOr("OMINULL_AGENT_VERSION", defaultAgentVersion), "Agent version bundled with this hub build (offered to outdated endpoints)")
+	tlsListen := flag.String("tls-listen", envOr("OMINULL_TLS_LISTEN", ":9443"), "HTTPS listen address for agent traffic (empty disables TLS)")
+	tlsCert := flag.String("tls-cert", envOr("OMINULL_TLS_CERT", ""), "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
+	tlsKey := flag.String("tls-key", envOr("OMINULL_TLS_KEY", ""), "PEM private key for --tls-cert")
+	tlsHosts := flag.String("tls-hosts", envOr("OMINULL_TLS_HOSTS", ""), "Comma-separated extra SANs for the self-issued certificate")
+	retentionDays := flag.Int("retention-days", envInt("OMINULL_RETENTION_DAYS", 14), "Days of raw flow telemetry to keep (0 disables pruning)")
+	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 14), "Days of aggregated communication profiles to keep (0 disables pruning)")
+	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 30), "Days of alerts to keep (0 disables pruning)")
+	auditRetentionDays := flag.Int("audit-retention-days", envInt("OMINULL_AUDIT_RETENTION_DAYS", 365), "Days of audit log to keep (0 disables pruning)")
+	accessTeam := flag.String("access-team", envOr("OMINULL_ACCESS_TEAM", ""), "Cloudflare Access team name")
+	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
+	accessAdmin := flag.String("access-bootstrap-admin", envOr("OMINULL_ACCESS_BOOTSTRAP_ADMIN", ""), "Email guaranteed to hold the admin role at startup")
+	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
+	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
 
 	resolvedAgentVersion := *agentVersion
@@ -119,14 +128,15 @@ func main() {
 	// filling does not necessarily have another hour in it.
 	retention := storage.RetentionPolicy{
 		Events:        time.Duration(*retentionDays) * 24 * time.Hour,
+		CommProfiles:  time.Duration(*commRetentionDays) * 24 * time.Hour,
 		AnomalyAlerts: time.Duration(*alertRetentionDays) * 24 * time.Hour,
 		Alerts:        time.Duration(*alertRetentionDays) * 24 * time.Hour,
 		AuditLogs:     time.Duration(*auditRetentionDays) * 24 * time.Hour,
 	}
 	stopRetention := store.StartRetention(retention, time.Hour)
 	defer stopRetention()
-	log.Printf("[+] Retention: telemetry %dd, alerts %dd, audit %dd (0 = keep everything)",
-		*retentionDays, *alertRetentionDays, *auditRetentionDays)
+	log.Printf("[+] Retention: telemetry %dd, communication profiles %dd, alerts %dd, audit %dd (0 = keep everything)",
+		*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays)
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{
@@ -217,6 +227,62 @@ func main() {
 
 	log.Println("\n[*] Shutting down Ominull Hub gracefully...")
 	srv.Close()
+}
+
+func findConfigArg(args []string) string {
+	for i, arg := range args {
+		if arg == "--config" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return ""
+}
+
+// loadConfigEnv reads the package-owned EnvironmentFile format before flags
+// are declared, so a service started only with --config has the same behavior
+// as an interactive invocation with explicit flags. It accepts namespaced
+// OMINULL_* variables only; shell syntax and command substitution are not
+// evaluated.
+func loadConfigEnv(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(key, "OMINULL_") {
+			continue
+		}
+		os.Setenv(key, strings.TrimSpace(value))
+	}
+	return nil
+}
+
+func envOr(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("[!] Ignoring invalid %s value; using %d.", name, fallback)
+		return fallback
+	}
+	return parsed
 }
 
 // readKeyFile takes the first line of a file as a credential, and refuses a file

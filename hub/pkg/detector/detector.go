@@ -126,6 +126,9 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 func (e *Engine) Start(ctx context.Context) {
 	subCtx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
+	if e.eventsChan == nil {
+		return
+	}
 
 	go func() {
 		for {
@@ -161,7 +164,58 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	return false
 }
 
+func (e *Engine) recordAlert(alert storage.Alert) {
+	if err := e.store.CreateAlert(alert); err != nil {
+		log.Printf("[-] alert write failed for %s/%s: %v", alert.EndpointID, alert.Title, err)
+	}
+}
+
+func (e *Engine) recordAnomaly(anomaly storage.AnomalyAlert) {
+	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
+		log.Printf("[-] anomaly write failed for %s/%s: %v", anomaly.EndpointID, anomaly.Title, err)
+	}
+}
+
+func (e *Engine) autoIsolate(endpointID, reason string) {
+	if e.onAutoIsolate == nil {
+		return
+	}
+	if err := e.onAutoIsolate(endpointID, reason); err != nil {
+		log.Printf("[-] automatic isolation failed for %s: %v", endpointID, err)
+	}
+}
+
 func (e *Engine) Evaluate(ev storage.Event) {
+	// Compatibility path for callers outside the batch ingestion seam. The
+	// production HTTP path records communication profiles in one batch before
+	// it calls EvaluateBatch.
+	if err := e.store.RecordNetworkComms(ev, ev.EndpointID, ""); err != nil {
+		log.Printf("[-] communication profile write failed for %s: %v", ev.EndpointID, err)
+	}
+	e.evaluate(ev, nil)
+}
+
+// BatchSnapshot contains the state shared by every event in one authenticated
+// telemetry request. The ingestion module obtains it before persistence so
+// detector decisions retain the old "first seen" ordering without repeating
+// database reads for every event.
+type BatchSnapshot struct {
+	Endpoint   storage.Endpoint
+	Geo        map[string]threatintel.GeoRecord
+	Exclusions []storage.Exclusion
+	FirstSeen  map[string]bool
+	LocationID string
+}
+
+// EvaluateBatch runs the detector only after the caller has durably accepted
+// the batch. Shared endpoint, policy, exclusion and GeoIP state is read once.
+func (e *Engine) EvaluateBatch(events []storage.Event, snapshot BatchSnapshot) {
+	for _, ev := range events {
+		e.evaluate(ev, &snapshot)
+	}
+}
+
+func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	now := ev.Timestamp
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -170,69 +224,43 @@ func (e *Engine) Evaluate(ev storage.Event) {
 	cleanPath := strings.ReplaceAll(ev.ProcessPath, "\\", "/")
 	procName := filepath.Base(cleanPath)
 	if procName == "." || procName == "/" || procName == "" {
-		procName = "kernel"
+		procName = "system"
 	}
 	procLower := strings.ToLower(cleanPath)
 
-	// In-flight GeoIP & ASN Resolution
-	geo := threatintel.ResolveGeoIP(ev.DstIP)
+	// GeoIP and ASN resolution. The batch path resolves each unique
+	// destination once and passes the result here.
+	var geo threatintel.GeoRecord
+	if snapshot != nil {
+		geo = snapshot.Geo[ev.DstIP]
+	} else {
+		geo = threatintel.ResolveGeoIP(ev.DstIP)
+	}
 	if ev.Country == "" || ev.Country == "US" {
 		ev.Country = geo.Country
 	}
 
-	// 0. Update Hierarchical Communications Baseline Profile
-	_ = e.store.RecordNetworkComms(ev, ev.EndpointID, "")
-
 	// 0.1 Check Active Custom Exclusions (Pinholes & Allowlists)
-	if e.store.IsExclusionMatch(ev, "") {
+	if snapshot != nil {
+		if storage.MatchesExclusion(ev, snapshot.LocationID, snapshot.Exclusions) {
+			return // Traffic matches verified security tool or operational exclusion
+		}
+	} else if e.store.IsExclusionMatch(ev, "") {
 		return // Traffic matches verified security tool or operational exclusion
 	}
 
-	// 0.2 Check 4-Tier Hierarchical Policy Engine (Global -> Client -> Location -> Endpoint/Role)
-	ep, _ := e.store.GetEndpoint(ev.EndpointID)
 	var endpoint storage.Endpoint
-	if ep != nil {
-		endpoint = *ep
+	if snapshot != nil {
+		endpoint = snapshot.Endpoint
 	} else {
-		endpoint = storage.Endpoint{ID: ev.EndpointID, RoleTag: "workstation"}
-	}
-
-	matchedPolicy, policyAction := e.store.EvaluatePolicyHierarchy(ev, endpoint)
-	if matchedPolicy != nil && policyAction != "" {
-		if policyAction == "BLOCK" {
-			ev.Action = "BLOCK"
-			alert := storage.Alert{
-				ID:          uuid.New().String(),
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Timestamp:   now,
-				Title:       fmt.Sprintf("4-Tier Policy Block: %s (%s Tier)", matchedPolicy.Name, strings.ToUpper(matchedPolicy.Scope)),
-				Description: fmt.Sprintf("Outbound flow to %s:%d matching policy '%s' was blocked at endpoint %s.", ev.DstIP, ev.DstPort, matchedPolicy.Name, ev.EndpointID),
-				Severity:    "HIGH",
-				Mitigated:   true,
-			}
-			_ = e.store.CreateAlert(alert)
-			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
-				ID:          alert.ID,
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Hostname:    endpoint.Hostname,
-				AnomalyType: "POLICY_BLOCK",
-				Severity:    "HIGH",
-				Title:       alert.Title,
-				Description: alert.Description,
-				Details:     fmt.Sprintf("Scope: %s (%s) | Rule: %s %s", matchedPolicy.Scope, matchedPolicy.ScopeValue, matchedPolicy.RuleType, matchedPolicy.RuleValue),
-				ProcessPath: ev.ProcessPath,
-				DstIP:       ev.DstIP,
-				DstPort:     ev.DstPort,
-				Timestamp:   now,
-			})
-			log.Printf("[!] POLICY BLOCK [%s]: %s on %s -> %s:%d", matchedPolicy.Scope, matchedPolicy.Name, ev.EndpointID, ev.DstIP, ev.DstPort)
-			return
-		} else if policyAction == "QUARANTINE" {
-			if e.onAutoIsolate != nil {
-				_ = e.onAutoIsolate(ev.EndpointID, "Policy Rule Isolation Triggered: "+matchedPolicy.Name)
-			}
+		ep, err := e.store.GetEndpoint(ev.EndpointID)
+		if err != nil {
+			log.Printf("[-] endpoint lookup failed for detector event %s: %v", ev.EndpointID, err)
+		}
+		if ep != nil {
+			endpoint = *ep
+		} else {
+			endpoint = storage.Endpoint{ID: ev.EndpointID, RoleTag: "workstation"}
 		}
 	}
 
@@ -246,12 +274,12 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
 				Title:       "Critical Threat Nullification Triggered",
-				Description: fmt.Sprintf("Confirmed C2 threat connection to %s (%s, %s) blocked at ring-0. Host quarantine verified.", ev.DstIP, geo.CountryName, geo.Org),
+				Description: fmt.Sprintf("Confirmed C2 threat connection to %s (%s, %s) blocked by the endpoint firewall.", ev.DstIP, geo.CountryName, geo.Org),
 				Severity:    "CRITICAL",
 				Mitigated:   true,
 			}
-			_ = e.store.CreateAlert(alert)
-			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+			e.recordAlert(alert)
+			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -268,9 +296,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 			})
 			log.Printf("[!] DETECTION ALERT [CRITICAL]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, ev.DstIP)
 
-			if e.onAutoIsolate != nil {
-				_ = e.onAutoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
-			}
+			e.autoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
 		}
 	}
 
@@ -330,8 +356,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				Severity:    "HIGH",
 				Mitigated:   false,
 			}
-			_ = e.store.CreateAlert(alert)
-			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+			e.recordAlert(alert)
+			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -376,8 +402,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 					Severity:    "CRITICAL",
 					Mitigated:   false,
 				}
-				_ = e.store.CreateAlert(alert)
-				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+				e.recordAlert(alert)
+				e.recordAnomaly(storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -438,8 +464,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 					Severity:  severity,
 					Mitigated: false,
 				}
-				_ = e.store.CreateAlert(alert)
-				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+				e.recordAlert(alert)
+				e.recordAnomaly(storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -464,11 +490,17 @@ func (e *Engine) Evaluate(ev storage.Event) {
 	}
 
 	// 5. Statistical Outlier: Rare First-Seen External Destination (Ignoring major CDNs/Clouds)
+	firstSeen := false
+	if snapshot != nil {
+		firstSeen = snapshot.FirstSeen[ev.DstIP]
+	} else {
+		firstSeen = e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP)
+	}
 	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedDst && !isTrustedSys && e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP) {
+		!isTrustedDst && !isTrustedSys && firstSeen {
 		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, ev.DstIP)
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
-			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -518,8 +550,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 					Severity:    "HIGH",
 					Mitigated:   false,
 				}
-				_ = e.store.CreateAlert(alert)
-				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+				e.recordAlert(alert)
+				e.recordAnomaly(storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -572,8 +604,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 					Severity:    "CRITICAL",
 					Mitigated:   false,
 				}
-				_ = e.store.CreateAlert(alert)
-				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+				e.recordAlert(alert)
+				e.recordAnomaly(storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -607,8 +639,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				Severity:    "HIGH",
 				Mitigated:   false,
 			}
-			_ = e.store.CreateAlert(alert)
-			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
+			e.recordAlert(alert)
+			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -646,79 +678,11 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			}
-			_ = e.store.CreateAnomalyAlert(anomaly)
+			e.recordAnomaly(anomaly)
 			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}
 
-	// 10. In-Flight DPI: Suspicious DGA Domain & High-Entropy C2 SNI
-	targetDomain := ev.SNI
-	if targetDomain == "" {
-		targetDomain = ev.Domain
-	}
-	if targetDomain != "" && len(targetDomain) >= 12 {
-		entropy := calcEntropy(targetDomain)
-		hasSuspiciousTLD := strings.HasSuffix(targetDomain, ".top") ||
-			strings.HasSuffix(targetDomain, ".xyz") ||
-			strings.HasSuffix(targetDomain, ".cc") ||
-			strings.HasSuffix(targetDomain, ".su") ||
-			strings.HasSuffix(targetDomain, ".tk") ||
-			strings.HasSuffix(targetDomain, ".biz")
-
-		if entropy >= 3.85 || (entropy >= 3.5 && hasSuspiciousTLD) {
-			alertKey := fmt.Sprintf("dga:%s:%s", ev.EndpointID, targetDomain)
-			if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
-				sev := "HIGH"
-				if entropy >= 4.1 || hasSuspiciousTLD {
-					sev = "CRITICAL"
-				}
-				alert := storage.Alert{
-					ID:          uuid.New().String(),
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Timestamp:   now,
-					Title:       fmt.Sprintf("Suspicious DGA / High-Entropy Domain Detected (%s)", targetDomain),
-					Description: fmt.Sprintf("Process %s contacted high-entropy domain %s (Shannon Entropy: %.2f) via %s.", procName, targetDomain, entropy, ev.DstIP),
-					Severity:    sev,
-					Mitigated:   false,
-				}
-				_ = e.store.CreateAlert(alert)
-				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
-					ID:          alert.ID,
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Hostname:    endpoint.Hostname,
-					AnomalyType: "SUSPICIOUS_DGA_DOMAIN",
-					Severity:    sev,
-					Title:       alert.Title,
-					Description: alert.Description,
-					Details:     fmt.Sprintf("Target Domain: %s | Shannon Entropy: %.2f | Dst IP: %s:%d", targetDomain, entropy, ev.DstIP, ev.DstPort),
-					ProcessPath: ev.ProcessPath,
-					DstIP:       ev.DstIP,
-					DstPort:     ev.DstPort,
-					Timestamp:   now,
-				})
-				log.Printf("[!] ANOMALY ALERT [%s]: %s on %s -> %s (Entropy: %.2f)", sev, alert.Title, ev.EndpointID, targetDomain, entropy)
-			}
-		}
-	}
-}
-
-func calcEntropy(s string) float64 {
-	if len(s) == 0 {
-		return 0.0
-	}
-	counts := make(map[rune]float64)
-	for _, r := range s {
-		counts[r]++
-	}
-	entropy := 0.0
-	total := float64(len(s))
-	for _, count := range counts {
-		p := count / total
-		entropy -= p * math.Log2(p)
-	}
-	return entropy
 }
 
 func isPrivateIP(ipStr string) bool {

@@ -54,6 +54,12 @@ func (c *analyticsCache) put(key string, summary *AnalyticsSummary, now time.Tim
 	c.entries[key] = analyticsEntry{summary: summary.clone(), computed: now}
 }
 
+func (c *analyticsCache) invalidate(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+}
+
 func (s *AnalyticsSummary) clone() *AnalyticsSummary {
 	if s == nil {
 		return nil

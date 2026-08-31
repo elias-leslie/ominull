@@ -103,7 +103,7 @@ func TestGeneratedInstallerCarriesTheTenantKey(t *testing.T) {
 		t.Fatalf("default tenant: %v", err)
 	}
 
-	for _, targetOS := range []string{"linux", "macos", "windows"} {
+	for _, targetOS := range []string{"linux", "windows"} {
 		script, err := d.renderInstaller(targetOS, DeployRequest{TargetIP: "10.0.0.9", EndpointID: "linux-a", Role: "server"})
 		if err != nil {
 			t.Fatalf("renderInstaller(%s): %v", targetOS, err)

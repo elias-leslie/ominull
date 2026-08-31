@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+remove|purge)
+    if [ -d /run/systemd/system ]; then
+        systemctl stop ominull-agent.service || true
+        systemctl disable ominull-agent.service || true
+    fi
+    if [ -x /opt/ominull/bin/ominulld ]; then
+        /opt/ominull/bin/ominulld --cleanup || true
+    fi
+    ;;
+esac

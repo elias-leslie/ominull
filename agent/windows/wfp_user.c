@@ -318,8 +318,8 @@ static DWORD AddBaselineRules(const OMINULL_BASELINE_RULE* baseline, int baselin
 /* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.
  *
  * The floor is loopback, the hub, DHCP and DNS - the same four the Linux chains
- * and the macOS anchor permit, so a quarantined host behaves the same whichever
- * platform it runs. What sits above the floor is the hub's allow list, which is
+ * permit, so a quarantined host behaves the same whichever retained agent runs.
+ * What sits above the floor is the hub's allow list, which is
  * the mechanism a scoped trust rule is delivered by.
  *
  * DNS and DHCP used to be permitted to *any* destination here. Both were holes
@@ -552,12 +552,8 @@ DWORD Wfp_UnisolateHost() {
 /* Wfp_BlockIP quarantines one peer, in both directions and in whichever address
  * family the literal is.
  *
- * It used to install a single filter on ALE_AUTH_CONNECT_V4. That blocked this
- * host from opening a connection to the peer and did nothing whatever about the
- * peer opening one to this host - so a mesh block placed on a compromised
- * machine still let that machine reach in. The Linux agent writes the rule into
- * both its chains and the macOS anchor writes both `block drop out quick to`
- * and `block drop in quick from`; this is the same rule, finally. */
+ * It installs both directions, so a mesh block placed on a compromised machine
+ * cannot leave the peer able to reach in. */
 DWORD Wfp_BlockIP(const char* ipStr) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
@@ -614,12 +610,67 @@ DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
 }
 
 #ifndef OMINULL_WFP_EMBEDDED
+static bool RemoveDirectoryFiles(const char* directory) {
+    char pattern[MAX_PATH];
+    int n = snprintf(pattern, sizeof(pattern), "%s\\*", directory);
+    if (n < 0 || (size_t)n >= sizeof(pattern)) return false;
+
+    WIN32_FIND_DATAA entry;
+    HANDLE find = FindFirstFileA(pattern, &entry);
+    if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_PATH_NOT_FOUND;
+
+    bool ok = true;
+    do {
+        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+        char path[MAX_PATH];
+        n = snprintf(path, sizeof(path), "%s\\%s", directory, entry.cFileName);
+        if (n < 0 || (size_t)n >= sizeof(path)) {
+            ok = false;
+            continue;
+        }
+        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!RemoveDirectoryA(path) && GetLastError() != ERROR_PATH_NOT_FOUND) ok = false;
+        } else if (!DeleteFileA(path) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+            ok = false;
+        }
+    } while (FindNextFileA(find, &entry));
+    FindClose(find);
+    return ok;
+}
+
+static bool RemoveAgentData(void) {
+    static const char* files[] = {
+        "C:\\ProgramData\\Ominull\\agent.conf",
+        "C:\\ProgramData\\Ominull\\agent.key",
+        "C:\\ProgramData\\Ominull\\ca.crt",
+        "C:\\ProgramData\\Ominull\\client.crt",
+        "C:\\ProgramData\\Ominull\\client.pfx",
+        "C:\\Program Files\\Ominull\\agent.conf",
+        "C:\\Program Files\\Ominull\\agent.key",
+        "C:\\Program Files\\Ominull\\ca.crt",
+        "C:\\Program Files\\Ominull\\client.crt",
+        "C:\\Program Files\\Ominull\\client.pfx",
+        NULL,
+    };
+    bool ok = true;
+    for (size_t i = 0; files[i]; i++) {
+        if (!DeleteFileA(files[i]) && GetLastError() != ERROR_FILE_NOT_FOUND) ok = false;
+    }
+    if (!RemoveDirectoryFiles("C:\\ProgramData\\Ominull\\updates")) ok = false;
+    if (!RemoveDirectoryA("C:\\ProgramData\\Ominull\\updates") &&
+        GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_DIR_NOT_EMPTY) ok = false;
+    if (!RemoveDirectoryA("C:\\ProgramData\\Ominull") &&
+        GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_DIR_NOT_EMPTY) ok = false;
+    return ok;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("Ominull Windows Zero-Friction User-Mode WFP Engine\n");
         printf("Usage:\n");
         printf("  ominull_wfp_user.exe isolate <hub_ip>   - Isolate host network (default-deny with hub pinhole)\n");
         printf("  ominull_wfp_user.exe unisolate          - Lift isolation and restore normal traffic\n");
+        printf("  ominull_wfp_user.exe uninstall           - Lift isolation and remove agent identity\n");
         printf("  ominull_wfp_user.exe block-ip <ip>      - Block specific IPv4 address\n");
         printf("  ominull_wfp_user.exe test               - Verify WFP subsystem initialization\n");
         return 1;
@@ -639,6 +690,12 @@ int main(int argc, char* argv[]) {
         Wfp_IsolateHost(hubIp, NULL, 0, NULL, 0, 0);
     } else if (strcmp(argv[1], "unisolate") == 0) {
         Wfp_UnisolateHost();
+    } else if (strcmp(argv[1], "uninstall") == 0) {
+        status = Wfp_UnisolateHost();
+        if (status == ERROR_SUCCESS && !RemoveAgentData()) {
+            printf("[-] WFP was cleared but some package-owned agent data could not be removed.\n");
+            status = ERROR_ACCESS_DENIED;
+        }
     } else if (strcmp(argv[1], "block-ip") == 0) {
         if (argc < 3) {
             printf("[-] Missing IP parameter.\n");
@@ -648,7 +705,7 @@ int main(int argc, char* argv[]) {
         Wfp_BlockIP(argv[2]);
     } else if (strcmp(argv[1], "test") == 0) {
         printf("[+] WFP User-Mode Engine Initialized Successfully!\n");
-        printf("[+] Ready for Zero-Driver Threat Nullification.\n");
+        printf("[+] Ready for user-mode WFP recovery.\n");
     } else {
         printf("[-] Unknown command: %s\n", argv[1]);
     }

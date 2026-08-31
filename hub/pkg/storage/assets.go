@@ -23,16 +23,16 @@ IP + subnet — and carries a nullable agent_endpoint_id. Every field is stored
 as a *claim* with a source and a confidence rather than as a column, so:
 
   - the merge is per field, never per record: the agent can own `hostname`
-    while a scan owns `vendor` and an inference owns `role`;
+    while a scan owns `vendor`;
   - losing claims survive, so an operator can see that the scanner said
     "Linux" while the agent says "Ubuntu 24.04";
   - installing an agent on a host we already discovered enriches that row
     instead of creating a second one.
 */
 
-// Claim sources, most to least authoritative. Confidence orders claims within
-// a rank; rank is what stops an inference from ever silently outranking
-// ground truth or an operator's correction.
+// Claim sources, most to least authoritative. Historical inferred claims have
+// no current rank: they remain readable in the database but cannot become
+// present-day identity or evidence.
 const (
 	SourceOperator = "operator"
 	SourceAgent    = "agent"
@@ -51,17 +51,14 @@ const (
 	FieldRisk     = "risk"
 )
 
-// sourceRank groups claims into precedence bands. Operator corrections and
-// agent ground truth each win outright; scan and inference share a band and
-// are settled on confidence, so a confident inference can beat a weak
-// fingerprint guess but never an agent.
+// sourceRank groups current claims into precedence bands.
 func sourceRank(source string) int {
 	switch source {
 	case SourceOperator:
 		return 3
 	case SourceAgent:
 		return 2
-	case SourceScan, SourceInferred:
+	case SourceScan:
 		return 1
 	}
 	return 0
@@ -480,9 +477,9 @@ func (s *Store) UpsertAssetFromScan(ip, mac, vendor, hostname, osGuess, category
 	return nil
 }
 
-// UpsertInferredAsset records a role deduced from flow. It creates the asset
-// when nothing else has ever seen the host — the whole point of inference is
-// naming machines that answer no probe and run no agent.
+// UpsertInferredAsset is retained only to preserve historical rows during an
+// upgrade. New telemetry never calls it, and mergeClaims excludes this source
+// from current identity.
 func (s *Store) UpsertInferredAsset(ip, role string, confidence float64, rationale string, seen time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -499,8 +496,8 @@ func (s *Store) UpsertInferredAsset(ip, role string, confidence float64, rationa
 
 // CorrectAsset records an operator's correction. Corrections outrank every
 // other source permanently, which is why they are stored as a claim rather
-// than applied as an edit: the inference that was wrong stays visible next to
-// the correction that overruled it.
+// than applied as an edit. Historical claims stay beside the correction that
+// overruled them.
 func (s *Store) CorrectAsset(assetID, field, value, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -531,6 +528,9 @@ func mergeClaims(a *Asset, claims []AssetClaim) {
 	best := make(map[string]int)
 	for i := range claims {
 		c := claims[i]
+		if sourceRank(c.Source) == 0 {
+			continue
+		}
 		j, seen := best[c.Field]
 		if !seen {
 			best[c.Field] = i
@@ -579,7 +579,7 @@ func mergeClaims(a *Asset, claims []AssetClaim) {
 	for _, c := range claims {
 		seenSource[c.Source] = true
 	}
-	for _, src := range []string{SourceAgent, SourceScan, SourceInferred, SourceOperator} {
+	for _, src := range []string{SourceAgent, SourceScan, SourceOperator} {
 		if seenSource[src] {
 			a.Sources = append(a.Sources, src)
 		}

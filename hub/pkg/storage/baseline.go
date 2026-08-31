@@ -187,7 +187,9 @@ func (s *Store) initBaselineSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN observed_services TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN readiness TEXT DEFAULT ''",
 	} {
-		_, _ = s.db.Exec(m)
+		if err := runAdditiveMigration(s.db, m); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -420,7 +422,11 @@ func (s *Store) DeleteBaselinePolicy(id string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking deleted baseline policy %q: %w", id, err)
+	}
+	if n == 0 {
 		return fmt.Errorf("no baseline policy %q", id)
 	}
 	return nil

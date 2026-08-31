@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -46,7 +45,7 @@ func KeyFingerprint(key string) string {
 // key is on every endpoint in the fleet, so anything a tenant key can do is
 // something a single compromised host can do. Fleet-wide controls - creating
 // tenants, quarantining a peer on every agent, pushing a deploy, pointing the
-// copilot at another server - are operator actions and must not be reachable
+// another server - are operator actions and must not be reachable
 // with a credential that ships to endpoints.
 func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -135,33 +134,13 @@ func validateSubnet(v string) (string, error) {
 	return ipNet.String(), nil
 }
 
-// validateHTTPURL accepts an absolute http(s) URL and nothing else.
-//
-// The copilot dials whatever this configures, from inside the management
-// network, and sends it the fleet context it was asked about. A file:// or a
-// bare host would either fail obscurely or point at something local.
-func validateHTTPURL(v string) (string, error) {
-	v = strings.TrimSpace(v)
-	u, err := url.Parse(v)
-	if err != nil {
-		return "", fmt.Errorf("%q is not a URL", v)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("%q must be an http:// or https:// URL", v)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("%q has no host", v)
-	}
-	return u.String(), nil
-}
-
 // securityHeaders are set on every console response.
 //
 // Referrer-Policy is the one that matters most here: the console is unlocked
 // with the admin key in the query string, so any outbound navigation from that
 // document would otherwise carry the key in a Referer header to a third party.
 // The CSP matches what the console actually loads - its own stylesheet, its own
-// script, its own embedded fonts, and a websocket back to the hub - so it costs
+// script, and its own embedded fonts - so it costs
 // nothing and closes the injection routes that a future template change could
 // open.
 func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
@@ -176,7 +155,7 @@ func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
 	}
 	h.Set("Content-Security-Policy",
 		"default-src 'none'; script-src "+scriptSrc+"; style-src 'self'; font-src 'self'; "+
-			"img-src 'self' data:; connect-src 'self' ws: wss:; form-action 'self'; "+
+			"img-src 'self' data:; connect-src 'self'; form-action 'self'; "+
 			"frame-ancestors 'none'; base-uri 'none'")
 }
 

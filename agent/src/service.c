@@ -28,15 +28,13 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
 
 
 /* ---------------------------------------------------------------------------
- * Per-flow byte counts, without a driver.
+ * Per-flow byte counts from the Windows user-mode APIs.
  *
  * This agent reported every flow as zero bytes because the user-mode collector
  * "has no byte counter to read". It does: TCP Extended Statistics keeps
  * DataBytesIn/DataBytesOut per connection, readable through iphlpapi by any
  * caller with administrator rights, which a service running as LocalSystem
- * has. No kernel driver and no signed binary is involved, which matters here -
- * the WFP driver is unsigned and stopped, and waiting for a certificate to
- * start counting bytes would have been waiting for the wrong thing.
+ * has. No privileged extension or additional signed binary is involved.
  *
  * ESTATS counts for the life of a connection. PollActiveSocketFlows reports
  * every established connection on every poll, so reporting that cumulative
@@ -69,6 +67,64 @@ typedef struct {
 
 static ESTATS_SLOT g_estats[ESTATS_TABLE_SIZE];
 static UINT32 g_estatsGeneration = 0;
+
+#define PROCESS_PATH_CACHE_SIZE 256
+typedef struct {
+    DWORD pid;
+    FILETIME created;
+    WCHAR path[OMINULL_MAX_PATH];
+    bool used;
+} PROCESS_PATH_SLOT;
+
+static PROCESS_PATH_SLOT g_processPathCache[PROCESS_PATH_CACHE_SIZE];
+
+static bool SameFileTime(FILETIME left, FILETIME right) {
+    return left.dwLowDateTime == right.dwLowDateTime && left.dwHighDateTime == right.dwHighDateTime;
+}
+
+static size_t ProcessPathSlot(DWORD pid) {
+    return (size_t)((pid * 2654435761u) & (PROCESS_PATH_CACHE_SIZE - 1));
+}
+
+/* QueryFullProcessImageNameW is a cross-process lookup. The old loop repeated
+ * it for every socket, so one busy process with many connections made the
+ * service pay the same handle/open/path cost once per row. Cache by PID and
+ * process creation time: PID reuse cannot inherit the old process's identity,
+ * and the fixed table keeps stale process churn bounded. */
+static void ProcessPathFor(DWORD pid, WCHAR* out, DWORD outCap) {
+	if (outCap == 0) return;
+    _snwprintf(out, outCap, L"C:\\Windows\\System32\\ntoskrnl.exe");
+    out[outCap - 1] = L'\0';
+    if (pid <= 4) return;
+
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return;
+
+    FILETIME created, exited, kernel, user;
+    bool haveCreation = GetProcessTimes(hProc, &created, &exited, &kernel, &user) != 0;
+    PROCESS_PATH_SLOT* slot = &g_processPathCache[ProcessPathSlot(pid)];
+    if (haveCreation && slot->used && slot->pid == pid && SameFileTime(slot->created, created)) {
+        wcsncpy(out, slot->path, outCap - 1);
+        out[outCap - 1] = L'\0';
+        CloseHandle(hProc);
+        return;
+    }
+
+    DWORD pathLen = outCap;
+    WCHAR queried[OMINULL_MAX_PATH] = {0};
+    if (QueryFullProcessImageNameW(hProc, 0, queried, &pathLen)) {
+        wcsncpy(out, queried, outCap - 1);
+        out[outCap - 1] = L'\0';
+        if (haveCreation) {
+            slot->pid = pid;
+            slot->created = created;
+            wcsncpy(slot->path, queried, OMINULL_MAX_PATH - 1);
+            slot->path[OMINULL_MAX_PATH - 1] = L'\0';
+            slot->used = true;
+        }
+    }
+    CloseHandle(hProc);
+}
 
 static size_t EstatsHash(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport) {
     UINT32 h = lip * 2654435761u;
@@ -185,17 +241,7 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
                     ev->Addr.Ipv4.LocalIp = ntohl(row.dwLocalAddr);
                     ev->Addr.Ipv4.RemoteIp = ntohl(row.dwRemoteAddr);
 
-                    wcscpy(ev->ProcessPath, L"C:\\Windows\\System32\\ntoskrnl.exe");
-                    if (row.dwOwningPid > 4) {
-                        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.dwOwningPid);
-                        if (hProc) {
-                            DWORD pathLen = OMINULL_MAX_PATH;
-                            if (QueryFullProcessImageNameW(hProc, 0, ev->ProcessPath, &pathLen)) {
-                                ev->ProcessPath[OMINULL_MAX_PATH - 1] = L'\0';
-                            }
-                            CloseHandle(hProc);
-                        }
-                    }
+                    ProcessPathFor(row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
                     EstatsMeasure(&row, ev);
                     count++;
                 }
@@ -211,12 +257,9 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
 /* ---------------------------------------------------------------------------
  * Enforcing what the hub decided.
  *
- * The hub used to deliver isolation as a WebSocket command, and the WebSocket
- * route was never registered on its mux - so the command had no transport, the
- * console showed an endpoint as cut off, and this agent was never told. It
- * arrives on the heartbeat reply now, next to the quarantined-peer list, and is
- * reconciled every beat so a host that was down when it was released still
- * comes back.
+ * The hub delivers isolation in the heartbeat reply, next to the quarantined-
+ * peer list, and this agent reconciles it every beat so a host that was down
+ * when it was released still comes back.
  * ------------------------------------------------------------------------- */
 
 #define MAX_BLOCKED_PEERS 64
@@ -328,7 +371,7 @@ static int ParseBaselineRules(const char* json, OMINULL_BASELINE_RULE* out, int 
         if (portKey) r.port = atoi(portKey + strlen("\"port\":"));
 
         /* Re-validated even though the hub validates it. These values become
-         * filter conditions in the kernel; the value itself is never echoed,
+         * filter conditions in the user-mode filtering API; the value itself is never echoed,
          * because it is attacker-controlled text on its way to a log. */
         if (!IsIPLiteralAny(r.destination)) {
             printf("[!] Hub sent a baseline rule whose destination is not an IP address; ignoring it.\n");
@@ -379,7 +422,7 @@ static int ParseAddressArray(const char* json, const char* key,
     return count;
 }
 
-/* What this agent has actually put in the kernel. At file scope rather than
+/* What this agent has actually put in the filtering engine. At file scope rather than
  * inside SyncEnforcement because the dead-man timer has to rebuild from it -
  * specifically, to lift this host's isolation while leaving the mesh quarantine
  * it was also holding in place. */
@@ -442,10 +485,9 @@ const char* Agent_EnforcementStatus(void) {
 const char* Agent_LastAppliedNote(void) { return g_DeadmanNote; }
 
 /* SyncEnforcement reconciles isolation and the mesh block list against the hub's
- * answer. The kernel driver is preferred when one is loaded; the user-mode
- * filtering engine is what runs on an endpoint without it, which on this fleet
- * is all of them. */
-static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const char* respJson) {
+ * answer. The user-mode Windows Filtering Platform is the only enforcement
+ * path. */
+static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
     if (!respJson) return;
 
     /* The dead-man timer released this host without the hub's agreement.
@@ -504,22 +546,6 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
         return;
     }
 
-    if (hDriver != INVALID_HANDLE_VALUE) {
-        uint32_t hubAddr = 0;
-        if (hubIP[0]) {
-            struct in_addr a;
-            if (inet_pton(AF_INET, hubIP, &a) == 1) hubAddr = ntohl(a.s_addr);
-        }
-        if (Driver_SetIsolation(hDriver, wantIsolated, hubAddr, 9443)) {
-            printf(wantIsolated
-                   ? "[!] Threat Nullification: host isolated at ring-0. Permitted: hub %s.\n"
-                   : "[+] Threat neutralized: ring-0 host isolation lifted.%s\n",
-                   wantIsolated ? hubIP : "");
-        } else {
-            printf("[-] The kernel driver refused the isolation change.\n");
-            return;
-        }
-    } else {
         if (!EnforcementEngineReady()) return;
 
         const char* blocked[MAX_BLOCKED_PEERS];
@@ -545,9 +571,8 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
         } else {
             printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
         }
-    }
 
-    appliedIsolated = wantIsolated;
+	appliedIsolated = wantIsolated;
     memcpy(appliedPeers, peers, sizeof(peers));
     appliedPeerCount = peerCount;
     memcpy(appliedAllow, allow, sizeof(allow));
@@ -570,7 +595,7 @@ static void SyncEnforcement(const AGENT_CONFIG* config, HANDLE hDriver, const ch
  * The Windows endpoint is the one where this matters most. When an isolation
  * here cannot be released, the only channel left is the agent's own outbound
  * pinhole to the hub - and if the floor is what broke, that is gone too. */
-static void HubContact(bool accepted, HANDLE hDriver) {
+static void HubContact(bool accepted) {
     static int missed = 0;
 
     if (accepted) {
@@ -594,9 +619,7 @@ static void HubContact(bool accepted, HANDLE hDriver) {
     fflush(stdout);
 
     bool released = false;
-    if (hDriver != INVALID_HANDLE_VALUE) {
-        released = Driver_SetIsolation(hDriver, false, 0, 0);
-    } else if (engineReady) {
+    if (engineReady) {
         const char* blocked[MAX_BLOCKED_PEERS];
         for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
         released = (Wfp_ApplyState(NULL, 0, blocked, appliedPeerCount, NULL, 0,
@@ -619,12 +642,7 @@ static void HubContact(bool accepted, HANDLE hDriver) {
 }
 
 void RunAgentLoop(AGENT_CONFIG* config) {
-    HANDLE hDriver = Driver_Open();
-    if (hDriver == INVALID_HANDLE_VALUE) {
-        printf("[*] Ominull kernel driver not present. Operating in User-Mode High-Fidelity Flow Mode.\n");
-    } else {
-        printf("[+] Connected to Ominull WFP kernel driver.\n");
-    }
+    printf("[+] Windows collection layer: user-mode TCP socket table and ESTATS.\n");
 
     OMINULL_EVENT eventBatch[64];
     size_t batchCount = 0;
@@ -637,18 +655,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             break;
         }
 
-        // 1. Collect driver events if connected
-        if (hDriver != INVALID_HANDLE_VALUE) {
-            OMINULL_EVENT ev;
-            while (Driver_StreamEvents(hDriver, &ev) && batchCount < 48) {
-                eventBatch[batchCount++] = ev;
-                if (config->verbose) {
-                    printf("[DRIVER EVENT] Type: 0x%lX Action: %lu PID: %llu\n", (unsigned long)ev.EventType, (unsigned long)ev.Action, (unsigned long long)ev.ProcessId);
-                }
-            }
-        }
-
-        // 2. Poll live socket table flows
+        // Poll live socket table flows.
         DWORD now = GetTickCount();
         if (now - lastFlush >= 2500) {
             size_t socketCount = PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
@@ -663,13 +670,13 @@ void RunAgentLoop(AGENT_CONFIG* config) {
                                                    hubResponse, sizeof(hubResponse));
             batchCount = 0;
             lastFlush = now;
-            HubContact(accepted, hDriver);
+            HubContact(accepted);
 
             // The hub answers with an agent_update descriptor when a newer
             // release is published. Update_Apply verifies it against the
             // pinned release key before anything is installed, and does not
             // return if the swap succeeds.
-            SyncEnforcement(config, hDriver, hubResponse);
+            SyncEnforcement(config, hubResponse);
 
             Update_Apply(config, hubResponse);
         }
@@ -681,9 +688,6 @@ void RunAgentLoop(AGENT_CONFIG* config) {
         Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0);
     }
 
-    if (hDriver != INVALID_HANDLE_VALUE) {
-        Driver_Close(hDriver);
-    }
     /* The engine handle is closed, not the filters: the session is not dynamic,
      * so an isolated host stays isolated across a restart of this service and is
      * reconciled against the hub on the next beat. */
@@ -798,7 +802,7 @@ static bool Service_WriteRecoveryScript(const char* installDir, char* outPath, s
 //
 // Registering this only at install time would have left every service upgraded
 // in place without any of it: CreateService returns ERROR_SERVICE_EXISTS on an
-// already-installed service, so --install never reaches the configuration.
+// already-installed service, so a one-time registration path never reaches the configuration.
 void Service_EnsureRecovery(void) {
     char binaryPath[MAX_PATH];
     if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) return;
@@ -993,9 +997,8 @@ int Service_WaitStoppedAndStart(void) {
  * which the default service DACL grants to Interactive Users, so any logged-on
  * account could read it; and the SCM writes the whole binPath into a System
  * event log 7045 record when the service is installed, where it stays for the
- * life of the log. Linux and macOS never had this - /etc/ominull/agent.conf and
- * the LaunchDaemon plist are both 0600 root - so this brings Windows level with
- * them: the key goes in a file, the command line carries the path.
+ * life of the log. The key goes in a protected file, and the command line carries
+ * only its path.
  *
  * Program Files is not enough on its own. It is writable only by
  * administrators, but it is *readable* by Users, so the key file gets an
@@ -1048,6 +1051,83 @@ static bool WriteProtectedFile(const char* path, const char* data) {
         DeleteFileA(path);
         return false;
     }
+    return true;
+}
+
+static bool ProtectExistingFile(const char* path) {
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL)) {
+        return false;
+    }
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = NULL;
+    DWORD rc = ERROR_INVALID_PARAMETER;
+    if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
+        rc = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, dacl, NULL);
+    }
+    LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
+static bool CopyProtectedFile(const char* source, const char* destination) {
+    if (!source[0] || !CopyFileA(source, destination, FALSE)) return false;
+    if (!ProtectExistingFile(destination)) {
+        DeleteFileA(destination);
+        return false;
+    }
+    return true;
+}
+
+/* Service_ConfigureFromStdin is the only package-facing enrollment writer.
+ * Bootstrap supplies paths to staged CA/PFX files and the tenant credential on
+ * stdin; this process, installed by the MSI, places them under ProgramData and
+ * applies the SYSTEM/Administrators ACL before the service can start. */
+bool Service_ConfigureFromStdin(void) {
+    char hub[256] = {0}, key[128] = {0}, endpoint[64] = {0};
+    char role[64] = "workstation", location[64] = "loc-home";
+    char caSource[260] = {0}, pfxSource[260] = {0};
+    char cfID[128] = {0}, cfSecret[128] = {0};
+    bool allowPlaintext = false;
+    char line[1024];
+    while (fgets(line, sizeof(line), stdin)) {
+        char* value = strchr(line, '=');
+        if (!value) continue;
+        *value++ = '\0';
+        value[strcspn(value, "\r\n")] = '\0';
+        if (strchr(value, '\r') || strchr(value, '\n')) return false;
+        if (strcmp(line, "hub_url") == 0) snprintf(hub, sizeof(hub), "%s", value);
+        else if (strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
+        else if (strcmp(line, "endpoint_id") == 0) snprintf(endpoint, sizeof(endpoint), "%s", value);
+        else if (strcmp(line, "role_tag") == 0) snprintf(role, sizeof(role), "%s", value);
+        else if (strcmp(line, "location_id") == 0) snprintf(location, sizeof(location), "%s", value);
+        else if (strcmp(line, "ca_source") == 0) snprintf(caSource, sizeof(caSource), "%s", value);
+        else if (strcmp(line, "client_pfx_source") == 0) snprintf(pfxSource, sizeof(pfxSource), "%s", value);
+        else if (strcmp(line, "cf_client_id") == 0) snprintf(cfID, sizeof(cfID), "%s", value);
+        else if (strcmp(line, "cf_client_secret") == 0) snprintf(cfSecret, sizeof(cfSecret), "%s", value);
+        else if (strcmp(line, "allow_plaintext") == 0) allowPlaintext = strcmp(value, "1") == 0;
+    }
+    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) return false;
+    if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) return false;
+    if (!CreateDirectoryA("C:\\ProgramData\\Ominull", NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+
+    if (!WriteProtectedFile(OMINULL_DEFAULT_KEY_PATH, key)) return false;
+    if (!CopyProtectedFile(caSource, "C:\\ProgramData\\Ominull\\ca.crt")) return false;
+    if (pfxSource[0] && !CopyProtectedFile(pfxSource, "C:\\ProgramData\\Ominull\\client.pfx")) return false;
+
+    char config[2048];
+    int n = snprintf(config, sizeof(config),
+                     "hub_url=%s\nkey_path=%s\nendpoint_id=%s\nrole_tag=%s\nlocation_id=%s\n"
+                     "ca_path=C:\\ProgramData\\Ominull\\ca.crt\nclient_pfx_path=C:\\ProgramData\\Ominull\\client.pfx\n"
+                     "cf_client_id=%s\ncf_client_secret=%s\nallow_plaintext=%d\n",
+                     hub, OMINULL_DEFAULT_KEY_PATH, endpoint, role, location, cfID, cfSecret, allowPlaintext ? 1 : 0);
+    if (n < 0 || (size_t)n >= sizeof(config) || !WriteProtectedFile(OMINULL_DEFAULT_CONFIG_PATH, config)) {
+        DeleteFileA(OMINULL_DEFAULT_KEY_PATH);
+        return false;
+    }
+    printf("[+] Package-owned agent configuration installed.\n");
     return true;
 }
 
@@ -1158,79 +1238,6 @@ void Service_MigrateKeyToFile(const AGENT_CONFIG* config) {
     CloseServiceHandle(schSCManager);
 }
 
-bool Service_Install(const AGENT_CONFIG* config) {
-    if (!config) return false;
-
-    char binaryPath[MAX_PATH];
-    if (!GetModuleFileNameA(NULL, binaryPath, MAX_PATH)) {
-        return false;
-    }
-
-    /* Enrolment hands the key on the command line, because that is the only
-     * channel an installer has. It stops there: the key goes straight into a
-     * protected file and the registration carries the path. An install that
-     * cannot protect the file is a failed install - registering the key inline
-     * as a fallback would quietly reintroduce exactly what this removes. */
-    AGENT_CONFIG stored = *config;
-    if (!stored.key_path[0] && stored.api_key[0]) {
-        if (!StoreKeyBesideBinary(config, stored.key_path, sizeof(stored.key_path))) {
-            fprintf(stderr, "[-] Cannot store the API key privately; refusing to register the "
-                            "service with the key on its command line.\n");
-            return false;
-        }
-    }
-
-    char cmdLine[MAX_PATH * 4];
-    if (BuildServiceCommandLine(&stored, binaryPath, cmdLine, sizeof(cmdLine)) < 0) {
-        fprintf(stderr, "[-] Service command line would be truncated; not registering.\n");
-        return false;
-    }
-
-    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (!schSCManager) {
-        fprintf(stderr, "[-] OpenSCManager failed (Error: %lu)\n", GetLastError());
-        return false;
-    }
-
-    SC_HANDLE schService = CreateServiceA(
-        schSCManager,
-        SERVICE_NAME,
-        SERVICE_DISPLAY_NAME,
-        SERVICE_ALL_ACCESS,
-        SERVICE_WIN32_OWN_PROCESS,
-        SERVICE_AUTO_START,
-        SERVICE_ERROR_NORMAL,
-        cmdLine,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL
-    );
-
-    if (!schService) {
-        DWORD err = GetLastError();
-        CloseServiceHandle(schSCManager);
-        if (err == ERROR_SERVICE_EXISTS) {
-            // Still apply the recovery configuration. Returning here without it
-            // is how an in-place upgrade ends up with a service that installs
-            // updates but can never restart into them.
-            printf("[*] Service already installed.\n");
-            Service_EnsureRecovery();
-            return true;
-        }
-        fprintf(stderr, "[-] CreateService failed (Error: %lu)\n", err);
-        return false;
-    }
-
-    Service_EnsureRecovery();
-
-    printf("[+] Service installed successfully: %s\n", SERVICE_NAME);
-    CloseServiceHandle(schService);
-    CloseServiceHandle(schSCManager);
-    return true;
-}
-
 /* Service_OwnsBinary reports whether the installed service runs the binary at
  * path. It exists so a console session cannot quietly replace a service's
  * installation: the updater swaps the binary on disk and exits, and run from a
@@ -1277,27 +1284,4 @@ bool Service_OwnsBinary(const char* path) {
     CloseServiceHandle(schService);
     CloseServiceHandle(schSCManager);
     return owns;
-}
-
-bool Service_Uninstall(void) {
-    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (!schSCManager) return false;
-
-    SC_HANDLE schService = OpenServiceA(schSCManager, SERVICE_NAME, SERVICE_STOP | DELETE);
-    if (!schService) {
-        CloseServiceHandle(schSCManager);
-        return false;
-    }
-
-    SERVICE_STATUS status;
-    ControlService(schService, SERVICE_CONTROL_STOP, &status);
-    BOOL deleted = DeleteService(schService);
-
-    CloseServiceHandle(schService);
-    CloseServiceHandle(schSCManager);
-
-    if (deleted) {
-        printf("[+] Service uninstalled successfully.\n");
-    }
-    return deleted ? true : false;
 }

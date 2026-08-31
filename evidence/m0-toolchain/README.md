@@ -1,5 +1,9 @@
 # Milestone 0 Evidence — Toolchain & Driver Lifecycle Validation
 
+> Historical evidence only. The kernel-driver lifecycle and macOS/driver scope were retired by
+> the feature-reduction decision. This directory is preserved as an audit record, not as a
+> supported build, install, or release path.
+
 ## 1. Overview & Honesty Gate
 Per [PLAN.md](../../PLAN.md) §3 and §7:
 - **Milestone 0 Goal:** Prove the complete build -> sign -> deploy -> load -> break -> unload toolchain end-to-end.

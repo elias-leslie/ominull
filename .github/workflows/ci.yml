@@ -15,8 +15,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # The hub, the three agents, and the package filenames must all agree, or the
-      # fleet is offered a self-update package the hub cannot serve.
+      # The retained hub and two endpoint agents must agree, or the fleet is
+      # offered a self-update package the hub cannot serve.
       - name: Verify every version site matches VERSION
         run: |
           chmod +x ./scripts/version.sh
@@ -40,22 +40,27 @@ jobs:
           cd hub
           go test -v -race ./...
 
-  test-agent-dpi:
-    name: C Agent & Stream DPI Unit Tests
+  test-agents:
+    name: Retained Native Agent Tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Compile and Test DPI Parser
+      - name: Compile and Run Linux Feedback Loops
         run: |
-          gcc -O2 -Wall -Wextra -o /tmp/test_dpi agent/tests/test_dpi.c
-          /tmp/test_dpi
-
-      - name: Compile Linux Native Agent
-        run: |
-          mkdir -p agent/bin
-          gcc -O2 -Wall -Wextra -o agent/bin/ominull-agent agent/linux/main.c
+          mkdir -p build
+          gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
+            -o build/test_baseline agent/tests/test_baseline.c -lcurl
+          build/test_baseline
+          gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
+            -o build/test_linux_collector agent/tests/test_linux_collector.c -lcurl
+          build/test_linux_collector
+          gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
+            -o build/test_der_sig agent/tests/test_der_sig.c
+          build/test_der_sig
+          gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
+            -o build/ominulld agent/linux/main.c -lcurl
 
       - name: Install mingw-w64 Cross Toolchain
         run: |
@@ -64,31 +69,35 @@ jobs:
 
       - name: Compile Windows Native Agent
         run: |
-          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o agent/bin/ominulld.exe \
-            agent/src/main.c agent/src/hub_client.c agent/src/service.c agent/src/driver_client.c \
-            -lws2_32 -lwinhttp -liphlpapi -ladvapi32
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wformat=2 -DOMINULL_WFP_EMBEDDED \
+            -Iagent/include -o build/ominulld.exe \
+            agent/src/main.c agent/src/hub_client.c agent/src/hub_tls.c \
+            agent/src/service.c agent/src/updater.c agent/src/provenance_windows.c \
+            agent/windows/wfp_user.c \
+            -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \
+            -lfwpuclnt -lole32
 
   build-packages:
     name: Cross-Platform Release Packaging
     runs-on: ubuntu-latest
-    needs: [version-consistency, test-hub, test-agent-dpi]
+    needs: [version-consistency, test-hub, test-agents]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # mingw-w64 builds the Windows agent. Without it the bundle used to ship an
-      # installer with no binary, which is why the fleet could not take a Windows update.
-      - name: Install Packaging Utilities (dpkg-dev, zip, mingw-w64)
+      - name: Install Packaging Utilities (dpkg-dev, wixl, mingw-w64, curl)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq dpkg-dev zip mingw-w64
+          sudo apt-get install -y -qq dpkg-dev wixl mingw-w64 libcurl4-openssl-dev
 
       - name: Build Cross-Platform Packages
         run: |
           chmod +x ./scripts/*.sh
           ./scripts/build-packages.sh
 
-      - name: Verify SHA256 Checksums
+      - name: Verify Native Package Identities
         run: |
-          cd dist
-          sha256sum --check SHA256SUMS.txt
+          dpkg-deb --field dist/ominull-agent_*.deb Package Version Architecture
+          dpkg-deb --field dist/ominull-hub_*.deb Package Version Architecture
+          command -v msidump
+          msidump -t File dist/ominull-agent-windows-*.msi >/dev/null

@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+install -d -o root -g root -m 0755 /etc/ominull /var/lib/ominull
+install -d -o root -g root -m 0700 /var/lib/ominull/updates
+if [ ! -e /etc/ominull/agent.conf ]; then
+    install -o root -g root -m 0600 /dev/null /etc/ominull/agent.conf
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+	# Registration belongs to the package even before enrollment supplies a
+	# config. The bootstrap only starts this package-owned unit after that.
+	systemctl enable ominull-agent.service
+    if [ -s /etc/ominull/agent.conf ]; then
+        systemctl try-restart ominull-agent.service || systemctl start ominull-agent.service
+    fi
+fi

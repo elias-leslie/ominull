@@ -49,13 +49,12 @@ func (d *Deployer) renderInstaller(targetOS string, req DeployRequest) (string, 
 		LocationID:      req.LocationID,
 		RoleTag:         req.Role,
 		EndpointID:      req.EndpointID,
+		AgentVersion:    d.agentVersion,
 	}
 
 	switch targetOS {
 	case "windows":
 		return bootstrap.GeneratePowerShell(opts) + "\n", nil
-	case "macos":
-		return bootstrap.GenerateMacOS(opts) + "\n", nil
 	default:
 		return bootstrap.GenerateBash(opts) + "\n", nil
 	}

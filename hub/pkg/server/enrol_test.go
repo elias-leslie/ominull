@@ -48,7 +48,7 @@ func TestTheConsoleCanRenderAnInstallerWithoutPuttingTheKeyInAURL(t *testing.T) 
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	for _, platform := range []string{"linux", "macos", "windows"} {
+	for _, platform := range []string{"linux", "windows"} {
 		out := renderInstaller(t, srv, platform, true)
 
 		script, _ := out["script"].(string)
@@ -197,7 +197,7 @@ func TestProbeRejectsAnOriginThatIsNotThisHub(t *testing.T) {
 }
 
 // The URL carries a "?", which zsh treats as a glob and refuses when it matches
-// nothing - so an unquoted install command fails outright on macOS.
+// nothing - so an unquoted install command fails outright on the target host.
 func TestOneLinerQuotesTheURL(t *testing.T) {
 	for _, p := range enrolmentPlatforms() {
 		cmd := p.oneLiner("http://hub.example:9999", "abc123")

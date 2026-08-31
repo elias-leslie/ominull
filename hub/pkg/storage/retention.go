@@ -20,6 +20,7 @@ import (
 // longer than anything else.
 type RetentionPolicy struct {
 	Events         time.Duration
+	CommProfiles   time.Duration
 	AnomalyAlerts  time.Duration
 	Alerts         time.Duration
 	AuditLogs      time.Duration
@@ -30,6 +31,7 @@ type RetentionPolicy struct {
 func DefaultRetention() RetentionPolicy {
 	return RetentionPolicy{
 		Events:        14 * 24 * time.Hour,
+		CommProfiles:  14 * 24 * time.Hour,
 		AnomalyAlerts: 30 * 24 * time.Hour,
 		Alerts:        30 * 24 * time.Hour,
 		AuditLogs:     365 * 24 * time.Hour,
@@ -60,6 +62,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		keep   time.Duration
 	}{
 		{"events", "timestamp", policy.Events},
+		{"comm_profiles", "last_seen", policy.CommProfiles},
 		{"anomaly_alerts", "timestamp", policy.AnomalyAlerts},
 		{"alerts", "timestamp", policy.Alerts},
 		{"audit_logs", "timestamp", policy.AuditLogs},
@@ -116,9 +119,9 @@ func (s *Store) StartRetention(policy RetentionPolicy, every time.Duration) func
 			total += n
 		}
 		if total > 0 {
-			log.Printf("[*] Retention: removed %d rows in %s (events %d, anomalies %d, alerts %d, audit %d)",
+			log.Printf("[*] Retention: removed %d rows in %s (events %d, comm_profiles %d, anomalies %d, alerts %d, audit %d)",
 				total, time.Since(start).Round(time.Millisecond),
-				removed["events"], removed["anomaly_alerts"], removed["alerts"], removed["audit_logs"])
+				removed["events"], removed["comm_profiles"], removed["anomaly_alerts"], removed["alerts"], removed["audit_logs"])
 		}
 	}
 

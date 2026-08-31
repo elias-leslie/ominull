@@ -17,7 +17,7 @@ type DeployRequest struct {
 	TargetIP   string `json:"target_ip"`
 	Port       int    `json:"port"`
 	Protocol   string `json:"protocol"` // "ssh", "winrm"
-	OS         string `json:"os"`       // "linux", "windows", "macos", "auto"
+	OS         string `json:"os"`       // "linux", "windows", or "auto"
 	Username   string `json:"username"`
 	Password   string `json:"password"`
 	PrivateKey string `json:"private_key"`
@@ -52,17 +52,22 @@ type Deployer struct {
 	// binaries from; agentHubURL is the transport the agent itself then uses.
 	// They differ on any hub published through a proxy, and enrolling against
 	// the wrong one puts telemetry on the cleartext listener.
-	hubURL      string
-	agentHubURL string
-	adminKey    string
-	jobs        map[string]*DeployJobStatus
-	mu          sync.RWMutex
+	hubURL       string
+	agentHubURL  string
+	agentVersion string
+	adminKey     string
+	jobs         map[string]*DeployJobStatus
+	mu           sync.RWMutex
 }
 
 // SetAgentHubURL mirrors the hub's --agent-hub-url so a pushed enrolment writes
 // the same transport into the agent's config as a hand-run bootstrap does.
 func (d *Deployer) SetAgentHubURL(u string) {
 	d.agentHubURL = u
+}
+
+func (d *Deployer) SetAgentVersion(v string) {
+	d.agentVersion = v
 }
 
 func New(store *storage.Store, hubURL, adminKey string) *Deployer {
@@ -183,9 +188,7 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 		unameOut, err := runSSHCmd(client, "uname -s 2>/dev/null || echo Windows")
 		if err == nil {
 			trimmed := strings.TrimSpace(unameOut)
-			if strings.Contains(strings.ToLower(trimmed), "darwin") {
-				targetOS = "macos"
-			} else if strings.Contains(strings.ToLower(trimmed), "linux") {
+			if strings.Contains(strings.ToLower(trimmed), "linux") {
 				targetOS = "linux"
 			} else if strings.Contains(strings.ToLower(trimmed), "windows") {
 				targetOS = "windows"
@@ -195,6 +198,11 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 		} else {
 			targetOS = "linux"
 		}
+	}
+
+	if targetOS == "macos" || targetOS == "darwin" {
+		d.failJob(jobID, "macOS endpoint support was retired; use the approved endpoint retirement procedure")
+		return
 	}
 
 	d.appendLog(jobID, fmt.Sprintf("[%s] Target OS identified as [%s]. Constructing bootstrap payload...", time.Now().Format("15:04:05"), strings.ToUpper(targetOS)))
@@ -219,7 +227,7 @@ func (d *Deployer) runDeployWorker(jobID string, req DeployRequest) {
 	switch targetOS {
 	case "windows":
 		bootstrapCmd = `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -Command -`
-	default: // Linux and macOS
+	default: // Linux
 		bootstrapCmd = `sudo -n sh -s`
 	}
 

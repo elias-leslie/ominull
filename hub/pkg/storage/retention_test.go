@@ -31,7 +31,7 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 				_, err = store.db.Exec(`INSERT INTO events
 					(tenant_id, endpoint_id, timestamp, layer, action, direction, protocol,
 					 src_ip, dst_ip, src_port, dst_port, process_path, process_id)
-					VALUES ('default','e1',?,'eBPF_TC','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,'/bin/x',1)`, ts)
+					VALUES ('default','e1',?,'linux-socket-v1','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,'/bin/x',1)`, ts)
 			case "anomaly_alerts":
 				_, err = store.db.Exec(`INSERT INTO anomaly_alerts
 					(id, tenant_id, endpoint_id, anomaly_type, title, description, timestamp)
@@ -44,6 +44,10 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 				_, err = store.db.Exec(`INSERT INTO audit_logs
 					(id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp)
 					VALUES (?, 'default','u','admin','ISOLATE_HOST','e1','','10.0.0.9',?)`, id, ts)
+			case "comm_profiles":
+				_, err = store.db.Exec(`INSERT INTO comm_profiles
+					(id, tenant_id, endpoint_id, process_name, dst_ip, dst_port, first_seen, last_seen)
+					VALUES (?, 'default', 'e1', 'x', '10.0.0.2', 443, ?, ?)`, id, ts, ts)
 			}
 			if err != nil {
 				t.Fatalf("seed %s: %v", table, err)
@@ -61,6 +65,8 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 
 	seed("events", "timestamp", now.Add(-30*24*time.Hour), pruneBatch+7)
 	seed("events", "timestamp", now.Add(-1*time.Hour), 3)
+	seed("comm_profiles", "last_seen", now.Add(-30*24*time.Hour), 4)
+	seed("comm_profiles", "last_seen", now.Add(-1*time.Hour), 2)
 	seed("anomaly_alerts", "timestamp", now.Add(-90*24*time.Hour), 4)
 	seed("anomaly_alerts", "timestamp", now.Add(-1*time.Hour), 2)
 	seed("alerts", "timestamp", now.Add(-90*24*time.Hour), 5)
@@ -74,6 +80,9 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 
 	if got := count("events"); got != 3 {
 		t.Errorf("events: kept %d rows, want the 3 inside retention (removed %d)", got, removed["events"])
+	}
+	if got := count("comm_profiles"); got != 2 {
+		t.Errorf("comm_profiles: kept %d rows, want 2", got)
 	}
 	if got := count("anomaly_alerts"); got != 2 {
 		t.Errorf("anomaly_alerts: kept %d rows, want 2", got)
@@ -95,6 +104,9 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 	if got := count("events"); got != 7 {
 		t.Errorf("an empty retention policy removed rows: %d left, want 7", got)
 	}
+	if got := count("comm_profiles"); got != 2 {
+		t.Errorf("an empty retention policy removed communication profiles: %d left, want 2", got)
+	}
 }
 
 // The live half of the diurnal profile ran strftime('%H', timestamp) against a
@@ -115,7 +127,7 @@ func TestDiurnalProfileIsMeasured(t *testing.T) {
 			if _, err := store.db.Exec(`INSERT INTO events
 				(tenant_id, endpoint_id, timestamp, layer, action, direction, protocol,
 				 src_ip, dst_ip, src_port, dst_port, process_path, process_id)
-				VALUES ('default','e1',?,'eBPF_TC','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,'/bin/x',1)`,
+				VALUES ('default','e1',?,'linux-socket-v1','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,'/bin/x',1)`,
 				ts.UTC()); err != nil {
 				t.Fatalf("insert: %v", err)
 			}
@@ -182,7 +194,7 @@ func TestAnalyticsTotalsAgreeWithTheCountryBreakdown(t *testing.T) {
 			if _, err := store.db.Exec(`INSERT INTO events
 				(tenant_id, endpoint_id, timestamp, layer, action, direction, protocol,
 				 src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id)
-				VALUES ('default','e1',?,'eBPF_TC',?,'out',6,'10.0.0.1','10.0.0.2',1,2,?,?,?,'/bin/x',1)`,
+				VALUES ('default','e1',?,'linux-socket-v1',?,'out',6,'10.0.0.1','10.0.0.2',1,2,?,?,?,'/bin/x',1)`,
 				time.Now().UTC(), action, in, out, country); err != nil {
 				t.Fatalf("insert: %v", err)
 			}
@@ -265,7 +277,7 @@ func TestAnalyticsSummaryIsCachedPerTenant(t *testing.T) {
 			if _, err := store.db.Exec(`INSERT INTO events
 				(tenant_id, endpoint_id, timestamp, layer, action, direction, protocol,
 				 src_ip, dst_ip, src_port, dst_port, country, process_path, process_id)
-				VALUES ('default','e1',?,'eBPF_TC','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,?,'/bin/x',1)`,
+				VALUES ('default','e1',?,'linux-socket-v1','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,?,'/bin/x',1)`,
 				time.Now().UTC(), country); err != nil {
 				t.Fatalf("insert: %v", err)
 			}
@@ -348,7 +360,7 @@ func TestNothingIsInventedOnTheWayIn(t *testing.T) {
 			Layer: "socket", Action: "PERMIT", Direction: "out", Protocol: 6,
 			SrcIP: "10.0.0.1", DstIP: "10.0.0.2", ProcessPath: "/bin/x"},
 		{TenantID: "default", EndpointID: "e1", Timestamp: time.Now().UTC(),
-			Layer: "eBPF_TC", Action: "PERMIT", Direction: "out", Protocol: 6,
+			Layer: "linux-socket-v1", Action: "PERMIT", Direction: "out", Protocol: 6,
 			SrcIP: "10.0.0.1", DstIP: "10.0.0.3", BytesIn: 7, BytesOut: 9,
 			Country: "SE", ProcessPath: "/bin/y"},
 	}); err != nil {

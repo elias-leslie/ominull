@@ -257,8 +257,7 @@
     return m ? m[1] : (v || "\u2014");
   }
 
-  /* Engine label from the decorated driver version an agent reports, e.g.
-     "1.1.0 (WFP Callout)" -> "WFP Callout". */
+  /* Collector label from the compatibility version an agent reports. */
   function engineOf(v) {
     var m = /\(([^)]+)\)/.exec(String(v || ""));
     return m ? m[1] : "";
@@ -267,7 +266,6 @@
   function osFamily(os) {
     var l = String(os || "").toLowerCase();
     if (l.indexOf("windows") >= 0) return "windows";
-    if (l.indexOf("mac") >= 0 || l.indexOf("darwin") >= 0) return "macos";
     if (l.indexOf("linux") >= 0 || l.indexOf("debian") >= 0 || l.indexOf("ubuntu") >= 0) return "linux";
     return "";
   }
@@ -286,7 +284,6 @@
     assetGraph: [],
     scanAssets: [],
     locations: [],
-    inference: null,
     coverage: null,
     anomalies: [],
     // True when the last fetch came back a full page, so the count on the
@@ -294,7 +291,6 @@
     anomaliesCapped: false,
     updateStatus: null,
     meshPeers: [],
-    policyGroups: [],
     exclusions: [],
     iocs: [],
     baselinePolicies: [],
@@ -334,8 +330,6 @@
 
     topoSelected: "",
     topoEdgeSelected: "",
-    chat: [],
-    chatBusy: false,
     statHistory: {},
     scanJob: null,
     // The running scan's own answer about itself. Polled while it runs; the
@@ -435,14 +429,13 @@
     var mins = function (m) { return new Date(Date.now() - m * 60000).toISOString(); };
 
     var endpoints = [
-      { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.1.0, PowerShell 7.4", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: true, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
-      { id: "mac-eng-lead", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "mac-eng-lead", os: "macOS Sonoma 14.8 (x86_64)", ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", role_tag: "workstation", installed_software: "Ominull PF Engine v1.1.0, Zsh 5.9", driver_version: "1.1.0 (PF)", status: "online", is_isolated: false, last_seen_at: mins(0.1), created_at: "2026-08-20T10:00:00Z" },
-      { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull eBPF Daemon v1.1.0, Nginx 1.26", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.2), created_at: "2026-08-20T10:00:00Z" },
-      { id: "win11-fin-11", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", mac: "00:1A:2B:99:88:77", role_tag: "workstation", installed_software: "Ominull WFP Agent v1.0.0", driver_version: "1.0.0 (WFP Callout)", status: "offline", is_isolated: false, last_seen_at: mins(134), created_at: "2026-08-20T10:00:00Z" },
-      { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull eBPF Daemon v1.0.0, PostgreSQL 16", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.05), created_at: "2026-08-20T10:00:00Z" },
-      { id: "linux-prod-api-02", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-api-02", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.9", mac: "02:42:AC:11:00:09", role_tag: "app-server", installed_software: "Ominull eBPF Daemon v1.1.0", driver_version: "1.1.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.15), created_at: "2026-08-21T10:00:00Z" },
-      { id: "win11-branch-kiosk", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-kiosk-19", os: "Windows 11 IoT Enterprise (x86_64)", ip: "10.0.4.44", mac: "00:1A:2B:44:44:44", role_tag: "kiosk", installed_software: "Ominull WFP Agent v1.1.0", driver_version: "1.1.0 (WFP Callout)", status: "online", is_isolated: false, last_seen_at: mins(0.3), created_at: "2026-08-22T10:00:00Z" },
-      { id: "linux-branch-nvr", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", mac: "00:50:56:46:46:46", role_tag: "recorder", installed_software: "Ominull eBPF Daemon v1.0.0", driver_version: "1.0.0 (eBPF/TC)", status: "online", is_isolated: false, last_seen_at: mins(0.4), created_at: "2026-08-22T10:00:00Z" }
+      { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.1.0 (windows-user-wfp)", status: "online", is_isolated: true, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull Linux socket agent, Nginx 1.26", driver_version: "1.1.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.2), created_at: "2026-08-20T10:00:00Z" },
+      { id: "win11-fin-11", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", mac: "00:1A:2B:99:88:77", role_tag: "workstation", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.0.0 (windows-user-wfp)", status: "offline", is_isolated: false, last_seen_at: mins(134), created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull Linux socket agent, PostgreSQL 16", driver_version: "1.0.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.05), created_at: "2026-08-20T10:00:00Z" },
+      { id: "linux-prod-api-02", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-api-02", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.9", mac: "02:42:AC:11:00:09", role_tag: "app-server", installed_software: "Ominull Linux socket agent", driver_version: "1.1.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.15), created_at: "2026-08-21T10:00:00Z" },
+      { id: "win11-branch-kiosk", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-kiosk-19", os: "Windows 11 IoT Enterprise (x86_64)", ip: "10.0.4.44", mac: "00:1A:2B:44:44:44", role_tag: "kiosk", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.1.0 (windows-user-wfp)", status: "online", is_isolated: false, last_seen_at: mins(0.3), created_at: "2026-08-22T10:00:00Z" },
+      { id: "linux-branch-nvr", tenant_id: "harbour-health", location_id: "loc-branch", location_name: "Branch Clinic", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", mac: "00:50:56:46:46:46", role_tag: "recorder", installed_software: "Ominull Linux socket agent", driver_version: "1.0.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.4), created_at: "2026-08-22T10:00:00Z" }
     ];
 
     var locations = [
@@ -481,16 +474,14 @@
       { ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", vendor: "VMware, Inc.", hostname: "dmz-web-01", os_guess: "Linux (generic)", category: "Server", confidence: 0.62, ttl: 64, app_delta_ms: 1.2, is_managed: true, agent_endpoint_id: "linux-dmz-web-01", risk_score: "LOW", weakpoints: [], identity_method: "ssh-banner", identity_why: ["SSH-2.0-OpenSSH_9.6", "the banner names no distribution, so the release is not known"], last_seen: mins(1), open_ports: [{ port: 80, protocol: "tcp", service: "http", risk_level: "MEDIUM" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
       { ip: "10.0.4.55", mac: "00:11:32:44:55:66", vendor: "Synology Inc.", hostname: "unmanaged-nas", os_guess: "Synology DiskStation DSM 7.2", category: "Storage / NAS", confidence: 0.92, ttl: 64, app_delta_ms: 1.4, is_managed: false, agent_endpoint_id: "", risk_score: "HIGH", weakpoints: ["Unencrypted HTTP administrative console (port 5000)", "SMBv1 legacy dialect enabled"], identity_method: "http-server", identity_why: ["Server: Synology DiskStation 7.2"], last_seen: mins(3), open_ports: [{ port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 5000, protocol: "tcp", service: "http", risk_level: "HIGH" }, { port: 5001, protocol: "tcp", service: "https", risk_level: "MEDIUM" }] },
       { ip: "10.0.4.71", mac: "00:1B:A9:71:71:71", vendor: "Brother Industries", hostname: "", os_guess: "Embedded print controller", category: "Printer", confidence: 0.44, ttl: 64, app_delta_ms: 2.6, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated raw print queue on 9100"], identity_method: "mdns-services", identity_why: ["mDNS services: _ipp _pdl-datastream", "mDNS name: brother-mfc.local"], last_seen: mins(4), open_ports: [{ port: 631, protocol: "tcp", service: "ipp", risk_level: "LOW" }, { port: 9100, protocol: "tcp", service: "jetdirect", risk_level: "MEDIUM" }] },
-      { ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", vendor: "Apple, Inc.", hostname: "mac-eng-lead", os_guess: "macOS", category: "Workstation", confidence: 0.81, ttl: 64, app_delta_ms: 1.0, is_managed: true, agent_endpoint_id: "mac-eng-lead", risk_score: "LOW", weakpoints: [], identity_method: "mdns-device-info", identity_why: ["model=MacBookPro18,3 osxvers=24"], last_seen: mins(1), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }] },
       { ip: "10.0.4.99", mac: "B8:27:EB:12:34:56", vendor: "Raspberry Pi Foundation", hostname: "rogue-dev-kali", os_guess: "Kali Linux Rolling (ARM64)", category: "Shadow IT / Pentest", confidence: 0.89, ttl: 64, app_delta_ms: 2.1, is_managed: false, agent_endpoint_id: "", risk_score: "CRITICAL", weakpoints: ["Unauthorized Metasploit payload listener on port 4444", "Unmanaged shadow IT device"], identity_method: "ssh-banner", identity_why: ["SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"], last_seen: mins(0.5), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }, { port: 4444, protocol: "tcp", service: "metasploit", risk_level: "CRITICAL" }] },
       { ip: "10.0.4.120", mac: "50:02:91:AA:BB:CC", vendor: "Samsung Electronics", hostname: "lobby-display", os_guess: "Samsung Tizen Smart Display", category: "IoT / Display", confidence: 0.88, ttl: 64, app_delta_ms: 1.9, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated smart-display remote API on LAN"], identity_method: "ssdp", identity_why: ["SSDP SERVER: Linux/4.1 UPnP/1.0 Samsung/1.0"], last_seen: mins(9), open_ports: [{ port: 8001, protocol: "tcp", service: "smarttv-api", risk_level: "MEDIUM" }] },
       { ip: "10.0.4.201", mac: "", vendor: "", hostname: "", os_guess: "", category: "", confidence: 0.12, ttl: 0, app_delta_ms: 0, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], identity_method: "", identity_why: ["nothing on this host answered any probe"], last_seen: mins(62), open_ports: [] }
     ];
 
     var anomalies = [
-      { id: "alert-dga-01", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "win11-corp-exec", hostname: "corp-win11-exec", anomaly_type: "DGA_BEACONING", severity: "CRITICAL", title: "Suspicious DGA / high-entropy domain", description: "Process powershell.exe queried 142 high-entropy domains in 60s; 138 returned NXDOMAIN.", details: "Shannon entropy 4.02 bits/byte | destination xj829vbnpqlmz019.xyz:443", process_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", dst_ip: "198.51.100.22", dst_port: 443, timestamp: mins(4), acknowledged: false },
+      { id: "alert-ioc-01", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "win11-corp-exec", hostname: "corp-win11-exec", anomaly_type: "THREAT_INTEL_MATCH", severity: "CRITICAL", title: "Threat-intel destination blocked", description: "powershell.exe attempted a connection to an active threat-intel destination.", details: "Destination 198.51.100.22:443 matched the active IOC catalogue.", process_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", dst_ip: "198.51.100.22", dst_port: 443, timestamp: mins(4), acknowledged: false },
       { id: "alert-offhours-02", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "win11-corp-exec", hostname: "corp-win11-exec", anomaly_type: "NOVEL_PROCESS_EGRESS", severity: "HIGH", title: "Off-hours interactive shell egress", description: "Interactive shell opened an external session at 02:14 UTC.", details: "explorer.exe -> powershell.exe -> 198.51.100.22:8443", process_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", dst_ip: "198.51.100.22", dst_port: 8443, timestamp: mins(38), acknowledged: false },
-      { id: "alert-fanout-03", tenant_id: "corp-default", location_id: "loc-hq", endpoint_id: "mac-eng-lead", hostname: "mac-eng-lead", anomaly_type: "UNUSUAL_PORT", severity: "HIGH", title: "Internal subnet fan-out / port sweep", description: "Host probed 8 distinct internal addresses within a 60s window.", details: "Probed 445, 3389 across 10.0.4.0/24", process_path: "/usr/bin/nmap", dst_ip: "10.0.4.0/24", dst_port: 445, timestamp: mins(51), acknowledged: false },
       { id: "alert-bandwidth-04", tenant_id: "corp-default", location_id: "loc-cloud", endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", anomaly_type: "BANDWIDTH_SPIKE", severity: "MEDIUM", title: "Egress volume 14x baseline", description: "Sustained outbound transfer well above the learned diurnal baseline.", details: "4.2 GB out in 20m vs 300 MB baseline", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip: "203.0.113.51", dst_port: 5432, timestamp: mins(96), acknowledged: false }
     ];
 
@@ -513,28 +504,6 @@
       });
     }
 
-    /* What a flow-inference pass concludes over this fixture. Each rationale
-       states only what the traffic actually shows: how many endpoints, from
-       which processes, on which ports, and what is absent. */
-    var DEMO_INFERENCES = [
-      {
-        ip: "10.0.4.10", role: "domain-controller", label: "Domain controller", confidence: 0.86,
-        rationale: "6 agented endpoints across 2 locations, from lsass.exe and svchost.exe, on 389/88/445/135; fan-in without any fan-out; nothing else on 10.0.4.0/24 answers 88."
-      },
-      {
-        ip: "10.0.4.12", role: "domain-controller", label: "Domain controller", confidence: 0.86,
-        rationale: "5 agented endpoints across 2 locations, from lsass.exe and svchost.exe, on 88/389/135; fan-in without any fan-out; no probe has ever reached this address and no agent reports from it."
-      },
-      {
-        ip: "10.0.4.55", role: "file-server", label: "File server", confidence: 0.74,
-        rationale: "4 agented endpoints, on 445; fan-in without any fan-out; 620.0 MB across 3120 flows."
-      },
-      {
-        ip: "10.0.4.71", role: "print-server", label: "Print server", confidence: 0.65,
-        rationale: "3 agented endpoints, on 9100/631; nothing else on 10.0.4.0/24 answers 9100."
-      }
-    ];
-
     /* Nodes come from the asset graph, so every one carries its evidence and
        its role. Two of them are quiet: known assets that said nothing inside
        the window, drawn dimmed rather than dropped. */
@@ -547,24 +516,23 @@
       };
     });
     topoNodes.push({ id: "10.0.4.1", label: "core-gateway", type: "gateway", ip: "10.0.4.1", os: "Cisco IOS-XE Gateway", role: "Router / Firewall", risk: "LOW", is_isolated: false, group: "Corporate HQ LAN", evidence: ["scan"], quiet: false });
-    topoNodes.push({ id: "10.0.4.10", label: "10.0.4.10", type: "unmanaged", ip: "10.0.4.10", os: "Windows Server", role: "domain-controller", risk: "MEDIUM", is_isolated: false, group: "Server", evidence: ["scan", "inferred"], confidence: 0.86, rationale: DEMO_INFERENCES[0].rationale, quiet: false });
-    topoNodes.push({ id: "10.0.4.12", label: "10.0.4.12", type: "unmanaged", ip: "10.0.4.12", os: "", role: "domain-controller", risk: "MEDIUM", is_isolated: false, group: "Seen in traffic only", evidence: ["inferred"], confidence: 0.86, rationale: DEMO_INFERENCES[1].rationale, quiet: false });
-    topoNodes.push({ id: "10.0.4.55", label: "unmanaged-nas", type: "unmanaged", ip: "10.0.4.55", os: "Synology DiskStation DSM 7.2", role: "file-server", risk: "HIGH", is_isolated: false, group: "Storage / NAS", evidence: ["scan", "inferred"], confidence: 0.74, rationale: DEMO_INFERENCES[2].rationale, quiet: false });
-    topoNodes.push({ id: "10.0.4.71", label: "10.0.4.71", type: "unmanaged", ip: "10.0.4.71", os: "Embedded print controller", role: "print-server", risk: "MEDIUM", is_isolated: false, group: "Printer", evidence: ["scan", "inferred"], confidence: 0.65, rationale: DEMO_INFERENCES[3].rationale, quiet: true });
+    topoNodes.push({ id: "10.0.4.10", label: "10.0.4.10", type: "unmanaged", ip: "10.0.4.10", os: "Windows Server", role: "Server", risk: "MEDIUM", is_isolated: false, group: "Server", evidence: ["scan"], confidence: 0.71, quiet: false });
+    topoNodes.push({ id: "10.0.4.12", label: "10.0.4.12", type: "unmanaged", ip: "10.0.4.12", os: "", role: "unknown", risk: "MEDIUM", is_isolated: false, group: "Seen in traffic only", evidence: [], quiet: false });
+    topoNodes.push({ id: "10.0.4.55", label: "unmanaged-nas", type: "unmanaged", ip: "10.0.4.55", os: "Synology DiskStation DSM 7.2", role: "Storage / NAS", risk: "HIGH", is_isolated: false, group: "Storage / NAS", evidence: ["scan"], confidence: 0.92, quiet: false });
+    topoNodes.push({ id: "10.0.4.71", label: "10.0.4.71", type: "unmanaged", ip: "10.0.4.71", os: "Embedded print controller", role: "Printer", risk: "MEDIUM", is_isolated: false, group: "Printer", evidence: ["scan"], confidence: 0.44, quiet: true });
     topoNodes.push({ id: "10.0.4.99", label: "rogue-dev-kali", type: "unmanaged", ip: "10.0.4.99", os: "Kali Linux Rolling (ARM64)", role: "Shadow IT / Pentest", risk: "CRITICAL", is_isolated: false, group: "Shadow IT / Pentest", evidence: ["scan"], quiet: false });
     topoNodes.push({ id: "10.0.4.120", label: "lobby-display", type: "unmanaged", ip: "10.0.4.120", os: "Samsung Tizen Smart Display", role: "IoT / Display", risk: "MEDIUM", is_isolated: false, group: "IoT / Display", evidence: ["scan"], quiet: true });
     topoNodes.push({ id: "198.51.100.22", label: "198.51.100.22", type: "threat", ip: "198.51.100.22", os: "", role: "unknown", risk: "CRITICAL", is_isolated: false, group: "Blocked destination", evidence: [], quiet: false });
 
-    /* The demo asset graph is generated from the same two fixtures the live
-       hub merges, plus the inferences flow alone supports. 10.0.4.12 exists
-       in no scan and runs no agent: it is named entirely by the shape of the
-       traffic other hosts send it. */
+    /* The demo asset graph is generated from the same scan and agent fixtures
+       the live hub merges. Flow-only addresses remain topology nodes without
+       being promoted into an asset identity. */
     function demoClaim(field, source, value, confidence, rationale, seen) {
       return { field: field, source: source, value: value, confidence: confidence, rationale: rationale || "", observed_at: seen, winner: false };
     }
 
-    /* Same rule as the hub: highest confidence wins per field, operator and
-       agent claims outrank scan and inference outright. */
+    /* Same rule as the hub: highest confidence wins per field, with agent and
+       operator claims outranking scan evidence. */
     var demoMergeAsset = DEMO_REMERGE;
 
     function demoAssetGraph() {
@@ -618,34 +586,15 @@
         }));
       });
 
-      /* A host with no agent and no scan, named from flow alone. */
-      out.push(demoMergeAsset({
-        id: "asset-ip-10-0-4-12-10-0-4-0-24", identity_kind: "ip", identity_value: "10.0.4.12|10.0.4.0/24",
-        agent_endpoint_id: "", tenant_id: "default", location_id: "",
-        ip: "10.0.4.12", mac: "", subnet: "10.0.4.0/24",
-        first_seen_at: mins(300), last_seen_at: mins(0.4), ports: [],
-        claims: [demoClaim("role", "inferred", "domain-controller", 0.86, DEMO_INFERENCES[1].rationale, mins(0.4))]
-      }));
-
-      out.forEach(function (a) {
-        DEMO_INFERENCES.forEach(function (inf) {
-          if (a.ip !== inf.ip) return;
-          if (a.claims.some(function (c) { return c.source === "inferred" && c.field === "role"; })) return;
-          a.claims.push(demoClaim("role", "inferred", inf.role, inf.confidence, inf.rationale, a.last_seen_at));
-          demoMergeAsset(a);
-        });
-      });
       return out;
     }
 
     var topoEdges = [
       { id: "e1", source: "10.0.4.15", target: "10.0.4.10", protocol: "tcp", port: 389, flow_count: 2140, total_bytes: 42000000, verdict: "clean", last_seen: now },
-      { id: "e2", source: "10.0.4.88", target: "10.0.4.10", protocol: "tcp", port: 88, flow_count: 980, total_bytes: 12000000, verdict: "clean", last_seen: now },
       { id: "e3", source: "10.0.4.20", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 18200, total_bytes: 1420000000, verdict: "clean", last_seen: now },
       { id: "e4", source: "10.0.4.44", target: "10.0.4.10", protocol: "tcp", port: 445, flow_count: 640, total_bytes: 8100000, verdict: "clean", last_seen: now },
       { id: "e5", source: "10.0.4.46", target: "10.0.4.55", protocol: "tcp", port: 445, flow_count: 3120, total_bytes: 620000000, verdict: "clean", last_seen: now },
       { id: "e6", source: "10.0.4.15", target: "198.51.100.22", protocol: "tcp", port: 443, flow_count: 142, total_bytes: 810000, verdict: "blocked", last_seen: now },
-      { id: "e7", source: "10.0.4.88", target: "10.0.4.99", protocol: "tcp", port: 4444, flow_count: 61, total_bytes: 190000, verdict: "anomalous", last_seen: now },
       { id: "e8", source: "172.16.10.4", target: "172.16.10.9", protocol: "tcp", port: 5432, flow_count: 9400, total_bytes: 2100000000, verdict: "clean", last_seen: now },
       { id: "e9", source: "10.0.4.31", target: "10.0.4.10", protocol: "tcp", port: 135, flow_count: 220, total_bytes: 2400000, verdict: "clean", last_seen: now },
       { id: "e10", source: "172.16.10.9", target: "10.0.4.1", protocol: "tcp", port: 443, flow_count: 5100, total_bytes: 310000000, verdict: "clean", last_seen: now },
@@ -673,32 +622,23 @@
       "/api/v1/baseline/catalogue": { services: DEMO_BASELINE_SERVICES },
       "/api/v1/baseline/policies": { policies: DEMO_BASELINE_POLICIES, services: DEMO_BASELINE_SERVICES },
       "/api/v1/assets": demoAssetGraph(),
-      "/api/v1/inference/status": {
-        last_run: mins(1), inferred_count: DEMO_INFERENCES.length, window: "24h0m0s",
-        interval: "5m0s", last_error: "", max_confidence: 0.9, results: DEMO_INFERENCES
-      },
       "/api/v1/scanner/results": scan,
       "/api/v1/scanner/coverage": {
-        total_discovered: scan.length, total_managed: 4, total_unmanaged: scan.length - 4,
-        coverage_percent: Math.round((4 / scan.length) * 1000) / 10, critical_risks: 1, high_risks: 1
+        total_discovered: scan.length, total_managed: endpoints.length, total_unmanaged: scan.length - endpoints.length,
+        coverage_percent: Math.round((endpoints.length / scan.length) * 1000) / 10, critical_risks: 1, high_risks: 1
       },
       "/api/v1/anomalies": anomalies,
       "/api/v1/agents/update-status": {
         latest_version: "1.1.0",
         outdated: [
-          { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", driver_version: "1.0.0 (eBPF/TC)" },
-          { endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", driver_version: "1.0.0 (WFP Callout)" },
-          { endpoint_id: "linux-branch-nvr", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", driver_version: "1.0.0 (eBPF/TC)" }
+          { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", driver_version: "1.0.0 (linux-socket-v1)" },
+          { endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", driver_version: "1.0.0 (windows-user-wfp)" },
+          { endpoint_id: "linux-branch-nvr", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", driver_version: "1.0.0 (linux-socket-v1)" }
         ],
         pending: []
       },
       "/api/v1/mesh/quarantined": [
         { id: "mq-01", target_ip: "10.0.4.99", target_mac: "B8:27:EB:12:34:56", subnet: "10.0.4.0/24", reason: "Metasploit listener on 4444", active: true, created_at: mins(22) }
-      ],
-      "/api/v1/policy-groups": [
-        { id: "pg-default-zt", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Corporate zero-trust default", description: "Baseline egress control for every managed endpoint", schedule: "all", criteria: "{}", action: "BLOCK", rule_type: "port", rule_value: "", port: 445, protocol: "tcp", active: true, created_at: "2026-08-20T10:00:00Z" },
-        { id: "pg-quarantine-drop", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Emergency lateral quarantine", description: "Drops peer-to-peer traffic for quarantined hosts", schedule: "all", criteria: "{}", action: "ISOLATE", rule_type: "cidr", rule_value: "10.0.4.0/24", port: 0, protocol: "any", active: true, created_at: "2026-08-21T10:00:00Z" },
-        { id: "pg-offhours", tenant_id: "corp-default", scope: "client", scope_value: "corp-default", name: "Off-hours shell egress alert", description: "Alerts on interactive shells opening external sessions outside business hours", schedule: "off_hours", criteria: "{\"process\":\"powershell\"}", action: "ALERT", rule_type: "process", rule_value: "powershell.exe", port: 0, protocol: "tcp", active: false, created_at: "2026-08-23T10:00:00Z" }
       ],
       "/api/v1/exclusions": [
         { id: "ex-01", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Directory service authentication", process_path: "", dst_ip_range: "10.0.4.10/32", port: 88, protocol: "tcp", reason: "Kerberos to the site directory server", active: true, created_at: "2026-08-20T10:00:00Z" },
@@ -711,24 +651,20 @@
         { id: "ioc-04", value: "198.51.100.0/24", type: "cidr", source: "emerging_threats", threat_type: "scanner", confidence: 70, active: true, created_at: mins(600), last_seen_at: mins(90) }
       ],
       "/api/v1/audit/logs": [
-        { id: "a-1", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "ISOLATE_HOST", resource: "win11-corp-exec", details: "Auto-isolated by detector: DGA beaconing", ip_address: "10.0.4.58", timestamp: mins(4) },
+        { id: "a-1", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "ISOLATE_HOST", resource: "win11-corp-exec", details: "Auto-isolated by detector: active threat-intel destination", ip_address: "10.0.4.58", timestamp: mins(4) },
         { id: "a-2", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "MESH_QUARANTINE", resource: "10.0.4.99", details: "Metasploit listener on 4444", ip_address: "10.0.4.58", timestamp: mins(22) },
         { id: "a-3", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "SYNC_TI", resource: "threatintel", details: "4 indicators refreshed from 3 feeds", ip_address: "10.0.4.58", timestamp: mins(60) },
-        { id: "a-4", tenant_id: "corp-default", user_id: "u-admin", username: "admin", action: "ADD_RULE", resource: "pg-offhours", details: "Off-hours shell egress alert created", ip_address: "10.0.4.58", timestamp: mins(180) }
       ],
       "/api/v1/events": [
         { id: 9001, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(4), layer: "ALE_AUTH_CONNECT", action: "BLOCK", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "198.51.100.22", src_port: 52140, dst_port: 443, bytes_in: 0, bytes_out: 1240, country: "NL", process_path: "powershell.exe", process_id: 4812, domain: "xj829vbnpqlmz019.xyz" },
-        { id: 9002, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(51), layer: "PF_OUT", action: "BLOCK", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.99", src_port: 61022, dst_port: 4444, bytes_in: 0, bytes_out: 480, country: "", process_path: "/usr/bin/nmap", process_id: 9911 },
-        { id: 9003, tenant_id: "corp-default", endpoint_id: "linux-dmz-web-01", timestamp: mins(2), layer: "TC_EGRESS", action: "PERMIT", direction: "INBOUND", protocol: 6, src_ip: "203.0.113.9", dst_ip: "10.0.4.20", src_port: 44120, dst_port: 443, bytes_in: 8400, bytes_out: 142000, country: "DE", process_path: "/usr/sbin/nginx", process_id: 1220 },
-        { id: 9004, tenant_id: "corp-default", endpoint_id: "linux-prod-db-01", timestamp: mins(96), layer: "TC_EGRESS", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "172.16.10.4", dst_ip: "203.0.113.51", src_port: 40122, dst_port: 5432, bytes_in: 210000, bytes_out: 4200000000, country: "US", process_path: "/usr/lib/postgresql/16/bin/postgres", process_id: 780 },
-        /* Fan-in to 10.0.4.10 from several agented endpoints on directory
-           ports. This is the shape Pass 2 reads as "domain controller"; in
-           Pass 1 it is visible as flow, not yet as an inference. */
+        { id: 9003, tenant_id: "corp-default", endpoint_id: "linux-dmz-web-01", timestamp: mins(2), layer: "linux-socket-v1", action: "PERMIT", direction: "INBOUND", protocol: 6, src_ip: "203.0.113.9", dst_ip: "10.0.4.20", src_port: 44120, dst_port: 443, bytes_in: 8400, bytes_out: 142000, country: "DE", process_path: "/usr/sbin/nginx", process_id: 1220 },
+        { id: 9004, tenant_id: "corp-default", endpoint_id: "linux-prod-db-01", timestamp: mins(96), layer: "linux-socket-v1", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "172.16.10.4", dst_ip: "203.0.113.51", src_port: 40122, dst_port: 5432, bytes_in: 210000, bytes_out: 4200000000, country: "US", process_path: "/usr/lib/postgresql/16/bin/postgres", process_id: 780 },
+        /* Several retained endpoints reach the same internal services; the
+           topology shows that traffic without assigning an identity. */
         { id: 9005, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.10", src_port: 49812, dst_port: 389, bytes_in: 21400, bytes_out: 9200, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
         { id: 9006, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1.2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.10", src_port: 49813, dst_port: 88, bytes_in: 4100, bytes_out: 2600, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
         { id: 9007, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(2), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.10", src_port: 51002, dst_port: 445, bytes_in: 812000, bytes_out: 44000, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 1044 },
         { id: 9008, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(140), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.10", src_port: 50221, dst_port: 135, bytes_in: 9400, bytes_out: 3100, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 998 },
-        { id: 9009, tenant_id: "corp-default", endpoint_id: "mac-eng-lead", timestamp: mins(3), layer: "PF_OUT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.88", dst_ip: "10.0.4.10", src_port: 61140, dst_port: 389, bytes_in: 15200, bytes_out: 6100, country: "", process_path: "/usr/libexec/opendirectoryd", process_id: 221 },
         { id: 9010, tenant_id: "corp-default", endpoint_id: "win11-corp-exec", timestamp: mins(1.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.15", dst_ip: "10.0.4.12", src_port: 49901, dst_port: 88, bytes_in: 8400, bytes_out: 3100, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 712 },
         { id: 9011, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(2.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.12", src_port: 50120, dst_port: 389, bytes_in: 6200, bytes_out: 2400, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 704 },
         { id: 9012, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(4.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.12", src_port: 51002, dst_port: 135, bytes_in: 3100, bytes_out: 1400, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 988 }
@@ -742,7 +678,7 @@
         countries: { US: 31200, DE: 4210, NL: 980, SG: 640, GB: 410 },
         top_processes: {},
         severity_counts: { CRITICAL: 1, HIGH: 2, MEDIUM: 1, LOW: 0 },
-        enforcement_counts: { "WFP Callout": 3, "eBPF/TC": 4, PF: 1 },
+        enforcement_counts: { "Windows user-mode WFP": 3, "Linux socket collector": 4 },
         bandwidth_timeline: timeline,
         diurnal_baseline: {}, diurnal_live: {},
         top_talkers: talkers,
@@ -761,13 +697,11 @@
           anomalous_edge_count: 2, managed_nodes_count: endpoints.length,
           unmanaged_nodes_count: topoNodes.length - endpoints.length,
           quiet_nodes_count: topoNodes.filter(function (n) { return n.quiet; }).length,
-          inferred_nodes_count: topoNodes.filter(function (n) { return (n.evidence || []).indexOf("inferred") >= 0; }).length,
           total_flow_count: topoEdges.reduce(function (t, e) { return t + e.flow_count; }, 0),
           measured_flow_count: topoEdges.reduce(function (t, e) { return t + e.measured_flows; }, 0),
           window_label: "24h"
         }
       },
-      "/api/v1/copilot/config": { provider: "ollama", ollama_model: "llama3.2" }
     };
   }
 
@@ -776,7 +710,7 @@
   /* The same merge rule the hub applies, so a demo correction visibly wins
      the field the way a live one would. */
   function DEMO_REMERGE(a) {
-    var rank = { operator: 3, agent: 2, scan: 1, inferred: 1 };
+    var rank = { operator: 3, agent: 2, scan: 1 };
     var best = {};
     arrayOf(a.claims).forEach(function (c) {
       c.winner = false;
@@ -844,8 +778,8 @@
       first_seen_enabled: true, first_seen_cooldown_minutes: 30,
       bandwidth_enabled: true, bandwidth_cooldown_minutes: 5,
       warmup_hours: 24,
-      quiet_processes: ["apsd", "launchd", "svchost.exe", "systemd-timesyncd", "ominull-agent"],
-      quiet_orgs: ["apple", "cloudflare", "microsoft"]
+      quiet_processes: ["svchost.exe", "systemd-timesyncd", "ominull-agent"],
+      quiet_orgs: ["cloudflare", "microsoft"]
     };
     var t = {};
     Object.keys(defaults).forEach(function (k) { t[k] = defaults[k]; });
@@ -970,7 +904,6 @@
     var host = "https://hub.demo.invalid:9443";
     var spec = {
       linux: { file: "ominull-install.sh", one: "curl -fsSL " + host + "/bootstrap.sh?t=DEMOTICKET | sudo bash" },
-      macos: { file: "ominull-install.mac.sh", one: "curl -fsSL " + host + "/bootstrap.mac.sh?t=DEMOTICKET | sudo bash" },
       windows: { file: "ominull-install.ps1", one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1?t=DEMOTICKET' | iex" }
     }[plat] || {};
     var out = {
@@ -983,7 +916,7 @@
         + "OMINULL_ROLE=\"" + (body.role || "workstation") + "\"\n"
         + "OMINULL_ENROL_TOKEN=\"demo-token-not-a-credential\"\n"
         + "set -eu\n"
-        + "curl -fsSL \"$OMINULL_HUB/downloads/ominull-agent_1.7.11_amd64.deb\" -o /tmp/ominull.deb\n"
+        + "curl -fsSL \"$OMINULL_HUB/download/ominull-agent_1.7.11_amd64.deb\" -o /tmp/ominull.deb\n"
         + "dpkg -i /tmp/ominull.deb\n"
         + "systemctl enable --now ominull-agent\n",
       note: "Demo mode: nothing was minted and this script will not enrol anything."
@@ -1036,12 +969,6 @@
       DEMO_CACHE["/api/v1/mesh/quarantined"] = DEMO_CACHE["/api/v1/mesh/quarantined"].filter(function (p) { return p.target_ip !== (body && body.target_ip); });
       return { status: "unquarantined" };
     }
-    if (base === "/api/v1/copilot/chat") {
-      return {
-        reply: "Severity: HIGH.\n\nThe fan-in shape on 10.0.4.10 (389/88/135/445 from lsass.exe and svchost.exe, in bursts at logon) reads as a directory server, not a workstation. corp-win11-exec is the host to look at first: it is the only endpoint with both a blocked external session and an unusual internal sweep in the same hour.\n\nRecommended order:\n  1. Keep corp-win11-exec isolated; capture the socket table before release.\n  2. Confirm 10.0.4.99 stays mesh-quarantined - the 4444 listener is still up.\n  3. Deploy an agent to 10.0.4.10 so the directory server stops being inferred.",
-        timestamp: new Date().toISOString(), model: "llama3.2 (demo)", provider: "ollama"
-      };
-    }
     if (base === "/api/v1/assets/correct") {
       var target = DEMO_CACHE["/api/v1/assets"].filter(function (a) {
         return a.id === (body && body.asset_id) || (body && body.ip && a.ip === body.ip);
@@ -1060,11 +987,6 @@
         DEMO_REMERGE(target);
       }
       return target || { status: "ok" };
-    }
-    if (base === "/api/v1/inference/run") {
-      var st = DEMO_CACHE["/api/v1/inference/status"];
-      st.last_run = new Date().toISOString();
-      return { status: "completed", inferred_count: arrayOf(st.results).length, detail: st };
     }
     if (base === "/api/v1/baseline/policies") {
       var saved = DEMO_CACHE["/api/v1/baseline/policies"];
@@ -1089,7 +1011,10 @@
     }
     if (base === "/api/v1/scanner/scan") return { scan_id: "scan-demo", status: "running" };
     if (base === "/api/v1/agents/update") {
-      return { desired_version: "1.1.0", scheduled: [{ endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", from: "1.0.0", to: "1.1.0" }], unsupported: [{ endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows", reason: "self-update not supported on this platform yet; use the SSH/WinRM push-deployer" }] };
+      return { desired_version: "1.1.0", scheduled: [
+        { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", from: "1.0.0", to: "1.1.0" },
+        { endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", from: "1.0.0", to: "1.1.0" }
+      ], unsupported: [] };
     }
     return { status: "ok" };
   }
@@ -1210,15 +1135,12 @@
 
   function evidenceOf(a) {
     var scanClaim = null;
-    var inferredClaim = null;
     arrayOf(a.claims).forEach(function (c) {
       if (c.source === "scan" && (!scanClaim || (c.confidence || 0) > (scanClaim.confidence || 0))) scanClaim = c;
-      if (c.source === "inferred" && (!inferredClaim || (c.confidence || 0) > (inferredClaim.confidence || 0))) inferredClaim = c;
     });
     return {
       agent: !!a.agent_endpoint_id,
       scan: claimGrade(scanClaim),
-      inferred: claimGrade(inferredClaim),
       operator: !!bestClaim(a, "role", "operator") || !!bestClaim(a, "category", "operator")
     };
   }
@@ -1263,7 +1185,6 @@
       else st = quiet ? STATE_SILENT : STATE_NOAGENT;
 
       var roleClaim = bestClaim(a, "role");
-      var inferredRole = bestClaim(a, "role", "inferred");
       var identityBits = [a.os || "Unidentified"];
       var descriptor = a.category || a.role;
       if (descriptor) identityBits.push(descriptor);
@@ -1289,7 +1210,6 @@
         role: a.role || "",
         roleConf: Number(a.role_confidence) || 0,
         rationale: a.rationale || "",
-        inferredRole: inferredRole,
         roleSource: roleClaim ? roleClaim.source : "",
         state: st,
         online: online,
@@ -1514,10 +1434,6 @@
     return "10.0.4.0/24";
   }
 
-  function inferredCount() {
-    return state.assets.filter(function (a) { return !!a.evidence.inferred; }).length;
-  }
-
   function sectionSummary() {
     var stats = assetStats();
     if (state.section === "discovery") {
@@ -1531,7 +1447,6 @@
         { label: "Managed", value: covered ? String(cov.total_managed || 0) : "\u2014" },
         { label: "Unmanaged", value: covered ? String(cov.total_unmanaged || 0) : "\u2014", tone: "warn" },
         { label: "Coverage", value: covered ? pct(cov.coverage_percent) : "\u2014" },
-        { label: "Deduced from flow", value: String(inferredCount()) },
         { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" }
       ];
     }
@@ -1563,8 +1478,8 @@
     }
     if (state.section === "policy") {
       return [
-        { label: "Policy groups", value: String(state.policyGroups.length) },
-        { label: "Active", value: String(state.policyGroups.filter(function (g) { return g.active; }).length) },
+        { label: "Baseline policies", value: String(state.baselinePolicies.length) },
+        { label: "Baseline services", value: String(state.baselineServices.length) },
         { label: "Exclusions", value: String(state.exclusions.length) },
         /* The hub returns at most IOC_PAGE indicators; the tile said 200 whether
            the feeds held 200 or 200,000. */
@@ -1654,19 +1569,11 @@
     menu.appendChild(menuItem("Correct fingerprint\u2026", "i-tag", null, function () { correctFingerprint(asset); },
       { disabled: !asset.scan, why: "Needs a scan result to correct" }));
 
-    var inferred = asset.inferredRole;
     var corrected = bestClaim({ claims: asset.claims }, "role", "operator");
     if (corrected) {
       menu.appendChild(menuItem("Withdraw role correction", "i-refresh", null, function () {
         correctAsset(asset, "role", "", "", true);
       }));
-    } else if (inferred) {
-      menu.appendChild(menuItem("Confirm " + roleLabel(inferred.value).toLowerCase(), "i-check", null, function () {
-        correctAsset(asset, "role", inferred.value, "operator confirmed the flow inference", false);
-      }));
-      menu.appendChild(menuItem("Not a " + roleLabel(inferred.value).toLowerCase(), "i-close", null, function () {
-        correctAsset(asset, "role", "unknown", "operator rejected the flow inference", false);
-      }, { danger: true }));
     }
 
     menu.appendChild(h("div", { cls: "sep" }));
@@ -1678,7 +1585,7 @@
       menu.appendChild(menuItem("Release host", "i-unlock", null, function () { setIsolation(asset, false); }));
     } else {
       menu.appendChild(menuItem("Isolate host", "i-lock", "i", function () { setIsolation(asset, true); },
-        { danger: true, disabled: !agent, why: "Ring-0 isolation needs an agent; use mesh quarantine instead" }));
+        { danger: true, disabled: !agent, why: "Host isolation needs an agent; use mesh quarantine instead" }));
     }
 
     if (asset.meshed) {
@@ -1885,12 +1792,10 @@
     var wrap = h("span", {
       cls: "ev",
       title: "Known by \u2014 agent: " + (asset.evidence.agent ? "yes" : "no") +
-        ", scan: " + (asset.evidence.scan || "no") +
-        ", inferred: " + (asset.evidence.inferred || "no")
+        ", scan: " + (asset.evidence.scan || "no")
     });
     wrap.appendChild(h("i", { "data-on": asset.evidence.agent ? "agent" : null }));
     wrap.appendChild(h("i", { "data-on": asset.evidence.scan ? "scan" : null }));
-    wrap.appendChild(h("i", { "data-on": asset.evidence.inferred ? "inferred" : null }));
     return wrap;
   }
 
@@ -1925,6 +1830,7 @@
     var byField = {};
     var order = [];
     arrayOf(asset.claims).forEach(function (c) {
+      if (c.source === "inferred") return;
       if (!byField[c.field]) { byField[c.field] = []; order.push(c.field); }
       byField[c.field].push(c);
     });
@@ -1961,65 +1867,6 @@
   function roleLabel(role) {
     if (!role) return "";
     return role.charAt(0).toUpperCase() + role.slice(1).replace(/-/g, " ");
-  }
-
-  /* The inference panel: what was deduced, why, and the two buttons that end
-     the argument. Confirm pins the deduction; Reject withdraws it and leaves
-     the row unclaimed rather than substituting another guess. */
-  function inferencePanel(asset) {
-    var wrap = h("div", {});
-    var inferred = asset.inferredRole;
-    var operator = bestClaim({ claims: asset.claims }, "role", "operator");
-
-    if (!inferred && !operator) return null;
-
-    if (inferred) {
-      wrap.appendChild(h("p", { cls: "why" },
-        h("b", { text: "Flow inference: " + roleLabel(inferred.value) + "." }),
-        document.createTextNode(" " + (inferred.rationale || ""))));
-      wrap.appendChild(h("div", { cls: "detail-acts" }, meter(Number(inferred.confidence) || 0)));
-    }
-
-    if (operator) {
-      wrap.appendChild(h("p", { cls: "why" },
-        h("b", { text: "Operator correction: " + roleLabel(operator.value) + "." }),
-        document.createTextNode(" " + (operator.rationale || "") +
-          " This outranks the inference and every scan.")));
-      wrap.appendChild(h("div", { cls: "detail-acts" },
-        h("button", {
-          cls: "mini", type: "button", text: "Withdraw correction",
-          on: {
-            click: function (e) {
-              e.stopPropagation();
-              correctAsset(asset, "role", "", "", true);
-            }
-          }
-        })));
-      return wrap;
-    }
-
-    var acts = h("div", { cls: "detail-acts" });
-    acts.appendChild(h("button", {
-      cls: "mini", type: "button", text: "Confirm " + roleLabel(inferred.value).toLowerCase(),
-      on: {
-        click: function (e) {
-          e.stopPropagation();
-          correctAsset(asset, "role", inferred.value, "operator confirmed the flow inference", false);
-        }
-      }
-    }));
-    acts.appendChild(h("button", {
-      cls: "mini", type: "button", text: "Not a " + roleLabel(inferred.value).toLowerCase(),
-      "data-danger": "true",
-      on: {
-        click: function (e) {
-          e.stopPropagation();
-          correctAsset(asset, "role", "unknown", "operator rejected the flow inference", false);
-        }
-      }
-    }));
-    wrap.appendChild(acts);
-    return wrap;
   }
 
   function detailRow(asset, colspan) {
@@ -2081,10 +1928,7 @@
     }
 
     var whyCol = h("div", {}, h("h4", { text: "Why we think this" }));
-    var inference = inferencePanel(asset);
-    if (inference) {
-      whyCol.appendChild(inference);
-    } else if (ep && asset.evidence.scan) {
+    if (ep && asset.evidence.scan) {
       var osScan = bestClaim({ claims: asset.claims }, "os", "scan");
       whyCol.appendChild(h("p", { cls: "why" },
         h("b", { text: "Agent and scan agree on this host." }),
@@ -2246,7 +2090,7 @@
       h("th", { text: "Asset" }),
       h("th", { text: "Address" }),
       h("th", { text: "Identity" }),
-      h("th", { title: "agent \u00b7 scan \u00b7 inferred", text: "Known by" }),
+      h("th", { title: "agent \u00b7 scan", text: "Known by" }),
       h("th", { text: "State" }),
       h("th", { text: "Exposure" }),
       h("th", { text: "Agent" }),
@@ -2303,7 +2147,6 @@
     var key = h("div", { cls: "evkey" },
       h("span", {}, h("i", { "data-on": "agent" }), h("span", { text: "agent \u2014 ground truth" })),
       h("span", {}, h("i", { "data-on": "scan" }), h("span", { text: "scan \u2014 probed" })),
-      h("span", {}, h("i", { "data-on": "inferred" }), h("span", { text: "inferred \u2014 deduced from flow (Pass 2)" })),
       h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
       h("span", { text: "j/k move \u00b7 x select \u00b7 i isolate \u00b7 r rescan \u00b7 y copy \u00b7 / filter \u00b7 enter open" }));
 
@@ -2502,51 +2345,15 @@
             h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
             h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: pct(cov.coverage_percent) })),
             h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
-            h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }),
-            h("dt", { text: "Named by flow" }), h("dd", {}, h("b", { text: String(inferredCount()) })))
+            h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }))
         : h("div", { cls: "empty", text: "No sweep has run, so there is nothing to measure coverage against. " +
             "The fleet's agented hosts are on the Assets view; a sweep is what finds the ones without an agent." }));
-
-    var inf = state.inference || {};
-    var infBody = h("div", { cls: "card-body" });
-    var infRows = arrayOf(inf.results);
-    if (infRows.length) {
-      infBody.appendChild(simpleTable(["Address", "Deduced role", "Confidence", "Why"],
-        infRows.map(function (r) {
-          var asset = state.assets.filter(function (a) { return a.ip === r.ip; })[0];
-          return [
-            h("span", { cls: "ip", text: r.ip }),
-            h("span", {}, h("b", { text: r.label || roleLabel(r.role) })),
-            h("span", { cls: "ago", text: (Number(r.confidence) || 0).toFixed(2) }),
-            h("span", { cls: "dim",
-              on: asset ? { click: function () { state.expandedKey = asset.key; state.cursorKey = asset.key; go("assets"); } } : null,
-              text: r.rationale || "" })
-          ];
-        })));
-    } else {
-      infBody.appendChild(h("div", { cls: "empty", text: "No role deduced from flow in the current window." }));
-    }
-    infBody.appendChild(h("p", { cls: "pending", text: "Inference runs every " + (inf.interval || "5m") +
-      " over a " + (inf.window || "24h") + " window of traffic. It never outranks an agent, a scan or an operator correction." }));
 
     clear(view);
     view.appendChild(h("div", { cls: "pad stack" },
       scanProgressCard(),
       h("div", { cls: "cols" }, launch, card("Coverage", covBody)),
       addEndpointCard(),
-      card("Deduced from flow \u2014 hosts nothing probed and nothing runs on", infBody, [
-        h("button", {
-          cls: "mini", type: "button", text: "Run inference now",
-          on: {
-            click: function () {
-              request("/api/v1/inference/run", "POST").then(function (res) {
-                toast("Inference pass complete: " + ((res && res.inferred_count) || 0) + " role(s)", "ok");
-                refresh();
-              }).catch(function (e) { toast("Inference failed: " + e.message, "crit"); });
-            }
-          }
-        })
-      ], true),
       worklist));
   }
 
@@ -2694,11 +2501,9 @@
   var TOPO_HOST_CEILING = 80;
 
   /* A byte total on its own reads as a measurement of everything on a link.
-     Usually it is not: neither the Windows nor the macOS collector has a byte
-     counter to read, and the Linux path reports a queue depth rather than a
-     cumulative total, so most flows contribute nothing to the sum. The figure
-     is shown with the share of traffic it was actually taken from, and is
-     replaced by the honest answer when that share is none. */
+     Usually it is not: a collector may report an unmeasured byte count. The
+     figure is shown with the share of traffic it was actually taken from, and
+     is replaced by the honest answer when that share is none. */
   function volume(b, flows, measured) {
     flows = Number(flows) || 0;
     measured = Number(measured) || 0;
@@ -3229,12 +3034,6 @@
           linked.reduce(function (t, p) { return t + p.flow; }, 0),
           linked.reduce(function (t, p) { return t + p.measured; }, 0)) }));
       side.appendChild(kv);
-      if (sel.rationale) {
-        side.appendChild(h("p", { cls: "why" },
-          h("b", { text: "Deduced from flow." }),
-          document.createTextNode(" " + sel.rationale)));
-      }
-
       var asset = state.assetByKey[sel.id] || state.assets.filter(function (a) { return a.ip && a.ip === sel.ip; })[0];
       var acts = h("div", { cls: "detail-acts" });
       if (asset) {
@@ -3293,7 +3092,7 @@
     clear(view);
 
     /* Every byte figure on this page is a sum over the flows that reported
-       one. On a fleet where the Windows and macOS collectors have no byte
+       one. Linux queue depth and Windows interval statistics do not cover
        counter to read, that is a small minority of the traffic, and the
        chart, the two rankings and the totals above are all drawn from it.
        Saying so once, at the top, costs one line and stops every number
@@ -3305,7 +3104,7 @@
         ? "None of the " + totalFlows + " flows on record carried a byte count. "
         : measuredFlows + " of " + totalFlows + " flows carried a byte count. " }),
         document.createTextNode(measuredFlows === 0
-          ? "Neither the Windows nor the macOS collector has one to read, and the Linux path reports a queue depth rather than a cumulative total. Flow counts on this page are complete; the byte figures are not measurements of this traffic."
+          ? "The retained collectors do not report a byte count for every socket. Flow counts on this page are complete; byte figures are not measurements of all traffic."
           : "The bandwidth chart, both rankings and the byte totals above are sums over those flows only \u2014 not over the rest.")));
     }
 
@@ -3495,7 +3294,6 @@
 
     var platform = h("select", { "aria-label": "Platform" },
       h("option", { value: "linux", text: "Linux" }),
-      h("option", { value: "macos", text: "macOS" }),
       h("option", { value: "windows", text: "Windows" }));
     if (pre.platform) platform.value = pre.platform;
 
@@ -3602,6 +3400,7 @@
     render(false);
   }
 
+
   /* ------------------------------------------------------- push deploy */
 
   function openDeploySheet(asset) {
@@ -3624,7 +3423,6 @@
     var os = h("select", { "aria-label": "Operating system" },
       h("option", { value: "auto", text: "Detect on connect" }),
       h("option", { value: "linux", text: "Linux" }),
-      h("option", { value: "macos", text: "macOS" }),
       h("option", { value: "windows", text: "Windows" }));
     os.value = guessed === "windows" ? "windows" : "auto";
 
@@ -3725,7 +3523,7 @@
       h("button", { cls: "btn", type: "button", text: "Close", on: { click: close } }),
       h("button", {
         cls: "btn", type: "button", text: "Install manually instead",
-        on: { click: function () { stopPolling(); openInstallerSheet({ platform: guessed === "windows" ? "windows" : guessed === "macos" ? "macos" : "linux" }); } }
+        on: { click: function () { stopPolling(); openInstallerSheet({ platform: guessed === "windows" ? "windows" : "linux" }); } }
       }),
       h("button", { cls: "btn btn-primary", type: "button", text: "Deploy", on: { click: start } })
     ]);
@@ -4185,30 +3983,6 @@
     var view = $("view");
     clear(view);
 
-    var groups = simpleTable(["Name", "Scope", "Action", "Match", "Schedule", "State", ""],
-      state.policyGroups.map(function (g) {
-        return [
-          h("span", { text: g.name || g.id }),
-          h("span", { cls: "dim-3", text: g.scope + (g.scope_value ? " \u00b7 " + g.scope_value : "") }),
-          h("span", { cls: "dim", text: g.action || "\u2014" }),
-          h("span", { cls: "ip", text: (g.rule_type || "") + " " + (g.rule_value || (g.port ? String(g.port) : "")) }),
-          h("span", { cls: "dim-3", text: g.schedule || "all" }),
-          h("span", { cls: "st", "data-state": g.active ? "ok" : "idle" },
-            icon(g.active ? "g-online" : "g-offline", true),
-            h("span", { text: g.active ? "Active" : "Paused" })),
-          h("button", {
-            cls: "mini", type: "button", text: g.active ? "Pause" : "Activate",
-            on: {
-              click: function () {
-                request("/api/v1/policy-groups/toggle", "POST", { id: g.id, active: !g.active })
-                  .then(function () { toast((g.active ? "Paused " : "Activated ") + (g.name || g.id), "ok"); refresh(); })
-                  .catch(function (e) { toast("Toggle failed: " + e.message, "crit"); });
-              }
-            }
-          })
-        ];
-      }));
-
     var excl = simpleTable(["Name", "Scope", "Process", "Destination", "Port", "State"],
       state.exclusions.map(function (x) {
         return [
@@ -4259,7 +4033,6 @@
     view.appendChild(h("div", { cls: "pad stack" },
       baselineCard(),
       tuningCard(),
-      card("Policy groups", groups),
       card("Exclusions", excl),
       card("Threat indicators", iocs, [
         h("button", {
@@ -4553,7 +4326,7 @@
         ? h("dl", { cls: "kv" },
             h("dt", { text: "Endpoint id" }), h("dd", {}, h("b", { text: ep.id })),
             h("dt", { text: "Version" }), h("dd", { text: shortVersion(ep.driver_version) + (asset.stale ? " \u2014 outdated" : "") }),
-            h("dt", { text: "Engine" }), h("dd", { text: engineOf(ep.driver_version) || "\u2014" }),
+            h("dt", { text: "Collector" }), h("dd", { text: engineOf(ep.driver_version) || "\u2014" }),
             h("dt", { text: "OS" }), h("dd", { text: ep.os || "\u2014" }),
             h("dt", { text: "Role" }), h("dd", { text: ep.role_tag || "\u2014" }),
             h("dt", { text: "Software" }), h("dd", { text: ep.installed_software || "\u2014" }),
@@ -4579,9 +4352,7 @@
 
     var evBody = h("div", { cls: "card-body" });
     evBody.appendChild(claimsPanel(asset));
-    var routeInference = inferencePanel(asset);
-    if (routeInference) evBody.appendChild(routeInference);
-    evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing claims stay on the row so an operator can see that the scanner said one thing and the agent another." }));
+    evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing scan claims stay on the row so an operator can see how the identity was formed." }));
 
     var flows = state.events.filter(function (e) {
       return (ep && e.endpoint_id === ep.id) || (asset.ip && (e.src_ip === asset.ip || e.dst_ip === asset.ip));
@@ -4638,7 +4409,6 @@
   var drawerEl = null;
   var scrimEl = null;
   var openDrawer = "";
-  var chatInput = null;
 
   function closeDrawer() {
     if (drawerEl && drawerEl.parentNode) drawerEl.parentNode.removeChild(drawerEl);
@@ -4647,18 +4417,18 @@
     scrimEl = null;
     openDrawer = "";
     $("btn-alerts").setAttribute("aria-expanded", "false");
-    $("btn-copilot").setAttribute("aria-expanded", "false");
   }
 
   function showDrawer(kind) {
+    if (kind !== "alerts") return;
     if (openDrawer === kind) { closeDrawer(); return; }
     closeDrawer();
     openDrawer = kind;
     scrimEl = h("div", { cls: "scrim", on: { click: closeDrawer } });
     document.body.appendChild(scrimEl);
-    drawerEl = h("aside", { cls: "drawer", role: "dialog", "aria-label": kind === "alerts" ? "Alerts" : "Copilot" });
+    drawerEl = h("aside", { cls: "drawer", role: "dialog", "aria-label": "Alerts" });
     document.body.appendChild(drawerEl);
-    $(kind === "alerts" ? "btn-alerts" : "btn-copilot").setAttribute("aria-expanded", "true");
+    $("btn-alerts").setAttribute("aria-expanded", "true");
     renderDrawer();
   }
 
@@ -4674,10 +4444,6 @@
         h("div", { cls: "desc", text: a.description || "" }),
         a.details ? h("div", { cls: "meta", text: a.details }) : null,
         compact ? null : h("div", { cls: "acts" },
-          h("button", {
-            cls: "mini", type: "button", text: "Ask Copilot",
-            on: { click: function () { askAboutAlert(a); } }
-          }),
           h("button", {
             cls: "mini", type: "button", text: "Open asset",
             on: {
@@ -4713,7 +4479,6 @@
 
   function renderDrawer() {
     if (!drawerEl) return;
-    var wasOpen = drawerEl.childNodes.length > 0;
     var previousScrollTop = 0;
     if (openDrawer === "alerts") {
       var prevBody = drawerEl.querySelector(".drawer-body");
@@ -4739,98 +4504,6 @@
       }
       return;
     }
-
-    drawerEl.appendChild(h("div", { cls: "drawer-head" },
-      icon("i-copilot"),
-      h("h2", { text: "Copilot" }),
-      h("span", { cls: "fill" }),
-      h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeDrawer } }, icon("i-close"))));
-
-    var chat = h("div", { cls: "chat" });
-    if (!state.chat.length) {
-      chat.appendChild(h("div", { cls: "empty", text: "Ask about a host, an alert, or the fleet. The drawer stays open over whatever you are looking at." }));
-    }
-    state.chat.forEach(function (m) {
-      var node = h("div", { cls: "msg", "data-who": m.who },
-        h("div", { cls: "who", text: m.who === "you" ? "You" : "Copilot" }),
-        h("pre", { text: m.text }));
-      /* Say who wrote it. A degraded answer comes from the built-in rule set and
-         reads exactly like a model's, so the reply alone cannot be trusted to
-         mean the configured provider was reached. */
-      if (m.who === "copilot" && (m.source || m.notice)) {
-        node.appendChild(h("div", { cls: "msg-src", "data-degraded": m.degraded ? "true" : "false" },
-          h("span", { text: m.source || "" }),
-          m.notice ? h("span", { text: m.notice }) : null));
-      }
-      chat.appendChild(node);
-    });
-    if (state.chatBusy) chat.appendChild(h("div", { cls: "empty", text: "Thinking\u2026" }));
-    drawerEl.appendChild(h("div", { cls: "drawer-body" }, chat));
-
-    /* The composer node survives re-renders so a five-second poll cannot wipe
-       a half-typed question or yank focus back mid-sentence. */
-    if (!chatInput) {
-      chatInput = h("textarea", { placeholder: "Ask the Copilot\u2026", "aria-label": "Message" });
-      chatInput.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitChat(); }
-      });
-    }
-    drawerEl.appendChild(h("div", { cls: "drawer-foot" }, chatInput,
-      h("button", { cls: "btn btn-primary", type: "button", text: "Send", on: { click: submitChat } })));
-    if (!wasOpen) chatInput.focus();
-    chat.scrollTop = chat.scrollHeight;
-  }
-
-  /* "ollama \u00b7 llama3.2", or "built-in rules" when the configured provider
-     could not be reached. The hub already reports both; the console used to
-     drop them and show the answer as though it had come from the model. */
-  function copilotSource(res) {
-    if (!res) return "";
-    if (res.degraded) return "built-in rules";
-    var parts = [];
-    if (res.provider) parts.push(res.provider);
-    if (res.model) parts.push(res.model);
-    return parts.join(" \u00b7 ");
-  }
-
-  function submitChat() {
-    if (!chatInput) return;
-    var text = chatInput.value.trim();
-    if (!text) return;
-    chatInput.value = "";
-    sendChat(text);
-  }
-
-  function sendChat(text) {
-    state.chat.push({ who: "you", text: text });
-    state.chatBusy = true;
-    renderDrawer();
-    request("/api/v1/copilot/chat", "POST", { message: text }).then(function (res) {
-      state.chatBusy = false;
-      state.chat.push({
-        who: "copilot",
-        text: (res && res.reply) || "(no reply)",
-        source: copilotSource(res),
-        notice: (res && res.notice) || "",
-        degraded: !!(res && res.degraded)
-      });
-      renderDrawer();
-    }).catch(function (e) {
-      state.chatBusy = false;
-      state.chat.push({ who: "copilot", text: "Copilot unavailable: " + e.message });
-      renderDrawer();
-    });
-  }
-
-  function askAboutAlert(a) {
-    showDrawerIfNeeded("copilot");
-    var q = "Investigate alert " + a.id + ": " + (a.title || "") + " on " + (a.hostname || a.endpoint_id) +
-      ". " + (a.description || "") + " " + (a.details || "");
-    sendChat(q.trim());
-  }
-
-  function showDrawerIfNeeded(kind) {
-    if (openDrawer !== kind) showDrawer(kind);
   }
 
   /* ------------------------------------------------------ command palette */
@@ -4901,7 +4574,6 @@
     } });
     items.push({ group: "Act", label: "Refresh now", iconId: "i-refresh", hint: "", run: refresh });
     items.push({ group: "Act", label: "Open alerts drawer", iconId: "i-alert", hint: "", run: function () { showDrawer("alerts"); } });
-    items.push({ group: "Act", label: "Open Copilot drawer", iconId: "i-copilot", hint: "", run: function () { showDrawer("copilot"); } });
 
     THEMES.forEach(function (t) {
       items.push({
@@ -5354,7 +5026,6 @@
         state.baselineServices = arrayOf(d && d.services);
       }));
       jobs.push(request("/api/v1/detection/tuning").then(function (d) { state.tuning = d || null; }));
-      jobs.push(request("/api/v1/policy-groups").then(function (d) { state.policyGroups = arrayOf(d); }));
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
@@ -5383,9 +5054,6 @@
       if (!state.baselineServices.length) {
         jobs.push(request("/api/v1/baseline/catalogue").then(function (d) { state.baselineServices = arrayOf(d && d.services); }));
       }
-    }
-    if (state.section === "discovery" || state.section === "topology" || state.expandedKey || state.routeKey) {
-      jobs.push(request("/api/v1/inference/status").then(function (d) { state.inference = d || null; }));
     }
 
     return Promise.all(jobs.map(function (p) {
@@ -5422,7 +5090,6 @@
     $("omni-kbd").textContent = MOD_LABEL;
     $("omni").addEventListener("click", openPalette);
     $("btn-alerts").addEventListener("click", function () { showDrawer("alerts"); });
-    $("btn-copilot").addEventListener("click", function () { showDrawer("copilot"); });
     $("theme-btn").addEventListener("click", function (e) {
       e.stopPropagation();
       if (themePop) closeThemePop();

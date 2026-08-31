@@ -8,6 +8,7 @@ ARM64/
 Debug/
 Release/
 dist/*.deb
+dist/*.msi
 dist/*.tar.gz
 dist/*.zip
 # Release signatures and digests are build output, produced by

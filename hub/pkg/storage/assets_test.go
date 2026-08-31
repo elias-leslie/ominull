@@ -129,9 +129,10 @@ func TestAgentEnrichesDiscoveredAsset(t *testing.T) {
 	}
 }
 
-// A correction outranks inference permanently, and withdrawing it hands the
-// field back to the remaining evidence.
-func TestOperatorCorrectionOutranksInference(t *testing.T) {
+// Historical inferred claims remain auditable but never become current
+// identity. An operator correction is the only way to assign this field when
+// no retained source has direct evidence.
+func TestHistoricalInferenceCannotBecomeCurrentIdentity(t *testing.T) {
 	store, err := New(filepath.Join(t.TempDir(), "assets.db"))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -149,17 +150,17 @@ func TestOperatorCorrectionOutranksInference(t *testing.T) {
 	if !ok {
 		t.Fatal("inference did not create an asset for a host nothing else knows")
 	}
-	if a.Role != "domain-controller" || a.Rationale == "" {
-		t.Fatalf("inferred role or rationale missing: role=%q rationale=%q", a.Role, a.Rationale)
+	if a.Role != "" || a.Rationale != "" {
+		t.Fatalf("historical inference became current identity: role=%q rationale=%q", a.Role, a.Rationale)
 	}
 
-	if err := store.CorrectAsset(a.ID, FieldRole, "file-server", "operator rejected the flow inference"); err != nil {
+	if err := store.CorrectAsset(a.ID, FieldRole, "file-server", "operator assigned the role"); err != nil {
 		t.Fatalf("CorrectAsset: %v", err)
 	}
 	assets, _ = store.ListAssets("")
 	a, _ = findAsset(assets, "10.0.4.12")
 	if a.Role != "file-server" {
-		t.Errorf("correction did not outrank the inference: %q", a.Role)
+		t.Errorf("operator correction did not become current identity: %q", a.Role)
 	}
 	if inf, ok := claimFor(a, FieldRole, SourceInferred); !ok || inf.Winner {
 		t.Error("the overruled inference must stay on the record, marked as losing")
@@ -170,8 +171,8 @@ func TestOperatorCorrectionOutranksInference(t *testing.T) {
 	}
 	assets, _ = store.ListAssets("")
 	a, _ = findAsset(assets, "10.0.4.12")
-	if a.Role != "domain-controller" {
-		t.Errorf("withdrawing the correction did not return the field to the evidence: %q", a.Role)
+	if a.Role != "" {
+		t.Errorf("withdrawing the correction restored retired evidence: %q", a.Role)
 	}
 }
 

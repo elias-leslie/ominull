@@ -47,12 +47,20 @@ type Endpoint struct {
 	InstalledSoftware string `json:"installed_software"`
 	DriverVersion     string `json:"driver_version"`
 	// UpdateCapability is the package format this endpoint can install for
-	// itself: "deb", "pkg", "exe", or "none". The agent reports it, because
+	// itself: "deb", "msi", or empty. The agent reports it, because
 	// the OS string is a display label and not a contract - matching on it is
 	// one string change away from silently misrouting a fleet-wide update.
 	// An agent that reports nothing is "none" and is never offered a package.
 	UpdateCapability string `json:"update_capability"`
-	Status           string `json:"status"` // online, offline
+	// InstallType, PackageIdentifier and RegisteredPackageVersion are the
+	// package manager's answer, not the agent's compiled version. ProvenanceStatus
+	// is "native", "manual", "unknown" or "mismatch" and is kept separate so
+	// an endpoint cannot look converged merely by reporting a new binary.
+	InstallType              string `json:"install_type"`
+	PackageIdentifier        string `json:"package_identifier"`
+	RegisteredPackageVersion string `json:"registered_package_version"`
+	ProvenanceStatus         string `json:"provenance_status"`
+	Status                   string `json:"status"` // online, offline, retired
 	// CertCN is the common name of the client certificate this endpoint last
 	// reported under, or empty if it has only ever reported under the tenant
 	// API key. It is what tells an operator whether the fleet is ready for
@@ -152,39 +160,6 @@ type IOC struct {
 	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
-type Rule struct {
-	ID         string    `json:"id"`
-	TenantID   string    `json:"tenant_id"`
-	Name       string    `json:"name"`
-	Type       string    `json:"type"` // "ip", "cidr", "domain", "process", "port"
-	Value      string    `json:"value"`
-	Port       uint16    `json:"port"`
-	Protocol   string    `json:"protocol"` // "tcp", "udp", "any"
-	Action     string    `json:"action"`   // "BLOCK", "PERMIT"
-	Scope      string    `json:"scope"`    // "all", "platform", "department", "ids", "group"
-	ScopeValue string    `json:"scope_value"`
-	Active     bool      `json:"active"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
-type PolicyGroup struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	Scope       string    `json:"scope"`       // "global", "client", "location", "endpoint", "role"
-	ScopeValue  string    `json:"scope_value"` // tenant_id, location_id, endpoint_id, or role
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Schedule    string    `json:"schedule"`  // "all", "business_hours", "off_hours"
-	Criteria    string    `json:"criteria"`  // JSON string: {"os":"windows","role":"db-server","subnet":"10.0.0.0/24","process":"powershell"}
-	Action      string    `json:"action"`    // BLOCK, PERMIT, ISOLATE, ALERT, THROTTLE
-	RuleType    string    `json:"rule_type"` // "ip", "cidr", "process", "port", "domain"
-	RuleValue   string    `json:"rule_value"`
-	Port        uint16    `json:"port"`
-	Protocol    string    `json:"protocol"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
 type HierarchyClient struct {
 	Tenant         Tenant              `json:"tenant"`
 	Locations      []HierarchyLocation `json:"locations"`
@@ -236,7 +211,7 @@ type TopologyNode struct {
 	IsIsolated bool     `json:"is_isolated"`
 	Group      string   `json:"group"`
 	AssetID    string   `json:"asset_id,omitempty"`
-	Evidence   []string `json:"evidence"` // agent / scan / inferred / operator
+	Evidence   []string `json:"evidence"` // agent / scan / operator
 	Confidence float64  `json:"confidence,omitempty"`
 	Rationale  string   `json:"rationale,omitempty"`
 	// Quiet marks a known asset that said nothing inside the window. Absence
@@ -253,9 +228,8 @@ type TopologyEdgePort struct {
 	FlowCount  int64  `json:"flow_count"`
 	TotalBytes int64  `json:"total_bytes"`
 	// MeasuredFlows is how many of FlowCount actually carried a byte count.
-	// Neither the Windows nor the macOS collector has one to read, and the
-	// Linux path reports a queue depth rather than a cumulative total, so on
-	// most fleets this is a small fraction of FlowCount. Without it the
+	// Linux reports queue depth while Windows reports interval statistics, so
+	// this may be a fraction of FlowCount. Without it the
 	// console prints a volume that reads as a measurement of all the traffic
 	// on a link when it is a measurement of almost none of it.
 	MeasuredFlows int64  `json:"measured_flows"`
@@ -284,7 +258,6 @@ type TopologyMetrics struct {
 	ManagedNodesCount   int `json:"managed_nodes_count"`
 	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
 	QuietNodesCount     int `json:"quiet_nodes_count"`
-	InferredNodesCount  int `json:"inferred_nodes_count"`
 	// TotalFlowCount and MeasuredFlowCount say how much of the window's
 	// traffic carried a byte count at all, so every volume on the page can be
 	// qualified rather than presented as a full measurement.
@@ -310,8 +283,8 @@ type AnalyticsSummary struct {
 	TotalBlocks   int64 `json:"total_blocks"`
 	TotalPermits  int64 `json:"total_permits"`
 	// MeasuredFlowCount is how many of TotalEvents carried a byte count at
-	// all. Neither the Windows nor the macOS collector has one to read, so on
-	// a real fleet the byte totals above are taken from a small fraction of
+	// all. Linux queue depth and Windows interval statistics do not cover every
+	// flow, so on a real fleet the byte totals above are taken from a fraction of
 	// the traffic and must not be printed as though they covered all of it.
 	MeasuredFlowCount int64                `json:"measured_flow_count"`
 	Countries         map[string]int64     `json:"countries"`
@@ -348,7 +321,7 @@ type AuditEntry struct {
 	TenantID  string    `json:"tenant_id"`
 	UserID    string    `json:"user_id"`
 	Username  string    `json:"username"`
-	Action    string    `json:"action"` // ISOLATE_HOST, ADD_RULE, REVOKE_RULE, SYNC_TI
+	Action    string    `json:"action"` // ISOLATE_HOST, SYNC_TI, ENDPOINT_RETIRED
 	Resource  string    `json:"resource"`
 	Details   string    `json:"details"`
 	IPAddress string    `json:"ip_address"`
@@ -377,7 +350,10 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("schema init failed: %w", err)
 	}
 
-	s.seedDefaults()
+	if err := s.seedDefaults(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("default seed failed: %w", err)
+	}
 	return s, nil
 }
 
@@ -417,6 +393,10 @@ func (s *Store) initSchema() error {
 		installed_software TEXT DEFAULT "",
 		driver_version TEXT NOT NULL,
 		update_capability TEXT DEFAULT "",
+		install_type TEXT DEFAULT "",
+		package_identifier TEXT DEFAULT "",
+		registered_package_version TEXT DEFAULT "",
+		provenance_status TEXT DEFAULT "unknown",
 		status TEXT NOT NULL,
 		is_isolated INTEGER NOT NULL DEFAULT 0,
 		cert_cn TEXT DEFAULT "",
@@ -534,36 +514,6 @@ func (s *Store) initSchema() error {
 		last_seen_at DATETIME NOT NULL
 	);
 
-	CREATE TABLE IF NOT EXISTS rules (
-		id TEXT PRIMARY KEY,
-		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-		name TEXT NOT NULL,
-		type TEXT NOT NULL,
-		value TEXT NOT NULL,
-		port INTEGER DEFAULT 0,
-		protocol TEXT DEFAULT "any",
-		action TEXT NOT NULL DEFAULT "BLOCK",
-		scope TEXT NOT NULL DEFAULT "all",
-		scope_value TEXT DEFAULT "",
-		active INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS policy_groups (
-		id TEXT PRIMARY KEY,
-		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-		name TEXT NOT NULL,
-		description TEXT NOT NULL DEFAULT "",
-		criteria TEXT NOT NULL DEFAULT "{}",
-		action TEXT NOT NULL DEFAULT "BLOCK",
-		rule_type TEXT NOT NULL DEFAULT "ip",
-		rule_value TEXT NOT NULL DEFAULT "",
-		port INTEGER DEFAULT 0,
-		protocol TEXT DEFAULT "any",
-		active INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME NOT NULL
-	);
-
 	CREATE TABLE IF NOT EXISTS alerts (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -612,9 +562,7 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_comm_loc ON comm_profiles(location_id);
 	CREATE INDEX IF NOT EXISTS idx_exclusions_tenant ON exclusions(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_anomaly_time ON anomaly_alerts(timestamp DESC);
-	CREATE INDEX IF NOT EXISTS idx_policy_groups_tenant ON policy_groups(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
-	CREATE INDEX IF NOT EXISTS idx_rules_tenant ON rules(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_alerts_tenant_time ON alerts(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
 
@@ -638,10 +586,13 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN installed_software TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN update_capability TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN cert_cn TEXT DEFAULT ''",
-		// The isolation allow list used to exist only inside a WebSocket
-		// command payload. That channel was never registered, so the list was
-		// built, validated and dropped. It is stored here because the agent now
-		// reads its isolation state from its own heartbeat reply.
+		"ALTER TABLE endpoints ADD COLUMN install_type TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN package_identifier TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN registered_package_version TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN provenance_status TEXT DEFAULT 'unknown'",
+		// The isolation allow list was formerly transient command state. It is
+		// stored here because the agent now reads its isolation state from its
+		// own heartbeat reply.
 		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
@@ -650,12 +601,11 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN asn TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN org TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE policy_groups ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
-		"ALTER TABLE policy_groups ADD COLUMN scope_value TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE policy_groups ADD COLUMN schedule TEXT NOT NULL DEFAULT 'all'",
 	}
 	for _, m := range migrations {
-		_, _ = s.db.Exec(m)
+		if err := runAdditiveMigration(s.db, m); err != nil {
+			return err
+		}
 	}
 
 	// The asset graph is additive: three new tables and their indexes. It
@@ -680,19 +630,36 @@ func (s *Store) initSchema() error {
 	return s.initBaselineSchema()
 }
 
-func (s *Store) seedDefaults() {
+func runAdditiveMigration(db *sql.DB, statement string) error {
+	if _, err := db.Exec(statement); err != nil {
+		// Fresh schemas already contain these columns. Existing schemas add them
+		// one at a time. Only SQLite's expected duplicate-column result is
+		// ignorable; busy, locked, malformed, and other errors must stop startup.
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return nil
+		}
+		return fmt.Errorf("additive migration %q failed: %w", statement, err)
+	}
+	return nil
+}
+
+func (s *Store) seedDefaults() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
 	// Single Real Default Home Tenant with automatic 256-bit CSPRNG key generation
 	var count int
-	_ = s.db.QueryRow("SELECT COUNT(*) FROM tenants WHERE id = 'default'").Scan(&count)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM tenants WHERE id = 'default'").Scan(&count); err != nil {
+		return fmt.Errorf("checking default tenant: %w", err)
+	}
 	if count == 0 {
 		masterKey := os.Getenv("OMINULL_MASTER_KEY")
 		if masterKey == "" {
 			var tokenBytes [32]byte
-			_, _ = rand.Read(tokenBytes[:])
+			if _, err := rand.Read(tokenBytes[:]); err != nil {
+				return fmt.Errorf("generating default tenant key: %w", err)
+			}
 			masterKey = "omi_live_" + hex.EncodeToString(tokenBytes[:])
 		}
 		defaultTenant := Tenant{
@@ -701,8 +668,10 @@ func (s *Store) seedDefaults() {
 			APIKey:    masterKey,
 			CreatedAt: now,
 		}
-		_, _ = s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
-			defaultTenant.ID, defaultTenant.Name, defaultTenant.APIKey, defaultTenant.CreatedAt)
+		if _, err := s.db.Exec("INSERT OR IGNORE INTO tenants (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
+			defaultTenant.ID, defaultTenant.Name, defaultTenant.APIKey, defaultTenant.CreatedAt); err != nil {
+			return fmt.Errorf("seeding default tenant: %w", err)
+		}
 	}
 
 	// Single Real Home Location
@@ -715,8 +684,11 @@ func (s *Store) seedDefaults() {
 		SubnetCIDR: "10.0.0.0/24",
 		CreatedAt:  now,
 	}
-	_, _ = s.db.Exec("INSERT OR IGNORE INTO locations (id, tenant_id, name, city, country, subnet_cidr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		homeLocation.ID, homeLocation.TenantID, homeLocation.Name, homeLocation.City, homeLocation.Country, homeLocation.SubnetCIDR, homeLocation.CreatedAt)
+	if _, err := s.db.Exec("INSERT OR IGNORE INTO locations (id, tenant_id, name, city, country, subnet_cidr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		homeLocation.ID, homeLocation.TenantID, homeLocation.Name, homeLocation.City, homeLocation.Country, homeLocation.SubnetCIDR, homeLocation.CreatedAt); err != nil {
+		return fmt.Errorf("seeding home location: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CreateTenant(t Tenant) error {
@@ -863,17 +835,15 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	// empty and identity falls back to address plus subnet.
 	if ep.InstalledSoftware == "" {
 		if strings.Contains(strings.ToLower(ep.OS), "windows") {
-			ep.InstalledSoftware = "Ominull WFP Agent v1.0.0, PowerShell 7.4, Windows Defender, OpenSSH"
+			ep.InstalledSoftware = "Ominull Windows user-mode WFP agent, PowerShell, Windows Defender, OpenSSH"
 		} else if strings.Contains(strings.ToLower(ep.OS), "linux") || strings.Contains(strings.ToLower(ep.OS), "ubuntu") {
-			ep.InstalledSoftware = "Ominull eBPF Daemon v1.0.0, Clang 18, bpftool, OpenSSH 9.6p1, systemd"
-		} else if strings.Contains(strings.ToLower(ep.OS), "mac") || strings.Contains(strings.ToLower(ep.OS), "darwin") {
-			ep.InstalledSoftware = "Ominull PF Engine v1.0.0, Zsh 5.9, Apple pfctl, OpenSSH"
+			ep.InstalledSoftware = "Ominull Linux socket agent, OpenSSH, systemd"
 		}
 	}
 
 	query := `
-	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, is_isolated, last_seen_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, install_type, package_identifier, registered_package_version, provenance_status, status, is_isolated, last_seen_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		hostname=excluded.hostname,
 		os=excluded.os,
@@ -885,6 +855,10 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		location_name=CASE WHEN excluded.location_name != '' THEN excluded.location_name ELSE endpoints.location_name END,
 		driver_version=excluded.driver_version,
 		update_capability=CASE WHEN excluded.update_capability != '' THEN excluded.update_capability ELSE endpoints.update_capability END,
+		install_type=CASE WHEN excluded.install_type != '' THEN excluded.install_type ELSE endpoints.install_type END,
+		package_identifier=CASE WHEN excluded.package_identifier != '' THEN excluded.package_identifier ELSE endpoints.package_identifier END,
+		registered_package_version=CASE WHEN excluded.registered_package_version != '' THEN excluded.registered_package_version ELSE endpoints.registered_package_version END,
+		provenance_status=CASE WHEN excluded.provenance_status != '' THEN excluded.provenance_status ELSE endpoints.provenance_status END,
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
@@ -892,6 +866,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		query,
 		ep.ID, ep.TenantID, ep.LocationID, ep.LocationName, ep.Hostname, ep.OS, ep.IP, ep.MAC,
 		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion, ep.UpdateCapability,
+		ep.InstallType, ep.PackageIdentifier, ep.RegisteredPackageVersion, ep.ProvenanceStatus,
 		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt,
 	); err != nil {
 		return err
@@ -923,6 +898,32 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []stri
 	}
 	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ? WHERE id = ?", val, allow, id)
 	return err
+}
+
+// RetireEndpoint removes pending control state and marks an endpoint as
+// retired without deleting its telemetry, asset, certificate, or audit history.
+// Retirement is used for intentionally removed platform agents and the hub's
+// co-installed endpoint agent; a retired row must not hold up fleet rollout.
+func (s *Store) RetireEndpoint(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE endpoints SET status = 'retired', is_isolated = 0, isolation_allow_ips = '' WHERE id = ?", id); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM agent_update_jobs WHERE endpoint_id = ?", id); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetEndpointIsolation reads back what an endpoint should be enforcing. It is
@@ -1144,12 +1145,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1164,6 +1165,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 		if err := rows.Scan(
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
+			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
 			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -1181,11 +1183,12 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
+		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
 		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1306,12 +1309,27 @@ func (s *Store) InsertEvent(ev Event) error {
 		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID,
 	)
+	if err == nil {
+		tenantID := ev.TenantID
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		s.analytics.invalidate(tenantID)
+	}
 	return err
 }
 
 func (s *Store) InsertEventsBatch(events []Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	tenantIDs := make(map[string]struct{}, 1)
+	for _, ev := range events {
+		tenantID := ev.TenantID
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		tenantIDs[tenantID] = struct{}{}
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1347,14 +1365,22 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 		if ev.Country == "" {
 			ev.Country = CountryUnknown
 		}
-		_, _ = stmt.Exec(
+		if _, err := stmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country,
 			ev.ProcessPath, ev.ProcessID,
-		)
+		); err != nil {
+			return fmt.Errorf("insert event batch: %w", err)
+		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit event batch: %w", err)
+	}
+	for tenantID := range tenantIDs {
+		s.analytics.invalidate(tenantID)
+	}
+	return nil
 }
 
 func (s *Store) ListEvents(tenantID string, limit int) ([]Event, error) {
@@ -1740,7 +1766,7 @@ func (s *Store) AcknowledgeAnomaly(id string) error {
 	return err
 }
 
-/* THREAT INTEL & RULES */
+/* THREAT INTEL */
 
 func (s *Store) UpsertIOCsBatch(iocs []IOC) error {
 	s.mu.Lock()
@@ -1770,10 +1796,12 @@ func (s *Store) UpsertIOCsBatch(iocs []IOC) error {
 		if ioc.Active {
 			actInt = 1
 		}
-		_, _ = stmt.Exec(
+		if _, err := stmt.Exec(
 			ioc.ID, ioc.Value, ioc.Type, ioc.Source, ioc.ThreatType,
 			ioc.Confidence, actInt, ioc.CreatedAt, ioc.LastSeenAt,
-		)
+		); err != nil {
+			return fmt.Errorf("upsert IOC batch: %w", err)
+		}
 	}
 
 	return tx.Commit()
@@ -1840,20 +1868,30 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	}
 	queryEvents += " GROUP BY country"
 
-	if rows, err := s.db.Query(queryEvents, args...); err == nil {
-		for rows.Next() {
-			var r countryRow
-			if err := rows.Scan(&r.country, &r.count, &r.bytesIn, &r.bytesOut, &r.blocks, &r.permits, &r.measured); err == nil {
-				byCountry = append(byCountry, r)
-				summary.TotalEvents += r.count
-				summary.TotalBytesIn += r.bytesIn
-				summary.TotalBytesOut += r.bytesOut
-				summary.TotalBlocks += r.blocks
-				summary.TotalPermits += r.permits
-				summary.MeasuredFlowCount += r.measured
-			}
+	rows, err := s.db.Query(queryEvents, args...)
+	if err != nil {
+		return nil, fmt.Errorf("analytics event totals: %w", err)
+	}
+	for rows.Next() {
+		var r countryRow
+		if err := rows.Scan(&r.country, &r.count, &r.bytesIn, &r.bytesOut, &r.blocks, &r.permits, &r.measured); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning analytics event totals: %w", err)
 		}
+		byCountry = append(byCountry, r)
+		summary.TotalEvents += r.count
+		summary.TotalBytesIn += r.bytesIn
+		summary.TotalBytesOut += r.bytesOut
+		summary.TotalBlocks += r.blocks
+		summary.TotalPermits += r.permits
+		summary.MeasuredFlowCount += r.measured
+	}
+	if err := rows.Err(); err != nil {
 		rows.Close()
+		return nil, fmt.Errorf("iterating analytics event totals: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics event totals: %w", err)
 	}
 
 	// The countries card is the ten busiest by flow count.
@@ -1876,23 +1914,35 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		queryProc = "SELECT process_path, COUNT(*) FROM events GROUP BY process_path ORDER BY COUNT(*) DESC LIMIT 10"
 	}
 	pRows, err := s.db.Query(queryProc, args...)
-	if err == nil {
-		for pRows.Next() {
-			var proc string
-			var count int64
-			if err := pRows.Scan(&proc, &count); err == nil && proc != "" {
-				parts := strings.Split(proc, "\\")
-				if len(parts) > 1 {
-					proc = parts[len(parts)-1]
-				}
-				parts = strings.Split(proc, "/")
-				if len(parts) > 1 {
-					proc = parts[len(parts)-1]
-				}
-				summary.TopProcesses[proc] += count
-			}
+	if err != nil {
+		return nil, fmt.Errorf("analytics process counts: %w", err)
+	}
+	for pRows.Next() {
+		var proc string
+		var count int64
+		if err := pRows.Scan(&proc, &count); err != nil {
+			pRows.Close()
+			return nil, fmt.Errorf("scanning analytics process counts: %w", err)
 		}
+		if proc == "" {
+			continue
+		}
+		parts := strings.Split(proc, "\\")
+		if len(parts) > 1 {
+			proc = parts[len(parts)-1]
+		}
+		parts = strings.Split(proc, "/")
+		if len(parts) > 1 {
+			proc = parts[len(parts)-1]
+		}
+		summary.TopProcesses[proc] += count
+	}
+	if err := pRows.Err(); err != nil {
 		pRows.Close()
+		return nil, fmt.Errorf("iterating analytics process counts: %w", err)
+	}
+	if err := pRows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics process counts: %w", err)
 	}
 
 	// 4. Severity counts
@@ -1903,15 +1953,24 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		querySev = "SELECT severity, COUNT(*) FROM alerts GROUP BY severity"
 	}
 	sRows, err := s.db.Query(querySev, args...)
-	if err == nil {
-		for sRows.Next() {
-			var sev string
-			var count int64
-			if err := sRows.Scan(&sev, &count); err == nil {
-				summary.SeverityCounts[sev] = count
-			}
+	if err != nil {
+		return nil, fmt.Errorf("analytics severity counts: %w", err)
+	}
+	for sRows.Next() {
+		var sev string
+		var count int64
+		if err := sRows.Scan(&sev, &count); err != nil {
+			sRows.Close()
+			return nil, fmt.Errorf("scanning analytics severity counts: %w", err)
 		}
+		summary.SeverityCounts[sev] = count
+	}
+	if err := sRows.Err(); err != nil {
 		sRows.Close()
+		return nil, fmt.Errorf("iterating analytics severity counts: %w", err)
+	}
+	if err := sRows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics severity counts: %w", err)
 	}
 
 	// 5. Enforcement mode distribution from endpoints
@@ -1922,24 +1981,31 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		queryEnf = "SELECT os, driver_version, COUNT(*) FROM endpoints GROUP BY os, driver_version"
 	}
 	eRows, err := s.db.Query(queryEnf, args...)
-	if err == nil {
-		for eRows.Next() {
-			var os, ver string
-			var count int64
-			if err := eRows.Scan(&os, &ver, &count); err == nil {
-				osLower := strings.ToLower(os)
-				if strings.Contains(osLower, "windows") {
-					summary.EnforcementCounts["OS Native WFP"] += count
-				} else if strings.Contains(osLower, "linux") || strings.Contains(osLower, "ubuntu") {
-					summary.EnforcementCounts["Native eBPF"] += count
-				} else if strings.Contains(osLower, "mac") || strings.Contains(osLower, "darwin") {
-					summary.EnforcementCounts["OS Native PF"] += count
-				} else {
-					summary.EnforcementCounts["Ring-0 Callout"] += count
-				}
-			}
+	if err != nil {
+		return nil, fmt.Errorf("analytics enforcement counts: %w", err)
+	}
+	for eRows.Next() {
+		var os, ver string
+		var count int64
+		if err := eRows.Scan(&os, &ver, &count); err != nil {
+			eRows.Close()
+			return nil, fmt.Errorf("scanning analytics enforcement counts: %w", err)
 		}
+		osLower := strings.ToLower(os)
+		if strings.Contains(osLower, "windows") {
+			summary.EnforcementCounts["OS Native WFP"] += count
+		} else if strings.Contains(osLower, "linux") || strings.Contains(osLower, "ubuntu") {
+			summary.EnforcementCounts["Linux socket collector"] += count
+		} else {
+			summary.EnforcementCounts["Unknown collector"] += count
+		}
+	}
+	if err := eRows.Err(); err != nil {
 		eRows.Close()
+		return nil, fmt.Errorf("iterating analytics enforcement counts: %w", err)
+	}
+	if err := eRows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics enforcement counts: %w", err)
 	}
 
 	// 6. Bandwidth over the last hour, in ten-minute buckets, measured.
@@ -1987,15 +2053,25 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	}
 	timelineQuery += " GROUP BY bucket"
 
-	if tRows, err := s.db.Query(timelineQuery, timelineArgs...); err == nil {
-		for tRows.Next() {
-			var bucket int64
-			var row bucketRow
-			if err := tRows.Scan(&bucket, &row.in, &row.out, &row.blocks); err == nil {
-				measured[bucket] = row
-			}
+	tRows, err := s.db.Query(timelineQuery, timelineArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("analytics bandwidth timeline: %w", err)
+	}
+	for tRows.Next() {
+		var bucket int64
+		var row bucketRow
+		if err := tRows.Scan(&bucket, &row.in, &row.out, &row.blocks); err != nil {
+			tRows.Close()
+			return nil, fmt.Errorf("scanning analytics bandwidth timeline: %w", err)
 		}
+		measured[bucket] = row
+	}
+	if err := tRows.Err(); err != nil {
 		tRows.Close()
+		return nil, fmt.Errorf("iterating analytics bandwidth timeline: %w", err)
+	}
+	if err := tRows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics bandwidth timeline: %w", err)
 	}
 
 	for i := 0; i < buckets; i++ {
@@ -2010,7 +2086,10 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	}
 
 	// 7. Diurnal Time-of-Day Activity (Baseline vs Live by Hour 0-23)
-	baseline, live, _ := s.diurnalProfilesLocked(tenantID)
+	baseline, live, err := s.diurnalProfilesLocked(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics diurnal profiles: %w", err)
+	}
 	summary.DiurnalBaseline = baseline
 	summary.DiurnalLive = live
 
@@ -2027,15 +2106,24 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		ttQuery = "SELECT process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out) FROM comm_profiles GROUP BY process_name ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 10"
 	}
 	ttRows, err := s.db.Query(ttQuery, args...)
-	if err == nil {
-		for ttRows.Next() {
-			var tt TopTalker
-			if err := ttRows.Scan(&tt.Process, &tt.FlowCount, &tt.BytesIn, &tt.BytesOut); err == nil {
-				tt.TotalBytes = tt.BytesIn + tt.BytesOut
-				summary.TopTalkers = append(summary.TopTalkers, tt)
-			}
+	if err != nil {
+		return nil, fmt.Errorf("analytics top talkers: %w", err)
+	}
+	for ttRows.Next() {
+		var tt TopTalker
+		if err := ttRows.Scan(&tt.Process, &tt.FlowCount, &tt.BytesIn, &tt.BytesOut); err != nil {
+			ttRows.Close()
+			return nil, fmt.Errorf("scanning analytics top talkers: %w", err)
 		}
+		tt.TotalBytes = tt.BytesIn + tt.BytesOut
+		summary.TopTalkers = append(summary.TopTalkers, tt)
+	}
+	if err := ttRows.Err(); err != nil {
 		ttRows.Close()
+		return nil, fmt.Errorf("iterating analytics top talkers: %w", err)
+	}
+	if err := ttRows.Close(); err != nil {
+		return nil, fmt.Errorf("closing analytics top talkers: %w", err)
 	}
 
 	// 9. GeoIP country distribution and threat metrics: the same scan as above,
@@ -2077,7 +2165,7 @@ func (s *Store) IsFirstSeenDestination(tenantID, dstIP string) bool {
 	defer s.mu.RUnlock()
 
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM comm_profiles WHERE dst_ip = ?", dstIP).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM comm_profiles WHERE tenant_id = ? AND dst_ip = ?", tenantID, dstIP).Scan(&count)
 	if err != nil {
 		return false
 	}
@@ -2129,7 +2217,7 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 
 	// substr trims the fractional seconds and the zone, which is the only form
 	// SQLite will parse here.
-	hourly := func(from, to time.Time) map[int]int64 {
+	hourly := func(from, to time.Time) (map[int]int64, error) {
 		out := make(map[int]int64)
 		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
 			FROM events WHERE timestamp >= ? AND timestamp < ?`
@@ -2142,239 +2230,48 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 
 		rows, err := s.db.Query(query, args...)
 		if err != nil {
-			return out
+			return out, err
 		}
-		defer rows.Close()
 		for rows.Next() {
 			var hr sql.NullInt64
 			var count int64
 			if err := rows.Scan(&hr, &count); err != nil {
-				continue
+				rows.Close()
+				return out, err
 			}
 			if hr.Valid && hr.Int64 >= 0 && hr.Int64 < 24 {
 				out[int(hr.Int64)] = count
 			}
 		}
-		return out
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return out, err
+		}
+		if err := rows.Close(); err != nil {
+			return out, err
+		}
+		return out, nil
 	}
 
-	for hr, n := range hourly(liveFrom, now) {
+	liveCounts, err := hourly(liveFrom, now)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading live diurnal profile: %w", err)
+	}
+	for hr, n := range liveCounts {
 		live[hr] = n
 	}
 	// The baseline is a typical day, so the seven-day totals are divided back
 	// down to one. A hub with less history than that reports the zeros it has
 	// rather than a curve it has not measured.
-	for hr, n := range hourly(baselineFrom, liveFrom) {
+	baselineCounts, err := hourly(baselineFrom, liveFrom)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading baseline diurnal profile: %w", err)
+	}
+	for hr, n := range baselineCounts {
 		baseline[hr] = n / baselineDays
 	}
 
 	return baseline, live, nil
-}
-
-func (s *Store) EvaluatePolicyHierarchy(ev Event, ep Endpoint) (*PolicyGroup, string) {
-	policies, err := s.ListPolicyGroups(ev.TenantID)
-	if err != nil || len(policies) == 0 {
-		return nil, ""
-	}
-
-	now := ev.Timestamp
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	hr := now.Hour()
-	isBusinessHours := hr >= 8 && hr < 18
-
-	// 4-Tier Hierarchical Order:
-	// Tier 3: Endpoint / Role (Highest Specificity)
-	// Tier 2: Location
-	// Tier 1: Client / Tenant
-	// Tier 0: Global (Broadest Scope)
-	var tier3, tier2, tier1, tier0 []PolicyGroup
-	for _, p := range policies {
-		if !p.Active {
-			continue
-		}
-		switch p.Scope {
-		case "endpoint":
-			if p.ScopeValue == ev.EndpointID || p.ScopeValue == ep.Hostname {
-				tier3 = append(tier3, p)
-			}
-		case "role":
-			if ep.RoleTag != "" && strings.EqualFold(p.ScopeValue, ep.RoleTag) {
-				tier3 = append(tier3, p)
-			}
-		case "location":
-			if ep.LocationID != "" && p.ScopeValue == ep.LocationID {
-				tier2 = append(tier2, p)
-			}
-		case "client":
-			if p.ScopeValue == ev.TenantID {
-				tier1 = append(tier1, p)
-			}
-		default: // global
-			tier0 = append(tier0, p)
-		}
-	}
-
-	ordered := append(tier3, append(tier2, append(tier1, tier0...)...)...)
-
-	for _, p := range ordered {
-		// 1. Time Schedule Match
-		if p.Schedule == "business_hours" && !isBusinessHours {
-			continue
-		}
-		if p.Schedule == "off_hours" && isBusinessHours {
-			continue
-		}
-
-		// 2. Protocol Match
-		if p.Protocol != "" && p.Protocol != "any" {
-			evProto := "tcp"
-			if ev.Protocol == 17 {
-				evProto = "udp"
-			} else if ev.Protocol == 1 {
-				evProto = "icmp"
-			}
-			if !strings.EqualFold(p.Protocol, evProto) {
-				continue
-			}
-		}
-
-		// 3. Port Match
-		if p.Port > 0 && p.Port != ev.DstPort && p.Port != ev.SrcPort {
-			continue
-		}
-
-		// 4. Rule Type & Value Match
-		ruleVal := strings.TrimSpace(p.RuleValue)
-		switch p.RuleType {
-		case "ip", "cidr":
-			if ruleVal != "" && ruleVal != "*" {
-				if strings.Contains(ruleVal, "/") {
-					_, ipNet, err := net.ParseCIDR(ruleVal)
-					if err == nil {
-						targetIP := net.ParseIP(ev.DstIP)
-						if targetIP == nil || !ipNet.Contains(targetIP) {
-							continue
-						}
-					}
-				} else if ruleVal != ev.DstIP {
-					continue
-				}
-			}
-		case "process":
-			if ruleVal != "" && ruleVal != "*" {
-				procLower := strings.ToLower(ev.ProcessPath)
-				targetLower := strings.ToLower(ruleVal)
-				if !strings.Contains(procLower, targetLower) {
-					continue
-				}
-			}
-		}
-
-		return &p, p.Action
-	}
-
-	return nil, ""
-}
-
-func (s *Store) CreatePolicyGroup(g PolicyGroup) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	actInt := 0
-	if g.Active {
-		actInt = 1
-	}
-	if g.Scope == "" {
-		g.Scope = "global"
-	}
-	if g.Schedule == "" {
-		g.Schedule = "all"
-	}
-
-	query := `
-	INSERT INTO policy_groups (id, tenant_id, scope, scope_value, name, description, schedule, criteria, action, rule_type, rule_value, port, protocol, active, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		scope=excluded.scope,
-		scope_value=excluded.scope_value,
-		name=excluded.name,
-		description=excluded.description,
-		schedule=excluded.schedule,
-		criteria=excluded.criteria,
-		action=excluded.action,
-		rule_type=excluded.rule_type,
-		rule_value=excluded.rule_value,
-		port=excluded.port,
-		protocol=excluded.protocol,
-		active=excluded.active
-	`
-	_, err := s.db.Exec(
-		query,
-		g.ID, g.TenantID, g.Scope, g.ScopeValue, g.Name, g.Description, g.Schedule,
-		g.Criteria, g.Action, g.RuleType, g.RuleValue, g.Port, g.Protocol, actInt, g.CreatedAt,
-	)
-	return err
-}
-
-func (s *Store) ListPolicyGroups(tenantID string) ([]PolicyGroup, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if tenantID != "" {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, COALESCE(scope, 'global'), COALESCE(scope_value, ''), name, description, COALESCE(schedule, 'all'), criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups WHERE tenant_id = ? OR scope = 'global' ORDER BY created_at DESC",
-			tenantID,
-		)
-	} else {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, COALESCE(scope, 'global'), COALESCE(scope_value, ''), name, description, COALESCE(schedule, 'all'), criteria, action, rule_type, rule_value, port, protocol, active, created_at FROM policy_groups ORDER BY created_at DESC",
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []PolicyGroup
-	for rows.Next() {
-		var g PolicyGroup
-		var actInt int
-		if err := rows.Scan(
-			&g.ID, &g.TenantID, &g.Scope, &g.ScopeValue, &g.Name, &g.Description, &g.Schedule,
-			&g.Criteria, &g.Action, &g.RuleType, &g.RuleValue, &g.Port, &g.Protocol, &actInt, &g.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		g.Active = actInt != 0
-		list = append(list, g)
-	}
-	return list, nil
-}
-
-func (s *Store) DeletePolicyGroup(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.Exec("DELETE FROM policy_groups WHERE id = ?", id)
-	return err
-}
-
-func (s *Store) TogglePolicyGroup(id string, active bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	actInt := 0
-	if active {
-		actInt = 1
-	}
-	_, err := s.db.Exec("UPDATE policy_groups SET active = ? WHERE id = ?", actInt, id)
-	return err
 }
 
 func (s *Store) UpsertIOC(ioc IOC) error {
@@ -2456,68 +2353,6 @@ func (s *Store) ListIOCs(limit int) ([]IOC, error) {
 		list = append(list, ioc)
 	}
 	return list, nil
-}
-
-func (s *Store) CreateRule(r Rule) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	actInt := 0
-	if r.Active {
-		actInt = 1
-	}
-
-	_, err := s.db.Exec(
-		"INSERT INTO rules (id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		r.ID, r.TenantID, r.Name, r.Type, r.Value, r.Port, r.Protocol, r.Action, r.Scope, r.ScopeValue, actInt, r.CreatedAt,
-	)
-	return err
-}
-
-func (s *Store) ListRules(tenantID string) ([]Rule, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if tenantID != "" {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at FROM rules WHERE tenant_id = ? AND active = 1 ORDER BY created_at DESC",
-			tenantID,
-		)
-	} else {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, name, type, value, port, protocol, action, scope, scope_value, active, created_at FROM rules WHERE active = 1 ORDER BY created_at DESC",
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []Rule
-	for rows.Next() {
-		var r Rule
-		var actInt int
-		if err := rows.Scan(
-			&r.ID, &r.TenantID, &r.Name, &r.Type, &r.Value, &r.Port, &r.Protocol, &r.Action, &r.Scope, &r.ScopeValue, &actInt, &r.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		r.Active = actInt != 0
-		list = append(list, r)
-	}
-	return list, nil
-}
-
-func (s *Store) DeleteRule(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.Exec("DELETE FROM rules WHERE id = ?", id)
-	return err
 }
 
 func (s *Store) CreateAlert(a Alert) error {
@@ -2797,7 +2632,6 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	managedCount := 0
 	unmanagedCount := 0
 	quietCount := 0
-	inferredCount := 0
 	for ip, n := range nodeMap {
 		n.Quiet = !spoke[ip]
 		if n.Quiet {
@@ -2807,12 +2641,6 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 			managedCount++
 		} else if n.Type == "unmanaged" {
 			unmanagedCount++
-		}
-		for _, e := range n.Evidence {
-			if e == SourceInferred {
-				inferredCount++
-				break
-			}
 		}
 		data.Nodes = append(data.Nodes, *n)
 	}
@@ -2855,7 +2683,6 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	data.Metrics.ManagedNodesCount = managedCount
 	data.Metrics.UnmanagedNodesCount = unmanagedCount
 	data.Metrics.QuietNodesCount = quietCount
-	data.Metrics.InferredNodesCount = inferredCount
 	data.Metrics.TotalFlowCount = totalFlows
 	data.Metrics.MeasuredFlowCount = measuredFlowTotal
 	data.Metrics.WindowLabel = windowLabel(timeWindow)
@@ -2863,8 +2690,8 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	return data, nil
 }
 
-// assetNode projects one asset onto the graph, carrying its evidence and the
-// role it was given or deduced instead of a bare address.
+// assetNode projects one asset onto the graph, carrying its retained evidence
+// and operator/agent role instead of a bare address.
 func assetNode(a Asset, endpointByID map[string]Endpoint, isolatedByIP map[string]bool) TopologyNode {
 	label := a.Hostname
 	if label == "" {

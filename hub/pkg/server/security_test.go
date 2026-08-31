@@ -4,19 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"ominull/hub/pkg/copilot"
 	"ominull/hub/pkg/storage"
 )
 
@@ -61,8 +56,6 @@ func TestTenantKeyCannotReachOperatorRoutes(t *testing.T) {
 		{"read deploy job output", "GET", "/api/v1/deployer/jobs", "", srv.handleDeployerJobs},
 		{"sweep an arbitrary subnet", "POST", "/api/v1/scanner/scan", `{"subnet":"10.0.0.0/24"}`, srv.handleScannerScan},
 		{"read the discovered inventory", "GET", "/api/v1/scanner/results", "", srv.handleScannerResults},
-		{"repoint the copilot backend", "POST", "/api/v1/copilot/config", `{"provider":"ollama","ollama_url":"http://attacker.example/"}`, srv.handleCopilotConfig},
-		{"read the copilot configuration", "GET", "/api/v1/copilot/config", "", srv.handleCopilotConfig},
 		{"read the whole topology", "GET", "/api/v1/topology/graph", "", srv.handleTopologyGraph},
 		{"correct an asset claim", "POST", "/api/v1/assets/correct", `{"ip":"10.0.0.9","field":"device","value":"x"}`, srv.handleAssetCorrect},
 		{"read fleet update currency", "GET", "/api/v1/agents/update-status", "", srv.handleAgentsUpdateStatus},
@@ -183,46 +176,6 @@ func TestScannerRefusesAnUnboundedSweep(t *testing.T) {
 	}
 }
 
-// TestCopilotConfigDoesNotDiscloseProviderKeys: a provider key is a billable
-// credential belonging to whoever pasted it in, and the route used to hand both
-// of them back verbatim.
-func TestCopilotConfigDoesNotDiscloseProviderKeys(t *testing.T) {
-	srv, store := setupTestServer(t)
-	defer store.Close()
-
-	set := `{"provider":"openai","openai_api_key":"sk-secret-value","gemini_api_key":"gem-secret-value"}`
-	w := call(srv, requireAdmin(srv.handleCopilotConfig), "POST", "/api/v1/copilot/config", "mock_admin_token", set)
-	if w.Code != http.StatusOK {
-		t.Fatalf("configuring the copilot failed: %d\n%s", w.Code, w.Body.String())
-	}
-	if strings.Contains(w.Body.String(), "sk-secret-value") || strings.Contains(w.Body.String(), "gem-secret-value") {
-		t.Errorf("the POST response echoed a provider key back:\n%s", w.Body.String())
-	}
-
-	w = call(srv, requireAdmin(srv.handleCopilotConfig), "GET", "/api/v1/copilot/config", "mock_admin_token", "")
-	if strings.Contains(w.Body.String(), "sk-secret-value") || strings.Contains(w.Body.String(), "gem-secret-value") {
-		t.Errorf("the configuration route disclosed a provider key:\n%s", w.Body.String())
-	}
-
-	// Reading the redacted form and writing it back must not erase the key.
-	var redacted copilot.Config
-	if err := json.Unmarshal(w.Body.Bytes(), &redacted); err != nil {
-		t.Fatalf("config response is not a config: %v", err)
-	}
-	roundTrip, _ := json.Marshal(redacted)
-	if w := call(srv, requireAdmin(srv.handleCopilotConfig), "POST", "/api/v1/copilot/config", "mock_admin_token", string(roundTrip)); w.Code != http.StatusOK {
-		t.Fatalf("writing back the redacted config failed: %d\n%s", w.Code, w.Body.String())
-	}
-	if got := srv.copilot.GetConfig().OpenAIAPIKey; got != "sk-secret-value" {
-		t.Errorf("a round-trip through the redacted form erased the stored key: %q", got)
-	}
-
-	// A backend the hub would dial has to be a URL.
-	if w := call(srv, requireAdmin(srv.handleCopilotConfig), "POST", "/api/v1/copilot/config", "mock_admin_token", `{"provider":"ollama","ollama_url":"file:///etc/shadow"}`); w.Code != http.StatusBadRequest {
-		t.Errorf("copilot accepted a file:// backend: got %d\n%s", w.Code, w.Body.String())
-	}
-}
-
 // TestCertificateEnrolmentNeedsAuthorisation. The certificate is what the hub
 // tells endpoints apart by; a route that mints one for any name on request
 // makes the identity it proves worth nothing.
@@ -305,31 +258,6 @@ func TestFailedAuthenticationIsThrottled(t *testing.T) {
 	srv.authMiddleware(func(http.ResponseWriter, *http.Request) {})(w, r)
 	if w.Code == http.StatusTooManyRequests {
 		t.Errorf("a lockout on one address blocked a different one")
-	}
-}
-
-// TestWebsocketRefusesForeignOrigins. Agents send no Origin header and are
-// unaffected; a page on another site is what this stops from opening the socket
-// in an operator's browser.
-func TestWebsocketRefusesForeignOrigins(t *testing.T) {
-	for _, tc := range []struct {
-		origin string
-		want   bool
-	}{
-		{"", true},
-		{"http://hub.example", true},
-		{"https://hub.example", true},
-		{"http://attacker.example", false},
-		{"null", false},
-	} {
-		r := httptest.NewRequest("GET", "http://hub.example/ws", nil)
-		r.Host = "hub.example"
-		if tc.origin != "" {
-			r.Header.Set("Origin", tc.origin)
-		}
-		if got := upgrader.CheckOrigin(r); got != tc.want {
-			t.Errorf("origin %q: CheckOrigin returned %v, want %v", tc.origin, got, tc.want)
-		}
 	}
 }
 
@@ -475,9 +403,8 @@ func TestAnInstallerIsNeverCached(t *testing.T) {
 	defer store.Close()
 
 	for path, handler := range map[string]http.HandlerFunc{
-		"/bootstrap.ps1":    srv.handleBootstrapPS1,
-		"/bootstrap.sh":     srv.handleBootstrapSH,
-		"/bootstrap.mac.sh": srv.handleBootstrapMac,
+		"/bootstrap.ps1": srv.handleBootstrapPS1,
+		"/bootstrap.sh":  srv.handleBootstrapSH,
 	} {
 		r := httptest.NewRequest("GET", path+"?key=mock_admin_token", nil)
 		w := httptest.NewRecorder()
@@ -489,119 +416,6 @@ func TestAnInstallerIsNeverCached(t *testing.T) {
 		if got := w.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("%s: Cache-Control is %q, so a proxy or CDN may keep the credential it carries", path, got)
 		}
-	}
-}
-
-// TestNoHandlerHoldsTheClientLockAcrossASendingCall is the server-side twin of
-// the storage package's locking test, and it exists for the same reason.
-//
-// Five handlers broadcast a command by holding clientsMu.RLock and calling
-// SendCommand inside the loop - and SendCommand takes clientsMu.RLock again. A
-// Go RWMutex read lock is not reentrant: the moment a writer queues between the
-// two acquisitions (any agent connecting or disconnecting), the inner RLock
-// waits for the writer, the writer waits for the outer read lock to drop, and
-// the hub's websocket registry stops for good. Snapshot under the lock and send
-// outside it, which is what broadcastToTenant does.
-func TestNoHandlerHoldsTheClientLockAcrossASendingCall(t *testing.T) {
-	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-
-	// Methods that take clientsMu themselves. Calling one of these while
-	// holding the same lock is the defect.
-	takesLock := map[string]bool{}
-	decls := map[string]*ast.FuncDecl{}
-
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, f, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", f, err)
-		}
-		for _, d := range file.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || fn.Body == nil {
-				continue
-			}
-			decls[fn.Name.Name] = fn
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if sel.Sel.Name != "Lock" && sel.Sel.Name != "RLock" {
-					return true
-				}
-				if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "clientsMu" {
-					takesLock[fn.Name.Name] = true
-				}
-				return true
-			})
-		}
-	}
-
-	for name, fn := range decls {
-		if !takesLock[name] {
-			continue
-		}
-		// Everything between the acquisition and the matching release.
-		var lockPos, unlockPos token.Pos
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			inner, ok := sel.X.(*ast.SelectorExpr)
-			if !ok || inner.Sel.Name != "clientsMu" {
-				return true
-			}
-			switch sel.Sel.Name {
-			case "Lock", "RLock":
-				if lockPos == token.NoPos {
-					lockPos = call.Pos()
-				}
-			case "Unlock", "RUnlock":
-				if unlockPos == token.NoPos && call.Pos() > lockPos {
-					unlockPos = call.Pos()
-				}
-			}
-			return true
-		})
-		if lockPos == token.NoPos {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || call.Pos() <= lockPos {
-				return true
-			}
-			if unlockPos != token.NoPos && call.Pos() >= unlockPos {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			ident, ok := sel.X.(*ast.Ident)
-			if !ok || ident.Name != "s" {
-				return true
-			}
-			if !takesLock[sel.Sel.Name] || sel.Sel.Name == name {
-				return true
-			}
-			t.Errorf("%s: %s holds clientsMu and calls s.%s, which takes it again - "+
-				"sync.RWMutex is not reentrant; snapshot the registry and send outside the lock",
-				fset.Position(call.Pos()), name, sel.Sel.Name)
-			return true
-		})
 	}
 }
 
@@ -632,23 +446,6 @@ func TestBulkIsolationIsScopedToTheOwningTenant(t *testing.T) {
 		`{"scope":"ids","ids":["linux-victim"]}`)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("a tenant bulk-released another tenant's endpoint: got %d\n%s", w.Code, w.Body.String())
-	}
-
-	// A fleet-wide broadcast reaches only the caller's own connected clients.
-	srv.clientsMu.Lock()
-	srv.clients["mine"] = &Client{EndpointID: "mine", TenantID: "t-01", Send: make(chan []byte, 1)}
-	srv.clients["theirs"] = &Client{EndpointID: "theirs", TenantID: "t-02", Send: make(chan []byte, 1)}
-	srv.clientsMu.Unlock()
-
-	if got := srv.clientsInScope("t-01"); len(got) != 1 || got[0] != "mine" {
-		t.Errorf("a t-01 broadcast targets %v; it must reach only that tenant's own endpoints", got)
-	}
-	if got := srv.clientsInScope("t-02"); len(got) != 1 || got[0] != "theirs" {
-		t.Errorf("a t-02 broadcast targets %v", got)
-	}
-	// An operator's broadcast is the only one that reaches the whole hub.
-	if got := srv.clientsInScope(""); len(got) != 2 {
-		t.Errorf("an operator broadcast targets %v; it should reach every connected endpoint", got)
 	}
 
 	// An allow list is a firewall pinhole, so it has to be addresses.
@@ -829,13 +626,12 @@ func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
 		"ominull-agent_1.6.7_amd64.deb.sha256",
 		"ominull-agent-windows-1.6.7.tar.gz",
 		"ominull-agent-windows-1.6.7.tar.gz.sig",
-		"ominull-agent-macos-1.6.7.tar.gz",
-		"ominull-agent-macos-1.6.7.tar.gz.sha256",
-		"ominulld",
-		"ominulld.exe",
-		"ominull_wfp_user.exe",
-		"ominull_mac_daemon.sh",
-		"pf_engine.sh",
+		"ominull-agent-windows-1.6.7.msi",
+		"ominull-agent-windows-1.6.7.msi.sig",
+		"ominull-agent-windows-1.6.7.msi.sha256",
+		"ominull-hub_1.6.7_amd64.deb",
+		"ominull-hub_1.6.7_amd64.deb.sig",
+		"ominull-hub_1.6.7_amd64.deb.sha256",
 	}
 	for _, name := range serve {
 		if !downloadAllowed(name) {

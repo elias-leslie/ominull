@@ -146,7 +146,7 @@ func TestBandwidthTimelineMeasuresTrafficRatherThanInventingIt(t *testing.T) {
 	now := time.Now().UTC()
 	ev := func(at time.Time, action string, in, out int64) Event {
 		return Event{
-			TenantID: "t-tl", EndpointID: "ep-tl", Timestamp: at, Layer: "TC", Action: action,
+			TenantID: "t-tl", EndpointID: "ep-tl", Timestamp: at, Layer: "linux-socket-v1", Action: action,
 			Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.2", DstIP: "10.0.0.3",
 			SrcPort: 1, DstPort: 443, BytesIn: in, BytesOut: out, Country: "US", ProcessPath: "p",
 		}

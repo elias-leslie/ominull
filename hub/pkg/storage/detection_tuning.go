@@ -106,10 +106,6 @@ func defaultQuietProcesses() []string {
 		"svchost.exe", "services.exe", "lsass.exe", "system", "ntoskrnl.exe",
 		"spoolsv.exe", "dwm.exe", "searchhost.exe", "tiworker.exe",
 		"trustedinstaller.exe", "msmpeng.exe", "usocoreworker.exe",
-		// macOS
-		"apsd", "mdnsresponder", "softwareupdated", "trustd", "launchd",
-		"cloudd", "bird", "storedownloadd", "nsurlsessiond", "kernel_task",
-		"timed", "akd", "identityservicesd",
 		// Linux
 		"systemd", "systemd-resolved", "systemd-timesyncd", "chronyd", "ntpd",
 		"snapd", "packagekitd", "unattended-upgr", "dbus-daemon",

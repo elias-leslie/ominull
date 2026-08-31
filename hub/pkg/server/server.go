@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,40 +19,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
-	"ominull/hub/pkg/copilot"
 	"ominull/hub/pkg/deployer"
 	"ominull/hub/pkg/detector"
-	"ominull/hub/pkg/inference"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
-
-// upgrader decides which browsers may open a hub websocket.
-//
-// Agents are not browsers and send no Origin header, so they are unaffected by
-// any policy here. A browser always sends one, and the same-origin rule is what
-// stops a page on another site from opening this socket in a logged-in
-// operator's browser and driving it with credentials the browser attaches on
-// its own. "return true" - the value it shipped with - is the setting that
-// turns that off.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true // not a browser
-		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		return strings.EqualFold(u.Host, r.Host)
-	},
-}
 
 type Server struct {
 	store     *storage.Store
@@ -60,9 +35,7 @@ type Server struct {
 	detector  *detector.Engine
 	pki       *pki.Manager
 	scanner   *scanner.Scanner
-	inference *inference.Engine
 	deployer  *deployer.Deployer
-	copilot   *copilot.Engine
 	adminKey  string
 	binaryDir string
 	hubURL    string
@@ -80,22 +53,11 @@ type Server struct {
 	// Access. nil means it is not configured, which is the default.
 	access *accessVerifier
 
-	clientsMu  sync.RWMutex
-	clients    map[string]*Client // endpointID -> Client
-	eventsChan chan storage.Event
-
 	// throttle bounds online credential guessing across every route that
-	// accepts a key: the console gate, the REST API and the websocket.
+	// accepts a key.
 	throttle *authThrottle
 	// topology holds the rendered graph briefly; see responsecache.go.
 	topology responseCache
-}
-
-type Client struct {
-	EndpointID string
-	TenantID   string
-	Conn       *websocket.Conn
-	Send       chan []byte
 }
 
 type TelemetryBatchMessage struct {
@@ -109,7 +71,7 @@ type TelemetryBatchMessage struct {
 	IP         string `json:"ip"`
 	// MAC is the endpoint's primary hardware address. Asset identity keys on
 	// it, so an agented host that changes DHCP lease stays one record instead
-	// of forking a second one. The Linux and macOS agents have always sent
+	// of forking a second one. The retained Linux and Windows agents send
 	// this field; until 1.2.0 the hub had nowhere to put it and encoding/json
 	// discarded it, which left every agented asset keyed on address alone.
 	MAC           string `json:"mac"`
@@ -119,8 +81,12 @@ type TelemetryBatchMessage struct {
 	// that string is a display label, and v1.2.0 changed the Windows one from
 	// a hardcoded literal to a detected value - so the agent states it
 	// outright. Absent means "none", which is what a pre-1.3.0 agent sends.
-	UpdateCapability string          `json:"update_capability"`
-	Events           []storage.Event `json:"events"`
+	UpdateCapability         string          `json:"update_capability"`
+	InstallType              string          `json:"install_type"`
+	PackageIdentifier        string          `json:"package_identifier"`
+	RegisteredPackageVersion string          `json:"registered_package_version"`
+	ProvenanceStatus         string          `json:"provenance_status"`
+	Events                   []storage.Event `json:"events"`
 	// ObservedServices is what this host actually uses the network for at the
 	// infrastructure layer - its resolvers, its DHCP server, its time sources -
 	// so the baseline isolation policy can be checked against reality instead
@@ -130,11 +96,6 @@ type TelemetryBatchMessage struct {
 	// this?". Absent from agents that predate the check, which is a state the
 	// gate distinguishes from a failing answer.
 	Readiness *storage.Readiness `json:"isolation_readiness"`
-}
-
-type CommandMessage struct {
-	Type    string      `json:"type"` // "ISOLATE", "UNISOLATE", "UPDATE_CONFIG"
-	Payload interface{} `json:"payload"`
 }
 
 // TLSOptions configures the hub's HTTPS listener. Agents carry the API key in
@@ -246,7 +207,6 @@ func (s *Server) SetAgentHubURL(u string) {
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
-	eventsChan := make(chan storage.Event, 1000)
 	pkiMgr, err := pki.New(filepath.Join(binaryDir, "certs"))
 	if err != nil {
 		log.Printf("[-] Warning: Failed to initialize Autonomous PKI Manager: %v", err)
@@ -261,38 +221,25 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	}
 
 	s := &Server{
-		store:     store,
-		ti:        threatintel.New(store),
-		pki:       pkiMgr,
-		scanner:   scanner.New(store),
-		inference: inference.New(store),
-		deployer:  deployer.New(store, hubURL, adminKey),
-		copilot: copilot.New(store, copilot.Config{
-			Provider:    copilot.ProviderLocalOllama,
-			OllamaURL:   "http://10.0.0.39:11434",
-			OllamaModel: "llama3.2",
-		}),
+		store:        store,
+		ti:           threatintel.New(store),
+		pki:          pkiMgr,
+		scanner:      scanner.New(store),
+		deployer:     deployer.New(store, hubURL, adminKey),
 		adminKey:     adminKey,
 		binaryDir:    binaryDir,
 		hubURL:       hubURL,
 		agentVersion: agentVersion,
-		clients:      make(map[string]*Client),
-		eventsChan:   eventsChan,
 		throttle:     newAuthThrottle(),
 	}
-	s.detector = detector.New(store, eventsChan, func(endpointID, reason string) error {
-		_ = s.store.SetEndpointIsolation(endpointID, true, nil)
-		cmd := CommandMessage{
-			Type:    "ISOLATE",
-			Payload: map[string]interface{}{"reason": reason},
+	s.deployer.SetAgentVersion(agentVersion)
+	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
+		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
+			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
 		}
-		return s.SendCommand(endpointID, cmd)
+		return nil
 	})
 	return s
-}
-
-func (s *Server) Events() <-chan storage.Event {
-	return s.eventsChan
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -504,12 +451,9 @@ func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request, opera
 }
 
 func (s *Server) Start(addr string) error {
-	// Start Threat Intelligence feed scheduler & Behavioral Detector
+	// Start Threat Intelligence feed scheduler and behavioral detector.
 	s.ti.Start(context.Background(), 1*time.Hour)
 	s.detector.Start(context.Background())
-	// Role inference walks the whole events window, so it runs on a schedule
-	// of its own rather than on any console request.
-	go s.inference.Start(context.Background())
 
 	mux := s.routes()
 
@@ -842,8 +786,8 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // versionParts extracts the leading major.minor.patch triple from a reported version
-// string. Endpoints decorate the version with an engine suffix ("1.1.0 (WFP Callout)",
-// "1.1.0 (eBPF/TC)"), so each component is read up to its first non-digit.
+// string. Endpoints may decorate the version with a collection-layer suffix,
+// so each component is read up to its first non-digit.
 func versionParts(v string) [3]int {
 	var out [3]int
 	fields := strings.Split(strings.TrimPrefix(strings.TrimSpace(v), "v"), ".")
@@ -1019,8 +963,10 @@ func agentPackageName(version, pkg string) string {
 	switch pkg {
 	case "windows":
 		return "ominull-agent-windows-" + version + ".tar.gz"
-	case "macos":
-		return "ominull-agent-macos-" + version + ".tar.gz"
+	case "windows-native":
+		return "ominull-agent-windows-" + version + ".msi"
+	case "hub":
+		return "ominull-hub_" + version + "_amd64.deb"
 	default:
 		return "ominull-agent_" + version + "_amd64.deb"
 	}
@@ -1059,12 +1005,28 @@ func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (ma
 	}
 	base := s.downloadBase(r)
 	return map[string]string{
-		"version":   version,
-		"package":   pkg,
-		"url":       base + "/download/" + name,
-		"signature": base + "/download/" + name + ".sig",
-		"sha256":    fields[0],
+		"version":            version,
+		"package":            pkg,
+		"package_identifier": packageIdentifierForKind(pkg),
+		"url":                base + "/download/" + name,
+		"signature":          base + "/download/" + name + ".sig",
+		"sha256":             fields[0],
 	}, true
+}
+
+func packageIdentifierForKind(pkg string) string {
+	switch pkg {
+	case "deb":
+		return linuxAgentPackageID
+	case "windows":
+		return "legacy-archive"
+	case "windows-native":
+		return windowsAgentPackageID
+	case "hub":
+		return "ominull-hub"
+	default:
+		return ""
+	}
 }
 
 // agentPackageForCapability maps what an agent says it can install onto the
@@ -1073,8 +1035,8 @@ func agentPackageForCapability(capability string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(capability)) {
 	case "deb":
 		return "deb", true
-	case "pkg":
-		return "macos", true
+	case "msi":
+		return "windows-native", true
 	case "exe":
 		return "windows", true
 	}
@@ -1084,11 +1046,9 @@ func agentPackageForCapability(capability string) (string, bool) {
 // updatePackageFor resolves the package an endpoint can install for itself.
 //
 // The reported capability is authoritative. An endpoint that has never
-// reported one is running an agent from before the field existed, and the only
-// such agent that can install anything is the Linux one - so the legacy
-// fallback covers precisely that case and nothing else. A pre-1.3.0 Windows or
-// macOS agent cannot act on a descriptor at all, and is honestly reported as
-// needing the push-deployer rather than handed a package it will ignore.
+// reported one is running an agent from before the field existed. Only legacy
+// Linux is given the compatibility package; older Windows is sent through the
+// bridge until its native package is installed.
 func updatePackageFor(capability, osName string) (string, bool) {
 	if pkg, ok := agentPackageForCapability(capability); ok {
 		return pkg, true
@@ -1105,8 +1065,6 @@ func agentPackageKind(osName string) string {
 	switch {
 	case strings.Contains(lower, "windows"):
 		return "windows"
-	case strings.Contains(lower, "darwin"), strings.Contains(lower, "mac"):
-		return "macos"
 	default:
 		return "deb"
 	}
@@ -1169,14 +1127,15 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if outdated {
 		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability, ep.OS)
 		if !selfInstallable {
-			pkg = agentPackageKind(ep.OS)
-		}
-		resp["update_version"] = desired
-		resp["package"] = pkg
-		resp["update_url"] = s.agentPackageURL(r, desired, pkg)
-		if desc, signed := s.agentUpdateDescriptor(r, desired, pkg); signed {
-			resp["sha256"] = desc["sha256"]
-			resp["signature_url"] = desc["signature"]
+			resp["update_method"] = "push-deployer"
+		} else {
+			resp["update_version"] = desired
+			resp["package"] = pkg
+			resp["update_url"] = s.agentPackageURL(r, desired, pkg)
+			if desc, signed := s.agentUpdateDescriptor(r, desired, pkg); signed {
+				resp["sha256"] = desc["sha256"]
+				resp["signature_url"] = desc["signature"]
+			}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1185,7 +1144,7 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleAgentsUpdate lets an operator push a new agent version to endpoints.
 // Endpoints that report an update capability self-update over their existing hub
-// connection; the rest are reported back as requiring the SSH/WinRM push-deployer.
+// connection; legacy endpoints remain on the bridge until native migration.
 func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Role") != "admin" {
 		http.Error(w, `{"error":"admin role required"}`, http.StatusForbidden)
@@ -1232,6 +1191,9 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	var scheduled, unsupported []map[string]string
 	for _, ep := range endpoints {
 		if !req.All && !contains(req.EndpointIDs, ep.ID) {
+			continue
+		}
+		if ep.Status == "retired" {
 			continue
 		}
 		if compareVersions(ep.DriverVersion, version) >= 0 {
@@ -1281,8 +1243,18 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var outdated []map[string]string
+	var outdated, retired []map[string]string
+	var provenanceIssues []map[string]string
 	for _, ep := range endpoints {
+		if ep.Status == "retired" {
+			retired = append(retired, map[string]string{
+				"endpoint_id": ep.ID,
+				"hostname":    ep.Hostname,
+				"os":          ep.OS,
+				"status":      ep.Status,
+			})
+			continue
+		}
 		if compareVersions(ep.DriverVersion, latest) < 0 {
 			outdated = append(outdated, map[string]string{
 				"endpoint_id":    ep.ID,
@@ -1292,13 +1264,30 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 				"driver_version": ep.DriverVersion,
 			})
 		}
+		if reason := provenanceIssue(ep, latest); reason != "" && compareVersions(ep.DriverVersion, latest) >= 0 {
+			provenanceIssues = append(provenanceIssues, map[string]string{
+				"endpoint_id":                ep.ID,
+				"hostname":                   ep.Hostname,
+				"os":                         ep.OS,
+				"ip":                         ep.IP,
+				"driver_version":             ep.DriverVersion,
+				"install_type":               ep.InstallType,
+				"package_identifier":         ep.PackageIdentifier,
+				"registered_package_version": ep.RegisteredPackageVersion,
+				"provenance_status":          ep.ProvenanceStatus,
+				"reason":                     reason,
+			})
+		}
 	}
 	pending, _ := s.store.ListPendingAgentUpdates()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"latest_version": latest,
-		"outdated":       outdated,
-		"pending":        pending,
+		"latest_version":    latest,
+		"outdated":          outdated,
+		"retired":           retired,
+		"provenance_issues": provenanceIssues,
+		"native_converged":  len(outdated) == 0 && len(provenanceIssues) == 0,
+		"pending":           pending,
 	})
 }
 
@@ -1419,6 +1408,7 @@ func (s *Server) buildEnrolmentOptions(w http.ResponseWriter, r *http.Request, t
 		LocationID:      t.LocationID,
 		RoleTag:         t.Role,
 		EndpointID:      t.EndpointID,
+		AgentVersion:    s.agentVersion,
 	}, true
 }
 
@@ -1468,30 +1458,6 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
-}
-
-func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
-	// A single-use install link first, the admin key second. The link is
-	// what the console hands an operator to paste on the host; the key path
-	// stays for the scripted callers that already use it.
-	opts, presented, ok := s.installTicketOptions(w, r, "macos")
-	if presented && !ok {
-		return
-	}
-	if !presented {
-		if opts, ok = s.bootstrapOptions(w, r); !ok {
-			return
-		}
-	}
-	// The script carries the tenant key and a live enrolment token off the hub.
-	// Generating one is how an endpoint joins the fleet, so it belongs in the
-	// record even though nothing has been installed yet.
-	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a macOS installer carrying the tenant key and a single-use enrolment token")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// The body is a credential. Nothing between here and the operator may keep
-	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write([]byte(bootstrap.GenerateMacOS(opts)))
 }
 
 func (s *Server) handlePKICACert(w http.ResponseWriter, r *http.Request) {
@@ -1590,13 +1556,10 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 // the signed release artifacts, and the five payloads the bootstrap scripts
 // name. Anything else is not found, whether or not it is on disk.
 var (
-	downloadArtifact = regexp.MustCompile(`^ominull-agent(_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|-(windows|macos)-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz)(\.sig|\.sha256)?$`)
+	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.(tar\.gz|msi)|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.sha256)?$`)
 	downloadPayloads = map[string]bool{
-		"ominulld":              true,
-		"ominulld.exe":          true,
-		"ominull_wfp_user.exe":  true,
-		"ominull_mac_daemon.sh": true,
-		"pf_engine.sh":          true,
+		// Native installers fetch only signed package artifacts. Raw binaries
+		// are intentionally not an install surface.
 	}
 )
 
@@ -1622,149 +1585,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	http.ServeFile(w, r, path)
-}
-
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	addr := clientIP(r)
-	if s.throttle.blocked(addr) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
-		return
-	}
-
-	apiKey := r.URL.Query().Get("key")
-	if apiKey == "" {
-		apiKey = r.Header.Get("X-API-Key")
-	}
-
-	var tenantID string
-	isAdmin := secretEqual(apiKey, s.adminKey)
-	if isAdmin {
-		tenantID = "admin-tenant"
-	} else {
-		t, err := s.store.GetTenantByAPIKey(apiKey)
-		if err != nil || t == nil {
-			if s.throttle.fail(addr) {
-				log.Printf("[!] %s has failed websocket authentication %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
-			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		tenantID = t.ID
-	}
-	s.throttle.succeed(addr)
-
-	// The socket claims an endpoint id and then writes telemetry under it for
-	// as long as it stays open, so it is bound by the same rule as the REST
-	// telemetry route rather than trusting the query string. Without this, the
-	// websocket was a way around every certificate check on /api/v1/events.
-	endpointID := r.URL.Query().Get("endpoint_id")
-	cn := clientCertCN(r)
-	if cn != "" {
-		if endpointID != "" && endpointID != cn {
-			log.Printf("[!] %s opened a websocket with a certificate for %q and claimed endpoint %q; refused.", addr, cn, endpointID)
-			http.Error(w, "the client certificate does not name this endpoint", http.StatusForbidden)
-			return
-		}
-		endpointID = cn
-	} else if s.tlsOpts.ClientCerts == ClientCertsRequired && !isAdmin {
-		log.Printf("[!] %s opened a websocket with no verified client certificate while --client-certs is required; refused.", addr)
-		http.Error(w, "this hub requires a client certificate to report as an endpoint", http.StatusForbidden)
-		return
-	}
-	if endpointID == "" {
-		endpointID = uuid.New().String()
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[-] WebSocket upgrade failed: %v", err)
-		return
-	}
-
-	client := &Client{
-		EndpointID: endpointID,
-		TenantID:   tenantID,
-		Conn:       conn,
-		Send:       make(chan []byte, 256),
-	}
-
-	s.clientsMu.Lock()
-	s.clients[endpointID] = client
-	s.clientsMu.Unlock()
-
-	defer func() {
-		s.clientsMu.Lock()
-		delete(s.clients, endpointID)
-		s.clientsMu.Unlock()
-		conn.Close()
-
-		s.store.UpsertEndpoint(storage.Endpoint{
-			ID:         endpointID,
-			TenantID:   tenantID,
-			Status:     "offline",
-			LastSeenAt: time.Now().UTC(),
-		})
-	}()
-
-	// Reader Loop
-	for {
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-
-		var batch TelemetryBatchMessage
-		if err := json.Unmarshal(message, &batch); err != nil {
-			continue
-		}
-
-		if batch.Type == "telemetry" {
-			// Update endpoint record
-			s.store.UpsertEndpoint(storage.Endpoint{
-				ID:            endpointID,
-				TenantID:      tenantID,
-				Hostname:      batch.Hostname,
-				OS:            batch.OS,
-				IP:            batch.IP,
-				DriverVersion: batch.DriverVersion,
-				Status:        "online",
-				LastSeenAt:    time.Now().UTC(),
-				CreatedAt:     time.Now().UTC(),
-			})
-
-			// Save batch events
-			for i := range batch.Events {
-				batch.Events[i].TenantID = tenantID
-				batch.Events[i].EndpointID = endpointID
-				if batch.Events[i].Timestamp.IsZero() {
-					batch.Events[i].Timestamp = time.Now().UTC()
-				}
-				select {
-				case s.eventsChan <- batch.Events[i]:
-				default:
-				}
-			}
-			s.store.InsertEventsBatch(batch.Events)
-		}
-	}
-}
-
-func (s *Server) SendCommand(endpointID string, cmd CommandMessage) error {
-	s.clientsMu.RLock()
-	client, ok := s.clients[endpointID]
-	s.clientsMu.RUnlock()
-
-	if !ok || client.Conn == nil {
-		return fmt.Errorf("endpoint %s is offline or disconnected", endpointID)
-	}
-
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
-
-	return client.Conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
@@ -1823,19 +1643,63 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.clientsMu.RLock()
 	for i := range list {
-		_, wsOnline := s.clients[list[i].ID]
-		if wsOnline || time.Since(list[i].LastSeenAt) < 30*time.Second {
+		if list[i].Status == "retired" {
+			continue
+		}
+		if time.Since(list[i].LastSeenAt) < 30*time.Second {
 			list[i].Status = "online"
 		} else {
 			list[i].Status = "offline"
 		}
 	}
-	s.clientsMu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
+}
+
+// handleRetireEndpoint marks an endpoint as intentionally removed while
+// retaining its telemetry, asset identity, certificate history, and audit log.
+// It clears recorded isolation first so an operator never retires a host with
+// a stale Ominull control order waiting for a heartbeat that will not come.
+func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		EndpointID string `json:"endpoint_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.EndpointID = strings.TrimSpace(req.EndpointID)
+	if req.EndpointID == "" {
+		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
+		return
+	}
+	ep, err := s.store.GetEndpoint(req.EndpointID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if ep == nil {
+		writeJSONError(w, http.StatusNotFound, "endpoint not registered")
+		return
+	}
+	if err := s.store.RetireEndpoint(req.EndpointID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	details := "Endpoint retired; telemetry and audit history retained"
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		details += ": " + reason
+	}
+	s.audit(r, "ENDPOINT_RETIRED", req.EndpointID, details)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "retired", "endpoint_id": req.EndpointID})
 }
 
 func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
@@ -1875,16 +1739,10 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		allowIPs = append(allowIPs, ip)
 	}
 
-	cmd := CommandMessage{
-		Type: "ISOLATE",
-		Payload: map[string]interface{}{
-			"allow_ips": allowIPs,
-		},
+	if err := s.store.SetEndpointIsolation(req.EndpointID, true, allowIPs); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-
-	_ = s.SendCommand(req.EndpointID, cmd)
-
-	s.store.SetEndpointIsolation(req.EndpointID, true, allowIPs)
 
 	_ = s.store.RecordAudit(storage.AuditEntry{
 		ID:        uuid.New().String(),
@@ -1893,7 +1751,7 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		Username:  r.Header.Get("X-Username"),
 		Action:    "ISOLATE_HOST",
 		Resource:  req.EndpointID,
-		Details:   "Host network isolation enabled at ring-0",
+		Details:   "Host network isolation enabled through the agent control response",
 		IPAddress: clientIP(r),
 		Timestamp: time.Now().UTC(),
 	})
@@ -1918,13 +1776,10 @@ func (s *Server) handleUnisolate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := CommandMessage{
-		Type: "UNISOLATE",
+	if err := s.store.SetEndpointIsolation(req.EndpointID, false, nil); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-
-	_ = s.SendCommand(req.EndpointID, cmd)
-
-	s.store.SetEndpointIsolation(req.EndpointID, false, nil)
 
 	_ = s.store.RecordAudit(storage.AuditEntry{
 		ID:        uuid.New().String(),
@@ -1978,11 +1833,6 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		}
 		allowIPs = append(allowIPs, ip)
 	}
-	cmd := CommandMessage{
-		Type:    "ISOLATE",
-		Payload: map[string]interface{}{"allow_ips": allowIPs},
-	}
-
 	// Scope first, gate second. The gate reads an endpoint's readiness report
 	// and answers with its resolvers and its rule set, so running it over
 	// caller-supplied ids before checking who owns them would answer questions
@@ -2016,8 +1866,10 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
 		for _, id := range scoped {
-			s.store.SetEndpointIsolation(id, true, allowIPs)
-			_ = s.SendCommand(id, cmd)
+			if err := s.store.SetEndpointIsolation(id, true, allowIPs); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			count++
 		}
 	} else {
@@ -2027,7 +1879,6 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.broadcastToTenant(tenantID, cmd)
 	}
 
 	s.audit(r, "BULK_ISOLATE", req.Scope+":"+req.Value, fmt.Sprintf("Cut %d endpoint(s) off the network", count))
@@ -2068,8 +1919,6 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 		req.Scope = "all"
 	}
 
-	cmd := CommandMessage{Type: "UNISOLATE"}
-
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
 		ids, ok := s.scopedEndpointIDs(w, r, req.IDs)
@@ -2077,8 +1926,10 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, id := range ids {
-			s.store.SetEndpointIsolation(id, false, nil)
-			_ = s.SendCommand(id, cmd)
+			if err := s.store.SetEndpointIsolation(id, false, nil); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			count++
 		}
 	} else {
@@ -2088,7 +1939,6 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.broadcastToTenant(tenantID, cmd)
 	}
 
 	s.audit(r, "BULK_UNISOLATE", req.Scope+":"+req.Value, fmt.Sprintf("Returned %d endpoint(s) to the network", count))
@@ -2160,60 +2010,9 @@ func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endp
 // endpoint it was, so any tenant could isolate - or release - any host in any
 // other tenant. The tenant scoping the listing routes already did is the same
 // rule; it just was not applied here.
-// The bulk routes scoped the database write to the caller's tenant and then
-// sent the command to every open socket, so one tenant isolating its own hosts
-// cut every host on the hub off the network - including hosts in tenants it
-// cannot see. The registry knows which tenant each client belongs to; it just
-// was not being asked.
-// callerTenantScope is the tenant a broadcast should be confined to: none for
-// an operator, the caller's own for a tenant credential.
-func callerTenantScope(r *http.Request) string {
-	if r.Header.Get("X-Role") == "tenant" {
-		return r.Header.Get("X-Tenant-ID")
-	}
-	return ""
-}
-
-// broadcastToTenant sends a command to every connected endpoint in scope.
-//
-// It snapshots the registry under the read lock and sends outside it. Every
-// call site used to hold clientsMu.RLock across SendCommand, which takes the
-// same read lock again - and a Go RWMutex read lock is not reentrant. A writer
-// (any agent connecting or disconnecting) queueing between the two acquisitions
-// blocks the inner RLock, while the writer waits for the outer one to drop:
-// the hub's whole websocket registry stops, permanently. This is the same
-// shape that took the storage package's lock down in production.
-func (s *Server) broadcastToTenant(tenantID string, cmd CommandMessage) int {
-	sent := 0
-	for _, id := range s.clientsInScope(tenantID) {
-		if s.SendCommand(id, cmd) == nil {
-			sent++
-		}
-	}
-	return sent
-}
-
-// clientsInScope snapshots the ids a broadcast should reach. Separated out so
-// the selection can be asserted on without opening real sockets, and so the
-// snapshot is unmistakably the only thing done under the lock.
-func (s *Server) clientsInScope(tenantID string) []string {
-	s.clientsMu.RLock()
-	defer s.clientsMu.RUnlock()
-
-	targets := make([]string, 0, len(s.clients))
-	for id, c := range s.clients {
-		if tenantID != "" && c.TenantID != tenantID {
-			continue
-		}
-		targets = append(targets, id)
-	}
-	return targets
-}
-
-// scopedEndpointIDs filters an explicit id list to the ones the caller owns and
-// answers the request if any of them are not. Refusing the whole call rather
-// than quietly skipping is deliberate: a bulk isolate that silently did nine of
-// ten hosts reads as a success.
+// scopedEndpointIDs rejects a bulk request when any requested endpoint is
+// outside the caller's tenant. The whole request fails rather than silently
+// applying to a partial set.
 func (s *Server) scopedEndpointIDs(w http.ResponseWriter, r *http.Request, ids []string) ([]string, bool) {
 	if r.Header.Get("X-Role") == "admin" {
 		return ids, true
@@ -2226,8 +2025,7 @@ func (s *Server) scopedEndpointIDs(w http.ResponseWriter, r *http.Request, ids [
 			return nil, false
 		}
 		if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {
-			log.Printf("[!] %s (tenant %q) asked to act on endpoint %q in a bulk request; it is not in scope, so the whole request is refused.",
-				clientIP(r), tenantID, id)
+			log.Printf("[!] %s (tenant %q) requested endpoint %q outside its scope; refused.", clientIP(r), tenantID, id)
 			writeJSONError(w, http.StatusNotFound, "one or more endpoints are not in this scope")
 			return nil, false
 		}
@@ -2249,11 +2047,8 @@ func (s *Server) endpointInScope(w http.ResponseWriter, r *http.Request, endpoin
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return false
 	}
-	// One answer for "no such endpoint" and "not yours": telling them apart
-	// turns the route into an oracle for which endpoint ids exist.
 	if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {
-		log.Printf("[!] %s (tenant %q) asked to act on endpoint %q, which is not in its scope; refused.",
-			clientIP(r), tenantID, endpointID)
+		log.Printf("[!] %s (tenant %q) requested endpoint %q outside its scope; refused.", clientIP(r), tenantID, endpointID)
 		writeJSONError(w, http.StatusNotFound, "no such endpoint in this scope")
 		return false
 	}
@@ -2279,137 +2074,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !s.endpointIdentityOK(w, r, batch.EndpointID) {
 				return
 			}
-			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			resp, err := s.ingestTelemetry(r, tenantID, batch)
 			if err != nil {
-				ip = r.RemoteAddr
-			}
-			if batch.IP != "" {
-				ip = batch.IP
-			}
-			s.store.UpsertEndpoint(storage.Endpoint{
-				ID:               batch.EndpointID,
-				TenantID:         tenantID,
-				LocationID:       batch.LocationID,
-				RoleTag:          batch.Role,
-				Hostname:         batch.Hostname,
-				OS:               batch.OS,
-				IP:               ip,
-				MAC:              batch.MAC,
-				DriverVersion:    batch.DriverVersion,
-				UpdateCapability: batch.UpdateCapability,
-				Status:           "online",
-				LastSeenAt:       time.Now().UTC(),
-				CreatedAt:        time.Now().UTC(),
-			})
-
-			// Record how this endpoint authenticated, not just that it did.
-			// UpsertEndpoint deliberately does not carry it: the certificate is
-			// a property of the connection, not of the batch, and an endpoint
-			// that stops presenting one has to stop showing one.
-			if err := s.store.SetEndpointCertCN(batch.EndpointID, r.Header.Get("X-Client-CN")); err != nil {
-				log.Printf("[-] Could not record the certificate identity for %s: %v", batch.EndpointID, err)
-			}
-
-			// Only recorded when the agent actually answered. An agent too old
-			// to report must not be recorded as having reported nothing: the
-			// gate treats "never answered" and "answered badly" differently,
-			// and collapsing them would make every old endpoint look ready.
-			if batch.Readiness != nil {
-				if err := s.store.SetEndpointObservations(batch.EndpointID, batch.ObservedServices, *batch.Readiness); err != nil {
-					log.Printf("[-] Could not record isolation readiness for %s: %v", batch.EndpointID, err)
+				log.Printf("[-] telemetry ingestion failed for %s: %v", batch.EndpointID, err)
+				status := http.StatusInternalServerError
+				if errors.Is(err, errRetiredEndpoint) {
+					status = http.StatusGone
 				}
+				writeJSONError(w, status, "telemetry was not accepted: "+err.Error())
+				return
 			}
-
-			for i := range batch.Events {
-				batch.Events[i].TenantID = tenantID
-				batch.Events[i].EndpointID = batch.EndpointID
-				if batch.Events[i].Timestamp.IsZero() {
-					batch.Events[i].Timestamp = time.Now().UTC()
-				}
-
-				// Enrich with in-flight GeoIP & ASN resolution
-				geo := threatintel.ResolveGeoIP(batch.Events[i].DstIP)
-				if batch.Events[i].Country == "" || batch.Events[i].Country == "US" {
-					batch.Events[i].Country = geo.Country
-				}
-
-				// Match against Threat Intelligence Cache
-				if ioc, found := s.ti.CheckThreat(batch.Events[i].DstIP); found {
-					batch.Events[i].Action = "BLOCK"
-					log.Printf("[!] THREAT MATCH: Endpoint %s -> C2 IP %s blocked (Source: %s, Threat: %s, Confidence: %d%%)",
-						batch.EndpointID, batch.Events[i].DstIP, ioc.Source, ioc.ThreatType, ioc.Confidence)
-				} else if ioc, found := s.ti.CheckThreat(batch.Events[i].SrcIP); found {
-					batch.Events[i].Action = "BLOCK"
-					log.Printf("[!] THREAT MATCH: Inbound threat %s blocked on %s (Source: %s, Threat: %s)",
-						batch.Events[i].SrcIP, batch.EndpointID, ioc.Source, ioc.ThreatType)
-				}
-
-				// Evaluate against anomaly detection & comms profiling
-				s.detector.Evaluate(batch.Events[i])
-			}
-			s.store.InsertEventsBatch(batch.Events)
-
-			qPeers, _ := s.store.GetQuarantinedPeers()
-			qIPs := make([]string, 0, len(qPeers))
-			for _, p := range qPeers {
-				if p.Active {
-					qIPs = append(qIPs, p.TargetIP)
-				}
-			}
-
-			// What this endpoint should be enforcing, on the reply to the
-			// request it already makes every few seconds.
-			//
-			// Isolation used to be delivered only as a WebSocket command, and
-			// the WebSocket route was never registered on the mux - so
-			// SendCommand had no client to write to and returned "offline or
-			// disconnected" every time. The hub set is_isolated, wrote the
-			// audit row and answered 200 "isolated"; the endpoint was never
-			// told, and kept talking. Only macOS ever learned, and only because
-			// it polled /api/v1/endpoints for itself.
-			isolated, allowIPs, isoErr := s.store.GetEndpointIsolation(batch.EndpointID)
-			if isoErr != nil {
-				log.Printf("[-] Could not read isolation state for %s: %v", batch.EndpointID, isoErr)
-			}
-			if allowIPs == nil {
-				allowIPs = []string{}
-			}
-			resp := map[string]interface{}{
-				"status":              "ok",
-				"quarantined_peers":   qIPs,
-				"is_isolated":         isolated,
-				"isolation_allow_ips": allowIPs,
-			}
-
-			// The baseline the agent should enforce underneath an isolation,
-			// already expanded to destination/protocol/port. Sent on every
-			// beat, isolated or not, so the rules are in place before they are
-			// needed rather than fetched at the moment the host is cut off.
-			//
-			// The key is always present from this hub version. That is what
-			// lets a new agent tell "this hub has a baseline and it is empty"
-			// from "this hub is too old to have one" - and keep its compiled-in
-			// permits in the second case rather than silently tightening the
-			// floor under a fleet whose hub never asked it to.
-			if res, err := s.store.ResolveBaseline(batch.EndpointID); err == nil {
-				// Trimmed to what the agent can hold. Over that it would read a
-				// subset anyway, and the reply would start crowding its response
-				// buffer; the readiness gate refuses to isolate a host whose
-				// baseline is being trimmed, so this never silently becomes the
-				// rule set someone thought they authored.
-				wire, _ := storage.CapBaselineWireRules(storage.BaselineWireRules(res.Rules))
-				resp["isolation_baseline"] = wire
-			} else {
-				resp["isolation_baseline"] = []storage.BaselineWireRule{}
-			}
-			if target, outdated := s.pendingAgentUpdate(batch.EndpointID, batch.DriverVersion); outdated {
-				if pkg, ok := updatePackageFor(batch.UpdateCapability, batch.OS); ok {
-					if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {
-						resp["agent_update"] = desc
-					}
-				}
-			}
-
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(resp)
@@ -2418,47 +2092,28 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 		var rawEvents []storage.Event
 		if err := json.Unmarshal(bodyBytes, &rawEvents); err == nil {
-			for i := range rawEvents {
-				rawEvents[i].TenantID = tenantID
-				if rawEvents[i].Timestamp.IsZero() {
-					rawEvents[i].Timestamp = time.Now().UTC()
-				}
-
-				geo := threatintel.ResolveGeoIP(rawEvents[i].DstIP)
-				if rawEvents[i].Country == "" || rawEvents[i].Country == "US" {
-					rawEvents[i].Country = geo.Country
-				}
-
-				if ioc, found := s.ti.CheckThreat(rawEvents[i].DstIP); found {
-					rawEvents[i].Action = "BLOCK"
-					log.Printf("[!] THREAT MATCH: Connection to C2 IP %s blocked (Source: %s, Threat: %s)",
-						rawEvents[i].DstIP, ioc.Source, ioc.ThreatType)
-				}
-
-				// Evaluate against anomaly detection & comms profiling
-				s.detector.Evaluate(rawEvents[i])
+			if err := s.ingestLegacyEvents(tenantID, rawEvents); err != nil {
+				log.Printf("[-] legacy telemetry ingestion failed: %v", err)
+				writeJSONError(w, http.StatusInternalServerError, "telemetry was not accepted: "+err.Error())
+				return
 			}
-			s.store.InsertEventsBatch(rawEvents)
-
-			qPeers, _ := s.store.GetQuarantinedPeers()
+			qPeers, err := s.store.GetQuarantinedPeers()
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "load quarantined peers: "+err.Error())
+				return
+			}
 			qIPs := make([]string, 0, len(qPeers))
-			for _, p := range qPeers {
-				if p.Active {
-					qIPs = append(qIPs, p.TargetIP)
+			for _, peer := range qPeers {
+				if peer.Active {
+					qIPs = append(qIPs, peer.TargetIP)
 				}
 			}
-
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":            "ok",
-				"quarantined_peers": qIPs,
-			})
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "quarantined_peers": qIPs})
 			return
 		}
 
-		http.Error(w, "invalid payload", http.StatusBadRequest)
-		return
 	}
 
 	endpointID := r.URL.Query().Get("endpoint_id")
@@ -2501,104 +2156,6 @@ func (s *Server) handleThreatIntelSync(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"syncing","message":"Threat intelligence synchronization initiated in background"}`))
-}
-
-func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
-	role := r.Header.Get("X-Role")
-	tenantID := "default"
-	if role == "tenant" {
-		tenantID = r.Header.Get("X-Tenant-ID")
-	}
-
-	if r.Method == http.MethodPost {
-		var req struct {
-			Name       string `json:"name"`
-			Type       string `json:"type"` // "ip", "cidr", "domain", "process", "port"
-			Value      string `json:"value"`
-			Port       uint16 `json:"port"`
-			Protocol   string `json:"protocol"`
-			Action     string `json:"action"` // "BLOCK", "PERMIT"
-			Scope      string `json:"scope"`
-			ScopeValue string `json:"scope_value"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if req.Action == "" {
-			req.Action = "BLOCK"
-		}
-		if req.Protocol == "" {
-			req.Protocol = "any"
-		}
-		if req.Scope == "" {
-			req.Scope = "all"
-		}
-
-		rule := storage.Rule{
-			ID:         uuid.New().String(),
-			TenantID:   tenantID,
-			Name:       req.Name,
-			Type:       req.Type,
-			Value:      req.Value,
-			Port:       req.Port,
-			Protocol:   req.Protocol,
-			Action:     req.Action,
-			Scope:      req.Scope,
-			ScopeValue: req.ScopeValue,
-			Active:     true,
-			CreatedAt:  time.Now().UTC(),
-		}
-
-		if err := s.store.CreateRule(rule); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Broadcast rule update to connected endpoints
-		cmd := CommandMessage{
-			Type: "UPDATE_CONFIG",
-			Payload: map[string]interface{}{
-				"rule": rule,
-			},
-		}
-		s.broadcastToTenant(callerTenantScope(r), cmd)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(rule)
-		return
-	}
-
-	if r.Method == http.MethodGet {
-		rules, err := s.store.ListRules(tenantID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rules)
-		return
-	}
-
-	if r.Method == http.MethodDelete {
-		ruleID := r.URL.Query().Get("id")
-		if ruleID == "" {
-			http.Error(w, "missing rule id", http.StatusBadRequest)
-			return
-		}
-		if err := s.store.DeleteRule(ruleID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"deleted","rule_id":"` + ruleID + `"}`))
-		return
-	}
-
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
@@ -2776,119 +2333,6 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handlePolicyGroups(w http.ResponseWriter, r *http.Request) {
-	role := r.Header.Get("X-Role")
-	tenantID := ""
-	if role == "tenant" {
-		tenantID = r.Header.Get("X-Tenant-ID")
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		groups, err := s.store.ListPolicyGroups(tenantID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(groups)
-
-	case http.MethodPost:
-		var g storage.PolicyGroup
-		if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if g.ID == "" {
-			g.ID = "grp-" + uuid.New().String()[:8]
-		}
-		if g.TenantID == "" {
-			g.TenantID = "default"
-		}
-		if role == "tenant" {
-			g.TenantID = r.Header.Get("X-Tenant-ID")
-		}
-		if g.Criteria == "" {
-			g.Criteria = "{}"
-		}
-		g.Active = true
-		g.CreatedAt = time.Now().UTC()
-
-		if err := s.store.CreatePolicyGroup(g); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Broadcast to matching connected endpoints
-		cmd := CommandMessage{
-			Type: "ADD_RULE",
-			Payload: map[string]interface{}{
-				"id":       g.ID,
-				"name":     g.Name,
-				"type":     g.RuleType,
-				"value":    g.RuleValue,
-				"port":     g.Port,
-				"protocol": g.Protocol,
-				"action":   g.Action,
-			},
-		}
-		s.broadcastToTenant(callerTenantScope(r), cmd)
-
-		_ = s.store.RecordAudit(storage.AuditEntry{
-			ID:        uuid.New().String(),
-			TenantID:  g.TenantID,
-			UserID:    r.Header.Get("X-User-ID"),
-			Username:  r.Header.Get("X-Username"),
-			Action:    "CREATE_POLICY_GROUP",
-			Resource:  g.ID,
-			Details:   fmt.Sprintf("Created group policy: %s (Action: %s)", g.Name, g.Action),
-			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
-			Timestamp: time.Now().UTC(),
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(g)
-
-	case http.MethodDelete:
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
-			return
-		}
-		if err := s.store.DeletePolicyGroup(id); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"deleted","id":"` + id + `"}`))
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleTogglePolicyGroup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		ID     string `json:"id"`
-		Active bool   `json:"active"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.store.TogglePolicyGroup(req.ID, req.Active); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "updated", "id": req.ID, "active": req.Active})
-}
-
 func (s *Server) handleGetAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2978,21 +2422,6 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		// Broadcast pinhole allowlist command to connected endpoints
-		cmd := CommandMessage{
-			Type: "ADD_RULE",
-			Payload: map[string]interface{}{
-				"id":       ex.ID,
-				"name":     ex.Name,
-				"type":     "ip",
-				"value":    ex.DstIPRange,
-				"port":     ex.Port,
-				"protocol": ex.Protocol,
-				"action":   "PERMIT",
-			},
-		}
-		s.broadcastToTenant(callerTenantScope(r), cmd)
 
 		_ = s.store.RecordAudit(storage.AuditEntry{
 			ID:        uuid.New().String(),
@@ -3248,7 +2677,7 @@ func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-/* 8b. UNIFIED ASSET GRAPH + FLOW INFERENCE HANDLERS */
+/* 8b. UNIFIED ASSET GRAPH + FLOW HANDLERS */
 
 // handleAssets returns the whole asset graph: one row per host, however many
 // sources know about it, with every source's claim attached so the console can
@@ -3356,32 +2785,6 @@ func (s *Server) handleAssetCorrect(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(updated)
-}
-
-func (s *Server) handleInferenceStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.inference.Status())
-}
-
-// handleInferenceRun triggers a pass out of schedule. Inference is scheduled
-// work; this exists so an operator who just onboarded a subnet does not wait
-// for the next tick.
-func (s *Server) handleInferenceRun(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	n, err := s.inference.RunOnce()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":         "completed",
-		"inferred_count": n,
-		"detail":         s.inference.Status(),
-	})
 }
 
 /* 9. REMOTE PUSH-DEPLOYMENT ENGINE HANDLERS */
@@ -3499,19 +2902,7 @@ func (s *Server) handleMeshQuarantine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast MESH_ISOLATE_PEER command to all connected agents
-	cmd := CommandMessage{
-		Type: "MESH_ISOLATE_PEER",
-		Payload: map[string]interface{}{
-			"target_ip":  req.TargetIP,
-			"target_mac": req.TargetMAC,
-			"action":     "BLOCK",
-			"reason":     req.Reason,
-		},
-	}
-	s.broadcastToTenant("", cmd)
-
-	s.audit(r, "MESH_QUARANTINE", req.TargetIP, "Broadcast a drop rule for "+req.TargetIP+" to every agent in the fleet: "+req.Reason)
+	s.audit(r, "MESH_QUARANTINE", req.TargetIP, "Recorded a fleet-wide drop rule for "+req.TargetIP+": "+req.Reason)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3542,16 +2933,7 @@ func (s *Server) handleMeshUnquarantine(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	cmd := CommandMessage{
-		Type: "MESH_ISOLATE_PEER",
-		Payload: map[string]interface{}{
-			"target_ip": req.TargetIP,
-			"action":    "ALLOW",
-		},
-	}
-	s.broadcastToTenant("", cmd)
-
-	s.audit(r, "MESH_UNQUARANTINE", req.TargetIP, "Withdrew the fleet-wide drop rule for "+req.TargetIP)
+	s.audit(r, "MESH_UNQUARANTINE", req.TargetIP, "Withdrew the recorded fleet-wide drop rule for "+req.TargetIP)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3568,115 +2950,6 @@ func (s *Server) handleMeshQuarantinedList(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(peers)
-}
-
-/* 11. AUTONOMOUS SECURITY COPILOT HANDLERS */
-
-func (s *Server) handleCopilotChat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req copilot.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
-		http.Error(w, "invalid request: message is required", http.StatusBadRequest)
-		return
-	}
-
-	resp, err := s.copilot.HandleChat(r.Context(), req.Message)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) handleCopilotInvestigate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		AlertID string `json:"alert_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AlertID == "" {
-		http.Error(w, "invalid request: alert_id is required", http.StatusBadRequest)
-		return
-	}
-
-	anomalies, err := s.store.ListAnomalyAlerts("default", 100)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	var targetAlert *storage.AnomalyAlert
-	for _, a := range anomalies {
-		if a.ID == req.AlertID {
-			targetAlert = &a
-			break
-		}
-	}
-	if targetAlert == nil {
-		http.Error(w, "alert not found", http.StatusNotFound)
-		return
-	}
-
-	report, err := s.copilot.Investigate(r.Context(), *targetAlert)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(report)
-}
-
-func (s *Server) handleCopilotConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		// Provider keys go out redacted. The route is admin-only, but a
-		// credential that never needs to leave the hub should not, and the
-		// console only ever needs to know whether one is set.
-		writeJSON(w, http.StatusOK, s.copilot.GetConfig().Redacted())
-		return
-	}
-	if r.Method == http.MethodPost {
-		var cfg copilot.Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		// A console that read the redacted form and posted it back must not
-		// erase the keys it was never shown.
-		cfg = cfg.MergeSecrets(s.copilot.GetConfig())
-		// The hub dials this URL from inside the management network and sends
-		// it whatever fleet context the question needed, so it is checked
-		// rather than taken: an absolute http(s) URL, nothing else.
-		if strings.TrimSpace(cfg.OllamaURL) != "" {
-			normalized, err := validateHTTPURL(cfg.OllamaURL)
-			if err != nil {
-				writeJSONError(w, http.StatusBadRequest, "ollama_url: "+err.Error())
-				return
-			}
-			cfg.OllamaURL = normalized
-		}
-		// A configuration that cannot be stored is not a configuration: it
-		// lasts until the next restart and then reverts without telling
-		// anyone. Report it rather than answering 200 with the new settings.
-		if err := s.copilot.UpdateConfig(cfg); err != nil {
-			log.Printf("[-] Copilot configuration could not be persisted: %v", err)
-			writeJSONError(w, http.StatusInternalServerError, "the configuration was applied to the running hub but could not be stored, and will revert at the next restart")
-			return
-		}
-		// Where the copilot sends fleet context is worth a record; the
-		// provider key it sends alongside it is not written here.
-		s.audit(r, "COPILOT_CONFIG", string(cfg.Provider), "Pointed the copilot at provider "+string(cfg.Provider)+" ("+cfg.OllamaURL+")")
-		writeJSON(w, http.StatusOK, s.copilot.GetConfig().Redacted())
-		return
-	}
-	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // Handler exposes the request table for tests.
@@ -3707,7 +2980,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/enrolment/script", s.authMiddleware(requireAdmin(s.handleEnrolmentScript)))
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
-	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
 	mux.HandleFunc("/download/", s.handleDownload)
 
 	// 3. Multi-Tenant REST API & Hierarchy
@@ -3717,6 +2989,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/operators", s.authMiddleware(requireAdmin(s.handleOperators)))
 	mux.HandleFunc("/api/v1/operators/remove", s.authMiddleware(requireAdmin(s.handleOperatorRemove)))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
+	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
 	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
@@ -3737,18 +3010,15 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
 
-	// 4. Dynamic Group Policy, Exclusions & Profiling API
+	// 4. Exclusions, traffic profiles, detection, analytics, and threat intel.
 	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
 	mux.HandleFunc("/api/v1/exclusions", s.authMiddleware(s.handleExclusions))
 	mux.HandleFunc("/api/v1/exclusions/toggle", s.authMiddleware(s.handleToggleExclusion))
 	mux.HandleFunc("/api/v1/anomalies", s.authMiddleware(s.handleAnomalies))
 	mux.HandleFunc("/api/v1/anomalies/acknowledge", s.authMiddleware(s.handleAcknowledgeAnomaly))
-	mux.HandleFunc("/api/v1/policy-groups", s.authMiddleware(s.handlePolicyGroups))
-	mux.HandleFunc("/api/v1/policy-groups/toggle", s.authMiddleware(s.handleTogglePolicyGroup))
 	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
-	mux.HandleFunc("/api/v1/rules", s.authMiddleware(s.handleRules))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
 	// 5. RBAC Auth & Audit Logging API
@@ -3773,11 +3043,9 @@ func (s *Server) routes() *http.ServeMux {
 	// 8. Visual Communications Topology Graph API
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
 
-	// 8b. Unified asset graph and flow inference
+	// 8b. Unified asset graph.
 	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
 	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(requireAdmin(s.handleAssetCorrect)))
-	mux.HandleFunc("/api/v1/inference/status", s.authMiddleware(requireAdmin(s.handleInferenceStatus)))
-	mux.HandleFunc("/api/v1/inference/run", s.authMiddleware(requireAdmin(s.handleInferenceRun)))
 
 	// 9. Remote Push-Deployment Engine API
 	// The push deployer opens an SSH session to an arbitrary address with
@@ -3789,21 +3057,13 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(requireAdmin(s.handleDeployerJobs)))
 
 	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
-	// Mesh quarantine is broadcast to the whole fleet and lands in a
+	// Mesh quarantine is persisted and returned in telemetry control state; it
+	// lands in a
 	// privileged firewall command on every agent that receives it. Nothing
 	// with that reach is driven by a credential that ships to endpoints.
 	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.handleMeshQuarantine)))
 	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.handleMeshUnquarantine)))
 	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
-
-	// 11. Autonomous Security Copilot API
-	// The copilot answers with fleet context and dials whatever backend its
-	// configuration names, carrying that context to it. Both halves are
-	// operator-only: the question surface because of what it discloses, the
-	// configuration because of where it can be pointed.
-	mux.HandleFunc("/api/v1/copilot/chat", s.authMiddleware(requireAdmin(s.handleCopilotChat)))
-	mux.HandleFunc("/api/v1/copilot/investigate", s.authMiddleware(requireAdmin(s.handleCopilotInvestigate)))
-	mux.HandleFunc("/api/v1/copilot/config", s.authMiddleware(requireAdmin(s.handleCopilotConfig)))
 
 	return mux
 }
