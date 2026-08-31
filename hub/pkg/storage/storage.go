@@ -555,6 +555,14 @@ func (s *Store) initSchema() error {
 	-- bandwidth timeline and both halves of the diurnal profile were each
 	-- re-reading the whole events table to answer a question about one day.
 	CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp);
+	-- These dimensions are read-only projections of the event table. Keeping
+	-- their measured columns in the index lets the analytics summary walk a
+	-- narrow covering index instead of the 574 MB production table. The tenant
+	-- column leads the companion indexes so scoped callers retain an indexed
+	-- prefix; the global callers still get a covering scan.
+	CREATE INDEX IF NOT EXISTS idx_events_analytics_country ON events(tenant_id, country, action, bytes_in, bytes_out);
+	CREATE INDEX IF NOT EXISTS idx_events_analytics_process ON events(tenant_id, process_path);
+	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity ON alerts(tenant_id, severity);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
