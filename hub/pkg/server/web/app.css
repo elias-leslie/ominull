@@ -2411,3 +2411,66 @@ p.pending {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ------------------------------------------------------ detection tuning */
+
+.tune-head {
+  font-family: var(--f-cond);
+  font-size: var(--t-3);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: var(--s-4) 0 0;
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.tune-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.tune-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 300px);
+  gap: var(--s-3);
+  align-items: start;
+}
+
+.tune-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--t-3);
+  color: var(--ink);
+}
+
+/* A row that is only a switch has no label column to balance. */
+.tune-row-wide {
+  grid-template-columns: 1fr;
+}
+
+.tune-ctl {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.tune-ctl input[type="number"],
+.tune-ctl input[type="text"],
+.tune-ctl textarea {
+  width: 100%;
+}
+
+.tune-ctl .form-row {
+  display: flex;
+  gap: var(--s-2);
+}
+
+@media (max-width: 640px) {
+  .tune-row {
+    grid-template-columns: 1fr;
+  }
+}

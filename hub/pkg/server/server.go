@@ -3577,6 +3577,11 @@ func (s *Server) routes() *http.ServeMux {
 	}
 
 	// 1. Static Bootstrap & Binary Downloads
+	// Reading the thresholds is open to any authenticated operator - an analyst
+	// looking at an alert has to be able to see the rule that produced it - and
+	// the handler itself refuses a write from anyone but an administrator.
+	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
+
 	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
 	mux.HandleFunc("/api/v1/enrolment/script", s.authMiddleware(requireAdmin(s.handleEnrolmentScript)))
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)

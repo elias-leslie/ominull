@@ -98,17 +98,21 @@ func TestDetectorEngine(t *testing.T) {
 		ProcessID:   999,
 	})
 
-	// 5. Test C2 Beaconing Detection (4 periodic connections with fixed ~2s interval)
-	baseTime := time.Now().UTC()
-	for i := 0; i < 5; i++ {
+	// 5. C2 beaconing. Twenty check-ins a minute apart, each carrying about the
+	// same payload, over twenty minutes. Five connections two seconds apart used
+	// to be enough, which is why a freshly installed workstation running nothing
+	// but its own operating system reported command-and-control traffic.
+	baseTime := time.Now().UTC().Add(-25 * time.Minute)
+	for i := 0; i < 20; i++ {
 		engine.Evaluate(storage.Event{
 			TenantID:    "default",
 			EndpointID:  "test-workstation-05",
-			Timestamp:   baseTime.Add(time.Duration(i*2) * time.Second),
+			Timestamp:   baseTime.Add(time.Duration(i) * 60 * time.Second),
 			Action:      "PERMIT",
 			Direction:   "OUTBOUND",
 			DstIP:       "194.26.29.114",
 			DstPort:     8443,
+			BytesOut:    int64(512 + i%3),
 			ProcessPath: "/usr/bin/python3",
 			ProcessID:   4444,
 		})

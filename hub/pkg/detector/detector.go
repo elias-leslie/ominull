@@ -43,59 +43,6 @@ func (b *bandwidthStats) update(val float64) (mean float64, stddev float64, z fl
 	return b.mean, stddev, z
 }
 
-type beaconWindow struct {
-	timestamps []time.Time
-}
-
-func (bw *beaconWindow) record(t time.Time) (avgInterval float64, jitter float64, count int, isBeacon bool) {
-	// Keep last 8 timestamps
-	bw.timestamps = append(bw.timestamps, t)
-	if len(bw.timestamps) > 8 {
-		bw.timestamps = bw.timestamps[len(bw.timestamps)-8:]
-	}
-
-	count = len(bw.timestamps)
-	if count < 4 {
-		return 0, 0, count, false
-	}
-
-	// Calculate inter-arrival intervals
-	var deltas []float64
-	var sum float64
-	for i := 1; i < count; i++ {
-		d := bw.timestamps[i].Sub(bw.timestamps[i-1]).Seconds()
-		if d < 0.1 {
-			continue // Skip immediate duplicate bursts
-		}
-		deltas = append(deltas, d)
-		sum += d
-	}
-
-	if len(deltas) < 3 {
-		return 0, 0, count, false
-	}
-
-	avgInterval = sum / float64(len(deltas))
-	if avgInterval < 1.0 || avgInterval > 300.0 {
-		return avgInterval, 0, count, false
-	}
-
-	// Calculate standard deviation of intervals (jitter)
-	var varSum float64
-	for _, d := range deltas {
-		diff := d - avgInterval
-		varSum += diff * diff
-	}
-	jitter = math.Sqrt(varSum / float64(len(deltas)))
-
-	// Beacon criteria: mean interval between 1s and 120s with low jitter (stddev < 1.5s or jitter < 15% of interval)
-	if jitter <= 1.5 || (avgInterval > 5.0 && jitter/avgInterval < 0.15) {
-		isBeacon = true
-	}
-
-	return avgInterval, jitter, count, isBeacon
-}
-
 type Engine struct {
 	store          *storage.Store
 	onAutoIsolate  IsolateFunc
@@ -106,7 +53,56 @@ type Engine struct {
 	beaconTracker  map[string]*beaconWindow        // endpoint:dstIP:process -> beacon window
 	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
 	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
+	tuning         storage.DetectionTuning
+	tuningAt       time.Time
 	cancel         context.CancelFunc
+}
+
+// tuningCacheTTL keeps the detector off the database on every packet without
+// making an operator wait for a restart to see their change take effect.
+const tuningCacheTTL = 15 * time.Second
+
+// settings returns the current tuning, re-reading it at most every few seconds.
+func (e *Engine) settings() storage.DetectionTuning {
+	e.mu.Lock()
+	if time.Since(e.tuningAt) < tuningCacheTTL && e.tuningAt.After(time.Time{}) {
+		t := e.tuning
+		e.mu.Unlock()
+		return t
+	}
+	e.mu.Unlock()
+
+	t := e.store.GetDetectionTuning()
+
+	e.mu.Lock()
+	e.tuning = t
+	e.tuningAt = time.Now()
+	e.mu.Unlock()
+	return t
+}
+
+// InvalidateTuning drops the cache so a save in the console is visible at once.
+func (e *Engine) InvalidateTuning() {
+	e.mu.Lock()
+	e.tuningAt = time.Time{}
+	e.mu.Unlock()
+}
+
+// warmingUp reports whether an endpoint is too new to be judged. Every one of a
+// freshly installed host's ordinary conversations is a first-seen destination,
+// and its operating system's keepalives are the most regular traffic it will
+// ever produce. Holding behavioural detections for a day is the difference
+// between a console worth reading and one nobody opens.
+func warmingUp(ep storage.Endpoint, cfg storage.DetectionTuning, now time.Time) (bool, time.Duration) {
+	if cfg.WarmupHours <= 0 || ep.CreatedAt.IsZero() {
+		return false, 0
+	}
+	window := time.Duration(cfg.WarmupHours) * time.Hour
+	age := now.Sub(ep.CreatedAt)
+	if age >= window {
+		return false, 0
+	}
+	return true, window - age
 }
 
 type portAccess struct {
@@ -278,10 +274,20 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		}
 	}
 
+	// The behavioural detectors below are the ones an operator tunes. They read
+	// one cached settings row rather than the numbers that used to be compiled
+	// into them.
+	cfg := e.settings()
+	warming, warmLeft := warmingUp(endpoint, cfg, now)
+
 	// 2. Diurnal Time-of-Day Hourly Behavioral Profiling & Off-Hours Detection
-	hr := now.Hour()
-	// Strict off-hours window (02:00 to 05:00 UTC)
-	isOffHours := hr >= 2 && hr <= 5
+	//
+	// The window used to be hours 2 to 5 UTC with no zone anywhere near it,
+	// which on this side of the Atlantic is late evening - so ordinary evening
+	// use of a workstation was reported as off-hours activity, over and over.
+	// It is now a window in a named zone, and it defaults to the operator's own.
+	hr := now.In(cfg.Location()).Hour()
+	isOffHours := cfg.IsOffHours(now)
 	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
 	isInteractiveShell := strings.HasSuffix(procLower, "powershell.exe") ||
@@ -303,19 +309,23 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		strings.HasSuffix(procLower, "python3") ||
 		strings.HasSuffix(procLower, "python.exe")
 
-	isTrustedSys := isTrustedSystemProcess(procLower)
-	isTrustedDst := isTrustedCloud(geo)
+	// Both lists are the operator's, held in the database and shown in the
+	// console, not a table compiled into this file.
+	isTrustedSys := cfg.IsQuietProcess(strings.ToLower(procName))
+	isTrustedDst := cfg.IsQuietOrg(geo.Org)
 
-	// Off-hours activity triggers ONLY for interactive shells / script interpreters, NEVER for standard OS system daemons
-	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
-		alertKey := fmt.Sprintf("offhours:%s:%s", ev.EndpointID, ev.DstIP)
-		if !e.shouldSuppressAlert(alertKey, 120*time.Second) {
+	// Off-hours activity triggers ONLY for interactive shells / script
+	// interpreters, NEVER for standard OS system daemons.
+	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !warming &&
+		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
+		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
+		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			alert := storage.Alert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
-				Title:       fmt.Sprintf("Off-Hours Workstation Activity Detected (%02d:00 UTC)", hr),
+				Title:       fmt.Sprintf("Off-Hours Workstation Activity Detected (%02d:00 %s)", hr, cfg.Location()),
 				Description: fmt.Sprintf("Interactive shell %s initiated external connection to %s:%d (%s) during off-hours baseline on %s.", procName, ev.DstIP, ev.DstPort, geo.CountryName, ev.EndpointID),
 				Severity:    "HIGH",
 				Mitigated:   false,
@@ -330,7 +340,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				Severity:    "HIGH",
 				Title:       alert.Title,
 				Description: alert.Description,
-				Details:     fmt.Sprintf("Time: %02d:%02d UTC | Expected: Idle Workstation Baseline | Process: %s | GeoIP: %s (%s)", hr, now.Minute(), ev.ProcessPath, geo.Country, geo.Org),
+				Details:     fmt.Sprintf("Time: %02d:%02d %s | Off-hours window: %s | Process: %s | GeoIP: %s (%s)", hr, now.In(cfg.Location()).Minute(), cfg.Location(), cfg.OffHoursLabel(), ev.ProcessPath, geo.Country, geo.Org),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
@@ -355,7 +365,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		// Trigger anomaly if Z-score > 3.5 and outbound bytes > 50,000, or huge burst (>10MB)
 		if (zScore > 3.5 && ev.BytesOut > 50000 && stats.count >= 4) || (ev.BytesOut > 10*1024*1024) {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
-			if !e.shouldSuppressAlert(alertKey, 60*time.Second) {
+			if cfg.BandwidthOn && !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -387,9 +397,14 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		}
 	}
 
-	// 4. Statistical Outlier: C2 Beaconing Detection (Periodic Interval + Low Jitter)
-	// Exclude trusted OS services (e.g. apsd, svchost, ntp) and trusted cloud providers
-	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && !isTrustedSys && !(isTrustedDst && ev.DstPort == 443) {
+	// 4. Statistical Outlier: C2 Beaconing Detection
+	//
+	// The scoring lives in beacon.go. What matters here is that a beacon is now
+	// a conversation with a long, uniform history rather than four packets in a
+	// row, and that whatever the detector decided travels into the alert so the
+	// operator can disagree with it.
+	if cfg.BeaconOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
+		!isTrustedSys && !(isTrustedDst && ev.DstPort == 443) {
 		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
 		e.mu.Lock()
 		bWin, exists := e.beaconTracker[beaconKey]
@@ -397,21 +412,31 @@ func (e *Engine) Evaluate(ev storage.Event) {
 			bWin = &beaconWindow{}
 			e.beaconTracker[beaconKey] = bWin
 		}
-		avgInterval, jitter, pulseCount, isBeacon := bWin.record(now)
+		bev, isBeacon := bWin.record(now, ev.BytesOut, cfg)
 		e.mu.Unlock()
 
-		if isBeacon {
-			alertKey := fmt.Sprintf("beacon:%s:%s", ev.EndpointID, ev.DstIP)
-			if !e.shouldSuppressAlert(alertKey, 300*time.Second) {
+		if isBeacon && !warming {
+			alertKey := fmt.Sprintf("beacon:%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
+			if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BeaconCooldownMin)*time.Minute) {
+				// The severity follows the evidence. A conversation that only
+				// just cleared the bar is worth looking at; one that is
+				// metronomic to within a few percent for an hour is not the
+				// same finding and should not wear the same word.
+				severity := "MEDIUM"
+				if bev.Score >= 0.90 && bev.SpanMinutes >= 30 {
+					severity = "HIGH"
+				}
 				alert := storage.Alert{
-					ID:          uuid.New().String(),
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Timestamp:   now,
-					Title:       fmt.Sprintf("Periodic C2 Beaconing Detected (~%.1fs Interval)", avgInterval),
-					Description: fmt.Sprintf("Process %s established %d periodic connections to %s:%d with fixed interval (~%.1fs) and low jitter (±%.2fs).", procName, pulseCount, ev.DstIP, ev.DstPort, avgInterval, jitter),
-					Severity:    "HIGH",
-					Mitigated:   false,
+					ID:         uuid.New().String(),
+					TenantID:   ev.TenantID,
+					EndpointID: ev.EndpointID,
+					Timestamp:  now,
+					Title:      fmt.Sprintf("Periodic beaconing to %s (every ~%.0fs)", ev.DstIP, bev.MeanInterval),
+					Description: fmt.Sprintf(
+						"%s has connected to %s:%d %d times over %.0f minutes at a near-constant interval of %.1fs (%.0f%% jitter), with payloads varying by %.0f%%.",
+						procName, ev.DstIP, ev.DstPort, bev.Samples, bev.SpanMinutes, bev.MeanInterval, bev.CoefVariation*100, bev.SizeVariation*100),
+					Severity:  severity,
+					Mitigated: false,
 				}
 				_ = e.store.CreateAlert(alert)
 				_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
@@ -420,24 +445,29 @@ func (e *Engine) Evaluate(ev storage.Event) {
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "C2_BEACONING",
-					Severity:    "HIGH",
+					Severity:    severity,
 					Title:       alert.Title,
 					Description: alert.Description,
-					Details:     fmt.Sprintf("Interval: %.2fs | Jitter: ±%.2fs | Pulses Observed: %d | GeoIP: %s (%s)", avgInterval, jitter, pulseCount, geo.Country, geo.Org),
+					Details: fmt.Sprintf("%s | threshold %.2f | GeoIP: %s (%s)",
+						bev.Summary(), cfg.BeaconScore, geo.Country, geo.Org),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %s:%d (~%.1fs, jitter ±%.2fs)", alert.Title, ev.EndpointID, ev.DstIP, ev.DstPort, avgInterval, jitter)
+				log.Printf("[!] ANOMALY ALERT [%s]: beaconing %s -> %s:%d (%s)", severity, ev.EndpointID, ev.DstIP, ev.DstPort, bev.Summary())
 			}
+		} else if isBeacon && warming {
+			log.Printf("[*] Held a beacon finding on %s -> %s: the endpoint is %s into its %dh learning period (%s)",
+				ev.EndpointID, ev.DstIP, (time.Duration(cfg.WarmupHours)*time.Hour - warmLeft).Round(time.Minute), cfg.WarmupHours, bev.Summary())
 		}
 	}
 
 	// 5. Statistical Outlier: Rare First-Seen External Destination (Ignoring major CDNs/Clouds)
-	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && !isTrustedDst && !isTrustedSys && e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP) {
+	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
+		!isTrustedDst && !isTrustedSys && e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP) {
 		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, ev.DstIP)
-		if !e.shouldSuppressAlert(alertKey, 300*time.Second) {
+		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
@@ -697,64 +727,4 @@ func isPrivateIP(ipStr string) bool {
 		return false
 	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
-}
-
-func isTrustedSystemProcess(procLower string) bool {
-	base := filepath.Base(procLower)
-	trusted := map[string]bool{
-		"ntoskrnl.exe":                true,
-		"svchost.exe":                 true,
-		"system":                      true,
-		"lsass.exe":                   true,
-		"services.exe":                true,
-		"spoolsv.exe":                 true,
-		"dwm.exe":                     true,
-		"explorer.exe":                true,
-		"searchhost.exe":              true,
-		"startmenuexperiencehost.exe": true,
-		"tiworker.exe":                true,
-		"trustedinstaller.exe":        true,
-		"msmpeng.exe":                 true,
-		"windefend.exe":               true,
-		"apsd":                        true,
-		"mdnsresponder":               true,
-		"softwareupdated":             true,
-		"trustd":                      true,
-		"launchd":                     true,
-		"cloudd":                      true,
-		"bird":                        true,
-		"storedownloadd":              true,
-		"nsurlsessiond":               true,
-		"kernel_task":                 true,
-		"coreauthd":                   true,
-		"remotemanagementd":           true,
-		"cupsd":                       true,
-		"systemd":                     true,
-		"systemd-resolved":            true,
-		"systemd-timesyncd":           true,
-		"chronyd":                     true,
-		"ntpd":                        true,
-		"cloudflared":                 true,
-		"sshd":                        true,
-		"dbus-daemon":                 true,
-		"snapd":                       true,
-		"packagekitd":                 true,
-		"apt-check":                   true,
-	}
-	return trusted[base]
-}
-
-func isTrustedCloud(geo threatintel.GeoRecord) bool {
-	orgLower := strings.ToLower(geo.Org + " " + geo.CountryName)
-	if strings.Contains(orgLower, "apple") ||
-		strings.Contains(orgLower, "microsoft") ||
-		strings.Contains(orgLower, "google") ||
-		strings.Contains(orgLower, "cloudflare") ||
-		strings.Contains(orgLower, "amazon") ||
-		strings.Contains(orgLower, "fastly") ||
-		strings.Contains(orgLower, "akamai") ||
-		strings.Contains(orgLower, "github") {
-		return true
-	}
-	return false
 }

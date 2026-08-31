@@ -298,6 +298,7 @@
     exclusions: [],
     iocs: [],
     baselinePolicies: [],
+    tuning: null,
     baselineServices: [],
     // Keyed by endpoint id. Resolved on demand rather than for the whole fleet:
     // it is a per-host answer and only one host is ever on screen.
@@ -794,6 +795,7 @@
           resolve(demoBaselineFor(path));
           return;
         }
+        if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/deployer/status") { resolve(demoJobStatus(path)); return; }
         var hit = DEMO_CACHE[base];
@@ -810,6 +812,36 @@
      them on a clock: the progress bar fills, the job log grows, and the failure
      path is reachable without a host to fail against. */
   var DEMO_JOBS = {};
+
+  /* Demo mode ships one changed threshold, so the "differs from the shipped
+     values" line and the restore button are both reachable. */
+  var DEMO_TUNING = { beacon_score_threshold: 0.88, warmup_hours: 48 };
+
+  function demoTuning() {
+    var defaults = {
+      off_hours_start: 22, off_hours_end: 5, off_hours_zone: "Local", off_hours_enabled: true,
+      beacon_enabled: true, beacon_min_samples: 12, beacon_min_span_minutes: 10,
+      beacon_min_interval_seconds: 5, beacon_max_interval_seconds: 3600,
+      beacon_score_threshold: 0.8, beacon_cooldown_minutes: 30,
+      first_seen_enabled: true, first_seen_cooldown_minutes: 30,
+      bandwidth_enabled: true, bandwidth_cooldown_minutes: 5,
+      warmup_hours: 24,
+      quiet_processes: ["apsd", "launchd", "svchost.exe", "systemd-timesyncd", "ominull-agent"],
+      quiet_orgs: ["apple", "cloudflare", "microsoft"]
+    };
+    var t = {};
+    Object.keys(defaults).forEach(function (k) { t[k] = defaults[k]; });
+    if (DEMO_TUNING) {
+      Object.keys(DEMO_TUNING).forEach(function (k) { t[k] = DEMO_TUNING[k]; });
+      t.updated_by = "demo@example.invalid";
+      t.updated_at = new Date().toISOString();
+    }
+    return {
+      tuning: t, defaults: defaults,
+      zone: "Local", window: pad(t.off_hours_start, 2) + ":00-" + pad(t.off_hours_end, 2) + ":00 Local",
+      now: pad(new Date().getHours(), 2) + ":" + pad(new Date().getMinutes(), 2)
+    };
+  }
 
   function demoScanStatus(path) {
     var id = new URLSearchParams(path.split("?")[1] || "").get("id") || "";
@@ -962,6 +994,11 @@
       return { job_id: jid, status: "queued" };
     }
     if (base === "/api/v1/enrolment/script") return demoInstaller(body || {});
+    if (base === "/api/v1/detection/tuning") {
+      if (body) DEMO_TUNING = body;
+      else DEMO_TUNING = null;
+      return demoTuning();
+    }
     if (base === "/api/v1/endpoints/isolate") { setIso(body && body.endpoint_id, true); return { status: "isolated" }; }
     if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
     if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
@@ -3567,6 +3604,192 @@
     return card("Isolation baseline", body, actions);
   }
 
+  /* ---------------------------------------------------- detection tuning */
+
+  /* Every number the behavioural detectors run on, on the page rather than in
+     the binary. The reason this exists is a console full of alerts nobody could
+     argue with: a freshly installed workstation reported command-and-control
+     traffic, and an off-hours window written in UTC called an ordinary evening
+     suspicious. Neither was adjustable, and neither said what it had measured. */
+
+  /* A row with no label is a switch that speaks for itself, and giving it an
+     empty first column leaves a gap the eye reads as a missing word. */
+  function tuningRow(label, why, control) {
+    if (!label) return h("div", { cls: "tune-row tune-row-wide" }, h("div", { cls: "tune-ctl" }, control));
+    return h("div", { cls: "tune-row" },
+      h("div", { cls: "tune-label" },
+        h("span", { text: label }),
+        why ? h("span", { cls: "why", text: why }) : null),
+      h("div", { cls: "tune-ctl" }, control));
+  }
+
+  function numberField(value, min, max, step) {
+    return h("input", {
+      type: "number", value: String(value === undefined || value === null ? "" : value),
+      min: String(min), max: String(max), step: String(step || 1)
+    });
+  }
+
+  function toggleField(on, label) {
+    var box = h("input", { type: "checkbox" });
+    box.checked = !!on;
+    return { input: box, node: h("label", { cls: "field-check" }, box, h("span", { text: label })) };
+  }
+
+  /* A list of names, edited as text. A table of one-word rows would be more
+     ceremony than the content deserves. */
+  function listField(items, placeholder) {
+    return h("textarea", { rows: "3", placeholder: placeholder }, arrayOf(items).join(", "));
+  }
+
+  function parseList(text) {
+    return String(text || "").split(/[,\n]/).map(function (v) { return v.trim(); })
+      .filter(function (v) { return v.length > 0; });
+  }
+
+  function openTuningSheet() {
+    var t = (state.tuning && state.tuning.tuning) || {};
+    var d = (state.tuning && state.tuning.defaults) || {};
+
+    var beaconOn = toggleField(t.beacon_enabled, "Report periodic beaconing");
+    var score = numberField(t.beacon_score_threshold, 0.1, 1, 0.01);
+    var samples = numberField(t.beacon_min_samples, 6, 200, 1);
+    var span = numberField(t.beacon_min_span_minutes, 1, 1440, 1);
+    var loInt = numberField(t.beacon_min_interval_seconds, 1, 3600, 1);
+    var hiInt = numberField(t.beacon_max_interval_seconds, 10, 86400, 10);
+    var bCool = numberField(t.beacon_cooldown_minutes, 1, 1440, 1);
+
+    var ohOn = toggleField(t.off_hours_enabled, "Report off-hours workstation activity");
+    var ohStart = numberField(t.off_hours_start, 0, 23, 1);
+    var ohEnd = numberField(t.off_hours_end, 0, 23, 1);
+    var ohZone = h("input", { type: "text", value: t.off_hours_zone || "Local", placeholder: "Local, UTC, or America/New_York" });
+
+    var fsOn = toggleField(t.first_seen_enabled, "Report first-seen external destinations");
+    var fsCool = numberField(t.first_seen_cooldown_minutes, 1, 1440, 1);
+    var bwOn = toggleField(t.bandwidth_enabled, "Report bandwidth spikes");
+    var bwCool = numberField(t.bandwidth_cooldown_minutes, 1, 1440, 1);
+
+    var warmup = numberField(t.warmup_hours, 0, 720, 1);
+    var procs = listField(t.quiet_processes, "svchost.exe, apsd, systemd-timesyncd");
+    var orgs = listField(t.quiet_orgs, "apple, microsoft, cloudflare");
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored." }),
+
+      h("h4", { cls: "tune-head", text: "Periodic beaconing" }),
+      h("div", { cls: "tune-list" },
+        tuningRow("", "", beaconOn.node),
+        tuningRow("Confidence to report", "0 to 1. Combines how regular the interval is, how little it drifts, and how uniform the payload stays. Shipped default " + (d.beacon_score_threshold || "0.8") + ".", score),
+        tuningRow("Check-ins required", "Below this there is not enough of a pattern to call one. Shipped default " + (d.beacon_min_samples || 12) + ".", samples),
+        tuningRow("Observed for at least", "Minutes. Regular for ninety seconds is a burst, not a beacon.", span),
+        tuningRow("Interval band", "Seconds. Conversations faster or slower than this are not considered.", h("div", { cls: "form-row" }, loInt, hiInt)),
+        tuningRow("Repeat at most every", "Minutes between alerts about the same conversation.", bCool)),
+
+      h("h4", { cls: "tune-head", text: "Off-hours activity" }),
+      h("div", { cls: "tune-list" },
+        tuningRow("", "", ohOn.node),
+        tuningRow("Window", "Start and end hour. Wraps midnight when the start is later than the end.", h("div", { cls: "form-row" }, ohStart, ohEnd)),
+        tuningRow("Time zone", "The hub's own zone unless you name one. Written as UTC, this window called an ordinary evening suspicious.", ohZone)),
+
+      h("h4", { cls: "tune-head", text: "Other detectors" }),
+      h("div", { cls: "tune-list" },
+        tuningRow("", "", fsOn.node),
+        tuningRow("Repeat at most every", "Minutes, per destination.", fsCool),
+        tuningRow("", "", bwOn.node),
+        tuningRow("Repeat at most every", "Minutes, per process.", bwCool)),
+
+      h("h4", { cls: "tune-head", text: "New endpoints" }),
+      h("div", { cls: "tune-list" },
+        tuningRow("Learning period", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is a first-seen destination. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
+
+      h("h4", { cls: "tune-head", text: "Known-quiet" }),
+      h("div", { cls: "tune-list" },
+        tuningRow("Processes", "Matched on the program name. These are the operating system's own components, whose job is to talk to their vendor on a timer.", procs),
+        tuningRow("Networks", "Matched against the owner of the destination address.", orgs)));
+
+    var save = function () {
+      var payload = {
+        beacon_enabled: beaconOn.input.checked,
+        beacon_score_threshold: parseFloat(score.value) || 0,
+        beacon_min_samples: parseInt(samples.value, 10) || 0,
+        beacon_min_span_minutes: parseInt(span.value, 10) || 0,
+        beacon_min_interval_seconds: parseInt(loInt.value, 10) || 0,
+        beacon_max_interval_seconds: parseInt(hiInt.value, 10) || 0,
+        beacon_cooldown_minutes: parseInt(bCool.value, 10) || 0,
+        off_hours_enabled: ohOn.input.checked,
+        off_hours_start: parseInt(ohStart.value, 10) || 0,
+        off_hours_end: parseInt(ohEnd.value, 10) || 0,
+        off_hours_zone: ohZone.value.trim() || "Local",
+        first_seen_enabled: fsOn.input.checked,
+        first_seen_cooldown_minutes: parseInt(fsCool.value, 10) || 0,
+        bandwidth_enabled: bwOn.input.checked,
+        bandwidth_cooldown_minutes: parseInt(bwCool.value, 10) || 0,
+        warmup_hours: parseInt(warmup.value, 10) || 0,
+        quiet_processes: parseList(procs.value),
+        quiet_orgs: parseList(orgs.value)
+      };
+      request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
+        state.tuning = res;
+        toast("Detection tuning saved", "ok");
+        closeSheet();
+        renderBody();
+      }).catch(function (e) { toast("Could not save: " + e.message, "crit"); });
+    };
+
+    var restore = function () {
+      request("/api/v1/detection/tuning", "DELETE").then(function (res) {
+        state.tuning = res;
+        toast("Restored the shipped thresholds", "ok");
+        closeSheet();
+        renderBody();
+      }).catch(function (e) { toast("Could not restore: " + e.message, "crit"); });
+    };
+
+    openSheet("Detection tuning", body, [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      IS_ADMIN ? h("button", { cls: "btn", type: "button", text: "Restore shipped values", on: { click: restore } }) : null,
+      IS_ADMIN ? h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: save } }) : null
+    ].filter(Boolean));
+  }
+
+  function tuningCard() {
+    var wrap = state.tuning || {};
+    var t = wrap.tuning || {};
+    var d = wrap.defaults || {};
+    var changed = [];
+    Object.keys(d).forEach(function (k) {
+      if (k === "updated_at" || k === "updated_by") return;
+      var a = JSON.stringify(t[k]), b = JSON.stringify(d[k]);
+      if (a !== undefined && a !== b) changed.push(k);
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Beaconing" }),
+        h("dd", {}, h("b", { text: t.beacon_enabled === false ? "Off" : "On" }),
+          h("span", { cls: "dim-3", text: t.beacon_enabled === false ? "" : "  · " + (t.beacon_min_samples || "—") + " check-ins over " + (t.beacon_min_span_minutes || "—") + " min, confidence " + (t.beacon_score_threshold || "—") })),
+        h("dt", { text: "Off-hours" }),
+        h("dd", {}, h("b", { text: t.off_hours_enabled === false ? "Off" : "On" }),
+          h("span", { cls: "dim-3", text: t.off_hours_enabled === false ? "" : "  · " + (wrap.window || "") })),
+        h("dt", { text: "First-seen" }), h("dd", { text: t.first_seen_enabled === false ? "Off" : "On" }),
+        h("dt", { text: "Bandwidth" }), h("dd", { text: t.bandwidth_enabled === false ? "Off" : "On" }),
+        h("dt", { text: "Learning period" }),
+        h("dd", { text: t.warmup_hours ? t.warmup_hours + "h after an endpoint first reports" : "None — hosts are judged from their first packet" }),
+        h("dt", { text: "Known-quiet" }),
+        h("dd", { text: arrayOf(t.quiet_processes).length + " process(es), " + arrayOf(t.quiet_orgs).length + " network(s)" }),
+        h("dt", { text: "Hub time" }), h("dd", { cls: "ip", text: wrap.now || "—" })),
+      changed.length
+        ? h("p", { cls: "note note-warn", text: changed.length + " setting(s) differ from the shipped values" + (t.updated_by ? ", last changed by " + t.updated_by : "") })
+        : h("p", { cls: "pending", text: "Running the shipped values." }));
+
+    return card("Detection tuning", body, [
+      h("button", {
+        cls: "btn", type: "button", text: IS_ADMIN ? "Adjust" : "View",
+        on: { click: openTuningSheet }
+      })
+    ]);
+  }
+
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -3644,6 +3867,7 @@
 
     view.appendChild(h("div", { cls: "pad stack" },
       baselineCard(),
+      tuningCard(),
       card("Policy groups", groups),
       card("Exclusions", excl),
       card("Threat indicators", iocs, [
@@ -4696,6 +4920,7 @@
         state.baselinePolicies = arrayOf(d && d.policies);
         state.baselineServices = arrayOf(d && d.services);
       }));
+      jobs.push(request("/api/v1/detection/tuning").then(function (d) { state.tuning = d || null; }));
       jobs.push(request("/api/v1/policy-groups").then(function (d) { state.policyGroups = arrayOf(d); }));
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));

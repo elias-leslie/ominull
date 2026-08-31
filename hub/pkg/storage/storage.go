@@ -655,6 +655,9 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
+	if err := s.initDetectionTuningSchema(); err != nil {
+		return err
+	}
 	return s.initBaselineSchema()
 }
 
