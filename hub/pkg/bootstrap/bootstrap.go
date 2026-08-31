@@ -293,9 +293,9 @@ __CF_CONFIG__
 		"ENDPOINT_ID":   endpoint,
 		"VERSION":       powershellQuote(o.AgentVersion),
 		"CF_ID_PRESENT": cfPresent,
-	 "CF_ID":         cfID,
-	 "CF_SECRET":     cfSecret,
-	 "CF_CONFIG":     cfBlock,
+		"CF_ID":         cfID,
+		"CF_SECRET":     cfSecret,
+		"CF_CONFIG":     cfBlock,
 		"PUBLIC_KEY_X":  "71CpMPEGtyUpx3ZSuvcf+YMiwM1F0e6k7D05y7jLxXQ=",
 		"PUBLIC_KEY_Y":  "G5ZN3e2YqwR9zDSZaO2lG7ZpUNos8/7ucExts7SfUwc=",
 	})
