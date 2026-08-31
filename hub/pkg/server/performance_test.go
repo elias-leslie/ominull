@@ -54,6 +54,24 @@ func TestTelemetryPerformanceFeedback(t *testing.T) {
 	if got := countPerformanceEvents(store); got != 400000+14*64 {
 		t.Fatalf("persisted event count=%d, want %d", got, 400000+14*64)
 	}
+	coldAnalyticsStarted := time.Now()
+	if _, err := store.GetAnalyticsSummary(""); err != nil {
+		t.Fatalf("cold analytics summary: %v", err)
+	}
+	coldAnalytics := time.Since(coldAnalyticsStarted)
+	if coldAnalytics > time.Second {
+		t.Fatalf("cold analytics summary=%s exceeds 1s budget", coldAnalytics)
+	}
+	t.Logf("cold analytics summary=%s", coldAnalytics)
+	coldTopologyStarted := time.Now()
+	if _, err := store.GetTopologyGraph(24 * time.Hour); err != nil {
+		t.Fatalf("cold topology graph: %v", err)
+	}
+	coldTopology := time.Since(coldTopologyStarted)
+	if coldTopology > time.Second {
+		t.Fatalf("cold topology graph=%s exceeds 1s budget", coldTopology)
+	}
+	t.Logf("cold topology graph=%s", coldTopology)
 	t.Logf("telemetry POST p95=%s p99=%s samples=%s", p95, latencies[len(latencies)-1], durations(latencies))
 }
 

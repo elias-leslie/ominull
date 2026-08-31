@@ -563,6 +563,12 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_country ON events(tenant_id, country, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_process ON events(tenant_id, process_path);
 	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity ON alerts(tenant_id, severity);
+	-- The operator dashboard has a deliberate all-tenant view. A second
+	-- covering order avoids making that view scan a tenant-prefixed index and
+	-- keeps the cold global projection below its latency budget.
+	CREATE INDEX IF NOT EXISTS idx_events_analytics_country_global ON events(country, action, bytes_in, bytes_out);
+	CREATE INDEX IF NOT EXISTS idx_events_analytics_process_global ON events(process_path);
+	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity_global ON alerts(severity);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
