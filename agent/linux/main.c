@@ -369,6 +369,48 @@ static void SetConfigValue(LINUX_AGENT_CONFIG* config, const char* key, const ch
     else if (strcmp(key, "allow_plaintext") == 0) config->allow_plaintext = strcmp(value, "1") == 0;
 }
 
+/* Releases before the native package wrote one shell-style OMINULL_ARGS line
+ * and put it in the systemd environment. The package-owned unit deliberately
+ * does not evaluate that line, but a package upgrade must still be able to
+ * start an enrolled endpoint. Parse the bounded, whitespace-delimited options
+ * emitted by that bootstrap without invoking a shell or placing the key in a
+ * process argument vector. New installs use the key/value format above. */
+static void LoadLegacyArguments(LINUX_AGENT_CONFIG* config, const char* raw) {
+    char args[2048];
+    int written = snprintf(args, sizeof(args), "%s", raw);
+    if (written < 0 || (size_t)written >= sizeof(args)) return;
+
+    char* save = NULL;
+    char* option = strtok_r(args, " \t", &save);
+    while (option) {
+        if (strcmp(option, "--allow-plaintext") == 0) {
+            config->allow_plaintext = true;
+            option = strtok_r(NULL, " \t", &save);
+            continue;
+        }
+        if (strcmp(option, "--no-auto-update") == 0) {
+            config->auto_update = false;
+            option = strtok_r(NULL, " \t", &save);
+            continue;
+        }
+
+        char* value = strtok_r(NULL, " \t", &save);
+        if (!value) break;
+        if (strcmp(option, "--hub") == 0) SetConfigValue(config, "hub_url", value);
+        else if (strcmp(option, "--key") == 0) snprintf(config->api_key, sizeof(config->api_key), "%s", value);
+        else if (strcmp(option, "--key-file") == 0) SetConfigValue(config, "key_path", value);
+        else if (strcmp(option, "--id") == 0) SetConfigValue(config, "endpoint_id", value);
+        else if (strcmp(option, "--role") == 0) SetConfigValue(config, "role_tag", value);
+        else if (strcmp(option, "--location") == 0) SetConfigValue(config, "location_id", value);
+        else if (strcmp(option, "--ca") == 0) SetConfigValue(config, "ca_path", value);
+        else if (strcmp(option, "--client-cert") == 0) SetConfigValue(config, "client_cert_path", value);
+        else if (strcmp(option, "--client-key") == 0) SetConfigValue(config, "client_key_path", value);
+        else if (strcmp(option, "--cf-id") == 0) SetConfigValue(config, "cf_client_id", value);
+        else if (strcmp(option, "--cf-secret") == 0) SetConfigValue(config, "cf_client_secret", value);
+        option = strtok_r(NULL, " \t", &save);
+    }
+}
+
 static bool LoadConfigFile(LINUX_AGENT_CONFIG* config, const char* path) {
     FILE* file = fopen(path, "rb");
     if (!file) return false;
@@ -379,7 +421,8 @@ static bool LoadConfigFile(LINUX_AGENT_CONFIG* config, const char* path) {
         *value++ = '\0';
         value[strcspn(value, "\r\n")] = '\0';
         if (line[0] == '#') continue;
-        SetConfigValue(config, line, value);
+        if (strcmp(line, "OMINULL_ARGS") == 0) LoadLegacyArguments(config, value);
+        else SetConfigValue(config, line, value);
     }
     fclose(file);
     return true;

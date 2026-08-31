@@ -127,7 +127,45 @@ static void make_fixture(void) {
     }
 }
 
+static void test_legacy_config(void) {
+    char path[] = "/tmp/ominull-linux-config.XXXXXX";
+    int fd = mkstemp(path);
+    check(fd >= 0, "could not create legacy config fixture");
+    if (fd < 0) return;
+
+    FILE* config_file = fdopen(fd, "w");
+    check(config_file != NULL, "could not open legacy config fixture");
+    if (!config_file) {
+        close(fd);
+        unlink(path);
+        return;
+    }
+    fputs("OMINULL_ARGS=--hub https://hub.example.test --key-file /etc/ominull/agent.key "
+          "--role workstation --location loc-home --id linux-target --ca /etc/ominull/ca.crt "
+          "--client-cert /etc/ominull/client.crt --client-key /etc/ominull/client.key "
+          "--cf-id client-id --cf-secret client-secret\n", config_file);
+    fclose(config_file);
+
+    LINUX_AGENT_CONFIG config;
+    memset(&config, 0, sizeof(config));
+    check(LoadConfigFile(&config, path), "legacy config fixture was not readable");
+    check(strcmp(config.hub_url, "https://hub.example.test") == 0,
+          "legacy config did not preserve hub URL");
+    check(strcmp(config.key_path, "/etc/ominull/agent.key") == 0,
+          "legacy config did not preserve key path");
+    check(strcmp(config.endpoint_id, "linux-target") == 0,
+          "legacy config did not preserve endpoint ID");
+    check(strcmp(config.ca_path, "/etc/ominull/ca.crt") == 0,
+          "legacy config did not preserve CA path");
+    check(strcmp(config.client_key_path, "/etc/ominull/client.key") == 0,
+          "legacy config did not preserve client key path");
+    check(strcmp(config.cf_client_secret, "client-secret") == 0,
+          "legacy config did not preserve Cloudflare secret");
+    unlink(path);
+}
+
 int main(void) {
+    test_legacy_config();
     make_fixture();
 
     LINUX_FLOW_EVENT events[FIXTURE_SOCKETS];
