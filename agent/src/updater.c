@@ -418,10 +418,13 @@ static void ScheduleUpdateCleanup(const char* packagePath) {
 
     char systemDir[MAX_PATH] = {0};
     if (!GetSystemDirectoryA(systemDir, sizeof(systemDir))) return;
+    char shortStage[MAX_PATH] = {0};
+    DWORD shortLen = GetShortPathNameA(stage, shortStage, sizeof(shortStage));
+    const char* cleanupStage = (shortLen > 0 && shortLen < sizeof(shortStage)) ? shortStage : stage;
     char command[MAX_PATH * 5];
     int n = snprintf(command, sizeof(command),
-                     "\"%s\\cmd.exe\" /d /c \"ping -n 3 127.0.0.1 >nul & del /f /q \"\"%s\\*\"\" >nul 2>&1 & rmdir \"\"%s\"\" >nul 2>&1\"",
-                     systemDir, stage, stage);
+                     "/d /c \"ping -n 3 127.0.0.1 >nul & del /f /q %s\\* >nul 2>&1 & rmdir %s >nul 2>&1\"",
+                     cleanupStage, cleanupStage);
     if (n < 0 || (size_t)n >= sizeof(command)) return;
 
     STARTUPINFOA startup;
@@ -429,7 +432,10 @@ static void ScheduleUpdateCleanup(const char* packagePath) {
     ZeroMemory(&startup, sizeof(startup));
     ZeroMemory(&process, sizeof(process));
     startup.cb = sizeof(startup);
-    if (CreateProcessA(NULL, command, NULL, NULL, FALSE,
+    char cmdExe[MAX_PATH] = {0};
+    int cmdLen = snprintf(cmdExe, sizeof(cmdExe), "%s\\cmd.exe", systemDir);
+    if (cmdLen < 0 || (size_t)cmdLen >= sizeof(cmdExe)) return;
+    if (CreateProcessA(cmdExe, command, NULL, NULL, FALSE,
                        CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL,
                        &startup, &process)) {
         CloseHandle(process.hThread);
