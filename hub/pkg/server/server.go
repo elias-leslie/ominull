@@ -2672,6 +2672,31 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Retired endpoints remain in the endpoint, telemetry, and audit stores as
+	// history, but they are not part of the current fleet. Keep them out of the
+	// asset graph so the console cannot call a retired macOS or hub-host row an
+	// active or outdated agent.
+	endpoints, err := s.store.ListEndpoints(tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	retired := make(map[string]struct{})
+	for _, ep := range endpoints {
+		if ep.Status == "retired" {
+			retired[ep.ID] = struct{}{}
+		}
+	}
+	if len(retired) > 0 {
+		current := assets[:0]
+		for _, asset := range assets {
+			if _, isRetired := retired[asset.AgentEndpointID]; isRetired {
+				continue
+			}
+			current = append(current, asset)
+		}
+		assets = current
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(assets)
 }

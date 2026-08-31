@@ -85,6 +85,23 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 		t.Fatalf("retired endpoint blocked convergence: %+v", status)
 	}
 
+	assetsReq := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	assetsReq.Header.Set("X-API-Key", "mock_admin_token")
+	assetsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assetsW, assetsReq)
+	if assetsW.Code != http.StatusOK {
+		t.Fatalf("assets returned %d: %s", assetsW.Code, assetsW.Body.String())
+	}
+	var assets []storage.Asset
+	if err := json.NewDecoder(assetsW.Body).Decode(&assets); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range assets {
+		if asset.AgentEndpointID == ep.ID {
+			t.Fatalf("retired endpoint remained in the current asset graph: %+v", asset)
+		}
+	}
+
 	// A late heartbeat must not silently revive a deliberately retired row.
 	heartbeat, _ := json.Marshal(TelemetryBatchMessage{
 		Type: "telemetry", EndpointID: ep.ID, Hostname: ep.Hostname,
