@@ -166,6 +166,7 @@ queue() {
 
 wait_for() {
     local ids="$1" status remaining native
+    status='{}'
     local ids_json="[]"
     if [ -n "${ids}" ]; then ids_json="$(target_json "${ids}")"; fi
     echo "[*] Waiting for ${ids:-the retained fleet} to report v${VERSION}."
@@ -205,7 +206,7 @@ wait_for() {
 }
 
 if [ -n "${CANARY_IDS}" ]; then
-    queue "${CANARY_IDS}" | jq . 2>/dev/null || true
+    queue "${CANARY_IDS}" | jq .
     if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
     if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
         echo "[+] Canary update queued; full-fleet queue deferred by --no-wait."
@@ -213,7 +214,7 @@ if [ -n "${CANARY_IDS}" ]; then
     fi
 fi
 
-queue "" | jq . 2>/dev/null || true
+queue "" | jq .
 if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
     echo "[+] v${VERSION} queued for retained endpoints."
     exit 0

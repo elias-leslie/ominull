@@ -61,7 +61,11 @@ static bool HubHTTPPrepare(const WCHAR* host, WORD port, BOOL isHttps) {
         if (!g_http.session) {
             return false;
         }
-        WinHttpSetTimeouts(g_http.session, 5000, 5000, 10000, 10000);
+        if (!WinHttpSetTimeouts(g_http.session, 5000, 5000, 10000, 10000)) {
+            WinHttpCloseHandle(g_http.session);
+            g_http.session = NULL;
+            return false;
+        }
     }
 
     if (g_http.connect && (g_http.port != port || g_http.isHttps != isHttps ||

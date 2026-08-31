@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define OMINULL_AGENT_VERSION "1.7.16"
+#define OMINULL_AGENT_VERSION "1.7.17"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
