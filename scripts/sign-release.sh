@@ -49,9 +49,6 @@ packages=(
     "${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
     "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi"
 )
-if [ "${OMINULL_BRIDGE_RELEASE:-0}" = "1" ]; then
-    packages+=("${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz")
-fi
 for pkg in "${packages[@]}"; do
     [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
 done

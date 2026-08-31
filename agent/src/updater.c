@@ -24,8 +24,6 @@
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 #endif
 
-#define UPDATE_MAX_ATTEMPTS 3
-
 /* ------------------------------------------------------------------ paths */
 
 /* The install directory is the only place a release is ever staged. It is
@@ -284,118 +282,7 @@ static bool ReadWholeFile(const char* path, unsigned char** out, size_t* outLen)
     return true;
 }
 
-/* ------------------------------------------------------------- rollback */
-
-/* An update that does not come back is a failed update. Before swapping the
- * binary the agent records the attempt; the new build clears the record once it
- * is running. If it starts but keeps failing, the count climbs and the previous
- * binary is put back. This covers a build that runs badly. A build so broken
- * the SCM cannot launch it at all never reaches this code, and is caught
- * instead by the recovery script Service_EnsureRecovery writes, which restores
- * the same file from outside the process. */
-static void UpdateMarkerPath(char* out, size_t cap) {
-    char dir[MAX_PATH];
-    if (!InstallDir(dir, sizeof(dir))) { out[0] = '\0'; return; }
-    PathIn(dir, "update.pending", out, cap);
-}
-
-static void ClearUpdateMarker(void) {
-    char dir[MAX_PATH], marker[MAX_PATH], old[MAX_PATH];
-    if (!InstallDir(dir, sizeof(dir))) return;
-    UpdateMarkerPath(marker, sizeof(marker));
-    PathIn(dir, "ominulld.old", old, sizeof(old));
-    if (marker[0]) DeleteFileA(marker);
-    /* The previous binary is unlocked once its process has exited. If it is
-     * somehow still held, queue the delete for the next boot rather than
-     * leaving it to accumulate. */
-    if (GetFileAttributesA(old) != INVALID_FILE_ATTRIBUTES && !DeleteFileA(old)) {
-        MoveFileExA(old, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
-    }
-}
-
-void Update_CheckStartup(const AGENT_CONFIG* config) {
-    char dir[MAX_PATH], marker[MAX_PATH], cur[MAX_PATH], old[MAX_PATH];
-    if (!InstallDir(dir, sizeof(dir))) return;
-    UpdateMarkerPath(marker, sizeof(marker));
-    if (!marker[0]) return;
-
-    /* Same reason as the guard in Update_Apply: this is the service's bookkeeping.
-     * A console session reading it counts its own start as a failed start of the
-     * service, and on the third one rolls the service's binary back underneath a
-     * process still running the new build. Debugging with --console must not
-     * decide whether an update sticks. */
-    PathIn(dir, "ominulld.exe", cur, sizeof(cur));
-    if (config && !config->is_service && Service_OwnsBinary(cur)) return;
-
-    FILE* f = fopen(marker, "r");
-    if (!f) return;
-    char version[64] = {0};
-    int attempts = 0;
-    if (fscanf(f, "%63s %d", version, &attempts) != 2) attempts = UPDATE_MAX_ATTEMPTS;
-    fclose(f);
-
-    if (strcmp(version, OMINULL_AGENT_VERSION) == 0) {
-        printf("[+] Agent v%s started after update; retiring the previous build.\n", OMINULL_AGENT_VERSION);
-        ClearUpdateMarker();
-        return;
-    }
-
-    PathIn(dir, "ominulld.old", old, sizeof(old));
-    attempts++;
-    if (attempts >= UPDATE_MAX_ATTEMPTS) {
-        if (GetFileAttributesA(old) != INVALID_FILE_ATTRIBUTES &&
-            MoveFileExA(old, cur, MOVEFILE_REPLACE_EXISTING)) {
-            printf("[!] Update to v%s failed %d times; restored the previous agent binary.\n", version, attempts);
-        }
-        DeleteFileA(marker);
-        /* Come back into the binary just restored. The helper is spawned from
-         * this process's own module path, which the restore above has already
-         * pointed back at the previous build. */
-        if (config && config->is_service) Service_SpawnRestart();
-        ExitProcess(1);
-    }
-
-    f = fopen(marker, "w");
-    if (f) {
-        fprintf(f, "%s %d\n", version, attempts);
-        fclose(f);
-    }
-}
-
 /* --------------------------------------------------------------- install */
-
-#ifdef OMINULL_BRIDGE_RELEASE
-/* The bridge binary alone can unpack the legacy archive. The final native MSI
- * binary is built without this path, so its package surface is only Windows
- * Installer. */
-static bool ExtractPackage(const char* archive, const char* destDir) {
-    char sys[MAX_PATH], tarExe[MAX_PATH];
-    if (!GetSystemDirectoryA(sys, MAX_PATH)) return false;
-    snprintf(tarExe, sizeof(tarExe), "%s\\tar.exe", sys);
-    if (GetFileAttributesA(tarExe) == INVALID_FILE_ATTRIBUTES) {
-        printf("[!] %s is missing; cannot unpack the agent package.\n", tarExe);
-        return false;
-    }
-
-    char cmd[MAX_PATH * 3];
-    snprintf(cmd, sizeof(cmd), "\"%s\" -xzf \"%s\" -C \"%s\"", tarExe, archive, destDir);
-
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, destDir, &si, &pi)) {
-        return false;
-    }
-    WaitForSingleObject(pi.hProcess, 120000);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    return code == 0;
-}
-#endif
 
 static bool WaitForInstalledServiceStopped(void) {
     SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
@@ -435,6 +322,8 @@ static bool StartInstalledService(void) {
     return started;
 }
 
+static void ScheduleUpdateCleanup(const char* packagePath);
+
 /* The helper is a copy of the installed executable, so it can wait for SCM to
  * stop the service while MSI replaces the installed image. MSI owns the
  * transaction and its rollback; this process only keeps the old service from
@@ -464,20 +353,29 @@ int Update_RunNativeInstaller(const char* packagePath) {
         fprintf(stderr, "[-] Could not launch MSI installer (Error: %lu).\n", GetLastError());
         return 1;
     }
-    WaitForSingleObject(process.hProcess, 300000);
+    DWORD waitResult = WaitForSingleObject(process.hProcess, 300000);
+    if (waitResult != WAIT_OBJECT_0) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        fprintf(stderr, "[-] Native MSI helper timed out waiting for Windows Installer.\n");
+        return 1;
+    }
     DWORD exitCode = 1;
     GetExitCodeProcess(process.hProcess, &exitCode);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
 	if (exitCode == ERROR_SUCCESS || exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
 		if (!StartInstalledService()) {
+			ScheduleUpdateCleanup(packagePath);
 			fprintf(stderr, "[-] Native MSI installed, but %s could not be started.\n", SERVICE_NAME);
 			return 1;
 		}
+		ScheduleUpdateCleanup(packagePath);
 		printf("[+] Native MSI installation completed.\n");
 		return 0;
 	}
 	(void)StartInstalledService();
+	ScheduleUpdateCleanup(packagePath);
     fprintf(stderr, "[-] Native MSI installation failed with code %lu; MSI rollback retained the prior release.\n", exitCode);
     return (int)exitCode;
 }
@@ -503,15 +401,46 @@ static void RemoveDirTree(const char* dir) {
     RemoveDirectoryA(dir);
 }
 
+/* ScheduleUpdateCleanup removes the package staged for the MSI helper after
+ * this process exits. It accepts only the exact update-stage directory created
+ * by Update_Apply; a manually supplied MSI elsewhere is never treated as a
+ * cleanup target. */
+static void ScheduleUpdateCleanup(const char* packagePath) {
+    if (!packagePath || !packagePath[0]) return;
+
+    char stage[MAX_PATH];
+    snprintf(stage, sizeof(stage), "%s", packagePath);
+    char* slash = strrchr(stage, '\\');
+    if (!slash) return;
+    *slash = '\0';
+    char* parent = strrchr(stage, '\\');
+    if (!parent || _stricmp(parent + 1, "update-stage") != 0) return;
+
+    char systemDir[MAX_PATH] = {0};
+    if (!GetSystemDirectoryA(systemDir, sizeof(systemDir))) return;
+    char command[MAX_PATH * 5];
+    int n = snprintf(command, sizeof(command),
+                     "\"%s\\cmd.exe\" /d /c \"ping -n 3 127.0.0.1 >nul & del /f /q \"\"%s\\*\"\" >nul 2>&1 & rmdir \"\"%s\"\" >nul 2>&1\"",
+                     systemDir, stage, stage);
+    if (n < 0 || (size_t)n >= sizeof(command)) return;
+
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (CreateProcessA(NULL, command, NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL,
+                       &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
 /* Update_Apply installs a newer agent when the hub offers one on a telemetry
- * heartbeat, and only once the package has been proved genuine.
- *
- * The running image cannot be overwritten - Windows locks it against write and
- * delete - but it can be renamed, so the swap is: move the running binary aside,
- * move the new one into its place, hand the restart to a detached helper, and
- * exit. The service comes back from the registered binPath, which now points at
- * the new build. Nothing here registers or reconfigures the service, because
- * that binPath carries this endpoint's key and identity. */
+ * heartbeat, and only once the package has been proved genuine. The running
+ * service exits after launching a detached helper; Windows Installer owns file
+ * replacement, service registration, rollback, and the subsequent restart. */
 void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     // Bounded retry, not a single shot: a dropped download would otherwise wedge
     // this endpoint on the offered version until the service restarted, while
@@ -535,19 +464,10 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     if (attempts >= 3) return;
     attempts++;
 
-	#ifdef OMINULL_BRIDGE_RELEASE
-	bool nativePackage = strcmp(pkg, "windows-native") == 0;
-	if (pkg[0] && strcmp(pkg, "windows") != 0 && !nativePackage) {
-		printf("[!] Hub offers agent v%s as a '%s' package; this agent only self-installs Windows packages.\n", version, pkg);
-		return;
-	}
-	#else
-	const bool nativePackage = true;
 	if (strcmp(pkg, "windows-native") != 0) {
 		printf("[!] Hub offers agent v%s as a '%s' package; this agent only self-installs Windows Installer packages.\n", version, pkg);
 		return;
 	}
-	#endif
     /* No signature, no install. There is no degraded mode worth having here:
      * an unverified install running as LocalSystem is the thing being
      * prevented, not an inconvenience to route around. */
@@ -571,35 +491,16 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     char dir[MAX_PATH];
     if (!InstallDir(dir, sizeof(dir))) return;
 
-    char stage[MAX_PATH], archive[MAX_PATH], sigFile[MAX_PATH], newExe[MAX_PATH];
-    char curExe[MAX_PATH], oldExe[MAX_PATH], marker[MAX_PATH];
-    PathIn(dir, "update-stage", stage, sizeof(stage));
-    PathIn(dir, "ominulld.exe", curExe, sizeof(curExe));
-    PathIn(dir, "ominulld.old", oldExe, sizeof(oldExe));
-    UpdateMarkerPath(marker, sizeof(marker));
-
-    /* A console session must not install over the service's binary. The swap
-     * below replaces the file the SCM starts next time while the service keeps
-     * running the image it already loaded, so an operator who ran --console to
-     * find out why something was failing would have upgraded the service by
-     * accident - and left it reporting an old version from a binary that is no
-     * longer on disk. Seen on a live endpoint, which is why this check exists.
-     * A portable console copy elsewhere on disk still updates itself. */
-    if (!config->is_service && Service_OwnsBinary(curExe)) {
-        printf("[!] Not installing agent v%s: %s is the binary the %s service runs, and this is a "
-               "console session. The service updates itself; restart it to take this release.\n",
-               version, curExe, SERVICE_NAME);
-        return;
-    }
+	char stage[MAX_PATH], archive[MAX_PATH], sigFile[MAX_PATH];
+	PathIn(dir, "update-stage", stage, sizeof(stage));
 
     RemoveDirTree(stage);
     if (!CreateDirectoryA(stage, NULL)) {
         printf("[!] Cannot create the update staging directory %s\n", stage);
         return;
     }
-	PathIn(stage, nativePackage ? "agent.msi" : "agent.tar.gz", archive, sizeof(archive));
-	PathIn(stage, nativePackage ? "agent.msi.sig" : "agent.tar.gz.sig", sigFile, sizeof(sigFile));
-    PathIn(stage, "ominulld.exe", newExe, sizeof(newExe));
+	PathIn(stage, "agent.msi", archive, sizeof(archive));
+	PathIn(stage, "agent.msi.sig", sigFile, sizeof(sigFile));
 
     printf("[*] Hub published agent v%s (running v%s); fetching and verifying before install.\n",
            version, OMINULL_AGENT_VERSION);
@@ -635,81 +536,35 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     free(sigBytes);
     printf("[+] v%s verified against the pinned release key; installing.\n", version);
 
-    if (nativePackage) {
-        char helper[MAX_PATH];
-        PathIn(stage, "ominull-msi-helper.exe", helper, sizeof(helper));
-        char current[MAX_PATH];
-        PathIn(dir, "ominulld.exe", current, sizeof(current));
-        if (!CopyFileA(current, helper, FALSE)) {
-            printf("[!] Agent update v%s: could not stage the MSI helper (Error %lu).\n", version, GetLastError());
-            RemoveDirTree(stage);
-            return;
-        }
-        char command[MAX_PATH * 3];
-        int commandLen = snprintf(command, sizeof(command), "\"%s\" --apply-msi \"%s\"", helper, archive);
-        if (commandLen < 0 || (size_t)commandLen >= sizeof(command)) {
-            RemoveDirTree(stage);
-            return;
-        }
-        STARTUPINFOA startup;
-        PROCESS_INFORMATION process;
-        ZeroMemory(&startup, sizeof(startup));
-        ZeroMemory(&process, sizeof(process));
-        startup.cb = sizeof(startup);
-        if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS,
-                            NULL, NULL, &startup, &process)) {
-            printf("[!] Agent update v%s: could not launch the MSI helper (Error %lu).\n", version, GetLastError());
-            RemoveDirTree(stage);
-            return;
-        }
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-        printf("[+] Agent v%s verified; MSI helper will install it after this service exits.\n", version);
-        fflush(stdout);
-		ExitProcess(0);
-    }
-
-	#ifdef OMINULL_BRIDGE_RELEASE
-	if (!nativePackage && (!ExtractPackage(archive, stage) || GetFileAttributesA(newExe) == INVALID_FILE_ATTRIBUTES)) {
-		printf("[!] Agent update v%s: package did not contain ominulld.exe.\n", version);
+	char helper[MAX_PATH];
+	PathIn(stage, "ominull-msi-helper.exe", helper, sizeof(helper));
+	char current[MAX_PATH];
+	PathIn(dir, "ominulld.exe", current, sizeof(current));
+	if (!CopyFileA(current, helper, FALSE)) {
+		printf("[!] Agent update v%s: could not stage the MSI helper (Error %lu).\n", version, GetLastError());
 		RemoveDirTree(stage);
 		return;
 	}
-	#endif
-
-	FILE* f = fopen(marker, "w");
-    if (f) {
-        fprintf(f, "%s 0\n", version);
-        fclose(f);
-    }
-
-    DeleteFileA(oldExe);
-    if (!MoveFileExA(curExe, oldExe, MOVEFILE_REPLACE_EXISTING)) {
-        printf("[!] Agent update v%s: could not move the running binary aside (Error %lu).\n", version, GetLastError());
-        DeleteFileA(marker);
-        RemoveDirTree(stage);
-        return;
-    }
-    if (!MoveFileExA(newExe, curExe, MOVEFILE_REPLACE_EXISTING)) {
-        printf("[!] Agent update v%s: could not install the new binary (Error %lu); restoring the previous one.\n",
-               version, GetLastError());
-        MoveFileExA(oldExe, curExe, MOVEFILE_REPLACE_EXISTING);
-        DeleteFileA(marker);
-        RemoveDirTree(stage);
-        return;
-    }
-
-    RemoveDirTree(stage);
-    printf("[+] Agent v%s installed; restarting the service into it.\n", version);
-    /* The restart is this agent's own job. A detached helper started here
-     * outlives the exit below, waits for the SCM to report the service stopped
-     * and starts it again - see Service_SpawnRestart for why the SCM's recovery
-     * actions could not be relied on to do it. The non-zero exit is kept so
-     * those actions remain the fallback if the helper never runs. */
-    if (config->is_service && !Service_SpawnRestart()) {
-        printf("[!] Agent v%s is installed but the restart helper did not start; "
-               "the service may need a manual start.\n", version);
-    }
-    fflush(stdout);
-    ExitProcess(1);
+	char command[MAX_PATH * 3];
+	int commandLen = snprintf(command, sizeof(command), "\"%s\" --apply-msi \"%s\"", helper, archive);
+	if (commandLen < 0 || (size_t)commandLen >= sizeof(command)) {
+		RemoveDirTree(stage);
+		return;
+	}
+	STARTUPINFOA startup;
+	PROCESS_INFORMATION process;
+	ZeroMemory(&startup, sizeof(startup));
+	ZeroMemory(&process, sizeof(process));
+	startup.cb = sizeof(startup);
+	if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS,
+	                    NULL, NULL, &startup, &process)) {
+		printf("[!] Agent update v%s: could not launch the MSI helper (Error %lu).\n", version, GetLastError());
+		RemoveDirTree(stage);
+		return;
+	}
+	CloseHandle(process.hThread);
+	CloseHandle(process.hProcess);
+	printf("[+] Agent v%s verified; MSI helper will install it after this service exits.\n", version);
+	fflush(stdout);
+	ExitProcess(0);
 }

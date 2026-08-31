@@ -21,7 +21,6 @@ import (
 	"github.com/google/uuid"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
-	"ominull/hub/pkg/deployer"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
@@ -35,7 +34,6 @@ type Server struct {
 	detector  *detector.Engine
 	pki       *pki.Manager
 	scanner   *scanner.Scanner
-	deployer  *deployer.Deployer
 	adminKey  string
 	binaryDir string
 	hubURL    string
@@ -201,9 +199,6 @@ func (s *Server) AccessConfigured() bool { return s.access != nil }
 
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
-	if s.deployer != nil {
-		s.deployer.SetAgentHubURL(u)
-	}
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
@@ -225,14 +220,12 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		ti:           threatintel.New(store),
 		pki:          pkiMgr,
 		scanner:      scanner.New(store),
-		deployer:     deployer.New(store, hubURL, adminKey),
 		adminKey:     adminKey,
 		binaryDir:    binaryDir,
 		hubURL:       hubURL,
 		agentVersion: agentVersion,
 		throttle:     newAuthThrottle(),
 	}
-	s.deployer.SetAgentVersion(agentVersion)
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
 			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
@@ -961,14 +954,14 @@ func probeServesHub(base string) bool {
 // digest sidecars hang off it, so name resolution has exactly one home.
 func agentPackageName(version, pkg string) string {
 	switch pkg {
-	case "windows":
-		return "ominull-agent-windows-" + version + ".tar.gz"
 	case "windows-native":
 		return "ominull-agent-windows-" + version + ".msi"
+	case "deb":
+		return "ominull-agent_" + version + "_amd64.deb"
 	case "hub":
 		return "ominull-hub_" + version + "_amd64.deb"
 	default:
-		return "ominull-agent_" + version + "_amd64.deb"
+		return ""
 	}
 }
 
@@ -1018,8 +1011,6 @@ func packageIdentifierForKind(pkg string) string {
 	switch pkg {
 	case "deb":
 		return linuxAgentPackageID
-	case "windows":
-		return "legacy-archive"
 	case "windows-native":
 		return windowsAgentPackageID
 	case "hub":
@@ -1037,8 +1028,6 @@ func agentPackageForCapability(capability string) (string, bool) {
 		return "deb", true
 	case "msi":
 		return "windows-native", true
-	case "exe":
-		return "windows", true
 	}
 	return "", false
 }
@@ -1046,28 +1035,13 @@ func agentPackageForCapability(capability string) (string, bool) {
 // updatePackageFor resolves the package an endpoint can install for itself.
 //
 // The reported capability is authoritative. An endpoint that has never
-// reported one is running an agent from before the field existed. Only legacy
-// Linux is given the compatibility package; older Windows is sent through the
-// bridge until its native package is installed.
-func updatePackageFor(capability, osName string) (string, bool) {
+// reported one is not given an update descriptor: the final fleet only accepts
+// package-manager-owned Linux and Windows agents.
+func updatePackageFor(capability string) (string, bool) {
 	if pkg, ok := agentPackageForCapability(capability); ok {
 		return pkg, true
 	}
-	if strings.TrimSpace(capability) == "" && agentPackageKind(osName) == "deb" && strings.Contains(strings.ToLower(osName), "linux") {
-		return "deb", true
-	}
 	return "", false
-}
-
-// agentPackageKind maps a reported OS string onto the packaging flavour the hub serves.
-func agentPackageKind(osName string) string {
-	lower := strings.ToLower(osName)
-	switch {
-	case strings.Contains(lower, "windows"):
-		return "windows"
-	default:
-		return "deb"
-	}
 }
 
 // pendingAgentUpdate resolves the update an endpoint should apply given the version it
@@ -1125,9 +1099,9 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		"update_available": outdated,
 	}
 	if outdated {
-		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability, ep.OS)
+		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability)
 		if !selfInstallable {
-			resp["update_method"] = "push-deployer"
+			resp["update_method"] = "native-package-required"
 		} else {
 			resp["update_version"] = desired
 			resp["package"] = pkg
@@ -1142,9 +1116,8 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleAgentsUpdate lets an operator push a new agent version to endpoints.
-// Endpoints that report an update capability self-update over their existing hub
-// connection; legacy endpoints remain on the bridge until native migration.
+// handleAgentsUpdate lets an operator publish a signed native package update to
+// endpoints that report a package-manager-owned installation.
 func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Role") != "admin" {
 		http.Error(w, `{"error":"admin role required"}`, http.StatusForbidden)
@@ -1199,9 +1172,9 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		if compareVersions(ep.DriverVersion, version) >= 0 {
 			continue // already up to date
 		}
-		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability, ep.OS)
+		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability)
 		if !selfInstallable {
-			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "endpoint reports no self-update capability; use the SSH/WinRM push-deployer"})
+			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "endpoint reports no supported native package capability"})
 			continue
 		}
 		// Refuse to queue a job for a release the endpoint could never install.
@@ -1556,7 +1529,7 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 // the signed release artifacts, and the five payloads the bootstrap scripts
 // name. Anything else is not found, whether or not it is on disk.
 var (
-	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.(tar\.gz|msi)|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.sha256)?$`)
+	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.msi|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.sha256)?$`)
 	downloadPayloads = map[string]bool{
 		// Native installers fetch only signed package artifacts. Raw binaries
 		// are intentionally not an install surface.
@@ -2787,60 +2760,7 @@ func (s *Server) handleAssetCorrect(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(updated)
 }
 
-/* 9. REMOTE PUSH-DEPLOYMENT ENGINE HANDLERS */
-
-func (s *Server) handleDeployerPush(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req deployer.DeployRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	jobID, err := s.deployer.DispatchPush(req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// The credentials in the request body are not recorded, and nor is the job
-	// output: it is the far host's console. What is recorded is that this hub
-	// opened a session to that address and installed software on it.
-	s.audit(r, "DEPLOYER_PUSH", req.TargetIP, "Opened a remote session to "+req.TargetIP+" as "+req.Username+" and ran the agent installer (job "+jobID+")")
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"job_id":    jobID,
-		"target_ip": req.TargetIP,
-		"status":    "running",
-	})
-}
-
-func (s *Server) handleDeployerStatus(w http.ResponseWriter, r *http.Request) {
-	jobID := r.URL.Query().Get("id")
-	if jobID == "" {
-		http.Error(w, "missing job id", http.StatusBadRequest)
-		return
-	}
-	st, err := s.deployer.GetJobStatus(jobID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(st)
-}
-
-func (s *Server) handleDeployerJobs(w http.ResponseWriter, r *http.Request) {
-	jobs := s.deployer.ListJobs()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jobs)
-}
-
-/* 10. SUBNET QUARANTINE MESH HANDLERS */
+/* 9. SUBNET QUARANTINE MESH HANDLERS */
 
 type MeshQuarantineRequest struct {
 	TargetIP  string `json:"target_ip"`
@@ -3047,16 +2967,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))
 	mux.HandleFunc("/api/v1/assets/correct", s.authMiddleware(requireAdmin(s.handleAssetCorrect)))
 
-	// 9. Remote Push-Deployment Engine API
-	// The push deployer opens an SSH session to an arbitrary address with
-	// credentials from the request body and runs an installer on the far end.
-	// That is an operator capability in every sense; the job logs it hands back
-	// are the far host's output, so reading them is one too.
-	mux.HandleFunc("/api/v1/deployer/push", s.authMiddleware(requireAdmin(s.handleDeployerPush)))
-	mux.HandleFunc("/api/v1/deployer/status", s.authMiddleware(requireAdmin(s.handleDeployerStatus)))
-	mux.HandleFunc("/api/v1/deployer/jobs", s.authMiddleware(requireAdmin(s.handleDeployerJobs)))
-
-	// 10. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
+	// 9. Subnet Quarantine Mesh API (Lateral Isolation for Rogue Assets)
 	// Mesh quarantine is persisted and returned in telemetry control state; it
 	// lands in a
 	// privileged firewall command on every agent that receives it. Nothing

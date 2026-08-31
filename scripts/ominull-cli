@@ -108,18 +108,6 @@ case "$cmd" in
         call_api POST "/api/v1/mesh/unquarantine" "{\"target_ip\":\"$tip\"}" | jq .
         ;;
 
-    deploy)
-        if [ "$#" -lt 1 ]; then
-            echo "Usage: ominull-cli deploy <target_ip> [user] [password]"
-            exit 1
-        fi
-        tip="$1"
-        user="${2:-operator}"
-        pass="${3:-}"
-        echo "[*] Dispatching 1-Click Remote Push Deployment to $tip ($user)..."
-        call_api POST "/api/v1/deployer/push" "{\"target_ip\":\"$tip\",\"ssh_user\":\"$user\",\"auth_method\":\"password\",\"password\":\"$pass\",\"sudo_password\":\"$pass\"}" | jq .
-        ;;
-
     agent-versions)
         echo "=== Fleet Agent Version Currency ==="
         call_api GET "/api/v1/agents/update-status" | jq . 2>/dev/null || call_api GET "/api/v1/agents/update-status"
@@ -154,7 +142,6 @@ case "$cmd" in
         echo "  alerts                       List active behavioral anomaly alerts & outliers"
         echo "  quarantine-mesh <ip>         Enforce subnet-wide lateral mesh drop for rogue host"
         echo "  unquarantine-mesh <ip>       Lift subnet-wide mesh quarantine"
-        echo "  deploy <ip> [user] [pass]    Push-deploy agent over SSH to unmanaged asset"
         echo "  agent-versions               Report fleet agent-version currency and pending updates"
         echo "  agent-update <id|all> [ver]  Publish an agent release to outdated endpoints"
         ;;

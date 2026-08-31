@@ -749,7 +749,6 @@
         }
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
-        if (base === "/api/v1/deployer/status") { resolve(demoJobStatus(path)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -760,9 +759,9 @@
     });
   }
 
-  /* A sweep and a push both take minutes on real hardware, so demo mode runs
-     them on a clock: the progress bar fills, the job log grows, and the failure
-     path is reachable without a host to fail against. */
+  /* A sweep takes minutes on real hardware, so demo mode runs it on a clock:
+     the progress bar fills and the failure path is reachable without a host to
+     fail against. */
   var DEMO_JOBS = {};
 
   /* Demo mode ships one changed threshold, so the "differs from the shipped
@@ -809,27 +808,6 @@
       found_count: Math.round((pct / 100) * 9),
       start_time: new Date(job.started).toISOString(),
       end_time: pct >= 100 ? new Date(job.started + 12000).toISOString() : ""
-    };
-  }
-
-  function demoJobStatus(path) {
-    var id = new URLSearchParams(path.split("?")[1] || "").get("id") || "";
-    var job = DEMO_JOBS[id];
-    if (!job) return { id: id, status: "failed", error: "No such job", logs: [] };
-    var steps = [
-      "Connecting to " + job.target + ":" + job.port + " as " + job.user,
-      "Host key SHA256:8Qk1n+… pinned on first contact",
-      "Detected Debian GNU/Linux 12 (bookworm)",
-      "Uploading ominull-agent_1.7.11_amd64.deb (4.2 MB)",
-      "dpkg -i ominull-agent_1.7.11_amd64.deb",
-      "Writing /etc/ominull/agent.conf",
-      "systemctl enable --now ominull-agent",
-      "Enrolled as " + (job.target.replace(/\./g, "-"))
-    ];
-    var n = Math.min(steps.length, Math.floor((Date.now() - job.started) / 900));
-    return {
-      id: id, status: n >= steps.length ? "success" : "running",
-      logs: steps.slice(0, n)
     };
   }
 
@@ -935,14 +913,6 @@
       var sid = "scan-" + Date.now();
       DEMO_JOBS[sid] = { started: Date.now(), subnet: (body && body.subnet) || "10.0.4.0/24", profile: (body && body.profile) || "standard" };
       return { scan_id: sid, status: "started" };
-    }
-    if (base === "/api/v1/deployer/push") {
-      var jid = "job-" + Date.now();
-      DEMO_JOBS[jid] = {
-        started: Date.now(), target: (body && body.target_ip) || "10.0.4.20",
-        port: (body && body.port) || 22, user: (body && body.username) || "root"
-      };
-      return { job_id: jid, status: "queued" };
     }
     if (base === "/api/v1/enrolment/script") return demoInstaller(body || {});
     if (base === "/api/v1/detection/tuning") {
@@ -1578,7 +1548,7 @@
 
     menu.appendChild(h("div", { cls: "sep" }));
     menu.appendChild(h("div", { cls: "lbl", text: "Act" }));
-    menu.appendChild(menuItem("Deploy agent", "i-download", "d", function () { deployAgent(asset); },
+    menu.appendChild(menuItem("Install agent", "i-download", "d", function () { installAgent(asset); },
       { disabled: agent, why: "This host already runs an agent" }));
 
     if (agent && asset.isolated) {
@@ -1720,9 +1690,15 @@
     }).catch(function (e) { toast("Training failed: " + e.message, "crit"); });
   }
 
-  function deployAgent(asset) {
+  function installAgent(asset) {
     if (asset.evidence.agent) { toast(asset.name + " already runs an agent", "warn"); return; }
-    openDeploySheet(asset);
+    var guessed = osFamily(asset.scan ? asset.scan.os_guess : "");
+    if (guessed && guessed !== "linux" && guessed !== "windows") {
+      toast("Only Linux and Windows agents are supported", "warn");
+      return;
+    }
+    var platform = guessed === "windows" ? "windows" : "linux";
+    openInstallerSheet({ platform: platform });
   }
 
   function bulkIsolate(on) {
@@ -1781,7 +1757,7 @@
       var n = arrayOf(res && res.scheduled).length;
       var u = arrayOf(res && res.unsupported).length;
       toast("Queued " + n + " self-update" + (n === 1 ? "" : "s") +
-        (u ? "; " + u + " need the push-deployer" : ""), n ? "ok" : "warn");
+        (u ? "; " + u + " need native package enrollment" : ""), n ? "ok" : "warn");
       refresh();
     }).catch(function (e) { toast("Update push failed: " + e.message, "crit"); });
   }
@@ -2270,10 +2246,7 @@
             cls: "btn btn-primary", type: "button", text: "Create an installer",
             on: { click: function () { openInstallerSheet(); } }
           }),
-          h("button", {
-            cls: "btn", type: "button", text: "Push over SSH",
-            on: { click: function () { openDeploySheet(null); } }
-          }))));
+        )));
   }
 
   function renderDiscovery() {
@@ -2326,7 +2299,7 @@
               icon(a.riskyPorts ? "g-watch" : "g-offline", true),
               h("span", { text: a.risk || "LOW" })),
             stamp(a.lastSeen),
-            h("button", { cls: "mini", type: "button", text: "Deploy agent", on: { click: function () { deployAgent(a); } } })
+            h("button", { cls: "mini", type: "button", text: "Install agent", on: { click: function () { installAgent(a); } } })
           ];
         })));
 
@@ -3246,17 +3219,9 @@
 
   /* ------------------------------------------------- adding an endpoint */
 
-  /* Getting an agent onto a host that has none. Two ways, and they fail in
-     different places, so the console offers both rather than picking one:
-
-       - the hub renders an installer and the operator runs it on the host. This
-         works everywhere, including on a host the hub cannot reach.
-       - the hub reaches out over SSH and installs it. This is faster for a list
-         of hosts and needs a credential the operator has.
-
-     The second one used to ask for a username, fire, and never look at the
-     result again - so a failed deployment was indistinguishable from a
-     successful one from where the operator was standing. */
+  /* Getting an agent onto a host that has none is package enrolment: the hub
+     renders a short-lived command or script, and the host invokes its native
+     package manager locally. */
 
   function tenantOptions() {
     var out = [];
@@ -3400,134 +3365,6 @@
     render(false);
   }
 
-
-  /* ------------------------------------------------------- push deploy */
-
-  function openDeploySheet(asset) {
-    var ip = h("input", { type: "text", value: (asset && asset.ip) || "", placeholder: "10.0.4.20" });
-    var port = h("input", { type: "text", value: "22", placeholder: "22" });
-    var user = h("input", { type: "text", value: "", placeholder: "root" });
-
-    var authKind = h("select", { "aria-label": "Authentication" },
-      h("option", { value: "password", text: "Password" }),
-      h("option", { value: "key", text: "Private key" }));
-    var password = h("input", { type: "password", value: "", placeholder: "••••••" });
-    /* The placeholder deliberately describes the key rather than showing a PEM
-       banner: the literal trips every secret scanner that will ever read this
-       repository, and a false positive in that gate is worse than a vaguer
-       hint. */
-    var privateKey = h("textarea", { rows: "4", placeholder: "Paste an OpenSSH private key, header line included" });
-    var fingerprint = h("input", { type: "text", value: "", placeholder: "SHA256:… (optional; pinned on first contact otherwise)" });
-
-    var guessed = asset ? (osFamily(asset.scan ? asset.scan.os_guess : "") || "linux") : "linux";
-    var os = h("select", { "aria-label": "Operating system" },
-      h("option", { value: "auto", text: "Detect on connect" }),
-      h("option", { value: "linux", text: "Linux" }),
-      h("option", { value: "windows", text: "Windows" }));
-    os.value = guessed === "windows" ? "windows" : "auto";
-
-    var authRow = h("div", { cls: "stack" });
-    var syncAuth = function () {
-      authRow.textContent = "";
-      if (authKind.value === "key") {
-        authRow.appendChild(h("label", { cls: "field" }, h("span", { text: "Private key" }), privateKey));
-      } else {
-        authRow.appendChild(h("label", { cls: "field" }, h("span", { text: "Password" }), password));
-      }
-    };
-    authKind.addEventListener("change", syncAuth);
-    syncAuth();
-
-    /* The log the hub keeps for this job, shown where the operator is standing.
-       Without it a deployment that failed on the first SSH packet looked exactly
-       like one that worked. */
-    var logBox = h("div", { cls: "joblog" });
-    var poll = null;
-    var stopPolling = function () { if (poll) { clearInterval(poll); poll = null; } };
-
-    var showJob = function (job) {
-      logBox.textContent = "";
-      var state_ = (job && job.status) || "pending";
-      logBox.appendChild(h("p", {
-        cls: "note " + (state_ === "failed" ? "note-crit" : state_ === "success" ? "note-ok" : "note-warn"),
-        text: state_ === "failed" ? (job.error || "The deployment failed.")
-          : state_ === "success" ? "The agent is installed and enrolled."
-          : "Running…"
-      }));
-      arrayOf(job && job.logs).forEach(function (line) {
-        logBox.appendChild(h("div", { cls: "jobline", text: line }));
-      });
-      logBox.scrollTop = logBox.scrollHeight;
-      if (state_ === "success" || state_ === "failed") {
-        stopPolling();
-        if (state_ === "success") refresh();
-      }
-    };
-
-    var start = function () {
-      if (!ip.value.trim()) { toast("A target address is required", "warn"); return; }
-      if (!user.value.trim()) { toast("An SSH user is required", "warn"); return; }
-      if (authKind.value === "password" && !password.value) { toast("A password is required, or switch to a private key", "warn"); return; }
-      if (authKind.value === "key" && !privateKey.value.trim()) { toast("Paste the private key, or switch to a password", "warn"); return; }
-
-      var body = {
-        target_ip: ip.value.trim(),
-        port: parseInt(port.value, 10) || 22,
-        protocol: os.value === "windows" ? "winrm" : "ssh",
-        os: os.value,
-        username: user.value.trim(),
-        host_key_fingerprint: fingerprint.value.trim()
-      };
-      if (authKind.value === "key") body.private_key = privateKey.value;
-      else body.password = password.value;
-
-      logBox.textContent = "";
-      logBox.appendChild(h("div", { cls: "jobline", text: "Dispatching…" }));
-
-      request("/api/v1/deployer/push", "POST", body).then(function (res) {
-        var jobID = res && res.job_id;
-        if (!jobID) { toast("The hub accepted the job but named no id", "warn"); return; }
-        /* Poll the job the hub just created. This is the part that was
-           missing: the id came back and nothing ever asked about it again. */
-        stopPolling();
-        var check = function () {
-          request("/api/v1/deployer/status?id=" + encodeURIComponent(jobID))
-            .then(showJob)
-            .catch(function (e) { stopPolling(); toast("Lost track of the job: " + e.message, "crit"); });
-        };
-        check();
-        poll = setInterval(check, 1500);
-      }).catch(function (e) {
-        logBox.textContent = "";
-        logBox.appendChild(h("p", { cls: "note note-crit", text: "The hub refused the job: " + e.message }));
-      });
-    };
-
-    var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "The hub opens an SSH session to this host and runs the installer. The credential is used for this connection and is not stored." }),
-      h("div", { cls: "form-row" },
-        h("label", { cls: "field" }, h("span", { text: "Address" }), ip),
-        h("label", { cls: "field" }, h("span", { text: "Port" }), port),
-        h("label", { cls: "field" }, h("span", { text: "User" }), user),
-        h("label", { cls: "field" }, h("span", { text: "OS" }), os),
-        h("label", { cls: "field" }, h("span", { text: "Authenticate with" }), authKind)),
-      authRow,
-      h("label", { cls: "field" }, h("span", { text: "Expected host key" }), fingerprint),
-      logBox);
-
-    /* Closing the sheet must not leave a timer running against a job nobody is
-       looking at any more. */
-    var close = function () { stopPolling(); closeSheet(); };
-
-    openSheet("Deploy an agent" + (asset && asset.name ? " to " + asset.name : ""), body, [
-      h("button", { cls: "btn", type: "button", text: "Close", on: { click: close } }),
-      h("button", {
-        cls: "btn", type: "button", text: "Install manually instead",
-        on: { click: function () { stopPolling(); openInstallerSheet({ platform: guessed === "windows" ? "windows" : "linux" }); } }
-      }),
-      h("button", { cls: "btn btn-primary", type: "button", text: "Deploy", on: { click: start } })
-    ]);
-  }
 
   /* -------------------------------------------------- isolation baseline */
 
@@ -4793,7 +4630,7 @@
         break;
       case "d":
         a = cursorAsset();
-        if (a && !a.evidence.agent) { e.preventDefault(); deployAgent(a); }
+        if (a && !a.evidence.agent) { e.preventDefault(); installAgent(a); }
         break;
       case "Enter":
         a = cursorAsset();

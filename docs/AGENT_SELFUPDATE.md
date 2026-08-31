@@ -51,11 +51,11 @@ signature verification. The service registration uses the package-installed
 binary and package-owned configuration. MSI `DisplayName=Ominull Agent` and
 `DisplayVersion` provide the registered provenance reported to the hub.
 
-The service has explicit SCM recovery actions and a detached restart helper.
-Recovery is configured on every start, not only at first registration. A
-startup marker and previous image provide rollback when a new binary cannot
-remain healthy. The recovery path is idempotent and does not silently downgrade
-without a pending update marker.
+The service has explicit SCM recovery actions, configured on every start. MSI
+owns file replacement and rollback; the agent only waits for its service to
+stop, invokes Windows Installer, and starts the package-owned service after a
+successful transaction. A failed transaction leaves the prior MSI installation
+authoritative.
 
 ## Rollback and dead-man behavior
 
@@ -78,8 +78,7 @@ register a second service, or install a raw archive.
 
 ## Release procedure
 
-Run `scripts/release.sh`. It builds and signs all required artifacts, verifies
+Run `scripts/release.sh`. It builds and signs the retained artifacts, verifies
 the isolated lifecycle harness, installs the hub package first, and rolls a
-retained canary before the rest of the fleet. Use `--bridge` only for the
-transitional release needed by legacy Windows agents; the final release serves
-the MSI and Debian packages only.
+retained canary before the rest of the fleet. Releases serve the MSI and Debian
+packages only.

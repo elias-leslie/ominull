@@ -36,7 +36,7 @@
     </Feature>
 
     <CustomAction Id="ClearWfp" FileKey="WfpExe" ExeCommand="uninstall"
-                  Execute="deferred" Return="ignore" Impersonate="no" />
+                  Execute="deferred" Return="check" Impersonate="no" />
     <InstallExecuteSequence>
       <!-- MajorUpgrade uninstalls the old product as part of the same
            transaction. Do not purge ProgramData identity during that leg;

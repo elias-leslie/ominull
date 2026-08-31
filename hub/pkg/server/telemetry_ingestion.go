@@ -97,7 +97,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	// logs while the request's durability contract remains true.
 	s.detector.EvaluateBatch(events, snapshot)
 
-	return s.telemetryControlResponse(r, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability, batch.OS)
+	return s.telemetryControlResponse(r, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
 }
 
 func requestRemoteIP(r *http.Request) string {
@@ -187,7 +187,7 @@ func applyThreatIntel(ti *threatintel.Manager, events []storage.Event, endpointI
 	}
 }
 
-func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedVersion, capability, osName string) (map[string]interface{}, error) {
+func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedVersion, capability string) (map[string]interface{}, error) {
 	qPeers, err := s.store.GetQuarantinedPeers()
 	if err != nil {
 		return nil, fmt.Errorf("load quarantined peers: %w", err)
@@ -223,7 +223,7 @@ func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedV
 		"isolation_baseline":  wire,
 	}
 	if target, outdated := s.pendingAgentUpdate(endpointID, reportedVersion); outdated {
-		if pkg, ok := updatePackageFor(capability, osName); ok {
+		if pkg, ok := updatePackageFor(capability); ok {
 			if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {
 				resp["agent_update"] = desc
 			}

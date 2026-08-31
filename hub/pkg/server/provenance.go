@@ -34,7 +34,7 @@ func nativePackageForCapability(capability string) (nativePackage, bool) {
 // provenanceIssue returns an operator-readable reason when an endpoint cannot
 // be counted as a native-package installation at the requested binary version.
 // Legacy/manual and missing reports stay visible even when the binary version
-// is current; release.sh decides whether a bridge rollout may accept them.
+// is current; release status refuses to count them as converged.
 func provenanceIssue(ep storage.Endpoint, targetVersion string) string {
 	if compareVersions(ep.DriverVersion, targetVersion) < 0 {
 		return "binary version is outdated"

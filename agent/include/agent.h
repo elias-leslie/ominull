@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define OMINULL_AGENT_VERSION "1.7.17"
+#define OMINULL_AGENT_VERSION "1.7.18"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
@@ -155,11 +155,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
 void Agent_DetectHostIdentity(AGENT_CONFIG* config);
 void Agent_DetectInstallProvenance(AGENT_CONFIG* config);
 
-// Self-update. Update_Apply installs a newer agent only after verifying it
-// against the release key compiled into this binary; Update_CheckStartup runs
-// once at startup and restores the previous binary if a new one keeps failing.
+// Self-update. Update_Apply verifies the signed MSI and delegates replacement
+// and rollback to Windows Installer.
 void Update_Apply(const AGENT_CONFIG* config, const char* respJson);
-void Update_CheckStartup(const AGENT_CONFIG* config);
 int Update_RunNativeInstaller(const char* packagePath);
 
 /* Hub transport security. Hub_TransportReady gates every outbound request:
@@ -202,23 +200,9 @@ bool Service_ConfigureFromStdin(void);
 // upgrade, so an endpoint enrolled before this existed has to repair itself.
 // No-op once config->key_path is set.
 void Service_MigrateKeyToFile(const AGENT_CONFIG* config);
-// Registers the SCM recovery actions and writes the script the last of them
-// runs. Idempotent, and applied on every start so an in-place upgrade is not
-// left without them.
+// Registers the package-owned service's SCM recovery actions. Idempotent, and
+// applied on every start so an in-place upgrade is not left without them.
 void Service_EnsureRecovery(void);
-// Self-update's restart path. A service cannot start itself, so the updater
-// spawns a detached copy of the installed binary in --restart-service mode
-// (Service_SpawnRestart) which waits for the SCM to report the service STOPPED
-// and starts it again (Service_WaitStoppedAndStart, the mode's entry point).
-// This exists because the SCM recovery actions cannot be relied on for it: the
-// failure counter that selects them counts every abnormal exit on the host, so
-// which action runs after an update is decided by unrelated history.
-bool Service_SpawnRestart(void);
-int Service_WaitStoppedAndStart(void);
-// True when the installed service is registered to run the binary at path. The
-// updater checks it before installing over that binary from a console session,
-// which would otherwise upgrade a service nobody asked to upgrade.
-bool Service_OwnsBinary(const char* path);
 void RunAgentLoop(AGENT_CONFIG* config);
 
 #endif // OMINULL_AGENT_H

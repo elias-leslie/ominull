@@ -56,8 +56,6 @@ static void PrintUsage(const char* prog) {
     printf("Usage:\n");
     printf("  %s --console --hub <url> --key <api_key>   Run in foreground (interactive)\n", prog);
     printf("  %s --service --hub <url> --key <api_key>   Run under Service Control Manager\n", prog);
-    printf("  %s --restart-service                       Wait for the service to stop, then start it\n", prog);
-    printf("                                             (internal: how self-update restarts itself)\n");
     printf("\nOptions:\n");
     printf("  --ca <path>          CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
     printf("  --key-file <path>    Read the API key from a file instead of the command line.\n");
@@ -107,7 +105,6 @@ int main(int argc, char* argv[]) {
 
     bool doConsole = false;
     bool doService = false;
-    bool doRestart = false;
     bool doConfigure = false;
     char nativePackage[MAX_PATH] = {0};
 
@@ -124,8 +121,6 @@ int main(int argc, char* argv[]) {
             doConsole = true;
         } else if (strcmp(argv[i], "--service") == 0) {
             doService = true;
-        } else if (strcmp(argv[i], "--restart-service") == 0) {
-            doRestart = true;
         } else if (strcmp(argv[i], "--configure-stdin") == 0) {
             doConfigure = true;
         } else if (strcmp(argv[i], "--apply-msi") == 0 && i + 1 < argc) {
@@ -195,23 +190,11 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
-    // The restart helper runs as a detached child of a service that is exiting,
-    // and does nothing but bring that service back. It is checked before every
-    // other mode so a stray --service or --hub on its command line could never
-    // start a second agent alongside the one it is restarting.
-    if (doRestart) {
-        return Service_WaitStoppedAndStart();
-    }
-
-    // Runs before either mode starts: if this process is the result of an
-    // update, retire the previous binary; if a new build keeps failing to come
-    // back, put the previous one back instead.
+    // The package-owned service and console paths share the same explicit mode
+    // flag; native package rollback handles replacement failures before this
+    // process starts.
     if (doConsole || doService) {
-        // Set before the check, not in Service_SetConfig afterwards: a rollback
-        // in Update_CheckStartup restarts the service, and it needs to know
-        // whether there is a service to restart.
         config.is_service = doService;
-        Update_CheckStartup(&config);
     }
 
     if (doConsole) {

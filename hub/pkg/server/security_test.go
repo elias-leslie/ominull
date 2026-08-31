@@ -52,8 +52,6 @@ func TestTenantKeyCannotReachOperatorRoutes(t *testing.T) {
 		{"create a tenant with a chosen key", "POST", "/api/v1/tenants", `{"id":"evil","api_key":"attacker-chosen"}`, srv.handleTenants},
 		{"quarantine a peer fleet-wide", "POST", "/api/v1/mesh/quarantine", `{"target_ip":"10.0.0.9"}`, srv.handleMeshQuarantine},
 		{"release a quarantined peer", "POST", "/api/v1/mesh/unquarantine", `{"target_ip":"10.0.0.9"}`, srv.handleMeshUnquarantine},
-		{"push a deploy to any address", "POST", "/api/v1/deployer/push", `{"target_ip":"10.0.0.9","username":"root","password":"x"}`, srv.handleDeployerPush},
-		{"read deploy job output", "GET", "/api/v1/deployer/jobs", "", srv.handleDeployerJobs},
 		{"sweep an arbitrary subnet", "POST", "/api/v1/scanner/scan", `{"subnet":"10.0.0.0/24"}`, srv.handleScannerScan},
 		{"read the discovered inventory", "GET", "/api/v1/scanner/results", "", srv.handleScannerResults},
 		{"read the whole topology", "GET", "/api/v1/topology/graph", "", srv.handleTopologyGraph},
@@ -624,8 +622,6 @@ func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
 		"ominull-agent_1.6.7_amd64.deb",
 		"ominull-agent_1.6.7_amd64.deb.sig",
 		"ominull-agent_1.6.7_amd64.deb.sha256",
-		"ominull-agent-windows-1.6.7.tar.gz",
-		"ominull-agent-windows-1.6.7.tar.gz.sig",
 		"ominull-agent-windows-1.6.7.msi",
 		"ominull-agent-windows-1.6.7.msi.sig",
 		"ominull-agent-windows-1.6.7.msi.sha256",
@@ -653,9 +649,8 @@ func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
 		".env",
 		// Near-misses on the artifact pattern.
 		"ominull-agent_1.6.7_amd64.deb.bak",
-		"ominull-agent-linux-1.6.7.tar.gz",
 		"ominull-agent_v1.6.7_amd64.deb",
-		"ominull-agent-windows-1.6.7.tar.gz.key",
+		"ominull-agent-windows-1.6.7.msi.bak",
 		// Traversal, which filepath.Base already flattened; the flattened form
 		// must not be servable either.
 		"ca.key",

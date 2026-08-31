@@ -74,7 +74,7 @@ Build and sign the hub package with the release workflow, then install it with
 the system package manager:
 
 ```bash
-sudo dpkg -i ominull-hub_1.7.16_amd64.deb
+sudo dpkg -i ominull-hub_1.7.18_amd64.deb
 sudo install -m 0600 /dev/null /etc/ominull/admin.key
 sudoedit /etc/ominull/hub.env
 sudo systemctl enable --now ominull-hub.service
@@ -110,15 +110,15 @@ privileged daemon or creates a service definition.
 Linux package install:
 
 ```bash
-curl -fsSL https://hub.example.invalid/download/ominull-agent_1.7.16_amd64.deb -o /tmp/ominull-agent.deb
-curl -fsSL https://hub.example.invalid/download/ominull-agent_1.7.16_amd64.deb.sig -o /tmp/ominull-agent.deb.sig
+curl -fsSL https://hub.example.invalid/download/ominull-agent_1.7.18_amd64.deb -o /tmp/ominull-agent.deb
+curl -fsSL https://hub.example.invalid/download/ominull-agent_1.7.18_amd64.deb.sig -o /tmp/ominull-agent.deb.sig
 sudo dpkg -i /tmp/ominull-agent.deb
 ```
 
 Windows package install uses the signed file through Windows Installer:
 
 ```powershell
-Start-Process msiexec.exe -ArgumentList @('/i', '.\ominull-agent-windows-1.7.16.msi', '/qn', '/norestart') -Wait
+Start-Process msiexec.exe -ArgumentList @('/i', '.\ominull-agent-windows-1.7.18.msi', '/qn', '/norestart') -Wait
 ```
 
 The final installer identities are `ominull-agent` and `ominull-hub` for
@@ -190,8 +190,7 @@ OMINULL_RELEASE_VERSION="$(scripts/version.sh show)" scripts/test-package-lifecy
 
 `scripts/release.sh` runs the retained gates, builds and signs packages, installs
 the hub first through the deployment hook, and verifies agent convergence and
-native provenance. It accepts `--bridge` only for the transitional Windows
-release; final releases use native packages only.
+native provenance. Releases use native packages only.
 
 See [`docs/AGENT_SELFUPDATE.md`](docs/AGENT_SELFUPDATE.md),
 [`docs/AGENT_TLS.md`](docs/AGENT_TLS.md), and the two refactor plans for the

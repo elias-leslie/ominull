@@ -170,8 +170,11 @@ func TestRemovedFeatureRoutesReturnNotFoundThroughRealMux(t *testing.T) {
 		"/api/v1/policy-groups",
 		"/api/v1/inference",
 		"/ws",
+		"/api/v1/deployer/push",
+		"/api/v1/deployer/status",
 		"/bootstrap-macos.sh",
 		"/download/ominull-agent-macos-1.7.16.pkg",
+		"/download/ominull-agent-windows-1.7.16.tar.gz",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("X-API-Key", "mock_admin_token")
@@ -356,19 +359,6 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestAgentPackageKind(t *testing.T) {
-	cases := map[string]string{
-		"Windows 11 Enterprise (x86_64)": "windows",
-		"Linux 6.8.0-40-generic":         "deb",
-		"":                               "deb",
-	}
-	for osName, want := range cases {
-		if got := agentPackageKind(osName); got != want {
-			t.Errorf("agentPackageKind(%q) = %q, want %q", osName, got, want)
-		}
-	}
-}
-
 // seedEndpoint registers an endpoint reporting a specific agent version.
 func seedEndpoint(t *testing.T, store *storage.Store, id, osName, version string) {
 	t.Helper()
@@ -438,23 +428,20 @@ func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
 		wantOK     bool
 	}{
 		{"reported deb", "deb", "Linux 6.8.0-40-generic", "deb", true},
-		{"reported legacy exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows", true},
+		{"reported legacy exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "", false},
 		{"reported native msi", "msi", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows-native", true},
 		{"capability outranks a misleading OS string", "msi", "Linux 6.8.0-40-generic", "windows-native", true},
 		{"explicit none is offered nothing", "none", "Linux 6.8.0-40-generic", "", false},
 		{"unknown capability is offered nothing", "msix", "Windows 11", "", false},
-		// The only agent that shipped before the field existed and can still
-		// install something is the Linux one, so that is the whole of the
-		// legacy fallback.
-		{"legacy linux agent still self-updates", "", "Linux 6.8.0-40-generic", "deb", true},
-		{"legacy windows agent needs the push-deployer", "", "Windows 11 Enterprise (x86_64)", "", false},
+		{"legacy linux agent needs native migration", "", "Linux 6.8.0-40-generic", "", false},
+		{"legacy windows agent needs native migration", "", "Windows 11 Enterprise (x86_64)", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			pkg, ok := updatePackageFor(c.capability, c.osName)
+			pkg, ok := updatePackageFor(c.capability)
 			if ok != c.wantOK || pkg != c.wantPkg {
-				t.Errorf("updatePackageFor(%q, %q) = (%q, %v), want (%q, %v)",
-					c.capability, c.osName, pkg, ok, c.wantPkg, c.wantOK)
+				t.Errorf("updatePackageFor(%q) = (%q, %v), want (%q, %v)",
+					c.capability, pkg, ok, c.wantPkg, c.wantOK)
 			}
 		})
 	}
@@ -537,7 +524,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
+	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
 
 	// 1. Unknown endpoints are rejected rather than handed a package URL.
 	req := httptest.NewRequest("GET", "/api/v1/agent/config?endpoint_id=ghost", nil)
@@ -599,7 +586,7 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 	defer store.Close()
 
 	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
-	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
+	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
 	seedEndpoint(t, store, "win-exec-01", "Windows 11 Enterprise (x86_64)", "1.0.0")
 	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (linux-socket-v1)")
 
@@ -624,9 +611,8 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 	}
 
 	// 3. An admin push schedules endpoints that can install the package and
-	//    flags the rest for the push-deployer. The Windows endpoint here
-	//    reports no capability, so it is correctly left out: its agent could
-	//    not act on a descriptor even if one were sent.
+	//    flags the rest as requiring native package migration. The Windows
+	//    endpoint here reports no capability, so it is correctly left out.
 	body, _ = json.Marshal(map[string]interface{}{"all": true})
 	req = httptest.NewRequest("POST", "/api/v1/agents/update", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")

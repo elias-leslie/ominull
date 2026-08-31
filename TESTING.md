@@ -16,8 +16,8 @@ OMINULL_RELEASE_VERSION="$(scripts/version.sh show)" scripts/test-package-lifecy
 
 The C feedback loops compile with warnings enabled and cover baseline parsing,
 Linux process attribution, socket collection, and release-signature parsing.
-Windows sources are cross-compiled for both bridge and final native modes with
-warnings treated as errors in CI.
+Windows sources are cross-compiled for the retained native MSI with warnings
+treated as errors in CI.
 
 ## Retained capability checks
 

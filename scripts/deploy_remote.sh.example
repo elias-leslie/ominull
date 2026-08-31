@@ -27,13 +27,6 @@ required=(
     "ominull-agent-windows-${VERSION}.msi.sig"
     "ominull-agent-windows-${VERSION}.msi.sha256"
 )
-if [ "${OMINULL_BRIDGE_RELEASE:-0}" = "1" ]; then
-    required+=(
-        "ominull-agent-windows-${VERSION}.tar.gz"
-        "ominull-agent-windows-${VERSION}.tar.gz.sig"
-        "ominull-agent-windows-${VERSION}.tar.gz.sha256"
-    )
-fi
 for file in "${required[@]}"; do
     [ -f "${DIST_DIR}/${file}" ] || { echo "[-] Missing dist/${file}; build and sign first." >&2; exit 1; }
 done

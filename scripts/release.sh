@@ -3,8 +3,8 @@
 #
 # The order is part of the update contract: build and sign the native artifacts,
 # install the hub package, then ask the running hub to roll the retained fleet.
-# A bridge release may use the transitional Windows archive for legacy agents;
-# a final release must converge on native package provenance.
+# Every endpoint release is a signed native package. The hub package is
+# installed first, then the retained Linux and Windows agents self-update.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +12,6 @@ HUB_URL="${OMINULL_HUB_URL:-}"
 DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy_remote.sh}"
 
 VERSION=""
-BRIDGE=0
 SKIP_TESTS=0
 DO_HUB=1
 DO_AGENTS=1
@@ -25,8 +24,6 @@ usage() {
 
 Options:
   --version X.Y.Z  release version (otherwise use VERSION)
-  --bridge         transitional release; retain the legacy Windows archive
-  --final          native-package release (default)
   --canary IDS     comma-separated endpoint IDs; roll these, verify, then roll all
   --skip-tests     skip local quality tests (never skips signing or live checks)
   --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
@@ -38,15 +35,6 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
-        --bridge)
-            [ "${BRIDGE}" -eq 0 ] || { echo "[-] --bridge and --final are mutually exclusive." >&2; exit 2; }
-            BRIDGE=1
-            shift
-            ;;
-        --final)
-            [ "${BRIDGE}" -eq 0 ] || { echo "[-] --bridge and --final are mutually exclusive." >&2; exit 2; }
-            shift
-            ;;
         --canary) CANARY_IDS="${2:?--canary needs endpoint IDs}"; shift 2 ;;
         --skip-tests) SKIP_TESTS=1; shift ;;
         --hub-only) DO_AGENTS=0; shift ;;
@@ -102,16 +90,16 @@ if [ "${DO_HUB}" -eq 1 ]; then
         exit 1
     }
     echo "[*] Building native packages for v${VERSION}."
-    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+    OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/build-packages.sh"
     echo "[*] Signing native packages for v${VERSION}."
-    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+    OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/sign-release.sh"
     echo "[*] Verifying native package lifecycle in an isolated root."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
     echo "[*] Installing hub package first and publishing signed endpoint packages."
-    OMINULL_RELEASE_VERSION="${VERSION}" OMINULL_BRIDGE_RELEASE="${BRIDGE}" \
+    OMINULL_RELEASE_VERSION="${VERSION}" \
         "${DEPLOY_CMD}"
 fi
 
@@ -169,7 +157,9 @@ wait_for() {
     status='{}'
     local ids_json="[]"
     if [ -n "${ids}" ]; then ids_json="$(target_json "${ids}")"; fi
-    echo "[*] Waiting for ${ids:-the retained fleet} to report v${VERSION}."
+    local scope="retained fleet"
+    if [ -n "${ids}" ]; then scope="canary endpoints"; fi
+    echo "[*] Waiting for ${scope} to report v${VERSION}."
     for _ in $(seq 1 60); do
         if ! status="$(api GET /api/v1/agents/update-status 2>/dev/null)"; then
             echo "    Hub did not answer; retrying."
@@ -179,34 +169,32 @@ wait_for() {
         if [ -n "${ids}" ]; then
             remaining="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
                 '[.outdated[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
-            if [ "${BRIDGE}" -eq 0 ]; then
-                native="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
-                    '[.provenance_issues[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
-            else
-                native=0
-            fi
+            native="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
+                '[.provenance_issues[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
         else
             remaining="$(printf '%s' "${status}" | jq -r '(.outdated // []) | length')"
-            if [ "${BRIDGE}" -eq 0 ]; then
-                native="$(printf '%s' "${status}" | jq -r '(.provenance_issues // []) | length')"
-            else
-                native=0
-            fi
+            native="$(printf '%s' "${status}" | jq -r '(.provenance_issues // []) | length')"
         fi
         if [ "${remaining}" = "0" ] && [ "${native}" = "0" ]; then
-            echo "[+] ${ids:-retained fleet} converged on v${VERSION}; native provenance gate passed."
+            echo "[+] ${scope} converged on v${VERSION}; native provenance gate passed."
             return 0
         fi
         echo "    ${remaining} outdated, ${native} provenance issue(s)."
         sleep 5
     done
     echo "[-] Rollout did not converge within five minutes." >&2
-    printf '%s\n' "${status}" | jq '{outdated,provenance_issues,retired,pending}' >&2 || true
+    printf '%s\n' "${status}" | jq '{outdated_count: ((.outdated // []) | length), provenance_issue_count: ((.provenance_issues // []) | length), retired_count: ((.retired // []) | length), pending_count: ((.pending // []) | length)}' >&2 || true
     return 1
 }
 
+queue_report() {
+    local ids="$1" response
+    response="$(queue "${ids}")"
+    printf '%s' "${response}" | jq -c '{desired_version,scheduled_count: ((.scheduled // []) | length),unsupported_count: ((.unsupported // []) | length)}'
+}
+
 if [ -n "${CANARY_IDS}" ]; then
-    queue "${CANARY_IDS}" | jq .
+    queue_report "${CANARY_IDS}"
     if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
     if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
         echo "[+] Canary update queued; full-fleet queue deferred by --no-wait."
@@ -214,7 +202,7 @@ if [ -n "${CANARY_IDS}" ]; then
     fi
 fi
 
-queue "" | jq .
+queue_report ""
 if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
     echo "[+] v${VERSION} queued for retained endpoints."
     exit 0

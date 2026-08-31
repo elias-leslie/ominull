@@ -2329,29 +2329,6 @@ p.pending {
   white-space: pre;
 }
 
-.joblog {
-  font-family: var(--f-mono);
-  font-size: var(--t-2);
-  line-height: 1.6;
-  max-height: 260px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.joblog:empty {
-  display: none;
-}
-
-.jobline {
-  color: var(--ink-2);
-  padding: 1px var(--s-2);
-  border-left: 2px solid var(--line);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* ------------------------------------------------------ detection tuning */
 
 .tune-head {

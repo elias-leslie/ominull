@@ -6,7 +6,6 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 BUILD_DIR="${ROOT_DIR}/build"
 VERSION="${OMINULL_RELEASE_VERSION:-$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")}"
-BRIDGE="${OMINULL_BRIDGE_RELEASE:-0}"
 
 case "${VERSION}" in
     ''|*[!0-9.]*|.*|*.)
@@ -19,7 +18,7 @@ if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-for tool in gcc x86_64-w64-mingw32-gcc go dpkg-deb wixl tar; do
+for tool in gcc x86_64-w64-mingw32-gcc go dpkg-deb wixl; do
     command -v "${tool}" >/dev/null || {
         echo "[-] Required build tool is missing: ${tool}" >&2
         exit 1
@@ -33,7 +32,6 @@ mkdir -p "${DIST_DIR}" "${BUILD_DIR}"
 find "${DIST_DIR}" -maxdepth 1 -type f \( \
     -name 'ominull-agent_*.deb' -o -name 'ominull-agent_*.deb.sig' -o -name 'ominull-agent_*.deb.sha256' -o \
     -name 'ominull-agent-windows-*.msi' -o -name 'ominull-agent-windows-*.msi.sig' -o -name 'ominull-agent-windows-*.msi.sha256' -o \
-    -name 'ominull-agent-windows-*.tar.gz' -o -name 'ominull-agent-windows-*.tar.gz.sig' -o -name 'ominull-agent-windows-*.tar.gz.sha256' -o \
     -name 'ominull-hub_*.deb' -o -name 'ominull-hub_*.deb.sig' -o -name 'ominull-hub_*.deb.sha256' \
 \) -delete
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ominull-packages.XXXXXX")"
@@ -50,12 +48,8 @@ echo "[*] Building hub."
     -ldflags "-X main.version=${VERSION}" -o "${BUILD_DIR}/ominull-hub" ./cmd)
 
 echo "[*] Building Windows user-mode agent and recovery tool."
-windows_defines=(-DOMINULL_WFP_EMBEDDED)
-if [ "${BRIDGE}" = "1" ]; then
-    windows_defines+=(-DOMINULL_BRIDGE_RELEASE)
-fi
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
-	"${windows_defines[@]}" \
+	-DOMINULL_WFP_EMBEDDED \
     -I"${ROOT_DIR}/agent/include" \
     "${ROOT_DIR}/agent/src/main.c" \
     "${ROOT_DIR}/agent/src/hub_client.c" \
@@ -133,21 +127,7 @@ wixl --arch x64 \
          -e "s|@WFP_EXE@|${BUILD_DIR}/ominull_wfp_user.exe|g" \
          "${ROOT_DIR}/packaging/windows/ominull.wxs.in")
 
-if [ "${BRIDGE}" = "1" ]; then
-    echo "[*] Building transitional Windows archive for legacy updater bridge."
-    BRIDGE_DIR="${WORK_DIR}/windows-bridge"
-    mkdir -p "${BRIDGE_DIR}"
-    install -m 0755 "${BUILD_DIR}/ominulld.exe" "${BRIDGE_DIR}/ominulld.exe"
-    install -m 0755 "${BUILD_DIR}/ominull_wfp_user.exe" "${BRIDGE_DIR}/ominull_wfp_user.exe"
-    install -m 0644 "${ROOT_DIR}/LICENSE" "${BRIDGE_DIR}/LICENSE"
-    tar --owner=root --group=root --numeric-owner -czf \
-        "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz" -C "${BRIDGE_DIR}" .
-fi
-
 echo "[+] Built packages:"
 printf '    %s\n' "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" \
     "${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb" \
     "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi"
-if [ "${BRIDGE}" = "1" ]; then
-    printf '    %s\n' "${DIST_DIR}/ominull-agent-windows-${VERSION}.tar.gz"
-fi

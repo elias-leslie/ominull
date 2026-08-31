@@ -650,6 +650,12 @@ static bool RemoveAgentData(void) {
         "C:\\Program Files\\Ominull\\ca.crt",
         "C:\\Program Files\\Ominull\\client.crt",
         "C:\\Program Files\\Ominull\\client.pfx",
+        /* Exact residue names from the retired direct-binary updater. The MSI
+         * owns this cleanup path; enrollment material remains under
+         * ProgramData until the package purge reaches it above. */
+        "C:\\Program Files\\Ominull\\ominull-recover.bat",
+        "C:\\Program Files\\Ominull\\ominulld.old",
+        "C:\\Program Files\\Ominull\\update.pending",
         NULL,
     };
     bool ok = true;
@@ -660,6 +666,9 @@ static bool RemoveAgentData(void) {
     if (!RemoveDirectoryA("C:\\ProgramData\\Ominull\\updates") &&
         GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_DIR_NOT_EMPTY) ok = false;
     if (!RemoveDirectoryA("C:\\ProgramData\\Ominull") &&
+        GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_DIR_NOT_EMPTY) ok = false;
+    if (!RemoveDirectoryFiles("C:\\Program Files\\Ominull\\update-stage")) ok = false;
+    if (!RemoveDirectoryA("C:\\Program Files\\Ominull\\update-stage") &&
         GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_DIR_NOT_EMPTY) ok = false;
     return ok;
 }
