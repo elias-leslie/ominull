@@ -569,6 +569,12 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_country_global ON events(country, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_process_global ON events(process_path);
 	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity_global ON alerts(severity);
+	-- Time-window cards group on parsed UTC hour and topology dimensions. Keep
+	-- those projected columns beside the timestamp so cold reads stay covering
+	-- instead of evaluating string date functions over the event table.
+	CREATE INDEX IF NOT EXISTS idx_events_time_hour ON events(timestamp, CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER));
+	CREATE INDEX IF NOT EXISTS idx_events_tenant_time_hour ON events(tenant_id, timestamp, CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER));
+	CREATE INDEX IF NOT EXISTS idx_events_topology_time ON events(timestamp, src_ip, dst_ip, protocol, dst_port, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
@@ -2233,8 +2239,12 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 	// SQLite will parse here.
 	hourly := func(from, to time.Time) (map[int]int64, error) {
 		out := make(map[int]int64)
+		indexName := "idx_events_time_hour"
+		if tenantID != "" {
+			indexName = "idx_events_tenant_time_hour"
+		}
 		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
-			FROM events WHERE timestamp >= ? AND timestamp < ?`
+			FROM events INDEXED BY ` + indexName + ` WHERE timestamp >= ? AND timestamp < ?`
 		args := []interface{}{from, to}
 		if tenantID != "" {
 			query += " AND tenant_id = ?"
@@ -2561,7 +2571,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	rows, err := s.db.Query(
 		`SELECT src_ip, dst_ip, protocol, dst_port, action, SUM(bytes_in + bytes_out), COUNT(*),
 		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
-		 FROM events
+		 FROM events INDEXED BY idx_events_topology_time
 		 WHERE timestamp >= ?
 		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
 		cutoff,
