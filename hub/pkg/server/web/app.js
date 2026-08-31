@@ -74,6 +74,12 @@
         if (v === null || v === undefined || v === false) continue;
         if (k === "text") el.textContent = String(v);
         else if (k === "cls") el.className = v;
+        else if (k === "vars") {
+          /* style-src is 'self' with no unsafe-inline, so a style attribute is
+             refused by the browser and the value silently never applies. Custom
+             properties set through the CSSOM are not an inline style. */
+          for (var cp in v) el.style.setProperty(cp, v[cp]);
+        }
         else if (k === "on") {
           for (var ev in v) el.addEventListener(ev, v[ev]);
         } else if (v === true) el.setAttribute(k, "");
@@ -187,6 +193,42 @@
     return Math.floor(hrs / 24) + "d " + pad(hrs % 24, 2) + "h";
   }
 
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  /* "4m 12s ago" is the wrong headline for a last-seen column. A host that hung
+     at 02:14 reads as a number that keeps climbing, and the one fact worth
+     having - when it stopped - is the one the console threw away. So the
+     absolute local time leads and the age moves to the tooltip. */
+  function stampText(date) {
+    if (!date) return "\u2014";
+    var now = new Date();
+    var hhmm = pad(date.getHours(), 2) + ":" + pad(date.getMinutes(), 2);
+    if (date.getFullYear() !== now.getFullYear()) {
+      return date.getFullYear() + "-" + pad(date.getMonth() + 1, 2) + "-" + pad(date.getDate(), 2) + " " + hhmm;
+    }
+    if (date.getDate() === now.getDate() && date.getMonth() === now.getMonth()) {
+      return hhmm + ":" + pad(date.getSeconds(), 2);
+    }
+    return MONTHS[date.getMonth()] + " " + pad(date.getDate(), 2) + " " + hhmm;
+  }
+
+  function stampTitle(date) {
+    if (!date) return "No timestamp recorded";
+    return date.toString() + " \u2014 " + ago(date) + " ago";
+  }
+
+  /* A <time> so the machine-readable instant travels with the text, and so a
+     copy-paste out of the console lands somewhere with a timezone on it. */
+  function stamp(date, extraCls) {
+    if (!date) return h("span", { cls: "ago" + (extraCls ? " " + extraCls : ""), text: "\u2014" });
+    return h("time", {
+      cls: "stamp" + (extraCls ? " " + extraCls : ""),
+      datetime: date.toISOString(),
+      title: stampTitle(date),
+      text: stampText(date)
+    });
+  }
+
   function bytes(n) {
     n = Number(n) || 0;
     var units = ["B", "KB", "MB", "GB", "TB"];
@@ -285,7 +327,11 @@
     chat: [],
     chatBusy: false,
     statHistory: {},
-    scanJob: null
+    scanJob: null,
+    // The running scan's own answer about itself. Polled while it runs; the
+    // console used to hold the id and never ask the hub what became of it.
+    scanStatus: null,
+    scanPoll: null
   };
 
   function selectedKeys() {
@@ -748,6 +794,8 @@
           resolve(demoBaselineFor(path));
           return;
         }
+        if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
+        if (base === "/api/v1/deployer/status") { resolve(demoJobStatus(path)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -756,6 +804,49 @@
         resolve(base.indexOf("/coverage") >= 0 || base.indexOf("/summary") >= 0 ? {} : []);
       }, 40);
     });
+  }
+
+  /* A sweep and a push both take minutes on real hardware, so demo mode runs
+     them on a clock: the progress bar fills, the job log grows, and the failure
+     path is reachable without a host to fail against. */
+  var DEMO_JOBS = {};
+
+  function demoScanStatus(path) {
+    var id = new URLSearchParams(path.split("?")[1] || "").get("id") || "";
+    var job = DEMO_JOBS[id];
+    if (!job) return { id: id, status: "failed", subnet: "", progress: 0 };
+    var age = (Date.now() - job.started) / 1000;
+    var pct = Math.min(100, Math.round((age / 12) * 100));
+    return {
+      id: id, subnet: job.subnet, profile: job.profile,
+      status: pct >= 100 ? "completed" : "running",
+      progress: pct,
+      total_hosts: 254,
+      found_count: Math.round((pct / 100) * 9),
+      start_time: new Date(job.started).toISOString(),
+      end_time: pct >= 100 ? new Date(job.started + 12000).toISOString() : ""
+    };
+  }
+
+  function demoJobStatus(path) {
+    var id = new URLSearchParams(path.split("?")[1] || "").get("id") || "";
+    var job = DEMO_JOBS[id];
+    if (!job) return { id: id, status: "failed", error: "No such job", logs: [] };
+    var steps = [
+      "Connecting to " + job.target + ":" + job.port + " as " + job.user,
+      "Host key SHA256:8Qk1n+… pinned on first contact",
+      "Detected Debian GNU/Linux 12 (bookworm)",
+      "Uploading ominull-agent_1.7.11_amd64.deb (4.2 MB)",
+      "dpkg -i ominull-agent_1.7.11_amd64.deb",
+      "Writing /etc/ominull/agent.conf",
+      "systemctl enable --now ominull-agent",
+      "Enrolled as " + (job.target.replace(/\./g, "-"))
+    ];
+    var n = Math.min(steps.length, Math.floor((Date.now() - job.started) / 900));
+    return {
+      id: id, status: n >= steps.length ? "success" : "running",
+      logs: steps.slice(0, n)
+    };
   }
 
   /* One demo host reports a resolver nothing covers, so the refusal path and the
@@ -822,12 +913,55 @@
 
   /* Demo writes mutate the fixture so an isolate or an acknowledge visibly
      lands, the same way it would against a live hub. */
+  /* The demo installer is a real-shaped script with a demonstrably fake key, so
+     the copy and download buttons can be exercised without minting a ticket. */
+  function demoInstaller(body) {
+    var plat = body.platform || "linux";
+    var host = "https://hub.demo.invalid:9443";
+    var spec = {
+      linux: { file: "ominull-install.sh", one: "curl -fsSL " + host + "/bootstrap.sh?t=DEMOTICKET | sudo bash" },
+      macos: { file: "ominull-install.mac.sh", one: "curl -fsSL " + host + "/bootstrap.mac.sh?t=DEMOTICKET | sudo bash" },
+      windows: { file: "ominull-install.ps1", one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1?t=DEMOTICKET' | iex" }
+    }[plat] || {};
+    var out = {
+      platform: plat,
+      filename: spec.file,
+      script: "#!/bin/sh\n# Ominull agent installer (demo mode - this script installs nothing)\n"
+        + "OMINULL_HUB=\"" + host + "\"\n"
+        + "OMINULL_TENANT=\"" + (body.tenant_id || "default") + "\"\n"
+        + "OMINULL_LOCATION=\"" + (body.location_id || "") + "\"\n"
+        + "OMINULL_ROLE=\"" + (body.role || "workstation") + "\"\n"
+        + "OMINULL_ENROL_TOKEN=\"demo-token-not-a-credential\"\n"
+        + "set -eu\n"
+        + "curl -fsSL \"$OMINULL_HUB/downloads/ominull-agent_1.7.11_amd64.deb\" -o /tmp/ominull.deb\n"
+        + "dpkg -i /tmp/ominull.deb\n"
+        + "systemctl enable --now ominull-agent\n",
+      note: "Demo mode: nothing was minted and this script will not enrol anything."
+    };
+    if (body.one_liner) { out.one_liner = spec.one; out.one_liner_expires_in = "30m0s"; }
+    return out;
+  }
+
   function demoMutate(base, body) {
     var eps = DEMO_CACHE["/api/v1/endpoints"];
     var setIso = function (id, on) {
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
       DEMO_CACHE["/api/v1/hierarchy"] = demoRebuildHierarchy();
     };
+    if (base === "/api/v1/scanner/scan") {
+      var sid = "scan-" + Date.now();
+      DEMO_JOBS[sid] = { started: Date.now(), subnet: (body && body.subnet) || "10.0.4.0/24", profile: (body && body.profile) || "standard" };
+      return { scan_id: sid, status: "started" };
+    }
+    if (base === "/api/v1/deployer/push") {
+      var jid = "job-" + Date.now();
+      DEMO_JOBS[jid] = {
+        started: Date.now(), target: (body && body.target_ip) || "10.0.4.20",
+        port: (body && body.port) || 22, user: (body && body.username) || "root"
+      };
+      return { job_id: jid, status: "queued" };
+    }
+    if (base === "/api/v1/enrolment/script") return demoInstaller(body || {});
     if (base === "/api/v1/endpoints/isolate") { setIso(body && body.endpoint_id, true); return { status: "isolated" }; }
     if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
     if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
@@ -1622,15 +1756,7 @@
 
   function deployAgent(asset) {
     if (asset.evidence.agent) { toast(asset.name + " already runs an agent", "warn"); return; }
-    var user = window.prompt("SSH user for " + asset.ip + ":", "");
-    if (!user) return;
-    var family = osFamily(asset.scan ? asset.scan.os_guess : "") || "linux";
-    request("/api/v1/deployer/push", "POST", {
-      target_ip: asset.ip, username: user, os: family,
-      protocol: family === "windows" ? "winrm" : "ssh"
-    }).then(function (job) {
-      toast("Deployment queued for " + asset.ip + (job && job.job_id ? " (" + job.job_id + ")" : ""), "ok");
-    }).catch(function (e) { toast("Deploy failed: " + e.message, "crit"); });
+    openDeploySheet(asset);
   }
 
   function bulkIsolate(on) {
@@ -2024,7 +2150,7 @@
       h("td", {}, stateBadge(asset.state)),
       h("td", {}, exposure),
       h("td", {}, agentCell),
-      h("td", {}, h("span", { cls: "ago", text: ago(asset.lastSeen) })),
+      h("td", {}, stamp(asset.lastSeen)),
       h("td", {}, menuBtn));
   }
 
@@ -2146,6 +2272,101 @@
     return h("div", { cls: "tblwrap" }, h("table", {}, h("thead", {}, thead), tbody));
   }
 
+  /* ------------------------------------------------------- scan progress */
+
+  /* A sweep takes minutes and the console had nowhere to say so: it kept the
+     scan id, printed it as "Last job: scan-…", and never asked the hub what
+     became of it. The hub has carried progress, a found count and a host total
+     the whole time. */
+
+  function stopScanPoll() {
+    if (state.scanPoll) { clearInterval(state.scanPoll); state.scanPoll = null; }
+  }
+
+  function watchScan(scanID) {
+    stopScanPoll();
+    state.scanJob = scanID;
+    var check = function () {
+      request("/api/v1/scanner/status?id=" + encodeURIComponent(scanID)).then(function (st) {
+        state.scanStatus = st || null;
+        if (st && (st.status === "completed" || st.status === "failed")) {
+          stopScanPoll();
+          toast(st.status === "completed"
+            ? "Sweep of " + st.subnet + " finished — " + (st.found_count || 0) + " host(s) found"
+            : "Sweep of " + st.subnet + " failed", st.status === "completed" ? "ok" : "crit");
+          refresh();
+          return;
+        }
+        if (state.section === "discovery") renderBody();
+      }).catch(function () {
+        /* A status the hub cannot answer for is a finished scan it has
+           forgotten, not a reason to keep asking. */
+        stopScanPoll();
+      });
+    };
+    check();
+    state.scanPoll = setInterval(check, 2000);
+  }
+
+  function scanProgressCard() {
+    var st = state.scanStatus;
+    if (!st) {
+      return card("Sweep status", h("div", { cls: "empty",
+        text: "No sweep has been started from this console. Progress, host counts and what was found appear here while one runs." }));
+    }
+
+    var running = st.status === "running" || st.status === "pending";
+    var pct = Math.max(0, Math.min(100, Number(st.progress) || 0));
+    var started = parseTime(st.start_time);
+    var ended = parseTime(st.end_time);
+    /* EndTime is a time.Time, and omitempty does not drop a zero struct, so a
+       running scan reports "0001-01-01T00:00:00Z" rather than nothing. */
+    if (ended && started && ended < started) ended = null;
+    var elapsed = started ? Math.round((((ended && !running) ? ended : new Date()) - started) / 1000) : 0;
+
+    var bar = h("div", { cls: "bar", role: "progressbar", vars: { "--pct": pct + "%" },
+      "aria-valuenow": String(pct), "aria-valuemin": "0", "aria-valuemax": "100",
+      "aria-label": "Sweep progress" },
+      h("i", { cls: "bar-fill" }));
+
+    var stateWord = running ? "Sweeping" : st.status === "completed" ? "Complete" : "Failed";
+
+    return card("Sweep status", h("div", { cls: "card-body stack" },
+      h("div", { cls: "scanhead" },
+        h("span", { cls: "st", "data-state": running ? "info" : st.status === "completed" ? "ok" : "crit" },
+          icon(running ? "g-watch" : st.status === "completed" ? "g-online" : "g-quarantine", true),
+          h("span", { text: stateWord })),
+        h("span", { cls: "ip", text: st.subnet || "" }),
+        h("span", { cls: "dim-3", text: st.profile || "" }),
+        h("span", { cls: "fill" }),
+        h("span", { cls: "ago", text: pct + "%" })),
+      bar,
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Hosts probed" }), h("dd", {}, h("b", { text: String(st.total_hosts || 0) })),
+        h("dt", { text: "Live hosts found" }), h("dd", {}, h("b", { text: String(st.found_count || 0) })),
+        h("dt", { text: "Elapsed" }), h("dd", { text: elapsed + "s" }),
+        h("dt", { text: "Started" }), h("dd", {}, stamp(started)),
+        h("dt", { text: "Job" }), h("dd", { cls: "ip", text: st.id || "" }))));
+  }
+
+  /* The bootstrap routes never went away; the button that reached them did.
+     Discovery is where an operator is already looking at a host with no agent
+     on it, so the door belongs on this page as well as in the topbar. */
+  function addEndpointCard() {
+    return card("Install an agent",
+      h("div", { cls: "card-body stack" },
+        h("p", { cls: "pending", text: "Render a signed installer for one platform, copy it or download it, or take a one-line command to paste on the host. The command carries a single-use ticket that expires in 30 minutes \u2014 not the admin key." }),
+        h("div", { cls: "row-acts" },
+          h("button", {
+            cls: "btn btn-primary", type: "button", text: "Create an installer",
+            on: { click: function () { openInstallerSheet(); } }
+          }),
+          h("button", {
+            cls: "btn", type: "button", text: "Push over SSH",
+            on: { click: function () { openDeploySheet(null); } }
+          }))));
+  }
+
   function renderDiscovery() {
     var view = $("view");
     var cov = state.coverage || {};
@@ -2173,17 +2394,15 @@
               click: function () {
                 request("/api/v1/scanner/scan", "POST", { subnet: subnetInput.value, profile: profileSel.value })
                   .then(function (res) {
-                    state.scanJob = res && res.scan_id ? res.scan_id : "running";
-                    toast("Scan started on " + subnetInput.value, "ok");
-                    setTimeout(refresh, 3000);
+                    toast("Sweeping " + subnetInput.value, "ok");
+                    if (res && res.scan_id) watchScan(res.scan_id);
+                    else { state.scanJob = "running"; setTimeout(refresh, 3000); }
                   })
                   .catch(function (e) { toast("Scan failed: " + e.message, "crit"); });
               }
             }
           })),
-        h("p", { cls: "pending", text: state.scanJob
-          ? "Last job: " + state.scanJob
-          : "Discovered assets are written to the asset graph as they are found, so they survive a hub restart and an agent installed later enriches the same row." })));
+        h("p", { cls: "pending", text: "Discovered assets are written to the asset graph as they are found, so they survive a hub restart and an agent installed later enriches the same row." })));
 
     var unmanaged = state.assets.filter(function (a) { return !a.evidence.agent; });
     var worklist = card("Deployment worklist \u2014 seen, but not covered",
@@ -2197,7 +2416,7 @@
             h("span", { cls: "st", "data-state": a.riskyPorts ? "warn" : "idle" },
               icon(a.riskyPorts ? "g-watch" : "g-offline", true),
               h("span", { text: a.risk || "LOW" })),
-            h("span", { cls: "ago", text: ago(a.lastSeen) }),
+            stamp(a.lastSeen),
             h("button", { cls: "mini", type: "button", text: "Deploy agent", on: { click: function () { deployAgent(a); } } })
           ];
         })));
@@ -2246,7 +2465,9 @@
 
     clear(view);
     view.appendChild(h("div", { cls: "pad stack" },
+      scanProgressCard(),
       h("div", { cls: "cols" }, launch, card("Coverage", covBody)),
+      addEndpointCard(),
       card("Deduced from flow \u2014 hosts nothing probed and nothing runs on", infBody, [
         h("button", {
           cls: "mini", type: "button", text: "Run inference now",
@@ -2763,7 +2984,7 @@
 
     var evRows = state.events.slice(0, 60).map(function (e) {
       return [
-        h("span", { cls: "ago", text: ago(parseTime(e.timestamp)) }),
+        stamp(parseTime(e.timestamp)),
         h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
           icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
           h("span", { text: e.action || "\u2014" })),
@@ -2778,7 +2999,7 @@
     view.appendChild(h("div", { cls: "pad stack" },
       chartCard,
       h("div", { cls: "cols" }, talkerCard, geoCard),
-      card("Recent flows", simpleTable(["Age", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
+      card("Recent flows", simpleTable(["Time", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
   }
 
   /* ------------------------------------------------------------- sheet */
@@ -2812,6 +3033,274 @@
     document.body.appendChild(sheetEl);
     var first = sheetEl.querySelector("input, select, button.btn-primary");
     if (first) first.focus();
+  }
+
+  /* ------------------------------------------------- adding an endpoint */
+
+  /* Getting an agent onto a host that has none. Two ways, and they fail in
+     different places, so the console offers both rather than picking one:
+
+       - the hub renders an installer and the operator runs it on the host. This
+         works everywhere, including on a host the hub cannot reach.
+       - the hub reaches out over SSH and installs it. This is faster for a list
+         of hosts and needs a credential the operator has.
+
+     The second one used to ask for a username, fire, and never look at the
+     result again - so a failed deployment was indistinguishable from a
+     successful one from where the operator was standing. */
+
+  function tenantOptions() {
+    var out = [];
+    arrayOf(state.hierarchy).forEach(function (c) {
+      if (c && c.tenant && c.tenant.id) out.push({ id: c.tenant.id, name: c.tenant.name || c.tenant.id });
+    });
+    if (!out.length) out.push({ id: "default", name: "default" });
+    return out;
+  }
+
+  function copyText(value, what) {
+    var done = function () { toast("Copied " + what, "ok"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, function () { toast("Could not copy — select it by hand", "warn"); });
+    } else {
+      toast("Could not copy — select it by hand", "warn");
+    }
+  }
+
+  /* A download the browser makes from a string we already hold. The script is a
+     credential, so it is never fetched through a URL that could be logged or
+     replayed - it came down the authenticated API call that rendered it. */
+  function downloadText(filename, body) {
+    var blob = new Blob([body], { type: "text/plain" });
+    var url = URL.createObjectURL(blob);
+    var a = h("a", { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function openInstallerSheet(prefill) {
+    var pre = prefill || {};
+
+    var platform = h("select", { "aria-label": "Platform" },
+      h("option", { value: "linux", text: "Linux" }),
+      h("option", { value: "macos", text: "macOS" }),
+      h("option", { value: "windows", text: "Windows" }));
+    if (pre.platform) platform.value = pre.platform;
+
+    var tenant = h("select", { "aria-label": "Client" },
+      tenantOptions().map(function (t) { return h("option", { value: t.id, text: t.name }); }));
+
+    var location = h("select", { "aria-label": "Location" }, h("option", { value: "", text: "—" }));
+    arrayOf(state.locations).forEach(function (l) {
+      location.appendChild(h("option", { value: l.id, text: l.name || l.id }));
+    });
+
+    var role = h("select", { "aria-label": "Role" },
+      h("option", { value: "workstation", text: "Workstation" }),
+      h("option", { value: "server", text: "Server" }),
+      h("option", { value: "kiosk", text: "Kiosk" }),
+      h("option", { value: "appliance", text: "Appliance" }));
+
+    var endpointID = h("input", { type: "text", value: pre.endpoint_id || "", placeholder: "derived from the hostname" });
+
+    var out = h("div", { cls: "stack" });
+    var rendered = null;
+
+    var render = function (wantOneLiner) {
+      out.textContent = "";
+      out.appendChild(h("div", { cls: "empty", text: "Rendering…" }));
+      request("/api/v1/enrolment/script", "POST", {
+        platform: platform.value,
+        tenant_id: tenant.value,
+        location_id: location.value,
+        role: role.value,
+        endpoint_id: endpointID.value.trim(),
+        one_liner: !!wantOneLiner
+      }).then(function (res) {
+        rendered = res || {};
+        out.textContent = "";
+
+        if (rendered.one_liner) {
+          out.appendChild(h("div", { cls: "field" },
+            h("span", { text: "Run this on the host" }),
+            h("pre", { cls: "cmd", text: rendered.one_liner }),
+            h("div", { cls: "form-row" },
+              h("button", {
+                cls: "btn", type: "button", text: "Copy command",
+                on: { click: function () { copyText(rendered.one_liner, "the install command"); } }
+              }),
+              h("span", { cls: "pending", text: "Works once, and expires in " + (rendered.one_liner_expires_in || "30m") + "." }))));
+        }
+
+        out.appendChild(h("div", { cls: "form-row" },
+          h("button", {
+            cls: "btn", type: "button", text: "Copy script",
+            on: { click: function () { copyText(rendered.script || "", rendered.filename || "the installer"); } }
+          }),
+          h("button", {
+            cls: "btn", type: "button", text: "Download " + (rendered.filename || "script"),
+            on: { click: function () { downloadText(rendered.filename || "ominull-install.txt", rendered.script || ""); } }
+          }),
+          !rendered.one_liner ? h("button", {
+            cls: "btn", type: "button", text: "Get a one-line command",
+            on: { click: function () { render(true); } }
+          }) : null));
+
+        out.appendChild(h("pre", { cls: "cmd cmd-scroll", text: rendered.script || "" }));
+        out.appendChild(h("p", { cls: "pending", text: rendered.note || "" }));
+      }).catch(function (e) {
+        out.textContent = "";
+        out.appendChild(h("p", { cls: "note note-crit", text: "Could not render the installer: " + e.message }));
+      });
+    };
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why", text: "The hub renders an installer carrying this client's key and a single-use enrolment token. Run it on the host, or hand the host the one-line command." }),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Platform" }), platform),
+        h("label", { cls: "field" }, h("span", { text: "Client" }), tenant),
+        h("label", { cls: "field" }, h("span", { text: "Location" }), location),
+        h("label", { cls: "field" }, h("span", { text: "Role" }), role),
+        h("label", { cls: "field" }, h("span", { text: "Endpoint id" }), endpointID)),
+      out);
+
+    openSheet("Install an agent", body, [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      h("button", { cls: "btn btn-primary", type: "button", text: "Render installer", on: { click: function () { render(false); } } })
+    ]);
+
+    render(false);
+  }
+
+  /* ------------------------------------------------------- push deploy */
+
+  function openDeploySheet(asset) {
+    var ip = h("input", { type: "text", value: (asset && asset.ip) || "", placeholder: "10.0.4.20" });
+    var port = h("input", { type: "text", value: "22", placeholder: "22" });
+    var user = h("input", { type: "text", value: "", placeholder: "root" });
+
+    var authKind = h("select", { "aria-label": "Authentication" },
+      h("option", { value: "password", text: "Password" }),
+      h("option", { value: "key", text: "Private key" }));
+    var password = h("input", { type: "password", value: "", placeholder: "••••••" });
+    /* The placeholder deliberately describes the key rather than showing a PEM
+       banner: the literal trips every secret scanner that will ever read this
+       repository, and a false positive in that gate is worse than a vaguer
+       hint. */
+    var privateKey = h("textarea", { rows: "4", placeholder: "Paste an OpenSSH private key, header line included" });
+    var fingerprint = h("input", { type: "text", value: "", placeholder: "SHA256:… (optional; pinned on first contact otherwise)" });
+
+    var guessed = asset ? (osFamily(asset.scan ? asset.scan.os_guess : "") || "linux") : "linux";
+    var os = h("select", { "aria-label": "Operating system" },
+      h("option", { value: "auto", text: "Detect on connect" }),
+      h("option", { value: "linux", text: "Linux" }),
+      h("option", { value: "macos", text: "macOS" }),
+      h("option", { value: "windows", text: "Windows" }));
+    os.value = guessed === "windows" ? "windows" : "auto";
+
+    var authRow = h("div", { cls: "stack" });
+    var syncAuth = function () {
+      authRow.textContent = "";
+      if (authKind.value === "key") {
+        authRow.appendChild(h("label", { cls: "field" }, h("span", { text: "Private key" }), privateKey));
+      } else {
+        authRow.appendChild(h("label", { cls: "field" }, h("span", { text: "Password" }), password));
+      }
+    };
+    authKind.addEventListener("change", syncAuth);
+    syncAuth();
+
+    /* The log the hub keeps for this job, shown where the operator is standing.
+       Without it a deployment that failed on the first SSH packet looked exactly
+       like one that worked. */
+    var logBox = h("div", { cls: "joblog" });
+    var poll = null;
+    var stopPolling = function () { if (poll) { clearInterval(poll); poll = null; } };
+
+    var showJob = function (job) {
+      logBox.textContent = "";
+      var state_ = (job && job.status) || "pending";
+      logBox.appendChild(h("p", {
+        cls: "note " + (state_ === "failed" ? "note-crit" : state_ === "success" ? "note-ok" : "note-warn"),
+        text: state_ === "failed" ? (job.error || "The deployment failed.")
+          : state_ === "success" ? "The agent is installed and enrolled."
+          : "Running…"
+      }));
+      arrayOf(job && job.logs).forEach(function (line) {
+        logBox.appendChild(h("div", { cls: "jobline", text: line }));
+      });
+      logBox.scrollTop = logBox.scrollHeight;
+      if (state_ === "success" || state_ === "failed") {
+        stopPolling();
+        if (state_ === "success") refresh();
+      }
+    };
+
+    var start = function () {
+      if (!ip.value.trim()) { toast("A target address is required", "warn"); return; }
+      if (!user.value.trim()) { toast("An SSH user is required", "warn"); return; }
+      if (authKind.value === "password" && !password.value) { toast("A password is required, or switch to a private key", "warn"); return; }
+      if (authKind.value === "key" && !privateKey.value.trim()) { toast("Paste the private key, or switch to a password", "warn"); return; }
+
+      var body = {
+        target_ip: ip.value.trim(),
+        port: parseInt(port.value, 10) || 22,
+        protocol: os.value === "windows" ? "winrm" : "ssh",
+        os: os.value,
+        username: user.value.trim(),
+        host_key_fingerprint: fingerprint.value.trim()
+      };
+      if (authKind.value === "key") body.private_key = privateKey.value;
+      else body.password = password.value;
+
+      logBox.textContent = "";
+      logBox.appendChild(h("div", { cls: "jobline", text: "Dispatching…" }));
+
+      request("/api/v1/deployer/push", "POST", body).then(function (res) {
+        var jobID = res && res.job_id;
+        if (!jobID) { toast("The hub accepted the job but named no id", "warn"); return; }
+        /* Poll the job the hub just created. This is the part that was
+           missing: the id came back and nothing ever asked about it again. */
+        stopPolling();
+        var check = function () {
+          request("/api/v1/deployer/status?id=" + encodeURIComponent(jobID))
+            .then(showJob)
+            .catch(function (e) { stopPolling(); toast("Lost track of the job: " + e.message, "crit"); });
+        };
+        check();
+        poll = setInterval(check, 1500);
+      }).catch(function (e) {
+        logBox.textContent = "";
+        logBox.appendChild(h("p", { cls: "note note-crit", text: "The hub refused the job: " + e.message }));
+      });
+    };
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why", text: "The hub opens an SSH session to this host and runs the installer. The credential is used for this connection and is not stored." }),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Address" }), ip),
+        h("label", { cls: "field" }, h("span", { text: "Port" }), port),
+        h("label", { cls: "field" }, h("span", { text: "User" }), user),
+        h("label", { cls: "field" }, h("span", { text: "OS" }), os),
+        h("label", { cls: "field" }, h("span", { text: "Authenticate with" }), authKind)),
+      authRow,
+      h("label", { cls: "field" }, h("span", { text: "Expected host key" }), fingerprint),
+      logBox);
+
+    /* Closing the sheet must not leave a timer running against a job nobody is
+       looking at any more. */
+    var close = function () { stopPolling(); closeSheet(); };
+
+    openSheet("Deploy an agent" + (asset && asset.name ? " to " + asset.name : ""), body, [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: close } }),
+      h("button", {
+        cls: "btn", type: "button", text: "Install manually instead",
+        on: { click: function () { stopPolling(); openInstallerSheet({ platform: guessed === "windows" ? "windows" : guessed === "macos" ? "macos" : "linux" }); } }
+      }),
+      h("button", { cls: "btn btn-primary", type: "button", text: "Deploy", on: { click: start } })
+    ]);
   }
 
   /* -------------------------------------------------- isolation baseline */
@@ -3128,7 +3617,7 @@
           h("span", { cls: "dim", text: i.threat_type || i.threat_name || "" }),
           h("span", { cls: "dim-3", text: i.source || "" }),
           h("span", { cls: "ago", text: String(i.confidence !== undefined ? i.confidence : "") }),
-          h("span", { cls: "ago", text: ago(parseTime(i.last_seen_at || i.created_at)) })
+          stamp(parseTime(i.last_seen_at || i.created_at))
         ];
       }));
 
@@ -3139,7 +3628,7 @@
           h("span", { cls: "ip", text: p.target_mac || "\u2014" }),
           h("span", { cls: "ip", text: p.subnet || "\u2014" }),
           h("span", { cls: "dim", text: p.reason || "" }),
-          h("span", { cls: "ago", text: ago(parseTime(p.created_at)) }),
+          stamp(parseTime(p.created_at)),
           h("button", {
             cls: "mini", type: "button", text: "Release",
             on: {
@@ -3178,7 +3667,7 @@
 
     var rows = state.audit.map(function (a) {
       return [
-        h("span", { cls: "ago", text: ago(parseTime(a.timestamp)) }),
+        stamp(parseTime(a.timestamp)),
         h("span", { cls: "dim", text: a.username || a.user_id || "\u2014" }),
         h("span", { text: a.action || "" }),
         h("span", { cls: "ip", text: a.resource || "" }),
@@ -3188,7 +3677,7 @@
     });
 
     view.appendChild(h("div", { cls: "pad stack" },
-      card("Audit trail", simpleTable(["Age", "Actor", "Action", "Resource", "Details", "From"], rows))));
+      card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows))));
   }
 
   /* Roles, in the words an operator uses about people rather than the words the
@@ -3310,7 +3799,7 @@
           isYou ? h("span", { cls: "dim-3", text: "  you" }) : document.createTextNode("")),
         sel,
         h("span", { cls: "dim-3", text: op.created_by || "\u2014" }),
-        h("span", { cls: "ago", text: op.created_at ? ago(parseTime(op.created_at)) : "\u2014" }),
+        stamp(parseTime(op.created_at)),
         h("button", {
           cls: "mini", type: "button", text: "Remove",
           on: {
@@ -3400,7 +3889,7 @@
         h("dt", { text: "Client" }), h("dd", { text: asset.tenantName }),
         h("dt", { text: "Location" }), h("dd", { text: asset.locationName }),
         h("dt", { text: "Subnet" }), h("dd", { text: asset.subnet || "\u2014" }),
-        h("dt", { text: "Last seen" }), h("dd", { text: ago(asset.lastSeen) + " ago" }))));
+        h("dt", { text: "Last seen" }), h("dd", {}, stamp(asset.lastSeen)))));
 
     var agentCard = card("Agent", h("div", { cls: "card-body" },
       ep
@@ -3411,7 +3900,7 @@
             h("dt", { text: "OS" }), h("dd", { text: ep.os || "\u2014" }),
             h("dt", { text: "Role" }), h("dd", { text: ep.role_tag || "\u2014" }),
             h("dt", { text: "Software" }), h("dd", { text: ep.installed_software || "\u2014" }),
-            h("dt", { text: "Registered" }), h("dd", { text: ago(parseTime(ep.created_at)) + " ago" }))
+            h("dt", { text: "Registered" }), h("dd", {}, stamp(parseTime(ep.created_at))))
         : h("div", { cls: "empty", text: "No agent on this asset. It is on the deployment worklist." })));
 
     var portsBody = h("div", { cls: "card-body" });
@@ -3440,10 +3929,10 @@
     var flows = state.events.filter(function (e) {
       return (ep && e.endpoint_id === ep.id) || (asset.ip && (e.src_ip === asset.ip || e.dst_ip === asset.ip));
     }).slice(0, 25);
-    var flowCard = card("Recent flows", simpleTable(["Age", "Action", "Source", "Destination", "Process"],
+    var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process"],
       flows.map(function (e) {
         return [
-          h("span", { cls: "ago", text: ago(parseTime(e.timestamp)) }),
+          stamp(parseTime(e.timestamp)),
           h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
             icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
             h("span", { text: e.action || "" })),
@@ -3522,7 +4011,9 @@
       h("div", {},
         h("div", { cls: "sev-word", text: (a.severity || "LOW") + " \u00b7 " + (a.anomaly_type || "ANOMALY") }),
         h("div", { cls: "ttl", text: a.title || "Anomaly" }),
-        h("div", { cls: "meta", text: (a.hostname || a.endpoint_id || "\u2014") + " \u00b7 " + ago(parseTime(a.timestamp)) + " ago" }),
+        h("div", { cls: "meta" },
+          document.createTextNode((a.hostname || a.endpoint_id || "\u2014") + " \u00b7 "),
+          stamp(parseTime(a.timestamp))),
         h("div", { cls: "desc", text: a.description || "" }),
         a.details ? h("div", { cls: "meta", text: a.details }) : null,
         compact ? null : h("div", { cls: "acts" },
@@ -4099,6 +4590,11 @@
           on: { click: pushAgentUpdates }
         }));
       }
+    } else if (state.section === "discovery") {
+      actions.appendChild(h("button", {
+        cls: "btn btn-primary", type: "button", text: "Install an agent",
+        on: { click: function () { openInstallerSheet(); } }
+      }));
     } else if (state.section === "topology") {
       ["1h", "6h", "24h", "7d"].forEach(function (w) {
         actions.appendChild(h("button", {

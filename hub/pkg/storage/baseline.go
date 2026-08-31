@@ -645,6 +645,27 @@ type BaselineWireRule struct {
 }
 
 // BaselineWireRules expands resolved rules into what the agents enforce.
+// BaselineWireLimit is how many expanded rules an agent can actually hold:
+// OMINULL_MAX_BASELINE_RULES in agent/include/agent.h and MAX_BASELINE_RULES in
+// agent/linux/main.c, which are the same number. Past it the agent reads the
+// first N and drops the rest, and the heartbeat reply starts crowding the
+// agent's 16KB response buffer - so an over-large policy would quietly become a
+// *subset* of itself on an isolated host, which is the one failure mode this
+// whole design exists to prevent. The hub trims to this number and refuses to
+// isolate while it is doing so.
+const BaselineWireLimit = 64
+
+// CapBaselineWireRules trims an expansion to what an agent can hold, and says
+// whether it had to. The input is already in a deterministic order, so the same
+// policy always trims to the same rules rather than to whatever the map
+// iteration produced this time.
+func CapBaselineWireRules(rules []BaselineWireRule) ([]BaselineWireRule, bool) {
+	if len(rules) <= BaselineWireLimit {
+		return rules, false
+	}
+	return rules[:BaselineWireLimit], true
+}
+
 func BaselineWireRules(rules []BaselineRule) []BaselineWireRule {
 	out := []BaselineWireRule{}
 	seen := map[string]bool{}

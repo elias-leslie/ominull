@@ -2320,3 +2320,94 @@ p.pending {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* --------------------------------------------------- sweep progress bar */
+
+.scanhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  width: var(--pct, 0%);
+  background: var(--brand);
+  transition: width 240ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-fill { transition: none; }
+}
+
+/* ------------------------------------------------------- absolute times */
+
+/* The timestamp leads and the age is the tooltip, so the dotted underline is
+   the only hint that hovering says more. */
+.stamp {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  text-decoration: underline dotted var(--line);
+  text-underline-offset: 3px;
+  cursor: help;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------- installers and job logs */
+
+.cmd {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: var(--s-3);
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+.cmd-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre;
+}
+
+.joblog {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  line-height: 1.6;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.joblog:empty {
+  display: none;
+}
+
+.jobline {
+  color: var(--ink-2);
+  padding: 1px var(--s-2);
+  border-left: 2px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

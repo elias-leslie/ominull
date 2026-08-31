@@ -126,12 +126,13 @@ func (s *Server) handleBaselineEndpoint(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ready, why, warning := s.isolationReadiness(res)
+	wire, _ := storage.CapBaselineWireRules(storage.BaselineWireRules(res.Rules))
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"resolution": res,
 		// The same expansion the agent is handed, not a second one written for
 		// the screen. A console that computes "udp/53" itself is a console that
 		// can disagree with the thing doing the enforcing.
-		"wire":    storage.BaselineWireRules(res.Rules),
+		"wire":    wire,
 		"ready":   ready,
 		"blocker": why,
 		"warning": warning,
@@ -201,6 +202,11 @@ func (s *Server) isolationReadiness(res storage.BaselineResolution) (bool, strin
 	}
 	if ok, why := res.Readiness.Ready(); !ok {
 		return false, "The endpoint reported that it is not ready to be isolated - " + why + ".", ""
+	}
+	if full := storage.BaselineWireRules(res.Rules); len(full) > storage.BaselineWireLimit {
+		return false, fmt.Sprintf(
+			"The policies covering this host expand to %d rules and an agent can hold %d, so isolating it would apply the first %d and drop the rest. Narrow the baseline that covers this host.",
+			len(full), storage.BaselineWireLimit, storage.BaselineWireLimit), ""
 	}
 	if len(res.Uncovered) > 0 {
 		parts := make([]string, 0, len(res.Uncovered))

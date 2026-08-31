@@ -651,6 +651,10 @@ func (s *Store) initSchema() error {
 	// with no policies, which reads as "hub and loopback only" - and the
 	// readiness gate then refuses to isolate anything whose observed services
 	// that does not cover, rather than cutting it off quietly.
+	if err := s.initInstallTicketSchema(); err != nil {
+		return err
+	}
+
 	return s.initBaselineSchema()
 }
 

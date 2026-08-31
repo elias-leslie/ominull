@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -266,31 +267,14 @@ func getServiceName(port int) string {
 	}
 }
 
-// StartScan initiates an asynchronous network discovery job
-func (s *Scanner) StartScan(subnet string, profile ScanProfile) (string, error) {
-	s.mu.Lock()
-	scanID := fmt.Sprintf("scan-%d", time.Now().UnixNano()/1000000)
-	status := &ScanStatus{
-		ID:         scanID,
-		Subnet:     subnet,
-		Profile:    profile,
-		Status:     "running",
-		Progress:   0,
-		StartTime:  time.Now().UTC(),
-		TotalHosts: 254,
-	}
-	s.activeScans[scanID] = status
-	s.mu.Unlock()
-
-	go s.runScanWorker(scanID, subnet, profile)
-	return scanID, nil
-}
-
-func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfile) {
+// targetsFor turns whatever the operator typed into the exact list of addresses
+// the sweep will probe. It is resolved before the job is announced rather than
+// inside the worker, because the console now shows the host count while the scan
+// runs and "254" was being reported for every subnet, /30 included.
+func targetsFor(subnet string) []string {
 	var ips []string
 	if strings.Contains(subnet, "/") {
-		_, ipNet, err := net.ParseCIDR(subnet)
-		if err == nil {
+		if _, ipNet, err := net.ParseCIDR(subnet); err == nil {
 			ips = generateIPs(ipNet)
 		}
 	}
@@ -307,6 +291,32 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 			ips = append(ips, fmt.Sprintf("%s%d", base, i))
 		}
 	}
+	return ips
+}
+
+// StartScan initiates an asynchronous network discovery job
+func (s *Scanner) StartScan(subnet string, profile ScanProfile) (string, error) {
+	ips := targetsFor(subnet)
+
+	s.mu.Lock()
+	scanID := fmt.Sprintf("scan-%d", time.Now().UnixNano()/1000000)
+	status := &ScanStatus{
+		ID:         scanID,
+		Subnet:     subnet,
+		Profile:    profile,
+		Status:     "running",
+		Progress:   0,
+		StartTime:  time.Now().UTC(),
+		TotalHosts: len(ips),
+	}
+	s.activeScans[scanID] = status
+	s.mu.Unlock()
+
+	go s.runScanWorker(scanID, ips, profile)
+	return scanID, nil
+}
+
+func (s *Scanner) runScanWorker(scanID string, ips []string, profile ScanProfile) {
 
 	// 1. Fetch managed endpoints from Store for immediate correlation
 	endpoints := s.store.GetEndpoints()
@@ -336,12 +346,15 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 
 	sem := make(chan struct{}, workerLimit)
 	total := len(ips)
+	// Probes finish out of order across forty workers, so progress taken from a
+	// worker's own index walked backwards on screen. Count what has finished.
+	var done int64
 
-	for idx, ip := range ips {
+	for _, ip := range ips {
 		sem <- struct{}{}
 		wg.Add(1)
 
-		go func(targetIP string, currentIdx int) {
+		go func(targetIP string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -350,9 +363,13 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 				mac = resolveMAC(targetIP)
 			}
 
-			// If passive mode, only evaluate hosts with active ARP or known traffic
+			// If passive mode, only evaluate hosts with active ARP or known
+			// traffic. It is still a probe that has been resolved, so it counts
+			// towards progress: skipping the tally here stalled the bar at
+			// whatever fraction of the subnet happened to answer ARP.
 			if profile == ProfilePassive {
 				if mac == "" {
+					s.tallyProbe(scanID, &done, total, &discMu, &discovered)
 					return
 				}
 			}
@@ -373,13 +390,8 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 				s.persist(asset)
 			}
 
-			s.mu.Lock()
-			if st, ok := s.activeScans[scanID]; ok {
-				st.Progress = int((float64(currentIdx+1) / float64(total)) * 100)
-				st.FoundCount = len(discovered)
-			}
-			s.mu.Unlock()
-		}(ip, idx)
+			s.tallyProbe(scanID, &done, total, &discMu, &discovered)
+		}(ip)
 	}
 
 	wg.Wait()
@@ -390,6 +402,22 @@ func (s *Scanner) runScanWorker(scanID string, subnet string, profile ScanProfil
 		st.Progress = 100
 		st.FoundCount = len(discovered)
 		st.EndTime = time.Now().UTC()
+	}
+	s.mu.Unlock()
+}
+
+// tallyProbe records one finished probe against the running scan. The found
+// count is read under the same mutex that guards the slice it counts.
+func (s *Scanner) tallyProbe(scanID string, done *int64, total int, discMu *sync.Mutex, discovered *[]DiscoveredAsset) {
+	n := atomic.AddInt64(done, 1)
+	discMu.Lock()
+	found := len(*discovered)
+	discMu.Unlock()
+
+	s.mu.Lock()
+	if st, ok := s.activeScans[scanID]; ok && total > 0 {
+		st.Progress = int((float64(n) / float64(total)) * 100)
+		st.FoundCount = found
 	}
 	s.mu.Unlock()
 }

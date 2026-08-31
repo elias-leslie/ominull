@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -325,5 +326,37 @@ func TestALoopbackResolverIsNotAGap(t *testing.T) {
 	proposed := ProposeBaselineRules(res.Observed)
 	if len(proposed) != 1 || proposed[0].Destination != "10.0.0.1" {
 		t.Fatalf("a loopback destination was proposed as a rule: %+v", proposed)
+	}
+}
+
+// TestAnOverLargeBaselineIsTrimmedDeterministically. An agent holds a fixed
+// number of rules. Past it the hub must trim rather than let the agent's own
+// truncation decide, because "the first 64 of a sorted list" is reproducible and
+// "whatever fitted in a 16KB buffer this time" is not.
+func TestAnOverLargeBaselineIsTrimmedDeterministically(t *testing.T) {
+	wire := make([]BaselineWireRule, 0, BaselineWireLimit+10)
+	for i := 0; i < BaselineWireLimit+10; i++ {
+		wire = append(wire, BaselineWireRule{
+			Service: "dns", Destination: fmt.Sprintf("10.0.%d.%d", i/256, i%256),
+			Protocol: "udp", Port: 53,
+		})
+	}
+	capped, over := CapBaselineWireRules(wire)
+	if !over {
+		t.Fatalf("a %d-rule expansion was not reported as over the %d-rule limit", len(wire), BaselineWireLimit)
+	}
+	if len(capped) != BaselineWireLimit {
+		t.Fatalf("trimmed to %d rules, want %d", len(capped), BaselineWireLimit)
+	}
+	again, _ := CapBaselineWireRules(wire)
+	for i := range capped {
+		if capped[i] != again[i] {
+			t.Fatalf("the same input trimmed to a different rule at %d: %+v vs %+v", i, capped[i], again[i])
+		}
+	}
+
+	short := wire[:BaselineWireLimit]
+	if _, over := CapBaselineWireRules(short); over {
+		t.Errorf("an expansion exactly at the limit was reported as over it")
 	}
 }

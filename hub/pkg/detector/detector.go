@@ -280,34 +280,43 @@ func (e *Engine) Evaluate(ev storage.Event) {
 
 	// 2. Diurnal Time-of-Day Hourly Behavioral Profiling & Off-Hours Detection
 	hr := now.Hour()
-	isOffHours := hr >= 22 || hr <= 5 // 22:00 to 05:59 UTC (e.g. 02:00 AM)
+	// Strict off-hours window (02:00 to 05:00 UTC)
+	isOffHours := hr >= 2 && hr <= 5
 	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
 	isInteractiveShell := strings.HasSuffix(procLower, "powershell.exe") ||
+		strings.HasSuffix(procLower, "pwsh.exe") ||
 		strings.HasSuffix(procLower, "cmd.exe") ||
 		strings.HasSuffix(procLower, "wscript.exe") ||
 		strings.HasSuffix(procLower, "cscript.exe") ||
 		strings.HasSuffix(procLower, "curl") ||
 		strings.HasSuffix(procLower, "curl.exe") ||
+		strings.HasSuffix(procLower, "wget") ||
 		strings.HasSuffix(procLower, "nc") ||
 		strings.HasSuffix(procLower, "ncat") ||
+		strings.HasSuffix(procLower, "netcat") ||
 		strings.HasSuffix(procLower, "/sh") ||
 		strings.HasSuffix(procLower, "/bash") ||
 		strings.HasSuffix(procLower, "/zsh") ||
+		strings.HasSuffix(procLower, "/dash") ||
 		strings.HasSuffix(procLower, "python") ||
 		strings.HasSuffix(procLower, "python3") ||
 		strings.HasSuffix(procLower, "python.exe")
 
-	if roleIsWorkstation && isOffHours && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
+	isTrustedSys := isTrustedSystemProcess(procLower)
+	isTrustedDst := isTrustedCloud(geo)
+
+	// Off-hours activity triggers ONLY for interactive shells / script interpreters, NEVER for standard OS system daemons
+	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
 		alertKey := fmt.Sprintf("offhours:%s:%s", ev.EndpointID, ev.DstIP)
-		if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
+		if !e.shouldSuppressAlert(alertKey, 120*time.Second) {
 			alert := storage.Alert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
 				Title:       fmt.Sprintf("Off-Hours Workstation Activity Detected (%02d:00 UTC)", hr),
-				Description: fmt.Sprintf("Process %s initiated external connection to %s:%d (%s) during off-hours baseline on %s.", procName, ev.DstIP, ev.DstPort, geo.CountryName, ev.EndpointID),
+				Description: fmt.Sprintf("Interactive shell %s initiated external connection to %s:%d (%s) during off-hours baseline on %s.", procName, ev.DstIP, ev.DstPort, geo.CountryName, ev.EndpointID),
 				Severity:    "HIGH",
 				Mitigated:   false,
 			}
@@ -321,7 +330,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 				Severity:    "HIGH",
 				Title:       alert.Title,
 				Description: alert.Description,
-				Details:     fmt.Sprintf("Time: %02d:%02d UTC | Expected: Idle Workstation Baseline | GeoIP: %s (%s)", hr, now.Minute(), geo.Country, geo.Org),
+				Details:     fmt.Sprintf("Time: %02d:%02d UTC | Expected: Idle Workstation Baseline | Process: %s | GeoIP: %s (%s)", hr, now.Minute(), ev.ProcessPath, geo.Country, geo.Org),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
@@ -346,7 +355,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		// Trigger anomaly if Z-score > 3.5 and outbound bytes > 50,000, or huge burst (>10MB)
 		if (zScore > 3.5 && ev.BytesOut > 50000 && stats.count >= 4) || (ev.BytesOut > 10*1024*1024) {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
-			if !e.shouldSuppressAlert(alertKey, 20*time.Second) {
+			if !e.shouldSuppressAlert(alertKey, 60*time.Second) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -379,7 +388,8 @@ func (e *Engine) Evaluate(ev storage.Event) {
 	}
 
 	// 4. Statistical Outlier: C2 Beaconing Detection (Periodic Interval + Low Jitter)
-	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
+	// Exclude trusted OS services (e.g. apsd, svchost, ntp) and trusted cloud providers
+	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && !isTrustedSys && !(isTrustedDst && ev.DstPort == 443) {
 		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
 		e.mu.Lock()
 		bWin, exists := e.beaconTracker[beaconKey]
@@ -392,7 +402,7 @@ func (e *Engine) Evaluate(ev storage.Event) {
 
 		if isBeacon {
 			alertKey := fmt.Sprintf("beacon:%s:%s", ev.EndpointID, ev.DstIP)
-			if !e.shouldSuppressAlert(alertKey, 30*time.Second) {
+			if !e.shouldSuppressAlert(alertKey, 300*time.Second) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -424,10 +434,10 @@ func (e *Engine) Evaluate(ev storage.Event) {
 		}
 	}
 
-	// 5. Statistical Outlier: Rare First-Seen External Destination
-	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP) {
+	// 5. Statistical Outlier: Rare First-Seen External Destination (Ignoring major CDNs/Clouds)
+	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && !isTrustedDst && !isTrustedSys && e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP) {
 		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, ev.DstIP)
-		if !e.shouldSuppressAlert(alertKey, 60*time.Second) {
+		if !e.shouldSuppressAlert(alertKey, 300*time.Second) {
 			_ = e.store.CreateAnomalyAlert(storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
@@ -687,4 +697,64 @@ func isPrivateIP(ipStr string) bool {
 		return false
 	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+func isTrustedSystemProcess(procLower string) bool {
+	base := filepath.Base(procLower)
+	trusted := map[string]bool{
+		"ntoskrnl.exe":                true,
+		"svchost.exe":                 true,
+		"system":                      true,
+		"lsass.exe":                   true,
+		"services.exe":                true,
+		"spoolsv.exe":                 true,
+		"dwm.exe":                     true,
+		"explorer.exe":                true,
+		"searchhost.exe":              true,
+		"startmenuexperiencehost.exe": true,
+		"tiworker.exe":                true,
+		"trustedinstaller.exe":        true,
+		"msmpeng.exe":                 true,
+		"windefend.exe":               true,
+		"apsd":                        true,
+		"mdnsresponder":               true,
+		"softwareupdated":             true,
+		"trustd":                      true,
+		"launchd":                     true,
+		"cloudd":                      true,
+		"bird":                        true,
+		"storedownloadd":              true,
+		"nsurlsessiond":               true,
+		"kernel_task":                 true,
+		"coreauthd":                   true,
+		"remotemanagementd":           true,
+		"cupsd":                       true,
+		"systemd":                     true,
+		"systemd-resolved":            true,
+		"systemd-timesyncd":           true,
+		"chronyd":                     true,
+		"ntpd":                        true,
+		"cloudflared":                 true,
+		"sshd":                        true,
+		"dbus-daemon":                 true,
+		"snapd":                       true,
+		"packagekitd":                 true,
+		"apt-check":                   true,
+	}
+	return trusted[base]
+}
+
+func isTrustedCloud(geo threatintel.GeoRecord) bool {
+	orgLower := strings.ToLower(geo.Org + " " + geo.CountryName)
+	if strings.Contains(orgLower, "apple") ||
+		strings.Contains(orgLower, "microsoft") ||
+		strings.Contains(orgLower, "google") ||
+		strings.Contains(orgLower, "cloudflare") ||
+		strings.Contains(orgLower, "amazon") ||
+		strings.Contains(orgLower, "fastly") ||
+		strings.Contains(orgLower, "akamai") ||
+		strings.Contains(orgLower, "github") {
+		return true
+	}
+	return false
 }

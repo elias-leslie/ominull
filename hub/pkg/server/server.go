@@ -1222,6 +1222,19 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 	r.Header.Set("X-Role", "admin")
 	r.Header.Set("X-Username", "admin")
 
+	return s.buildEnrolmentOptions(w, r, storage.InstallTicket{
+		TenantID:   r.URL.Query().Get("tenant"),
+		LocationID: r.URL.Query().Get("location"),
+		Role:       r.URL.Query().Get("role"),
+		EndpointID: r.URL.Query().Get("endpoint_id"),
+	})
+}
+
+// buildEnrolmentOptions turns an authorised request into one enrolment. The
+// caller has already established that the requester may have it - with the
+// admin key, or with a single-use install ticket - and this is the part that is
+// the same either way.
+func (s *Server) buildEnrolmentOptions(w http.ResponseWriter, r *http.Request, t storage.InstallTicket) (bootstrap.Options, bool) {
 	// What the installer is authorised by and what it leaves behind are two
 	// different credentials, and used to be the same one.
 	//
@@ -1232,7 +1245,7 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 	// read every tenant's key and push an agent release. The agent needs a
 	// credential to report telemetry, and that is the tenant key - which is
 	// what least privilege meant here all along.
-	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	tenantID := strings.TrimSpace(t.TenantID)
 	if tenantID == "" {
 		tenantID = "default"
 	}
@@ -1255,7 +1268,7 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 
 	// One certificate, once. The script cannot be replayed into a second
 	// identity and is worthless an hour after it was generated.
-	enrollToken, err := s.store.CreateEnrollmentToken(r.URL.Query().Get("endpoint_id"), storage.EnrollmentTokenTTL)
+	enrollToken, err := s.store.CreateEnrollmentToken(t.EndpointID, storage.EnrollmentTokenTTL)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "could not mint an enrolment token: "+err.Error())
 		return bootstrap.Options{}, false
@@ -1282,16 +1295,24 @@ func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (boots
 		EnrollmentToken: enrollToken,
 		CFClientID:      cfID,
 		CFClientSecret:  cfSecret,
-		LocationID:      r.URL.Query().Get("location"),
-		RoleTag:         r.URL.Query().Get("role"),
-		EndpointID:      r.URL.Query().Get("endpoint_id"),
+		LocationID:      t.LocationID,
+		RoleTag:         t.Role,
+		EndpointID:      t.EndpointID,
 	}, true
 }
 
 func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
-	opts, ok := s.bootstrapOptions(w, r)
-	if !ok {
+	// A single-use install link first, the admin key second. The link is
+	// what the console hands an operator to paste on the host; the key path
+	// stays for the scripted callers that already use it.
+	opts, presented, ok := s.installTicketOptions(w, r, "windows")
+	if presented && !ok {
 		return
+	}
+	if !presented {
+		if opts, ok = s.bootstrapOptions(w, r); !ok {
+			return
+		}
 	}
 	// The script carries the tenant key and a live enrolment token off the hub.
 	// Generating one is how an endpoint joins the fleet, so it belongs in the
@@ -1305,9 +1326,17 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
-	opts, ok := s.bootstrapOptions(w, r)
-	if !ok {
+	// A single-use install link first, the admin key second. The link is
+	// what the console hands an operator to paste on the host; the key path
+	// stays for the scripted callers that already use it.
+	opts, presented, ok := s.installTicketOptions(w, r, "linux")
+	if presented && !ok {
 		return
+	}
+	if !presented {
+		if opts, ok = s.bootstrapOptions(w, r); !ok {
+			return
+		}
 	}
 	// The script carries the tenant key and a live enrolment token off the hub.
 	// Generating one is how an endpoint joins the fleet, so it belongs in the
@@ -1321,9 +1350,17 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBootstrapMac(w http.ResponseWriter, r *http.Request) {
-	opts, ok := s.bootstrapOptions(w, r)
-	if !ok {
+	// A single-use install link first, the admin key second. The link is
+	// what the console hands an operator to paste on the host; the key path
+	// stays for the scripted callers that already use it.
+	opts, presented, ok := s.installTicketOptions(w, r, "macos")
+	if presented && !ok {
 		return
+	}
+	if !presented {
+		if opts, ok = s.bootstrapOptions(w, r); !ok {
+			return
+		}
 	}
 	// The script carries the tenant key and a live enrolment token off the hub.
 	// Generating one is how an endpoint joins the fleet, so it belongs in the
@@ -2234,7 +2271,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			// permits in the second case rather than silently tightening the
 			// floor under a fleet whose hub never asked it to.
 			if res, err := s.store.ResolveBaseline(batch.EndpointID); err == nil {
-				resp["isolation_baseline"] = storage.BaselineWireRules(res.Rules)
+				// Trimmed to what the agent can hold. Over that it would read a
+				// subset anyway, and the reply would start crowding its response
+				// buffer; the readiness gate refuses to isolate a host whose
+				// baseline is being trimmed, so this never silently becomes the
+				// rule set someone thought they authored.
+				wire, _ := storage.CapBaselineWireRules(storage.BaselineWireRules(res.Rules))
+				resp["isolation_baseline"] = wire
 			} else {
 				resp["isolation_baseline"] = []storage.BaselineWireRule{}
 			}
@@ -3534,6 +3577,8 @@ func (s *Server) routes() *http.ServeMux {
 	}
 
 	// 1. Static Bootstrap & Binary Downloads
+	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
+	mux.HandleFunc("/api/v1/enrolment/script", s.authMiddleware(requireAdmin(s.handleEnrolmentScript)))
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
 	mux.HandleFunc("/bootstrap.mac.sh", s.handleBootstrapMac)
