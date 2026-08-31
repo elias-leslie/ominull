@@ -3541,7 +3541,25 @@
                 cls: "btn", type: "button", text: "Copy command",
                 on: { click: function () { copyText(rendered.one_liner, "the install command"); } }
               }),
-              h("span", { cls: "pending", text: "Works once, and expires in " + (rendered.one_liner_expires_in || "30m") + "." }))));
+              h("span", { cls: "pending", text: "Works once, and expires in " + (rendered.one_liner_expires_in || "30m") + "." })),
+            /* When the hub doubts the URL it just built, say so here rather
+               than letting the operator find out as a shell syntax error on
+               the host. The alternate carries the same ticket: a command that
+               never reached the hub did not spend it. */
+            rendered.one_liner_warning
+              ? h("p", { cls: "note note-warn", text: rendered.one_liner_warning })
+              : null,
+            rendered.one_liner_alternate
+              ? h("div", { cls: "field" },
+                  h("span", { text: "Alternate, using the address this console reached the hub on" }),
+                  h("pre", { cls: "cmd", text: rendered.one_liner_alternate }),
+                  h("div", { cls: "form-row" },
+                    h("button", {
+                      cls: "btn", type: "button", text: "Copy alternate",
+                      on: { click: function () { copyText(rendered.one_liner_alternate, "the alternate install command"); } }
+                    }),
+                    h("span", { cls: "pending", text: "Same single-use ticket \u2014 whichever command reaches the hub first spends it." })))
+              : null));
         }
 
         out.appendChild(h("div", { cls: "form-row" },

@@ -117,6 +117,14 @@ typedef struct _OMINULL_EVENT {
     } Addr;
     UINT64 FlowId;                   // WFP flow handle / ID
     WCHAR  ProcessPath[OMINULL_MAX_PATH];
+    // Bytes attributable to this flow *in this reporting interval*, not for the
+    // life of the connection. Zero means "not measured", which is a different
+    // claim from "no traffic" and is reported as such by the hub. Appended
+    // rather than inserted: Driver_StreamEvents rejects a payload whose size
+    // does not match this struct, so a driver built against the older layout is
+    // ignored rather than misread.
+    UINT64 BytesIn;
+    UINT64 BytesOut;
 } OMINULL_EVENT, *POMINULL_EVENT;
 
 // Runtime Statistics

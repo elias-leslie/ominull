@@ -144,3 +144,66 @@ func TestRenderingAnInstallerNeedsAnAdministrator(t *testing.T) {
 		t.Fatalf("a non-administrator rendered an installer carrying the tenant key")
 	}
 }
+
+// A public URL that answers with someone else's page must not end up in an
+// install link. This is the defect an operator hit in the field: --hub-url
+// pointed at a domain behind an identity proxy, the proxy answered the
+// installer's unauthenticated fetch with a sign-in page, and the one-line
+// command piped HTML into bash.
+func TestProbeRejectsAnOriginThatIsNotThisHub(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    bool
+	}{
+		{"this hub", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"valid admin key required"}`))
+		}, true},
+		{"identity proxy redirect", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://example.cloudflareaccess.com/login", http.StatusFound)
+		}, false},
+		{"sign-in page served as 200", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Sign in</body></html>"))
+		}, false},
+		{"cdn error page", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>502</html>"))
+		}, false},
+		{"right status, wrong body type", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("<html>401</html>"))
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(c.handler)
+			defer srv.Close()
+			if got := probeServesHub(srv.URL); got != c.want {
+				t.Errorf("probeServesHub(%s) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+	if probeServesHub("") {
+		t.Error("an empty public URL is not a usable origin")
+	}
+	if probeServesHub("http://127.0.0.1:1") {
+		t.Error("an origin nothing answers on is not usable")
+	}
+}
+
+// The URL carries a "?", which zsh treats as a glob and refuses when it matches
+// nothing - so an unquoted install command fails outright on macOS.
+func TestOneLinerQuotesTheURL(t *testing.T) {
+	for _, p := range enrolmentPlatforms() {
+		cmd := p.oneLiner("http://hub.example:9999", "abc123")
+		if !strings.Contains(cmd, "\"http://hub.example:9999/bootstrap") &&
+			!strings.Contains(cmd, "'http://hub.example:9999/bootstrap") {
+			t.Errorf("%s one-liner leaves the URL unquoted: %s", p.key, cmd)
+		}
+	}
+}

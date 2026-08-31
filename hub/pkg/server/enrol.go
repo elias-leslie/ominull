@@ -43,15 +43,19 @@ func enrolmentPlatforms() []enrolmentPlatform {
 		{
 			key: "linux", label: "Linux", route: "/bootstrap.sh", filename: "ominull-install.sh",
 			generate: bootstrap.GenerateBash,
+			// The URL is quoted. It carries a "?", which is a glob character,
+			// and zsh - the default shell on macOS and on plenty of Linux
+			// installs - refuses an unmatched glob outright: the operator gets
+			// "no matches found" instead of an install.
 			oneLiner: func(base, ticket string) string {
-				return fmt.Sprintf("curl -fsSL %s/bootstrap.sh?t=%s | sudo bash", base, ticket)
+				return fmt.Sprintf("curl -fsSL \"%s/bootstrap.sh?t=%s\" | sudo bash", base, ticket)
 			},
 		},
 		{
 			key: "macos", label: "macOS", route: "/bootstrap.mac.sh", filename: "ominull-install-macos.sh",
 			generate: bootstrap.GenerateMacOS,
 			oneLiner: func(base, ticket string) string {
-				return fmt.Sprintf("curl -fsSL %s/bootstrap.mac.sh?t=%s | sudo bash", base, ticket)
+				return fmt.Sprintf("curl -fsSL \"%s/bootstrap.mac.sh?t=%s\" | sudo bash", base, ticket)
 			},
 		},
 		{
@@ -156,6 +160,17 @@ func (s *Server) handleEnrolmentScript(w http.ResponseWriter, r *http.Request) {
 		base := s.downloadBase(r)
 		body["one_liner"] = plat.oneLiner(base, tok)
 		body["one_liner_expires_in"] = storage.InstallTicketTTL.String()
+		body["one_liner_origin"] = base
+		// The operator is about to paste this onto a host. If the hub has any
+		// reason to doubt the URL it just built, that belongs on the screen
+		// next to the command, not only in a log nobody has open.
+		if problem := s.publicURLProblem(); problem != "" {
+			body["one_liner_warning"] = problem
+			if alt := requestOrigin(r); alt != base {
+				body["one_liner_alternate"] = plat.oneLiner(alt, tok)
+				body["one_liner_alternate_origin"] = alt
+			}
+		}
 		s.audit(r, "INSTALL_TICKET_MINTED", opts.EndpointID,
 			"Minted a single-use "+plat.label+" install link, valid for "+storage.InstallTicketTTL.String())
 	}

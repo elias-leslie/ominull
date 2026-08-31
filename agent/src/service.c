@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <tcpestats.h>
 #include <psapi.h>
 #include <errno.h>
 #include <sddl.h>
@@ -25,9 +26,142 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Per-flow byte counts, without a driver.
+ *
+ * This agent reported every flow as zero bytes because the user-mode collector
+ * "has no byte counter to read". It does: TCP Extended Statistics keeps
+ * DataBytesIn/DataBytesOut per connection, readable through iphlpapi by any
+ * caller with administrator rights, which a service running as LocalSystem
+ * has. No kernel driver and no signed binary is involved, which matters here -
+ * the WFP driver is unsigned and stopped, and waiting for a certificate to
+ * start counting bytes would have been waiting for the wrong thing.
+ *
+ * ESTATS counts for the life of a connection. PollActiveSocketFlows reports
+ * every established connection on every poll, so reporting that cumulative
+ * figure would have the hub add the same bytes again on each poll: a
+ * connection alive for twenty polls counted twenty times. What is reported is
+ * the delta since this agent last looked, which is what "bytes on this flow"
+ * means everywhere else in the pipeline.
+ *
+ * A connection is reported as zero the first time it is seen even when ESTATS
+ * already has a total for it. That total is traffic that crossed before this
+ * agent was watching, and attributing it to the interval it happened to be
+ * discovered in is a spike: real bytes reported at the wrong time. Zero once,
+ * then true deltas.
+ *
+ * Collection is off by default per connection and has to be enabled, which is
+ * done on first sight. Anything that fails - the enable, the read, a full
+ * table - leaves the flow at zero, and zero travels the whole pipeline as "not
+ * measured" rather than as "no traffic".
+ * ------------------------------------------------------------------------- */
+
+#define ESTATS_TABLE_SIZE 4096
+
+typedef struct {
+    UINT32  localIp, remoteIp;      /* network order, exactly as the table gives them */
+    UINT16  localPort, remotePort;  /* network order */
+    UINT8   used;
+    UINT32  generation;
+    ULONG64 bytesIn, bytesOut;      /* last cumulative reading */
+} ESTATS_SLOT;
+
+static ESTATS_SLOT g_estats[ESTATS_TABLE_SIZE];
+static UINT32 g_estatsGeneration = 0;
+
+static size_t EstatsHash(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport) {
+    UINT32 h = lip * 2654435761u;
+    h ^= (UINT32)rip + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= ((UINT32)lport << 16 | (UINT32)rport) + 0x85ebca6bu + (h << 6) + (h >> 2);
+    return (size_t)(h & (ESTATS_TABLE_SIZE - 1));
+}
+
+/* Finds this connection's slot, claiming a free one if it is new. NULL when the
+ * table is full: the flow is then reported unmeasured rather than attributed to
+ * whichever connection happened to hash to the same place. */
+static ESTATS_SLOT* EstatsSlot(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport, bool* isNew) {
+    size_t start = EstatsHash(lip, lport, rip, rport);
+    for (size_t probe = 0; probe < ESTATS_TABLE_SIZE; probe++) {
+        ESTATS_SLOT* slot = &g_estats[(start + probe) & (ESTATS_TABLE_SIZE - 1)];
+        if (!slot->used) {
+            slot->used = 1;
+            slot->localIp = lip; slot->localPort = lport;
+            slot->remoteIp = rip; slot->remotePort = rport;
+            slot->bytesIn = 0; slot->bytesOut = 0;
+            *isNew = true;
+            return slot;
+        }
+        if (slot->localIp == lip && slot->localPort == lport &&
+            slot->remoteIp == rip && slot->remotePort == rport) {
+            *isNew = false;
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+/* Connections that were not seen this poll are gone. Their slots are released
+ * so a later connection reusing the same ports starts from zero rather than
+ * inheriting a stale total and reporting a negative delta as a huge one. */
+static void EstatsEvictUnseen(void) {
+    for (size_t i = 0; i < ESTATS_TABLE_SIZE; i++) {
+        if (g_estats[i].used && g_estats[i].generation != g_estatsGeneration) {
+            memset(&g_estats[i], 0, sizeof(g_estats[i]));
+        }
+    }
+}
+
+/* Reads this connection's byte counters and returns what crossed it since the
+ * previous poll. Enables collection the first time the connection is seen. */
+static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
+    bool isNew = false;
+    ESTATS_SLOT* slot = EstatsSlot(src->dwLocalAddr, (UINT16)src->dwLocalPort,
+                                   src->dwRemoteAddr, (UINT16)src->dwRemotePort, &isNew);
+    if (!slot) return;
+    slot->generation = g_estatsGeneration;
+
+    MIB_TCPROW row;
+    memset(&row, 0, sizeof(row));
+    row.dwState = src->dwState;
+    row.dwLocalAddr = src->dwLocalAddr;
+    row.dwLocalPort = src->dwLocalPort;
+    row.dwRemoteAddr = src->dwRemoteAddr;
+    row.dwRemotePort = src->dwRemotePort;
+
+    if (isNew) {
+        TCP_ESTATS_DATA_RW_v0 rw;
+        memset(&rw, 0, sizeof(rw));
+        rw.EnableCollection = TRUE;
+        /* Failure is not fatal and not worth logging every poll: the flow stays
+         * at zero, which is the honest report for a flow nobody counted. */
+        (void)SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData,
+                                        (PUCHAR)&rw, 0, sizeof(rw), 0);
+        return;
+    }
+
+    TCP_ESTATS_DATA_ROD_v0 rod;
+    memset(&rod, 0, sizeof(rod));
+    if (GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData,
+                                  NULL, 0, 0, NULL, 0, 0,
+                                  (PUCHAR)&rod, 0, sizeof(rod)) != NO_ERROR) {
+        return;
+    }
+
+    /* A counter that went backwards means the four-tuple was reused by a new
+     * connection between polls. Re-baseline rather than report the difference,
+     * which would be a negative number in an unsigned field. */
+    if (rod.DataBytesIn >= slot->bytesIn) ev->BytesIn = rod.DataBytesIn - slot->bytesIn;
+    if (rod.DataBytesOut >= slot->bytesOut) ev->BytesOut = rod.DataBytesOut - slot->bytesOut;
+    slot->bytesIn = rod.DataBytesIn;
+    slot->bytesOut = rod.DataBytesOut;
+}
+
 static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) {
     size_t count = 0;
     DWORD dwSize = 0;
+
+    g_estatsGeneration++;
 
     DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
     if (ret == ERROR_INSUFFICIENT_BUFFER && dwSize > 0) {
@@ -62,12 +196,14 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
                             CloseHandle(hProc);
                         }
                     }
+                    EstatsMeasure(&row, ev);
                     count++;
                 }
             }
             free(pTcpTable);
         }
     }
+    EstatsEvictUnseen();
     return count;
 }
 

@@ -27,7 +27,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.7.14"
+const defaultAgentVersion = "1.7.16"
 
 func main() {
 	listenAddr := flag.String("listen", ":9999", "HTTP/WebSocket listen address")
@@ -171,6 +171,23 @@ func main() {
 	}
 	log.Printf("[+] Bundled agent release:      v%s (endpoints below this are offered an update)", resolvedAgentVersion)
 	log.Printf("[+] Bootstrap script endpoint: http://%s/bootstrap.ps1", consoleHost)
+	// --hub-url is what every install link an operator pastes onto a host is
+	// built from. A value that does not serve this hub produces a command that
+	// pipes someone else's error page into a shell, and the operator sees a
+	// shell syntax error with nothing pointing at the URL. Checked once here,
+	// in the background so a slow or dead public URL cannot delay startup.
+	if *hubURL != "" {
+		go func(u string) {
+			// After the listener is up: when --hub-url points back at this
+			// process, probing sooner races Start and refuses itself.
+			time.Sleep(2 * time.Second)
+			if srv.PublicURLServesHub() {
+				log.Printf("[+] Public URL for install links: %s (verified: it answers as this hub)", u)
+				return
+			}
+			log.Printf("[!] Public URL %s does not answer as this hub does. Install links are still built from it, because a hub often cannot reach its own public address (split-horizon DNS, hairpin NAT) and that is harmless - but if a CDN or identity proxy is in front of it, it will hand installers a sign-in page instead of the script and the one-line command will pipe HTML into a shell. The console shows this warning beside any link it mints, with an alternate. Exempt /bootstrap.* and /download/ at the proxy, or correct --hub-url.", u)
+		}(*hubURL)
+	}
 	log.Printf("[+] Multi-Tenant REST API:    http://%s/api/v1/", consoleHost)
 	if *tlsListen != "" {
 		agentTarget := *agentHubURL

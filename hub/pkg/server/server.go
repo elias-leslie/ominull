@@ -55,17 +55,22 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	store        *storage.Store
-	ti           *threatintel.Manager
-	detector     *detector.Engine
-	pki          *pki.Manager
-	scanner      *scanner.Scanner
-	inference    *inference.Engine
-	deployer     *deployer.Deployer
-	copilot      *copilot.Engine
-	adminKey     string
-	binaryDir    string
-	hubURL       string
+	store     *storage.Store
+	ti        *threatintel.Manager
+	detector  *detector.Engine
+	pki       *pki.Manager
+	scanner   *scanner.Scanner
+	inference *inference.Engine
+	deployer  *deployer.Deployer
+	copilot   *copilot.Engine
+	adminKey  string
+	binaryDir string
+	hubURL    string
+	// Whether hubURL actually serves this hub, and when that was last checked.
+	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
+	publicURLMu  sync.Mutex
+	publicURLOK  bool
+	publicURLAt  time.Time
 	agentHubURL  string
 	agentVersion string
 	httpServer   *http.Server
@@ -878,18 +883,134 @@ func (s *Server) desiredAgentVersion() string {
 
 // downloadBase is the URL prefix agents fetch packages from.
 func (s *Server) downloadBase(r *http.Request) string {
-	baseURL := strings.TrimSuffix(s.hubURL, "/")
-	if baseURL == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-			scheme = proto
-		}
-		baseURL = scheme + "://" + r.Host
+	if base := strings.TrimSuffix(s.hubURL, "/"); base != "" {
+		return base
 	}
-	return baseURL
+	return requestOrigin(r)
+}
+
+// requestOrigin is the origin this request actually arrived on. Whatever it is,
+// it demonstrably reaches this hub, which is more than can be said for a
+// configured string nobody checked.
+func requestOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	return scheme + "://" + r.Host
+}
+
+// publicURLProblem returns an explanation when --hub-url does not serve this
+// hub, and "" when it does or when there is nothing configured.
+//
+// It does not override the configured value, and deliberately so: a hub often
+// cannot reach its own public URL from where it runs - split-horizon DNS and
+// hairpin NAT both do this - and a probe failure is not proof the operator
+// configured the wrong thing. What it is good for is the case that actually bit
+// someone: --hub-url pointing at a domain behind an identity proxy, which
+// answers an installer's unauthenticated fetch with a sign-in page, so the
+// one-line command piped HTML into a shell and the operator saw a shell syntax
+// error with nothing pointing at the URL. The configuration still wins; the
+// operator is told, and offered a link built from the origin they reached the
+// console on.
+func (s *Server) publicURLProblem() string {
+	configured := strings.TrimSuffix(s.hubURL, "/")
+	if configured == "" || s.publicURLServesHub() {
+		return ""
+	}
+	return "This link points at " + configured + ", the hub's configured public URL, but a fetch of its bootstrap route from here does not come back as this hub would answer it - usually a CDN or an identity proxy in front of it, which will hand the installer a sign-in page instead of the script. It can also mean this hub simply cannot reach its own public address, which is normal on split-horizon DNS and harmless. If the command fails on the host, use the alternate below, or exempt the /bootstrap.* and /download/ paths at the proxy."
+}
+
+const (
+	publicURLProbeTTL = 5 * time.Minute
+	// A failure is cached far more briefly than a success. The probe can fail
+	// for reasons that pass in seconds - the listener not up yet at startup, a
+	// resolver blip - and a wrong "your public URL is broken" shown to an
+	// operator for five minutes is worse than probing again.
+	publicURLFailTTL = 30 * time.Second
+)
+
+// PublicURLServesHub is publicURLServesHub for callers outside the package -
+// the startup banner, which reports the answer once so it is on the record
+// before anyone generates an installer.
+//
+// It retries, because at startup this races the hub's own listener: when
+// --hub-url points back at this process, the first probe can be refused simply
+// because Start has not finished binding yet, and reporting that as "your
+// public URL is broken" would be a lie with a five-minute shelf life.
+func (s *Server) PublicURLServesHub() bool {
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		if s.refreshPublicURL() {
+			return true
+		}
+	}
+	return false
+}
+
+// publicURLServesHub reports whether --hub-url answers as this hub does.
+//
+// The probe is the exact request an operator's installer makes: an
+// unauthenticated GET of the bootstrap route. This hub answers that with a JSON
+// refusal. A sign-in page, a redirect to one, a CDN error or a timeout all mean
+// the URL cannot be pasted onto a host that needs to install from it.
+func (s *Server) publicURLServesHub() bool {
+	s.publicURLMu.Lock()
+	ttl := publicURLProbeTTL
+	if !s.publicURLOK {
+		ttl = publicURLFailTTL
+	}
+	if !s.publicURLAt.IsZero() && time.Since(s.publicURLAt) < ttl {
+		ok := s.publicURLOK
+		s.publicURLMu.Unlock()
+		return ok
+	}
+	s.publicURLMu.Unlock()
+
+	return s.refreshPublicURL()
+}
+
+// refreshPublicURL probes and records the answer, ignoring whatever is cached.
+// The startup check needs this: its retries exist to outlast a listener that is
+// not bound yet, and a retry that reads back the cached failure it is retrying
+// would just return the same wrong answer three times.
+func (s *Server) refreshPublicURL() bool {
+	ok := probeServesHub(strings.TrimSuffix(s.hubURL, "/"))
+
+	s.publicURLMu.Lock()
+	s.publicURLOK = ok
+	s.publicURLAt = time.Now()
+	s.publicURLMu.Unlock()
+	return ok
+}
+
+func probeServesHub(base string) bool {
+	if base == "" {
+		return false
+	}
+	client := &http.Client{
+		Timeout: 4 * time.Second,
+		// A redirect is the failure, not a step towards success: an identity
+		// proxy answers with one, and following it would land on a sign-in page
+		// that returns 200 and looks fine to a naive check.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(base + "/bootstrap.sh")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	return strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
 }
 
 // agentPackageName is the on-disk filename of an agent package. Signature and

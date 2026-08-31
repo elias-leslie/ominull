@@ -3,7 +3,7 @@ set -u
 
 # Kept in step with the banner and the reported driver_version by
 # scripts/version.sh, which owns every site the release version appears in.
-AGENT_VERSION="1.7.14"
+AGENT_VERSION="1.7.16"
 
 # Answered before anything else is parsed. The arguments below are positional,
 # so without this "--version" is read as the hub URL and the daemon starts
@@ -404,7 +404,7 @@ apply_agent_update() {
     exit 0
 }
 
-echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.14)..."
+echo "[+] Starting Ominull macOS Network Defense & Telemetry Daemon (v1.7.16)..."
 echo "[+] Endpoint ID: $ENDPOINT_ID | Role: $ROLE_TAG | Hub: $HUB_URL"
 if [[ "$HUB_URL" == https://* ]]; then
     echo "[+] Hub trust: TLS, pinned to $CA_PATH"
@@ -731,9 +731,61 @@ while true; do
     # outranks real scan evidence and never ages out.
     OS_STR="$(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null) ($(uname -m))"
 
-    # 1. Collect active socket flows with process name & PID
-    EVENTS_JSON=$(lsof -iTCP -iUDP -n -P 2>/dev/null | awk '
-    BEGIN { first = 1; printf "[" }
+    # 1a. Per-flow byte counts.
+    #
+    # lsof reports which sockets are open, never how much has crossed them,
+    # which is why every macOS flow reached the console as zero bytes. nettop
+    # keeps a per-connection byte count and needs no entitlement, no kernel
+    # extension and no signed binary - none of which this host has - so it is
+    # read here and joined onto the lsof rows by the same four-tuple.
+    #
+    # nettop's figure is cumulative for the life of a connection, and this loop
+    # reports every open socket on every poll, so sending it as it stands would
+    # have the hub add the same bytes again each time round. What is written is
+    # the delta since the previous poll. A connection seen for the first time
+    # reports zero rather than its running total: that total is traffic that
+    # crossed before this agent looked, and booking it to the interval it was
+    # discovered in is real traffic reported at the wrong time.
+    #
+    # TCP only, matching nettop's tcp mode and the Windows collector. UDP flows
+    # stay at zero, and zero travels the pipeline as "not measured" rather than
+    # as an absence of traffic.
+    FLOW_STATE="/opt/ominull/flowbytes"
+    touch "$FLOW_STATE" 2>/dev/null
+    nettop -m tcp -x -L 1 -J bytes_in,bytes_out 2>/dev/null | awk -F, '
+        /^tcp4 / {
+            split($1, a, " ");
+            split(a[2], ends, "<->");
+            if (ends[1] == "" || ends[2] == "") next;
+            if ($2 == "" || $3 == "") next;
+            printf "%s>%s %d %d\n", ends[1], ends[2], $2 + 0, $3 + 0;
+        }
+    ' > "${FLOW_STATE}.now" 2>/dev/null
+
+    # FILENAME rather than the usual NR==FNR: on the first poll the state file
+    # is empty, and NR==FNR then matches the second file's records too.
+    awk -v prev="$FLOW_STATE" '
+        FILENAME == prev { pin[$1] = $2; pout[$1] = $3; next }
+        {
+            di = 0; dout = 0;
+            if ($1 in pin) {
+                if ($2 + 0 >= pin[$1] + 0) di = $2 - pin[$1];
+                if ($3 + 0 >= pout[$1] + 0) dout = $3 - pout[$1];
+            }
+            printf "%s %d %d\n", $1, di, dout;
+        }
+    ' "$FLOW_STATE" "${FLOW_STATE}.now" > "${FLOW_STATE}.delta" 2>/dev/null
+    mv -f "${FLOW_STATE}.now" "$FLOW_STATE" 2>/dev/null
+
+    # 1b. Collect active socket flows with process name & PID
+    EVENTS_JSON=$(lsof -iTCP -iUDP -n -P 2>/dev/null | awk -v deltas="${FLOW_STATE}.delta" '
+    BEGIN {
+        while ((getline line < deltas) > 0) {
+            if (split(line, f, " ") == 3) { bin[f[1]] = f[2]; bout[f[1]] = f[3]; }
+        }
+        close(deltas);
+        first = 1; printf "["
+    }
     /->/ {
         cmd = $1; pid = $2; proto = $8;
         split($9, ep, "->");
@@ -742,12 +794,16 @@ while true; do
         if (dst[1] != "" && dst[2] != "" && dst[1] != "0.0.0.0" && dst[1] != "127.0.0.1") {
             if (!first) printf ",";
             first = 0;
-            # Zero, not a hash of the pid. These were
-            # 1420 + (pid * 37 % 4096) and 512 + (pid * 19 % 2048), sent as
-            # measured traffic and totalled on the console as bandwidth. lsof
-            # reports which sockets are open, not how much has crossed them.
-            b_in = 0;
-            b_out = 0;
+            # What crossed this flow since the previous poll, from nettop.
+            # These were 1420 + (pid * 37 % 4096) and 512 + (pid * 19 % 2048) -
+            # arithmetic on the process id, sent as measured traffic and
+            # totalled on the console as bandwidth - and then they were zero,
+            # because lsof cannot count. Zero survives for anything nettop did
+            # not have: UDP, a connection seen for the first time, one that
+            # closed between the two reads.
+            key = src[1] ":" src[2] ">" dst[1] ":" dst[2];
+            b_in = (key in bin) ? bin[key] + 0 : 0;
+            b_out = (key in bout) ? bout[key] + 0 : 0;
             proc_path = (cmd ~ /^\//) ? cmd : ("/Applications/" cmd);
             printf "{\"layer\":\"PF_SOCKET\",\"action\":\"PERMIT\",\"direction\":\"OUTBOUND\",\"protocol\":%s,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%d,\"dst_port\":%d,\"bytes_in\":%d,\"bytes_out\":%d,\"process_path\":\"%s\",\"process_id\":%d}", (proto == "TCP" ? 6 : 17), src[1], dst[1], src[2], dst[2], b_in, b_out, proc_path, pid;
         }
@@ -771,7 +827,7 @@ while true; do
   "os": "$OS_STR",
   "ip": "$IP",
   "mac": "$MAC",
-  "driver_version": "1.7.14 (PF)",
+  "driver_version": "1.7.16 (PF)",
   "update_capability": "pkg",
   "events": $EVENTS_JSON,
   "observed_services": $(observed_services_json),
