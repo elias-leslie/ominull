@@ -2527,8 +2527,17 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	defer s.mu.RUnlock()
 
 	isolatedByIP := make(map[string]bool)
+	retiredByID := make(map[string]bool)
+	retiredByIP := make(map[string]bool)
 	endpointByID := make(map[string]Endpoint)
 	for _, ep := range endpoints {
+		if ep.Status == "retired" {
+			retiredByID[ep.ID] = true
+			if ep.IP != "" {
+				retiredByIP[ep.IP] = true
+			}
+			continue
+		}
 		endpointByID[ep.ID] = ep
 		if ep.IsIsolated && ep.IP != "" {
 			isolatedByIP[ep.IP] = true
@@ -2540,6 +2549,9 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 
 	for i := range assets {
 		a := assets[i]
+		if retiredByID[a.AgentEndpointID] {
+			continue
+		}
 		if a.IP == "" {
 			continue
 		}
@@ -2550,6 +2562,9 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	// Endpoints without an asset row yet (a hub mid-upgrade, before the next
 	// check-in projects them) still deserve a node.
 	for _, ep := range endpoints {
+		if ep.Status == "retired" {
+			continue
+		}
 		if ep.IP == "" {
 			continue
 		}
@@ -2598,6 +2613,9 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		}
 		maxTime := scanTime(maxTimeRaw)
 		if srcIP == "127.0.0.1" || dstIP == "127.0.0.1" {
+			continue
+		}
+		if retiredByIP[srcIP] || retiredByIP[dstIP] {
 			continue
 		}
 

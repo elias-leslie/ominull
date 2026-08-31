@@ -101,6 +101,15 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 			t.Fatalf("retired endpoint remained in the current asset graph: %+v", asset)
 		}
 	}
+	topology, err := store.GetTopologyGraph(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range topology.Nodes {
+		if node.IP == ep.IP {
+			t.Fatalf("retired endpoint remained in the current topology graph: %+v", node)
+		}
+	}
 
 	// A late heartbeat must not silently revive a deliberately retired row.
 	heartbeat, _ := json.Marshal(TelemetryBatchMessage{
