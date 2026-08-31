@@ -41,7 +41,11 @@ func TestDeviceSignatureMatching(t *testing.T) {
 		t.Errorf("Expected confidence >= 0.80, got: %.2f", conf)
 	}
 
-	// Test 2: Windows 11 Workstation
+	// Test 2: Windows 11 on a Proxmox guest. The identification still lands,
+	// but on the strength of the TTL, the ports and the banner - not the MAC.
+	// BC:24:11 is Proxmox's prefix and every guest on that host wears it, so it
+	// is not evidence of an operating system and no longer scores as any. The
+	// confidence is lower than it used to be because it used to be wrong.
 	wName, wConf, wCat := MatchDeviceSignature("BC:24:11:2E:DA:85", 128, []int{135, 445, 3389}, []string{"Microsoft Windows RPC", "MS-WBT-Server"}, 1.5, nil)
 	if wName != "Windows 11 Enterprise / Pro (x86_64)" {
 		t.Errorf("Expected Windows 11 match, got: %s (confidence: %.2f)", wName, wConf)
@@ -49,8 +53,11 @@ func TestDeviceSignatureMatching(t *testing.T) {
 	if wCat != "Workstation" {
 		t.Errorf("Expected Workstation category, got: %s", wCat)
 	}
-	if wConf < 0.80 {
-		t.Errorf("Expected confidence >= 0.80, got: %.2f", wConf)
+	if wConf < 0.50 {
+		t.Errorf("Expected confidence >= 0.50 from TTL, ports and banner alone, got: %.2f", wConf)
+	}
+	if p := VirtualPlatform("BC:24:11:2E:DA:85"); p == "" {
+		t.Error("a Proxmox MAC was not recognised as a hypervisor address")
 	}
 
 	// Test 3: Synology NAS

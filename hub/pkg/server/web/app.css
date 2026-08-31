@@ -2474,3 +2474,18 @@ p.pending {
     grid-template-columns: 1fr;
   }
 }
+
+/* One line of the reasoning behind an identification. Monospace because most
+   of these lines are a banner the host actually sent. */
+.whyline {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  line-height: 1.55;
+  padding: 2px 0 2px var(--s-2);
+  border-left: 2px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.whyline + .whyline {
+  margin-top: 2px;
+}

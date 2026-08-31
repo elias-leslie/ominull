@@ -466,16 +466,16 @@
     });
 
     var scan = [
-      { ip: "10.0.4.1", mac: "00:00:0C:9F:F0:01", vendor: "Cisco Systems", hostname: "core-gateway", os_guess: "Cisco IOS-XE Gateway", category: "Router / Firewall", confidence: 0.95, ttl: 255, app_delta_ms: 0.8, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], last_seen: mins(2), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "LOW" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
-      { ip: "10.0.4.10", mac: "00:1A:2B:0A:0A:0A", vendor: "Dell Inc.", hostname: "", os_guess: "Windows Server", category: "Server", confidence: 0.71, ttl: 128, app_delta_ms: 1.0, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["RDP reachable from three subnets"], last_seen: mins(0.2), open_ports: [{ port: 53, protocol: "tcp", service: "dns", risk_level: "LOW" }, { port: 88, protocol: "tcp", service: "kerberos", risk_level: "LOW" }, { port: 135, protocol: "tcp", service: "rpc", risk_level: "LOW" }, { port: 389, protocol: "tcp", service: "ldap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 636, protocol: "tcp", service: "ldaps", risk_level: "LOW" }, { port: 3389, protocol: "tcp", service: "rdp", risk_level: "HIGH" }] },
-      { ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", vendor: "Dell Inc.", hostname: "corp-win11-exec", os_guess: "Windows 11 Enterprise (x86_64)", category: "Workstation", confidence: 0.98, ttl: 128, app_delta_ms: 1.1, is_managed: true, agent_endpoint_id: "win11-corp-exec", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 135, protocol: "tcp", service: "epmap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "microsoft-ds", risk_level: "LOW" }] },
-      { ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", vendor: "VMware, Inc.", hostname: "dmz-web-01", os_guess: "Linux (generic)", category: "Server", confidence: 0.62, ttl: 64, app_delta_ms: 1.2, is_managed: true, agent_endpoint_id: "linux-dmz-web-01", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 80, protocol: "tcp", service: "http", risk_level: "MEDIUM" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
-      { ip: "10.0.4.55", mac: "00:11:32:44:55:66", vendor: "Synology Inc.", hostname: "unmanaged-nas", os_guess: "Synology DiskStation DSM 7.2", category: "Storage / NAS", confidence: 0.92, ttl: 64, app_delta_ms: 1.4, is_managed: false, agent_endpoint_id: "", risk_score: "HIGH", weakpoints: ["Unencrypted HTTP administrative console (port 5000)", "SMBv1 legacy dialect enabled"], last_seen: mins(3), open_ports: [{ port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 5000, protocol: "tcp", service: "http", risk_level: "HIGH" }, { port: 5001, protocol: "tcp", service: "https", risk_level: "MEDIUM" }] },
-      { ip: "10.0.4.71", mac: "00:1B:A9:71:71:71", vendor: "Brother Industries", hostname: "", os_guess: "Embedded print controller", category: "Printer", confidence: 0.44, ttl: 64, app_delta_ms: 2.6, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated raw print queue on 9100"], last_seen: mins(4), open_ports: [{ port: 631, protocol: "tcp", service: "ipp", risk_level: "LOW" }, { port: 9100, protocol: "tcp", service: "jetdirect", risk_level: "MEDIUM" }] },
-      { ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", vendor: "Apple, Inc.", hostname: "mac-eng-lead", os_guess: "macOS", category: "Workstation", confidence: 0.81, ttl: 64, app_delta_ms: 1.0, is_managed: true, agent_endpoint_id: "mac-eng-lead", risk_score: "LOW", weakpoints: [], last_seen: mins(1), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }] },
-      { ip: "10.0.4.99", mac: "B8:27:EB:12:34:56", vendor: "Raspberry Pi Foundation", hostname: "rogue-dev-kali", os_guess: "Kali Linux Rolling (ARM64)", category: "Shadow IT / Pentest", confidence: 0.89, ttl: 64, app_delta_ms: 2.1, is_managed: false, agent_endpoint_id: "", risk_score: "CRITICAL", weakpoints: ["Unauthorized Metasploit payload listener on port 4444", "Unmanaged shadow IT device"], last_seen: mins(0.5), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }, { port: 4444, protocol: "tcp", service: "metasploit", risk_level: "CRITICAL" }] },
-      { ip: "10.0.4.120", mac: "50:02:91:AA:BB:CC", vendor: "Samsung Electronics", hostname: "lobby-display", os_guess: "Samsung Tizen Smart Display", category: "IoT / Display", confidence: 0.88, ttl: 64, app_delta_ms: 1.9, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated smart-display remote API on LAN"], last_seen: mins(9), open_ports: [{ port: 8001, protocol: "tcp", service: "smarttv-api", risk_level: "MEDIUM" }] },
-      { ip: "10.0.4.201", mac: "", vendor: "", hostname: "", os_guess: "", category: "", confidence: 0.12, ttl: 0, app_delta_ms: 0, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], last_seen: mins(62), open_ports: [] }
+      { ip: "10.0.4.1", mac: "00:00:0C:9F:F0:01", vendor: "Cisco Systems", hostname: "core-gateway", os_guess: "Cisco IOS-XE Gateway", category: "Router / Firewall", confidence: 0.95, ttl: 255, app_delta_ms: 0.8, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], identity_method: "signature", identity_why: ["OUI 00:00:0C is listed for Cisco Catalyst / IOS Core Switch", "measured TTL 255 is consistent with an initial 255", "open ports 22, 443 are expected for Cisco Catalyst / IOS Core Switch"], last_seen: mins(2), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "LOW" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
+      { ip: "10.0.4.10", mac: "00:1A:2B:0A:0A:0A", vendor: "Dell Inc.", hostname: "", os_guess: "Windows Server", category: "Server", confidence: 0.71, ttl: 128, app_delta_ms: 1.0, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["RDP reachable from three subnets"], identity_method: "netbios", identity_why: ["NBSTAT: DC01<00> DC01<20> CORP<00> group"], last_seen: mins(0.2), open_ports: [{ port: 53, protocol: "tcp", service: "dns", risk_level: "LOW" }, { port: 88, protocol: "tcp", service: "kerberos", risk_level: "LOW" }, { port: 135, protocol: "tcp", service: "rpc", risk_level: "LOW" }, { port: 389, protocol: "tcp", service: "ldap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 636, protocol: "tcp", service: "ldaps", risk_level: "LOW" }, { port: 3389, protocol: "tcp", service: "rdp", risk_level: "HIGH" }] },
+      { ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", vendor: "Dell Inc.", hostname: "corp-win11-exec", os_guess: "Windows 11 Enterprise (x86_64)", category: "Workstation", confidence: 0.98, ttl: 128, app_delta_ms: 1.1, is_managed: true, agent_endpoint_id: "win11-corp-exec", risk_score: "LOW", weakpoints: [], identity_method: "agent", identity_why: ["reported by the agent installed on this host"], last_seen: mins(1), open_ports: [{ port: 135, protocol: "tcp", service: "epmap", risk_level: "LOW" }, { port: 445, protocol: "tcp", service: "microsoft-ds", risk_level: "LOW" }] },
+      { ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", vendor: "VMware, Inc.", hostname: "dmz-web-01", os_guess: "Linux (generic)", category: "Server", confidence: 0.62, ttl: 64, app_delta_ms: 1.2, is_managed: true, agent_endpoint_id: "linux-dmz-web-01", risk_score: "LOW", weakpoints: [], identity_method: "ssh-banner", identity_why: ["SSH-2.0-OpenSSH_9.6", "the banner names no distribution, so the release is not known"], last_seen: mins(1), open_ports: [{ port: 80, protocol: "tcp", service: "http", risk_level: "MEDIUM" }, { port: 443, protocol: "tcp", service: "https", risk_level: "LOW" }] },
+      { ip: "10.0.4.55", mac: "00:11:32:44:55:66", vendor: "Synology Inc.", hostname: "unmanaged-nas", os_guess: "Synology DiskStation DSM 7.2", category: "Storage / NAS", confidence: 0.92, ttl: 64, app_delta_ms: 1.4, is_managed: false, agent_endpoint_id: "", risk_score: "HIGH", weakpoints: ["Unencrypted HTTP administrative console (port 5000)", "SMBv1 legacy dialect enabled"], identity_method: "http-server", identity_why: ["Server: Synology DiskStation 7.2"], last_seen: mins(3), open_ports: [{ port: 445, protocol: "tcp", service: "smb", risk_level: "HIGH" }, { port: 5000, protocol: "tcp", service: "http", risk_level: "HIGH" }, { port: 5001, protocol: "tcp", service: "https", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.71", mac: "00:1B:A9:71:71:71", vendor: "Brother Industries", hostname: "", os_guess: "Embedded print controller", category: "Printer", confidence: 0.44, ttl: 64, app_delta_ms: 2.6, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated raw print queue on 9100"], identity_method: "mdns-services", identity_why: ["mDNS services: _ipp _pdl-datastream", "mDNS name: brother-mfc.local"], last_seen: mins(4), open_ports: [{ port: 631, protocol: "tcp", service: "ipp", risk_level: "LOW" }, { port: 9100, protocol: "tcp", service: "jetdirect", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.88", mac: "3C:22:FB:11:22:33", vendor: "Apple, Inc.", hostname: "mac-eng-lead", os_guess: "macOS", category: "Workstation", confidence: 0.81, ttl: 64, app_delta_ms: 1.0, is_managed: true, agent_endpoint_id: "mac-eng-lead", risk_score: "LOW", weakpoints: [], identity_method: "mdns-device-info", identity_why: ["model=MacBookPro18,3 osxvers=24"], last_seen: mins(1), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.99", mac: "B8:27:EB:12:34:56", vendor: "Raspberry Pi Foundation", hostname: "rogue-dev-kali", os_guess: "Kali Linux Rolling (ARM64)", category: "Shadow IT / Pentest", confidence: 0.89, ttl: 64, app_delta_ms: 2.1, is_managed: false, agent_endpoint_id: "", risk_score: "CRITICAL", weakpoints: ["Unauthorized Metasploit payload listener on port 4444", "Unmanaged shadow IT device"], identity_method: "ssh-banner", identity_why: ["SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"], last_seen: mins(0.5), open_ports: [{ port: 22, protocol: "tcp", service: "ssh", risk_level: "MEDIUM" }, { port: 4444, protocol: "tcp", service: "metasploit", risk_level: "CRITICAL" }] },
+      { ip: "10.0.4.120", mac: "50:02:91:AA:BB:CC", vendor: "Samsung Electronics", hostname: "lobby-display", os_guess: "Samsung Tizen Smart Display", category: "IoT / Display", confidence: 0.88, ttl: 64, app_delta_ms: 1.9, is_managed: false, agent_endpoint_id: "", risk_score: "MEDIUM", weakpoints: ["Unauthenticated smart-display remote API on LAN"], identity_method: "ssdp", identity_why: ["SSDP SERVER: Linux/4.1 UPnP/1.0 Samsung/1.0"], last_seen: mins(9), open_ports: [{ port: 8001, protocol: "tcp", service: "smarttv-api", risk_level: "MEDIUM" }] },
+      { ip: "10.0.4.201", mac: "", vendor: "", hostname: "", os_guess: "", category: "", confidence: 0.12, ttl: 0, app_delta_ms: 0, is_managed: false, agent_endpoint_id: "", risk_score: "LOW", weakpoints: [], identity_method: "", identity_why: ["nothing on this host answered any probe"], last_seen: mins(62), open_ports: [] }
     ];
 
     var anomalies = [
@@ -2145,7 +2145,14 @@
        key alone is indistinguishable from any other holding that key, and an
        operator has no other place to see that before turning
        --client-certs required on. */
-    var identityCell = h("td", { cls: "dim" }, h("span", { text: asset.identity }));
+    var identMethod = (asset.scan && asset.scan.identity_method) || (asset.endpoint ? "agent" : "");
+    var identityCell = h("td", {
+      cls: "dim",
+      title: identMethod
+        ? "Identified from " + (IDENT_METHODS[identMethod] || identMethod) +
+          (asset.scan && asset.scan.confidence ? " \u2014 " + Math.round(asset.scan.confidence * 100) + "% confidence" : "")
+        : "Nothing has identified this host yet"
+    }, h("span", { text: asset.identity }));
     if (asset.endpoint) {
       var cn = asset.endpoint.cert_cn || "";
       identityCell.appendChild(document.createTextNode(" "));
@@ -4086,6 +4093,48 @@
     }
   }
 
+  /* Why the console thinks a host is what it says it is. The scanner used to
+     print "Ubuntu Linux" over a regex that had matched the word OpenSSH, and
+     there was no way to see that from the screen - which is the same as there
+     being no way to correct it. */
+  var IDENT_METHODS = {
+    "agent": "the agent installed on it",
+    "ssh-banner": "the SSH server's own version string",
+    "mdns-device-info": "the host's own mDNS device-info record",
+    "mdns-services": "the services it publishes over mDNS",
+    "http-server": "the web server's Server header",
+    "ssdp": "its UPnP announcement",
+    "netbios": "its NetBIOS name table",
+    "snmp-sysdescr": "its SNMP system description",
+    "signature": "a weighted match against the signature catalogue"
+  };
+
+  function identityWhyCard(asset) {
+    var sc = asset.scan;
+    var method = (sc && sc.identity_method) || (asset.endpoint ? "agent" : "");
+    var why = arrayOf(sc && sc.identity_why);
+    if (!method && !why.length) return null;
+
+    var body = h("div", { cls: "card-body stack" },
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Reads as" }), h("dd", {}, h("b", { text: (sc && sc.os_guess) || asset.identity || "\u2014" })),
+        h("dt", { text: "Decided by" }), h("dd", { text: IDENT_METHODS[method] || method || "\u2014" }),
+        h("dt", { text: "Confidence" }),
+        h("dd", { text: sc && sc.confidence ? Math.round(sc.confidence * 100) + "%" : "\u2014" }),
+        h("dt", { text: "Hop limit" }),
+        h("dd", { text: sc && sc.ttl ? String(sc.ttl) : "not measured" })));
+
+    if (why.length) {
+      var list = h("div", { cls: "why" });
+      why.forEach(function (w) { list.appendChild(h("div", { cls: "whyline", text: w })); });
+      body.appendChild(list);
+    }
+    if (method === "signature") {
+      body.appendChild(h("p", { cls: "pending", text: "Nothing on this host named itself, so this is a weighted guess rather than an answer. Correct it on the Evidence card and the correction wins from then on." }));
+    }
+    return card("How this was identified", body);
+  }
+
   function renderRoute() {
     var previousScrollTop = 0;
     if (routeEl) {
@@ -4171,7 +4220,7 @@
       ? h("div", {}, alerts.map(function (a) { return alertCardNode(a, true); }))
       : h("div", { cls: "empty", text: "No open alert on this asset." }), null, true);
 
-    var routeBody = h("div", { cls: "route-body" }, idCard, agentCard, card("Observed exposure", portsBody),
+    var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
       ep ? baselineEndpointCard(asset) : null,
       card("Evidence", evBody), flowCard, alertCard);
 

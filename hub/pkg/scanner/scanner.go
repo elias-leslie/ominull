@@ -49,7 +49,13 @@ type DiscoveredAsset struct {
 	Weakpoints      []string   `json:"weakpoints"`
 	TTL             int        `json:"ttl"`
 	AppDeltaMs      float64    `json:"app_delta_ms"`
-	LastSeen        time.Time  `json:"last_seen"`
+	// IdentityMethod and IdentityWhy are how the identification was reached and
+	// the exact strings that reached it. The console shows them, because
+	// "Ubuntu Linux" with nothing behind it was not something an operator could
+	// correct - or trust.
+	IdentityMethod string    `json:"identity_method"`
+	IdentityWhy    []string  `json:"identity_why"`
+	LastSeen       time.Time `json:"last_seen"`
 }
 
 type ScanStatus struct {
@@ -71,6 +77,11 @@ type CoverageSummary struct {
 	CoveragePercent float64 `json:"coverage_percent"`
 	CriticalRisks   int     `json:"critical_risks"`
 	HighRisks       int     `json:"high_risks"`
+	// TTLMeasured says whether the sweep can read hop limits, and TTLNote says
+	// what to do about it when it cannot. A blank TTL column with no
+	// explanation is a fault report nobody can act on.
+	TTLMeasured bool   `json:"ttl_measured"`
+	TTLNote     string `json:"ttl_note,omitempty"`
 }
 
 type Scanner struct {
@@ -426,7 +437,11 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 	openPorts := make([]PortInfo, 0)
 	var totalAppDelta float64
 	deltaCount := 0
-	ttl := 64
+	// Measured, not assumed. This was `ttl := 64`, handed unchanged to a matcher
+	// that awarded a fifth of its points for a TTL match - so every host on the
+	// network arrived at the matcher already looking like Linux. Zero now means
+	// "not measured" and scores as no evidence at all.
+	ttl := measureTTL(ip)
 	banners := make([]string, 0)
 
 	// In passive mode, skip TCP active probing unless we already know it
@@ -521,8 +536,20 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 		openPortInts = append(openPortInts, p.Port)
 	}
 
-	osGuess, confidence, category := MatchDeviceSignature(mac, ttl, openPortInts, banners, avgDelta, customSigs)
+	// Ask the host to describe itself before guessing. NetBIOS, mDNS and SSDP
+	// are all unprivileged and all answer with the host's own words; a passive
+	// sweep skips them because it is not supposed to send anything.
+	var extras []string
+	if profile != ProfilePassive {
+		extras = probeExtras(ip, hostname)
+	}
+
+	ident := IdentifyHost(mac, ttl, openPortInts, banners, extras, avgDelta, customSigs)
+	osGuess, confidence, category := ident.Name, ident.Confidence, ident.Category
+	method, evidence := ident.Method, ident.Evidence
 	if isManaged {
+		// An installed agent reports the operating system from inside it. There
+		// is nothing on the network that beats that.
 		ep := managedMap[ip]
 		osGuess = ep.OS
 		confidence = 1.00
@@ -530,6 +557,8 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 		if ep.RoleTag == "server" {
 			category = "Server"
 		}
+		method = "agent"
+		evidence = []string{"reported by the agent installed on this host"}
 	}
 
 	// Weakpoint and Risk Scoring
@@ -550,6 +579,8 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 		Weakpoints:      weakpoints,
 		TTL:             ttl,
 		AppDeltaMs:      avgDelta,
+		IdentityMethod:  method,
+		IdentityWhy:     evidence,
 		LastSeen:        time.Now().UTC(),
 	}, true
 }
@@ -821,6 +852,7 @@ func (s *Scanner) GetCoverageSummary() CoverageSummary {
 	if total > 0 {
 		covPct = (float64(managed) / float64(total)) * 100.0
 	}
+	ttlOK, ttlNote := TTLMeasurable()
 
 	return CoverageSummary{
 		TotalDiscovered: total,
@@ -829,6 +861,8 @@ func (s *Scanner) GetCoverageSummary() CoverageSummary {
 		CoveragePercent: covPct,
 		CriticalRisks:   crit,
 		HighRisks:       high,
+		TTLMeasured:     ttlOK,
+		TTLNote:         ttlNote,
 	}
 }
 
