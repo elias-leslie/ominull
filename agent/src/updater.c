@@ -420,6 +420,21 @@ static bool WaitForInstalledServiceStopped(void) {
     return stopped;
 }
 
+static bool StartInstalledService(void) {
+    SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!manager) return false;
+    SC_HANDLE service = OpenServiceA(manager, SERVICE_NAME, SERVICE_START);
+    if (!service) {
+        CloseServiceHandle(manager);
+        return false;
+    }
+    bool started = StartServiceA(service, 0, NULL) != FALSE;
+    if (!started && GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) started = true;
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return started;
+}
+
 /* The helper is a copy of the installed executable, so it can wait for SCM to
  * stop the service while MSI replaces the installed image. MSI owns the
  * transaction and its rollback; this process only keeps the old service from
@@ -455,18 +470,14 @@ int Update_RunNativeInstaller(const char* packagePath) {
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
 	if (exitCode == ERROR_SUCCESS || exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
+		if (!StartInstalledService()) {
+			fprintf(stderr, "[-] Native MSI installed, but %s could not be started.\n", SERVICE_NAME);
+			return 1;
+		}
 		printf("[+] Native MSI installation completed.\n");
 		return 0;
 	}
-	SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
-	if (manager) {
-		SC_HANDLE service = OpenServiceA(manager, SERVICE_NAME, SERVICE_START);
-		if (service) {
-			StartServiceA(service, 0, NULL);
-			CloseServiceHandle(service);
-		}
-		CloseServiceHandle(manager);
-	}
+	(void)StartInstalledService();
     fprintf(stderr, "[-] Native MSI installation failed with code %lu; MSI rollback retained the prior release.\n", exitCode);
     return (int)exitCode;
 }

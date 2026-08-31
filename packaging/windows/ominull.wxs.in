@@ -16,7 +16,11 @@
                             DisplayName="Ominull Threat Nullification Service" Start="auto"
                             ErrorControl="normal" Vital="yes" Account="LocalSystem"
                             Arguments="--service --config &quot;[CommonAppDataFolder]Ominull\agent.conf&quot;" />
-            <ServiceControl Id="AgentServiceControl" Name="ominulld" Start="install"
+            <!-- A clean MSI has no enrolled config yet. Bootstrap starts the
+                 registered service after package-owned enrollment; self-update
+                 starts it after its MSI transaction returns. Starting here
+                 makes every clean install fail with SCM error 1920. -->
+            <ServiceControl Id="AgentServiceControl" Name="ominulld"
                             Stop="both" Remove="uninstall" Wait="yes" />
           </Component>
         </Directory>
