@@ -1109,13 +1109,31 @@ bool Service_ConfigureFromStdin(void) {
         else if (strcmp(line, "cf_client_secret") == 0) snprintf(cfSecret, sizeof(cfSecret), "%s", value);
         else if (strcmp(line, "allow_plaintext") == 0) allowPlaintext = strcmp(value, "1") == 0;
     }
-    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) return false;
-    if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) return false;
-    if (!CreateDirectoryA("C:\\ProgramData\\Ominull", NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) {
+        fprintf(stderr, "[-] Package enrollment is missing a required field.\n");
+        return false;
+    }
+    if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) {
+        fprintf(stderr, "[-] Package enrollment requires an https hub URL.\n");
+        return false;
+    }
+    if (!CreateDirectoryA("C:\\ProgramData\\Ominull", NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        fprintf(stderr, "[-] Cannot create the package data directory (Error: %lu)\n", GetLastError());
+        return false;
+    }
 
-    if (!WriteProtectedFile(OMINULL_DEFAULT_KEY_PATH, key)) return false;
-    if (!CopyProtectedFile(caSource, "C:\\ProgramData\\Ominull\\ca.crt")) return false;
-    if (pfxSource[0] && !CopyProtectedFile(pfxSource, "C:\\ProgramData\\Ominull\\client.pfx")) return false;
+    if (!WriteProtectedFile(OMINULL_DEFAULT_KEY_PATH, key)) {
+        fprintf(stderr, "[-] Cannot install the package API key (Error: %lu).\n", GetLastError());
+        return false;
+    }
+    if (!CopyProtectedFile(caSource, "C:\\ProgramData\\Ominull\\ca.crt")) {
+        fprintf(stderr, "[-] Cannot install the package CA file (Error: %lu)\n", GetLastError());
+        return false;
+    }
+    if (pfxSource[0] && !CopyProtectedFile(pfxSource, "C:\\ProgramData\\Ominull\\client.pfx")) {
+        fprintf(stderr, "[-] Cannot install the package client certificate (Error: %lu)\n", GetLastError());
+        return false;
+    }
 
     char config[2048];
     int n = snprintf(config, sizeof(config),

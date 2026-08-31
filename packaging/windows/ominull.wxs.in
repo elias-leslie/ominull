@@ -41,7 +41,7 @@
       <!-- MajorUpgrade uninstalls the old product as part of the same
            transaction. Do not purge ProgramData identity during that leg;
            the new MSI must inherit the enrolled endpoint. -->
-      <Custom Action="ClearWfp" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="ClearWfp" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT REINSTALL</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>
