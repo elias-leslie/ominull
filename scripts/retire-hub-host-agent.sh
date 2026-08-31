@@ -47,7 +47,9 @@ done
 # Let the installed agent perform its own ordered teardown before dpkg removes
 # its executable. The fallback below uses exact chain names only.
 if [ -x /opt/ominull/bin/ominulld ]; then
-    run /opt/ominull/bin/ominulld --cleanup
+    if ! run /opt/ominull/bin/ominulld --cleanup; then
+        echo "[*] Installed legacy agent has no cleanup command; applying exact teardown fallback."
+    fi
 fi
 for tool in iptables ip6tables; do
     if command -v "${tool}" >/dev/null 2>&1; then
