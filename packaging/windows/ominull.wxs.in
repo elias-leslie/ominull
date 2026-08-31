@@ -12,6 +12,10 @@
           <Component Id="AgentFiles" Guid="*">
             <File Id="AgentExe" Source="@AGENT_EXE@" KeyPath="yes" />
             <File Id="WfpExe" Source="@WFP_EXE@" />
+            <RegistryKey Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\OminullAgent">
+              <RegistryValue Name="DisplayName" Type="string" Value="Ominull Agent" KeyPath="no" />
+              <RegistryValue Name="DisplayVersion" Type="string" Value="@VERSION@" KeyPath="no" />
+            </RegistryKey>
             <ServiceInstall Id="AgentServiceInstall" Type="ownProcess" Name="ominulld"
                             DisplayName="Ominull Threat Nullification Service" Start="auto"
                             ErrorControl="normal" Vital="yes" Account="LocalSystem"

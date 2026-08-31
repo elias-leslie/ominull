@@ -54,12 +54,16 @@ mkdir -p "${msi_tables}"
 msiinfo export "${MSI}" ServiceInstall > "${msi_tables}/ServiceInstall.idt"
 msiinfo export "${MSI}" ServiceControl > "${msi_tables}/ServiceControl.idt"
 msiinfo export "${MSI}" CustomAction > "${msi_tables}/CustomAction.idt"
+msiinfo export "${MSI}" Registry > "${msi_tables}/Registry.idt"
 grep -q 'ominulld' "${msi_tables}/ServiceInstall.idt"
 grep -q 'ominulld' "${msi_tables}/ServiceControl.idt"
 if grep -q $'ominulld\t163\t' "${msi_tables}/ServiceControl.idt"; then
     echo "[-] MSI starts an unconfigured service during clean install." >&2
     exit 1
 fi
+grep -q 'OminullAgent' "${msi_tables}/Registry.idt"
+grep -q 'DisplayName' "${msi_tables}/Registry.idt"
+grep -q 'DisplayVersion' "${msi_tables}/Registry.idt"
 grep -q 'uninstall' "${msi_tables}/CustomAction.idt"
 echo "[+] MSI ${VERSION}: files, service registration, recovery action, and no driver payload verified."
 
