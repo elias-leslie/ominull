@@ -272,3 +272,58 @@ func TestAssetIdentityAndMACNormalisation(t *testing.T) {
 		t.Errorf("AssetIdentity with a MAC should key on it, got %q", kind)
 	}
 }
+
+// A byte total is only worth as much as the share of flows it was taken from.
+// Neither the Windows nor the macOS collector has a byte counter to read, so on
+// a real fleet almost every flow contributes nothing to the sum; the graph has
+// to carry that fraction or the console prints a volume that reads as a
+// measurement of the whole link.
+func TestTopologyReportsHowMuchTrafficCarriedByteCounts(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "measured.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	ev := func(bytesIn, bytesOut int64) Event {
+		return Event{
+			TenantID: "default", EndpointID: "ep-1", Timestamp: now,
+			Layer: "TEST", Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6,
+			SrcIP: "10.0.4.15", DstIP: "10.0.4.10", SrcPort: 5000, DstPort: 389,
+			BytesIn: bytesIn, BytesOut: bytesOut,
+		}
+	}
+	batch := []Event{ev(600, 400)}
+	for i := 0; i < 4; i++ {
+		batch = append(batch, ev(0, 0))
+	}
+	if err := store.InsertEventsBatch(batch); err != nil {
+		t.Fatalf("InsertEventsBatch: %v", err)
+	}
+
+	graph, err := store.GetTopologyGraph(time.Hour)
+	if err != nil {
+		t.Fatalf("GetTopologyGraph: %v", err)
+	}
+	if len(graph.Edges) != 1 {
+		t.Fatalf("expected one edge, got %d", len(graph.Edges))
+	}
+	e := graph.Edges[0]
+	if e.FlowCount != 5 {
+		t.Errorf("FlowCount = %d, want 5", e.FlowCount)
+	}
+	if e.TotalBytes != 1000 {
+		t.Errorf("TotalBytes = %d, want 1000", e.TotalBytes)
+	}
+	if e.MeasuredFlows != 1 {
+		t.Errorf("MeasuredFlows = %d, want 1 - four of the five flows reported no byte count", e.MeasuredFlows)
+	}
+	if len(e.Ports) != 1 || e.Ports[0].MeasuredFlows != 1 {
+		t.Errorf("the port breakdown lost the measured count: %+v", e.Ports)
+	}
+	if graph.Metrics.TotalFlowCount != 5 || graph.Metrics.MeasuredFlowCount != 1 {
+		t.Errorf("metrics = %d measured of %d, want 1 of 5",
+			graph.Metrics.MeasuredFlowCount, graph.Metrics.TotalFlowCount)
+	}
+}

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "../../driver/include/ominull_ioctl.h"
 
-#define OMINULL_AGENT_VERSION "1.7.11"
+#define OMINULL_AGENT_VERSION "1.7.13"
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
 

@@ -657,11 +657,15 @@
     /* The hub aggregates edges to the asset pair and hands the port breakdown
        over with them, so the demo carries the same shape. */
     topoEdges.forEach(function (e) {
-      e.ports = [{ port: e.port, protocol: (e.protocol || "tcp").toUpperCase(), flow_count: e.flow_count, total_bytes: e.total_bytes, verdict: e.verdict }];
+      /* The demo stands for a fleet whose collectors can read a byte counter,
+         so every flow in it is a measured one. A live hub reports how many
+         actually were, and the console says so where it prints a volume. */
+      e.measured_flows = e.flow_count;
+      e.ports = [{ port: e.port, protocol: (e.protocol || "tcp").toUpperCase(), flow_count: e.flow_count, total_bytes: e.total_bytes, measured_flows: e.flow_count, verdict: e.verdict }];
     });
-    topoEdges[0].ports.push({ port: 445, protocol: "TCP", flow_count: 610, total_bytes: 7400000, verdict: "clean" });
-    topoEdges[0].ports.push({ port: 135, protocol: "TCP", flow_count: 240, total_bytes: 1100000, verdict: "clean" });
-    topoEdges[0].ports.push({ port: 88, protocol: "TCP", flow_count: 1290, total_bytes: 6800000, verdict: "clean" });
+    topoEdges[0].ports.push({ port: 445, protocol: "TCP", flow_count: 610, total_bytes: 7400000, measured_flows: 610, verdict: "clean" });
+    topoEdges[0].ports.push({ port: 135, protocol: "TCP", flow_count: 240, total_bytes: 1100000, measured_flows: 240, verdict: "clean" });
+    topoEdges[0].ports.push({ port: 88, protocol: "TCP", flow_count: 1290, total_bytes: 6800000, measured_flows: 1290, verdict: "clean" });
 
     return {
       "/api/v1/hierarchy": hierarchy,
@@ -755,6 +759,8 @@
           unmanaged_nodes_count: topoNodes.length - endpoints.length,
           quiet_nodes_count: topoNodes.filter(function (n) { return n.quiet; }).length,
           inferred_nodes_count: topoNodes.filter(function (n) { return (n.evidence || []).indexOf("inferred") >= 0; }).length,
+          total_flow_count: topoEdges.reduce(function (t, e) { return t + e.flow_count; }, 0),
+          measured_flow_count: topoEdges.reduce(function (t, e) { return t + e.measured_flows; }, 0),
           window_label: "24h"
         }
       },
@@ -1534,7 +1540,11 @@
         { label: "Managed", value: String(m.managed_nodes_count || 0) },
         { label: "Unmanaged", value: String(m.unmanaged_nodes_count || 0), tone: "warn" },
         { label: "Quiet in window", value: String(m.quiet_nodes_count || 0) },
-        { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" }
+        { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" },
+        /* Volume is only as real as the share of flows that carried a byte
+           count. Reporting it beside the graph keeps every figure on the page
+           readable as what it is. */
+        measuredStat(m)
       ];
     }
     if (state.section === "traffic") {
@@ -2680,6 +2690,20 @@
 
   var TOPO_HOST_CEILING = 80;
 
+  /* A byte total on its own reads as a measurement of everything on a link.
+     Usually it is not: neither the Windows nor the macOS collector has a byte
+     counter to read, and the Linux path reports a queue depth rather than a
+     cumulative total, so most flows contribute nothing to the sum. The figure
+     is shown with the share of traffic it was actually taken from, and is
+     replaced by the honest answer when that share is none. */
+  function volume(b, flows, measured) {
+    flows = Number(flows) || 0;
+    measured = Number(measured) || 0;
+    if (!measured) return flows ? "not measured on any of these " + flows + " flow(s)" : "\u2014";
+    if (measured < flows) return bytes(b) + ", measured on " + measured + " of " + flows + " flow(s)";
+    return bytes(b);
+  }
+
   function topoGroupKey(n, mode) {
     if (mode === "category") return n.group || (n.type === "threat" ? "External" : "Unclassified");
     if (mode === "kind") {
@@ -2687,11 +2711,32 @@
                isolated: "Quarantined", threat: "External" }[nodeKind(n)] || "Other";
     }
     /* Subnet. The /24 a host sits in is the closest thing to "where on the
-       network is this" that the graph holds without asking the hub. */
-    var m = String(n.ip || "").match(/^(\d+)\.(\d+)\.(\d+)\.\d+$/);
-    if (m) return m[1] + "." + m[2] + "." + m[3] + ".0/24";
-    if (n.type === "threat" || n.type === "cloud") return "External";
-    return n.group || "No address";
+       network is this" that the graph holds without asking the hub - but only
+       for an address on this network. Grouping the internet by /24 put every
+       CDN edge in a segment of its own: a fleet of 493 hosts collapsed into
+       122 boxes, which is the dot cloud again with bigger dots. Everything
+       off-network is one destination as far as this view is concerned. */
+    var ip = String(n.ip || "");
+    if (!topoOnNetwork(ip)) {
+      if (ip || n.type === "threat" || n.type === "cloud") return "Internet";
+      return n.group || "No address";
+    }
+    var m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.\d+$/);
+    return m[1] + "." + m[2] + "." + m[3] + ".0/24";
+  }
+
+  /* RFC1918, CGNAT, link-local and loopback: the addresses that belong to a
+     network somebody here runs. Anything else is the internet. */
+  function topoOnNetwork(ip) {
+    var m = String(ip).match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (!m) return false;
+    var a = +m[1], b = +m[2];
+    if (a > 255 || b > 255 || +m[3] > 255 || +m[4] > 255) return false;
+    return a === 10 || a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254);
   }
 
   var TOPO_RISK_ORDER = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, CLEAN: 0 };
@@ -2765,7 +2810,8 @@
       if (!g) {
         g = groups[k] = {
           label: k, members: [], risk: "CLEAN", managed: 0, unmanaged: 0,
-          isolated: 0, threat: 0, quietAll: true, internalFlows: 0, internalBytes: 0
+          isolated: 0, threat: 0, quietAll: true,
+          internalFlows: 0, internalBytes: 0, internalMeasured: 0
         };
       }
       g.members.push(n);
@@ -2783,6 +2829,7 @@
       if (a === b) {
         groups[a].internalFlows += Number(e.flow_count) || 0;
         groups[a].internalBytes += Number(e.total_bytes) || 0;
+        groups[a].internalMeasured += Number(e.measured_flows) || 0;
         return;
       }
       var lo = a < b ? a : b, hi = a < b ? b : a;
@@ -2791,11 +2838,12 @@
       if (!ge) {
         ge = gEdges[id] = {
           source: "grp:" + lo, target: "grp:" + hi, flow_count: 0, total_bytes: 0,
-          verdict: "clean", port: 0, ports: [], pairs: 0
+          measured_flows: 0, verdict: "clean", port: 0, ports: [], pairs: 0
         };
       }
       ge.flow_count += Number(e.flow_count) || 0;
       ge.total_bytes += Number(e.total_bytes) || 0;
+      ge.measured_flows += Number(e.measured_flows) || 0;
       ge.pairs++;
       if (e.verdict === "blocked") ge.verdict = "blocked";
       else if (e.verdict === "anomalous" && ge.verdict !== "blocked") ge.verdict = "anomalous";
@@ -2863,6 +2911,18 @@
     return bar;
   }
 
+  function measuredStat(m) {
+    var total = Number(m.total_flow_count) || 0;
+    var meas = Number(m.measured_flow_count) || 0;
+    if (!total) return { label: "Byte counts", value: "\u2014" };
+    var pct = Math.round((meas / total) * 100);
+    return {
+      label: "Flows with byte counts",
+      value: (pct === 0 && meas > 0 ? "<1" : String(pct)) + "%",
+      tone: pct >= 95 ? "" : "warn"
+    };
+  }
+
   function renderTopology() {
     var view = $("view");
     var data = state.topology;
@@ -2906,10 +2966,11 @@
       var id = a + "\u0000" + b;
       var p = pairs[id];
       if (!p) {
-        p = pairs[id] = { id: id, source: a, target: b, flow: 0, bytes: 0, verdict: "clean", topPort: e.port, topFlow: 0, ports: {} };
+        p = pairs[id] = { id: id, source: a, target: b, flow: 0, bytes: 0, measured: 0, verdict: "clean", topPort: e.port, topFlow: 0, ports: {} };
       }
       p.flow += Number(e.flow_count) || 0;
       p.bytes += Number(e.total_bytes) || 0;
+      p.measured += Number(e.measured_flows) || 0;
       if (e.verdict === "blocked") p.verdict = "blocked";
       else if (e.verdict === "anomalous" && p.verdict !== "blocked") p.verdict = "anomalous";
       if ((Number(e.flow_count) || 0) >= p.topFlow) { p.topFlow = Number(e.flow_count) || 0; p.topPort = e.port; }
@@ -2919,9 +2980,10 @@
          ports" without another round trip. */
       arrayOf(e.ports).forEach(function (ps) {
         var k = (ps.protocol || "TCP") + "/" + ps.port;
-        var slot = p.ports[k] || (p.ports[k] = { port: ps.port, protocol: ps.protocol || "TCP", flow: 0, bytes: 0, verdict: "clean" });
+        var slot = p.ports[k] || (p.ports[k] = { port: ps.port, protocol: ps.protocol || "TCP", flow: 0, bytes: 0, measured: 0, verdict: "clean" });
         slot.flow += Number(ps.flow_count) || 0;
         slot.bytes += Number(ps.total_bytes) || 0;
+        slot.measured += Number(ps.measured_flows) || 0;
         if (ps.verdict && ps.verdict !== "clean") slot.verdict = ps.verdict;
       });
     });
@@ -3079,11 +3141,12 @@
         h("dt", { text: "Between" }), h("dd", {}, h("b", { text: nodeLabelFor(nodes, selEdge.source) })),
         h("dt", { text: "and" }), h("dd", {}, h("b", { text: nodeLabelFor(nodes, selEdge.target) })),
         h("dt", { text: "Flows" }), h("dd", { text: String(selEdge.flow) }),
-        h("dt", { text: "Volume" }), h("dd", { text: bytes(selEdge.bytes) }),
+        h("dt", { text: "Volume" }), h("dd", { text: volume(selEdge.bytes, selEdge.flow, selEdge.measured) }),
         h("dt", { text: "Verdict" }), h("dd", { text: selEdge.verdict })));
 
       var portKeys = Object.keys(selEdge.ports).sort(function (a, b) {
-        return selEdge.ports[b].bytes - selEdge.ports[a].bytes;
+        if (selEdge.ports[b].bytes !== selEdge.ports[a].bytes) return selEdge.ports[b].bytes - selEdge.ports[a].bytes;
+        return selEdge.ports[b].flow - selEdge.ports[a].flow;
       });
       if (portKeys.length) {
         side.appendChild(h("h4", { text: "Ports on this link" }));
@@ -3092,7 +3155,9 @@
           var ps = selEdge.ports[k];
           plist.appendChild(h("span", {
             cls: "port", "data-risk": ps.verdict === "blocked" ? "CRITICAL" : "LOW",
-            text: ps.port + " " + ps.protocol + " \u00b7 " + bytes(ps.bytes)
+            /* Flows, not "0 B", when nothing on this port was measured. */
+            text: ps.port + " " + ps.protocol + " \u00b7 " +
+              (ps.measured ? bytes(ps.bytes) : ps.flow + " flow(s)")
           }));
         });
         side.appendChild(plist);
@@ -3118,10 +3183,13 @@
         h("dt", { text: "Agented" }), h("dd", { text: g.managed + " of " + g.members.length }),
         h("dt", { text: "Quarantined" }), h("dd", { text: String(g.isolated) }),
         h("dt", { text: "Worst risk" }), h("dd", { text: g.risk || "CLEAN" }),
-        h("dt", { text: "Inside the segment" }), h("dd", { text: g.internalFlows + " flow(s) \u00b7 " + bytes(g.internalBytes) + " (counted, not drawn)" }),
+        h("dt", { text: "Inside the segment" }), h("dd", { text: g.internalFlows + " flow(s), counted here rather than drawn \u00b7 " + volume(g.internalBytes, g.internalFlows, g.internalMeasured) }),
         h("dt", { text: "Segments reached" }), h("dd", {}, h("b", { text: String(out.length) })),
         h("dt", { text: "Flows out" }), h("dd", { text: String(out.reduce(function (t, pr) { return t + pr.flow; }, 0)) }),
-        h("dt", { text: "Volume out" }), h("dd", { text: bytes(out.reduce(function (t, pr) { return t + pr.bytes; }, 0)) })));
+        h("dt", { text: "Volume out" }), h("dd", { text: volume(
+          out.reduce(function (t, pr) { return t + pr.bytes; }, 0),
+          out.reduce(function (t, pr) { return t + pr.flow; }, 0),
+          out.reduce(function (t, pr) { return t + pr.measured; }, 0)) })));
       side.appendChild(h("div", { cls: "detail-acts" },
         h("button", {
           cls: "mini", type: "button", text: "Open this segment",
@@ -3146,7 +3214,10 @@
         h("dt", { text: "In window" }), h("dd", { text: sel.quiet ? "quiet" : "active" }),
         h("dt", { text: "Peers" }), h("dd", {}, h("b", { text: String(linked.length) })),
         h("dt", { text: "Flows" }), h("dd", { text: String(linked.reduce(function (t, p) { return t + p.flow; }, 0)) }),
-        h("dt", { text: "Volume" }), h("dd", { text: bytes(linked.reduce(function (t, p) { return t + p.bytes; }, 0)) }));
+        h("dt", { text: "Volume" }), h("dd", { text: volume(
+          linked.reduce(function (t, p) { return t + p.bytes; }, 0),
+          linked.reduce(function (t, p) { return t + p.flow; }, 0),
+          linked.reduce(function (t, p) { return t + p.measured; }, 0)) }));
       side.appendChild(kv);
       if (sel.rationale) {
         side.appendChild(h("p", { cls: "why" },

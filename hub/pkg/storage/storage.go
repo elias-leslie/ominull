@@ -252,31 +252,45 @@ type TopologyEdgePort struct {
 	Protocol   string `json:"protocol"`
 	FlowCount  int64  `json:"flow_count"`
 	TotalBytes int64  `json:"total_bytes"`
-	Verdict    string `json:"verdict"`
+	// MeasuredFlows is how many of FlowCount actually carried a byte count.
+	// Neither the Windows nor the macOS collector has one to read, and the
+	// Linux path reports a queue depth rather than a cumulative total, so on
+	// most fleets this is a small fraction of FlowCount. Without it the
+	// console prints a volume that reads as a measurement of all the traffic
+	// on a link when it is a measurement of almost none of it.
+	MeasuredFlows int64  `json:"measured_flows"`
+	Verdict       string `json:"verdict"`
 }
 
 type TopologyEdge struct {
-	ID         string             `json:"id"`
-	Source     string             `json:"source"`
-	Target     string             `json:"target"`
-	Protocol   string             `json:"protocol"`
-	Port       uint16             `json:"port"` // heaviest port on the pair
-	FlowCount  int64              `json:"flow_count"`
-	TotalBytes int64              `json:"total_bytes"`
-	Verdict    string             `json:"verdict"` // "clean", "anomalous", "blocked"
-	LastSeen   time.Time          `json:"last_seen"`
-	Ports      []TopologyEdgePort `json:"ports"`
+	ID         string `json:"id"`
+	Source     string `json:"source"`
+	Target     string `json:"target"`
+	Protocol   string `json:"protocol"`
+	Port       uint16 `json:"port"` // heaviest port on the pair
+	FlowCount  int64  `json:"flow_count"`
+	TotalBytes int64  `json:"total_bytes"`
+	// MeasuredFlows: see TopologyEdgePort.MeasuredFlows.
+	MeasuredFlows int64              `json:"measured_flows"`
+	Verdict       string             `json:"verdict"` // "clean", "anomalous", "blocked"
+	LastSeen      time.Time          `json:"last_seen"`
+	Ports         []TopologyEdgePort `json:"ports"`
 }
 
 type TopologyMetrics struct {
-	TotalNodes          int    `json:"total_nodes"`
-	TotalEdges          int    `json:"total_edges"`
-	AnomalousEdgeCount  int    `json:"anomalous_edge_count"`
-	ManagedNodesCount   int    `json:"managed_nodes_count"`
-	UnmanagedNodesCount int    `json:"unmanaged_nodes_count"`
-	QuietNodesCount     int    `json:"quiet_nodes_count"`
-	InferredNodesCount  int    `json:"inferred_nodes_count"`
-	WindowLabel         string `json:"window_label"`
+	TotalNodes          int `json:"total_nodes"`
+	TotalEdges          int `json:"total_edges"`
+	AnomalousEdgeCount  int `json:"anomalous_edge_count"`
+	ManagedNodesCount   int `json:"managed_nodes_count"`
+	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
+	QuietNodesCount     int `json:"quiet_nodes_count"`
+	InferredNodesCount  int `json:"inferred_nodes_count"`
+	// TotalFlowCount and MeasuredFlowCount say how much of the window's
+	// traffic carried a byte count at all, so every volume on the page can be
+	// qualified rather than presented as a full measurement.
+	TotalFlowCount    int64  `json:"total_flow_count"`
+	MeasuredFlowCount int64  `json:"measured_flow_count"`
+	WindowLabel       string `json:"window_label"`
 }
 
 type TopologyData struct {
@@ -2688,7 +2702,8 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 
 	cutoff := time.Now().UTC().Add(-timeWindow)
 	rows, err := s.db.Query(
-		`SELECT src_ip, dst_ip, protocol, dst_port, action, SUM(bytes_in + bytes_out), COUNT(*), MAX(timestamp)
+		`SELECT src_ip, dst_ip, protocol, dst_port, action, SUM(bytes_in + bytes_out), COUNT(*),
+		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
 		 FROM events
 		 WHERE timestamp >= ?
 		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
@@ -2708,9 +2723,10 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		var dstPort int
 		var totalBytes int64
 		var flowCount int64
+		var measuredFlows int64
 		var maxTimeRaw interface{}
 
-		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &maxTimeRaw); err != nil {
+		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &measuredFlows, &maxTimeRaw); err != nil {
 			continue
 		}
 		maxTime := scanTime(maxTimeRaw)
@@ -2748,6 +2764,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		}
 		edge.FlowCount += flowCount
 		edge.TotalBytes += totalBytes
+		edge.MeasuredFlows += measuredFlows
 		if maxTime.After(edge.LastSeen) {
 			edge.LastSeen = maxTime
 		}
@@ -2763,6 +2780,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		}
 		ps.FlowCount += flowCount
 		ps.TotalBytes += totalBytes
+		ps.MeasuredFlows += measuredFlows
 		if verdict != "clean" {
 			ps.Verdict = verdict
 		}
@@ -2795,7 +2813,10 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	})
 
 	anomEdges := 0
+	var totalFlows, measuredFlowTotal int64
 	for key, e := range edgeMap {
+		totalFlows += e.FlowCount
+		measuredFlowTotal += e.MeasuredFlows
 		ports := make([]TopologyEdgePort, 0, len(edgePorts[key]))
 		for _, ps := range edgePorts[key] {
 			ports = append(ports, *ps)
@@ -2827,6 +2848,8 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	data.Metrics.UnmanagedNodesCount = unmanagedCount
 	data.Metrics.QuietNodesCount = quietCount
 	data.Metrics.InferredNodesCount = inferredCount
+	data.Metrics.TotalFlowCount = totalFlows
+	data.Metrics.MeasuredFlowCount = measuredFlowTotal
 	data.Metrics.WindowLabel = windowLabel(timeWindow)
 
 	return data, nil
