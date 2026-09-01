@@ -1419,27 +1419,12 @@ func (s *Store) InsertEvent(ev Event) error {
 		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID,
 	)
-	if err == nil {
-		tenantID := ev.TenantID
-		if tenantID == "" {
-			tenantID = "default"
-		}
-		s.analytics.invalidate(tenantID)
-	}
 	return err
 }
 
 func (s *Store) InsertEventsBatch(events []Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tenantIDs := make(map[string]struct{}, 1)
-	for _, ev := range events {
-		tenantID := ev.TenantID
-		if tenantID == "" {
-			tenantID = "default"
-		}
-		tenantIDs[tenantID] = struct{}{}
-	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1457,21 +1442,6 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer stmt.Close()
 
 	for _, ev := range events {
-		// Nothing is invented here any more.
-		//
-		// A flow whose agent reported no byte counts used to be stored as
-		// 1420 in and 512 out. The Windows agent falls back to user-mode socket
-		// telemetry, which has no byte accounting, so on this fleet that was
-		// 212,427 of 374,318 rows - 56% of every byte figure the console
-		// printed, including the bandwidth timeline, the geo ranking and the
-		// top-talkers card, was a constant. The comment on the timeline in
-		// GetAnalyticsSummary says a console that invents a number is worse
-		// than one that shows none, because the invented one is acted on. This
-		// was the same defect one layer down, feeding the same cards.
-		//
-		// An unlocated flow was likewise stored as "US", so traffic the GeoIP
-		// stage could not place was attributed to a country on a security
-		// console. It is recorded as unknown, and the card names it that.
 		if ev.Country == "" {
 			ev.Country = CountryUnknown
 		}
@@ -1486,9 +1456,6 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit event batch: %w", err)
-	}
-	for tenantID := range tenantIDs {
-		s.analytics.invalidate(tenantID)
 	}
 	return nil
 }

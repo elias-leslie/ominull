@@ -208,8 +208,5 @@ func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit telemetry batch: %w", err)
 	}
-	for tenantID := range tenantIDs {
-		s.analytics.invalidate(tenantID)
-	}
 	return nil
 }
