@@ -502,7 +502,7 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 
 	trendQuery := fmt.Sprintf(`
 		SELECT
-			CAST(strftime('%%s', timestamp) AS INTEGER) / %d * %d as bucket_sec,
+			CAST(strftime('%%s', substr(timestamp, 1, 19) || 'Z') AS INTEGER) / %d * %d as bucket_sec,
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COUNT(*),
@@ -1007,8 +1007,8 @@ func (s *Store) queryHeatmap(whereClause string, args []interface{}, isUnfiltere
 
 	query := fmt.Sprintf(`
 		SELECT
-			CAST(strftime('%%w', timestamp) AS INTEGER) as dow,
-			CAST(strftime('%%H', timestamp) AS INTEGER) as hod,
+			CAST(strftime('%%w', substr(timestamp, 1, 19) || 'Z') AS INTEGER) as dow,
+			CAST(strftime('%%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) as hod,
 			COUNT(*),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
