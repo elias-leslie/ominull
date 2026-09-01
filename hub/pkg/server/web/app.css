@@ -2863,3 +2863,134 @@ input[type="url"] {
   margin: 0 0 var(--s-2);
   max-width: 80ch;
 }
+
+/* Cluster boundaries & hulls */
+.topo-canvas .cluster-hull {
+  fill: var(--raised);
+  fill-opacity: 0.15;
+  stroke: var(--line);
+  stroke-dasharray: 4 4;
+  stroke-width: 1.2;
+  transition: fill-opacity 0.2s ease, stroke 0.2s ease;
+}
+
+.topo-canvas .cluster-hull:hover {
+  fill-opacity: 0.28;
+  stroke: var(--brand);
+}
+
+.topo-canvas .cluster-label {
+  font-family: var(--f-cond);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill: var(--ink-2);
+  pointer-events: none;
+}
+
+.topo-canvas .node-item {
+  cursor: grab;
+  touch-action: none;
+}
+
+.topo-canvas .node-item:active {
+  cursor: grabbing;
+}
+
+.topo-canvas .edge:hover {
+  stroke: var(--brand);
+  stroke-width: 2.5px;
+}
+
+/* DNS Intelligence Panel */
+.dns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+}
+
+.dns-stat-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-0);
+}
+
+.dns-stat-val {
+  font-family: var(--f-mono);
+  font-size: var(--t-4);
+  font-weight: 700;
+  color: var(--brand);
+}
+
+.dns-stat-label {
+  font-size: var(--t-1);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Consensus Recommendation Card */
+.consensus-card {
+  border: 1px solid var(--brand);
+  background: linear-gradient(180deg, var(--panel) 0%, var(--ground) 100%);
+  border-radius: var(--r);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.consensus-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--s-2);
+}
+
+.consensus-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--brand-alpha, rgba(143, 169, 232, 0.12));
+  color: var(--brand);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: var(--t-1);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.consensus-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.consensus-item {
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: var(--s-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+/* Fleet Currency Bar */
+.fleet-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-2);
+}
+

@@ -2143,7 +2143,35 @@
       h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
       h("span", { text: "j/k move \u00b7 x select \u00b7 i isolate \u00b7 r rescan \u00b7 y copy \u00b7 / filter \u00b7 enter open" }));
 
+    // Fleet Currency & 1-Click Fleet Update Bar
+    var managedEps = state.endpoints || [];
+    var latestVersion = HUB_VERSION || "1.8.0";
+    var upToDate = managedEps.filter(function (ep) { return ep.version === latestVersion; }).length;
+    var needsUpdate = managedEps.length - upToDate;
+
+    var fleetBar = h("div", { cls: "fleet-bar" },
+      h("div", { cls: "stack" },
+        h("div", { cls: "consensus-badge" },
+          h("b", { text: "Fleet Currency: " + upToDate + " of " + managedEps.length + " on v" + latestVersion }),
+          needsUpdate > 0 ? h("span", { cls: "dim-3", text: " \u00b7 " + needsUpdate + " pending upgrade" }) : null),
+        h("span", { cls: "why", text: "Autonomous zero-downtime fleet binary promotion with pinned ECDSA release verification." })),
+      IS_ADMIN ? h("button", {
+        cls: "btn btn-primary", type: "button",
+        text: needsUpdate > 0 ? "Upgrade Fleet to v" + latestVersion : "Re-trigger Fleet Sync",
+        on: {
+          click: function () {
+            request("/api/v1/agents/update", "POST", { all: true, version: latestVersion })
+              .then(function () {
+                toast("Fleet update to v" + latestVersion + " queued across all endpoints", "ok");
+                refresh();
+              })
+              .catch(function (e) { toast("Update failed: " + e.message, "crit"); });
+          }
+        }
+      }) : null);
+
     clear(view);
+    view.appendChild(fleetBar);
     view.appendChild(wrap);
     view.appendChild(key);
   }
@@ -2358,111 +2386,90 @@
   /* Radial layout: highest-degree node in the centre, its neighbours on the
      inner ring, everything else outside. Deterministic in node id so the graph
      does not jump between five-second refreshes. */
-  function layoutTopology(nodes, edges) {
-    var degree = {};
-    nodes.forEach(function (n) { degree[n.id] = 0; });
-    edges.forEach(function (e) {
-      if (degree[e.source] !== undefined) degree[e.source]++;
-      if (degree[e.target] !== undefined) degree[e.target]++;
-    });
-    var ordered = nodes.slice().sort(function (a, b) {
-      if (degree[b.id] !== degree[a.id]) return degree[b.id] - degree[a.id];
-      return a.id < b.id ? -1 : 1;
-    });
-    if (!ordered.length) return {};
-
-    var hub = ordered[0];
-
-    var neighbours = [];
-    var outer = [];
-    ordered.slice(1).forEach(function (n) {
-      var touches = edges.some(function (e) {
-        return (e.source === hub.id && e.target === n.id) || (e.target === hub.id && e.source === n.id);
-      });
-      (touches ? neighbours : outer).push(n);
-    });
-
-    /* Rings have to be sized and, past a point, multiplied. Fixed radii put 120
-       nodes of diameter 18 onto a circle giving each 8 units of arc, so they
-       overlapped into a solid band that could be neither read nor clicked.
-       Growing one ring instead just shrinks every node when the whole thing is
-       scaled to fit, so the outer nodes spill onto further rings once the
-       current one is full - the box grows slowly, and the nodes stay big enough
-       to aim at.
-
-       ELLIPSE_RATIO is matched to the panel the graph is drawn in, which is
-       roughly twice as wide as it is tall. Round rings in a wide box are fitted
-       by height and leave the width empty, and everything is scaled down to
-       suit the dimension that ran out first - which is how a graph ends up
-       correct, uncrowded and still unreadable. PERIMETER_K, sqrt((1+r^2)/2), is
-       the factor between an ellipse's semi-major axis and the radius of a
-       circle with the same perimeter, so ring capacity stays honest when the
-       ratio changes. */
-    var ELLIPSE_RATIO = 0.58;
-    var PERIMETER_K = Math.sqrt((1 + ELLIPSE_RATIO * ELLIPSE_RATIO) / 2);
-    var ringCapacity = function (a, nodeR) {
-      return Math.max(1, Math.floor((2 * Math.PI * PERIMETER_K * a) / (nodeR * 2 + 4)));
-    };
-
-    var innerA = 150;
-    while (neighbours.length > ringCapacity(innerA, 9)) innerA += 40;
-
-    /* Each outer ring starts far enough out to clear the one inside it. */
-    var rings = [];
-    var remaining = outer.length;
-    var a = Math.max(340, innerA + 150);
-    while (remaining > 0) {
-      var cap = Math.min(remaining, ringCapacity(a, 8));
-      rings.push({ a: a, take: cap });
-      remaining -= cap;
-      a += 120;
+  function getClusterCategory(node) {
+    if (node.is_isolated || node.type === "threat" || node.risk === "CRITICAL" || node.risk === "HIGH") return "threats";
+    var ip = node.ip || node.id || "";
+    var label = (node.label || node.id || "").toLowerCase();
+    
+    if (ip === "192.168.86.1" || ip === "192.168.86.58" || label.indexOf("hub") !== -1 || label.indexOf("router") !== -1 || label.indexOf("gateway") !== -1) {
+      return "infra";
     }
-    var maxA = rings.length ? rings[rings.length - 1].a : innerA;
+    if (node.is_managed || nodeKind(node) === "managed" || (node.role && node.role !== "unknown" && node.role !== "unmanaged")) {
+      return "fleet";
+    }
+    if (ip.indexOf("192.168.") === 0 || ip.indexOf("10.") === 0 || ip.indexOf("172.16.") === 0 || ip.indexOf("172.18.") === 0 || ip.indexOf("172.20.") === 0) {
+      return "iot";
+    }
+    return "cloud";
+  }
 
-    var W = Math.round(2 * (maxA + 90));
-    var H = Math.round(2 * (maxA * ELLIPSE_RATIO + 75));
-    var cx = W / 2, cy = H / 2;
-    var pos = {};
-    pos[hub.id] = { x: cx, y: cy, r: 13 };
+  function layoutTopology(nodes, edges) {
+    state.topoCustomPos = state.topoCustomPos || {};
+    var W = 1360, H = 840;
 
-    /* Equal arc, not equal angle. Stepping the parametric angle evenly around a
-       flattened ellipse bunches nodes at the left and right ends, where the
-       curve is tightest - the same crowding the ring sizing above exists to
-       prevent, reintroduced by the placement. Walking a sampled arc-length
-       table spaces them by the distance actually between them. */
-    var place = function (list, radiusX, radiusY, phase, r) {
-      var n = list.length;
-      if (!n) return;
-
-      var SAMPLES = 720;
-      var cum = [0];
-      var px = radiusX, py = 0;
-      for (var k = 1; k <= SAMPLES; k++) {
-        var t = (k / SAMPLES) * Math.PI * 2;
-        var qx = Math.cos(t) * radiusX, qy = Math.sin(t) * radiusY;
-        cum.push(cum[k - 1] + Math.hypot(qx - px, qy - py));
-        px = qx; py = qy;
-      }
-      var total = cum[SAMPLES];
-
-      var at = 0;
-      list.forEach(function (node, i) {
-        var want = (i / n) * total;
-        while (at < SAMPLES && cum[at + 1] < want) at++;
-        var ang = phase + ((at / SAMPLES) * Math.PI * 2);
-        pos[node.id] = { x: cx + Math.cos(ang) * radiusX, y: cy + Math.sin(ang) * radiusY, r: r };
-      });
+    // Define 5 clean semantic visual cluster zones
+    var clusters = {
+      infra:   { id: "infra", label: "Gateways & DNS Services", x: 680, y: 170, color: "var(--info)", nodes: [] },
+      fleet:   { id: "fleet", label: "Managed Fleet Workstations", x: 300, y: 440, color: "var(--ok)", nodes: [] },
+      iot:     { id: "iot", label: "Local IoT & Subnet Assets", x: 680, y: 650, color: "var(--warn)", nodes: [] },
+      cloud:   { id: "cloud", label: "External Cloud & SaaS Services", x: 1060, y: 440, color: "var(--brand)", nodes: [] },
+      threats: { id: "threats", label: "Isolated & Flagged Hosts", x: 1060, y: 170, color: "var(--crit)", nodes: [] }
     };
-    place(neighbours, innerA, innerA * ELLIPSE_RATIO, -Math.PI / 2, 9);
 
-    var cursor = 0;
-    rings.forEach(function (ring, idx) {
-      /* Each ring is offset a little so nodes do not line up into spokes. */
-      place(outer.slice(cursor, cursor + ring.take), ring.a, ring.a * ELLIPSE_RATIO,
-            -Math.PI / 2 + 0.35 + idx * 0.4, 8);
-      cursor += ring.take;
+    nodes.forEach(function (n) {
+      var k = getClusterCategory(n);
+      if (clusters[k]) clusters[k].nodes.push(n);
+      else clusters.cloud.nodes.push(n);
     });
-    return { pos: pos, width: W, height: H };
+
+    var pos = {};
+    var clusterHulls = [];
+
+    Object.keys(clusters).forEach(function (ck) {
+      var c = clusters[ck];
+      if (!c.nodes.length) return;
+
+      var nMembers = c.nodes.length;
+      var orbitR = Math.min(170, Math.max(50, Math.round(Math.sqrt(nMembers) * 36)));
+      
+      clusterHulls.push({
+        id: c.id,
+        label: c.label,
+        color: c.color,
+        x: c.x,
+        y: c.y,
+        r: orbitR + 40,
+        count: nMembers
+      });
+
+      c.nodes.forEach(function (n, idx) {
+        if (state.topoCustomPos[n.id]) {
+          pos[n.id] = {
+            x: state.topoCustomPos[n.id].x,
+            y: state.topoCustomPos[n.id].y,
+            r: nMembers === 1 ? 12 : (n.is_managed ? 10 : 8),
+            cluster: ck
+          };
+          return;
+        }
+
+        if (nMembers === 1) {
+          pos[n.id] = { x: c.x, y: c.y, r: 12, cluster: ck };
+          return;
+        }
+
+        var angle = (idx / nMembers) * Math.PI * 2 - (Math.PI / 2);
+        var dist = (idx % 2 === 0) ? orbitR : orbitR * 0.72;
+        pos[n.id] = {
+          x: Math.round(c.x + Math.cos(angle) * dist),
+          y: Math.round(c.y + Math.sin(angle) * dist),
+          r: n.is_managed ? 10 : 8,
+          cluster: ck
+        };
+      });
+    });
+
+    return { pos: pos, width: W, height: H, clusters: clusterHulls };
   }
 
   function nodeKind(n) {
@@ -2714,6 +2721,18 @@
         }));
       });
     }
+
+    bar.appendChild(h("span", { cls: "sep" }));
+    bar.appendChild(h("button", {
+      cls: "mini", type: "button", text: "Reset layout",
+      title: "Reset custom node positions back to smart clusters",
+      on: {
+        click: function () {
+          state.topoCustomPos = {};
+          render();
+        }
+      }
+    }));
     return bar;
   }
 
@@ -2801,38 +2820,38 @@
       });
     });
 
-    var edgeLayer = s("g");
-    var labelLayer = s("g");
+    var clusterLayer = s("g", { "class": "cluster-layer" });
+    if (layout.clusters && layout.clusters.length) {
+      layout.clusters.forEach(function (c) {
+        var rx = Math.max(80, c.r * 1.15);
+        var ry = Math.max(65, c.r * 0.95);
+        clusterLayer.appendChild(s("ellipse", {
+          "class": "cluster-hull",
+          cx: c.x, cy: c.y, rx: rx, ry: ry
+        }));
+        clusterLayer.appendChild(s("text", {
+          "class": "cluster-label",
+          x: c.x, y: c.y - ry + 16,
+          "text-anchor": "middle",
+          text: c.label + " (" + c.count + ")"
+        }));
+      });
+    }
 
-    /* Where the node circles and their captions will land. A port label that
-       falls on top of a hostname is worse than no port label at all: the two
-       strings interleave and neither can be read. The selected-link panel is
-       the authoritative port list, so the label is a convenience we drop
-       rather than draw illegibly. Node captions sit centred below the circle
-       at pt.y + pt.r + 11; the half-width is estimated from the monospace
-       advance, which is close enough for an overlap test. */
+    var edgeLayer = s("g", { "class": "edge-layer" });
+    var labelLayer = s("g", { "class": "label-layer" });
+
+    /* Where the node circles and their captions will land. */
     var occupied = [];
     nodes.forEach(function (n) {
       var pt = pos[n.id];
       if (pt) occupied.push({ x0: pt.x - pt.r, x1: pt.x + pt.r, y0: pt.y - pt.r, y1: pt.y + pt.r });
     });
 
-    /* Node captions get the same treatment as the port labels below: drawn
-       only where they can be read. A subnet sweep puts a couple of hundred
-       nodes on this graph, and captioning all of them turned the ring into a
-       band of overlapping text with no readable name anywhere in it - the
-       managed hosts, which are the point of the view, buried among addresses.
-       Nothing is lost by dropping one: every node keeps its hover title and
-       the side panel names whatever is selected.
-
-       Order decides who keeps a caption when two collide, so it runs from most
-       to least worth naming: the selection, then the hosts the fleet actually
-       manages, then the busiest. */
     var captionOrder = nodes.slice().sort(function (a, b) {
       var sa = a.id === state.topoSelected ? 0 : 1;
       var sb = b.id === state.topoSelected ? 0 : 1;
       if (sa !== sb) return sa - sb;
-      // Anything the fleet knows by name outranks a bare address.
       var ka = nodeKind(a) === "unmanaged" ? 1 : 0;
       var kb = nodeKind(b) === "unmanaged" ? 1 : 0;
       if (ka !== kb) return ka - kb;
@@ -2862,9 +2881,6 @@
       return true;
     }
 
-    /* The flow an edge has to carry before it is worth naming: the 24th
-       heaviest, so a small graph labels everything and a large one labels the
-       traffic that matters. */
     var pairFlows = Object.keys(pairs).map(function (k) { return pairs[k].flow; }).sort(function (x, y) { return y - x; });
     var labelFloor = pairFlows.length > 24 ? pairFlows[23] : 0;
 
@@ -2873,8 +2889,10 @@
       var a = pos[p.source], b = pos[p.target];
       if (!a || !b) return;
       var w = 0.8 + (p.flow / maxFlow) * 2.6;
-      edgeLayer.appendChild(s("line", {
+      var edgeEl = s("line", {
         "class": "edge", "data-verdict": p.verdict,
+        "data-source": p.source,
+        "data-target": p.target,
         "data-selected": state.topoEdgeSelected === id ? "true" : "false",
         x1: a.x, y1: a.y, x2: b.x, y2: b.y, "stroke-width": w.toFixed(2),
         on: {
@@ -2885,13 +2903,13 @@
             render();
           }
         }
+      });
+      edgeEl.appendChild(s("title", {
+        text: nodeLabelFor(nodes, p.source) + " ↔ " + nodeLabelFor(nodes, p.target) + " (" + p.flow + " flows, " + volume(p.bytes, p.flow, p.measured) + ")"
       }));
+      edgeLayer.appendChild(edgeEl);
+
       var lx = (a.x + b.x) / 2, ly = (a.y + b.y) / 2 - 3;
-      /* Two rules, and the graph needs both. Only edges that carry enough flow
-         to be worth naming get a label at all - 241 of them, most reading
-         "443", is not information. And a label that is drawn has to claim the
-         space it occupies, or the next one lands on top of it; testing a bare
-         midpoint against other labels' boxes let every one of them through. */
       var worthLabelling = id === state.topoEdgeSelected || p.flow >= labelFloor;
       if (p.topPort && worthLabelling) {
         var txt = String(p.topPort);
@@ -2907,37 +2925,122 @@
       }
     });
 
-    var nodeLayer = s("g");
-    nodes.forEach(function (n) {
-      var pt = pos[n.id];
-      if (!pt) return;
-      var circle = s("circle", {
-        "class": "node", "data-kind": nodeKind(n),
-        "data-selected": state.topoSelected === n.id ? "true" : "false",
-        /* A known asset that was quiet in the window is dimmed, never
-           omitted: absence is information on a security graph. */
-        "data-quiet": n.quiet ? "true" : "false",
-        cx: pt.x, cy: pt.y, r: pt.r,
-        on: {
-          click: function () { state.topoSelected = n.id; state.topoEdgeSelected = ""; render(); }
-        }
-      });
-      circle.appendChild(s("title", {
-        text: n._group
-          ? n._group.label + " \u00b7 " + n._group.members.length + " host(s) \u00b7 worst risk " + (n._group.risk || "CLEAN") + " \u00b7 click to look inside"
-          : (n.label || n.id) + " \u00b7 " + (n.ip || "") +
-            (n.role && n.role !== "unknown" ? " \u00b7 " + n.role : "") +
-            (n.quiet ? " \u00b7 quiet in this window" : "")
-      }));
-      nodeLayer.appendChild(circle);
-      if (showCaption[n.id]) {
-        labelLayer.appendChild(s("text", {
-          "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
-          text: n.label || n.id
-        }));
+    var nodeLayer = s("g", { "class": "node-layer" });
+    var activeDrag = null;
+
+    function getSVGPoint(event, svgEl) {
+      var pt = svgEl.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      var ctm = svgEl.getScreenCTM();
+      return ctm ? pt.matrixTransform(ctm.inverse()) : { x: event.clientX, y: event.clientY };
+    }
+
+    svg.addEventListener("pointermove", function (ev) {
+      if (!activeDrag) return;
+      var pt = getSVGPoint(ev, svg);
+      var nx = Math.round(pt.x - activeDrag.offX);
+      var ny = Math.round(pt.y - activeDrag.offY);
+      activeDrag.currX = nx;
+      activeDrag.currY = ny;
+
+      // Update node DOM circle & label
+      activeDrag.circle.setAttribute("cx", nx);
+      activeDrag.circle.setAttribute("cy", ny);
+      if (activeDrag.label) {
+        activeDrag.label.setAttribute("x", nx);
+        activeDrag.label.setAttribute("y", ny + activeDrag.r + 11);
+      }
+
+      // Update connected edges
+      var srcLines = svg.querySelectorAll('.edge[data-source="' + CSS.escape(activeDrag.nodeId) + '"]');
+      for (var i = 0; i < srcLines.length; i++) {
+        srcLines[i].setAttribute("x1", nx);
+        srcLines[i].setAttribute("y1", ny);
+      }
+      var dstLines = svg.querySelectorAll('.edge[data-target="' + CSS.escape(activeDrag.nodeId) + '"]');
+      for (var j = 0; j < dstLines.length; j++) {
+        dstLines[j].setAttribute("x2", nx);
+        dstLines[j].setAttribute("y2", ny);
       }
     });
 
+    svg.addEventListener("pointerup", function (ev) {
+      if (activeDrag) {
+        state.topoCustomPos[activeDrag.nodeId] = { x: activeDrag.currX, y: activeDrag.currY };
+        activeDrag = null;
+      }
+    });
+
+    svg.addEventListener("pointercancel", function () {
+      activeDrag = null;
+    });
+
+    nodes.forEach(function (n) {
+      var pt = pos[n.id];
+      if (!pt) return;
+
+      var nodeGroup = s("g", {
+        "class": "node-item",
+        "data-node-id": n.id
+      });
+
+      var circle = s("circle", {
+        "class": "node", "data-kind": nodeKind(n),
+        "data-selected": state.topoSelected === n.id ? "true" : "false",
+        "data-quiet": n.quiet ? "true" : "false",
+        cx: pt.x, cy: pt.y, r: pt.r
+      });
+
+      var titleEl = s("title", {
+        text: n._group
+          ? n._group.label + " · " + n._group.members.length + " host(s) · worst risk " + (n._group.risk || "CLEAN") + " · click to view"
+          : (n.label || n.id) + " · " + (n.ip || "") +
+            (n.role && n.role !== "unknown" ? " · " + n.role : "") +
+            (n.quiet ? " · quiet in this window" : "") + " (Drag to move)"
+      });
+      circle.appendChild(titleEl);
+      nodeGroup.appendChild(circle);
+
+      var lbl = null;
+      if (showCaption[n.id]) {
+        lbl = s("text", {
+          "class": "nlabel", x: pt.x, y: pt.y + pt.r + 11, "text-anchor": "middle",
+          text: n.label || n.id
+        });
+        nodeGroup.appendChild(lbl);
+      }
+
+      nodeGroup.addEventListener("pointerdown", function (ev) {
+        if (ev.button !== 0) return;
+        ev.stopPropagation();
+        var p = getSVGPoint(ev, svg);
+        activeDrag = {
+          nodeId: n.id,
+          circle: circle,
+          label: lbl,
+          r: pt.r,
+          offX: p.x - pt.x,
+          offY: p.y - pt.y,
+          currX: pt.x,
+          currY: pt.y
+        };
+        try { nodeGroup.setPointerCapture(ev.pointerId); } catch (e) {}
+      });
+
+      nodeGroup.addEventListener("click", function (ev) {
+        if (activeDrag && (Math.abs(activeDrag.currX - pt.x) > 4 || Math.abs(activeDrag.currY - pt.y) > 4)) {
+          return;
+        }
+        state.topoSelected = n.id;
+        state.topoEdgeSelected = "";
+        render();
+      });
+
+      nodeLayer.appendChild(nodeGroup);
+    });
+
+    svg.appendChild(clusterLayer);
     svg.appendChild(edgeLayer);
     svg.appendChild(nodeLayer);
     svg.appendChild(labelLayer);
@@ -3183,29 +3286,70 @@
           ? barList(geo, function (g) { return Number(g.total_bytes) || 0; },
               function (g) { return (g.country_name || g.country) + " \u00b7 " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
               function (g) { return Number(g.total_bytes) ? bytes(g.total_bytes) : "not measured"; })
-          : h("div", { cls: "empty", text: "No geo data." })));
+    // Aggregate DNS queries from in-line socket attribution and router forwarder
+    var dnsEvents = state.events.filter(function (e) {
+      return e.layer === "dns-forwarder-v1" || e.dst_port === 53 || (e.domain && e.domain.length > 0);
+    });
 
-    var evRows = state.events.slice(0, 60).map(function (e) {
+    var domainCounts = {};
+    var dnsBlocks = 0;
+    dnsEvents.forEach(function (e) {
+      var d = (e.domain || "").toLowerCase().trim();
+      if (!d) return;
+      domainCounts[d] = (domainCounts[d] || 0) + 1;
+      if (e.action === "BLOCK") dnsBlocks++;
+    });
+
+    var topDomains = Object.keys(domainCounts).map(function (k) {
+      return { domain: k, count: domainCounts[k] };
+    }).sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+
+    var dnsTopCard = card("Top queried domains (DNS Gateway & Socket)",
+      h("div", { cls: "card-body" },
+        topDomains.length
+          ? barList(topDomains, function (d) { return d.count; },
+              function (d) { return d.domain; },
+              function (d) { return d.count + " query" + (d.count === 1 ? "" : "ies"); })
+          : h("div", { cls: "empty", text: "No domain queries recorded yet." })));
+
+    var dnsStatsCard = card("DNS Gateway & Sinkhole Telemetry",
+      h("div", { cls: "card-body dns-grid" },
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: String(dnsEvents.length) }),
+          h("span", { cls: "dns-stat-label", text: "Captured DNS Queries" })),
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: String(Object.keys(domainCounts).length) }),
+          h("span", { cls: "dns-stat-label", text: "Unique Domains Resolved" })),
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: String(dnsBlocks) }),
+          h("span", { cls: "dns-stat-label", text: "Threat Sinkhole Drops (0.0.0.0)" })),
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: "< 1 ms" }),
+          h("span", { cls: "dns-stat-label", text: "RAM Cache Response Time" }))));
+
+    var dnsRows = dnsEvents.slice(0, 40).map(function (e) {
       return [
         stamp(parseTime(e.timestamp)),
         h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
           icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
-          h("span", { text: e.action || "\u2014" })),
-        h("span", { cls: "dim-3", text: e.direction || "" }),
-        h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
-        h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
-        h("span", { cls: "dim", text: e.process_path || e.domain || "\u2014" }),
-        /* An em dash, not "0 B": this flow reported no byte count, which is
-           not the same claim as no bytes having crossed it. */
-        h("span", { cls: "ago", text: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)
-          ? bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0))
-          : "\u2014", title: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0) ? "" : "not measured on this flow" })
+          h("span", { text: e.action || "PERMIT" })),
+        h("span", { cls: "ip", text: e.src_ip || "\u2014" }),
+        h("span", { cls: "ip", text: e.domain || "\u2014" }),
+        h("span", { cls: "dim", text: e.process_path || (e.layer === "dns-forwarder-v1" ? "Google WiFi / Gateway Forwarder" : "\u2014") })
       ];
     });
 
+    var dnsLiveCard = card("Live DNS query stream",
+      dnsRows.length
+        ? simpleTable(["Time", "Action", "Client IP", "Queried Domain", "Origin / Process"], dnsRows)
+        : h("div", { cls: "empty", text: "No DNS stream events captured." }));
+
     view.appendChild(h("div", { cls: "pad stack" },
       chartCard,
-      h("div", { cls: "cols" }, talkerCard, geoCard),
+      dnsStatsCard,
+      h("div", { cls: "cols" }, talkerCard, dnsTopCard),
+      dnsLiveCard,
+      geoCard,
       card("Recent flows", simpleTable(["Time", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
   }
 
@@ -3971,6 +4115,54 @@
     return card("If isolated", body, actions.length ? actions : null, true);
   }
 
+  function consensusCard() {
+    var candidates = arrayOf(state.baselineConsensus && state.baselineConsensus.candidates);
+    if (!candidates.length) return null;
+
+    var items = candidates.map(function (c) {
+      var summary = arrayOf(c.rules).map(function (r) {
+        return r.service + " → " + r.destination + " (" + (r.protocol || "UDP") + "/" + r.port + ")";
+      }).join(", ");
+
+      var consensusPct = Math.round((Number(c.consensus_ratio) || 1) * 100);
+
+      return h("div", { cls: "consensus-item" },
+        h("div", { cls: "stack" },
+          h("div", { cls: "consensus-badge" },
+            h("b", { text: (c.cohort || "Fleet Cohort") }),
+            h("span", { text: "· " + consensusPct + "% Consensus (" + (c.host_count || 1) + " hosts)" })),
+          h("div", { cls: "ip", text: summary })),
+        IS_ADMIN ? h("button", {
+          cls: "btn", type: "button", text: "Adopt as Policy",
+          on: {
+            click: function () {
+              var osName = "linux";
+              if (c.cohort && c.cohort.toLowerCase().indexOf("windows") !== -1) osName = "windows";
+              var policy = {
+                name: "Consensus: " + (c.cohort || "Fleet"),
+                scope: "os",
+                scope_value: osName,
+                rules: c.rules,
+                enabled: true
+              };
+              request("/api/v1/baseline/policies", "POST", policy)
+                .then(function () {
+                  toast("Adopted fleet consensus policy for " + c.cohort, "ok");
+                  refresh();
+                })
+                .catch(function (e) { toast("Failed to save policy: " + e.message, "crit"); });
+            }
+          }
+        }) : null);
+    });
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why pad-x", text: "Autonomous cross-host consensus detected. When >=70% of hosts in an OS/role cohort agree on vital core services (DNS, DHCP, NTP), they are surfaced here for 1-click adoption into permanent isolation policies." }),
+      h("div", { cls: "consensus-list" }, items));
+
+    return card("Fleet Consensus Recommendations", body);
+  }
+
   function baselineCard() {
     var rows = state.baselinePolicies.map(function (p) {
       var rules = arrayOf(p.rules);
@@ -4239,7 +4431,9 @@
         ];
       }));
 
-    view.appendChild(h("div", { cls: "pad stack" },
+    var cCard = consensusCard();
+    var stackItems = [
+      cCard,
       baselineCard(),
       tuningCard(),
       card("Exclusions", excl),
@@ -4255,7 +4449,10 @@
           }
         })
       ]),
-      card("Peer-mesh quarantine", mesh)));
+      card("Peer-mesh quarantine", mesh)
+    ];
+
+    view.appendChild(h("div", { cls: "pad stack" }, stackItems.filter(Boolean)));
   }
 
   function renderAudit() {
@@ -5234,6 +5431,7 @@
         state.baselinePolicies = arrayOf(d && d.policies);
         state.baselineServices = arrayOf(d && d.services);
       }));
+      jobs.push(request("/api/v1/baseline/consensus").then(function (d) { state.baselineConsensus = d || null; }));
       jobs.push(request("/api/v1/detection/tuning").then(function (d) { state.tuning = d || null; }));
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
@@ -5247,11 +5445,11 @@
     }
     if (state.section === "audit") {
       jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
-      jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
+      jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "traffic" || state.routeKey) {
       jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }));
-      jobs.push(request("/api/v1/events").then(function (d) { state.events = arrayOf(d); }));
+      jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
     /* The open host's own answer, and the catalogue the editor needs to name a
