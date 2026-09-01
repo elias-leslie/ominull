@@ -2021,6 +2021,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpointID := r.URL.Query().Get("endpoint_id")
+	if role != "tenant" {
+		if qTenant := r.URL.Query().Get("tenant_id"); qTenant != "" {
+			tenantID = qTenant
+		} else {
+			tenantID = ""
+		}
+	}
 	events, err := s.store.QueryEvents(tenantID, endpointID, 100)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -15,14 +15,16 @@ const deviceCredentialHeader = "X-Ominull-Device-Credential"
 // continue through the old shared-key middleware during a bounded migration;
 // no new installer or package config emits that path.
 func (s *Server) deviceOrLegacyMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	legacy := s.authMiddleware(next)
+	legacy := s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Role") == "tenant" && !s.legacyAgentAuthEnabled() {
+			writeJSONError(w, http.StatusUnauthorized, "legacy agent authentication is disabled; enroll this device for a unique credential")
+			return
+		}
+		next(w, r)
+	})
 	return func(w http.ResponseWriter, r *http.Request) {
 		credential := strings.TrimSpace(r.Header.Get(deviceCredentialHeader))
 		if credential == "" {
-			if !s.legacyAgentAuthEnabled() && !secureStringEqual(strings.TrimSpace(r.Header.Get("X-API-Key")), s.adminKey) {
-				writeJSONError(w, http.StatusUnauthorized, "legacy agent authentication is disabled; enroll this device for a unique credential")
-				return
-			}
 			legacy(w, r)
 			return
 		}

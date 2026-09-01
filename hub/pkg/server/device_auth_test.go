@@ -145,3 +145,27 @@ func TestLegacyHeartbeatDeliversAndRetriesUniqueCredentialMigration(t *testing.T
 		t.Fatalf("expected two historical migration records, got %d (%v)", len(items), err)
 	}
 }
+
+func TestOperatorCanReadEventsViaAdminAuth(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	if err := store.SetSetting("legacy_agent_auth", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Admin JWT Bearer token
+	w := call(srv, srv.handleEvents, http.MethodGet, "/api/v1/events", "mock_admin_token", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("operator events read via admin token returned status %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. Admin API key via router
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	wKey := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wKey, req)
+	if wKey.Code != http.StatusOK {
+		t.Fatalf("operator events read via X-API-Key returned status %d: %s", wKey.Code, wKey.Body.String())
+	}
+}
