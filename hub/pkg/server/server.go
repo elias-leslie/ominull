@@ -2919,6 +2919,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/baseline/policies/delete", s.authMiddleware(requireAdmin(s.handleBaselinePolicyDelete)))
 	mux.HandleFunc("/api/v1/baseline/endpoint", s.authMiddleware(s.handleBaselineEndpoint))
 	mux.HandleFunc("/api/v1/baseline/propose", s.authMiddleware(s.handleBaselinePropose))
+	mux.HandleFunc("/api/v1/baseline/consensus", s.authMiddleware(s.handleBaselineConsensus))
 
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))

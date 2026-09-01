@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -176,6 +177,40 @@ func (s *Server) handleBaselinePropose(w http.ResponseWriter, r *http.Request) {
 		// Named so the console can offer "save as a policy for this host" with
 		// something already in the box.
 		"suggested_name": "Baseline for " + req.EndpointID,
+	})
+}
+
+// handleBaselineConsensus discovers fleet-wide common patterns across endpoint cohorts
+// (grouped by OS family and role) achieving at least the consensus threshold (default 70%).
+func (s *Server) handleBaselineConsensus(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+	threshold := 0.70
+	if q := r.URL.Query().Get("threshold"); q != "" {
+		if t, err := strconv.ParseFloat(q, 64); err == nil && t > 0 && t <= 1.0 {
+			threshold = t
+		}
+	}
+
+	candidates, err := s.store.ComputeFleetConsensus(tenantID, threshold)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	proposed, err := s.store.ProposeFleetConsensusRules(tenantID, threshold)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"threshold_ratio": threshold,
+		"candidates":      candidates,
+		"proposed_rules":  proposed,
+		"total_patterns":  len(candidates),
 	})
 }
 
