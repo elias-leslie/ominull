@@ -256,6 +256,10 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	return s
 }
 
+func (s *Server) ThreatIntel() *threatintel.Manager {
+	return s.ti
+}
+
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)

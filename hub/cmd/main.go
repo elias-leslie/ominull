@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/configuration"
+	"ominull/hub/pkg/dns"
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/setup"
 	"ominull/hub/pkg/storage"
@@ -60,6 +61,7 @@ func main() {
 	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
 	accessAdmin := flag.String("access-bootstrap-admin", envOr("OMINULL_ACCESS_BOOTSTRAP_ADMIN", ""), "Email guaranteed to hold the admin role at startup")
 	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
+	dnsListen := flag.String("dns-listen", envOr("OMINULL_DNS_LISTEN", ":53"), "DNS forwarder and threat sinkhole listen address (:53 or empty to disable)")
 	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
 	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
@@ -200,6 +202,15 @@ func main() {
 			log.Fatalf("[-] Hub server error: %v", err)
 		}
 	}()
+
+	if *dnsListen != "" && *dnsListen != "off" && *dnsListen != "disabled" {
+		dnsServer := dns.NewServer(*dnsListen, []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}, store, srv.ThreatIntel())
+		if err := dnsServer.Start(); err != nil {
+			log.Printf("[!] Warning: DNS Forwarder could not bind to %s: %v (skipping port 53 listener)", *dnsListen, err)
+		} else {
+			defer dnsServer.Stop()
+		}
+	}
 
 	// --listen may be ":9999" or "127.0.0.1:9999". Pasting "localhost" in front
 	// of the second form printed "http://localhost127.0.0.1:9999", a URL nobody
