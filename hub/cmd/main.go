@@ -32,7 +32,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.8.0"
+const defaultAgentVersion = "1.8.1"
 
 func main() {
 	configPath := findConfigArg(os.Args[1:])
@@ -205,6 +205,7 @@ func main() {
 
 	if *dnsListen != "" && *dnsListen != "off" && *dnsListen != "disabled" {
 		dnsServer := dns.NewServer(*dnsListen, []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}, store, srv.ThreatIntel())
+		srv.SetDNSServer(dnsServer)
 		if err := dnsServer.Start(); err != nil {
 			log.Printf("[!] Warning: DNS Forwarder could not bind to %s: %v (skipping port 53 listener)", *dnsListen, err)
 		} else {

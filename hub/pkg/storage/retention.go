@@ -62,6 +62,9 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		keep   time.Duration
 	}{
 		{"events", "timestamp", policy.Events},
+		{"bandwidth_buckets", "hour_bucket", policy.Events},
+		{"topology_edges_cube", "last_seen_at", policy.Events},
+		{"dns_events", "timestamp", policy.Events},
 		{"comm_profiles", "last_seen", policy.CommProfiles},
 		{"anomaly_alerts", "timestamp", policy.AnomalyAlerts},
 		{"alerts", "timestamp", policy.Alerts},

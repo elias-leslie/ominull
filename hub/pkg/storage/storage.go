@@ -332,6 +332,7 @@ type Store struct {
 	db        *sql.DB
 	mu        sync.RWMutex
 	analytics analyticsCache
+	traffic   trafficCache
 }
 
 func New(dbPath string) (*Store, error) {
@@ -666,10 +667,10 @@ func (s *Store) initSchema() error {
 	if err := s.initDetectionTuningSchema(); err != nil {
 		return err
 	}
-	if err := s.initInstallReportsTable(); err != nil {
+	if err := s.initRollupCubesSchema(); err != nil {
 		return err
 	}
-	if err := s.initRollupCubesSchema(); err != nil {
+	if err := s.initDNSSchema(); err != nil {
 		return err
 	}
 	return s.initBaselineSchema()
@@ -1564,6 +1565,9 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer stmt.Close()
 
 	for _, ev := range events {
+		if ev.TenantID == "" {
+			ev.TenantID = "default"
+		}
 		if ev.Country == "" {
 			ev.Country = CountryUnknown
 		}
@@ -1920,27 +1924,76 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	return err
 }
 
-func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
+func (s *Store) CountAnomalyAlerts(tenantID string, unacknowledgedOnly bool) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var (
+		count int64
+		err   error
+	)
+	query := "SELECT COUNT(*) FROM anomaly_alerts WHERE 1=1"
+	var args []interface{}
+	if tenantID != "" {
+		query += " AND tenant_id = ?"
+		args = append(args, tenantID)
+	}
+	if unacknowledgedOnly {
+		query += " AND acknowledged = 0"
+	}
+	err = s.db.QueryRow(query, args...).Scan(&count)
+	return count, err
+}
+
+func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity string) ([]AnomalyAlert, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if limit <= 0 || limit > 1000 {
-		limit = 100
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
+	whereClause := " WHERE 1=1"
+	var args []interface{}
+
 	if tenantID != "" {
-		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?", tenantID, limit)
-	} else {
-		rows, err = s.db.Query("SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts ORDER BY timestamp DESC LIMIT ?", limit)
+		whereClause += " AND tenant_id = ?"
+		args = append(args, tenantID)
 	}
+	if unackOnly {
+		whereClause += " AND acknowledged = 0"
+	}
+	if endpointID != "" {
+		whereClause += " AND (endpoint_id = ? OR hostname = ?)"
+		args = append(args, endpointID, endpointID)
+	}
+	if anomalyType != "" {
+		whereClause += " AND anomaly_type = ?"
+		args = append(args, anomalyType)
+	}
+	if severity != "" {
+		whereClause += " AND severity = ?"
+		args = append(args, severity)
+	}
+
+	var total int64
+	countQuery := "SELECT COUNT(*) FROM anomaly_alerts" + whereClause
+	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+	queryArgs := append(args, limit, offset)
+
+	rows, err := s.db.Query(query, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
+
 	list := make([]AnomalyAlert, 0)
 	for rows.Next() {
 		var a AnomalyAlert
@@ -1950,12 +2003,17 @@ func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, e
 			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details,
 			&a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		a.Acknowledged = ackInt != 0
 		list = append(list, a)
 	}
-	return list, nil
+	return list, total, nil
+}
+
+func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
+	list, _, err := s.QueryAnomalyAlerts(tenantID, limit, 0, false, "", "", "")
+	return list, err
 }
 
 func (s *Store) AcknowledgeAnomaly(id string) error {
@@ -1963,6 +2021,57 @@ func (s *Store) AcknowledgeAnomaly(id string) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) AcknowledgeAnomaliesBatch(ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AcknowledgeAllAnomalies(tenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tenantID != "" {
+		_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE tenant_id = ?", tenantID)
+		return err
+	}
+	_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1")
+	return err
+}
+
+func (s *Store) ClearAcknowledgedAnomalies(tenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tenantID != "" {
+		_, err := s.db.Exec("DELETE FROM anomaly_alerts WHERE acknowledged = 1 AND tenant_id = ?", tenantID)
+		return err
+	}
+	_, err := s.db.Exec("DELETE FROM anomaly_alerts WHERE acknowledged = 1")
 	return err
 }
 

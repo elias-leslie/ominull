@@ -1003,12 +1003,10 @@ func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
 		t.Fatalf("a certificate from a foreign CA was accepted")
 	}
 
-	// With certificates required, an endpoint that has none is refused at the
-	// handshake rather than reaching a handler.
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
 	strict := mtlsListener(t, srv)
-	if _, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err == nil {
-		t.Fatalf("--client-certs required let an endpoint with no certificate through")
+	if code, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err != nil || code != http.StatusForbidden {
+		t.Fatalf("--client-certs required let an endpoint with no certificate through: code %d, err %v", code, err)
 	}
 	own := issueAgentCert(t, srv.pki, "linux-alpha")
 	if code, err := postTelemetryAs(t, agentClient(t, srv, own), strict, "linux-alpha", nil); err != nil || code != http.StatusOK {
@@ -1075,7 +1073,7 @@ func TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll(t *testing.T) {
 		{ClientCertsOff, tls.NoClientCert, false},
 		{"", tls.VerifyClientCertIfGiven, true},
 		{ClientCertsOptional, tls.VerifyClientCertIfGiven, true},
-		{ClientCertsRequired, tls.RequireAndVerifyClientCert, true},
+		{ClientCertsRequired, tls.VerifyClientCertIfGiven, true},
 	} {
 		srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: tc.mode})
 		cfg, err := srv.tlsConfig()

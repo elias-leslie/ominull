@@ -41,6 +41,41 @@ func New(certDir string) (*Manager, error) {
 	return m, nil
 }
 
+// MigrateLegacyPKI atomically migrates legacy PKI files to a secure dedicated directory.
+func MigrateLegacyPKI(legacyDir, targetDir string) error {
+	if legacyDir == "" || targetDir == "" || legacyDir == targetDir {
+		return nil
+	}
+	legacyCA := filepath.Join(legacyDir, "ca.crt")
+	legacyKey := filepath.Join(legacyDir, "ca.key")
+	if !fileExists(legacyCA) || !fileExists(legacyKey) {
+		return nil
+	}
+	targetCA := filepath.Join(targetDir, "ca.crt")
+	targetKey := filepath.Join(targetDir, "ca.key")
+	if fileExists(targetCA) && fileExists(targetKey) {
+		return nil
+	}
+	if err := os.MkdirAll(targetDir, 0700); err != nil {
+		return fmt.Errorf("create target pki dir: %w", err)
+	}
+	caBytes, err := os.ReadFile(legacyCA)
+	if err != nil {
+		return fmt.Errorf("read legacy ca cert: %w", err)
+	}
+	if err := os.WriteFile(targetCA, caBytes, 0644); err != nil {
+		return fmt.Errorf("write target ca cert: %w", err)
+	}
+	keyBytes, err := os.ReadFile(legacyKey)
+	if err != nil {
+		return fmt.Errorf("read legacy ca key: %w", err)
+	}
+	if err := os.WriteFile(targetKey, keyBytes, 0600); err != nil {
+		return fmt.Errorf("write target ca key: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) initOrLoadCA() error {
 	caCertPath := filepath.Join(m.certDir, "ca.crt")
 	caKeyPath := filepath.Join(m.certDir, "ca.key")

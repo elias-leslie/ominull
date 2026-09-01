@@ -108,8 +108,12 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
   <symbol id="g-online" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></symbol>
   <symbol id="g-offline" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></symbol>
   <symbol id="g-watch" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M12 6a6 6 0 0 0 0 12z" fill="currentColor" stroke="none"/></symbol>
-  <symbol id="g-quarantine" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/><rect x="9" y="9" width="6" height="6" fill="currentColor" stroke="none"/></symbol>
-  <symbol id="g-unknown" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" stroke-dasharray="2.6 2.4"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24">
+    <circle cx="12" cy="8" r="4.5"/><path d="M4 20c0-4 3.5-6.5 8-6.5s8 2.5 8 6.5"/>
+  </symbol>
+  <symbol id="i-sweep" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="9"/><path d="M12 12l6-6"/><circle cx="12" cy="12" r="3"/>
+  </symbol>
 </svg>
 
 <div class="app">
@@ -121,11 +125,6 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <svg class="ic"><use href="#i-assets"/></svg>
       <span class="tip" aria-hidden="true">Assets</span>
       <span class="sr">Assets</span>
-    </button>
-    <button class="rail-btn" type="button" data-section="discovery" aria-current="false">
-      <svg class="ic"><use href="#i-discovery"/></svg>
-      <span class="tip" aria-hidden="true">Discovery</span>
-      <span class="sr">Discovery</span>
     </button>
     <button class="rail-btn" type="button" data-section="topology" aria-current="false">
       <svg class="ic"><use href="#i-topology"/></svg>
@@ -141,6 +140,12 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <svg class="ic"><use href="#i-policy"/></svg>
       <span class="tip" aria-hidden="true">Policy</span>
       <span class="sr">Policy</span>
+    </button>
+    <button class="rail-btn rail-btn-alerts" type="button" data-section="alerts" aria-current="false">
+      <svg class="ic"><use href="#i-alert"/></svg>
+      <span class="rail-alert-badge" id="rail-alert-badge" data-n="0">0</span>
+      <span class="tip" aria-hidden="true">Alerts</span>
+      <span class="sr">Alerts</span>
     </button>
     <button class="rail-btn" type="button" data-section="audit" aria-current="false">
       <svg class="ic"><use href="#i-audit"/></svg>
@@ -163,11 +168,6 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
         <span class="pip"></span>
         <span class="sr" id="health-word">Hub healthy</span>
       </span>
-      <button class="theme-btn" type="button" id="theme-btn" aria-haspopup="true" aria-expanded="false">
-        <i class="sw" id="theme-sw-1"></i><i class="sw" id="theme-sw-2"></i>
-        <i class="sw" id="theme-sw-3"></i><i class="sw" id="theme-sw-4"></i>
-        <span class="sr">Theme</span>
-      </button>
     </div>
   </nav>
 
@@ -183,16 +183,20 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
 
       <span id="topbar-actions"></span>
 
-      <a class="btn" href="/status">Status</a>
+      <!-- Universal Controls -->
+      <button class="btn btn-sweep" type="button" id="topbar-sweep-btn" title="Subnet Sweep & Asset Discovery">
+        <svg class="ic ic-s"><use href="#i-sweep"/></svg>
+        <span class="sweep-dot" id="sweep-pulse-dot"></span>
+        <span class="sweep-label" id="sweep-label-text">Subnet Sweep</span>
+      </button>
 
-      <span class="ver" id="signed-in" title="Signed in as"></span>
+      <button class="btn btn-primary btn-install" type="button" id="topbar-install-btn" title="Install an Ominull Agent">
+        <svg class="ic ic-s"><use href="#i-plus"/></svg>
+        <span>Install Agent</span>
+      </button>
 
-      <span class="ver" id="hub-version" title="Hub build"></span>
-
-      <button class="btn btn-icon" type="button" id="btn-alerts" aria-expanded="false">
-        <svg class="ic"><use href="#i-alert"/></svg>
-        <span class="count-pip" id="alert-count" data-n="0">0</span>
-        <span class="sr">Alerts</span>
+      <button class="btn-avatar" type="button" id="user-avatar-btn" aria-haspopup="true" aria-expanded="false" title="Account & Hub Settings">
+        <span class="avatar-initial" id="avatar-initial">A</span>
       </button>
     </header>
 

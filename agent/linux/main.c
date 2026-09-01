@@ -31,7 +31,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.0"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.1"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -1019,163 +1019,9 @@ static bool ShouldReportFlow(const char* dst_ip, uint16_t dst_port, uint8_t prot
     return true;
 }
 
-typedef struct {
-    char ip[64];
-    char domain[128];
-    uint64_t last_seen;
-    bool valid;
-} DNS_ATTRIBUTION_SLOT;
-
-#define DNS_ATTR_CAP 512
-static DNS_ATTRIBUTION_SLOT g_DnsAttr[DNS_ATTR_CAP];
-
-static void CacheDnsAttribution(const char* ip, const char* domain) {
-    if (!ip || !ip[0] || !domain || !domain[0]) return;
-    uint64_t hash = 5381;
-    for (const char* p = ip; *p; p++) hash = ((hash << 5) + hash) + (unsigned char)*p;
-    size_t start = (size_t)(hash & (DNS_ATTR_CAP - 1));
-    
-    time_t now = time(NULL);
-    for (size_t probe = 0; probe < DNS_ATTR_CAP; probe++) {
-        DNS_ATTRIBUTION_SLOT* slot = &g_DnsAttr[(start + probe) & (DNS_ATTR_CAP - 1)];
-        if (!slot->valid || strcmp(slot->ip, ip) == 0) {
-            slot->valid = true;
-            snprintf(slot->ip, sizeof(slot->ip), "%s", ip);
-            snprintf(slot->domain, sizeof(slot->domain), "%s", domain);
-            slot->last_seen = (uint64_t)now;
-            return;
-        }
-    }
-}
-
-static void PopulateEtcHosts(void) {
-    FILE* fp = fopen("/etc/hosts", "r");
-    if (!fp) return;
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        char ip[64] = {0}, host[128] = {0};
-        if (sscanf(line, "%63s %127s", ip, host) == 2) {
-            if (strcmp(ip, "127.0.0.1") != 0 && strcmp(ip, "::1") != 0) {
-                CacheDnsAttribution(ip, host);
-            }
-        }
-    }
-    fclose(fp);
-}
-
 static const char* LookupDnsDomain(const char* ip) {
-    if (!ip || !ip[0]) return NULL;
-    uint64_t hash = 5381;
-    for (const char* p = ip; *p; p++) hash = ((hash << 5) + hash) + (unsigned char)*p;
-    size_t start = (size_t)(hash & (DNS_ATTR_CAP - 1));
-    
-    for (size_t probe = 0; probe < DNS_ATTR_CAP; probe++) {
-        DNS_ATTRIBUTION_SLOT* slot = &g_DnsAttr[(start + probe) & (DNS_ATTR_CAP - 1)];
-        if (!slot->valid) break;
-        if (strcmp(slot->ip, ip) == 0) return slot->domain;
-    }
+    (void)ip;
     return NULL;
-}
-
-typedef struct {
-    uint32_t process_id;
-    char target_ips[32][64];
-    size_t target_count;
-    uint64_t window_start;
-    bool alerted;
-} BEHAVIORAL_PROCESS_TRACKER;
-
-#define BEHAVIORAL_TRACKER_CAP 64
-static BEHAVIORAL_PROCESS_TRACKER g_BehavioralTrackers[BEHAVIORAL_TRACKER_CAP];
-
-static void TrackLateralSweep(uint32_t pid, const char* dst_ip) {
-    if (pid <= 1 || !dst_ip || !dst_ip[0] || strcmp(dst_ip, "127.0.0.1") == 0 || strcmp(dst_ip, "::1") == 0) return;
-    
-    // Only track RFC1918 private / local subnet fan-outs
-    if (strncmp(dst_ip, "192.168.", 8) != 0 && strncmp(dst_ip, "10.", 3) != 0 && strncmp(dst_ip, "172.", 4) != 0) return;
-
-    time_t now = time(NULL);
-    size_t slotIdx = (size_t)(pid % BEHAVIORAL_TRACKER_CAP);
-    BEHAVIORAL_PROCESS_TRACKER* tracker = &g_BehavioralTrackers[slotIdx];
-
-    if (tracker->process_id != pid || (uint64_t)now >= tracker->window_start + 60) {
-        tracker->process_id = pid;
-        tracker->target_count = 0;
-        tracker->window_start = (uint64_t)now;
-        tracker->alerted = false;
-    }
-
-    for (size_t i = 0; i < tracker->target_count; i++) {
-        if (strcmp(tracker->target_ips[i], dst_ip) == 0) return;
-    }
-
-    if (tracker->target_count < 32) {
-        snprintf(tracker->target_ips[tracker->target_count++], 64, "%s", dst_ip);
-    }
-
-    if (tracker->target_count >= 15 && !tracker->alerted) {
-        tracker->alerted = true;
-        printf("[!] ANOMALY ALERT [CRITICAL]: Lateral Fan-Out / Internal Port Sweep detected (PID %u reached %zu internal hosts in 60s)\n",
-               pid, tracker->target_count);
-        fflush(stdout);
-    }
-}
-
-typedef struct {
-    char ip[64];
-    char mac[32];
-    char hostname[128];
-    char vendor[64];
-    char protocol[16];
-    uint64_t last_seen;
-    bool valid;
-} DISCOVERED_DEVICE_ENTRY;
-
-#define DISCOVERED_DEVICES_CAP 64
-static DISCOVERED_DEVICE_ENTRY g_DiscoveredDevices[DISCOVERED_DEVICES_CAP];
-
-static void RecordDiscoveredDevice(const char* ip, const char* mac, const char* hostname, const char* vendor, const char* proto) {
-    if (!ip || !ip[0] || strcmp(ip, "127.0.0.1") == 0 || strcmp(ip, "::1") == 0) return;
-
-    time_t now = time(NULL);
-    for (size_t i = 0; i < DISCOVERED_DEVICES_CAP; i++) {
-        if (g_DiscoveredDevices[i].valid && strcmp(g_DiscoveredDevices[i].ip, ip) == 0) {
-            if (hostname && hostname[0]) snprintf(g_DiscoveredDevices[i].hostname, 128, "%s", hostname);
-            if (mac && mac[0]) snprintf(g_DiscoveredDevices[i].mac, 32, "%s", mac);
-            g_DiscoveredDevices[i].last_seen = (uint64_t)now;
-            return;
-        }
-    }
-    for (size_t i = 0; i < DISCOVERED_DEVICES_CAP; i++) {
-        if (!g_DiscoveredDevices[i].valid) {
-            g_DiscoveredDevices[i].valid = true;
-            snprintf(g_DiscoveredDevices[i].ip, 64, "%s", ip);
-            if (mac && mac[0]) snprintf(g_DiscoveredDevices[i].mac, 32, "%s", mac);
-            if (hostname && hostname[0]) snprintf(g_DiscoveredDevices[i].hostname, 128, "%s", hostname);
-            if (vendor && vendor[0]) snprintf(g_DiscoveredDevices[i].vendor, 64, "%s", vendor);
-            snprintf(g_DiscoveredDevices[i].protocol, 16, "%s", proto ? proto : "mdns");
-            g_DiscoveredDevices[i].last_seen = (uint64_t)now;
-            return;
-        }
-    }
-}
-
-static void HarvestArpTable(void) {
-    FILE* fp = fopen("/proc/net/arp", "r");
-    if (!fp) return;
-    char line[256];
-    if (fgets(line, sizeof(line), fp)) {
-        while (fgets(line, sizeof(line), fp)) {
-            char ip[64] = {0}, hwType[32] = {0}, flags[32] = {0}, mac[32] = {0}, mask[32] = {0}, dev[32] = {0};
-            if (sscanf(line, "%63s %31s %31s %31s %31s %31s", ip, hwType, flags, mac, mask, dev) >= 4) {
-                if (strcmp(mac, "00:00:00:00:00:00") != 0 && strcmp(flags, "0x0") != 0) {
-                    RecordDiscoveredDevice(ip, mac, "", "", "arp");
-                }
-            }
-        }
-    }
-    fclose(fp);
 }
 
 // Capture active TCP socket flows from both Linux address families.
@@ -1185,8 +1031,6 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
     PROC_SOCKET_OWNER owners[MAX_FLOWS_PER_BATCH];
     memset(targetInodes, 0, sizeof(targetInodes));
     memset(owners, 0, sizeof(owners));
-
-    HarvestArpTable();
 
     CollectSocketTable("net/tcp", false, outEvents, maxEvents, targetInodes, &count);
     CollectSocketTable("net/tcp6", true, outEvents, maxEvents, targetInodes, &count);
@@ -1214,7 +1058,6 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
             outEvents[i].process_id = 0;
             snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "/usr/bin/system");
         }
-        TrackLateralSweep(outEvents[i].process_id, outEvents[i].dst_ip);
     }
 
     // Apply edge deduplication: novel flows emit immediately; routine idle flows rollup every 30s.
@@ -1796,6 +1639,10 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     int peerCount = ParseAddressList(respJson, "quarantined_peers", peers, MAX_QUARANTINED_PEERS);
     char threats[MAX_QUARANTINED_PEERS][64];
     int threatCount = ParseAddressList(respJson, "threat_indicators", threats, MAX_QUARANTINED_PEERS);
+
+    if (allowCount > 1) qsort(allow, allowCount, sizeof(allow[0]), (int (*)(const void*, const void*))strcmp);
+    if (peerCount > 1) qsort(peers, peerCount, sizeof(peers[0]), (int (*)(const void*, const void*))strcmp);
+    if (threatCount > 1) qsort(threats, threatCount, sizeof(threats[0]), (int (*)(const void*, const void*))strcmp);
 
     BASELINE_RULE baseline[MAX_BASELINE_RULES];
     int baselineCount = ParseBaselineRules(respJson, baseline, MAX_BASELINE_RULES);
@@ -2525,30 +2372,6 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
 
     offset += snprintf(jsonBuf + offset, bufCap - offset, "]");
 
-    // Append discovered_assets
-    bool firstDev = true;
-    int devOffset = snprintf(jsonBuf + offset, bufCap - offset, ",\"discovered_assets\":[");
-    if (devOffset > 0) offset += devOffset;
-
-    time_t nowTime = time(NULL);
-    for (size_t i = 0; i < DISCOVERED_DEVICES_CAP && offset < (int)bufCap - 1024; i++) {
-        if (!g_DiscoveredDevices[i].valid || (uint64_t)nowTime > g_DiscoveredDevices[i].last_seen + 300) continue;
-        int dWritten = snprintf(jsonBuf + offset, bufCap - offset,
-            "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\",\"protocol\":\"%s\"}",
-            firstDev ? "" : ",",
-            g_DiscoveredDevices[i].ip,
-            g_DiscoveredDevices[i].mac,
-            g_DiscoveredDevices[i].hostname,
-            g_DiscoveredDevices[i].protocol
-        );
-        if (dWritten > 0) {
-            offset += dWritten;
-            firstDev = false;
-        }
-    }
-    int closeOffset = snprintf(jsonBuf + offset, bufCap - offset, "]");
-    if (closeOffset > 0) offset += closeOffset;
-
     /* What this host uses the network for, and whether it believes it could
      * still be released after an isolation. Both ride on the heartbeat that is
      * already going out: an agent that can report telemetry can report this,
@@ -2588,7 +2411,6 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "[-] Could not initialize in-process TLS transport.\n");
 		return 1;
 	}
-    PopulateEtcHosts();
 
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));

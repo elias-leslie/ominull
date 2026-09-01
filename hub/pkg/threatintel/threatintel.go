@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,8 +91,7 @@ func (m *Manager) CheckThreat(ipOrDomain string) (*storage.IOC, bool) {
 	return ioc, exists
 }
 
-// GetActiveIndicators returns a bounded slice of active malicious IPs/domains
-// for endpoint edge threat filtering and in-line kernel drops.
+// GetActiveIndicators returns a deterministic, stably sorted slice of active indicators.
 func (m *Manager) GetActiveIndicators(limit int) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -100,16 +100,53 @@ func (m *Manager) GetActiveIndicators(limit int) []string {
 		limit = 128
 	}
 
-	indicators := make([]string, 0, limit)
+	indicators := make([]string, 0, len(m.cache))
 	for val := range m.cache {
 		if val != "" && !strings.HasPrefix(val, "127.") && val != "::1" {
 			indicators = append(indicators, val)
-			if len(indicators) >= limit {
-				break
-			}
 		}
 	}
+	sort.Strings(indicators)
+	if len(indicators) > limit {
+		indicators = indicators[:limit]
+	}
 	return indicators
+}
+
+// GetActiveDomainIndicators returns all active normalized domain indicators, sorted.
+func (m *Manager) GetActiveDomainIndicators() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var domains []string
+	for val, ioc := range m.cache {
+		if val == "" {
+			continue
+		}
+		if ioc != nil && ioc.Type == "domain" {
+			domains = append(domains, strings.ToLower(strings.TrimSuffix(val, ".")))
+		}
+	}
+	sort.Strings(domains)
+	return domains
+}
+
+// GetActiveIPIndicators returns all active IP/CIDR indicators, sorted.
+func (m *Manager) GetActiveIPIndicators() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var ips []string
+	for val, ioc := range m.cache {
+		if val == "" {
+			continue
+		}
+		if ioc != nil && (ioc.Type == "ipv4" || ioc.Type == "ipv6" || ioc.Type == "cidr") {
+			ips = append(ips, val)
+		}
+	}
+	sort.Strings(ips)
+	return ips
 }
 
 func (m *Manager) SyncAllFeeds(ctx context.Context) error {

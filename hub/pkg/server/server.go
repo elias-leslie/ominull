@@ -22,6 +22,7 @@ import (
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
+	"ominull/hub/pkg/dns"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
@@ -31,6 +32,7 @@ import (
 type Server struct {
 	store     *storage.Store
 	ti        *threatintel.Manager
+	dnsServer *dns.Server
 	detector  *detector.Engine
 	pki       *pki.Manager
 	scanner   *scanner.Scanner
@@ -218,6 +220,25 @@ func (s *Server) AccessConfigured() bool { return s.access != nil }
 
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
+}
+
+func (s *Server) SetDNSServer(ds *dns.Server) {
+	s.dnsServer = ds
+}
+
+func (s *Server) DNSServer() *dns.Server {
+	return s.dnsServer
+}
+
+func (s *Server) tenantFromRequest(r *http.Request) string {
+	role := r.Header.Get("X-Role")
+	if role == "tenant" {
+		return r.Header.Get("X-Tenant-ID")
+	}
+	if t := r.URL.Query().Get("tenant_id"); t != "" {
+		return t
+	}
+	return r.Header.Get("X-Tenant-ID")
 }
 
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
@@ -561,8 +582,8 @@ func (s *Server) tlsConfig() (*tls.Config, error) {
 			log.Printf("[!] TLS client certificates: not requested. Device credentials still bind new agents; direct native mTLS is not an additional proof.")
 		case ClientCertsRequired:
 			base.ClientCAs = s.pki.ClientCAPool()
-			base.ClientAuth = tls.RequireAndVerifyClientCert
-			log.Printf("[+] TLS client certificates: required (agents without one are refused at the handshake)")
+			base.ClientAuth = tls.VerifyClientCertIfGiven
+			log.Printf("[+] TLS client certificates: required for protected agent endpoints; verified at application layer to allow pre-cert bootstrap")
 		default:
 			base.ClientCAs = s.pki.ClientCAPool()
 			base.ClientAuth = tls.VerifyClientCertIfGiven
@@ -2414,14 +2435,44 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		tenantID = r.Header.Get("X-Tenant-ID")
 	}
 
-	anomalies, err := s.store.ListAnomalyAlerts(tenantID, 100)
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 {
+			limit = val
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if val, err := strconv.Atoi(o); err == nil && val >= 0 {
+			offset = val
+		}
+	}
+	unackOnly := r.URL.Query().Get("unacknowledged_only") == "true"
+	endpointID := r.URL.Query().Get("endpoint_id")
+	anomalyType := r.URL.Query().Get("type")
+	severity := r.URL.Query().Get("severity")
+
+	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	unackTotal, _ := s.store.CountAnomalyAlerts(tenantID, true)
+
+	// Return envelope or array based on accept / query param
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(anomalies)
+	if r.URL.Query().Get("envelope") == "false" {
+		json.NewEncoder(w).Encode(anomalies)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"alerts":               anomalies,
+		"total":                total,
+		"unacknowledged_total": unackTotal,
+		"limit":                limit,
+		"offset":               offset,
+	})
 }
 
 func (s *Server) handleAcknowledgeAnomaly(w http.ResponseWriter, r *http.Request) {
@@ -2430,18 +2481,48 @@ func (s *Server) handleAcknowledgeAnomaly(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		ID string `json:"id"`
+		ID  string   `json:"id"`
+		IDs []string `json:"ids"`
+		All bool     `json:"all"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.store.AcknowledgeAnomaly(req.ID); err != nil {
+
+	tenantID := s.tenantFromRequest(r)
+	var err error
+	if req.All {
+		err = s.store.AcknowledgeAllAnomalies(tenantID)
+	} else if len(req.IDs) > 0 {
+		err = s.store.AcknowledgeAnomaliesBatch(req.IDs)
+	} else if req.ID != "" {
+		err = s.store.AcknowledgeAnomaly(req.ID)
+	} else {
+		http.Error(w, "missing id, ids, or all parameter", http.StatusBadRequest)
+		return
+	}
+
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged", "id": req.ID})
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged"})
+}
+
+func (s *Server) handleClearAnomalies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tenantID := s.tenantFromRequest(r)
+	if err := s.store.ClearAcknowledgedAnomalies(tenantID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "cleared"})
 }
 
 /* 7. NETWORK ASSET DISCOVERY & EXTENSIBLE SCANNER HANDLERS */
@@ -2895,8 +2976,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/enrolment/windows", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrolmentWindows)))
 	mux.HandleFunc("/api/v1/enrollment/profiles", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrollmentProfiles)))
 	mux.HandleFunc("/api/v1/enrollment/redeem", s.handleEnrollmentRedeem)
-	mux.HandleFunc("/api/v1/enrolment/report-error", s.handleReportInstallError)
-	mux.HandleFunc("/api/v1/enrolment/install-errors", s.authMiddleware(requireAdmin(s.handleInstallReports)))
 	// The self-service portal. Unauthenticated by necessity - the machine that
 	// needs the agent has no credential yet, which is the whole problem it
 	// solves - and gated instead on the source address falling inside an
@@ -2932,7 +3011,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/baseline/policies/delete", s.authMiddleware(requireAdmin(s.handleBaselinePolicyDelete)))
 	mux.HandleFunc("/api/v1/baseline/endpoint", s.authMiddleware(s.handleBaselineEndpoint))
 	mux.HandleFunc("/api/v1/baseline/propose", s.authMiddleware(s.handleBaselinePropose))
-	mux.HandleFunc("/api/v1/baseline/consensus", s.authMiddleware(s.handleBaselineConsensus))
 
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.handleIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
@@ -2940,13 +3018,21 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
 	mux.HandleFunc("/api/v1/events", s.deviceOrLegacyMiddleware(s.handleEvents))
 
-	// 4. Exclusions, traffic profiles, detection, analytics, and threat intel.
+	// 4. Exclusions, traffic profiles, detection, analytics, DNS, and threat intel.
 	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
 	mux.HandleFunc("/api/v1/exclusions", s.authMiddleware(s.handleExclusions))
 	mux.HandleFunc("/api/v1/exclusions/toggle", s.authMiddleware(s.handleToggleExclusion))
 	mux.HandleFunc("/api/v1/anomalies", s.authMiddleware(s.handleAnomalies))
 	mux.HandleFunc("/api/v1/anomalies/acknowledge", s.authMiddleware(s.handleAcknowledgeAnomaly))
+	mux.HandleFunc("/api/v1/anomalies/clear", s.authMiddleware(s.handleClearAnomalies))
 	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
+	mux.HandleFunc("/api/v1/traffic/overview", s.authMiddleware(s.handleTrafficOverview))
+	mux.HandleFunc("/api/v1/traffic/flows", s.authMiddleware(s.handleTrafficFlows))
+	mux.HandleFunc("/api/v1/traffic/flows/", s.authMiddleware(s.handleTrafficFlows))
+	mux.HandleFunc("/api/v1/dns/status", s.authMiddleware(s.handleDNSStatus))
+	mux.HandleFunc("/api/v1/dns/events", s.authMiddleware(s.handleDNSEvents))
+	mux.HandleFunc("/api/v1/dns/policy", s.authMiddleware(s.handleDNSPolicy))
+	mux.HandleFunc("/api/v1/dns/policy/test", s.authMiddleware(s.handleDNSPolicyTest))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))

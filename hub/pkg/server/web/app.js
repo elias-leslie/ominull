@@ -36,10 +36,10 @@
 
   var SECTIONS = [
     { id: "assets", label: "Assets" },
-    { id: "discovery", label: "Discovery" },
     { id: "topology", label: "Topology" },
     { id: "traffic", label: "Traffic" },
     { id: "policy", label: "Policy" },
+    { id: "alerts", label: "Alerts" },
     { id: "audit", label: "Audit" }
   ];
 
@@ -305,6 +305,13 @@
     you: "",
     events: [],
     analytics: null,
+    trafficOverview: null,
+    trafficFlows: null,
+    trafficFilter: { range: "1h", endpoint_id: "", src_ip: "", dst_ip: "", process: "", domain: "", country: "", protocol: "", port: "", direction: "", action: "", measured_only: false, cursor: "" },
+    selectedFlow: null,
+    dnsStatus: null,
+    dnsEvents: [],
+    dnsPolicy: [],
     topology: null,
     topoWindow: "24h",
     /* The graph is reduced before it is drawn; these decide how. */
@@ -335,7 +342,14 @@
     // The running scan's own answer about itself. Polled while it runs; the
     // console used to hold the id and never ask the hub what became of it.
     scanStatus: null,
-    scanPoll: null
+    scanPoll: null,
+
+    alertsFilter: { page: 1, limit: 50, severity: "", type: "", endpoint_id: "", unacknowledged_only: true, search: "" },
+    alertsData: null,
+    selectedAlerts: {},
+    expandedAlertId: "",
+    unackAlertsTotal: 0,
+    lastClickedAssetIndex: -1
   };
 
   function selectedKeys() {
@@ -1039,9 +1053,11 @@
     var slots = ["theme-sw-1", "theme-sw-2", "theme-sw-3", "theme-sw-4"];
     var roles = ["ground", "ink", "ok", "crit"];
     slots.forEach(function (id, i) {
-      $(id).className = "sw sw-" + roles[i] + "-" + name;
+      var el = $(id);
+      if (el) el.className = "sw sw-" + roles[i] + "-" + name;
     });
-    $("theme-btn").setAttribute("title", "Theme: " + THEME_NAMES[name]);
+    var btn = $("theme-btn");
+    if (btn) btn.setAttribute("title", "Theme: " + THEME_NAMES[name]);
   }
 
   var themePop = null;
@@ -1049,12 +1065,14 @@
   function closeThemePop() {
     if (themePop && themePop.parentNode) themePop.parentNode.removeChild(themePop);
     themePop = null;
-    $("theme-btn").setAttribute("aria-expanded", "false");
+    var btn = $("theme-btn");
+    if (btn) btn.setAttribute("aria-expanded", "false");
   }
 
   function openThemePop() {
     closeThemePop();
     var btn = $("theme-btn");
+    if (!btn) return;
     var pop = h("div", { cls: "theme-pop", role: "radiogroup", "aria-label": "Theme" },
       h("div", { cls: "lbl", text: "Palette" }));
 
@@ -1070,16 +1088,16 @@
           click: function () {
             applyTheme(t, true);
             closeThemePop();
-            toast("Theme: " + THEME_NAMES[t], "ok");
           }
         }
-      }, h("span", { text: THEME_NAMES[t] }), chips));
+      },
+        h("span", { text: THEME_NAMES[t] }),
+        chips));
     });
 
     document.body.appendChild(pop);
     var r = btn.getBoundingClientRect();
-    var pr = pop.getBoundingClientRect();
-    placeOverlay(pop, r.right + 8, Math.min(r.bottom - pr.height, window.innerHeight - pr.height - 8));
+    placeOverlay(pop, r.left, r.top - pop.offsetHeight - 8);
     themePop = pop;
     btn.setAttribute("aria-expanded", "true");
   }
@@ -1172,9 +1190,17 @@
       else st = quiet ? STATE_SILENT : STATE_NOAGENT;
 
       var roleClaim = bestClaim(a, "role");
-      var identityBits = [a.os || "Unidentified"];
+      var identityBits = [];
+      if (a.os && a.os.toLowerCase() !== "discovered" && a.os.toLowerCase() !== "unidentified") {
+        identityBits.push(a.os);
+      }
       var descriptor = a.category || a.role;
-      if (descriptor) identityBits.push(descriptor);
+      if (descriptor && descriptor.toLowerCase() !== "discovered" && descriptor.toLowerCase() !== "unclassified" && identityBits.indexOf(descriptor) === -1) {
+        identityBits.push(descriptor);
+      }
+      if (!identityBits.length) {
+        identityBits.push(ep ? "Managed Host" : "Unmanaged Host");
+      }
 
       return {
         key: a.id,
@@ -1188,7 +1214,7 @@
         tenantName: ten ? ten.name : (ep ? (ep.tenant_id || "Unassigned") : "Unassigned"),
         locationId: a.location_id || "",
         locationName: ep ? (ep.location_name || (loc ? loc.name : "Unassigned"))
-          : "Discovered \u2014 no client assigned",
+          : "Unassigned Devices",
         subnet: a.subnet || (loc ? loc.subnet_cidr : ""),
         evidence: ev,
         endpoint: ep,
@@ -1453,14 +1479,19 @@
       ];
     }
     if (state.section === "traffic") {
-      var an = state.analytics || {};
+      var ov = state.trafficOverview || {};
+      var tot = ov.totals || {};
+      var totalFlows = ov.total_flows || tot.flow_count || 0;
+      var measuredFlows = ov.measured_flows || 0;
+      var permits = totalFlows - (tot.block_count || 0);
+      if (permits < 0) permits = 0;
       return [
-        { label: "Events", value: String(an.total_events || 0) },
-        { label: "Blocked", value: String(an.total_blocks || 0), tone: an.total_blocks ? "crit" : "" },
-        { label: "Permitted", value: String(an.total_permits || 0) },
-        { label: "Bytes in", value: bytes(an.total_bytes_in) },
-        { label: "Bytes out", value: bytes(an.total_bytes_out) },
-        measuredStat({ total_flow_count: an.total_events, measured_flow_count: an.measured_flow_count })
+        { label: "Events", value: String(totalFlows) },
+        { label: "Blocked", value: String(tot.block_count || 0), tone: tot.block_count ? "crit" : "" },
+        { label: "Permitted", value: String(permits) },
+        { label: "Bytes in", value: bytes(tot.bytes_in) },
+        { label: "Bytes out", value: bytes(tot.bytes_out) },
+        measuredStat({ total_flow_count: totalFlows, measured_flow_count: measuredFlows })
       ];
     }
     if (state.section === "policy") {
@@ -1535,56 +1566,76 @@
     return btn;
   }
 
-  /* Actions live in a menu rather than a row of buttons because a menu grows
-     with capability and a button row does not. */
+  /* Actions live in a contextual menu on the left side of the row */
   function openAssetMenu(asset, x, y, anchorBtn) {
     closeCtx();
     var agent = asset.evidence.agent;
     var menu = h("div", { cls: "ctx", role: "menu" });
+    var targetVer = HUB_VERSION || "1.8.1";
 
-    menu.appendChild(h("div", { cls: "lbl", text: "Asset" }));
-    menu.appendChild(menuItem("Open full view", "i-external", "\u21b5", function () { openRoute(asset.key); }));
-    menu.appendChild(menuItem("Show in topology", "i-topology", "g t", function () {
-      state.topoSelected = asset.evidence.agent ? asset.key : asset.ip;
-      go("topology");
-    }));
-    menu.appendChild(menuItem("Copy address", "i-copy", "y", function () { copyAddress(asset); }));
-
-    menu.appendChild(h("div", { cls: "sep" }));
-    menu.appendChild(h("div", { cls: "lbl", text: "Discovery" }));
-    menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
-    menu.appendChild(menuItem("Correct fingerprint\u2026", "i-tag", null, function () { correctFingerprint(asset); },
-      { disabled: !asset.scan, why: "Needs a scan result to correct" }));
-
-    var corrected = bestClaim({ claims: asset.claims }, "role", "operator");
-    if (corrected) {
-      menu.appendChild(menuItem("Withdraw role correction", "i-refresh", null, function () {
-        correctAsset(asset, "role", "", "", true);
+    if (agent && asset.endpoint) {
+      // ----------------- Agent-managed host menu
+      var isOutdated = asset.endpoint.driver_version !== targetVer;
+      menu.appendChild(h("div", { cls: "lbl", text: "Managed Host (" + (asset.name || asset.ip) + ")" }));
+      menu.appendChild(menuItem("Open full view", "i-external", "\u21b5", function () { openRoute(asset.key); }));
+      menu.appendChild(menuItem("Show in topology", "i-topology", "g t", function () {
+        state.topoSelected = asset.key;
+        go("topology");
       }));
-    }
+      menu.appendChild(menuItem("Copy IP address", "i-copy", "y", function () { copyAddress(asset); }));
 
-    menu.appendChild(h("div", { cls: "sep" }));
-    menu.appendChild(h("div", { cls: "lbl", text: "Act" }));
-    menu.appendChild(menuItem("Install agent", "i-download", "d", function () { installAgent(asset); },
-      { disabled: agent, why: "This host already runs an agent" }));
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Agent Operations" }));
+      menu.appendChild(menuItem("Upgrade agent to v" + targetVer, "i-refresh", null, function () {
+        request("/api/v1/agents/update", "POST", { endpoint_ids: [asset.endpoint.id], version: targetVer })
+          .then(function () { toast("Upgrade to v" + targetVer + " queued for " + asset.name, "ok"); refresh(); })
+          .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
+      }, { disabled: !IS_ADMIN, why: isOutdated ? "Queue upgrade to v" + targetVer : "Already running latest v" + targetVer }));
 
-    if (agent && asset.isolated) {
-      menu.appendChild(menuItem("Release host", "i-unlock", null, function () { setIsolation(asset, false); }));
+      menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
+
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Containment" }));
+      if (asset.isolated) {
+        menu.appendChild(menuItem("Release host", "i-unlock", null, function () { setIsolation(asset, false); }));
+      } else {
+        menu.appendChild(menuItem("Isolate host", "i-lock", "i", function () { setIsolation(asset, true); }, { danger: true }));
+      }
+
+      if (asset.meshed) {
+        menu.appendChild(menuItem("Release from peer mesh", "i-unlock", null, function () { setMesh(asset, false); }));
+      } else {
+        menu.appendChild(menuItem("Quarantine via peer mesh", "i-lock", null, function () { setMesh(asset, true); }, { danger: true }));
+      }
     } else {
-      menu.appendChild(menuItem("Isolate host", "i-lock", "i", function () { setIsolation(asset, true); },
-        { danger: true, disabled: !agent, why: "Host isolation needs an agent; use mesh quarantine instead" }));
-    }
+      // ----------------- Unassigned / Discovered asset menu
+      menu.appendChild(h("div", { cls: "lbl", text: "Unmanaged Asset (" + (asset.ip || asset.name) + ")" }));
+      menu.appendChild(menuItem("Install Ominull agent", "i-download", "d", function () { installAgent(asset); }));
+      menu.appendChild(menuItem("Show in topology", "i-topology", "g t", function () {
+        state.topoSelected = asset.ip;
+        go("topology");
+      }));
+      menu.appendChild(menuItem("Copy IP address", "i-copy", "y", function () { copyAddress(asset); }));
 
-    if (asset.meshed) {
-      menu.appendChild(menuItem("Release from peer mesh", "i-unlock", null, function () { setMesh(asset, false); }));
-    } else {
-      menu.appendChild(menuItem("Quarantine via peer mesh", "i-lock", null, function () { setMesh(asset, true); },
-        { danger: true, disabled: !asset.ip, why: "Needs an address" }));
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Discovery" }));
+      menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
+      menu.appendChild(menuItem("Correct fingerprint\u2026", "i-tag", null, function () { correctFingerprint(asset); },
+        { disabled: !asset.scan, why: "Needs a scan result to correct" }));
+
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Containment" }));
+      if (asset.meshed) {
+        menu.appendChild(menuItem("Release from peer mesh", "i-unlock", null, function () { setMesh(asset, false); }));
+      } else {
+        menu.appendChild(menuItem("Quarantine via peer mesh", "i-lock", null, function () { setMesh(asset, true); },
+          { danger: true, disabled: !asset.ip, why: "Needs an IP address" }));
+      }
     }
 
     document.body.appendChild(menu);
     var r = menu.getBoundingClientRect();
-    placeOverlay(menu, Math.min(x, window.innerWidth - r.width - 8), Math.min(y, window.innerHeight - r.height - 8));
+    placeOverlay(menu, Math.max(8, Math.min(x, window.innerWidth - r.width - 8)), Math.min(y, window.innerHeight - r.height - 8));
     ctxMenu = menu;
     if (anchorBtn) anchorBtn.setAttribute("aria-expanded", "true");
   }
@@ -1951,17 +2002,18 @@
     return h("tr", { cls: "exp" }, td);
   }
 
-  function assetRow(asset, colspan) {
+  function assetRow(asset, colspan, index, allRows) {
     var selected = !!state.selected[asset.key];
     var isCursor = state.cursorKey === asset.key;
 
     var check = h("input", {
       type: "checkbox", "aria-label": "Select " + asset.name,
       on: {
-        click: function (e) { e.stopPropagation(); },
-        change: function (e) {
+        click: function (e) {
+          e.stopPropagation();
           state.selected[asset.key] = e.target.checked;
           if (!e.target.checked) delete state.selected[asset.key];
+          state.lastClickedAssetIndex = index;
           render();
         }
       }
@@ -1971,22 +2023,17 @@
     var menuBtn = h("button", {
       cls: "menu-btn", type: "button", "aria-haspopup": "true", "aria-expanded": "false",
       "aria-label": "Actions for " + asset.name,
+      title: "Actions for " + asset.name,
       on: {
         click: function (e) {
           e.stopPropagation();
           var r = e.currentTarget.getBoundingClientRect();
-          openAssetMenu(asset, r.left - 170, r.bottom + 2, e.currentTarget);
+          openAssetMenu(asset, r.left, r.bottom + 2, e.currentTarget);
         }
       }
     }, icon("i-dots"));
 
     var nameCell = h("td", {}, h("span", { cls: "host", text: asset.name }));
-    /* Annotate only when the name is a bare address: the Identity column
-       already carries the category, so repeating it on a named host is noise. */
-    if (asset.name === asset.ip && asset.scan && asset.scan.category) {
-      nameCell.appendChild(document.createTextNode(" "));
-      nameCell.appendChild(h("span", { cls: "dim-3", text: "\u2192 likely " + asset.scan.category.toLowerCase() }));
-    }
 
     var agentCell;
     if (asset.endpoint) {
@@ -1999,11 +2046,6 @@
       ? h("span", { cls: "ago", text: asset.ports.length + (asset.riskyPorts ? " \u00b7 " + asset.riskyPorts + " risky" : "") })
       : h("span", { cls: "dim-3", text: asset.scan ? "0" : "\u2014" });
 
-    /* The Identity column says what the host is; for an agented one it also has
-       to say who the hub believes it is. An endpoint reporting under the tenant
-       key alone is indistinguishable from any other holding that key, and an
-       operator has no other place to see that before turning
-       --client-certs required on. */
     var identMethod = (asset.scan && asset.scan.identity_method) || (asset.endpoint ? "agent" : "");
     var identityCell = h("td", {
       cls: "dim",
@@ -2024,19 +2066,32 @@
       }));
     }
 
-    /* Cell order must match the header in renderAssets():
-       select \u00b7 Asset \u00b7 Address \u00b7 Identity \u00b7 Known by \u00b7 State \u00b7 Exposure \u00b7
-       Agent \u00b7 Last seen \u00b7 menu */
+    /* Cell order: select · menu · Asset · Address · Identity · Known by · State · Exposure · Agent · Last seen */
     return h("tr", {
       cls: "row",
       "data-selected": selected ? "true" : "false",
       "data-cursor": isCursor ? "true" : "false",
       "data-key": asset.key,
       on: {
-        click: function () {
-          state.cursorKey = asset.key;
-          state.expandedKey = state.expandedKey === asset.key ? "" : asset.key;
-          render();
+        click: function (e) {
+          if (e.ctrlKey || e.metaKey) {
+            state.selected[asset.key] = !state.selected[asset.key];
+            if (!state.selected[asset.key]) delete state.selected[asset.key];
+            state.lastClickedAssetIndex = index;
+            render();
+          } else if (e.shiftKey && state.lastClickedAssetIndex >= 0 && allRows) {
+            var start = Math.min(state.lastClickedAssetIndex, index);
+            var end = Math.max(state.lastClickedAssetIndex, index);
+            for (var i = start; i <= end; i++) {
+              if (allRows[i]) state.selected[allRows[i].key] = true;
+            }
+            render();
+          } else {
+            state.cursorKey = asset.key;
+            state.expandedKey = state.expandedKey === asset.key ? "" : asset.key;
+            state.lastClickedAssetIndex = index;
+            render();
+          }
         },
         contextmenu: function (e) {
           e.preventDefault();
@@ -2045,7 +2100,8 @@
         }
       }
     },
-      h("td", {}, check),
+      h("td", { cls: "c-sel" }, check),
+      h("td", { cls: "c-menu" }, menuBtn),
       nameCell,
       h("td", {}, h("span", { cls: "ip", text: asset.ip || "\u2014" })),
       identityCell,
@@ -2053,8 +2109,7 @@
       h("td", {}, stateBadge(asset.state)),
       h("td", {}, exposure),
       h("td", {}, agentCell),
-      h("td", {}, stamp(asset.lastSeen)),
-      h("td", {}, menuBtn));
+      h("td", {}, stamp(asset.lastSeen)));
   }
 
   function renderAssets() {
@@ -2080,6 +2135,7 @@
         box.checked = all;
         return box;
       })()),
+      h("th", { cls: "c-menu", title: "Row actions" }),
       h("th", { text: "Asset" }),
       h("th", { text: "Address" }),
       h("th", { text: "Identity" }),
@@ -2087,8 +2143,7 @@
       h("th", { text: "State" }),
       h("th", { text: "Exposure" }),
       h("th", { text: "Agent" }),
-      h("th", { text: "Last seen" }),
-      h("th", { cls: "c-menu" }));
+      h("th", { text: "Last seen" }));
 
     var tbody = h("tbody");
     var currentGroup = null;
@@ -2100,7 +2155,7 @@
       if (!r.evidence.agent) groupCounts[r.groupKey].noagent++;
     });
 
-    rows.forEach(function (r) {
+    rows.forEach(function (r, idx) {
       if (r.groupKey !== currentGroup) {
         currentGroup = r.groupKey;
         var g = groupCounts[currentGroup];
@@ -2126,7 +2181,7 @@
         })(currentGroup);
       }
       if (state.collapsedGroups[currentGroup]) return;
-      tbody.appendChild(assetRow(r, cols));
+      tbody.appendChild(assetRow(r, cols, idx, rows));
       if (state.expandedKey === r.key) tbody.appendChild(detailRow(r, cols));
     });
 
@@ -2141,39 +2196,72 @@
       h("span", {}, h("i", { "data-on": "agent" }), h("span", { text: "agent \u2014 ground truth" })),
       h("span", {}, h("i", { "data-on": "scan" }), h("span", { text: "scan \u2014 probed" })),
       h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
-      h("span", { text: "j/k move \u00b7 x select \u00b7 i isolate \u00b7 r rescan \u00b7 y copy \u00b7 / filter \u00b7 enter open" }));
-
-    // Fleet Currency & 1-Click Fleet Update Bar
-    var managedEps = state.endpoints || [];
-    var latestVersion = HUB_VERSION || "1.8.0";
-    var upToDate = managedEps.filter(function (ep) { return ep.version === latestVersion; }).length;
-    var needsUpdate = managedEps.length - upToDate;
-
-    var fleetBar = h("div", { cls: "fleet-bar" },
-      h("div", { cls: "stack" },
-        h("div", { cls: "consensus-badge" },
-          h("b", { text: "Fleet Currency: " + upToDate + " of " + managedEps.length + " on v" + latestVersion }),
-          needsUpdate > 0 ? h("span", { cls: "dim-3", text: " \u00b7 " + needsUpdate + " pending upgrade" }) : null),
-        h("span", { cls: "why", text: "Autonomous zero-downtime fleet binary promotion with pinned ECDSA release verification." })),
-      IS_ADMIN ? h("button", {
-        cls: "btn btn-primary", type: "button",
-        text: needsUpdate > 0 ? "Upgrade Fleet to v" + latestVersion : "Re-trigger Fleet Sync",
-        on: {
-          click: function () {
-            request("/api/v1/agents/update", "POST", { all: true, version: latestVersion })
-              .then(function () {
-                toast("Fleet update to v" + latestVersion + " queued across all endpoints", "ok");
-                refresh();
-              })
-              .catch(function (e) { toast("Update failed: " + e.message, "crit"); });
-          }
-        }
-      }) : null);
+      h("span", { text: "j/k move \u00b7 Ctrl/Shift+Click range select \u00b7 i isolate \u00b7 r rescan \u00b7 enter open" }));
 
     clear(view);
-    view.appendChild(fleetBar);
     view.appendChild(wrap);
     view.appendChild(key);
+
+    // Floating Context Action Bar when rows are selected
+    var selKeys = selectedKeys();
+    if (selKeys.length > 0) {
+      var selCount = selKeys.length;
+      var selAssets = selKeys.map(function (k) { return state.assetByKey[k]; }).filter(Boolean);
+      var agentedSelected = selAssets.filter(function (a) { return a.endpoint; });
+      var unmanagedSelected = selAssets.filter(function (a) { return !a.endpoint; });
+      var targetVer = HUB_VERSION || "1.8.1";
+
+      var acts = [
+        h("span", { cls: "floating-count-pill", text: selCount + " selected" })
+      ];
+
+      if (agentedSelected.length > 0) {
+        acts.push(h("button", {
+          cls: "btn btn-primary mini", type: "button", text: "Upgrade Agents (" + agentedSelected.length + ")",
+          on: {
+            click: function () {
+              var epIds = agentedSelected.map(function (a) { return a.endpoint.id; });
+              request("/api/v1/agents/update", "POST", { endpoint_ids: epIds, version: targetVer })
+                .then(function () { toast("Queued v" + targetVer + " upgrade for " + epIds.length + " agent(s)", "ok"); refresh(); })
+                .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
+            }
+          }
+        }));
+        acts.push(h("button", {
+          cls: "btn mini", type: "button", text: "Isolate (" + agentedSelected.length + ")",
+          on: { click: function () { bulkIsolate(true); } }
+        }));
+        acts.push(h("button", {
+          cls: "btn mini", type: "button", text: "Release",
+          on: { click: function () { bulkIsolate(false); } }
+        }));
+      }
+
+      if (unmanagedSelected.length > 0) {
+        acts.push(h("button", {
+          cls: "btn btn-primary mini", type: "button", text: "Install Agent (" + unmanagedSelected.length + ")",
+          on: { click: function () { openInstallerSheet(); } }
+        }));
+      }
+
+      acts.push(h("button", {
+        cls: "btn mini", type: "button", text: "Rescan (" + selCount + ")",
+        on: { click: function () { selKeys.forEach(function (k) { if (state.assetByKey[k]) rescan(state.assetByKey[k]); }); } }
+      }));
+
+      acts.push(h("button", {
+        cls: "btn mini", type: "button", text: "Export CSV",
+        on: { click: exportSelectedAssetsCSV }
+      }));
+
+      acts.push(h("button", {
+        cls: "btn mini ghost", type: "button", text: "✕ Deselect",
+        on: { click: function () { state.selected = {}; render(); } }
+      }));
+
+      var floatBar = h("div", { cls: "assets-floating-bar" }, acts);
+      view.appendChild(floatBar);
+    }
   }
 
   /* ------------------------------------------------------- other sections */
@@ -2302,85 +2390,474 @@
         )));
   }
 
-  function renderDiscovery() {
-    var view = $("view");
-    var cov = state.coverage || {};
+  var accountPop = null;
 
-    /* The hub knows the network it is on - the location carries a CIDR and
-       every managed endpoint carries an address. Defaulting the field to a
-       demo subnet meant the first scan an operator ran on a real deployment
-       swept a network that does not exist and reported nothing found. */
+  function closeAccountPop() {
+    if (accountPop && accountPop.parentNode) accountPop.parentNode.removeChild(accountPop);
+    accountPop = null;
+    var btn = $("user-avatar-btn");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+  }
+
+  function openAccountPop() {
+    closeAccountPop();
+    var btn = $("user-avatar-btn");
+    if (!btn) return;
+
+    var pop = h("div", { cls: "account-pop", role: "dialog", "aria-label": "Account & Hub Settings" });
+
+    var opName = state.you || OPERATOR || "admin";
+    var initial = (opName[0] || "A").toUpperCase();
+    var roleLbl = roleName(ROLE) || "Operator";
+
+    var header = h("div", { cls: "account-pop-header" },
+      h("div", { cls: "account-pop-avatar", text: initial }),
+      h("div", { cls: "account-pop-user" },
+        h("span", { cls: "account-pop-email", text: opName, title: opName }),
+        h("span", { cls: "account-pop-role", text: roleLbl })));
+
+    var themeOpts = THEMES.map(function (t) {
+      return h("button", {
+        cls: "account-theme-opt", type: "button",
+        "aria-checked": state.theme === t ? "true" : "false",
+        on: {
+          click: function () {
+            applyTheme(t, true);
+            closeAccountPop();
+            toast("Theme: " + THEME_NAMES[t], "ok");
+          }
+        }
+      },
+        h("span", { text: THEME_NAMES[t] }),
+        h("span", { cls: "chips" },
+          ["brand", "ok", "warn", "crit"].map(function (role) {
+            return h("i", { cls: "sw-" + role + "-" + t });
+          })));
+    });
+
+    var statusUrl = "/status" + (API_KEY ? "?key=" + encodeURIComponent(API_KEY) : "");
+
+    var links = h("div", { cls: "account-links" },
+      h("a", { cls: "account-link-btn", href: statusUrl, target: "_blank" },
+        icon("i-external"), h("span", { text: "System Status & Diagnostics" })),
+      h("a", { cls: "account-link-btn", href: "/install", target: "_blank" },
+        icon("i-download"), h("span", { text: "Agent Enrollment Portal" })));
+
+    var body = h("div", { cls: "account-pop-body" },
+      h("div", { cls: "account-section" },
+        h("div", { cls: "account-section-title", text: "Color Theme" }),
+        h("div", { cls: "account-theme-grid" }, themeOpts)),
+      links);
+
+    var footer = h("div", { cls: "account-pop-footer" },
+      h("span", { text: "Ominull Hub v" + (HUB_VERSION || "1.8.1") }),
+      h("span", { text: "ECDSA Verified" }));
+
+    pop.appendChild(header);
+    pop.appendChild(body);
+    pop.appendChild(footer);
+
+    document.body.appendChild(pop);
+    var r = btn.getBoundingClientRect();
+    var pr = pop.getBoundingClientRect();
+    placeOverlay(pop, Math.max(8, r.right - pr.width), r.bottom + 8);
+    accountPop = pop;
+    btn.setAttribute("aria-expanded", "true");
+  }
+
+  function openSweepModal() {
     var defaultSubnet = suggestedSubnet();
-    var subnetInput = h("input", { type: "text", id: "scan-subnet", value: defaultSubnet, placeholder: defaultSubnet });
-    var profileSel = h("select", { id: "scan-profile" },
-      h("option", { value: "quick", text: "Quick" }),
-      h("option", { value: "standard", text: "Standard" }),
-      h("option", { value: "deep", text: "Deep" }));
+    var subnetInput = h("input", { type: "text", id: "modal-scan-subnet", value: defaultSubnet, placeholder: defaultSubnet });
+    var profileSel = h("select", { id: "modal-scan-profile" },
+      h("option", { value: "quick", text: "Quick (fast port sweep)" }),
+      h("option", { value: "standard", text: "Standard (OS + SYN fingerprint)" }),
+      h("option", { value: "deep", text: "Deep (Full port & service analysis)" }));
     profileSel.value = "standard";
 
-    var launch = card("Subnet sweep",
-      h("div", { cls: "card-body" },
-        h("div", { cls: "form-row" },
-          h("label", { cls: "field" }, h("span", { text: "Subnet" }), subnetInput),
-          h("label", { cls: "field" }, h("span", { text: "Profile" }), profileSel),
-          h("button", {
-            cls: "btn btn-primary", type: "button", text: "Start scan",
-            on: {
-              click: function () {
-                request("/api/v1/scanner/scan", "POST", { subnet: subnetInput.value, profile: profileSel.value })
-                  .then(function (res) {
-                    toast("Sweeping " + subnetInput.value, "ok");
-                    if (res && res.scan_id) watchScan(res.scan_id);
-                    else { state.scanJob = "running"; setTimeout(refresh, 3000); }
-                  })
-                  .catch(function (e) { toast("Scan failed: " + e.message, "crit"); });
-              }
-            }
-          })),
-        h("p", { cls: "pending", text: "Discovered assets are written to the asset graph as they are found, so they survive a hub restart and an agent installed later enriches the same row." })));
+    var cov = state.coverage || {};
+    var covered = (cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) > 0;
 
-    var unmanaged = state.assets.filter(function (a) { return !a.evidence.agent; });
-    var worklist = card("Deployment worklist \u2014 seen, but not covered",
-      simpleTable(["Address", "Identity", "Vendor", "Exposure", "Risk", "Last seen", ""],
-        unmanaged.map(function (a) {
-          return [
-            h("span", { cls: "ip", text: a.ip || "\u2014" }),
-            h("span", { cls: "dim", text: a.identity }),
-            h("span", { cls: "dim-3", text: (a.scan && a.scan.vendor) || "\u2014" }),
-            h("span", { cls: "ago", text: String(a.ports.length) }),
-            h("span", { cls: "st", "data-state": a.riskyPorts ? "warn" : "idle" },
-              icon(a.riskyPorts ? "g-watch" : "g-offline", true),
-              h("span", { text: a.risk || "LOW" })),
-            stamp(a.lastSeen),
-            h("button", { cls: "mini", type: "button", text: "Install agent", on: { click: function () { installAgent(a); } } })
-          ];
-        })));
-
-    /* Coverage is a ratio over what the sweep found, so before any sweep it is
-       not zero - there is nothing to take a ratio of. Printing "Managed 0" and
-       "0% covered" next to an Assets view reporting four managed endpoints made
-       the two screens contradict each other over the same fleet. */
-    var discovered = cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length;
-    var swept = discovered > 0;
-
-    var covBody = h("div", { cls: "card-body" },
-      swept
-        ? h("dl", { cls: "kv" },
-            h("dt", { text: "Discovered" }), h("dd", {}, h("b", { text: String(discovered) })),
-            h("dt", { text: "Managed" }), h("dd", { text: String(cov.total_managed || 0) }),
-            h("dt", { text: "Unmanaged" }), h("dd", { text: String(cov.total_unmanaged || 0) }),
-            h("dt", { text: "Coverage" }), h("dd", {}, h("b", { text: pct(cov.coverage_percent) })),
-            h("dt", { text: "Critical" }), h("dd", { text: String(cov.critical_risks || 0) }),
-            h("dt", { text: "High" }), h("dd", { text: String(cov.high_risks || 0) }))
-        : h("div", { cls: "empty", text: "No sweep has run, so there is nothing to measure coverage against. " +
-            "The fleet's agented hosts are on the Assets view; a sweep is what finds the ones without an agent." }));
-
-    clear(view);
-    view.appendChild(h("div", { cls: "pad stack" },
+    var statusSummary = h("div", { cls: "stack" },
+      h("p", { cls: "sub", text: "Active subnet asset sweep and OS fingerprinting engine." }),
       scanProgressCard(),
-      h("div", { cls: "cols" }, launch, card("Coverage", covBody)),
-      addEndpointCard(),
-      worklist));
+      h("div", { cls: "dns-grid" },
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: String(covered ? cov.total_discovered : state.assets.length) }),
+          h("span", { cls: "dns-stat-label", text: "Total Network Assets" })),
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: covered ? pct(cov.coverage_percent) : "—" }),
+          h("span", { cls: "dns-stat-label", text: "Fleet Agent Coverage" })),
+        h("div", { cls: "dns-stat-box" },
+          h("span", { cls: "dns-stat-val", text: String(cov.critical_risks || 0), style: cov.critical_risks ? "color: var(--crit)" : "" }),
+          h("span", { cls: "dns-stat-label", text: "Critical Risk Weakpoints" }))),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Target Subnet CIDR" }), subnetInput),
+        h("label", { cls: "field" }, h("span", { text: "Sweep Profile" }), profileSel)));
+
+    var actions = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-primary", type: "button", text: "Start Subnet Sweep",
+        on: {
+          click: function () {
+            request("/api/v1/scanner/scan", "POST", { subnet: subnetInput.value, profile: profileSel.value })
+              .then(function (res) {
+                toast("Sweeping subnet " + subnetInput.value, "ok");
+                closeSheet();
+                if (res && res.scan_id) watchScan(res.scan_id);
+                else { state.scanJob = "running"; setTimeout(refresh, 2500); }
+              })
+              .catch(function (e) { toast("Sweep failed: " + e.message, "crit"); });
+          }
+        }
+      })
+    ];
+
+    openSheet("Subnet Sweep & Asset Discovery", statusSummary, actions, true);
+  }
+
+  function exportSelectedAssetsCSV() {
+    var keys = selectedKeys();
+    if (!keys.length) { toast("No assets selected for export", "warn"); return; }
+    var rows = keys.map(function (k) { return state.assetByKey[k]; }).filter(Boolean);
+    var csv = "Asset,Address,Identity,State,Exposure,Agent,LastSeen\n";
+    rows.forEach(function (r) {
+      var name = '"' + (r.name || "").replace(/"/g, '""') + '"';
+      var ip = '"' + (r.ip || "").replace(/"/g, '""') + '"';
+      var ident = '"' + (r.identity || "").replace(/"/g, '""') + '"';
+      var st = '"' + ((r.state && r.state.word) || "Unknown") + '"';
+      var exp = String(r.ports ? r.ports.length : 0);
+      var ag = '"' + (r.endpoint ? r.endpoint.driver_version : "None") + '"';
+      var seen = '"' + (r.lastSeen ? r.lastSeen.toISOString() : "") + '"';
+      csv += [name, ip, ident, st, exp, ag, seen].join(",") + "\n";
+    });
+    var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "ominull_assets_export_" + new Date().toISOString().slice(0, 10) + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    toast("Exported " + rows.length + " assets to CSV", "ok");
+  }
+
+  function renderAlerts() {
+    var view = $("view");
+    clear(view);
+
+    var allAnomalies = state.anomalies || [];
+    var af = state.alertsFilter || { page: 1, limit: 50, unacknowledged_only: true, severity: "", endpoint_id: "", search: "" };
+
+    // Group by system / endpoint
+    var sysMap = {};
+    allAnomalies.forEach(function (a) {
+      var host = a.hostname || a.endpoint_id || "Unknown Host";
+      if (!sysMap[host]) {
+        sysMap[host] = { host: host, total: 0, crit: 0, high: 0, med: 0, low: 0, types: {} };
+      }
+      var s = sysMap[host];
+      s.total++;
+      var sev = (a.severity || "LOW").toUpperCase();
+      if (sev === "CRITICAL") s.crit++;
+      else if (sev === "HIGH") s.high++;
+      else if (sev === "MEDIUM") s.med++;
+      else s.low++;
+      var t = a.anomaly_type || "ANOMALY";
+      s.types[t] = (s.types[t] || 0) + 1;
+    });
+
+    var topSystems = Object.keys(sysMap).map(function (k) { return sysMap[k]; })
+      .sort(function (a, b) { return b.total - a.total; })
+      .slice(0, 6);
+
+    // 1. Top Graphic Card: Systems with Most Alerts by Type
+    var chartBoxes = topSystems.map(function (s) {
+      var wCrit = Math.round((s.crit / s.total) * 100);
+      var wHigh = Math.round((s.high / s.total) * 100);
+      var wMed = Math.round((s.med / s.total) * 100);
+      var wLow = Math.round((s.low / s.total) * 100);
+
+      var isSelected = af.endpoint_id === s.host;
+
+      return h("div", {
+        cls: "alerts-sys-box" + (isSelected ? " selected" : ""),
+        on: {
+          click: function () {
+            af.endpoint_id = (af.endpoint_id === s.host) ? "" : s.host;
+            af.page = 1;
+            renderAlerts();
+          }
+        }
+      },
+        h("div", { cls: "alerts-sys-header" },
+          h("span", { text: s.host }),
+          h("b", { text: s.total + " alert" + (s.total === 1 ? "" : "s") })),
+        h("div", { cls: "alerts-sys-bars" },
+          s.crit ? h("div", { cls: "alerts-bar-seg alerts-bar-crit", style: "width:" + wCrit + "%" }) : null,
+          s.high ? h("div", { cls: "alerts-bar-seg alerts-bar-high", style: "width:" + wHigh + "%" }) : null,
+          s.med ? h("div", { cls: "alerts-bar-seg alerts-bar-med", style: "width:" + wMed + "%" }) : null,
+          s.low ? h("div", { cls: "alerts-bar-seg alerts-bar-low", style: "width:" + wLow + "%" }) : null),
+        h("div", { cls: "dim-3 pad-y", style: "font-size: 11px" },
+          h("span", { text: Object.keys(s.types).slice(0, 2).join(", ").replace(/_/g, " ").toLowerCase() })));
+    });
+
+    var chartCard = card("Systems with the Most Alerts by Alert Type",
+      h("div", { cls: "stack" },
+        chartBoxes.length
+          ? h("div", { cls: "alerts-sys-grid" }, chartBoxes)
+          : h("div", { cls: "empty", text: "No active anomaly alerts recorded across fleet." }),
+        h("div", { cls: "legend pad-x" },
+          h("span", { text: "■ Red: Critical" }),
+          h("span", { text: "■ Amber: High" }),
+          h("span", { text: "■ Blue: Medium" }),
+          h("span", { text: "■ Gray: Low" }),
+          h("span", { text: "Click any host to filter table" }))));
+
+    // 2. Filter Bar
+    var sevBtns = ["", "CRITICAL", "HIGH", "MEDIUM", "LOW"].map(function (sev) {
+      var active = (af.severity || "") === sev;
+      return h("button", {
+        cls: "btn mini" + (active ? " btn-primary" : ""),
+        type: "button",
+        text: sev ? sev : "ALL SEVERITIES",
+        on: {
+          click: function () {
+            af.severity = sev;
+            af.page = 1;
+            refresh();
+          }
+        }
+      });
+    });
+
+    var unackBtn = h("button", {
+      cls: "btn mini" + (af.unacknowledged_only ? " btn-primary" : ""),
+      type: "button",
+      text: af.unacknowledged_only ? "UNACKNOWLEDGED ONLY" : "ALL STATUSES",
+      on: {
+        click: function () {
+          af.unacknowledged_only = !af.unacknowledged_only;
+          af.page = 1;
+          refresh();
+        }
+      }
+    });
+
+    var searchInput = h("input", {
+      type: "search",
+      placeholder: "Search alerts (host, process, IP)...",
+      value: af.search || "",
+      on: {
+        input: function (e) {
+          af.search = e.target.value;
+          renderAlerts();
+        }
+      }
+    });
+
+    // Bulk actions
+    var selectedAlertIds = Object.keys(state.selectedAlerts || {}).filter(function (k) { return state.selectedAlerts[k]; });
+    var bulkAckBtn = selectedAlertIds.length ? h("button", {
+      cls: "btn btn-primary mini", type: "button",
+      text: "Acknowledge Selected (" + selectedAlertIds.length + ")",
+      on: {
+        click: function () {
+          request("/api/v1/anomalies/acknowledge", "POST", { ids: selectedAlertIds })
+            .then(function () {
+              toast("Acknowledged " + selectedAlertIds.length + " alerts", "ok");
+              state.selectedAlerts = {};
+              refresh();
+            })
+            .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+        }
+      }
+    }) : null;
+
+    var ackAllBtn = h("button", {
+      cls: "btn mini", type: "button",
+      text: "Acknowledge All (" + allAnomalies.length + ")",
+      on: {
+        click: function () {
+          request("/api/v1/anomalies/acknowledge", "POST", { all: true })
+            .then(function () {
+              toast("Acknowledged all anomalies", "ok");
+              refresh();
+            })
+            .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+        }
+      }
+    });
+
+    var clearResolvedBtn = h("button", {
+      cls: "btn mini ghost", type: "button", text: "Clear Acknowledged",
+      on: {
+        click: function () {
+          request("/api/v1/anomalies/clear", "POST", {})
+            .then(function () {
+              toast("Cleared resolved alerts from storage", "ok");
+              refresh();
+            })
+            .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+        }
+      }
+    });
+
+    var filterBar = h("div", { cls: "traffic-filter-bar" },
+      h("div", { cls: "traffic-filter-group" }, unackBtn, sevBtns),
+      h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
+
+    // Filter anomalies by search text
+    var filteredAnomalies = allAnomalies.filter(function (a) {
+      if (af.endpoint_id && a.hostname !== af.endpoint_id && a.endpoint_id !== af.endpoint_id) return false;
+      if (af.severity && (a.severity || "").toUpperCase() !== af.severity) return false;
+      if (af.unacknowledged_only && a.acknowledged) return false;
+      if (af.search) {
+        var q = af.search.toLowerCase();
+        var match = (a.hostname || "").toLowerCase().includes(q) ||
+          (a.endpoint_id || "").toLowerCase().includes(q) ||
+          (a.process_path || "").toLowerCase().includes(q) ||
+          (a.dst_ip || "").toLowerCase().includes(q) ||
+          (a.title || "").toLowerCase().includes(q) ||
+          (a.description || "").toLowerCase().includes(q) ||
+          (a.anomaly_type || "").toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    // 3. Alerts Table
+    var tableRows = [];
+    var allRowsSelected = filteredAnomalies.length > 0 && filteredAnomalies.every(function (a) { return state.selectedAlerts && state.selectedAlerts[a.id]; });
+
+    var headCheckbox = h("input", {
+      type: "checkbox",
+      checked: allRowsSelected,
+      on: {
+        change: function (e) {
+          state.selectedAlerts = state.selectedAlerts || {};
+          filteredAnomalies.forEach(function (a) {
+            if (e.target.checked) state.selectedAlerts[a.id] = true;
+            else delete state.selectedAlerts[a.id];
+          });
+          renderAlerts();
+        }
+      }
+    });
+
+    filteredAnomalies.forEach(function (a) {
+      var isExpanded = state.expandedAlertId === a.id;
+      var isSelected = state.selectedAlerts && state.selectedAlerts[a.id];
+
+      var rowCheckbox = h("input", {
+        type: "checkbox",
+        checked: !!isSelected,
+        on: {
+          click: function (e) { e.stopPropagation(); },
+          change: function (e) {
+            state.selectedAlerts = state.selectedAlerts || {};
+            state.selectedAlerts[a.id] = e.target.checked;
+            if (!e.target.checked) delete state.selectedAlerts[a.id];
+            renderAlerts();
+          }
+        }
+      });
+
+      var ackAction = a.acknowledged
+        ? h("span", { cls: "dim-3", text: "Acknowledged" })
+        : h("button", {
+          cls: "btn mini", type: "button", text: "Acknowledge",
+          on: {
+            click: function (e) {
+              e.stopPropagation();
+              request("/api/v1/anomalies/acknowledge", "POST", { id: a.id })
+                .then(function () { toast("Alert acknowledged", "ok"); refresh(); })
+                .catch(function (err) { toast("Error: " + err.message, "crit"); });
+            }
+          }
+        });
+
+      var tr = h("tr", {
+        cls: "alert-row-interactive" + (isSelected ? " selected" : ""),
+        on: {
+          click: function () {
+            state.expandedAlertId = isExpanded ? "" : a.id;
+            renderAlerts();
+          }
+        }
+      },
+        h("td", {}, rowCheckbox),
+        h("td", {}, stamp(parseTime(a.timestamp))),
+        h("td", {}, h("span", { cls: "st", "data-state": (a.severity || "LOW").toLowerCase() === "critical" ? "crit" : (a.severity === "HIGH" ? "warn" : "idle"), text: a.severity || "LOW" })),
+        h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") })),
+        h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
+        h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
+        h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
+        h("td", {}, h("span", { text: a.title || a.description || "—" })),
+        h("td", {}, ackAction));
+
+      tableRows.push(tr);
+
+      // Inline Expansion Card
+      if (isExpanded) {
+        var expBox = h("div", { cls: "alert-exp-card" },
+          h("div", { cls: "stack" },
+            h("b", { text: a.title || "Anomaly Alert Detail" }),
+            h("p", { cls: "why", text: a.description || "" })),
+          h("div", { cls: "alert-exp-grid" },
+            h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Endpoint ID" }), h("div", { cls: "alert-exp-val", text: a.endpoint_id || "—" })),
+            h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Process Path" }), h("div", { cls: "alert-exp-val", text: a.process_path || "—" })),
+            h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Target Destination" }), h("div", { cls: "alert-exp-val", text: (a.dst_ip || "—") + ":" + (a.dst_port || 0) })),
+            h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Diagnostic Details" }), h("div", { cls: "alert-exp-val", text: a.details || "None" }))),
+          h("div", { cls: "actions pad-y" },
+            h("button", {
+              cls: "btn mini btn-crit", type: "button", text: "Isolate Endpoint (" + (a.hostname || a.endpoint_id) + ")",
+              on: {
+                click: function (e) {
+                  e.stopPropagation();
+                  var ep = state.endpoints.find(function (x) { return x.id === a.endpoint_id || x.hostname === a.hostname; });
+                  if (ep) {
+                    var ast = state.assetByKey["asset-ep-" + ep.id];
+                    if (ast) setIsolation(ast, true);
+                    else toast("Asset mapping not found", "warn");
+                  } else { toast("Endpoint not found", "warn"); }
+                }
+              }
+            }),
+            h("button", {
+              cls: "btn mini", type: "button", text: "Copy Alert ID",
+              on: { click: function (e) { e.stopPropagation(); copyText(a.id); toast("Copied alert ID", "ok"); } }
+            })));
+
+        var expTr = h("tr", { cls: "exp" }, h("td", { colspan: "9" }, expBox));
+        tableRows.push(expTr);
+      }
+    });
+
+    var alertsTable = h("div", { cls: "tblwrap" },
+      h("table", {},
+        h("thead", {},
+          h("tr", {},
+            h("th", { cls: "c-sel" }, headCheckbox),
+            h("th", { text: "Time" }),
+            h("th", { text: "Severity" }),
+            h("th", { text: "Anomaly Type" }),
+            h("th", { text: "System / Host" }),
+            h("th", { text: "Destination" }),
+            h("th", { text: "Process" }),
+            h("th", { text: "Title / Finding" }),
+            h("th", { text: "Action" }))),
+        h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "9" }, h("div", { cls: "empty", text: "No alerts match active filters." }))))));
+
+    var totalAlerts = (state.alertsData && state.alertsData.total) || allAnomalies.length;
+    var alertsCard = card("Active Security Anomaly Stream (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
+      h("div", { cls: "stack" }, alertsTable));
+
+    view.appendChild(h("div", { cls: "pad stack alerts-workspace" },
+      chartCard,
+      filterBar,
+      alertsCard));
   }
 
   /* Radial layout: highest-degree node in the centre, its neighbours on the
@@ -3189,186 +3666,366 @@
 
   function renderTraffic() {
     var view = $("view");
-    var an = state.analytics || {};
     clear(view);
 
-    /* Every byte figure on this page is a sum over the flows that reported
-       one. Linux queue depth and Windows interval statistics do not cover
-       counter to read, that is a small minority of the traffic, and the
-       chart, the two rankings and the totals above are all drawn from it.
-       Saying so once, at the top, costs one line and stops every number
-       below being read as something it is not. */
-    var totalFlows = Number(an.total_events) || 0;
-    var measuredFlows = Number(an.measured_flow_count) || 0;
-    if (totalFlows && measuredFlows < totalFlows) {
-      view.appendChild(h("p", { cls: "topo-note pad-x" }, h("b", { text: measuredFlows === 0
-        ? "None of the " + totalFlows + " flows on record carried a byte count. "
-        : measuredFlows + " of " + totalFlows + " flows carried a byte count. " }),
-        document.createTextNode(measuredFlows === 0
-          ? "The retained collectors do not report a byte count for every socket. Flow counts on this page are complete; byte figures are not measurements of all traffic."
-          : "The bandwidth chart, both rankings and the byte totals above are sums over those flows only \u2014 not over the rest.")));
-    }
+    var ov = state.trafficOverview || {};
+    var flowsData = state.trafficFlows || {};
+    var tf = state.trafficFilter || { range: "1h" };
 
-    var timeline = arrayOf(an.bandwidth_timeline);
-    var chartCard;
-    if (timeline.length) {
-      var maxB = Math.max.apply(null, timeline.map(function (p) {
-        return Math.max(Number(p.bytes_in) || 0, Number(p.bytes_out) || 0);
-      }).concat([1]));
-      var n = timeline.length;
-      /* The bars are laid out across a fixed 100-unit width and scaled to the
-         bucket count, rather than eight units per bucket. With the six buckets
-         the hub returns, the old form stretched each three-unit bar across a
-         quarter of the card - a chart of six blocks, unreadable as a series. */
-      var W = 100;
-      var slot = W / n;
-      var barW = slot * 0.3;
-      var maxBlocks = Math.max.apply(null, timeline.map(function (p) { return Number(p.blocks) || 0; }).concat([1]));
-      var svg = s("svg", { "class": "chart", viewBox: "0 0 " + W + " 132", preserveAspectRatio: "none", role: "img", "aria-label": "Bandwidth and blocked flows over time" });
-      timeline.forEach(function (p, i) {
-        var bin = Number(p.bytes_in) || 0;
-        var bout = Number(p.bytes_out) || 0;
-        /* A bucket with no traffic draws nothing. The one-pixel floor the old
-           chart used drew a bar for silence, which is the state most worth
-           being able to see. */
-        var hi = bin ? Math.max(1, Math.round((bin / maxB) * 60)) : 0;
-        var ho = bout ? Math.max(1, Math.round((bout / maxB) * 60)) : 0;
-        var x0 = i * slot + slot * 0.15;
-        if (hi) svg.appendChild(s("rect", { "class": "series-in", x: x0, y: 62 - hi, width: barW, height: hi }));
-        if (ho) svg.appendChild(s("rect", { "class": "series-out", x: x0 + barW + slot * 0.1, y: 62 - ho, width: barW, height: ho }));
-        var blocks = Number(p.blocks) || 0;
-        // Scaled against the busiest bucket, not a fixed four units per block,
-        // which flattened anything past fifteen into the same full-height bar.
-        if (blocks) {
-          var hb = Math.max(2, Math.round((blocks / maxBlocks) * 55));
-          svg.appendChild(s("rect", { "class": "series-block", x: x0, y: 66, width: barW * 2 + slot * 0.1, height: hb }));
+    // 1. Filter Bar
+    var rangeButtons = ["15m", "1h", "6h", "24h", "7d", "all"].map(function (r) {
+      var active = (tf.range || "1h") === r;
+      return h("button", {
+        cls: "btn mini" + (active ? " btn-primary" : ""),
+        type: "button",
+        text: r.toUpperCase(),
+        on: {
+          click: function () {
+            tf.range = r;
+            tf.cursor = "";
+            refresh();
+          }
         }
       });
-      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 63, x2: W, y2: 63 }));
+    });
 
-      /* Bucket times as HTML under the chart rather than SVG text: the chart is
-         drawn with preserveAspectRatio="none" so it can fill the card, and any
-         text inside it would be stretched with the bars. Without these the
-         series had no time axis at all. */
-      var ticks = h("div", { cls: "chart-ticks" });
-      timeline.forEach(function (p) {
-        /* The hub labels a bucket "HH:MM". Anything that parses as a date is
-           reduced to the same thing rather than printed as a full ISO string,
-           which is 24 characters in a slot a few characters wide. */
-        var t = String(p.timestamp || "");
-        var d = t.length > 8 ? parseTime(t) : null;
-        ticks.appendChild(h("span", { text: d ? pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) : t }));
-      });
-
-      chartCard = card("Bandwidth and blocks",
-        h("div", { cls: "card-body" }, svg, ticks,
-          h("div", { cls: "legend" },
-            h("span", { text: "above the axis: bytes in / bytes out" }),
-            h("span", { text: "below: blocked flows" }),
-            h("span", { text: "ten-minute buckets, last hour" }))));
-    } else {
-      chartCard = card("Bandwidth and blocks", h("div", { cls: "empty", text: "No timeline in this window." }));
+    var chips = [];
+    if (tf.endpoint_id) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Endpoint: " + tf.endpoint_id }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.endpoint_id; refresh(); } } })));
+    }
+    if (tf.dst_ip) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Dest: " + tf.dst_ip }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.dst_ip; refresh(); } } })));
+    }
+    if (tf.process) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Process: " + tf.process }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.process; refresh(); } } })));
+    }
+    if (tf.domain) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Domain: " + tf.domain }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.domain; refresh(); } } })));
+    }
+    if (tf.protocol) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Proto: " + tf.protocol }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.protocol; refresh(); } } })));
+    }
+    if (tf.action) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Action: " + tf.action }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.action; refresh(); } } })));
     }
 
-    var talkers = arrayOf(an.top_talkers);
-    var talkerCard = card("Top talkers",
+    var measuredCheck = h("label", { cls: "traffic-chip", style: "cursor:pointer" },
+      h("input", {
+        type: "checkbox",
+        checked: !!tf.measured_only,
+        on: {
+          change: function (e) {
+            tf.measured_only = e.target.checked;
+            tf.cursor = "";
+            refresh();
+          }
+        }
+      }),
+      h("span", { text: " Measured bytes only" }));
+
+    var filterBar = h("div", { cls: "traffic-filter-bar" },
+      h("div", { cls: "traffic-filter-group" }, rangeButtons),
+      h("div", { cls: "traffic-chips" }, measuredCheck, chips));
+
+    // 2. Measured Coverage Banner & Stat Cards
+    var totalFlows = Number(ov.total_flows) || 0;
+    var measuredFlows = Number(ov.measured_flows) || 0;
+    var covPct = Math.round((Number(ov.measured_flow_coverage) || 0) * 100);
+
+    var totals = ov.totals || {};
+    var statsGrid = h("div", { cls: "dns-grid" },
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: bytes((Number(totals.bytes_in) || 0) + (Number(totals.bytes_out) || 0)) }),
+        h("span", { cls: "dns-stat-label", text: "Total Volume (" + bytes(totals.bytes_in) + " in / " + bytes(totals.bytes_out) + " out)" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(totals.flow_count || totalFlows) }),
+        h("span", { cls: "dns-stat-label", text: "Tracked Flow Events (" + covPct + "% Socket Measured)" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(totals.block_count || 0), style: totals.block_count ? "color: var(--crit)" : "" }),
+        h("span", { cls: "dns-stat-label", text: "Threat & Policy Block Drops" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(totals.anomaly_count || 0), style: totals.anomaly_count ? "color: var(--warn)" : "" }),
+        h("span", { cls: "dns-stat-label", text: "Anomalous Behavioral Detections" })));
+
+    // 3. Dual Synchronized Time Lanes
+    var trends = arrayOf(ov.trends);
+    var dualChartCard;
+    if (trends.length > 1) {
+      var maxB = Math.max.apply(null, trends.map(function (p) {
+        return Math.max(Number(p.bytes_in) || 0, Number(p.bytes_out) || 0);
+      }).concat([1]));
+      var maxF = Math.max.apply(null, trends.map(function (p) {
+        return Number(p.flows) || 0;
+      }).concat([1]));
+
+      var n = trends.length;
+      var W = 100;
+      var slot = W / n;
+      var barW = slot * 0.35;
+
+      var svg = s("svg", { "class": "chart dual-chart-svg", viewBox: "0 0 " + W + " 150", preserveAspectRatio: "none", role: "img", "aria-label": "Dual synchronized traffic lanes" });
+
+      // Lane 1 (Top: Bandwidth In/Out) - y: 10 to 65
+      // Lane 2 (Bottom: Flows / Blocks) - y: 85 to 140
+      trends.forEach(function (p, i) {
+        var x0 = i * slot + slot * 0.1;
+        var bin = Number(p.bytes_in) || 0;
+        var bout = Number(p.bytes_out) || 0;
+        var flows = Number(p.flows) || 0;
+        var blocks = Number(p.blocks) || 0;
+
+        var hIn = bin ? Math.max(1, Math.round((bin / maxB) * 50)) : 0;
+        var hOut = bout ? Math.max(1, Math.round((bout / maxB) * 50)) : 0;
+        var hFlow = flows ? Math.max(1, Math.round((flows / maxF) * 45)) : 0;
+        var hBlock = blocks ? Math.max(2, Math.round((blocks / maxF) * 45)) : 0;
+
+        if (hIn) svg.appendChild(s("rect", { "class": "series-in", x: x0, y: 65 - hIn, width: barW, height: hIn }));
+        if (hOut) svg.appendChild(s("rect", { "class": "series-out", x: x0 + barW + 0.2, y: 65 - hOut, width: barW, height: hOut }));
+        if (hFlow) svg.appendChild(s("rect", { "class": "series-flow", fill: "var(--dim)", opacity: "0.4", x: x0, y: 140 - hFlow, width: barW * 2 + 0.2, height: hFlow }));
+        if (hBlock) svg.appendChild(s("rect", { "class": "series-block", fill: "var(--crit)", x: x0, y: 140 - hBlock, width: barW * 2 + 0.2, height: hBlock }));
+      });
+
+      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 66, x2: W, y2: 66, stroke: "var(--line)" }));
+      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 141, x2: W, y2: 141, stroke: "var(--line)" }));
+
+      var ticks = h("div", { cls: "chart-ticks" });
+      trends.forEach(function (p) {
+        var d = parseTime(p.timestamp);
+        ticks.appendChild(h("span", { text: d ? pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) : "" }));
+      });
+
+      dualChartCard = card("Dual Synchronized Flow & Volume Timeline",
+        h("div", { cls: "card-body" },
+          h("div", { cls: "dual-timeline-container" },
+            h("div", { cls: "dual-lane-label", text: "Lane 1: Bandwidth Volume (Bytes In · Out)" }),
+            svg,
+            h("div", { cls: "dual-lane-label", text: "Lane 2: Event Counts (Flows · Blocks)" }),
+            ticks,
+            h("div", { cls: "legend pad-x" },
+              h("span", { text: "■ Blue: Bytes In" }),
+              h("span", { text: "■ Indigo: Bytes Out" }),
+              h("span", { text: "■ Gray: Total Flows" }),
+              h("span", { text: "■ Red: Block Drops" }),
+              h("span", { text: "Window: " + (tf.range || "1h") })))));
+    } else {
+      dualChartCard = card("Traffic Timeline", h("div", { cls: "empty", text: "No timeline points captured in this window." }));
+    }
+
+    // 4. Composition Breakdowns
+    var dist = ov.distributions || {};
+    var protoCards = card("Protocol Distribution",
       h("div", { cls: "card-body" },
-        talkers.length
-          ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
-              function (t) { return (t.process || "\u2014") + " \u00b7 " + (Number(t.flow_count) || 0) + " flows"; },
-              function (t) { return Number(t.total_bytes) ? bytes(t.total_bytes) : "not measured"; })
+        arrayOf(dist.protocols).length
+          ? barList(dist.protocols, function (p) { return p.count; },
+              function (p) { return p.label + " (" + Math.round(p.percentage * 100) + "%)"; },
+              function (p) { return p.count + " flows · " + bytes(p.total_bytes); })
+          : h("div", { cls: "empty", text: "No protocols active." })));
+
+    var actCards = card("Action Breakdown",
+      h("div", { cls: "card-body" },
+        arrayOf(dist.actions).length
+          ? barList(dist.actions, function (a) { return a.count; },
+              function (a) { return a.label + " (" + Math.round(a.percentage * 100) + "%)"; },
+              function (a) { return a.count + " flows"; })
+          : h("div", { cls: "empty", text: "No action distribution." })));
+
+    var dirCards = card("Direction Distribution",
+      h("div", { cls: "card-body" },
+        arrayOf(dist.directions).length
+          ? barList(dist.directions, function (d) { return d.count; },
+              function (d) { return d.label + " (" + Math.round(d.percentage * 100) + "%)"; },
+              function (d) { return d.count + " flows"; })
+          : h("div", { cls: "empty", text: "No direction distribution." })));
+
+    // 5. Multi-column Rankings
+    var rankings = ov.rankings || {};
+    var procCard = card("Top Active Processes",
+      h("div", { cls: "card-body" },
+        arrayOf(rankings.top_processes).length
+          ? barList(rankings.top_processes, function (p) { return p.total_bytes || p.flow_count; },
+              function (p) { return p.label; },
+              function (p) { return p.flow_count + " flows" + (p.total_bytes ? " · " + bytes(p.total_bytes) : ""); })
           : h("div", { cls: "empty", text: "No process attribution yet." })));
 
-    var geo = arrayOf(an.geo_stats);
-    var geoCard = card("Destinations by country",
+    var dstCard = card("Top Remote Destinations",
       h("div", { cls: "card-body" },
-        geo.length
-          ? barList(geo, function (g) { return Number(g.total_bytes) || 0; },
-              function (g) { return (g.country_name || g.country) + " · " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " · " + g.threat_count + " flagged" : ""); },
-              function (g) { return Number(g.total_bytes) ? bytes(g.total_bytes) : "not measured"; })
-          : h("div", { cls: "empty", text: "No geo data." })));
+        arrayOf(rankings.top_destinations).length
+          ? barList(rankings.top_destinations, function (d) { return d.total_bytes || d.flow_count; },
+              function (d) { return d.label; },
+              function (d) { return d.flow_count + " flows" + (d.total_bytes ? " · " + bytes(d.total_bytes) : ""); })
+          : h("div", { cls: "empty", text: "No destination data." })));
 
-    // Aggregate DNS queries from in-line socket attribution and router forwarder
-    var dnsEvents = state.events.filter(function (e) {
-      return e.layer === "dns-forwarder-v1" || e.dst_port === 53 || (e.domain && e.domain.length > 0);
+    var domCard = card("Top Queried Domains",
+      h("div", { cls: "card-body" },
+        arrayOf(rankings.top_domains).length
+          ? barList(rankings.top_domains, function (d) { return d.flow_count; },
+              function (d) { return d.label; },
+              function (d) { return d.flow_count + " queries"; })
+          : h("div", { cls: "empty", text: "No domain queries." })));
+
+    var portCard = card("Top Destination Ports",
+      h("div", { cls: "card-body" },
+        arrayOf(rankings.top_ports).length
+          ? barList(rankings.top_ports, function (p) { return p.flow_count; },
+              function (p) { return "Port " + p.label; },
+              function (p) { return p.flow_count + " flows"; })
+          : h("div", { cls: "empty", text: "No port data." })));
+
+    // 6. Live Filtered Flow Stream Table
+    var flowsList = arrayOf(flowsData.flows);
+    var flowRows = flowsList.map(function (f) {
+      var isSelected = state.selectedFlow && state.selectedFlow.id === f.id;
+      var row = [
+        stamp(parseTime(f.timestamp)),
+        h("span", { cls: "st", "data-state": f.action === "BLOCK" ? "crit" : "ok" },
+          icon(f.action === "BLOCK" ? "g-quarantine" : "g-online", true),
+          h("span", { text: f.action || "PERMIT" })),
+        h("span", { cls: "dim-3", text: f.direction || "OUT" }),
+        h("span", { cls: "ip", text: f.endpoint_id || "—", on: { click: function (e) { e.stopPropagation(); tf.endpoint_id = f.endpoint_id; refresh(); } } }),
+        h("span", { cls: "ip", text: f.src_ip + (f.src_port ? ":" + f.src_port : "") }),
+        h("span", { cls: "ip", text: f.dst_ip + (f.dst_port ? ":" + f.dst_port : ""), on: { click: function (e) { e.stopPropagation(); tf.dst_ip = f.dst_ip; refresh(); } } }),
+        h("span", { cls: "dim-3", text: f.proto_name || "TCP" }),
+        h("span", { cls: "dim", text: f.process_name || f.domain || "—", on: { click: function (e) { e.stopPropagation(); if (f.process_name) tf.process = f.process_name; refresh(); } } }),
+        h("span", { cls: "ago", text: (Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0)
+          ? bytes((Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0))
+          : "—" })
+      ];
+      return row;
     });
 
-    var domainCounts = {};
-    var dnsBlocks = 0;
-    dnsEvents.forEach(function (e) {
-      var d = (e.domain || "").toLowerCase().trim();
-      if (!d) return;
-      domainCounts[d] = (domainCounts[d] || 0) + 1;
-      if (e.action === "BLOCK") dnsBlocks++;
-    });
+    var flowsTable = flowRows.length
+      ? simpleTable(["Time", "Action", "Dir", "Endpoint", "Source", "Destination", "Proto", "Process / Domain", "Volume"], flowRows)
+      : h("div", { cls: "empty", text: "No flow events match active filters." });
 
-    var topDomains = Object.keys(domainCounts).map(function (k) {
-      return { domain: k, count: domainCounts[k] };
-    }).sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+    // Make table rows interactive for drawer selection
+    var tableEl = flowsTable.querySelector("tbody");
+    if (tableEl) {
+      var trs = tableEl.querySelectorAll("tr");
+      trs.forEach(function (tr, idx) {
+        tr.classList.add("flow-table-row");
+        if (flowsList[idx] && state.selectedFlow && state.selectedFlow.id === flowsList[idx].id) {
+          tr.classList.add("selected");
+        }
+        tr.addEventListener("click", function () {
+          state.selectedFlow = flowsList[idx];
+          renderTraffic();
+        });
+      });
+    }
 
-    var dnsTopCard = card("Top queried domains (DNS Gateway & Socket)",
-      h("div", { cls: "card-body" },
-        topDomains.length
-          ? barList(topDomains, function (d) { return d.count; },
-              function (d) { return d.domain; },
-              function (d) { return d.count + " query" + (d.count === 1 ? "" : "ies"); })
-          : h("div", { cls: "empty", text: "No domain queries recorded yet." })));
+    var nextBtn = flowsData.next_cursor ? h("button", {
+      cls: "btn mini btn-primary", type: "button", text: "Next Page →",
+      on: { click: function () { tf.cursor = flowsData.next_cursor; refresh(); } }
+    }) : null;
+    var prevBtn = tf.cursor ? h("button", {
+      cls: "btn mini", type: "button", text: "← First Page",
+      on: { click: function () { tf.cursor = ""; refresh(); } }
+    }) : null;
 
-    var dnsStatsCard = card("DNS Gateway & Sinkhole Telemetry",
-      h("div", { cls: "card-body dns-grid" },
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(dnsEvents.length) }),
-          h("span", { cls: "dns-stat-label", text: "Captured DNS Queries" })),
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(Object.keys(domainCounts).length) }),
-          h("span", { cls: "dns-stat-label", text: "Unique Domains Resolved" })),
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(dnsBlocks) }),
-          h("span", { cls: "dns-stat-label", text: "Threat Sinkhole Drops (0.0.0.0)" })),
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: "< 1 ms" }),
-          h("span", { cls: "dns-stat-label", text: "RAM Cache Response Time" }))));
+    var pagination = h("div", { cls: "actions pad-x" }, prevBtn, nextBtn);
+    var flowStreamCard = card("Active Flow Telemetry (" + (flowsData.total || flowsList.length) + " matching events)",
+      h("div", { cls: "stack" }, flowsTable, pagination));
 
-    var dnsRows = dnsEvents.slice(0, 40).map(function (e) {
+    // 7. DNS Gateway & Sinkhole Telemetry (Driven by real DNS APIs)
+    var dnsStatus = state.dnsStatus || {};
+    var dnsEventsList = arrayOf(state.dnsEvents);
+    var dnsGrid = h("div", { cls: "card-body dns-grid" },
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(dnsStatus.state || "active").toUpperCase() }),
+        h("span", { cls: "dns-stat-label", text: "DNS Gateway State" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(dnsStatus.queries_total || 0) }),
+        h("span", { cls: "dns-stat-label", text: "RFC-53 Queries Handled" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: String(dnsStatus.blocked_total || 0), style: dnsStatus.blocked_total ? "color: var(--crit)" : "" }),
+        h("span", { cls: "dns-stat-label", text: "Domain Threat Drops (0.0.0.0)" })),
+      h("div", { cls: "dns-stat-box" },
+        h("span", { cls: "dns-stat-val", text: Math.round((Number(dnsStatus.cache_hit_ratio) || 0) * 100) + "%" }),
+        h("span", { cls: "dns-stat-label", text: "RAM Cache Hit Ratio" })));
+
+    var dnsRows = dnsEventsList.map(function (e) {
       return [
         stamp(parseTime(e.timestamp)),
         h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
           icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
           h("span", { text: e.action || "PERMIT" })),
-        h("span", { cls: "ip", text: e.src_ip || "\u2014" }),
-        h("span", { cls: "ip", text: e.domain || "\u2014" }),
-        h("span", { cls: "dim", text: e.process_path || (e.layer === "dns-forwarder-v1" ? "Google WiFi / Gateway Forwarder" : "\u2014") })
+        h("span", { cls: "ip", text: e.client_ip || "—" }),
+        h("span", { cls: "ip", text: e.domain || "—" }),
+        h("span", { cls: "dim-3", text: (e.transport || "udp").toUpperCase() + " · " + (e.qtype || "A") }),
+        h("span", { cls: "dim", text: (e.latency_us ? (e.latency_us / 1000).toFixed(2) + " ms" : "< 1 ms") + " · " + (e.status || "HIT") })
       ];
     });
 
-    var dnsLiveCard = card("Live DNS query stream",
-      dnsRows.length
-        ? simpleTable(["Time", "Action", "Client IP", "Queried Domain", "Origin / Process"], dnsRows)
-        : h("div", { cls: "empty", text: "No DNS stream events captured." }));
+    var dnsStreamCard = card("RFC-Compliant DNS Gateway & Threat Sinkhole",
+      h("div", { cls: "stack" },
+        dnsGrid,
+        dnsRows.length
+          ? simpleTable(["Time", "Verdict", "Client IP", "Queried Domain", "Proto/Type", "Latency & Cache"], dnsRows)
+          : h("div", { cls: "empty", text: "No DNS queries recorded." })));
 
-    var evRows = state.events.slice(0, 60).map(function (e) {
-      return [
-        stamp(parseTime(e.timestamp)),
-        h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
-          icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
-          h("span", { text: e.action || "PERMIT" })),
-        h("span", { cls: "dim-3", text: e.direction || "" }),
-        h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
-        h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
-        h("span", { cls: "dim", text: e.process_path || e.domain || "—" }),
-        h("span", { cls: "ago", text: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)
-          ? bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0))
-          : "—", title: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0) ? "" : "not measured on this flow" })
-      ];
-    });
+    // Assemble View
+    view.appendChild(h("div", { cls: "pad stack traffic-workspace" },
+      filterBar,
+      statsGrid,
+      dualChartCard,
+      h("div", { cls: "distrib-grid" }, protoCards, actCards, dirCards),
+      h("div", { cls: "cols" }, procCard, dstCard),
+      h("div", { cls: "cols" }, domCard, portCard),
+      dnsStreamCard,
+      flowStreamCard));
 
-    view.appendChild(h("div", { cls: "pad stack" },
-      chartCard,
-      dnsStatsCard,
-      h("div", { cls: "cols" }, talkerCard, dnsTopCard),
-      dnsLiveCard,
-      geoCard,
-      card("Recent flows", simpleTable(["Time", "Action", "Dir", "Source", "Destination", "Process", "Bytes"], evRows))));
+    // Render Drawer if Flow is Selected
+    if (state.selectedFlow) {
+      var sel = state.selectedFlow;
+      var drawer = h("div", { cls: "flow-drawer" },
+        h("div", { cls: "drawer-header" },
+          h("div", { cls: "stack" },
+            h("b", { text: "Flow Investigation #" + (sel.id || sel.ID || "") }),
+            h("span", { cls: "dim-3", text: sel.timestamp ? String(sel.timestamp) : "" })),
+          h("button", {
+            cls: "btn mini ghost", type: "button", text: "✕ Close",
+            on: { click: function () { state.selectedFlow = null; renderTraffic(); } }
+          })),
+        h("div", { cls: "drawer-body" },
+          h("div", { cls: "drawer-kv-group" },
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Action Verdict" }), h("span", { cls: "st", "data-state": sel.action === "BLOCK" ? "crit" : "ok", text: sel.action || "PERMIT" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Direction" }), h("span", { cls: "drawer-kv-val", text: sel.direction || "OUTBOUND" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Protocol" }), h("span", { cls: "drawer-kv-val", text: (sel.proto_name || "TCP") + " (" + sel.protocol + ")" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Endpoint ID" }), h("span", { cls: "drawer-kv-val", text: sel.endpoint_id || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Source IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.src_ip + ":" + sel.src_port })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Destination IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.dst_ip + ":" + sel.dst_port })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Remote Country" }), h("span", { cls: "drawer-kv-val", text: sel.country || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Process Path" }), h("span", { cls: "drawer-kv-val", text: sel.process_path || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Queried Domain" }), h("span", { cls: "drawer-kv-val", text: sel.domain || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes In" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_in) })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes Out" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_out) }))),
+          h("div", { cls: "drawer-actions" },
+            h("button", {
+              cls: "btn mini btn-primary", type: "button", text: "Filter by this Endpoint",
+              on: { click: function () { tf.endpoint_id = sel.endpoint_id; state.selectedFlow = null; refresh(); } }
+            }),
+            h("button", {
+              cls: "btn mini", type: "button", text: "Filter by this Destination IP",
+              on: { click: function () { tf.dst_ip = sel.dst_ip; state.selectedFlow = null; refresh(); } }
+            }),
+            sel.process_name ? h("button", {
+              cls: "btn mini", type: "button", text: "Filter by Process (" + sel.process_name + ")",
+              on: { click: function () { tf.process = sel.process_name; state.selectedFlow = null; refresh(); } }
+            }) : null)));
+      view.appendChild(drawer);
+    }
   }
 
   /* ------------------------------------------------------------- sheet */
@@ -4133,54 +4790,6 @@
     return card("If isolated", body, actions.length ? actions : null, true);
   }
 
-  function consensusCard() {
-    var candidates = arrayOf(state.baselineConsensus && state.baselineConsensus.candidates);
-    if (!candidates.length) return null;
-
-    var items = candidates.map(function (c) {
-      var summary = arrayOf(c.rules).map(function (r) {
-        return r.service + " → " + r.destination + " (" + (r.protocol || "UDP") + "/" + r.port + ")";
-      }).join(", ");
-
-      var consensusPct = Math.round((Number(c.consensus_ratio) || 1) * 100);
-
-      return h("div", { cls: "consensus-item" },
-        h("div", { cls: "stack" },
-          h("div", { cls: "consensus-badge" },
-            h("b", { text: (c.cohort || "Fleet Cohort") }),
-            h("span", { text: "· " + consensusPct + "% Consensus (" + (c.host_count || 1) + " hosts)" })),
-          h("div", { cls: "ip", text: summary })),
-        IS_ADMIN ? h("button", {
-          cls: "btn", type: "button", text: "Adopt as Policy",
-          on: {
-            click: function () {
-              var osName = "linux";
-              if (c.cohort && c.cohort.toLowerCase().indexOf("windows") !== -1) osName = "windows";
-              var policy = {
-                name: "Consensus: " + (c.cohort || "Fleet"),
-                scope: "os",
-                scope_value: osName,
-                rules: c.rules,
-                enabled: true
-              };
-              request("/api/v1/baseline/policies", "POST", policy)
-                .then(function () {
-                  toast("Adopted fleet consensus policy for " + c.cohort, "ok");
-                  refresh();
-                })
-                .catch(function (e) { toast("Failed to save policy: " + e.message, "crit"); });
-            }
-          }
-        }) : null);
-    });
-
-    var body = h("div", { cls: "stack" },
-      h("p", { cls: "why pad-x", text: "Autonomous cross-host consensus detected. When >=70% of hosts in an OS/role cohort agree on vital core services (DNS, DHCP, NTP), they are surfaced here for 1-click adoption into permanent isolation policies." }),
-      h("div", { cls: "consensus-list" }, items));
-
-    return card("Fleet Consensus Recommendations", body);
-  }
-
   function baselineCard() {
     var rows = state.baselinePolicies.map(function (p) {
       var rules = arrayOf(p.rules);
@@ -4449,9 +5058,7 @@
         ];
       }));
 
-    var cCard = consensusCard();
     var stackItems = [
-      cCard,
       baselineCard(),
       tuningCard(),
       card("Exclusions", excl),
@@ -4840,7 +5447,8 @@
     drawerEl = null;
     scrimEl = null;
     openDrawer = "";
-    $("btn-alerts").setAttribute("aria-expanded", "false");
+    var btn = $("btn-alerts");
+    if (btn) btn.setAttribute("aria-expanded", "false");
   }
 
   function showDrawer(kind) {
@@ -4852,7 +5460,8 @@
     document.body.appendChild(scrimEl);
     drawerEl = h("aside", { cls: "drawer", role: "dialog", "aria-label": "Alerts" });
     document.body.appendChild(drawerEl);
-    $("btn-alerts").setAttribute("aria-expanded", "true");
+    var btn = $("btn-alerts");
+    if (btn) btn.setAttribute("aria-expanded", "true");
     renderDrawer();
   }
 
@@ -5236,13 +5845,13 @@
   }
 
   document.addEventListener("click", function (e) {
-    if (ctxMenu && !ctxMenu.contains(e.target)) closeCtx();
-    if (themePop && !themePop.contains(e.target) && e.target !== $("theme-btn") && !$("theme-btn").contains(e.target)) closeThemePop();
-  }, true);
+    if (ctxMenu && !ctxMenu.contains(e.target) && !e.target.closest(".menu-btn")) closeCtx();
+    if (accountPop && !accountPop.contains(e.target) && !e.target.closest("#user-avatar-btn")) closeAccountPop();
+  });
 
   window.addEventListener("resize", function () {
     closeCtx();
-    closeThemePop();
+    closeAccountPop();
   });
 
   /* ------------------------------------------------------------- topbar */
@@ -5262,11 +5871,10 @@
         sub += " \u00b7 filtered: " + active.map(function (k) { return FILTERS[k].label.toLowerCase(); }).join(", ");
       }
       if (state.query) sub += " \u00b7 \u201c" + state.query + "\u201d";
-    } else if (state.section === "discovery") {
-      var cov = state.coverage || {};
-      sub = (cov.total_discovered || state.scanAssets.length)
-        ? "/ " + pct(cov.coverage_percent) + " covered"
-        : "/ no sweep yet";
+    } else if (state.section === "alerts") {
+      var unack = state.unackAlertsTotal !== undefined ? state.unackAlertsTotal : state.anomalies.filter(function (a) { return !a.acknowledged; }).length;
+      var total = state.alertsData ? state.alertsData.total : state.anomalies.length;
+      sub = "/ " + total + " total \u00b7 " + unack + " open";
     } else if (state.section === "topology") {
       sub = "/ " + state.topoWindow + " window";
     } else if (state.demo) {
@@ -5275,20 +5883,12 @@
     if (state.demo && state.section === "assets") sub += " \u00b7 demo";
     $("crumb-sub").textContent = sub;
 
-    $("hub-version").textContent = HUB_VERSION ? "hub " + HUB_VERSION : "";
-
-    /* The hub returns at most ANOMALY_PAGE unacknowledged anomalies, so a full
-       page is a floor and not a count. Printing it as one turned "at least a
-       hundred open" into a confident "100", which is the number an operator
-       then reasons about. */
-    var pip = $("alert-count");
-    var open = state.anomalies.length;
-    var capped = !!state.anomaliesCapped;
-    pip.textContent = capped ? open + "+" : String(open);
-    pip.setAttribute("data-n", String(open));
-    pip.setAttribute("title", capped
-      ? "At least " + open + " open anomalies; the hub returns one page at a time."
-      : open + " open " + (open === 1 ? "anomaly" : "anomalies"));
+    var badge = $("rail-alert-badge");
+    if (badge) {
+      var count = state.unackAlertsTotal !== undefined ? state.unackAlertsTotal : state.anomalies.filter(function (a) { return !a.acknowledged; }).length;
+      badge.textContent = String(count);
+      badge.setAttribute("data-n", String(count));
+    }
 
     var health = $("health");
     var hstate = state.lastError ? "down" : (assetStats().offline > 0 ? "degraded" : "ok");
@@ -5302,69 +5902,55 @@
   function renderTopbar() {
     updateCrumb();
 
+    var sweepDot = $("sweep-pulse-dot");
+    var sweepLabel = $("sweep-label-text");
+    var isScanning = !!(state.scanStatus && state.scanStatus.active);
+    if (sweepDot) {
+      if (isScanning) sweepDot.classList.add("scanning");
+      else sweepDot.classList.remove("scanning");
+    }
+    if (sweepLabel) {
+      sweepLabel.textContent = isScanning ? "Scanning LAN (" + (state.scanStatus.progress || 0) + "%)" : "Subnet Sweep";
+    }
+
     var actions = $("topbar-actions");
-    clear(actions);
 
     if (state.section === "assets") {
-      /* The filter field is reused rather than rebuilt: render() runs on every
-         five-second poll, and a fresh input would drop the caret mid-word. */
-      var input = filterInput;
-      if (!input) {
-        input = filterInput = h("input", {
+      /* The filter field is reused rather than rebuilt to preserve focus and caret */
+      if (!filterInput) {
+        filterInput = h("input", {
           type: "search", id: "filter-input", placeholder: "Filter rows", "aria-label": "Filter rows"
         });
-        input.value = state.query;
-        input.addEventListener("input", function () {
-          state.query = input.value;
+        filterInput.value = state.query;
+        filterInput.addEventListener("input", function () {
+          state.query = filterInput.value;
           state.cursorKey = "";
           renderBody();
           renderStrip();
           updateCrumb();
         });
-      } else if (document.activeElement !== input) {
-        input.value = state.query;
+      } else if (document.activeElement !== filterInput) {
+        filterInput.value = state.query;
       }
-      actions.appendChild(input);
-
-      var sel = selectedKeys().length;
-      if (sel) {
-        actions.appendChild(h("button", {
-          cls: "btn", type: "button", text: "Release " + sel,
-          on: { click: function () { bulkIsolate(false); } }
-        }));
-        actions.appendChild(h("button", {
-          cls: "btn", type: "button", text: "Isolate " + sel,
-          on: { click: function () { bulkIsolate(true); } }
-        }));
+      if (actions && actions.firstElementChild !== filterInput) {
+        clear(actions);
+        actions.appendChild(filterInput);
       }
-      if (assetStats().outdated) {
-        actions.appendChild(h("button", {
-          cls: "btn btn-primary", type: "button", text: "Update agents",
-          on: { click: pushAgentUpdates }
-        }));
-      }
-    } else if (state.section === "discovery") {
-      actions.appendChild(h("button", {
-        cls: "btn btn-primary", type: "button", text: "Install an agent",
-        on: { click: function () { openInstallerSheet(); } }
-      }));
-    } else if (state.section === "topology") {
-      ["1h", "6h", "24h", "7d"].forEach(function (w) {
-        actions.appendChild(h("button", {
-          cls: state.topoWindow === w ? "btn btn-primary" : "btn", type: "button", text: w,
-          on: {
-            click: function () {
-              state.topoWindow = w;
-              loadTopology().then(render);
+    } else if (actions) {
+      clear(actions);
+      if (state.section === "topology") {
+        ["1h", "6h", "24h", "7d"].forEach(function (w) {
+          actions.appendChild(h("button", {
+            cls: state.topoWindow === w ? "btn btn-primary" : "btn", type: "button", text: w,
+            on: {
+              click: function () {
+                state.topoWindow = w;
+                loadTopology().then(render);
+              }
             }
-          }
-        }));
-      });
-    } else if (state.section === "discovery") {
-      actions.appendChild(h("button", {
-        cls: "btn", type: "button", text: "Refresh",
-        on: { click: refresh }
-      }));
+          }));
+        });
+      }
     }
   }
 
@@ -5378,12 +5964,13 @@
     var tblScrollLeft = tblWrap ? tblWrap.scrollLeft : 0;
 
     if (state.section === "assets") renderAssets();
-    else if (state.section === "discovery") renderDiscovery();
     else if (state.section === "topology") renderTopology();
     else if (state.section === "traffic") renderTraffic();
     else if (state.section === "policy") renderPolicy();
+    else if (state.section === "alerts") renderAlerts();
     else if (state.section === "audit") renderAudit();
     else if (state.section === "access") renderAccess();
+    else renderAssets();
 
     view.scrollTop = scrollTop;
     view.scrollLeft = scrollLeft;
@@ -5406,6 +5993,7 @@
   }
 
   function go(section) {
+    if (section === "discovery") section = "assets";
     state.section = section;
     closeSheet();
     closeRoute();
@@ -5423,22 +6011,38 @@
   }
 
   function refresh() {
+    if (state.refreshing) {
+      state.queuedRefresh = true;
+      return Promise.resolve();
+    }
+    state.refreshing = true;
+    state.queuedRefresh = false;
+
+    var af = state.alertsFilter || { page: 1, limit: 50 };
+    var offset = (af.page - 1) * af.limit;
+    var aParams = "?limit=" + af.limit + "&offset=" + offset;
+    if (af.unacknowledged_only) aParams += "&unacknowledged_only=true";
+    if (af.severity) aParams += "&severity=" + encodeURIComponent(af.severity);
+    if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
+    if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
+
     var jobs = [
       request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
       request("/api/v1/endpoints").then(function (d) { state.endpoints = arrayOf(d); }),
       request("/api/v1/assets").then(function (d) { state.assetGraph = arrayOf(d); }),
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
-      /* Only used to seed the discovery scan field, but it is the hub's own
-         answer to "what network is this", which beats guessing from an
-         address. */
       request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
-      request("/api/v1/anomalies").then(function (d) {
-        var page = arrayOf(d);
-        /* Recorded before the acknowledged ones are filtered out: a full page
-           means the hub had more to give, whatever survives the filter. */
-        state.anomaliesCapped = page.length >= ANOMALY_PAGE;
-        state.anomalies = page.filter(function (a) { return !a.acknowledged; });
+      request("/api/v1/anomalies" + aParams).then(function (d) {
+        if (d && Array.isArray(d.alerts)) {
+          state.alertsData = d;
+          state.anomalies = d.alerts;
+          state.unackAlertsTotal = Number(d.unacknowledged_total) || 0;
+        } else {
+          var page = arrayOf(d);
+          state.anomalies = page;
+          state.unackAlertsTotal = page.filter(function (a) { return !a.acknowledged; }).length;
+        }
       }),
       request("/api/v1/agents/update-status").then(function (d) { state.updateStatus = d || null; }),
       request("/api/v1/mesh/quarantined").then(function (d) { state.meshPeers = arrayOf(d); })
@@ -5449,12 +6053,12 @@
         state.baselinePolicies = arrayOf(d && d.policies);
         state.baselineServices = arrayOf(d && d.services);
       }));
-      jobs.push(request("/api/v1/baseline/consensus").then(function (d) { state.baselineConsensus = d || null; }));
       jobs.push(request("/api/v1/detection/tuning").then(function (d) { state.tuning = d || null; }));
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
-    if (state.section === "access" && IS_ADMIN) {
+    if (state.section === "assets") jobs.push(loadDiscovered());
+    if (state.section === "operators") {
       jobs.push(request("/api/v1/operators").then(function (d) {
         state.operators = arrayOf(d && d.operators);
         if (d && Array.isArray(d.roles) && d.roles.length) state.operatorRoles = d.roles;
@@ -5465,13 +6069,32 @@
       jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
-    if (state.section === "traffic" || state.routeKey) {
-      jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }));
-      jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
+    if (state.section === "traffic") {
+      var tf = state.trafficFilter || { range: "1h" };
+      var qs = "?range=" + encodeURIComponent(tf.range || "1h");
+      if (tf.endpoint_id) qs += "&endpoint_id=" + encodeURIComponent(tf.endpoint_id);
+      if (tf.src_ip) qs += "&src_ip=" + encodeURIComponent(tf.src_ip);
+      if (tf.dst_ip) qs += "&dst_ip=" + encodeURIComponent(tf.dst_ip);
+      if (tf.process) qs += "&process=" + encodeURIComponent(tf.process);
+      if (tf.domain) qs += "&domain=" + encodeURIComponent(tf.domain);
+      if (tf.country) qs += "&country=" + encodeURIComponent(tf.country);
+      if (tf.protocol) qs += "&protocol=" + encodeURIComponent(tf.protocol);
+      if (tf.port) qs += "&port=" + encodeURIComponent(tf.port);
+      if (tf.direction) qs += "&direction=" + encodeURIComponent(tf.direction);
+      if (tf.action) qs += "&action=" + encodeURIComponent(tf.action);
+      if (tf.measured_only) qs += "&measured_only=true";
+      if (tf.cursor) qs += "&cursor=" + encodeURIComponent(tf.cursor);
+
+      jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { state.trafficOverview = d || null; }));
+      jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { state.trafficFlows = d || null; }));
+    }
+    if (state.section === "dns") {
+      jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
+      jobs.push(request("/api/v1/dns/events?limit=40").then(function (d) { state.dnsEvents = arrayOf(d && d.events); }));
+      jobs.push(request("/api/v1/dns/policy").then(function (d) { state.dnsPolicy = arrayOf(d && d.rules); }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
-    /* The open host's own answer, and the catalogue the editor needs to name a
-       service. Both are small and only fetched while a host is on screen. */
+
     if (state.routeKey && state.assetByKey[state.routeKey] && state.assetByKey[state.routeKey].endpoint) {
       var openEp = state.assetByKey[state.routeKey].endpoint.id;
       jobs.push(request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(openEp))
@@ -5490,15 +6113,36 @@
       state.loading = false;
       buildAssets();
       pushHistory(Object.assign({ total: state.assets.length }, assetStats()));
-      /* Drop selections for assets that no longer exist, but keep every other
-         selection so a five-second refresh never clears the operator's work. */
       Object.keys(state.selected).forEach(function (k) {
         if (!state.assetByKey[k]) delete state.selected[k];
       });
       if (state.expandedKey && !state.assetByKey[state.expandedKey]) state.expandedKey = "";
       if (state.cursorKey && !state.assetByKey[state.cursorKey]) state.cursorKey = "";
       if (state.routeKey && !state.assetByKey[state.routeKey]) closeRoute();
+
+      // Check if user is actively selecting text or typing in an input
+      var sel = window.getSelection ? window.getSelection() : null;
+      var hasActiveTextSelection = sel && !sel.isCollapsed && sel.toString().length > 0;
+      var isInputFocused = document.activeElement && (
+        document.activeElement.tagName === "INPUT" ||
+        document.activeElement.tagName === "TEXTAREA" ||
+        document.activeElement.isContentEditable
+      );
+      if (hasActiveTextSelection || isInputFocused) {
+        updateCrumb();
+        renderStrip();
+        var alertBadge = $("rail-alert-badge");
+        if (alertBadge) alertBadge.textContent = state.unackAlertsTotal || 0;
+        return;
+      }
+
       render();
+    }).finally(function () {
+      state.refreshing = false;
+      if (state.queuedRefresh) {
+        state.queuedRefresh = false;
+        refresh();
+      }
     });
   }
 
@@ -5514,30 +6158,41 @@
 
     $("omni-kbd").textContent = MOD_LABEL;
     $("omni").addEventListener("click", openPalette);
-    $("btn-alerts").addEventListener("click", function () { showDrawer("alerts"); });
-    $("theme-btn").addEventListener("click", function (e) {
-      e.stopPropagation();
-      if (themePop) closeThemePop();
-      else openThemePop();
-    });
+
+    var sweepBtn = $("topbar-sweep-btn");
+    if (sweepBtn) sweepBtn.addEventListener("click", openSweepModal);
+
+    var installBtn = $("topbar-install-btn");
+    if (installBtn) installBtn.addEventListener("click", function () { openInstallerSheet({ platform: "linux" }); });
+
+    var avatarBtn = $("user-avatar-btn");
+    if (avatarBtn) {
+      var opName = state.you || OPERATOR || "admin";
+      var initial = (opName[0] || "A").toUpperCase();
+      var avInit = $("avatar-initial");
+      if (avInit) avInit.textContent = initial;
+
+      avatarBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (accountPop) closeAccountPop();
+        else openAccountPop();
+      });
+    }
 
     if (IS_ADMIN) $("rail-access").removeAttribute("hidden");
-
-    /* An operator who signed in as themselves should be able to see who the
-       console thinks they are without opening a section to find out. */
-    if (OPERATOR && OPERATOR !== "admin") {
-      $("signed-in").textContent = OPERATOR + (READ_ONLY ? " \u00b7 read only" : "");
-      $("signed-in").title = "Signed in as " + OPERATOR + " (" + roleName(ROLE).toLowerCase() + ")";
-    }
 
     Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
       b.addEventListener("click", function () { go(b.getAttribute("data-section")); });
     });
 
     if (state.demo) toast("Demo mode \u2014 synthetic fleet, no live hub data", "warn");
-    /* Said once, on arrival. The alternative is letting someone select forty
-       hosts and click Isolate to find out. */
     if (READ_ONLY) toast("Read-only role \u2014 the hub refuses any action taken from this console", "warn");
+
+    window.__state = state;
+    window.__refresh = refresh;
+    window.__request = request;
+    window.__render = render;
 
     render();
     refresh();

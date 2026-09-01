@@ -2,6 +2,7 @@ package detector
 
 import (
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,5 +185,59 @@ func TestDetectorEngine(t *testing.T) {
 	}
 	if !foundLateral {
 		t.Errorf("expected LATERAL_PORT_SWEEP anomaly to be recorded")
+	}
+}
+
+func TestDockerAndInfrastructureExcludedFromLateralSweep(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_docker_fp.db")
+
+	store, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	eventsChan := make(chan storage.Event, 100)
+	engine := New(store, eventsChan, func(endpointID, reason string) error { return nil })
+
+	// Simulate docker-proxy connecting to 10 distinct containers in 172.18.0.0/16
+	for i := 1; i <= 10; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID:    "default",
+			EndpointID:  "dev-workstation",
+			Timestamp:   time.Now().UTC(),
+			Action:      "PERMIT",
+			Direction:   "OUTBOUND",
+			DstIP:       "172.18.0." + strconv.Itoa(i),
+			DstPort:     8080,
+			ProcessPath: "/usr/bin/docker-proxy",
+			ProcessID:   uint32(1000 + i),
+		})
+	}
+
+	// Simulate dnsmasq connecting to 10 local interfaces
+	for i := 1; i <= 10; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID:    "default",
+			EndpointID:  "dev-workstation",
+			Timestamp:   time.Now().UTC(),
+			Action:      "PERMIT",
+			Direction:   "OUTBOUND",
+			DstIP:       "192.168.86." + strconv.Itoa(i),
+			DstPort:     53,
+			ProcessPath: "/usr/sbin/dnsmasq",
+			ProcessID:   uint32(2000 + i),
+		})
+	}
+
+	anomalies, err := store.ListAnomalyAlerts("default", 100)
+	if err != nil {
+		t.Fatalf("ListAnomalyAlerts failed: %v", err)
+	}
+
+	for _, a := range anomalies {
+		if a.AnomalyType == "LATERAL_PORT_SWEEP" || a.AnomalyType == "PORT_SCAN_RECON" {
+			t.Errorf("unexpected anomaly alert for docker-proxy/dnsmasq: %s (%s)", a.AnomalyType, a.Title)
+		}
 	}
 }

@@ -519,10 +519,15 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 	}
 
-	// 6. Rapid Port Sweeps / Reconnaissance
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 {
+	// 6. Rapid Port Sweeps / Reconnaissance (Evaluated per-process)
+	procKey := strings.ToLower(filepath.Base(ev.ProcessPath))
+	if procKey == "" || procKey == "." {
+		procKey = "unknown"
+	}
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
+		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
-		history := e.portHistory[ev.EndpointID]
+		history := e.portHistory[sweepKey]
 		var recent []portAccess
 		seenPorts := make(map[uint16]bool)
 		for _, p := range history {
@@ -533,13 +538,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 		recent = append(recent, portAccess{port: ev.DstPort, t: now})
 		seenPorts[ev.DstPort] = true
-		e.portHistory[ev.EndpointID] = recent
+		e.portHistory[sweepKey] = recent
 		distinctCount := len(seenPorts)
 		e.mu.Unlock()
 
-		if distinctCount >= 15 {
-			alertKey := fmt.Sprintf("portsweep:%s", ev.EndpointID)
-			if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
+		portThreshold := 30
+		if isInteractiveShell {
+			portThreshold = 15
+		}
+		if distinctCount >= portThreshold {
+			alertKey := fmt.Sprintf("portsweep:%s:%s", ev.EndpointID, procKey)
+			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -566,18 +575,21 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s", alert.Title, alert.EndpointID)
+				log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, procKey)
 			}
 		}
 	}
 
-	// 7. Topological Graph Outlier: Internal Lateral Port Sweep / Subnet Fan-Out
-	if isPrivateIP(ev.DstIP) && ev.Direction == "OUTBOUND" && ev.DstIP != "127.0.0.1" {
+	// 7. Topological Graph Outlier: Internal Lateral Movement / Subnet Fan-Out (Evaluated per-process)
+	if isPrivateIP(ev.DstIP) && ev.Direction == "OUTBOUND" && ev.DstIP != "127.0.0.1" &&
+		!isBridgeOrContainerSubnet(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
+
 		e.mu.Lock()
-		targetMap, exists := e.lateralTargets[ev.EndpointID]
+		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
+		targetMap, exists := e.lateralTargets[lateralKey]
 		if !exists {
 			targetMap = make(map[string]time.Time)
-			e.lateralTargets[ev.EndpointID] = targetMap
+			e.lateralTargets[lateralKey] = targetMap
 		}
 		// Clean targets older than 60 seconds
 		for ip, t := range targetMap {
@@ -591,16 +603,30 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 		isOffHours := now.Hour() >= 22 || now.Hour() <= 5
 		isWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
-		if (distinctTargets >= 5) || (distinctTargets >= 3 && isOffHours && isWorkstation) {
-			alertKey := fmt.Sprintf("lateral_sweep:%s", ev.EndpointID)
-			if !e.shouldSuppressAlert(alertKey, 20*time.Second) {
+
+		// Thresholds:
+		// - Interactive shell / script interpreter (cmd.exe, powershell, python, bash, nmap): >= 6 distinct LAN hosts (or >= 3 off-hours)
+		// - Standard compiled app: >= 20 distinct LAN hosts (or >= 10 off-hours)
+		threshold := 20
+		if isInteractiveShell {
+			threshold = 6
+			if isOffHours && isWorkstation {
+				threshold = 3
+			}
+		} else if isOffHours && isWorkstation {
+			threshold = 10
+		}
+
+		if distinctTargets >= threshold {
+			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
+			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Timestamp:   now,
 					Title:       fmt.Sprintf("Lateral Port Sweep / Internal Fan-Out (%d Hosts)", distinctTargets),
-					Description: fmt.Sprintf("Endpoint %s initiated rapid internal connection sweep to %d distinct hosts on subnet within 60 seconds.", ev.EndpointID, distinctTargets),
+					Description: fmt.Sprintf("Process %s on %s initiated rapid internal connection sweep to %d distinct hosts on subnet within 60 seconds.", ev.ProcessPath, ev.EndpointID, distinctTargets),
 					Severity:    "CRITICAL",
 					Mitigated:   false,
 				}
@@ -620,7 +646,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on %s -> %d targets in 60s", alert.Title, ev.EndpointID, distinctTargets)
+				log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on %s (%s) -> %d targets in 60s", alert.Title, ev.EndpointID, procKey, distinctTargets)
 			}
 		}
 	}
@@ -691,4 +717,39 @@ func isPrivateIP(ipStr string) bool {
 		return false
 	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+// isBridgeOrContainerSubnet checks if an IP belongs to standard local bridge/container subnets
+func isBridgeOrContainerSubnet(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 172.17.0.0/16 through 172.31.0.0/16 (Docker / Podman default bridges)
+		if v4[0] == 172 && v4[1] >= 17 && v4[1] <= 31 {
+			return true
+		}
+		// 10.244.0.0/16 and 10.96.0.0/12 (Kubernetes pod / service CIDRs)
+		if v4[0] == 10 && (v4[1] == 244 || v4[1] >= 96 && v4[1] <= 111) {
+			return true
+		}
+	}
+	return false
+}
+
+// isKnownInfrastructureProcess checks if a process is a container runtime, local DNS resolver, or test runner
+func isKnownInfrastructureProcess(procPath string) bool {
+	p := strings.ToLower(procPath)
+	base := filepath.Base(p)
+	if strings.HasSuffix(p, ".test") || strings.Contains(p, "go-build") {
+		return true
+	}
+	switch base {
+	case "docker-proxy", "dockerd", "containerd", "runc", "dnsmasq",
+		"systemd-resolved", "kubelet", "cilium-agent", "avahi-daemon",
+		"coredns", "named", "unbound", "wireguard-go":
+		return true
+	}
+	return false
 }
