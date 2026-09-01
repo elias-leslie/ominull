@@ -6057,7 +6057,6 @@
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
-    if (state.section === "assets") jobs.push(loadDiscovered());
     if (state.section === "operators") {
       jobs.push(request("/api/v1/operators").then(function (d) {
         state.operators = arrayOf(d && d.operators);
@@ -6193,6 +6192,12 @@
     window.__refresh = refresh;
     window.__request = request;
     window.__render = render;
+
+    if ("serviceWorker" in navigator && !state.demo) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("/sw.js").catch(function () {});
+      });
+    }
 
     render();
     refresh();

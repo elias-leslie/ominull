@@ -93,6 +93,14 @@ func consoleContentType(name string) string {
 		return "text/css; charset=utf-8"
 	case ".js":
 		return "text/javascript; charset=utf-8"
+	case ".webmanifest":
+		return "application/manifest+json"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".ico":
+		return "image/x-icon"
 	case ".woff2":
 		return "font/woff2"
 	case ".txt":
@@ -188,6 +196,14 @@ func consoleGateDocument(oidcConfigured bool) []byte {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ominull Console</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#14161a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ominull">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>

@@ -156,7 +156,7 @@ func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
 	h.Set("Content-Security-Policy",
 		"default-src 'none'; script-src "+scriptSrc+"; style-src 'self'; font-src 'self'; "+
 			"img-src 'self' data:; connect-src 'self'; form-action 'self'; "+
-			"frame-ancestors 'none'; base-uri 'none'")
+			"manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 }
 
 // authThrottle bounds how fast a credential can be guessed.
