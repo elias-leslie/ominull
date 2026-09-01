@@ -19,7 +19,7 @@ import (
 // correctness cache: nothing reads it to decide anything, and the freshest
 // numbers on the page - isolation state, endpoint status - come from other
 // routes that are not cached at all.
-const analyticsCacheTTL = 15 * time.Second
+const analyticsCacheTTL = 60 * time.Second
 
 type analyticsCache struct {
 	mu      sync.Mutex

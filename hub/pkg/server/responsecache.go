@@ -20,7 +20,7 @@ import (
 // re-encode is saved too. Nothing here is read to make a decision - it is a
 // picture of the last day - so a few seconds of staleness is not a correctness
 // question.
-const responseCacheTTL = 15 * time.Second
+const responseCacheTTL = 60 * time.Second
 
 type responseCache struct {
 	mu      sync.Mutex
