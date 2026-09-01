@@ -226,11 +226,12 @@ try {
     $digest = "$msi.sha256"
     if ($UseSystemCA) {
         $PinHubCA = 0
+        $CurlTLS = @('--ssl-no-revoke')
         Write-Host "[+] Using the operating system's public certificate trust."
     } else {
         Write-Host "[+] Fetching and validating the Ominull CA."
-        curl.exe -k -fsSL --max-time 30 "$HubURL/api/v1/pki/ca.crt" -o $ca
-        $CurlTLS = @('--cacert', $ca)
+        curl.exe -k --ssl-no-revoke -fsSL --max-time 30 "$HubURL/api/v1/pki/ca.crt" -o $ca
+        $CurlTLS = @('--cacert', $ca, '--ssl-no-revoke')
     }
     curl.exe @CurlTLS -fsSL --max-time 60 "$HubURL/download/$Package" -o $msi
     curl.exe @CurlTLS -fsSL --max-time 30 "$HubURL/download/$Package.sig" -o $sig
@@ -240,37 +241,46 @@ try {
     if ($expected.ToLowerInvariant() -ne $actual) { throw "native package digest mismatch" }
     $publicKeyPem = @'
 __PUBLIC_KEY__'@
-    function Read-DerLength([byte[]] $Data, [ref] $Offset) {
-        if ($Offset.Value -ge $Data.Length) { throw "invalid release signature length" }
-        $first = $Data[$Offset.Value]; $Offset.Value++
-        if ($first -lt 128) { return [int]$first }
-        $count = $first -band 0x7f
-        if ($count -lt 1 -or $count -gt 2 -or $Offset.Value + $count -gt $Data.Length) { throw "invalid release signature length" }
-        $length = 0
-        for ($i = 0; $i -lt $count; $i++) { $length = ($length -shl 8) -bor $Data[$Offset.Value]; $Offset.Value++ }
-        return [int]$length
+    function Parse-DerSig([byte[]]$sigBytes) {
+        if ($sigBytes.Length -lt 8 -or $sigBytes[0] -ne 0x30) { throw "invalid release signature" }
+        $pos = 1
+        if ($sigBytes[$pos] -ge 128) {
+            $lenBytes = $sigBytes[$pos] -band 0x7f
+            $pos += 1 + $lenBytes
+        } else {
+            $pos += 1
+        }
+        if ($sigBytes[$pos] -ne 0x02) { throw "invalid release signature integer" }
+        $pos += 1
+        $rLen = [int]$sigBytes[$pos]
+        $pos += 1
+        $rBytes = New-Object byte[] $rLen
+        [Array]::Copy($sigBytes, $pos, $rBytes, 0, $rLen)
+        $pos += $rLen
+
+        if ($sigBytes[$pos] -ne 0x02) { throw "invalid release signature integer" }
+        $pos += 1
+        $sLen = [int]$sigBytes[$pos]
+        $pos += 1
+        $sBytes = New-Object byte[] $sLen
+        [Array]::Copy($sigBytes, $pos, $sBytes, 0, $sLen)
+
+        $r32 = New-Object byte[] 32
+        $s32 = New-Object byte[] 32
+        $rStart = 0
+        $rTake = $rLen
+        if ($rTake -gt 32) { $rStart = $rTake - 32; $rTake = 32 }
+        [Array]::Copy($rBytes, $rStart, $r32, 32 - $rTake, $rTake)
+        $sStart = 0
+        $sTake = $sLen
+        if ($sTake -gt 32) { $sStart = $sTake - 32; $sTake = 32 }
+        [Array]::Copy($sBytes, $sStart, $s32, 32 - $sTake, $sTake)
+
+        $raw = New-Object byte[] 64
+        [Array]::Copy($r32, 0, $raw, 0, 32)
+        [Array]::Copy($s32, 0, $raw, 32, 32)
+        return $raw
     }
-    function Read-DerInteger([byte[]] $Data, [ref] $Offset) {
-        if ($Offset.Value -ge $Data.Length -or $Data[$Offset.Value] -ne 0x02) { throw "invalid release signature integer" }
-        $Offset.Value++
-        $length = Read-DerLength $Data ([ref]$Offset)
-        if ($length -lt 1 -or $length -gt 33 -or $Offset.Value + $length -gt $Data.Length) { throw "invalid release signature integer length" }
-        $start = $Offset.Value; $Offset.Value += $length
-        while ($length -gt 1 -and $Data[$start] -eq 0) { $start++; $length-- }
-        if ($length -gt 32 -or ($length -eq 32 -and $Data[$start] -ge 0x80)) { throw "invalid release signature integer" }
-        $out = New-Object byte[] 32
-        [Array]::Copy($Data, $start, $out, 32 - $length, $length)
-        return $out
-    }
-    $signature = [IO.File]::ReadAllBytes($sig)
-    $offset = 0
-    if ($signature.Length -lt 8 -or $signature[$offset] -ne 0x30) { throw "invalid release signature" }
-    $offset++
-    $sequenceLength = Read-DerLength $signature ([ref]$offset)
-    if ($sequenceLength -gt $signature.Length - $offset) { throw "invalid release signature sequence" }
-    $r = Read-DerInteger $signature ([ref]$offset)
-    $s = Read-DerInteger $signature ([ref]$offset)
-    if ($offset -ne $signature.Length) { throw "trailing release signature data" }
     $spki = [Convert]::FromBase64String(($publicKeyPem -replace '-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s', ''))
     if ($spki.Length -lt 65 -or $spki[$spki.Length - 65] -ne 0x04) { throw "invalid pinned release public key" }
     $cngBlob = New-Object byte[] 72
@@ -280,8 +290,7 @@ __PUBLIC_KEY__'@
     $ecdsa = New-Object System.Security.Cryptography.ECDsaCng($cngKey)
     try {
         $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($msi))
-        $rawSignature = New-Object byte[] 64
-        [Array]::Copy($r, 0, $rawSignature, 0, 32); [Array]::Copy($s, 0, $rawSignature, 32, 32)
+        $rawSignature = Parse-DerSig ([IO.File]::ReadAllBytes($sig))
         if (-not $ecdsa.VerifyHash($hash, $rawSignature)) { throw "native package signature mismatch" }
     } finally { $ecdsa.Dispose(); $cngKey.Dispose() }
     Write-Host "[+] Installing through Windows Installer."
