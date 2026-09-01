@@ -3800,20 +3800,36 @@
       svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 66, x2: W, y2: 66, stroke: "var(--line)" }));
       svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 141, x2: W, y2: 141, stroke: "var(--line)" }));
 
-      var ticks = h("div", { cls: "chart-ticks" });
-      trends.forEach(function (p) {
+      var ticks = h("div", { cls: "chart-ticks", style: "display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: var(--t-1); color: var(--ink-3); padding: 4px 2px 8px 2px; width: 100%;" });
+      var step = Math.max(1, Math.floor((trends.length - 1) / 5));
+      for (var idx = 0; idx < trends.length; idx += step) {
+        var p = trends[idx];
         var d = parseTime(p.timestamp);
-        ticks.appendChild(h("span", { text: d ? pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) : "" }));
-      });
+        if (d) {
+          var label = (tf.range === "7d" || tf.range === "all")
+            ? (d.getMonth() + 1) + "/" + d.getDate() + " " + pad(d.getHours(), 2) + ":00"
+            : pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2);
+          ticks.appendChild(h("span", { text: label }));
+        }
+      }
+      if ((trends.length - 1) % step !== 0 && trends.length > 1) {
+        var lastP = trends[trends.length - 1];
+        var lastD = parseTime(lastP.timestamp);
+        if (lastD) {
+          var lastLabel = (tf.range === "7d" || tf.range === "all")
+            ? (lastD.getMonth() + 1) + "/" + lastD.getDate() + " " + pad(lastD.getHours(), 2) + ":00"
+            : pad(lastD.getHours(), 2) + ":" + pad(lastD.getMinutes(), 2);
+          ticks.appendChild(h("span", { text: lastLabel }));
+        }
+      }
 
       dualChartCard = card("Dual Synchronized Flow & Volume Timeline",
         h("div", { cls: "card-body" },
           h("div", { cls: "dual-timeline-container" },
-            h("div", { cls: "dual-lane-label", text: "Lane 1: Bandwidth Volume (Bytes In · Out)" }),
+            h("div", { cls: "dual-lane-label", style: "margin-bottom: 4px; display: flex; justify-content: space-between;", text: "Lane 1: Bandwidth Volume (Top) · Lane 2: Event Counts (Bottom)" }),
             svg,
-            h("div", { cls: "dual-lane-label", text: "Lane 2: Event Counts (Flows · Blocks)" }),
             ticks,
-            h("div", { cls: "legend pad-x" },
+            h("div", { cls: "legend pad-x", style: "margin-top: 4px;" },
               h("span", { text: "■ Blue: Bytes In" }),
               h("span", { text: "■ Indigo: Bytes Out" }),
               h("span", { text: "■ Gray: Total Flows" }),
@@ -6086,6 +6102,8 @@
 
       jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { state.trafficOverview = d || null; }));
       jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { state.trafficFlows = d || null; }));
+      jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
+      jobs.push(request("/api/v1/dns/events?limit=40").then(function (d) { state.dnsEvents = arrayOf(d && d.events); }));
     }
     if (state.section === "dns") {
       jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
