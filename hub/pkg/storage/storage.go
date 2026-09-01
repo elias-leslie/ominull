@@ -621,6 +621,9 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN asn TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN org TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE events ADD COLUMN domain TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN sni TEXT DEFAULT ''",
+		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
 	}
 	for _, m := range migrations {
 		if err := runAdditiveMigration(s.db, m); err != nil {
@@ -1535,8 +1538,8 @@ func (s *Store) InsertEvent(ev Event) error {
 	}
 
 	_, err := s.db.Exec(
-		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID,
+		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
 	)
 	return err
 }
@@ -1552,8 +1555,8 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1567,7 +1570,7 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 		if _, err := stmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country,
-			ev.ProcessPath, ev.ProcessID,
+			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
 		); err != nil {
 			return fmt.Errorf("insert event batch: %w", err)
 		}
@@ -1597,17 +1600,17 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 	)
 	if tenantID != "" && endpointID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, endpointID, limit,
 		)
 	} else if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id FROM events ORDER BY timestamp DESC LIMIT ?",
+			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events ORDER BY timestamp DESC LIMIT ?",
 			limit,
 		)
 	}
@@ -1622,6 +1625,7 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 		if err := rows.Scan(
 			&ev.ID, &ev.TenantID, &ev.EndpointID, &ev.Timestamp, &ev.Layer, &ev.Action, &ev.Direction, &ev.Protocol,
 			&ev.SrcIP, &ev.DstIP, &ev.SrcPort, &ev.DstPort, &ev.BytesIn, &ev.BytesOut, &ev.Country, &ev.ProcessPath, &ev.ProcessID,
+			&ev.Domain, &ev.SNI,
 		); err != nil {
 			return nil, err
 		}

@@ -27,13 +27,14 @@ func (s *Store) RecordNetworkCommsBatch(events []Event, hostname, locationID str
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+		INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline, domain)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			last_seen=excluded.last_seen,
 			event_count=comm_profiles.event_count + 1,
 			total_bytes_in=comm_profiles.total_bytes_in + excluded.total_bytes_in,
-			total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out
+			total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out,
+			domain=CASE WHEN excluded.domain != '' THEN excluded.domain ELSE comm_profiles.domain END
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare communication batch: %w", err)
@@ -80,7 +81,7 @@ func communicationValues(ev Event, hostname, locationID string) []interface{} {
 	return []interface{}{
 		profileID, ev.TenantID, locationID, ev.EndpointID, hostname,
 		procName, ev.ProcessPath, ev.DstIP, ev.DstPort, proto, direction, country,
-		ev.Timestamp, ev.Timestamp, ev.BytesIn, ev.BytesOut,
+		ev.Timestamp, ev.Timestamp, ev.BytesIn, ev.BytesOut, ev.Domain,
 	}
 }
 
@@ -108,35 +109,48 @@ func MatchesExclusion(ev Event, locationID string, exclusions []Exclusion) bool 
 		}
 
 		if ex.Protocol != "any" && ex.Protocol != "" {
-			evProtocol := "tcp"
-			if ev.Protocol == 17 {
-				evProtocol = "udp"
+			if strings.ToUpper(ex.Protocol) == "TCP" && ev.Protocol != 6 {
+				continue
 			}
-			if !strings.EqualFold(ex.Protocol, evProtocol) {
+			if strings.ToUpper(ex.Protocol) == "UDP" && ev.Protocol != 17 {
+				continue
+			}
+			if strings.ToUpper(ex.Protocol) == "ICMP" && ev.Protocol != 1 {
 				continue
 			}
 		}
-		if ex.Port > 0 && ex.Port != ev.DstPort && ex.Port != ev.SrcPort {
-			continue
-		}
-		if ex.ProcessPath != "*" && ex.ProcessPath != "" {
-			if !strings.Contains(strings.ToLower(ev.ProcessPath), strings.ToLower(ex.ProcessPath)) {
-				continue
-			}
-		}
+
 		if ex.DstIPRange != "*" && ex.DstIPRange != "" {
 			if strings.Contains(ex.DstIPRange, "/") {
 				_, ipNet, err := net.ParseCIDR(ex.DstIPRange)
 				if err == nil {
-					ip := net.ParseIP(ev.DstIP)
-					if ip == nil || !ipNet.Contains(ip) {
+					targetIP := net.ParseIP(ev.DstIP)
+					if targetIP != nil && !ipNet.Contains(targetIP) {
 						continue
 					}
 				}
-			} else if ex.DstIPRange != ev.DstIP {
-				continue
+			} else {
+				if ex.DstIPRange != ev.DstIP {
+					continue
+				}
 			}
 		}
+
+		if ex.Port != 0 && ex.Port != ev.DstPort {
+			continue
+		}
+
+		if ex.ProcessPath != "*" && ex.ProcessPath != "" {
+			pattern := strings.ToLower(strings.ReplaceAll(ex.ProcessPath, "\\", "/"))
+			actual := strings.ToLower(strings.ReplaceAll(ev.ProcessPath, "\\", "/"))
+			matched, err := filepath.Match(pattern, actual)
+			if err != nil || !matched {
+				if !strings.Contains(actual, pattern) && !strings.HasSuffix(actual, pattern) {
+					continue
+				}
+			}
+		}
+
 		return true
 	}
 	return false
@@ -146,6 +160,10 @@ func MatchesExclusion(ev Event, locationID string, exclusions []Exclusion) bool 
 // rows and their communication projection commit together, so a successful
 // response cannot leave one accepted representation missing the other.
 func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string) error {
+	return s.IngestTelemetryBatch(events, hostname, locationID)
+}
+
+func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -160,8 +178,8 @@ func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string
 	defer tx.Rollback()
 
 	eventStmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare telemetry events: %w", err)
@@ -169,13 +187,14 @@ func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string
 	defer eventStmt.Close()
 
 	commStmt, err := tx.Prepare(`
-		INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+		INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline, domain)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			last_seen=excluded.last_seen,
 			event_count=comm_profiles.event_count + 1,
 			total_bytes_in=comm_profiles.total_bytes_in + excluded.total_bytes_in,
-			total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out
+			total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out,
+			domain=CASE WHEN excluded.domain != '' THEN excluded.domain ELSE comm_profiles.domain END
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare telemetry communication profiles: %w", err)
@@ -191,7 +210,7 @@ func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string
 		if _, err := eventStmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, country,
-			ev.ProcessPath, ev.ProcessID,
+			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
 		); err != nil {
 			return fmt.Errorf("insert telemetry event: %w", err)
 		}

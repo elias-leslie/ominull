@@ -212,6 +212,48 @@ static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
     slot->bytesOut = rod.DataBytesOut;
 }
 
+typedef struct {
+    UINT32 remoteIp;
+    UINT16 remotePort;
+    UINT8 protocol;
+    DWORD processId;
+    DWORD lastReported;
+    bool valid;
+} FLOW_DEDUP_SLOT_WIN;
+
+#define FLOW_DEDUP_CAP_WIN 2048
+static FLOW_DEDUP_SLOT_WIN g_FlowDedupWin[FLOW_DEDUP_CAP_WIN];
+
+static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid, ULONG64 bytesIn, ULONG64 bytesOut) {
+    if (rip == 0x7f000001 || rip == 0) return false; // 127.0.0.1 or 0.0.0.0
+    if (bytesIn > 0 || bytesOut > 0) return true;
+
+    DWORD now = GetTickCount();
+    UINT32 hash = rip ^ ((UINT32)rport << 16) ^ (pid * 2654435761u) ^ proto;
+    size_t start = (size_t)(hash & (FLOW_DEDUP_CAP_WIN - 1));
+
+    for (size_t probe = 0; probe < FLOW_DEDUP_CAP_WIN; probe++) {
+        FLOW_DEDUP_SLOT_WIN* slot = &g_FlowDedupWin[(start + probe) & (FLOW_DEDUP_CAP_WIN - 1)];
+        if (!slot->valid) {
+            slot->valid = true;
+            slot->remoteIp = rip;
+            slot->remotePort = rport;
+            slot->protocol = proto;
+            slot->processId = pid;
+            slot->lastReported = now;
+            return true; // Novel flow
+        }
+        if (slot->remoteIp == rip && slot->remotePort == rport && slot->protocol == proto && slot->processId == pid) {
+            if (now - slot->lastReported >= 30000) {
+                slot->lastReported = now;
+                return true; // 30s rollup
+            }
+            return false; // Suppress duplicate idle keepalive
+        }
+    }
+    return true;
+}
+
 static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) {
     size_t count = 0;
     DWORD dwSize = 0;
@@ -226,6 +268,7 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
                 for (DWORD i = 0; i < pTcpTable->dwNumEntries && count < maxEvents; i++) {
                     MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
                     if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
+                    if (row.dwRemoteAddr == 0x0100007f || row.dwLocalAddr == 0x0100007f) continue; // Loopback
 
                     OMINULL_EVENT* ev = &outEvents[count];
                     memset(ev, 0, sizeof(OMINULL_EVENT));
@@ -249,7 +292,18 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
         }
     }
     EstatsEvictUnseen();
-    return count;
+
+    size_t filteredCount = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (ShouldReportFlowWin(outEvents[i].Addr.Ipv4.RemoteIp, outEvents[i].RemotePort, outEvents[i].Protocol,
+                                (DWORD)outEvents[i].ProcessId, outEvents[i].BytesIn, outEvents[i].BytesOut)) {
+            if (filteredCount != i) {
+                outEvents[filteredCount] = outEvents[i];
+            }
+            filteredCount++;
+        }
+    }
+    return filteredCount;
 }
 
 

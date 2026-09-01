@@ -974,6 +974,110 @@ static void CollectSocketTable(const char* tableName, bool ipv6,
     fclose(fp);
 }
 
+typedef struct {
+    char dst_ip[64];
+    uint16_t dst_port;
+    uint8_t protocol;
+    uint32_t process_id;
+    uint64_t last_reported;
+    bool valid;
+} FLOW_DEDUP_SLOT;
+
+#define FLOW_DEDUP_CAP 2048
+static FLOW_DEDUP_SLOT g_FlowDedup[FLOW_DEDUP_CAP];
+
+static bool ShouldReportFlow(const char* dst_ip, uint16_t dst_port, uint8_t proto, uint32_t pid, uint64_t bytesIn, uint64_t bytesOut) {
+    if (strcmp(dst_ip, "127.0.0.1") == 0 || strcmp(dst_ip, "::1") == 0) return false;
+    
+    // Always report if there is active byte movement
+    if (bytesIn > 0 || bytesOut > 0) return true;
+
+    time_t now = time(NULL);
+    uint64_t hash = (uint64_t)dst_port * 2654435761u ^ (uint64_t)pid ^ (uint64_t)proto;
+    for (const char* p = dst_ip; *p; p++) hash = (hash * 33) ^ (unsigned char)*p;
+    
+    size_t start = (size_t)(hash & (FLOW_DEDUP_CAP - 1));
+    for (size_t probe = 0; probe < FLOW_DEDUP_CAP; probe++) {
+        FLOW_DEDUP_SLOT* slot = &g_FlowDedup[(start + probe) & (FLOW_DEDUP_CAP - 1)];
+        if (!slot->valid) {
+            slot->valid = true;
+            snprintf(slot->dst_ip, sizeof(slot->dst_ip), "%s", dst_ip);
+            slot->dst_port = dst_port;
+            slot->protocol = proto;
+            slot->process_id = pid;
+            slot->last_reported = (uint64_t)now;
+            return true; // Novel flow on first seen
+        }
+        if (slot->dst_port == dst_port && slot->protocol == proto && slot->process_id == pid && strcmp(slot->dst_ip, dst_ip) == 0) {
+            if ((uint64_t)now >= slot->last_reported + 30) {
+                slot->last_reported = (uint64_t)now;
+                return true; // 30s rollup summary
+            }
+            return false; // Suppress duplicate idle keepalive
+        }
+    }
+    return true;
+}
+
+typedef struct {
+    char ip[64];
+    char domain[128];
+    uint64_t last_seen;
+    bool valid;
+} DNS_ATTRIBUTION_SLOT;
+
+#define DNS_ATTR_CAP 512
+static DNS_ATTRIBUTION_SLOT g_DnsAttr[DNS_ATTR_CAP];
+
+static void CacheDnsAttribution(const char* ip, const char* domain) {
+    if (!ip || !ip[0] || !domain || !domain[0]) return;
+    uint64_t hash = 5381;
+    for (const char* p = ip; *p; p++) hash = ((hash << 5) + hash) + (unsigned char)*p;
+    size_t start = (size_t)(hash & (DNS_ATTR_CAP - 1));
+    
+    time_t now = time(NULL);
+    for (size_t probe = 0; probe < DNS_ATTR_CAP; probe++) {
+        DNS_ATTRIBUTION_SLOT* slot = &g_DnsAttr[(start + probe) & (DNS_ATTR_CAP - 1)];
+        if (!slot->valid || strcmp(slot->ip, ip) == 0) {
+            slot->valid = true;
+            snprintf(slot->ip, sizeof(slot->ip), "%s", ip);
+            snprintf(slot->domain, sizeof(slot->domain), "%s", domain);
+            slot->last_seen = (uint64_t)now;
+            return;
+        }
+    }
+}
+
+static void PopulateEtcHosts(void) {
+    FILE* fp = fopen("/etc/hosts", "r");
+    if (!fp) return;
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char ip[64] = {0}, host[128] = {0};
+        if (sscanf(line, "%63s %127s", ip, host) == 2) {
+            if (strcmp(ip, "127.0.0.1") != 0 && strcmp(ip, "::1") != 0) {
+                CacheDnsAttribution(ip, host);
+            }
+        }
+    }
+    fclose(fp);
+}
+
+static const char* LookupDnsDomain(const char* ip) {
+    if (!ip || !ip[0]) return NULL;
+    uint64_t hash = 5381;
+    for (const char* p = ip; *p; p++) hash = ((hash << 5) + hash) + (unsigned char)*p;
+    size_t start = (size_t)(hash & (DNS_ATTR_CAP - 1));
+    
+    for (size_t probe = 0; probe < DNS_ATTR_CAP; probe++) {
+        DNS_ATTRIBUTION_SLOT* slot = &g_DnsAttr[(start + probe) & (DNS_ATTR_CAP - 1)];
+        if (!slot->valid) break;
+        if (strcmp(slot->ip, ip) == 0) return slot->domain;
+    }
+    return NULL;
+}
+
 // Capture active TCP socket flows from both Linux address families.
 static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) {
     size_t count = 0;
@@ -1009,7 +1113,19 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
             snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "/usr/bin/system");
         }
     }
-    return count;
+
+    // Apply edge deduplication: novel flows emit immediately; routine idle flows rollup every 30s.
+    size_t filteredCount = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (ShouldReportFlow(outEvents[i].dst_ip, outEvents[i].dst_port, outEvents[i].protocol,
+                             outEvents[i].process_id, outEvents[i].bytes_in, outEvents[i].bytes_out)) {
+            if (filteredCount != i) {
+                outEvents[filteredCount] = outEvents[i];
+            }
+            filteredCount++;
+        }
+    }
+    return filteredCount;
 }
 
 /* IsIPLiteral accepts only a bare IPv4 or IPv6 address.
@@ -2262,8 +2378,14 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             *outP++ = *inP;
         }
 
+        const char* domain = LookupDnsDomain(f->dst_ip);
+        char domainJson[256] = {0};
+        if (domain && domain[0]) {
+            snprintf(domainJson, sizeof(domainJson), ",\"domain\":\"%s\"", domain);
+        }
+
         int written = snprintf(jsonBuf + offset, bufCap - offset,
-            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u}%s",
+            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u%s}%s",
             f->direction,
             f->protocol,
             f->src_ip,
@@ -2274,6 +2396,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             (unsigned long)f->bytes_out,
             escapedPath[0] ? escapedPath : "/usr/bin/system",
             f->process_id,
+            domainJson,
             comma
         );
 
@@ -2323,6 +2446,7 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "[-] Could not initialize in-process TLS transport.\n");
 		return 1;
 	}
+    PopulateEtcHosts();
 
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
