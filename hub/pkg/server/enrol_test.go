@@ -65,6 +65,55 @@ func TestTheConsoleCanRenderAnInstallerWithoutPuttingTheKeyInAURL(t *testing.T) 
 	}
 }
 
+// Console traffic and agent traffic deliberately use different addresses. The
+// console may be plain HTTP on a trusted LAN or protected by an interactive
+// identity proxy; package download and enrollment must use the HTTPS agent
+// address instead. The self-service page itself remains on the console address
+// so a workstation on that LAN reaches the hub directly and retains its source
+// address for the network authorization check.
+func TestInstallTrafficUsesTheAgentURLAndThePortalUsesTheConsoleURL(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.SetAgentHubURL("https://10.0.0.57:9443")
+
+	out := renderInstaller(t, srv, "windows", false)
+	script, _ := out["script"].(string)
+	if !strings.Contains(script, "$HubURL = 'https://10.0.0.57:9443'") {
+		t.Fatalf("Windows installer does not fetch from the HTTPS agent address:\n%s", script)
+	}
+	if strings.Contains(script, "$HubURL = 'http://10.0.0.57:9999'") {
+		t.Fatal("Windows installer still fetches packages from the HTTP console address")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/enrolment/windows", nil)
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("listing LAN enrollment access returned %d: %s", w.Code, w.Body.String())
+	}
+	var windows map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &windows); err != nil {
+		t.Fatal(err)
+	}
+	if got := windows["portal_url"]; got != "http://10.0.0.57:9999/install" {
+		t.Fatalf("portal_url = %v, want the configured LAN console address", got)
+	}
+}
+
+func TestReusableProfileCannotPinEveryInstallToOneEndpoint(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	for _, kind := range []string{"campaign", "deployment"} {
+		w := postJSON(t, srv, "/api/v1/enrolment/script",
+			`{"platform":"linux","kind":"`+kind+`","endpoint_id":"same-host"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s profile with a fixed endpoint id returned %d, want 400: %s", kind, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestAnEnrollmentCodeWorksOnceAndThenStopsWorking(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()

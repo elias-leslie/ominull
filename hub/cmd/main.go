@@ -222,22 +222,27 @@ func main() {
 	}
 	log.Printf("[+] Bundled agent release:      v%s (endpoints below this are offered an update)", resolvedAgentVersion)
 	log.Printf("[+] Bootstrap script endpoint: http://%s/bootstrap.ps1", consoleHost)
-	// --hub-url is what every install link an operator pastes onto a host is
-	// built from. A value that does not serve this hub produces a command that
+	// The agent URL is what every install command uses for bootstrap, package
+	// download, and enrollment; --hub-url remains the compatibility fallback.
+	// A value that does not serve this hub produces a command that
 	// pipes someone else's error page into a shell, and the operator sees a
 	// shell syntax error with nothing pointing at the URL. Checked once here,
 	// in the background so a slow or dead public URL cannot delay startup.
-	if *hubURL != "" {
+	installURL := strings.TrimRight(strings.TrimSpace(*agentHubURL), "/")
+	if installURL == "" {
+		installURL = strings.TrimRight(strings.TrimSpace(*hubURL), "/")
+	}
+	if installURL != "" {
 		go func(u string) {
-			// After the listener is up: when --hub-url points back at this
+			// After the listener is up: when the URL points back at this
 			// process, probing sooner races Start and refuses itself.
 			time.Sleep(2 * time.Second)
 			if srv.PublicURLServesHub() {
-				log.Printf("[+] Public URL for install links: %s (verified: it answers as this hub)", u)
+				log.Printf("[+] HTTPS agent URL for installs: %s (verified: it answers as this hub)", u)
 				return
 			}
-			log.Printf("[!] Public URL %s does not answer as this hub does. Install links are still built from it, because a hub often cannot reach its own public address (split-horizon DNS, hairpin NAT) and that is harmless - but if a CDN or identity proxy is in front of it, it will hand installers a sign-in page instead of the script and the one-line command will pipe HTML into a shell. The console shows this warning beside any link it mints, with an alternate. Exempt /bootstrap.* and /download/ at the proxy, or correct --hub-url.", u)
-		}(*hubURL)
+			log.Printf("[!] Agent URL %s does not answer as this hub does. Install commands are still built from it because split-horizon DNS or NAT hairpin can make a valid address unreachable from the hub. Verify /bootstrap.*, /download/, and /api/v1/enrollment/redeem from an endpoint network; the agent hostname must not return an interactive login page.", u)
+		}(installURL)
 	}
 	log.Printf("[+] Multi-Tenant REST API:    http://%s/api/v1/", consoleHost)
 	if *tlsListen != "" {

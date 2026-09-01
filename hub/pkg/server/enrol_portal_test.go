@@ -259,6 +259,23 @@ func TestAPortalEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
 	}
 }
 
+func TestTheLANPortalOffersAPlatformCorrectDownload(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.SetAgentHubURL("https://10.0.0.57:9443")
+
+	openTestWindow(t, srv, `{"cidrs":["10.0.0.0/24"],"hours":4}`)
+	body := portalPost(t, srv, "10.0.0.57", "platform=windows").Body.String()
+	for _, want := range []string{"Download ominull-install.ps1", "Ominull Windows native-package bootstrap", "https://10.0.0.57:9443"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Windows LAN installer page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "Download ominull-install.sh") {
+		t.Fatal("Windows LAN installer page offered the Linux download")
+	}
+}
+
 // The expiry is read by somebody standing at a laptop, not an operator reading
 // logs, so it must not be a Go duration string.
 func TestThePortalSaysHowLongInEnglish(t *testing.T) {

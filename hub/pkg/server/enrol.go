@@ -132,8 +132,12 @@ func (s *Server) handleEnrolmentScript(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "kind must be invitation, campaign, or deployment")
 		return
 	}
+	if err := s.validateEnrollmentProfileTarget(kind, req.TenantID, req.LocationID, req.EndpointID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	maxUses := req.MaxUses
-	if kind == "invitation" && maxUses == 0 {
+	if kind == "invitation" {
 		maxUses = 1
 	}
 	ttl := storage.EnrollmentProfileTTL
@@ -166,6 +170,7 @@ func (s *Server) handleEnrolmentScript(w http.ResponseWriter, r *http.Request) {
 		"script":          plat.generate(opts),
 		"profile_id":      profile.ID,
 		"enrollment_code": code,
+		"expires_in":      enrollmentExpiresIn(profile),
 		"note":            enrollmentProfileNote(profile),
 	}
 
@@ -182,7 +187,7 @@ func (s *Server) handleEnrolmentScript(w http.ResponseWriter, r *http.Request) {
 		// next to the command, not only in a log nobody has open.
 		if problem := s.publicURLProblem(); problem != "" {
 			body["one_liner_warning"] = problem
-			if alt := requestOrigin(r); alt != base {
+			if alt := requestOrigin(r); alt != base && strings.HasPrefix(alt, "https://") && probeServesHub(alt) {
 				body["one_liner_alternate"] = plat.oneLiner(alt)
 				body["one_liner_alternate_origin"] = alt
 			}
@@ -236,7 +241,7 @@ func (s *Server) listEnrolmentWindows(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"windows":    out,
-		"portal_url": s.downloadBase(r) + "/install",
+		"portal_url": s.consoleBase(r) + "/install",
 		// What to prefill the network box with. An operator opening a window for
 		// "this LAN" should not have to work out its CIDR from memory.
 		"suggested_cidrs": suggestedEnrolmentCIDRs(),
@@ -294,6 +299,10 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "an enrolment window may stay open for at most a week (168 hours)")
 		return
 	}
+	if err := s.validateEnrollmentProfileTarget("campaign", req.TenantID, req.LocationID, ""); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	window, err := s.store.CreateEnrolmentWindow(storage.EnrolmentWindow{
 		Label: req.Label, CIDRs: req.CIDRs, TenantID: req.TenantID,
@@ -316,7 +325,7 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"window":     window,
-		"portal_url": s.downloadBase(r) + "/install",
+		"portal_url": s.consoleBase(r) + "/install",
 	})
 }
 

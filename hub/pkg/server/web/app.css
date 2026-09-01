@@ -236,6 +236,19 @@ a {
   display: none !important;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.clipboard-fallback {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
 .sprite {
   display: none;
 }
@@ -2031,6 +2044,295 @@ p.pending {
   font-size: var(--t-3);
 }
 
+/* ------------------------------------------------ setup and status pages */
+
+body.setup-page {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+}
+
+.setup-shell {
+  width: min(980px, calc(100vw - 2 * var(--s-4)));
+  margin: 0 auto;
+  padding: var(--s-6) 0;
+}
+
+.setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-4);
+  margin-bottom: var(--s-4);
+}
+
+.setup-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-head h1 {
+  font-family: var(--f-cond);
+  font-size: var(--t-7);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.setup-head .sub {
+  color: var(--ink-2);
+  margin-top: var(--s-1);
+}
+
+.setup-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--panel);
+  overflow: hidden;
+  margin-bottom: var(--s-4);
+}
+
+.setup-progress button {
+  min-width: 0;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-3);
+  padding: var(--s-2) var(--s-3);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--f-cond);
+  font-size: var(--t-2);
+}
+
+.setup-progress button:last-child {
+  border-right: 0;
+}
+
+.setup-progress button[aria-current="step"] {
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: inset 0 -2px var(--brand);
+}
+
+.setup-progress b {
+  display: block;
+  color: var(--brand);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+}
+
+.setup-step {
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--panel);
+  padding: var(--s-5);
+}
+
+.setup-step > h2,
+.setup-step > legend {
+  width: 100%;
+  font-family: var(--f-cond);
+  font-size: var(--t-5);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: var(--s-2);
+}
+
+.setup-step > p {
+  color: var(--ink-2);
+  max-width: 78ch;
+}
+
+.setup-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.setup-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--ink-2);
+  font-family: var(--f-cond);
+  font-size: var(--t-2);
+  font-weight: 600;
+}
+
+.setup-fields .field-wide {
+  grid-column: 1 / -1;
+}
+
+.setup-fields input,
+.setup-fields select {
+  width: 100%;
+}
+
+input[type="email"],
+input[type="url"] {
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  color: var(--ink);
+  padding: var(--s-1) var(--s-2);
+  font-family: var(--f-mono);
+  font-size: var(--t-3);
+  min-width: 0;
+}
+
+.setup-group {
+  grid-column: 1 / -1;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+}
+
+.setup-group h3 {
+  font-family: var(--f-cond);
+  font-size: var(--t-4);
+  font-weight: 600;
+  margin-bottom: var(--s-2);
+}
+
+.setup-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+}
+
+.setup-actions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.setup-message {
+  min-height: 1.5em;
+  margin-top: var(--s-3);
+}
+
+.setup-message[data-tone="ok"] { color: var(--ok); }
+.setup-message[data-tone="warn"] { color: var(--warn); }
+.setup-message[data-tone="crit"] { color: var(--crit); }
+
+.diag-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin: var(--s-4) 0 var(--s-3);
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.diag {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--r-b);
+  background: var(--ground);
+}
+
+.diag[data-state="pass"] { border-left-color: var(--ok); }
+.diag[data-state="fail"] { border-left-color: var(--crit); }
+.diag[data-state="warn"] { border-left-color: var(--warn); }
+
+.diag-mark {
+  font-family: var(--f-mono);
+  font-size: var(--t-5);
+  line-height: 1;
+  color: var(--ink-3);
+}
+
+.diag[data-state="pass"] .diag-mark { color: var(--ok); }
+.diag[data-state="fail"] .diag-mark { color: var(--crit); }
+.diag[data-state="warn"] .diag-mark { color: var(--warn); }
+
+.diag h3 {
+  font-family: var(--f-cond);
+  font-size: var(--t-3);
+  font-weight: 600;
+}
+
+.diag p {
+  color: var(--ink-2);
+  font-size: var(--t-2);
+  margin-top: 2px;
+}
+
+.diag .remediation {
+  color: var(--ink);
+  margin-top: var(--s-1);
+}
+
+.setup-install {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.setup-install > div {
+  padding: var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--ground);
+}
+
+.setup-install h3 {
+  font-family: var(--f-cond);
+  font-size: var(--t-4);
+  margin-bottom: var(--s-2);
+}
+
+.setup-install p {
+  color: var(--ink-2);
+  margin-bottom: var(--s-3);
+}
+
+@media (max-width: 700px) {
+  .setup-shell {
+    width: calc(100vw - 2 * var(--s-3));
+    padding: var(--s-4) 0;
+  }
+
+  .setup-progress {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-progress button {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .setup-progress button:last-child {
+    border-bottom: 0;
+  }
+
+  .setup-fields,
+  .diag-grid,
+  .setup-install {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-head,
+  .setup-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 /* ---------------------------------------------------------- breakpoints */
 
 @media (max-width: 1180px) {
@@ -2108,6 +2410,7 @@ p.pending {
 
 .scrim-sheet {
   z-index: 60;
+  background: rgba(0, 0, 0, 0.72);
 }
 
 .sheet {
@@ -2117,6 +2420,14 @@ p.pending {
   left: 50%;
   transform: translate(-50%, -50%);
   width: min(720px, calc(100vw - 2 * var(--s-4)));
+  max-height: calc(100vh - 2 * var(--s-4));
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  box-shadow: var(--overlay);
+  overflow: hidden;
 }
 
 /* A sheet that manages a list rather than filling in a form. 720px puts the
@@ -2125,13 +2436,6 @@ p.pending {
    table needs. */
 .sheet-wide {
   width: min(940px, calc(100vw - 2 * var(--s-4)));
-  max-height: calc(100vh - 2 * var(--s-4));
-  display: flex;
-  flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  box-shadow: var(--overlay);
 }
 
 .sheet-head {
@@ -2158,6 +2462,8 @@ p.pending {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: var(--s-3);
 }
 
@@ -2252,6 +2558,7 @@ p.pending {
 
 .row-acts {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: var(--s-1);
 }
 
@@ -2335,6 +2642,109 @@ p.pending {
   max-height: 320px;
   overflow-y: auto;
   white-space: pre;
+}
+
+/* Installer setup is a short decision followed by usable output. Keep the
+   assignment fields aligned, hide irrelevant campaign controls completely,
+   and leave the generated script collapsed unless an operator wants to audit
+   it. */
+.installer-paths {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s-3);
+  align-items: center;
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--raised);
+}
+
+.installer-paths h3,
+.installer-section h3,
+.installer-result h3 {
+  font-family: var(--f-cond);
+  font-size: var(--t-4);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.installer-section,
+.installer-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--ground);
+}
+
+.installer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+}
+
+.installer-grid .field-wide {
+  grid-column: 1 / -1;
+}
+
+.installer-grid input,
+.installer-grid select {
+  width: 100%;
+}
+
+.installer-result-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+
+.installer-result-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.installer-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+}
+
+.script-review summary {
+  color: var(--ink-2);
+  cursor: pointer;
+  font-family: var(--f-cond);
+  font-size: var(--t-2);
+  font-weight: 600;
+}
+
+.script-review[open] summary {
+  margin-bottom: var(--s-2);
+}
+
+.script-review .cmd-scroll {
+  max-height: 240px;
+}
+
+@media (max-width: 640px) {
+  .sheet {
+    width: calc(100vw - 2 * var(--s-2));
+    max-height: calc(100vh - 2 * var(--s-2));
+  }
+
+  .installer-paths,
+  .installer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .installer-paths .btn,
+  .installer-result-head .btn {
+    width: 100%;
+    justify-content: center;
+  }
 }
 
 /* ------------------------------------------------------ detection tuning */

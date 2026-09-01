@@ -92,8 +92,8 @@ func (c Config) Validate() error {
 			problems = append(problems, "cloudflare mode must enable the optional Cloudflare adapter")
 		}
 	}
-	if tlsMode == "custom" && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
-		problems = append(problems, "custom TLS needs both certificate and key paths")
+	if (tlsMode == "custom" || tlsMode == "acme") && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+		problems = append(problems, tlsMode+" TLS needs both certificate and key paths")
 	}
 	if c.OIDCIssuer != "" {
 		u, err := url.Parse(strings.TrimSpace(c.OIDCIssuer))

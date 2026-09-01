@@ -16,6 +16,45 @@ import (
 
 var enrollmentEndpointID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
+func (s *Server) validateEnrollmentProfileTarget(kind, tenantID, locationID, endpointID string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tenant, err := s.store.GetTenant(tenantID)
+	if err != nil {
+		return errors.New("client could not be validated")
+	}
+	if tenant == nil {
+		return errors.New("client does not exist")
+	}
+	locationID = strings.TrimSpace(locationID)
+	if locationID != "" {
+		locations, err := s.store.ListLocations(tenantID)
+		if err != nil {
+			return errors.New("location could not be validated")
+		}
+		found := false
+		for _, location := range locations {
+			if location.ID == locationID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("location does not belong to the selected client")
+		}
+	}
+	endpointID = strings.TrimSpace(endpointID)
+	if kind != "invitation" && endpointID != "" {
+		return errors.New("a reusable enrollment profile cannot pin every install to one endpoint id")
+	}
+	if endpointID != "" && !enrollmentEndpointID.MatchString(endpointID) {
+		return errors.New("endpoint id is invalid")
+	}
+	return nil
+}
+
 type enrollmentRedeemRequest struct {
 	Code       string `json:"code"`
 	Platform   string `json:"platform"`
@@ -66,6 +105,10 @@ func (s *Server) handleEnrollmentProfiles(w http.ResponseWriter, r *http.Request
 		}
 		if kind == "invitation" && req.MaxUses == 0 {
 			req.MaxUses = 1
+		}
+		if err := s.validateEnrollmentProfileTarget(kind, req.TenantID, req.LocationID, req.EndpointID); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		profile, code, err := s.store.CreateEnrollmentProfile(storage.EnrollmentProfile{
 			Kind: kind, Platform: req.Platform, TenantID: req.TenantID,

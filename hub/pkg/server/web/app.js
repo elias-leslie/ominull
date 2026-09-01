@@ -894,15 +894,25 @@
     var plat = body.platform || "linux";
     var host = "https://hub.demo.invalid:9443";
     var spec = {
-      linux: { file: "ominull-install.sh", one: "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash" },
-      windows: { file: "ominull-install.ps1", one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1' | iex" }
+      linux: {
+        file: "ominull-install.sh",
+        one: "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash",
+        script: "#!/bin/bash\n# Ominull Linux installer (demo mode - installs nothing)\n"
+          + "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash\n"
+      },
+      windows: {
+        file: "ominull-install.ps1",
+        one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1' | iex",
+        script: "# Ominull Windows PowerShell installer (demo mode - installs nothing)\n"
+          + "$HubURL = '" + host + "'\nWrite-Host 'Demo only'\n"
+      }
     }[plat] || {};
     var out = {
       platform: plat,
       filename: spec.file,
-      script: "#!/bin/sh\n# Ominull agent installer (demo mode - this script installs nothing)\n"
-        + "# The live installer asks for a one-use enrollment code in its request body.\n"
-        + "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash\n",
+      script: spec.script,
+      profile_id: "enr_demo",
+      expires_in: body.kind === "deployment" ? "until revoked" : "30 minutes",
       note: "Demo mode: nothing was minted and this script will not enroll anything."
     };
     out.enrollment_code = "one-demo-code";
@@ -2247,16 +2257,20 @@
   function addEndpointCard() {
     return card("Install an agent",
       h("div", { cls: "card-body stack" },
-        h("p", { cls: "pending", text: "Render a signed native installer for one platform, copy it or download it, or take a one-line command to paste on the host. Each install uses a one-use enrollment code and receives its own device credential. For more than a couple of hosts, open a self-service window and let each machine ask for its own." }),
+        h("p", { cls: "pending", text: "Generate a Windows or Linux install script for one host, an expiring rollout, or a protected GPO/MDM deployment. For workstations on the same LAN, temporarily allow that network and let each workstation download its own installer from /install." }),
         h("div", { cls: "row-acts" },
           h("button", {
             cls: "btn btn-primary", type: "button", text: "Create an installer",
             on: { click: function () { openInstallerSheet(); } }
           }),
           h("button", {
-            cls: "btn", type: "button", text: "Self-service",
+            cls: "btn", type: "button", text: "Set up LAN installs",
             on: { click: function () { openSelfServiceSheet(); } }
           }),
+          h("button", {
+            cls: "btn", type: "button", text: "Manage enrollment keys",
+            on: { click: function () { openEnrollmentProfilesSheet(); } }
+          })
         )));
   }
 
@@ -3243,12 +3257,35 @@
     return out;
   }
 
+  function fillLocationOptions(select, tenantID) {
+    var previous = select.value;
+    select.textContent = "";
+    select.appendChild(h("option", { value: "", text: "—" }));
+    arrayOf(state.locations).forEach(function (location) {
+      if (location.tenant_id && location.tenant_id !== tenantID) return;
+      select.appendChild(h("option", { value: location.id, text: location.name || location.id }));
+    });
+    if (previous && select.querySelector('option[value="' + cssEscape(previous) + '"]')) select.value = previous;
+  }
+
   function copyText(value, what) {
     var done = function () { toast("Copied " + what, "ok"); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(value).then(done, function () { toast("Could not copy — select it by hand", "warn"); });
+    var fallback = function () {
+      var field = h("textarea", { cls: "clipboard-fallback", "aria-hidden": "true" });
+      field.value = value;
+      document.body.appendChild(field);
+      field.focus();
+      field.select();
+      var copied = false;
+      try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+      document.body.removeChild(field);
+      if (copied) done();
+      else toast("Could not copy — select the text and copy it", "warn");
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(value).then(done, fallback);
     } else {
-      toast("Could not copy — select it by hand", "warn");
+      fallback();
     }
   }
 
@@ -3276,10 +3313,9 @@
     var tenant = h("select", { "aria-label": "Client" },
       tenantOptions().map(function (t) { return h("option", { value: t.id, text: t.name }); }));
 
-    var location = h("select", { "aria-label": "Location" }, h("option", { value: "", text: "—" }));
-    arrayOf(state.locations).forEach(function (l) {
-      location.appendChild(h("option", { value: l.id, text: l.name || l.id }));
-    });
+    var location = h("select", { "aria-label": "Location" });
+    fillLocationOptions(location, tenant.value);
+    tenant.addEventListener("change", function () { fillLocationOptions(location, tenant.value); });
 
     var role = h("select", { "aria-label": "Role" },
       h("option", { value: "workstation", text: "Workstation" }),
@@ -3287,27 +3323,150 @@
       h("option", { value: "kiosk", text: "Kiosk" }),
       h("option", { value: "appliance", text: "Appliance" }));
 
-    var endpointID = h("input", { type: "text", value: pre.endpoint_id || "", placeholder: "derived from the hostname" });
+    var endpointID = h("input", { type: "text", value: pre.endpoint_id || "", placeholder: "Use target hostname" });
     var profileKind = h("select", { "aria-label": "Enrollment profile" },
-      h("option", { value: "invitation", text: "One-use invitation" }),
-      h("option", { value: "campaign", text: "Time-boxed campaign" }),
-      h("option", { value: "deployment", text: "Persistent deployment key" }));
+      h("option", { value: "invitation", text: "One computer (30-minute invitation)" }),
+      h("option", { value: "campaign", text: "Multiple computers (expiring campaign)" }),
+      h("option", { value: "deployment", text: "GPO / MDM (persistent key)" }));
     var profileHours = h("select", { "aria-label": "Profile lifetime" },
       h("option", { value: "1", text: "1 hour" }),
       h("option", { value: "8", text: "8 hours" }),
       h("option", { value: "24", text: "24 hours" }),
       h("option", { value: "168", text: "7 days" }));
     profileHours.value = "8";
-    var profileMaxUses = h("input", { type: "text", placeholder: "campaign: no limit" });
+    var profileMaxUses = h("input", { type: "text", inputmode: "numeric", placeholder: "No limit" });
 
-    var out = h("div", { cls: "stack" });
+    var platformField = h("label", { cls: "field" }, h("span", { text: "Operating system" }), platform);
+    var tenantField = h("label", { cls: "field" }, h("span", { text: "Client" }), tenant);
+    var locationField = h("label", { cls: "field" }, h("span", { text: "Location" }), location);
+    var roleField = h("label", { cls: "field" }, h("span", { text: "Role" }), role);
+    var endpointField = h("label", { cls: "field" }, h("span", { text: "Endpoint ID (optional)" }), endpointID);
+    var profileField = h("label", { cls: "field field-wide" }, h("span", { text: "Deployment method" }), profileKind);
+    var hoursField = h("label", { cls: "field" }, h("span", { text: "Campaign expires after" }), profileHours);
+    var maxUsesField = h("label", { cls: "field" }, h("span", { text: "Optional install cap" }), profileMaxUses);
+    var profileHelp = h("p", { cls: "why field-wide" });
+
+    var out = h("div", { cls: "stack", "aria-live": "polite" });
     var rendered = null;
+    var generation = 0;
+    var renderButton = null;
+    var setupBlocks = [];
+    var controls = [platform, tenant, location, role, endpointID, profileKind, profileHours, profileMaxUses];
 
-    var render = function (wantOneLiner) {
+    var setControlsDisabled = function (disabled) {
+      controls.forEach(function (control) { control.disabled = disabled; });
+    };
+
+    var syncProfile = function () {
+      var kind = profileKind.value;
+      hoursField.hidden = kind !== "campaign";
+      maxUsesField.hidden = kind !== "campaign";
+      endpointField.hidden = kind !== "invitation";
+      if (kind !== "invitation") endpointID.value = "";
+      profileHelp.textContent = kind === "campaign"
+        ? "Reusable until the selected expiry. Install cap is optional; leave it blank for no limit. Each computer still receives a unique identity."
+        : kind === "deployment"
+          ? "For protected GPO, MDM, or scripted rollout. The shared enrollment key stays valid until an administrator revokes it; each computer still receives a unique identity."
+          : "Best for one computer. The code works once and expires after 30 minutes.";
+    };
+
+    var reset = function () {
+      generation++;
+      rendered = null;
+      setControlsDisabled(false);
+      syncProfile();
+      setupBlocks.forEach(function (block) { block.hidden = false; });
       out.textContent = "";
-      out.appendChild(h("div", { cls: "empty", text: "Rendering…" }));
+      out.appendChild(h("p", { cls: "why", text: "Choose the target and deployment method, then generate the correct download and command." }));
+      renderButton.disabled = false;
+      renderButton.textContent = "Generate install options";
+      platform.focus();
+    };
+
+    var revokeRendered = function () {
+      if (!rendered || !rendered.profile_id) return;
+      var id = rendered.profile_id;
+      request("/api/v1/enrollment/profiles?id=" + encodeURIComponent(id), "DELETE")
+        .then(function () {
+          rendered = null;
+          setControlsDisabled(false);
+          syncProfile();
+          setupBlocks.forEach(function (block) { block.hidden = false; });
+          out.textContent = "";
+          out.appendChild(h("p", { cls: "note note-warn", text: "Enrollment code revoked. Any downloaded copy of this installer can no longer enroll a computer." }));
+          renderButton.textContent = "Generate install options";
+          toast("Enrollment code revoked", "ok");
+        })
+        .catch(function (e) { toast("Could not revoke the code: " + e.message, "crit"); });
+    };
+
+    var showResult = function (res) {
+      var isWindows = res.platform === "windows";
+      var platformLabel = isWindows ? "Windows" : "Linux";
+      var packageLabel = isWindows ? "MSI" : ".deb";
+      var runHint = isWindows
+        ? "Open PowerShell as Administrator and run the downloaded .ps1 file."
+        : "From the download folder, run: sudo bash " + (res.filename || "ominull-install.sh");
+      out.textContent = "";
+      setupBlocks.forEach(function (block) { block.hidden = true; });
+
+      var downloadChoice = h("div", { cls: "installer-choice" },
+        h("h3", { text: "Option 1 · Download the prepared script" }),
+        h("p", { cls: "why", text: "Recommended when you are on the target computer. This script contains the enrollment code, downloads and verifies the signed " + packageLabel + " package, installs it through the operating system, and starts the agent." }),
+        h("div", { cls: "form-row" },
+          h("button", {
+            cls: "btn btn-primary", type: "button", text: "Download " + (res.filename || "install script"),
+            on: { click: function () { downloadText(res.filename || "ominull-install.txt", res.script || ""); } }
+          }),
+          h("span", { cls: "pending", text: runHint })));
+      var commandChoice = null;
+      if (res.one_liner) {
+        commandChoice = h("div", { cls: "installer-choice" },
+          h("h3", { text: "Option 2 · Run a command on the target" }),
+          h("p", { cls: "why", text: "The command downloads a generic installer. It prompts for the separate enrollment code, keeping that code out of shell history and URLs." }),
+          h("span", { cls: "pending", text: "Command" }),
+          h("pre", { cls: "cmd", text: res.one_liner }),
+          h("div", { cls: "form-row" },
+            h("button", {
+              cls: "btn", type: "button", text: "Copy command",
+              on: { click: function () { copyText(res.one_liner, "the install command"); } }
+            })),
+          h("span", { cls: "pending", text: "Enrollment code" }),
+          h("pre", { cls: "cmd", text: res.enrollment_code || "" }),
+          h("div", { cls: "form-row" },
+            h("button", {
+              cls: "btn", type: "button", text: "Copy code",
+              on: { click: function () { copyText(res.enrollment_code || "", "the enrollment code"); } }
+            })),
+          res.one_liner_warning ? h("p", { cls: "note note-warn", text: res.one_liner_warning }) : null);
+      }
+      var result = h("section", { cls: "installer-result" },
+        h("div", { cls: "installer-result-head" },
+          h("div", {},
+            h("h3", { text: platformLabel + " install options ready" }),
+            h("p", { cls: "why", text: (profileKind.options[profileKind.selectedIndex].text || "Enrollment") + " · " + (res.expires_in || res.one_liner_expires_in || "ready") })),
+          h("button", { cls: "btn btn-crit", type: "button", text: "Revoke code", on: { click: revokeRendered } })),
+        downloadChoice,
+        commandChoice,
+        h("details", { cls: "script-review" },
+          h("summary", { text: "Review generated " + platformLabel + " script" }),
+          h("pre", { cls: "cmd cmd-scroll", text: res.script || "" })),
+        h("p", { cls: "note", text: res.note || "" }));
+      out.appendChild(result);
+      result.scrollIntoView({ block: "nearest" });
+    };
+
+    var render = function () {
+      if (rendered) { reset(); return; }
+      var requestedPlatform = platform.value;
+      var requestID = ++generation;
+      setControlsDisabled(true);
+      renderButton.disabled = true;
+      renderButton.textContent = "Generating…";
+      out.textContent = "";
+      out.appendChild(h("div", { cls: "empty", text: "Generating secure " + (requestedPlatform === "windows" ? "Windows" : "Linux") + " install options…" }));
       request("/api/v1/enrolment/script", "POST", {
-        platform: platform.value,
+        platform: requestedPlatform,
         tenant_id: tenant.value,
         location_id: location.value,
         role: role.value,
@@ -3316,94 +3475,110 @@
         hours: profileKind.value === "campaign" ? (parseFloat(profileHours.value) || 8) : 0,
         max_uses: profileKind.value === "campaign" ? (parseInt(profileMaxUses.value, 10) || 0) : (profileKind.value === "invitation" ? 1 : 0),
         persistent: profileKind.value === "deployment",
-        one_liner: !!wantOneLiner
+        one_liner: true
       }).then(function (res) {
+        if (requestID !== generation) return;
+        if (!res || res.platform !== requestedPlatform) throw new Error("the hub returned an installer for the wrong platform");
         rendered = res || {};
-        out.textContent = "";
-
-        if (rendered.one_liner) {
-          out.appendChild(h("div", { cls: "field" },
-            h("span", { text: "Run this on the host" }),
-            h("pre", { cls: "cmd", text: rendered.one_liner }),
-            h("div", { cls: "form-row" },
-              h("button", {
-                cls: "btn", type: "button", text: "Copy command",
-                on: { click: function () { copyText(rendered.one_liner, "the install command"); } }
-              }),
-              h("span", { cls: "pending", text: "The code below works once and expires in " + (rendered.one_liner_expires_in || "30 minutes") + "." })),
-            /* When the hub doubts the URL it just built, say so here rather
-               than letting the operator find out as a shell syntax error on
-               the host. The alternate carries no credential; the code below is
-               entered by the installer after it starts. */
-            rendered.one_liner_warning
-              ? h("p", { cls: "note note-warn", text: rendered.one_liner_warning })
-              : null,
-            rendered.one_liner_alternate
-              ? h("div", { cls: "field" },
-                  h("span", { text: "Alternate, using the address this console reached the hub on" }),
-                  h("pre", { cls: "cmd", text: rendered.one_liner_alternate }),
-                  h("div", { cls: "form-row" },
-                    h("button", {
-                      cls: "btn", type: "button", text: "Copy alternate",
-                      on: { click: function () { copyText(rendered.one_liner_alternate, "the alternate install command"); } }
-                    }),
-                    h("span", { cls: "pending", text: "Same one-use code, entered at the host." })))
-              : null));
-        }
-
-        if (rendered.enrollment_code) {
-          out.appendChild(h("div", { cls: "field" },
-            h("span", { text: "Enrollment code" }),
-            h("pre", { cls: "cmd", text: rendered.enrollment_code }),
-            h("div", { cls: "form-row" },
-              h("button", {
-                cls: "btn", type: "button", text: "Copy code",
-                on: { click: function () { copyText(rendered.enrollment_code, "the enrollment code"); } }
-              }),
-              h("span", { cls: "pending", text: "Keep it out of URLs, service arguments, logs, and screenshots." }))));
-        }
-
-        out.appendChild(h("div", { cls: "form-row" },
-          h("button", {
-            cls: "btn", type: "button", text: "Copy script",
-            on: { click: function () { copyText(rendered.script || "", rendered.filename || "the installer"); } }
-          }),
-          h("button", {
-            cls: "btn", type: "button", text: "Download " + (rendered.filename || "script"),
-            on: { click: function () { downloadText(rendered.filename || "ominull-install.txt", rendered.script || ""); } }
-          }),
-          !rendered.one_liner ? h("button", {
-            cls: "btn", type: "button", text: "Get a one-line command",
-            on: { click: function () { render(true); } }
-          }) : null));
-
-        out.appendChild(h("pre", { cls: "cmd cmd-scroll", text: rendered.script || "" }));
-        out.appendChild(h("p", { cls: "pending", text: rendered.note || "" }));
+        renderButton.disabled = false;
+        renderButton.textContent = "Create another";
+        showResult(rendered);
       }).catch(function (e) {
+        if (requestID !== generation) return;
+        rendered = null;
+        setControlsDisabled(false);
+        syncProfile();
+        renderButton.disabled = false;
+        renderButton.textContent = "Try again";
         out.textContent = "";
-        out.appendChild(h("p", { cls: "note note-crit", text: "Could not render the installer: " + e.message }));
+        out.appendChild(h("p", { cls: "note note-crit", text: "Could not generate install options: " + e.message }));
       });
     };
 
-    var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "The hub renders a native package installer. It redeems an enrollment code, then writes a unique device credential and matching client certificate through the package's protected configuration input." }),
-      h("div", { cls: "form-row" },
-        h("label", { cls: "field" }, h("span", { text: "Platform" }), platform),
-        h("label", { cls: "field" }, h("span", { text: "Client" }), tenant),
-        h("label", { cls: "field" }, h("span", { text: "Location" }), location),
-        h("label", { cls: "field" }, h("span", { text: "Role" }), role),
-        h("label", { cls: "field" }, h("span", { text: "Endpoint id" }), endpointID),
-        h("label", { cls: "field" }, h("span", { text: "Enrollment profile" }), profileKind),
-        h("label", { cls: "field" }, h("span", { text: "Campaign lifetime" }), profileHours),
-        h("label", { cls: "field" }, h("span", { text: "Campaign use cap" }), profileMaxUses)),
-      out);
+    var intro = h("p", { cls: "why", text: "Prepare a platform-correct installer for one computer, an expiring rollout, or a protected GPO/MDM deployment. Every installed agent receives its own device credential and client certificate." });
+    var lanPath = h("section", { cls: "installer-paths" },
+        h("div", {},
+          h("h3", { text: "Installing computers from the same LAN?" }),
+          h("p", { cls: "why", text: "Allow the LAN temporarily, then open the hub's /install page on each workstation to download its installer." })),
+        h("button", { cls: "btn", type: "button", text: "Set up LAN installs", on: { click: function () { closeSheet(); openSelfServiceSheet(); } } }));
+    var targetSection = h("section", { cls: "installer-section" },
+        h("h3", { text: "1 · Target and assignment" }),
+        h("div", { cls: "installer-grid" }, platformField, tenantField, locationField, roleField, endpointField));
+    var profileSection = h("section", { cls: "installer-section" },
+        h("h3", { text: "2 · Enrollment lifetime" }),
+        h("div", { cls: "installer-grid" }, profileField, hoursField, maxUsesField, profileHelp));
+    setupBlocks = [intro, lanPath, targetSection, profileSection];
+    var body = h("div", { cls: "stack" }, setupBlocks, out);
+
+    renderButton = h("button", { cls: "btn btn-primary", type: "button", text: "Generate install options", on: { click: render } });
 
     openSheet("Install an agent", body, [
       h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
-      h("button", { cls: "btn btn-primary", type: "button", text: "Render installer", on: { click: function () { render(false); } } })
+      renderButton
     ]);
 
-    render(false);
+    profileKind.addEventListener("change", syncProfile);
+    syncProfile();
+    out.appendChild(h("p", { cls: "why", text: "Nothing is created until you generate the install options." }));
+  }
+
+  function enrollmentProfileState(profile) {
+    if (profile.revoked_at) return "revoked";
+    if (profile.kind !== "deployment" && parseTime(profile.expires_at) && parseTime(profile.expires_at) <= new Date()) return "expired";
+    if (Number(profile.max_uses) > 0 && Number(profile.used) >= Number(profile.max_uses)) return "spent";
+    return "open";
+  }
+
+  function openEnrollmentProfilesSheet() {
+    var out = h("div", { cls: "stack", "aria-live": "polite" });
+
+    var load = function () {
+      out.textContent = "";
+      out.appendChild(h("div", { cls: "empty", text: "Loading enrollment keys…" }));
+      request("/api/v1/enrollment/profiles").then(function (res) {
+        out.textContent = "";
+        var profiles = arrayOf(res && res.profiles);
+        if (!profiles.length) {
+          out.appendChild(h("div", { cls: "empty", text: "No enrollment keys have been created." }));
+          return;
+        }
+        var rows = profiles.map(function (profile) {
+          var state_ = enrollmentProfileState(profile);
+          var limit = Number(profile.max_uses) > 0 ? String(profile.used || 0) + " of " + profile.max_uses : String(profile.used || 0) + " · no cap";
+          var scope = [profile.tenant_id, profile.location_id, profile.role].filter(Boolean).join(" · ") || "default";
+          var expiry = profile.kind === "deployment" ? h("span", { text: "until revoked" }) : stamp(parseTime(profile.expires_at));
+          return [
+            h("div", {}, h("div", { text: profile.kind || "invitation" }), h("div", { cls: "pending ip", text: profile.id || "" })),
+            h("span", { text: profile.platform || "any" }),
+            h("span", { text: scope }),
+            h("span", { text: limit }),
+            expiry,
+            h("span", { cls: "st", "data-state": windowStateTone(state_) }, h("span", { text: state_ })),
+            state_ === "open" ? h("button", {
+              cls: "btn btn-crit", type: "button", text: "Revoke",
+              on: { click: function () { revoke(profile.id); } }
+            }) : h("span", { cls: "pending", text: "—" })
+          ];
+        });
+        out.appendChild(h("p", { cls: "why", text: "Codes are shown only once when generated. Revoke any campaign or persistent GPO/MDM key that is no longer needed." }));
+        out.appendChild(simpleTable(["Method", "OS", "Assignment", "Installs", "Expires", "State", ""], rows));
+      }).catch(function (e) {
+        out.textContent = "";
+        out.appendChild(h("p", { cls: "note note-crit", text: "Could not load enrollment keys: " + e.message }));
+      });
+    };
+
+    var revoke = function (id) {
+      request("/api/v1/enrollment/profiles?id=" + encodeURIComponent(id), "DELETE")
+        .then(function () { toast("Enrollment key revoked", "ok"); load(); })
+        .catch(function (e) { toast("Could not revoke the key: " + e.message, "crit"); });
+    };
+
+    openSheet("Enrollment keys", out, [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      h("button", { cls: "btn btn-primary", type: "button", text: "Create new", on: { click: function () { closeSheet(); openInstallerSheet(); } } })
+    ], "sheet-wide");
+    load();
   }
 
   /* -------------------------------------------- self-service enrolment */
@@ -3426,7 +3601,7 @@
     var out = h("div", { cls: "stack" });
     var portalURL = "";
 
-    var label = h("input", { type: "text", placeholder: "Ground floor, Tuesday rollout" });
+    var label = h("input", { type: "text", placeholder: "Tuesday workstation rollout" });
     var cidrs = h("input", { type: "text", placeholder: "10.0.0.0/24" });
     var hours = h("select", {},
       h("option", { value: "1", text: "1 hour" }),
@@ -3435,8 +3610,18 @@
       h("option", { value: "24", text: "24 hours" }),
       h("option", { value: "168", text: "7 days" }));
     hours.value = "8";
-    var maxUses = h("input", { type: "text", value: "", placeholder: "no limit" });
-    var passcode = h("input", { type: "text", value: "", placeholder: "optional" });
+    var maxUses = h("input", { type: "text", inputmode: "numeric", value: "", placeholder: "No limit" });
+    var passcode = h("input", { type: "password", value: "", placeholder: "Optional" });
+    var tenant = h("select", { "aria-label": "Client" },
+      tenantOptions().map(function (t) { return h("option", { value: t.id, text: t.name }); }));
+    var location = h("select", { "aria-label": "Location" });
+    fillLocationOptions(location, tenant.value);
+    tenant.addEventListener("change", function () { fillLocationOptions(location, tenant.value); });
+    var role = h("select", { "aria-label": "Role" },
+      h("option", { value: "workstation", text: "Workstation" }),
+      h("option", { value: "server", text: "Server" }),
+      h("option", { value: "kiosk", text: "Kiosk" }),
+      h("option", { value: "appliance", text: "Appliance" }));
 
     var renderList = function (res) {
       out.textContent = "";
@@ -3449,7 +3634,7 @@
       var suggestions = arrayOf(res && res.suggested_cidrs);
       if (suggestions.length) {
         var picks = h("div", { cls: "row-acts" },
-          h("span", { cls: "pending", text: "Networks this hub is on:" }));
+          h("span", { cls: "pending", text: "Detected private networks — verify before allowing:" }));
         suggestions.forEach(function (cidr) {
           picks.appendChild(h("button", {
             cls: "btn", type: "button", text: cidr,
@@ -3463,14 +3648,14 @@
       /* The address to hand out is the point of the whole screen, so it is the
          first thing on it rather than something to derive from the hub URL. */
       out.appendChild(h("div", { cls: "field" },
-        h("span", { text: "Send people here" }),
+        h("span", { text: "2 · On each workstation, open this address" }),
         h("pre", { cls: "cmd", text: portalURL }),
         h("div", { cls: "form-row" },
           h("button", {
             cls: "btn", type: "button", text: "Copy address",
             on: { click: function () { copyText(portalURL, "the enrolment address"); } }
           }),
-          h("span", { cls: "pending", text: "The page shows whoever opens it the command for the machine they are on. It works only from a network with an open window below." }))));
+          h("span", { cls: "pending", text: "Each workstation chooses Windows or Linux, then downloads its prepared install script. Access works only from an allowed network below." }))));
 
       var rows = windows.map(function (win) {
         var state_ = win.state || "open";
@@ -3492,23 +3677,23 @@
         ];
       });
 
-      out.appendChild(card("Open windows",
+      out.appendChild(card("LAN install access",
         h("div", { cls: "card-body" },
-          simpleTable(["Window", "State", "Enrolled", "Expires", ""], rows))));
+          simpleTable(["Access", "State", "Installed", "Expires", ""], rows))));
 
     };
 
     var load = function () {
       request("/api/v1/enrolment/windows").then(renderList).catch(function (e) {
         out.textContent = "";
-        out.appendChild(h("p", { cls: "note note-crit", text: "Could not read the enrolment windows: " + e.message }));
+        out.appendChild(h("p", { cls: "note note-crit", text: "Could not read LAN install access: " + e.message }));
       });
     };
 
     var revoke = function (id) {
       request("/api/v1/enrolment/windows?id=" + encodeURIComponent(id), "DELETE")
-        .then(function () { toast("Window closed", "ok"); load(); })
-        .catch(function (e) { toast("Could not close it: " + e.message, "crit"); });
+        .then(function () { toast("LAN install access closed", "ok"); load(); })
+        .catch(function (e) { toast("Could not close LAN access: " + e.message, "crit"); });
     };
 
     var open = function () {
@@ -3517,34 +3702,37 @@
       request("/api/v1/enrolment/windows", "POST", {
         label: label.value.trim(),
         cidrs: nets,
+        tenant_id: tenant.value,
+        location_id: location.value,
+        role: role.value,
         hours: parseFloat(hours.value) || 8,
         max_uses: parseInt(maxUses.value, 10) || 0,
         passcode: passcode.value.trim()
       }).then(function (res) {
-        toast("Enrolment window open", "ok");
-        /* The passcode is shown once, here, and the hub keeps only its hash -
-           so if it is not copied off this screen it cannot be recovered. */
-        if (passcode.value.trim()) {
-          toast("Passcode: " + passcode.value.trim() + " \u2014 it cannot be shown again", "warn");
-        }
+        toast("LAN install access is active", "ok");
         label.value = ""; maxUses.value = ""; passcode.value = "";
         load();
-      }).catch(function (e) { toast("Could not open it: " + e.message, "crit"); });
+      }).catch(function (e) { toast("Could not allow LAN installs: " + e.message, "crit"); });
     };
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "Let machines on a network install the agent themselves. Each one still gets its own single-use enrollment code \u2014 the window only decides who may ask for one." }),
-      h("div", { cls: "form-row" },
-        h("label", { cls: "field" }, h("span", { text: "Label" }), label),
-        h("label", { cls: "field" }, h("span", { text: "Networks" }), cidrs),
-        h("label", { cls: "field" }, h("span", { text: "Stays open for" }), hours),
-        h("label", { cls: "field" }, h("span", { text: "Limit" }), maxUses),
-        h("label", { cls: "field" }, h("span", { text: "Passcode" }), passcode)),
+      h("p", { cls: "why", text: "Temporarily allow a trusted LAN. Then visit /install from each workstation to download a Windows or Linux installer. Every workstation receives a unique one-use code, device credential, and client certificate." }),
+      h("section", { cls: "installer-section" },
+        h("h3", { text: "1 · Allow a trusted LAN" }),
+        h("div", { cls: "installer-grid" },
+          h("label", { cls: "field" }, h("span", { text: "Label" }), label),
+          h("label", { cls: "field" }, h("span", { text: "Network (CIDR)" }), cidrs),
+          h("label", { cls: "field" }, h("span", { text: "Client" }), tenant),
+          h("label", { cls: "field" }, h("span", { text: "Location" }), location),
+          h("label", { cls: "field" }, h("span", { text: "Role" }), role),
+          h("label", { cls: "field" }, h("span", { text: "Access duration" }), hours),
+          h("label", { cls: "field" }, h("span", { text: "Optional install cap" }), maxUses),
+          h("label", { cls: "field" }, h("span", { text: "Optional passcode" }), passcode))),
       out);
 
-    openSheet("Self-service enrolment", body, [
+    openSheet("LAN self-service installs", body, [
       h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
-      h("button", { cls: "btn btn-primary", type: "button", text: "Open a window", on: { click: open } })
+      h("button", { cls: "btn btn-primary", type: "button", text: "Allow this LAN", on: { click: open } })
     ], "sheet-wide");
 
     load();

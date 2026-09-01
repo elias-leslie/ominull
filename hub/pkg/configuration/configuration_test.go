@@ -18,6 +18,9 @@ func TestConfigurationRejectsPaidOrUnsafeShapes(t *testing.T) {
 	if err := (Config{NetworkMode: "lan", ConsoleURL: "http://hub.local", AgentURL: "http://hub.local", TLSMode: "self-issued"}).Validate(); err == nil {
 		t.Fatal("configuration accepted an HTTP agent URL")
 	}
+	if err := (Config{NetworkMode: "direct", ConsoleURL: "https://console.invalid", AgentURL: "https://agent.invalid", TLSMode: "acme"}).Validate(); err == nil {
+		t.Fatal("ACME mode accepted no certificate and key paths even though the hub does not obtain them")
+	}
 }
 
 func TestEnvironmentAndAtomicWriteNeverContainSecretFields(t *testing.T) {

@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -132,7 +134,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if session, ok := s.setupSessionFromRequest(r); ok {
-		doc, nonce := setupDocument(session.CSRF, s.setupIsComplete())
+		doc, nonce := setupWizardDocument(session.CSRF, s.setupIsComplete())
 		setConsoleSecurityHeaders(w, nonce)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -250,6 +252,7 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	previousConfiguration := s.setupConfiguration()
 	email := strings.ToLower(strings.TrimSpace(req.LocalAdminEmail))
 	if email == "" || !strings.Contains(email, "@") {
 		writeJSONError(w, http.StatusBadRequest, "local_admin_email is required")
@@ -302,6 +305,8 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 	s.setupMu.Lock()
 	configPath, dbPath, adminPath, binaryDir := s.setupConfigPath, s.setupDBPath, s.setupAdminPath, s.setupBinaryDir
 	s.setupMu.Unlock()
+	restartRequired := configPath != "" && (!s.setupRuntimeMatches(req.Configuration) ||
+		!strings.EqualFold(previousConfiguration.TLSMode, req.Configuration.TLSMode))
 	if configPath != "" {
 		contents := req.Configuration.Environment(dbPath, adminPath, binaryDir, s.setupTokenPath)
 		if err := configuration.WriteEnvironmentAtomic(configPath, contents); err != nil {
@@ -323,7 +328,28 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.audit(r, "SETUP_APPLIED", "setup", "Saved first-run network, TLS, identity, and optional Cloudflare adapter configuration")
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "saved", "restart_required": configPath != ""})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "saved", "restart_required": restartRequired})
+}
+
+func (s *Server) setupRuntimeMatches(cfg configuration.Config) bool {
+	if strings.TrimRight(strings.TrimSpace(s.hubURL), "/") != cfg.ConsoleURL ||
+		strings.TrimRight(strings.TrimSpace(s.agentHubURL), "/") != cfg.AgentURL ||
+		strings.TrimSpace(s.tlsOpts.CertFile) != cfg.TLSCertFile ||
+		strings.TrimSpace(s.tlsOpts.KeyFile) != cfg.TLSKeyFile ||
+		!strings.EqualFold(strings.TrimSpace(string(s.tlsOpts.ClientCerts)), cfg.ClientCerts) {
+		return false
+	}
+	activeHosts := append([]string(nil), s.tlsOpts.Hosts...)
+	configuredHosts := append([]string(nil), cfg.TLSHosts...)
+	sort.Strings(activeHosts)
+	sort.Strings(configuredHosts)
+	if !slices.Equal(activeHosts, configuredHosts) {
+		return false
+	}
+	if cfg.AccessTeam == "" && cfg.AccessAudience == "" {
+		return s.access == nil
+	}
+	return s.access != nil && s.access.team == cfg.AccessTeam && s.access.aud == cfg.AccessAudience
 }
 
 func removeOIDCSecret(path string) error {
@@ -370,7 +396,8 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, session := s.consoleSession(r)
-	authorized := session || secureStringEqual(strings.TrimSpace(r.Header.Get("X-API-Key")), s.adminKey)
+	_, setupSession := s.setupSessionFromRequest(r)
+	authorized := session || setupSession || secureStringEqual(strings.TrimSpace(r.Header.Get("X-API-Key")), s.adminKey)
 	if !authorized {
 		if _, ok := s.access.Verify(r); ok {
 			authorized = true
@@ -384,7 +411,39 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 	setConsoleSecurityHeaders(w, nonce)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull status</title><link rel="stylesheet" href="/app.css"></head><body><main class="setup-shell"><h1>Ominull status</h1><p class="sub">Same bounded diagnostics used by first-run setup.</p><button id="rerun" class="btn btn-primary" type="button">Run checks again</button><section id="checks"><p>Loading…</p></section><p><a href="/">Open console</a></p></main><script nonce="` + nonce + `">const checks=document.querySelector('#checks');const render=b=>{checks.replaceChildren(...(b.results||[]).map(x=>{const p=document.createElement('p');const strong=document.createElement('strong');strong.textContent=x.state||'unknown';p.append(strong,document.createTextNode(' '+(x.title||'')+': '+(x.summary||'')+(x.remediation?' — '+x.remediation:'')));return p}))};const load=()=>fetch('/api/v1/diagnostics',{credentials:'same-origin'}).then(r=>r.json()).then(render).catch(e=>{checks.textContent=e.message});document.querySelector('#rerun').addEventListener('click',load);load();</script></body></html>`
+	page := `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull status</title><link rel="stylesheet" href="/app.css"></head>
+<body class="setup-page">
+<main class="setup-shell">
+  <header class="setup-head"><div><h1>Ominull status</h1><p class="sub">Live checks for host, packages, network, certificates, agent transport, identity, and fleet proof.</p></div><a class="btn" href="/">Open console</a></header>
+  <section class="setup-step"><div class="setup-actions"><div><h2>System checks</h2></div><div><button id="rerun" class="btn btn-primary" type="button">Run checks again</button></div></div><div id="checks"><p class="empty">Running diagnostics…</p></div></section>
+</main>
+<script nonce="` + nonce + `">
+(function(){
+  "use strict";
+  var checks=document.querySelector("#checks"), rerun=document.querySelector("#rerun");
+  function el(tag,cls,text){var node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;}
+  function render(body){
+    checks.textContent="";
+    var results=body.results||[], counts={pass:0,fail:0,warn:0,not_configured:0};
+    results.forEach(function(item){counts[item.state]=(counts[item.state]||0)+1;});
+    var summary=el("div","diag-summary");
+    [["pass","Pass"],["fail","Fail"],["warn","Warning"],["not_configured","Not configured"]].forEach(function(pair){summary.appendChild(el("span","st",""+counts[pair[0]]+" "+pair[1]));});
+    var grid=el("div","diag-grid");
+    results.forEach(function(item){
+      var card=el("article","diag");card.dataset.state=item.state||"not_configured";
+      card.appendChild(el("span","diag-mark",item.state==="pass"?"✓":item.state==="fail"?"×":item.state==="warn"?"!":"–"));
+      var copy=el("div");copy.appendChild(el("h3","",item.title||"Check"));copy.appendChild(el("p","",item.summary||"No result"));
+      if(item.remediation)copy.appendChild(el("p","remediation",item.remediation));card.appendChild(copy);grid.appendChild(card);
+    });
+    checks.append(summary,grid);
+  }
+  function load(){rerun.disabled=true;rerun.textContent="Running…";return fetch("/api/v1/setup/status",{credentials:"same-origin"}).then(function(response){if(!response.ok)throw new Error("diagnostics request failed");return response.json();}).then(render).catch(function(error){checks.textContent=error.message;}).finally(function(){rerun.disabled=false;rerun.textContent="Run checks again";});}
+  rerun.addEventListener("click",load);load();
+})();
+</script>
+</body></html>`
 	_, _ = w.Write([]byte(page))
 }
 
@@ -417,11 +476,4 @@ func setupGateDocument() []byte {
 	var b strings.Builder
 	_ = setupGateTemplate.Execute(&b, nil)
 	return []byte(b.String())
-}
-
-func setupDocument(csrf string, complete bool) ([]byte, string) {
-	nonce := newCSPNonce()
-	state, _ := json.Marshal(map[string]interface{}{"csrf": csrf, "complete": complete})
-	html := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull setup wizard</title><link rel="stylesheet" href="/app.css"></head><body><main class="setup-shell"><h1>Ominull setup wizard</h1><p class="sub">Resumable package-owned setup. Direct native access works without Cloudflare.</p><section class="setup-step"><h2>Step 1 · Host preflight</h2><p>Checks cover the hub package, one service, storage, PKI, signed agent packages, URLs, optional identity providers, and a real agent heartbeat.</p><section id="checks"><p>Loading diagnostics…</p></section></section><form id="setup-form"><fieldset class="setup-step"><legend>Step 2 · Local administrator and recovery</legend><label>Administrator email<input name="email" type="email" required placeholder="operator@example.invalid"></label><p class="pending">The local admin key stays in its root-only package file. Keep <code>sudo ominullctl setup-token --rotate</code> as break-glass recovery if OIDC or Cloudflare is unavailable.</p></fieldset><fieldset class="setup-step"><legend>Step 3 · Network mode and addresses</legend><label>Network mode<select name="network"><option value="lan">LAN-only / direct local</option><option value="direct">Direct WAN</option><option value="cloudflare">Optional Cloudflare Tunnel + Access</option></select></label><label>Console URL<input name="console_url" type="url" placeholder="https://console.example.invalid"></label><label>Agent URL<input name="agent_url" type="url" placeholder="https://agent.example.invalid"></label><p class="pending">Keep console and agent hostnames separate. Direct WAN requires public TLS and upstream TCP 443 forwarding. Cloudflare uses an outbound Tunnel; this hub does not change DNS, router forwarding, or provider policy.</p></fieldset><fieldset class="setup-step"><legend>Step 4 · DNS and certificates</legend><label>TLS mode<select name="tls_mode"><option value="self-issued">Self-issued native CA (LAN)</option><option value="acme">ACME certificate prepared by operator</option><option value="custom">Operator certificate</option></select></label><label>Client certificate proof<select name="client_certs"><option value="optional">Optional during migration; verify when offered</option><option value="required">Required after every agent is proven</option><option value="off">Do not request client certificates (recovery only)</option></select></label><label>Server certificate path<input name="tls_cert_file" placeholder="/etc/ominull/server.crt"></label><label>Server key path<input name="tls_key_file" placeholder="/etc/ominull/server.key"></label><label>Additional certificate names<input name="tls_hosts" placeholder="hub.local,agent.example.invalid"></label><p class="pending">Keep native mTLS optional while enrolling or recovering a fleet, then require it after every agent presents its matching hub-issued certificate. The hub device CA stays separate from the public server certificate. Private keys are read by the package service and never returned by diagnostics.</p></fieldset><fieldset class="setup-step"><legend>Step 5 · Human authentication</legend><h3>Optional native OIDC</h3><label>HTTPS issuer<input name="oidc_issuer" type="url" placeholder="https://issuer.example.invalid"></label><label>Client ID<input name="oidc_client_id"></label><label>Redirect URL<input name="oidc_redirect_url" type="url" placeholder="https://console.example.invalid/oidc/callback"></label><label>Client secret<input name="oidc_client_secret" type="password" autocomplete="off" placeholder="stored root-only"></label><h3>Optional Cloudflare Access console</h3><label>Access team<input name="access_team" placeholder="team-name"></label><label>Access application audience<input name="access_audience" placeholder="application audience tag"></label><p class="pending">OIDC uses discovery, authorization code, PKCE, state, nonce, issuer, audience, and stable subject binding. Cloudflare Access uses its signed JWT and explicit Ominull operator membership. Neither provider grants an Ominull role by itself.</p></fieldset><section class="setup-step"><h2>Step 6 · WAN agent access</h2><p>Use the separate agent URL for native device credentials. An unauthenticated agent request must return bounded JSON, never a browser login page. In Cloudflare mode create the separate agent Tunnel route without an interactive Access redirect; no shared service token, Access mTLS, BYOCA, Workers, Spectrum, paid load balancing, or Enterprise feature is required.</p></section><section class="setup-step"><h2>Step 7 · Install agents</h2><p>Open <a href="/install">/install</a> for Linux or Windows native package enrollment. Choose the platform, redeem the one-use invitation, campaign, or persistent deployment profile, and run the protected stdin/file installer.</p></section><section class="setup-step"><h2>Step 8 · Prove and finish</h2><p>Each successful redemption receives a unique device credential and matching client certificate. The proof gate requires current heartbeats and native package provenance. Re-run checks after each install, then complete setup.</p><button id="complete" class="btn btn-primary" type="button">Complete after proof</button><button id="rerun" class="btn" type="button">Run checks again</button><pre id="output"></pre></section><button class="btn btn-primary" type="submit">Save validated configuration</button></form><p><a href="/status">Open permanent status page</a></p></main><script nonce="` + nonce + `">const SETUP=` + string(state) + `;const q=s=>document.querySelector(s);const field=n=>q('[name="'+n+'"]');async function api(url,opt={}){opt.headers=Object.assign({'Content-Type':'application/json','X-CSRF-Token':SETUP.csrf},opt.headers||{});const r=await fetch(url,opt);const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.error||'request failed');return b}function renderChecks(b){const box=q('#checks');box.replaceChildren(document.createElement('h2'));box.firstChild.textContent='Diagnostics';(b.results||[]).forEach(x=>{const p=document.createElement('p');const strong=document.createElement('strong');strong.textContent=x.state||'unknown';p.append(strong,document.createTextNode(' '+(x.title||'')+': '+(x.summary||'')+(x.remediation?' — '+x.remediation:'')+(x.checked_at?' · '+new Date(x.checked_at).toLocaleString():'')));box.append(p)});q('#complete').disabled=!!b.has_failures;const c=b.configuration||{};[['network','network_mode'],['console_url','console_url'],['agent_url','agent_url'],['tls_mode','tls_mode'],['client_certs','client_certs'],['tls_cert_file','tls_cert_file'],['tls_key_file','tls_key_file'],['tls_hosts','tls_hosts'],['oidc_issuer','oidc_issuer'],['oidc_client_id','oidc_client_id'],['oidc_redirect_url','oidc_redirect_url'],['access_team','access_team'],['access_audience','access_audience']].forEach(pair=>{if(c[pair[1]]!==undefined&&field(pair[0]))field(pair[0]).value=Array.isArray(c[pair[1]])?c[pair[1]].join(','):c[pair[1]]})}function load(){return api('/api/v1/setup/status',{headers:{}}).then(renderChecks).catch(e=>{q('#checks').textContent=e.message})}q('#setup-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);const b={configuration:{network_mode:f.get('network'),console_url:f.get('console_url'),agent_url:f.get('agent_url'),tls_mode:f.get('tls_mode'),client_certs:f.get('client_certs'),tls_cert_file:f.get('tls_cert_file'),tls_key_file:f.get('tls_key_file'),tls_hosts:String(f.get('tls_hosts')||'').split(',').map(x=>x.trim()).filter(Boolean),oidc_issuer:f.get('oidc_issuer'),oidc_client_id:f.get('oidc_client_id'),oidc_redirect_url:f.get('oidc_redirect_url'),access_team:f.get('access_team'),access_audience:f.get('access_audience'),cloudflare:f.get('network')==='cloudflare'},local_admin_email:f.get('email'),oidc_client_secret:f.get('oidc_client_secret')};try{q('#output').textContent=JSON.stringify(await api('/api/v1/setup/apply',{method:'POST',body:JSON.stringify(b)}),null,2);await load()}catch(e){q('#output').textContent=e.message}});q('#complete').addEventListener('click',async()=>{try{q('#output').textContent=JSON.stringify(await api('/api/v1/setup/complete',{method:'POST',body:'{}'}),null,2);q('#complete').disabled=true}catch(e){q('#output').textContent=e.message}});q('#rerun').addEventListener('click',load);load();</script></body></html>`
-	return []byte(html), nonce
 }

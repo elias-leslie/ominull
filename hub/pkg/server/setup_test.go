@@ -87,10 +87,20 @@ func TestFirstRunSetupConsumesLocalTokenAndUsesCSRFSession(t *testing.T) {
 		t.Fatalf("setup session did not open wizard: %d %s", wizard.Code, wizard.Body.String())
 	}
 	csrf := setupCSRFToken(t, wizard.Body.String())
+	for _, want := range []string{"data-step=\"0\"", "data-step=\"4\"", "checks-preflight", "setup-generate"} {
+		if !strings.Contains(wizard.Body.String(), want) {
+			t.Errorf("setup wizard lacks %q", want)
+		}
+	}
 
 	missingCSRF := setupCall(t, srv, http.MethodPost, "/api/v1/setup/apply", `{}`, cookie, "")
 	if missingCSRF.Code != http.StatusForbidden {
 		t.Fatalf("setup mutation without CSRF returned %d: %s", missingCSRF.Code, missingCSRF.Body.String())
+	}
+
+	installer := setupCall(t, srv, http.MethodPost, "/api/v1/enrolment/script", `{"platform":"windows","kind":"invitation"}`, cookie, csrf)
+	if installer.Code != http.StatusOK || !strings.Contains(installer.Body.String(), "ominull-install.ps1") {
+		t.Fatalf("setup session could not prepare the first Windows agent: %d %s", installer.Code, installer.Body.String())
 	}
 
 	apply := setupCall(t, srv, http.MethodPost, "/api/v1/setup/apply", `{"configuration":{"network_mode":"lan","tls_mode":"self-issued","console_url":"http://127.0.0.1:9999","agent_url":"https://127.0.0.1:9443"},"local_admin_email":"operator@example.invalid"}`, cookie, csrf)

@@ -59,11 +59,14 @@ func (s *Store) CreateEnrollmentProfile(p EnrollmentProfile, ttl time.Duration) 
 	if p.MaxUses < 0 {
 		return EnrollmentProfile{}, "", errors.New("max uses cannot be negative")
 	}
-	if p.Kind == "invitation" && p.MaxUses == 0 {
+	if p.Kind == "invitation" {
 		// An invitation is the one-use primitive. Campaigns deliberately use
 		// zero for unlimited and deployment profiles remain persistent until
-		// revoked, so only the invitation default is filled here.
+		// revoked, so an invitation can never be widened by a caller.
 		p.MaxUses = 1
+	}
+	if p.Kind != "invitation" && strings.TrimSpace(p.EndpointID) != "" {
+		return EnrollmentProfile{}, "", errors.New("a reusable enrollment profile cannot pin every install to one endpoint id")
 	}
 	if ttl <= 0 && p.Kind != "deployment" {
 		ttl = EnrollmentProfileTTL

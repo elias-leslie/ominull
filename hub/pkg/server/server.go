@@ -835,12 +835,36 @@ func (s *Server) desiredAgentVersion() string {
 	return s.agentVersion
 }
 
-// downloadBase is the URL prefix agents fetch packages from.
+// downloadBase is the URL prefix bootstrap scripts use for packages and
+// enrollment. That traffic belongs on the HTTPS agent surface, not on the
+// operator console: the console may be plain HTTP on a trusted LAN or sit
+// behind an interactive identity proxy. Older configurations have no separate
+// agent URL, so the former hub URL remains the compatibility fallback.
 func (s *Server) downloadBase(r *http.Request) string {
+	if base := strings.TrimSuffix(s.agentHubURL, "/"); base != "" {
+		return base
+	}
 	if base := strings.TrimSuffix(s.hubURL, "/"); base != "" {
 		return base
 	}
 	return requestOrigin(r)
+}
+
+// consoleBase is the address a browser on the operator's network uses for the
+// self-service install portal. Keeping it distinct from downloadBase preserves
+// the caller's LAN source address for enrollment-window authorization.
+func (s *Server) consoleBase(r *http.Request) string {
+	if base := strings.TrimSuffix(s.hubURL, "/"); base != "" {
+		return base
+	}
+	return requestOrigin(r)
+}
+
+func (s *Server) configuredInstallBase() string {
+	if base := strings.TrimSuffix(s.agentHubURL, "/"); base != "" {
+		return base
+	}
+	return strings.TrimSuffix(s.hubURL, "/")
 }
 
 // requestOrigin is the origin this request actually arrived on. Whatever it is,
@@ -871,11 +895,11 @@ func requestOrigin(r *http.Request) string {
 // operator is told, and offered a link built from the origin they reached the
 // console on.
 func (s *Server) publicURLProblem() string {
-	configured := strings.TrimSuffix(s.hubURL, "/")
+	configured := s.configuredInstallBase()
 	if configured == "" || s.publicURLServesHub() {
 		return ""
 	}
-	return "This link points at " + configured + ", the hub's configured public URL, but a fetch of its bootstrap route from here does not come back as this hub would answer it - usually a CDN or an identity proxy in front of it, which will hand the installer a sign-in page instead of the script. It can also mean this hub simply cannot reach its own public address, which is normal on split-horizon DNS and harmless. If the command fails on the host, use the alternate below, or exempt the /bootstrap.* and /download/ paths at the proxy."
+	return "This install uses " + configured + ", the configured agent URL, but a fetch of its bootstrap route from here does not come back as this hub would answer it. The hub may be unable to reach its own address because of split-horizon DNS or NAT hairpin, but an identity proxy on the agent hostname will also hand the installer a sign-in page instead of the script. Verify /bootstrap.*, /download/, and enrollment on that hostname from an endpoint network."
 }
 
 const (
@@ -934,7 +958,7 @@ func (s *Server) publicURLServesHub() bool {
 // not bound yet, and a retry that reads back the cached failure it is retrying
 // would just return the same wrong answer three times.
 func (s *Server) refreshPublicURL() bool {
-	ok := probeServesHub(strings.TrimSuffix(s.hubURL, "/"))
+	ok := probeServesHub(s.configuredInstallBase())
 
 	s.publicURLMu.Lock()
 	s.publicURLOK = ok
@@ -1863,13 +1887,11 @@ func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endp
 	// No certificate on this connection. Whether that is allowed is not a
 	// property of the request - it is the fleet-wide setting.
 	//
-	// The TLS listener enforces --client-certs required at the handshake, but
-	// the plain listener has no handshake to enforce it in, and both listeners
-	// share one mux. So an operator who had moved the fleet to "required" still
-	// had an agent-facing route on :9999 that took an endpoint id out of a
-	// request body and believed it, reachable by anything holding the tenant
-	// key - which is every endpoint. Requiring the certificate here is what
-	// makes the setting mean the same thing on both ports.
+	// Enforcement belongs here rather than at the TLS handshake. Bootstrap,
+	// signed package download, CA fetch, and enrollment all happen before a new
+	// machine owns a client certificate. Both listeners share this handler seam,
+	// so requiring the certificate here also makes the setting mean the same
+	// thing on direct TLS and proxy-to-HTTP paths.
 	//
 	// The admin credential is exempt: an operator posting on behalf of an
 	// endpoint (a CLI, a test) is not an endpoint claiming to be one.
@@ -2845,9 +2867,13 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
 
 	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
-	mux.HandleFunc("/api/v1/enrolment/script", s.authMiddleware(requireAdmin(s.handleEnrolmentScript)))
-	mux.HandleFunc("/api/v1/enrolment/windows", s.authMiddleware(requireAdmin(s.handleEnrolmentWindows)))
-	mux.HandleFunc("/api/v1/enrollment/profiles", s.authMiddleware(requireAdmin(s.handleEnrollmentProfiles)))
+	// A local one-use setup session has administrator weight for enrollment:
+	// first-run proof cannot complete until the operator can install an agent.
+	// The setup cookie is short-lived, HttpOnly, SameSite=Strict and CSRF-bound;
+	// after completion every session is invalidated and normal auth applies.
+	mux.HandleFunc("/api/v1/enrolment/script", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrolmentScript)))
+	mux.HandleFunc("/api/v1/enrolment/windows", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrolmentWindows)))
+	mux.HandleFunc("/api/v1/enrollment/profiles", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrollmentProfiles)))
 	mux.HandleFunc("/api/v1/enrollment/redeem", s.handleEnrollmentRedeem)
 	// The self-service portal. Unauthenticated by necessity - the machine that
 	// needs the agent has no credential yet, which is the whole problem it

@@ -505,20 +505,24 @@ func publicJSONProbe(ctx context.Context, rawURL string) publicProbe {
 
 func (s *Server) checkBootstrap(ctx context.Context) diagnostics.Result {
 	cfg := s.effectiveConfiguration()
-	if cfg.ConsoleURL == "" {
-		return diag("bootstrap", "Public install surface", diagnostics.NotConfigured, "console URL is not configured", "", "save a console URL in setup")
+	installURL := strings.TrimRight(cfg.AgentURL, "/")
+	if installURL == "" {
+		installURL = strings.TrimRight(cfg.ConsoleURL, "/")
 	}
-	probe := publicScriptProbe(ctx, strings.TrimRight(cfg.ConsoleURL, "/")+"/bootstrap.sh")
+	if installURL == "" {
+		return diag("bootstrap", "Public install surface", diagnostics.NotConfigured, "agent URL is not configured", "", "save an HTTPS agent URL in setup")
+	}
+	probe := publicScriptProbe(ctx, installURL+"/bootstrap.sh")
 	if probe.err != nil {
-		return diag("bootstrap", "Public install surface", diagnostics.Warn, "bootstrap route could not be checked from the hub", probe.err.Error(), "check the console route from the operator network; split-horizon or NAT hairpin can make this inconclusive")
+		return diag("bootstrap", "Public install surface", diagnostics.Warn, "agent bootstrap route could not be checked from the hub", probe.err.Error(), "check the agent route from an endpoint network; split-horizon or NAT hairpin can make this inconclusive")
 	}
 	if probe.redirect || probe.html {
-		return diag("bootstrap", "Public install surface", diagnostics.Fail, "bootstrap route returned a redirect or HTML page instead of an installer", probe.status, "exclude bootstrap and download routes from interactive login redirects")
+		return diag("bootstrap", "Public install surface", diagnostics.Fail, "agent bootstrap route returned a redirect or HTML page instead of an installer", probe.status, "keep interactive login redirects off the agent hostname")
 	}
 	if !probe.installer {
 		return diag("bootstrap", "Public install surface", diagnostics.Fail, "bootstrap route did not contain the body-only enrollment flow", probe.status, "serve the current signed native bootstrap script")
 	}
-	return diag("bootstrap", "Public install surface", diagnostics.Pass, "public bootstrap route serves the retained Linux installer flow", probe.status, "")
+	return diag("bootstrap", "Public install surface", diagnostics.Pass, "HTTPS agent route serves the retained Linux installer flow", probe.status, "")
 }
 
 type scriptProbe struct {

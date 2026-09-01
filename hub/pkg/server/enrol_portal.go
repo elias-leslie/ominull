@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/storage"
 )
 
@@ -52,6 +53,8 @@ type portalView struct {
 	PlatformLbl string
 	Platforms   []portalPlatform
 	Command     string
+	Script      string
+	Filename    string
 	Code        string
 	ProfileID   string
 	ExpiresIn   string
@@ -192,6 +195,13 @@ func (s *Server) portalMint(w http.ResponseWriter, r *http.Request, addr string,
 	view.NeedsPass = false
 	view.WindowLabel = window.Label
 	view.Command = plat.oneLiner(s.downloadBase(r))
+	view.Filename = plat.filename
+	view.Script = plat.generate(bootstrap.Options{
+		HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL,
+		LocationID: window.LocationID, RoleTag: window.Role,
+		AgentVersion: s.agentVersion, EnrollmentCode: code,
+		UseSystemCA: s.agentUsesSystemCA(),
+	})
 	view.Code = code
 	view.ProfileID = profile.ID
 	view.ExpiresIn = enrollmentExpiresIn(profile)
@@ -263,6 +273,7 @@ body{margin:0;padding:2rem 1rem;background:var(--bg);color:var(--ink);font:15px/
 main{max-width:44rem;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1.5rem;margin-bottom:1rem}
 h1{font-size:1.35rem;margin:0 0 .35rem}
+h2{font-size:1rem;margin:0 0 .35rem}
 p.sub{color:var(--dim);margin:0 0 1.25rem}
 fieldset{border:0;padding:0;margin:0 0 1rem}
 legend{font-weight:600;margin-bottom:.5rem;padding:0}
@@ -277,7 +288,10 @@ label.field span{display:block;font-weight:600;margin-bottom:.35rem}
 input[type=password]{width:100%;padding:.6rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
 button{font:inherit;font-weight:600;padding:.7rem 1.1rem;border-radius:8px;border:1px solid var(--brand);background:var(--brand);color:#fff;cursor:pointer}
 button.ghost{background:transparent;color:var(--brand)}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin:.75rem 0 1rem}
+.choice{border-top:1px solid var(--line);padding-top:1rem;margin-top:1rem}
 pre{background:var(--code);color:var(--codeink);padding:1rem;border-radius:8px;overflow-x:auto;margin:0 0 .75rem;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+[hidden]{display:none!important}
 .note{padding:.75rem 1rem;border-radius:8px;margin:0 0 1rem}
 .note-warn{background:var(--warnbg);color:var(--warn)}
 .note-crit{background:var(--critbg);color:var(--crit)}
@@ -296,21 +310,28 @@ a{color:var(--brand)}
 <main>
 {{if .Command}}
   <div class="card">
-    <h1>Run this on this machine</h1>
-    <p class="sub">{{.PlatformLbl}} &middot; code expires in {{.ExpiresIn}}.</p>
-    <p>Run the command below on this host. When it asks, enter this code:</p>
-    <pre id="code">{{.Code}}</pre>
-    <pre id="cmd">{{.Command}}</pre>
-    <button type="button" id="copy" class="ghost">Copy command</button>
-    <ol class="steps">
+    <h1>{{.PlatformLbl}} installer ready</h1>
+    <p class="sub">Prepared for this machine &middot; enrollment expires in {{.ExpiresIn}}.</p>
+    <h2>Download and run</h2>
+    <p>Download the prepared script. It verifies and installs the signed native package, enrolls this machine, and starts the agent.</p>
+    <div class="actions"><button type="button" id="download">Download {{.Filename}}</button></div>
+    <pre id="installer" hidden>{{.Script}}</pre>
+    <ol>
       {{if eq .Platform "windows"}}
-      <li>Open <strong>PowerShell as Administrator</strong> — right-click Start, then &ldquo;Terminal (Admin)&rdquo;.</li>
+      <li>Open <strong>PowerShell as Administrator</strong>.</li>
+      <li>Run the downloaded <code class="inline">{{.Filename}}</code> script.</li>
       {{else}}
       <li>Open a <strong>Terminal</strong>.</li>
+      <li>Run <code class="inline">sudo bash {{.Filename}}</code> from the download folder.</li>
       {{end}}
-      <li>Paste the command and press Enter.</li>
-      <li>Enter the code when prompted. It installs the native package and enrolls this machine.</li>
     </ol>
+    <div class="choice">
+    <h2>Or use a terminal command</h2>
+    <p>Run this generic command on the target, then enter the code when prompted:</p>
+    <pre id="code">{{.Code}}</pre>
+    <pre id="cmd">{{.Command}}</pre>
+    <div class="actions"><button type="button" id="copy" class="ghost">Copy command</button><button type="button" id="copy-code" class="ghost">Copy code</button></div>
+    </div>
   </div>
   <div class="card">
     <p class="flush"><a href="/install">Get a command for a different operating system</a></p>
@@ -318,7 +339,7 @@ a{color:var(--brand)}
 {{else}}
   <div class="card">
     <h1>Install the Ominull agent</h1>
-    <p class="sub">This machine ({{.ClientIP}}) can enrol itself. Pick its operating system.</p>
+    {{if .Covered}}<p class="sub">This machine ({{.ClientIP}}) is allowed to enroll. Pick its operating system.</p>{{else}}<p class="sub">This machine is connecting from {{.ClientIP}}.</p>{{end}}
     {{if .Error}}<p class="note note-crit">{{.Error}}</p>{{end}}
     {{if .Covered}}
     <form method="POST" action="/install">
@@ -334,7 +355,7 @@ a{color:var(--brand)}
       <label class="field"><span>Enrolment passcode</span>
         <input type="password" name="passcode" autocomplete="off" autofocus></label>
       {{end}}
-      <button type="submit">Get my install command</button>
+      <button type="submit">Prepare my installer</button>
     </form>
     {{else}}
     <p class="note note-warn">This machine is not authorised to enrol itself. An administrator has to open an enrolment window covering <code class="inline">{{.ClientIP}}</code> in the Ominull console.</p>
@@ -345,25 +366,36 @@ a{color:var(--brand)}
 </main>
 <script nonce="{{.Nonce}}">
 (function () {
-  var btn = document.getElementById("copy"), cmd = document.getElementById("cmd");
-  if (!btn || !cmd) return;
-  btn.addEventListener("click", function () {
-    var text = cmd.textContent;
-    var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy command"; }, 1600); };
+  function copy(button, source, resting) {
+    if (!button || !source) return;
+    button.addEventListener("click", function () {
+    var text = source.textContent;
+    var done = function () { button.textContent = "Copied"; setTimeout(function () { button.textContent = resting; }, 1600); };
     /* clipboard.writeText is unavailable on a plain-HTTP origin, which is
        exactly how this page is usually reached, so the selection fallback is
        the path that actually runs rather than a nicety. */
-    if (navigator.clipboard && navigator.clipboard.writeText) {
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(done, select);
     } else { select(); }
     function select() {
       var range = document.createRange();
-      range.selectNodeContents(cmd);
+      range.selectNodeContents(source);
       var sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
-      try { document.execCommand("copy"); done(); } catch (e) { btn.textContent = "Press Ctrl+C"; }
+      try { document.execCommand("copy"); done(); } catch (e) { button.textContent = "Press Ctrl+C"; }
     }
+  });
+  }
+  copy(document.getElementById("copy"), document.getElementById("cmd"), "Copy command");
+  copy(document.getElementById("copy-code"), document.getElementById("code"), "Copy code");
+  var download = document.getElementById("download"), installer = document.getElementById("installer");
+  if (download && installer) download.addEventListener("click", function () {
+    var url = URL.createObjectURL(new Blob([installer.textContent], {type:"text/plain"}));
+    var link = document.createElement("a");
+    link.href = url; link.download = {{.Filename}};
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   });
 })();
 </script>
