@@ -1487,6 +1487,7 @@ static void EnforcementTeardown(const char* tool) {
 static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
                              char allow[][64], int allowCount,
                              char peers[][64], int peerCount,
+                             char threats[][64], int threatCount,
                              const BASELINE_RULE* baseline, int baselineCount,
                              bool baselineKnown) {
     bool v6 = strcmp(tool, "ip6tables") == 0;
@@ -1514,15 +1515,7 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
     (void)RunTool(loIn);
     (void)RunTool(loOut);
 
-    /* 3. DHCP, above the peer blocks: a lease that expires because a quarantine
-     *    named the DHCP server costs this host the address the hub reaches it
-     *    on, and there is no way back from that either.
-     *
-     *    Which servers, though, is the baseline policy's business rather than
-     *    this agent's. Only the DHCP rules are placed here - the rest of the
-     *    baseline sits below the peer blocks with DNS, so that quarantining a
-     *    rogue resolver still beats the rule that lets this host resolve names,
-     *    while quarantining something cannot cost it its lease. */
+    /* 3. DHCP, above the peer blocks. */
     if (baselineKnown) {
         for (int i = 0; i < baselineCount; i++) {
             if (strcmp(baseline[i].service, "dhcp") != 0) continue;
@@ -1530,8 +1523,6 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
             BaselinePermit(tool, &baseline[i]);
         }
     } else {
-        /* No policy from this hub: keep the permit that has always been here.
-         * DHCPv6 is a different pair of ports rather than the same two. */
         const char* dhcpPorts = v6 ? "546:547" : "67:68";
         const char* dhcpIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-p", "udp", "--sport", dhcpPorts, "-j", "RETURN", NULL };
         const char* dhcpOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-p", "udp", "--dport", dhcpPorts, "-j", "RETURN", NULL };
@@ -1546,6 +1537,15 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
         const char* pOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", peers[i], "-j", "DROP", NULL };
         (void)RunTool(pIn);
         (void)RunTool(pOut);
+    }
+
+    /* 4b. In-Line Threat Intelligence indicators drop. */
+    for (int i = 0; i < threatCount; i++) {
+        if ((strchr(threats[i], ':') != NULL) != v6) continue;
+        const char* tIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-s", threats[i], "-j", "DROP", NULL };
+        const char* tOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", threats[i], "-j", "DROP", NULL };
+        (void)RunTool(tIn);
+        (void)RunTool(tOut);
     }
 
     if (isolated) {
@@ -1637,6 +1637,8 @@ static char appliedAllow[MAX_ISOLATION_ALLOW][64];
 static int appliedAllowCount = 0;
 static char appliedPeers[MAX_QUARANTINED_PEERS][64];
 static int appliedPeerCount = 0;
+static char appliedThreats[MAX_QUARANTINED_PEERS][64];
+static int appliedThreatCount = 0;
 static BASELINE_RULE appliedBaseline[MAX_BASELINE_RULES];
 static int appliedBaselineCount = 0;
 static bool appliedBaselineKnown = false;
@@ -1689,6 +1691,8 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     int allowCount = ParseAddressList(respJson, "isolation_allow_ips", allow, MAX_ISOLATION_ALLOW);
     char peers[MAX_QUARANTINED_PEERS][64];
     int peerCount = ParseAddressList(respJson, "quarantined_peers", peers, MAX_QUARANTINED_PEERS);
+    char threats[MAX_QUARANTINED_PEERS][64];
+    int threatCount = ParseAddressList(respJson, "threat_indicators", threats, MAX_QUARANTINED_PEERS);
 
     BASELINE_RULE baseline[MAX_BASELINE_RULES];
     int baselineCount = ParseBaselineRules(respJson, baseline, MAX_BASELINE_RULES);
@@ -1697,12 +1701,16 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
 
     bool changed = !known || wantIsolated != appliedIsolated
                    || allowCount != appliedAllowCount || peerCount != appliedPeerCount
+                   || threatCount != appliedThreatCount
                    || baselineKnown != appliedBaselineKnown || baselineCount != appliedBaselineCount;
     for (int i = 0; !changed && i < allowCount; i++) {
         if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
     for (int i = 0; !changed && i < peerCount; i++) {
         if (strcmp(peers[i], appliedPeers[i]) != 0) changed = true;
+    }
+    for (int i = 0; !changed && i < threatCount; i++) {
+        if (strcmp(threats[i], appliedThreats[i]) != 0) changed = true;
     }
     for (int i = 0; !changed && i < baselineCount; i++) {
         if (strcmp(baseline[i].destination, appliedBaseline[i].destination) != 0
@@ -1738,20 +1746,23 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
         }
     } else if (known && appliedIsolated) {
         printf("[+] Threat neutralized: lifting host isolation. %d peer(s) still quarantined.\n", peerCount);
-    } else if (peerCount == 0 && appliedPeerCount > 0) {
+    } else if (peerCount == 0 && appliedPeerCount > 0 && threatCount == 0) {
         printf("[+] Mesh quarantine cleared; no enforcement rules remain on this host.\n");
     } else if (peerCount != appliedPeerCount) {
         printf("[*] Mesh quarantine updated: %d peer(s).\n", peerCount);
     }
+    if (threatCount > 0) {
+        printf("[*] In-line edge threat intelligence: active drop rules for %d indicator(s).\n", threatCount);
+    }
     fflush(stdout);
 
-    if (!wantIsolated && peerCount == 0) {
+    if (!wantIsolated && peerCount == 0 && threatCount == 0) {
         EnforcementTeardown("iptables");
         EnforcementTeardown("ip6tables");
     } else {
-        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount,
+        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount, threats, threatCount,
                          baseline, baselineCount, baselineKnown);
-        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount,
+        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount, threats, threatCount,
                          baseline, baselineCount, baselineKnown);
     }
 
@@ -1760,6 +1771,8 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     appliedAllowCount = allowCount;
     memcpy(appliedPeers, peers, sizeof(peers));
     appliedPeerCount = peerCount;
+    memcpy(appliedThreats, threats, sizeof(threats));
+    appliedThreatCount = threatCount;
     memcpy(appliedBaseline, baseline, sizeof(baseline));
     appliedBaselineCount = baselineCount;
     appliedBaselineKnown = baselineKnown;
@@ -1800,9 +1813,11 @@ static void HubContact(bool accepted) {
 
     EnforcementBuild("iptables", false, NULL, appliedAllow, 0,
                      appliedPeers, appliedPeerCount,
+                     appliedThreats, appliedThreatCount,
                      appliedBaseline, appliedBaselineCount, appliedBaselineKnown);
     EnforcementBuild("ip6tables", false, NULL, appliedAllow, 0,
                      appliedPeers, appliedPeerCount,
+                     appliedThreats, appliedThreatCount,
                      appliedBaseline, appliedBaselineCount, appliedBaselineKnown);
 
     appliedIsolated = false;

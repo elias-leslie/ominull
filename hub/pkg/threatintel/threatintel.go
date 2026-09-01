@@ -90,6 +90,28 @@ func (m *Manager) CheckThreat(ipOrDomain string) (*storage.IOC, bool) {
 	return ioc, exists
 }
 
+// GetActiveIndicators returns a bounded slice of active malicious IPs/domains
+// for endpoint edge threat filtering and in-line kernel drops.
+func (m *Manager) GetActiveIndicators(limit int) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if limit <= 0 || limit > 512 {
+		limit = 128
+	}
+
+	indicators := make([]string, 0, limit)
+	for val := range m.cache {
+		if val != "" && !strings.HasPrefix(val, "127.") && val != "::1" {
+			indicators = append(indicators, val)
+			if len(indicators) >= limit {
+				break
+			}
+		}
+	}
+	return indicators
+}
+
 func (m *Manager) SyncAllFeeds(ctx context.Context) error {
 	log.Printf("[*] Synchronizing Threat Intelligence feeds (Feodo Tracker, Emerging Threats)...")
 	var allIOCs []storage.IOC

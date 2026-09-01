@@ -222,6 +222,9 @@ func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedV
 		"isolation_allow_ips": allowIPs,
 		"isolation_baseline":  wire,
 	}
+	if s.ti != nil {
+		resp["threat_indicators"] = s.ti.GetActiveIndicators(128)
+	}
 	// A retained 1.7.x agent still arrives with the shared tenant key while
 	// migration mode is open. Issue its endpoint credential in the successful
 	// heartbeat response; the updated native agent writes it to its protected
