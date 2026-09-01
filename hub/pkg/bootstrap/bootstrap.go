@@ -232,6 +232,7 @@ try {
         Write-Host "[+] Fetching and validating the Ominull CA."
         curl.exe -k --ssl-no-revoke -fsSL --max-time 30 "$HubURL/api/v1/pki/ca.crt" -o $ca
         $CurlTLS = @('--cacert', $ca, '--ssl-no-revoke')
+        certutil.exe -addstore -f Root $ca | Out-Null
     }
     curl.exe @CurlTLS -fsSL --max-time 60 "$HubURL/download/$Package" -o $msi
     curl.exe @CurlTLS -fsSL --max-time 30 "$HubURL/download/$Package.sig" -o $sig
