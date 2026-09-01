@@ -164,6 +164,13 @@ func (s *Store) initAssetSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_assets_endpoint ON assets(agent_endpoint_id);
 	CREATE INDEX IF NOT EXISTS idx_asset_claims_asset ON asset_claims(asset_id);
 	CREATE INDEX IF NOT EXISTS idx_asset_ports_asset ON asset_ports(asset_id);
+
+	-- Cleanup malformed or orphaned empty identity rows
+	UPDATE assets SET agent_endpoint_id = (SELECT agent_endpoint_id FROM assets WHERE id = 'asset-ip--' AND agent_endpoint_id IS NOT NULL)
+	WHERE id != 'asset-ip--' AND ip = (SELECT ip FROM assets WHERE id = 'asset-ip--') AND (SELECT agent_endpoint_id FROM assets WHERE id = 'asset-ip--') IS NOT NULL;
+	DELETE FROM asset_claims WHERE asset_id = 'asset-ip--';
+	DELETE FROM asset_ports WHERE asset_id = 'asset-ip--';
+	DELETE FROM assets WHERE id = 'asset-ip--' OR identity_value = '|';
 	`
 	_, err := s.db.Exec(schema)
 	return err
