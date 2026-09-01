@@ -58,9 +58,10 @@ type portalView struct {
 	Code        string
 	ProfileID   string
 	ExpiresIn   string
-	Error       string
-	WindowLabel string
-	WindowID    string
+	Error         string
+	WindowLabel   string
+	WindowID      string
+	ReportSuccess string
 }
 
 type portalPlatform struct {
@@ -82,7 +83,8 @@ func (s *Server) handleEnrolPortal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addr := clientIP(r)
-	guess := portalOSFromAgent(r.Header.Get("User-Agent"))
+	ua := r.Header.Get("User-Agent")
+	guess := portalOSFromAgent(ua)
 
 	view := portalView{
 		HubVersion: s.agentVersion,
@@ -92,7 +94,34 @@ func (s *Server) handleEnrolPortal(w http.ResponseWriter, r *http.Request) {
 	_, view.Covered = s.store.CoveringWindow(addr)
 
 	if r.Method == http.MethodPost {
-		s.portalMint(w, r, addr, &view)
+		if errOut := strings.TrimSpace(r.FormValue("error_output")); errOut != "" {
+			plat := strings.TrimSpace(r.FormValue("platform"))
+			if plat == "" {
+				plat = guess
+			}
+			winID := strings.TrimSpace(r.FormValue("window_id"))
+			report, err := s.store.CreateInstallReport(storage.InstallReport{
+				ClientIP:    addr,
+				Platform:    plat,
+				UserAgent:   ua,
+				ErrorOutput: errOut,
+				WindowID:    winID,
+				SystemInfo: map[string]interface{}{
+					"client_ip":     addr,
+					"user_agent":    ua,
+					"platform":      plat,
+					"submitted_via": "form_post",
+				},
+				CreatedAt: time.Now().UTC(),
+			})
+			if err == nil {
+				view.ReportSuccess = "Error report " + report.ID + " recorded successfully. System details and logs have been saved."
+			} else {
+				view.Error = "Could not save error report: " + err.Error()
+			}
+		} else {
+			s.portalMint(w, r, addr, &view)
+		}
 	} else if covering, ok := s.store.CoveringWindow(addr); ok {
 		view.NeedsPass = covering.HasPasscode
 		view.WindowLabel = covering.Label
@@ -123,7 +152,7 @@ func (s *Server) handleEnrolPortal(w http.ResponseWriter, r *http.Request) {
 	view.Nonce = newCSPNonce()
 	h.Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'nonce-"+view.Nonce+"'; script-src 'nonce-"+view.Nonce+"'; "+
-			"form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+			"connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 
 	if err := portalTemplate.Execute(w, view); err != nil {
 		log.Printf("[!] Could not render the enrolment portal for %s: %v", addr, err)
@@ -370,7 +399,8 @@ textarea:focus{outline:2px solid var(--brand);outline-offset:1px}
   <div class="card" id="error-card">
     <h2>Report an installation error</h2>
     <p class="sub">Ran into an issue running the installer? Paste the error message or terminal output below. System context (IP, OS, browser environment) is captured automatically.</p>
-    <form id="error-report-form" method="POST" action="/api/v1/enrolment/report-error">
+    {{if .ReportSuccess}}<p class="note note-ok">{{.ReportSuccess}}</p>{{end}}
+    <form id="error-report-form" method="POST" action="/install">
       <label class="field">
         <span>Error output or terminal log</span>
         <textarea id="error-output" name="error_output" rows="6" placeholder="Paste PowerShell / Bash error output, traceback, or installer output here..." required></textarea>
