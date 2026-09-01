@@ -318,7 +318,10 @@ client_pfx_source=$pfx
     $agent = Join-Path $env:ProgramFiles "Ominull\ominulld.exe"
     $config | & $agent --configure-stdin
     if ($LASTEXITCODE -ne 0) { throw "agent configuration failed with exit code $LASTEXITCODE" }
-    Start-Service -Name ominulld
+    Restart-Service -Name ominulld -Force -ErrorAction SilentlyContinue
+    if ((Get-Service -Name ominulld -ErrorAction SilentlyContinue).Status -ne 'Running') {
+        Start-Service -Name ominulld -ErrorAction SilentlyContinue
+    }
     Write-Host "[+] Ominull Windows agent installed, enrolled, and started from $Package."
 } finally {
     Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
