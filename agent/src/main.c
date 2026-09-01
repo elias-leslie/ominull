@@ -3,7 +3,7 @@
 #define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
 #define OMINULL_DEFAULT_PFX_PATH "C:\\Program Files\\Ominull\\client.pfx"
 
-/* ReadKeyFile loads the API key written beside the binary at enrolment. The
+/* ReadKeyFile loads the device credential written beside the binary at enrolment. The
  * file holds the key and nothing else; trailing whitespace is tolerated because
  * an operator repairing one by hand will leave a newline behind. */
 static bool ReadKeyFile(const char* path, char* out, size_t cap) {
@@ -24,14 +24,14 @@ static bool ReadKeyFile(const char* path, char* out, size_t cap) {
 
 static void SetConfigValue(AGENT_CONFIG* config, const char* key, const char* value) {
     if (strcmp(key, "hub_url") == 0) snprintf(config->hub_url, sizeof(config->hub_url), "%s", value);
-    else if (strcmp(key, "key_path") == 0) snprintf(config->key_path, sizeof(config->key_path), "%s", value);
+    else if (strcmp(key, "key_path") == 0 || strcmp(key, "device_credential_path") == 0) snprintf(config->key_path, sizeof(config->key_path), "%s", value);
+    else if (strcmp(key, "device_credential") == 0 || strcmp(key, "api_key") == 0) snprintf(config->api_key, sizeof(config->api_key), "%s", value);
     else if (strcmp(key, "endpoint_id") == 0) snprintf(config->endpoint_id, sizeof(config->endpoint_id), "%s", value);
     else if (strcmp(key, "role_tag") == 0) snprintf(config->role_tag, sizeof(config->role_tag), "%s", value);
     else if (strcmp(key, "location_id") == 0) snprintf(config->location_id, sizeof(config->location_id), "%s", value);
     else if (strcmp(key, "ca_path") == 0) snprintf(config->ca_path, sizeof(config->ca_path), "%s", value);
     else if (strcmp(key, "client_pfx_path") == 0) snprintf(config->client_pfx_path, sizeof(config->client_pfx_path), "%s", value);
-    else if (strcmp(key, "cf_client_id") == 0) snprintf(config->cf_client_id, sizeof(config->cf_client_id), "%s", value);
-    else if (strcmp(key, "cf_client_secret") == 0) snprintf(config->cf_client_secret, sizeof(config->cf_client_secret), "%s", value);
+    else if (strcmp(key, "pin_hub_ca") == 0) config->pin_hub_ca = strcmp(value, "0") != 0;
     else if (strcmp(key, "allow_plaintext") == 0) config->allow_plaintext = strcmp(value, "1") == 0;
 }
 
@@ -54,17 +54,17 @@ static bool LoadConfigFile(AGENT_CONFIG* config, const char* path) {
 static void PrintUsage(const char* prog) {
     printf("Ominull Endpoint Agent (v%s)\n", OMINULL_AGENT_VERSION);
     printf("Usage:\n");
-    printf("  %s --console --hub <url> --key <api_key>   Run in foreground (interactive)\n", prog);
-    printf("  %s --service --hub <url> --key <api_key>   Run under Service Control Manager\n", prog);
+    printf("  %s --console --hub <url> --key-file <path>   Run in foreground (interactive)\n", prog);
+    printf("  %s --service --hub <url> --key-file <path>   Run under Service Control Manager\n", prog);
     printf("\nOptions:\n");
     printf("  --ca <path>          CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
-    printf("  --key-file <path>    Read the API key from a file instead of the command line.\n");
+    printf("  --key-file <path>    Read the unique device credential from a protected file.\n");
     printf("                       Enrollment writes this file; a service command\n");
     printf("                       line is readable through `sc qc` by any logged-on user.\n");
     printf("  --client-pfx <path>  PKCS#12 archive holding this endpoint's own certificate and key\n");
     printf("                       (default %s). Presented to the hub so it can\n", OMINULL_DEFAULT_PFX_PATH);
-    printf("                       tell this endpoint from any other holding the same tenant key.\n");
-    printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
+    printf("                       the client certificate adds a second matching proof.\n");
+    printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the device credential then cross the network in the clear.\n");
     printf("  --version            Print the version and exit.\n");
     printf("  --config <path>      Read package-owned runtime configuration from this file.\n");
 }
@@ -92,6 +92,7 @@ int main(int argc, char* argv[]) {
     strcpy(config.config_path, OMINULL_DEFAULT_CONFIG_PATH);
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-home");
+    config.pin_hub_ca = true;
 
     DWORD hostLen = sizeof(config.hostname);
     if (!GetComputerNameA(config.hostname, &hostLen)) {
@@ -137,10 +138,9 @@ int main(int argc, char* argv[]) {
             strncpy(config.role_tag, argv[++i], sizeof(config.role_tag) - 1);
         } else if (strcmp(argv[i], "--location") == 0 && i + 1 < argc) {
             strncpy(config.location_id, argv[++i], sizeof(config.location_id) - 1);
-        } else if (strcmp(argv[i], "--cf-id") == 0 && i + 1 < argc) {
-            strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
-        } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
-            strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--cf-id") == 0 || strcmp(argv[i], "--cf-secret") == 0) {
+            fprintf(stderr, "[-] Cloudflare service-token authentication is not supported; use the unique device credential.\n");
+            return 2;
         } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
             strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
         } else if (strcmp(argv[i], "--client-pfx") == 0 && i + 1 < argc) {
@@ -181,12 +181,12 @@ int main(int argc, char* argv[]) {
     // --key-file wins over --key: a registration that carries both is one being
     // migrated, and the file is the copy that is actually protected.
     if (config.key_path[0] && !ReadKeyFile(config.key_path, config.api_key, sizeof(config.api_key))) {
-        fprintf(stderr, "[-] Cannot read the API key from %s. Enrolment writes it; without it "
+        fprintf(stderr, "[-] Cannot read the device credential from %s. Enrolment writes it; without it "
                         "this agent has no identity to report under.\n", config.key_path);
         return 1;
     }
 	if (!config.api_key[0] || strcmp(config.api_key, "<provision-via-bootstrap>") == 0) {
-		fprintf(stderr, "[-] No enrolled API key is configured; refusing to start.\n");
+		fprintf(stderr, "[-] No enrolled device credential is configured; refusing to start.\n");
 		return 1;
 	}
 
@@ -205,8 +205,12 @@ int main(int argc, char* argv[]) {
          * end up. Where it came from is the part that is actually diagnostic. */
         printf("[*] Connecting to Hub at: %s (key: %s)\n", config.hub_url,
                config.key_path[0] ? config.key_path : "supplied on the command line");
-        if (Hub_UsesTLS(&config)) {
-            printf("[*] Hub trust: TLS, pinned to %s\n", config.ca_path);
+		if (Hub_UsesTLS(&config)) {
+			if (config.pin_hub_ca) {
+				printf("[*] Hub trust: TLS, pinned to %s\n", config.ca_path);
+			} else {
+				printf("[*] Hub trust: TLS, Windows machine certificate store\n");
+			}
         } else {
             printf("[*] Hub trust: NONE - cleartext transport%s\n",
                    config.allow_plaintext ? " (--allow-plaintext)" : " (will refuse to report)");

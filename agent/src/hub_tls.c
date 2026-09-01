@@ -1,7 +1,7 @@
 /* ---------------------------------------------------------------------------
  * Hub transport security (Windows)
  *
- * Everything this agent sends to the hub carries the tenant API key, and
+ * Everything this agent sends to the hub carries its device credential, and
  * everything it reads back can move the host: an isolation command, a mesh
  * quarantine list, a release descriptor. On plain HTTP all of that is readable
  * and forgeable by anyone on the path.
@@ -169,6 +169,11 @@ static bool ChainEndsAtPinnedCA(PCCERT_CONTEXT serverCert, PCCERT_CONTEXT pinned
 
 bool Hub_VerifyRequestPin(void* hRequest, const AGENT_CONFIG* config) {
     if (!Hub_UsesTLS(config)) return true;
+	/* Public ACME and Cloudflare edge certificates are verified by normal
+	 * WinHTTP machine-store validation. There is no Ominull CA pin to compare
+	 * on that path; the device credential and client certificate still prove
+	 * endpoint identity to the hub. */
+	if (!config->pin_hub_ca) return true;
 
     PCCERT_CONTEXT serverCert = NULL;
     DWORD certLen = sizeof(serverCert);
@@ -277,12 +282,12 @@ bool Hub_TransportReady(const AGENT_CONFIG* config) {
         return false;
     }
 
-    if (config->ca_path[0] == '\0') {
-        ReportRefusal("no CA certificate is configured; pass --ca <path>.");
-        return false;
-    }
+	if (config->pin_hub_ca && config->ca_path[0] == '\0') {
+		ReportRefusal("no CA certificate is configured; pass --ca <path>.");
+		return false;
+	}
 
-    static ULONGLONG lastOk = 0;
+	static ULONGLONG lastOk = 0;
     ULONGLONG now = GetTickCount64();
     if (lastOk != 0 && now - lastOk < PIN_REVALIDATE_MS) {
         return true;

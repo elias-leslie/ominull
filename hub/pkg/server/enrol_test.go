@@ -8,23 +8,16 @@ import (
 	"testing"
 )
 
-// What these tests are about: the console has to be able to hand an operator a
-// working install command without the fleet's admin key ever appearing in a URL,
-// and the credential that replaces it has to be worth less than the key it
-// replaced - single use, short lived, and good for one platform.
-
-// ticketFrom pulls the ?t= value out of a rendered one-line install command.
-func ticketFrom(t *testing.T, oneLiner string) string {
+// What these tests are about: the console has to hand an operator a working
+// install script without an admin or shared tenant credential ever appearing
+// in the command or URL. The enrollment code is body-only and one-use.
+func enrollmentCode(t *testing.T, out map[string]interface{}) string {
 	t.Helper()
-	i := strings.Index(oneLiner, "?t=")
-	if i < 0 {
-		t.Fatalf("no ticket in %q", oneLiner)
+	code, ok := out["enrollment_code"].(string)
+	if !ok || !strings.HasPrefix(code, "one_") {
+		t.Fatalf("no one-use enrollment code in %#v", out)
 	}
-	tok := oneLiner[i+3:]
-	if j := strings.IndexAny(tok, " '\"|"); j >= 0 {
-		tok = tok[:j]
-	}
-	return tok
+	return code
 }
 
 func renderInstaller(t *testing.T, srv *Server, platform string, oneLiner bool) map[string]interface{} {
@@ -59,74 +52,91 @@ func TestTheConsoleCanRenderAnInstallerWithoutPuttingTheKeyInAURL(t *testing.T) 
 		if one == "" {
 			t.Fatalf("%s: no one-line form was returned", platform)
 		}
-		// The whole point. The command an operator pastes on a host must not
-		// carry the hub's admin key, because that command lands in shell
-		// history and in every log on the path.
+		// The command an operator pastes on a host must not carry any credential.
 		if strings.Contains(one, "mock_admin_token") {
 			t.Fatalf("%s: the install command carries the admin key: %s", platform, one)
 		}
-		if !strings.Contains(one, "?t=") {
-			t.Fatalf("%s: the install command carries no ticket: %s", platform, one)
+		if strings.Contains(one, "?t=") || strings.Contains(one, "?key=") || strings.Contains(one, "one_") {
+			t.Fatalf("%s: the install command carries enrollment material in its URL: %s", platform, one)
+		}
+		if strings.Contains(script, "mock_admin_token") || strings.Contains(script, "mock_tenant_token") {
+			t.Fatalf("%s: the script carries a static hub credential", platform)
 		}
 	}
 }
 
-func TestAnInstallLinkWorksOnceAndThenStopsWorking(t *testing.T) {
+func TestAnEnrollmentCodeWorksOnceAndThenStopsWorking(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
 	out := renderInstaller(t, srv, "linux", true)
-	one, _ := out["one_liner"].(string)
-	ticket := ticketFrom(t, one)
+	code := enrollmentCode(t, out)
 
 	first := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(first, httptest.NewRequest("GET", "/bootstrap.sh?t="+ticket, nil))
+	firstReq := httptest.NewRequest("POST", "/api/v1/enrollment/redeem", strings.NewReader(`{"code":"`+code+`","platform":"linux","hostname":"linux-test"}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(first, firstReq)
 	if first.Code != http.StatusOK {
 		t.Fatalf("the first redemption was refused: %d %s", first.Code, first.Body.String())
 	}
-	if !strings.Contains(strings.ToLower(first.Body.String()), "ominull") {
-		t.Fatalf("the redeemed body is not an installer: %.120s", first.Body.String())
+	var bundle map[string]interface{}
+	if err := json.Unmarshal(first.Body.Bytes(), &bundle); err != nil {
+		t.Fatalf("the first redemption did not return JSON: %v", err)
+	}
+	if !strings.HasPrefix(bundle["device_credential"].(string), "omd_") {
+		t.Fatalf("the first redemption did not issue a unique device credential: %#v", bundle)
 	}
 
 	second := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(second, httptest.NewRequest("GET", "/bootstrap.sh?t="+ticket, nil))
+	secondReq := httptest.NewRequest("POST", "/api/v1/enrollment/redeem", strings.NewReader(`{"code":"`+code+`","platform":"linux","hostname":"linux-test-2"}`))
+	secondReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(second, secondReq)
 	if second.Code == http.StatusOK {
-		t.Fatalf("a spent install link was redeemed a second time")
+		t.Fatalf("a spent enrollment code was redeemed a second time")
 	}
 	if !strings.Contains(strings.ToLower(second.Body.String()), "already been used") {
-		t.Errorf("a spent link should say so plainly; got %q", strings.TrimSpace(second.Body.String()))
+		t.Errorf("a spent code should say so plainly; got %q", strings.TrimSpace(second.Body.String()))
 	}
 }
 
-func TestAnInstallLinkIsBoundToItsPlatform(t *testing.T) {
+func TestAnEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
 	out := renderInstaller(t, srv, "windows", true)
-	one, _ := out["one_liner"].(string)
-	ticket := ticketFrom(t, one)
+	code := enrollmentCode(t, out)
 
-	// A Windows ticket must not fetch the Linux installer. The two carry
-	// different enrolment payloads, and a host that runs the wrong one either
-	// fails or enrols as something it is not.
+	// A Windows code must not redeem as Linux. The code remains available for
+	// the correct platform after the refused attempt.
 	wrong := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(wrong, httptest.NewRequest("GET", "/bootstrap.sh?t="+ticket, nil))
+
+	wrongReq := httptest.NewRequest("POST", "/api/v1/enrollment/redeem", strings.NewReader(`{"code":"`+code+`","platform":"linux","hostname":"linux-wrong"}`))
+	wrongReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(wrong, wrongReq)
 	if wrong.Code == http.StatusOK {
-		t.Fatalf("a Windows install link fetched the Linux installer")
+		t.Fatalf("a Windows enrollment code redeemed as Linux")
+	}
+
+	right := httptest.NewRecorder()
+	rightReq := httptest.NewRequest("POST", "/api/v1/enrollment/redeem", strings.NewReader(`{"code":"`+code+`","platform":"windows","hostname":"windows-right"}`))
+	rightReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(right, rightReq)
+	if right.Code != http.StatusOK {
+		t.Fatalf("the Windows enrollment code was not reusable after wrong-platform refusal: %d %s", right.Code, right.Body.String())
 	}
 }
 
-// TestAnInstallerIsNotRenderedWithoutOneBeingAskedFor. Minting a ticket is a
-// second credential with its own audit line, so merely looking at the screen
-// must not create one.
-func TestNoTicketIsMintedUnlessTheOneLinerIsAskedFor(t *testing.T) {
+// The generic one-line command is optional. A script request still returns the
+// one-use code needed by the script, but does not add a command containing it.
+func TestNoOneLinerIsRenderedUnlessAskedFor(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
 	out := renderInstaller(t, srv, "linux", false)
 	if _, ok := out["one_liner"]; ok {
-		t.Fatalf("a ticket was minted for a request that did not ask for one")
+		t.Fatalf("a one-line command was rendered for a request that did not ask for one")
 	}
+	_ = enrollmentCode(t, out)
 	if s, _ := out["script"].(string); len(s) < 200 {
 		t.Fatalf("the script itself should still be rendered; got %d bytes", len(s))
 	}

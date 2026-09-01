@@ -34,7 +34,15 @@ done
 MSI_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ominull-msi-check.XXXXXX")"
 DEB_WORK="$(mktemp -d "${TMPDIR:-/tmp}/ominull-deb-check.XXXXXX")"
 SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ominull-dpkg-check.XXXXXX")"
-trap 'rm -rf "${MSI_ROOT}" "${DEB_WORK}" "${SANDBOX_ROOT}"' EXIT
+cleanup() {
+    for root in "${MSI_ROOT}" "${DEB_WORK}" "${SANDBOX_ROOT}"; do
+        if [ -d "${root}" ]; then
+            find "${root}" -depth -mindepth 1 -delete
+            rmdir "${root}" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup EXIT
 
 msiextract --directory "${MSI_ROOT}" "${MSI}" >/dev/null
 [ -f "${MSI_ROOT}/Ominull/ominulld.exe" ] || {
@@ -70,12 +78,14 @@ grep -q 'NOT REINSTALL' "${msi_tables}/InstallExecuteSequence.idt"
 echo "[+] MSI ${VERSION}: files, service registration, recovery action, and no driver payload verified."
 
 make_versioned_deb() {
-    local source="$1" version="$2" output="$3" tree
+    local source="$1" version="$2" output="$3" tree old_pattern
     tree="${DEB_WORK}/$(basename "${output}").root"
     mkdir -p "${tree}"
     dpkg-deb --raw-extract "${source}" "${tree}"
     sed -i "s/^Version: .*/Version: ${version}/" "${tree}/DEBIAN/control"
-    sed -i "s/@VERSION@/${version}/g" "${tree}/DEBIAN/preinst"
+    old_pattern="${VERSION//./\\.}"
+    sed -i "s/@VERSION@/${version}/g; s/${old_pattern}/${version}/g" "${tree}/DEBIAN/preinst"
+    sed -i "s/@VERSION@/${version}/g; s/${old_pattern}/${version}/g" "${tree}/DEBIAN/postinst"
     dpkg-deb --build --root-owner-group "${tree}" "${output}" >/dev/null
 }
 
@@ -91,8 +101,9 @@ cp -a /etc/dpkg/. "${SANDBOX_ROOT}/etc/dpkg/"
 cp -a /etc/alternatives/. "${SANDBOX_ROOT}/etc/alternatives/"
 cp "${AGENT_DEB}" "${SANDBOX_ROOT}/release/base-agent.deb"
 cp "${HUB_DEB}" "${SANDBOX_ROOT}/release/base-hub.deb"
-make_versioned_deb "${AGENT_DEB}" "${VERSION}.1" "${DEB_WORK}/next-agent.deb"
-make_versioned_deb "${HUB_DEB}" "${VERSION}.1" "${DEB_WORK}/next-hub.deb"
+NEXT_VERSION="${VERSION}+1"
+make_versioned_deb "${AGENT_DEB}" "${NEXT_VERSION}" "${DEB_WORK}/next-agent.deb"
+make_versioned_deb "${HUB_DEB}" "${NEXT_VERSION}" "${DEB_WORK}/next-hub.deb"
 cp "${DEB_WORK}/next-agent.deb" "${SANDBOX_ROOT}/release/next-agent.deb"
 cp "${DEB_WORK}/next-hub.deb" "${SANDBOX_ROOT}/release/next-hub.deb"
 
@@ -100,7 +111,10 @@ SANDBOX=(
     bwrap --unshare-user --unshare-net --uid 0 --gid 0
     --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     --bind "${SANDBOX_ROOT}" /
-    --ro-bind /usr/bin /usr/bin --ro-bind /usr/sbin /usr/sbin
+    # Keep /usr/bin from the disposable root writable: dpkg must be able to
+    # extract package-owned files there. Bind only the host package tools that
+    # the isolated database and maintainer scripts need.
+    --ro-bind /usr/sbin /usr/sbin
     --ro-bind /usr/lib /usr/lib --ro-bind /usr/lib64 /usr/lib64
     --ro-bind /usr/share/dpkg /usr/share/dpkg
     --ro-bind /usr/bin /bin --ro-bind /usr/sbin /sbin
@@ -108,6 +122,9 @@ SANDBOX=(
     --ro-bind /usr/lib64 /lib64
     --proc /proc --dev /dev
 )
+for tool in dpkg dpkg-deb dpkg-query dpkg-split awk basename cat chown chmod grep head install openssl sed; do
+    SANDBOX+=(--ro-bind "/usr/bin/${tool}" "/usr/bin/${tool}")
+done
 sandbox() { "${SANDBOX[@]}" "$@"; }
 
 sandbox /usr/bin/dpkg --force-depends -i /release/base-agent.deb >/dev/null
@@ -115,16 +132,26 @@ sandbox /usr/bin/dpkg --force-depends -i /release/base-hub.deb >/dev/null
 [ "$(sandbox /usr/bin/dpkg-query -W -f='${Status}' ominull-agent)" = 'install ok installed' ]
 [ "$(sandbox /usr/bin/dpkg-query -W -f='${Status}' ominull-hub)" = 'install ok installed' ]
 [ "$(sandbox /usr/bin/dpkg-query -S /opt/ominull/bin/ominulld)" = 'ominull-agent: /opt/ominull/bin/ominulld' ]
+[ "$(sandbox /usr/bin/dpkg-query -S /usr/bin/ominullctl)" = 'ominull-hub: /usr/bin/ominullctl' ]
+[ -s "${SANDBOX_ROOT}/etc/ominull/admin.key" ]
+[ "$(stat -c '%a' "${SANDBOX_ROOT}/etc/ominull/admin.key")" = 600 ]
+[ -s "${SANDBOX_ROOT}/etc/ominull/hub.env" ]
+sandbox /usr/bin/ominullctl setup-token >/dev/null
+[ -s "${SANDBOX_ROOT}/var/lib/ominull/setup.token" ]
+[ "$(stat -c '%a' "${SANDBOX_ROOT}/var/lib/ominull/setup.token")" = 600 ]
 printf '%s\n' 'hub_url=https://example.invalid' 'endpoint_id=lifecycle' > "${SANDBOX_ROOT}/etc/ominull/agent.conf"
-printf '%s\n' 'database=/var/lib/ominull/ominull.db' > "${SANDBOX_ROOT}/etc/ominull/hub.env"
+printf '%s\n' 'OMINULL_ADMIN_KEY=test-admin-value' 'OMINULL_DB=/var/lib/ominull/ominull.db' > "${SANDBOX_ROOT}/etc/ominull/hub.env"
 printf '%s\n' 'production-data' > "${SANDBOX_ROOT}/var/lib/ominull/ominull.db"
 printf '%s\n' 'pki-data' > "${SANDBOX_ROOT}/var/lib/ominull/pki-marker"
 
 sandbox /usr/bin/dpkg --force-depends -i /release/next-agent.deb >/dev/null
 sandbox /usr/bin/dpkg --force-depends -i /release/next-hub.deb >/dev/null
-[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-agent)" = "${VERSION}.1" ]
-[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-hub)" = "${VERSION}.1" ]
+[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-agent)" = "${NEXT_VERSION}" ]
+[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-hub)" = "${NEXT_VERSION}" ]
 grep -q 'endpoint_id=lifecycle' "${SANDBOX_ROOT}/etc/ominull/agent.conf"
+! grep -q '^OMINULL_ADMIN_KEY=' "${SANDBOX_ROOT}/etc/ominull/hub.env"
+grep -q '^OMINULL_ADMIN_KEY_FILE=/etc/ominull/admin.key$' "${SANDBOX_ROOT}/etc/ominull/hub.env"
+[ "$(tr -d '\n' < "${SANDBOX_ROOT}/etc/ominull/admin.key")" = 'test-admin-value' ]
 
 if sandbox /usr/bin/dpkg --force-depends -i /release/base-agent.deb >/dev/null 2>&1; then
     echo "[-] Agent preinst allowed a downgrade." >&2
@@ -134,8 +161,19 @@ if sandbox /usr/bin/dpkg --force-depends -i /release/base-hub.deb >/dev/null 2>&
     echo "[-] Hub preinst allowed a downgrade." >&2
     exit 1
 fi
-[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-agent)" = "${VERSION}.1" ]
-[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-hub)" = "${VERSION}.1" ]
+[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-agent)" = "${NEXT_VERSION}" ]
+[ "$(sandbox /usr/bin/dpkg-query -W -f='${Version}' ominull-hub)" = "${NEXT_VERSION}" ]
+
+# A plain remove must leave enrollment and hub state available for reinstall.
+sandbox /usr/bin/dpkg --force-depends --remove ominull-agent >/dev/null
+[ -s "${SANDBOX_ROOT}/etc/ominull/agent.conf" ]
+sandbox /usr/bin/dpkg --force-depends -i /release/next-agent.deb >/dev/null
+[ -s "${SANDBOX_ROOT}/etc/ominull/agent.conf" ]
+sandbox /usr/bin/dpkg --force-depends --remove ominull-hub >/dev/null
+[ -s "${SANDBOX_ROOT}/etc/ominull/hub.env" ]
+[ -s "${SANDBOX_ROOT}/var/lib/ominull/ominull.db" ]
+sandbox /usr/bin/dpkg --force-depends -i /release/next-hub.deb >/dev/null
+[ -s "${SANDBOX_ROOT}/etc/ominull/admin.key" ]
 
 sandbox /usr/bin/dpkg --force-depends --purge ominull-agent >/dev/null
 [ "$(sandbox /usr/bin/dpkg-query -W -f='${Status}' ominull-agent 2>/dev/null || true)" != 'install ok installed' ]

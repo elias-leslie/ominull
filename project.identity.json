@@ -7,7 +7,7 @@
   },
   "branding": {
     "short_name": "Ominull",
-    "description": "Kernel-Native Cross-Platform Threat Nullification & Network Profiler Command Center."
+    "description": "Linux and Windows endpoint telemetry, detection, and containment hub."
   },
   "runtime": {
     "backend_port": 9999,

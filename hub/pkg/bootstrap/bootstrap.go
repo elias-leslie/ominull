@@ -1,26 +1,27 @@
-// Package bootstrap generates unattended enrolment scripts for the retained
-// Linux and Windows agents.
+// Package bootstrap generates unattended enrollment scripts for the retained
+// Linux and Windows native packages.
 package bootstrap
 
 import "strings"
 
-// Options describes one enrolment. The tenant key and one-use token are
-// rendered into the script; the admin key never crosses this boundary.
+// Options contains public installer parameters. EnrollmentCode is optional: an
+// interactive script asks for it through the terminal, while a console-rendered
+// script may carry it in the downloaded script body. It is never put in a URL,
+// service argument, package property, or process argument.
 type Options struct {
-	HubURL          string
-	AgentHubURL     string
-	TenantAPIKey    string
-	EnrollmentToken string
-	CFClientID      string
-	CFClientSecret  string
-	LocationID      string
-	RoleTag         string
-	EndpointID      string
-	AgentVersion    string
+	HubURL         string
+	AgentHubURL    string
+	LocationID     string
+	RoleTag        string
+	EndpointID     string
+	AgentVersion   string
+	EnrollmentCode string
+	// UseSystemCA is true when the hub URL is expected to use a public
+	// certificate, such as an ACME certificate or a Cloudflare edge
+	// certificate. Direct self-issued LAN deployments pin the Ominull CA.
+	UseSystemCA bool
 }
 
-// Public material pinned in every released agent. The private key stays in the
-// operations vault.
 const releasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F
 0e6k7D05y7jLxXQblk3d7ZirBH3MNJlo7aUbtmlQ2izz/u5wTG2ztJ9TBw==
@@ -40,6 +41,8 @@ func (o Options) normalized() Options {
 	if o.AgentVersion == "" {
 		o.AgentVersion = "0.0.0"
 	}
+	o.HubURL = strings.TrimRight(strings.TrimSpace(o.HubURL), "/")
+	o.AgentHubURL = strings.TrimRight(strings.TrimSpace(o.AgentHubURL), "/")
 	return o
 }
 
@@ -58,20 +61,26 @@ func render(t string, values map[string]string) string {
 	return strings.TrimSpace(t)
 }
 
-// GenerateBash installs the signed native .deb and asks the package-installed
-// binary to write enrollment material. It does not copy a privileged binary or
-// create a service unit.
+func codeBash(o Options) string {
+	if o.EnrollmentCode != "" {
+		return "ENROLLMENT_CODE=" + bashQuote(o.EnrollmentCode)
+	}
+	return `if [ -n "${OMINULL_ENROLLMENT_CODE_FILE:-}" ]; then
+    ENROLLMENT_CODE=$(cat -- "$OMINULL_ENROLLMENT_CODE_FILE")
+elif [ -n "${OMINULL_ENROLLMENT_CODE:-}" ]; then
+    ENROLLMENT_CODE=$OMINULL_ENROLLMENT_CODE
+else
+    read -r -s -p "Ominull enrollment code: " ENROLLMENT_CODE < /dev/tty
+    printf '\n'
+fi
+ENROLLMENT_CODE=$(printf '%s' "$ENROLLMENT_CODE" | tr -d '\r\n[:space:]')
+[ -n "$ENROLLMENT_CODE" ] || { echo "[-] Enrollment code is required." >&2; exit 1; }`
+}
+
+// GenerateBash installs the signed native .deb, redeems a body-only enrollment
+// code, and asks the package-installed binary to write protected configuration.
 func GenerateBash(o Options) string {
 	o = o.normalized()
-	endpoint := o.EndpointID
-	if endpoint == "" {
-		endpoint = "linux-$(hostname)"
-	}
-	cfBlock := ""
-	if o.CFClientID != "" && o.CFClientSecret != "" {
-		cfBlock = "cf_client_id=" + bashQuote(o.CFClientID) + "\ncf_client_secret=" + bashQuote(o.CFClientSecret)
-	}
-
 	template := `#!/bin/bash
 set -euo pipefail
 
@@ -79,39 +88,46 @@ if [ "${EUID}" -ne 0 ]; then
     echo "[-] Run this installer as root (the one-line form uses sudo)." >&2
     exit 1
 fi
-command -v curl >/dev/null
-command -v openssl >/dev/null
-command -v dpkg >/dev/null
-command -v sha256sum >/dev/null
+for tool in curl openssl dpkg sha256sum base64; do
+    command -v "$tool" >/dev/null || { echo "[-] Missing required tool: $tool" >&2; exit 1; }
+done
 
 HUB_URL=__HUB_URL__
 AGENT_HUB_URL=__AGENT_HUB_URL__
-API_KEY=__API_KEY__
-ENROLL_TOKEN=__ENROLL_TOKEN__
 ROLE_TAG=__ROLE_TAG__
 LOCATION_ID=__LOCATION_ID__
-ENDPOINT_ID=__ENDPOINT_ID__
 VERSION=__VERSION__
+USE_SYSTEM_CA=__USE_SYSTEM_CA__
 PACKAGE="ominull-agent_${VERSION}_amd64.deb"
 TMP=$(mktemp -d /tmp/ominull-bootstrap.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
-curl_auth=()
-if [ -n __CF_ID__ ] && [ -n __CF_SECRET__ ]; then
-    curl_auth=(-H "CF-Access-Client-Id: __CF_ID__" -H "CF-Access-Client-Secret: __CF_SECRET__")
+` + codeBash(o) + `
+
+if [[ "$HUB_URL" == https://* ]]; then
+    CURL_TLS=()
+    PIN_HUB_CA=1
+    if [ "$USE_SYSTEM_CA" = 1 ]; then
+        PIN_HUB_CA=0
+        echo "[+] Using the operating system's public certificate trust."
+    else
+        echo "[+] Fetching and validating the Ominull CA."
+        curl -k -fsSL --max-time 30 "$HUB_URL/api/v1/pki/ca.crt" -o "$TMP/ca.crt"
+        CURL_TLS=(--cacert "$TMP/ca.crt")
+        openssl x509 -in "$TMP/ca.crt" -noout -subject >/dev/null
+    fi
+else
+    echo "[-] Enrollment requires an https hub URL." >&2
+    exit 1
 fi
 
-echo "[+] Fetching and validating the Ominull CA."
-curl -fsSL "${curl_auth[@]}" "$HUB_URL/api/v1/pki/ca.crt" -o "$TMP/ca.crt"
-openssl x509 -in "$TMP/ca.crt" -noout -subject >/dev/null
-
 echo "[+] Fetching native package $PACKAGE."
-curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE" -o "$TMP/$PACKAGE"
-curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE.sig" -o "$TMP/$PACKAGE.sig"
-curl -fsSL "${curl_auth[@]}" "$HUB_URL/download/$PACKAGE.sha256" -o "$TMP/$PACKAGE.sha256"
+curl -fsSL --max-time 60 "${CURL_TLS[@]}" "$HUB_URL/download/$PACKAGE" -o "$TMP/$PACKAGE"
+curl -fsSL --max-time 30 "${CURL_TLS[@]}" "$HUB_URL/download/$PACKAGE.sig" -o "$TMP/$PACKAGE.sig"
+curl -fsSL --max-time 30 "${CURL_TLS[@]}" "$HUB_URL/download/$PACKAGE.sha256" -o "$TMP/$PACKAGE.sha256"
 expected=$(awk 'NF { print $1; exit }' "$TMP/$PACKAGE.sha256")
 actual=$(sha256sum "$TMP/$PACKAGE" | awk '{ print $1 }')
-[ "$expected" = "$actual" ]
+[ "$expected" = "$actual" ] || { echo "[-] Native package digest mismatch." >&2; exit 1; }
 cat > "$TMP/release.pub" <<'OMINULL_RELEASE_KEY'
 __PUBLIC_KEY__OMINULL_RELEASE_KEY
 openssl dgst -sha256 -verify "$TMP/release.pub" -signature "$TMP/$PACKAGE.sig" "$TMP/$PACKAGE" >/dev/null
@@ -119,159 +135,176 @@ openssl dgst -sha256 -verify "$TMP/release.pub" -signature "$TMP/$PACKAGE.sig" "
 echo "[+] Installing through dpkg."
 dpkg -i "$TMP/$PACKAGE"
 
+echo "[+] Redeeming the one-use enrollment code."
+form=$(printf 'code=%s&platform=linux&hostname=%s' "$ENROLLMENT_CODE" "$(hostname)")
+bundle=$(printf '%s' "$form" | curl -fsSL --max-time 30 "${CURL_TLS[@]}" -H 'Content-Type: application/x-www-form-urlencoded' --data-binary @- "$HUB_URL/api/v1/enrollment/redeem")
 json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
-echo "[+] Enrolling endpoint $ENDPOINT_ID."
-bundle=$(curl -fsSL "${curl_auth[@]}" -H "X-API-Key: $API_KEY" -H "X-Enrollment-Token: $ENROLL_TOKEN" \
-    -H "Content-Type: application/json" -d "{\"endpoint_id\":\"$ENDPOINT_ID\",\"hostname\":\"$(hostname)\"}" \
-    "$HUB_URL/api/v1/pki/enroll")
-printf '%s' "$bundle" | json_field cert_pem | openssl base64 -d -A > "$TMP/client.crt"
-printf '%s' "$bundle" | json_field key_pem | openssl base64 -d -A > "$TMP/client.key"
+device_credential=$(printf '%s' "$bundle" | json_field device_credential)
+endpoint_id=$(printf '%s' "$bundle" | json_field endpoint_id)
+agent_hub_url=$(printf '%s' "$bundle" | json_field agent_hub_url)
+[ -n "$device_credential" ] && [ -n "$endpoint_id" ] || { echo "[-] Hub returned no device identity." >&2; exit 1; }
+printf '%s' "$bundle" | json_field cert_pem | base64 -d > "$TMP/client.crt"
+printf '%s' "$bundle" | json_field key_pem | base64 -d > "$TMP/client.key"
 openssl x509 -in "$TMP/client.crt" -noout -subject >/dev/null
 
 cat <<CONF | /opt/ominull/bin/ominulld --configure-stdin
-hub_url=$AGENT_HUB_URL
-api_key=$API_KEY
-endpoint_id=$ENDPOINT_ID
+hub_url=$agent_hub_url
+device_credential=$device_credential
+endpoint_id=$endpoint_id
 role_tag=$ROLE_TAG
 location_id=$LOCATION_ID
 ca_source=$TMP/ca.crt
+pin_hub_ca=$PIN_HUB_CA
 client_cert_source=$TMP/client.crt
 client_key_source=$TMP/client.key
-__CF_CONFIG__
 CONF
 
-# The unit and its ownership came from the .deb. Start the already-registered
-# package unit after package-owned configuration is ready; enrollment never
-# creates or edits a service definition.
 systemctl start ominull-agent.service
 echo "[+] Ominull Linux agent installed, enrolled, and started from $PACKAGE."
 `
-
 	return render(template, map[string]string{
 		"HUB_URL":       bashQuote(o.HubURL),
 		"AGENT_HUB_URL": bashQuote(o.AgentHubURL),
-		"API_KEY":       bashQuote(o.TenantAPIKey),
-		"ENROLL_TOKEN":  bashQuote(o.EnrollmentToken),
 		"ROLE_TAG":      bashQuote(o.RoleTag),
 		"LOCATION_ID":   bashQuote(o.LocationID),
-		"ENDPOINT_ID":   bashQuote(endpoint),
 		"VERSION":       bashQuote(o.AgentVersion),
-		"CF_ID":         bashQuote(o.CFClientID),
-		"CF_SECRET":     bashQuote(o.CFClientSecret),
-		"CF_CONFIG":     cfBlock,
-		"PUBLIC_KEY":    releasePublicKeyPEM,
+		"USE_SYSTEM_CA": func() string {
+			if o.UseSystemCA {
+				return "1"
+			}
+			return "0"
+		}(),
+		"PUBLIC_KEY": releasePublicKeyPEM,
 	})
 }
 
-// GeneratePowerShell installs the signed native MSI and asks the
-// package-installed binary to write enrollment material. It does not copy a
-// privileged binary or register a service.
+func codePowerShell(o Options) string {
+	if o.EnrollmentCode != "" {
+		return "$EnrollmentCode = " + powershellQuote(o.EnrollmentCode)
+	}
+	return `$EnrollmentCode = $null
+if ($env:OMINULL_ENROLLMENT_CODE_FILE) {
+    $EnrollmentCode = (Get-Content -LiteralPath $env:OMINULL_ENROLLMENT_CODE_FILE -Raw).Trim()
+} elseif ($env:OMINULL_ENROLLMENT_CODE) {
+    $EnrollmentCode = $env:OMINULL_ENROLLMENT_CODE.Trim()
+} else {
+    $EnrollmentCode = (Read-Host "Ominull enrollment code").Trim()
+}
+if (-not $EnrollmentCode) { throw "Enrollment code is required." }`
+}
+
+// GeneratePowerShell installs the signed native MSI and configures the package
+// through its stdin enrollment writer. It contains no Cloudflare service-token
+// headers and never places the device credential in an MSI property or service
+// argument.
 func GeneratePowerShell(o Options) string {
 	o = o.normalized()
 	endpoint := powershellQuote(o.EndpointID)
 	if o.EndpointID == "" {
-		endpoint = `win11-$env:COMPUTERNAME`
+		endpoint = "''"
 	}
-	cfBlock := ""
-	cfID, cfSecret, cfPresent := "", "", "$false"
-	if o.CFClientID != "" && o.CFClientSecret != "" {
-		cfID, cfSecret, cfPresent = powershellQuote(o.CFClientID), powershellQuote(o.CFClientSecret), "$true"
-		cfBlock = "cf_client_id=" + o.CFClientID + "\ncf_client_secret=" + o.CFClientSecret
-	}
-
 	template := `# Ominull Windows native-package bootstrap
 $ErrorActionPreference = "Stop"
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "Run this installer from an elevated PowerShell."
-}
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Run this installer from an elevated PowerShell." }
 $HubURL = __HUB_URL__
 $AgentHubURL = __AGENT_HUB_URL__
-$APIKey = __API_KEY__
-$EnrollToken = __ENROLL_TOKEN__
 $RoleTag = __ROLE_TAG__
 $LocationID = __LOCATION_ID__
 $EndpointID = __ENDPOINT_ID__
 $Version = __VERSION__
+$UseSystemCA = __USE_SYSTEM_CA__
 $Package = "ominull-agent-windows-$Version.msi"
 $Temp = Join-Path $env:TEMP ("ominull-bootstrap-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $Temp | Out-Null
+` + codePowerShell(o) + `
 try {
-    $Headers = @{}
-    if (__CF_ID_PRESENT__) {
-        $Headers["CF-Access-Client-Id"] = __CF_ID__
-        $Headers["CF-Access-Client-Secret"] = __CF_SECRET__
-    }
     $ca = Join-Path $Temp "ca.crt"
+    $CurlTLS = @()
+    $PinHubCA = 1
     $msi = Join-Path $Temp $Package
     $sig = "$msi.sig"
     $digest = "$msi.sha256"
-    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/api/v1/pki/ca.crt" -OutFile $ca
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ca)
-    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package" -OutFile $msi
-    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package.sig" -OutFile $sig
-    Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$HubURL/download/$Package.sha256" -OutFile $digest
+    if ($UseSystemCA) {
+        $PinHubCA = 0
+        Write-Host "[+] Using the operating system's public certificate trust."
+    } else {
+        Write-Host "[+] Fetching and validating the Ominull CA."
+        curl.exe -k -fsSL --max-time 30 "$HubURL/api/v1/pki/ca.crt" -o $ca
+        $CurlTLS = @('--cacert', $ca)
+    }
+    curl.exe @CurlTLS -fsSL --max-time 60 "$HubURL/download/$Package" -o $msi
+    curl.exe @CurlTLS -fsSL --max-time 30 "$HubURL/download/$Package.sig" -o $sig
+    curl.exe @CurlTLS -fsSL --max-time 30 "$HubURL/download/$Package.sha256" -o $digest
     $expected = (Get-Content -LiteralPath $digest | Where-Object { $_.Trim() } | Select-Object -First 1).Split()[0]
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $msi).Hash.ToLowerInvariant()
     if ($expected.ToLowerInvariant() -ne $actual) { throw "native package digest mismatch" }
-
-    function Convert-DerEcdsaSignatureToP1363([byte[]] $der) {
-        if ($der.Length -lt 8 -or $der[0] -ne 0x30) { throw "invalid release signature" }
-        $offset = 2
-        if ($der[1] -eq 0x81) { $offset = 3 }
-        if ($offset -ge $der.Length -or $der[$offset] -ne 0x02) { throw "invalid release signature" }
-        $rLength = [int]$der[$offset + 1]
-        $rStart = $offset + 2
-        $sTag = $rStart + $rLength
-        if ($sTag + 2 -gt $der.Length -or $der[$sTag] -ne 0x02) { throw "invalid release signature" }
-        $sLength = [int]$der[$sTag + 1]
-        $sStart = $sTag + 2
-        if ($sStart + $sLength -gt $der.Length) { throw "invalid release signature" }
-        while ($rLength -gt 1 -and $der[$rStart] -eq 0) { $rStart++; $rLength-- }
-        while ($sLength -gt 1 -and $der[$sStart] -eq 0) { $sStart++; $sLength-- }
-        if ($rLength -gt 32 -or $sLength -gt 32) { throw "invalid release signature width" }
-        $raw = New-Object byte[] 64
-        [Array]::Copy($der, $rStart, $raw, 32 - $rLength, $rLength)
-        [Array]::Copy($der, $sStart, $raw, 64 - $sLength, $sLength)
-        return ,$raw
+    $publicKeyPem = @'
+__PUBLIC_KEY__'@
+    function Read-DerLength([byte[]] $Data, [ref] $Offset) {
+        if ($Offset.Value -ge $Data.Length) { throw "invalid release signature length" }
+        $first = $Data[$Offset.Value]; $Offset.Value++
+        if ($first -lt 128) { return [int]$first }
+        $count = $first -band 0x7f
+        if ($count -lt 1 -or $count -gt 2 -or $Offset.Value + $count -gt $Data.Length) { throw "invalid release signature length" }
+        $length = 0
+        for ($i = 0; $i -lt $count; $i++) { $length = ($length -shl 8) -bor $Data[$Offset.Value]; $Offset.Value++ }
+        return [int]$length
     }
-
-    $releaseECDSA = [System.Security.Cryptography.ECDsa]::Create()
+    function Read-DerInteger([byte[]] $Data, [ref] $Offset) {
+        if ($Offset.Value -ge $Data.Length -or $Data[$Offset.Value] -ne 0x02) { throw "invalid release signature integer" }
+        $Offset.Value++
+        $length = Read-DerLength $Data ([ref]$Offset)
+        if ($length -lt 1 -or $length -gt 33 -or $Offset.Value + $length -gt $Data.Length) { throw "invalid release signature integer length" }
+        $start = $Offset.Value; $Offset.Value += $length
+        while ($length -gt 1 -and $Data[$start] -eq 0) { $start++; $length-- }
+        if ($length -gt 32 -or ($length -eq 32 -and $Data[$start] -ge 0x80)) { throw "invalid release signature integer" }
+        $out = New-Object byte[] 32
+        [Array]::Copy($Data, $start, $out, 32 - $length, $length)
+        return $out
+    }
+    $signature = [IO.File]::ReadAllBytes($sig)
+    $offset = 0
+    if ($signature.Length -lt 8 -or $signature[$offset] -ne 0x30) { throw "invalid release signature" }
+    $offset++
+    $sequenceLength = Read-DerLength $signature ([ref]$offset)
+    if ($sequenceLength -gt $signature.Length - $offset) { throw "invalid release signature sequence" }
+    $r = Read-DerInteger $signature ([ref]$offset)
+    $s = Read-DerInteger $signature ([ref]$offset)
+    if ($offset -ne $signature.Length) { throw "trailing release signature data" }
+    $spki = [Convert]::FromBase64String(($publicKeyPem -replace '-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s', ''))
+    if ($spki.Length -lt 65 -or $spki[$spki.Length - 65] -ne 0x04) { throw "invalid pinned release public key" }
+    $cngBlob = New-Object byte[] 72
+    $cngBlob[0] = 0x45; $cngBlob[1] = 0x43; $cngBlob[2] = 0x53; $cngBlob[3] = 0x31; $cngBlob[4] = 32
+    [Array]::Copy($spki, $spki.Length - 64, $cngBlob, 8, 64)
+    $cngKey = [System.Security.Cryptography.CngKey]::Import($cngBlob, [System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)
+    $ecdsa = New-Object System.Security.Cryptography.ECDsaCng($cngKey)
     try {
-        $releaseParameters = New-Object System.Security.Cryptography.ECParameters
-        $releaseParameters.Curve = [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256
-        $releasePoint = New-Object System.Security.Cryptography.ECPoint
-        $releasePoint.X = [Convert]::FromBase64String("__PUBLIC_KEY_X__")
-        $releasePoint.Y = [Convert]::FromBase64String("__PUBLIC_KEY_Y__")
-        $releaseParameters.Q = $releasePoint
-        $releaseECDSA.ImportParameters($releaseParameters)
-        $releaseHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($msi))
-        $releaseSignature = Convert-DerEcdsaSignatureToP1363 ([IO.File]::ReadAllBytes($sig))
-        if (-not $releaseECDSA.VerifyHash($releaseHash, $releaseSignature)) { throw "native package signature mismatch" }
-    } finally {
-        $releaseECDSA.Dispose()
-    }
-
+        $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($msi))
+        $rawSignature = New-Object byte[] 64
+        [Array]::Copy($r, 0, $rawSignature, 0, 32); [Array]::Copy($s, 0, $rawSignature, 32, 32)
+        if (-not $ecdsa.VerifyHash($hash, $rawSignature)) { throw "native package signature mismatch" }
+    } finally { $ecdsa.Dispose(); $cngKey.Dispose() }
     Write-Host "[+] Installing through Windows Installer."
     $install = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart', 'REBOOT=ReallySuppress') -Wait -PassThru
     if ($install.ExitCode -ne 0 -and $install.ExitCode -ne 3010) { throw "MSI failed with exit code $($install.ExitCode)" }
 
-    $body = @{ endpoint_id = $EndpointID; hostname = $env:COMPUTERNAME } | ConvertTo-Json -Compress
-    $enrollHeaders = @{ "X-API-Key" = $APIKey; "X-Enrollment-Token" = $EnrollToken; "Content-Type" = "application/json" }
-    foreach ($key in $Headers.Keys) { $enrollHeaders[$key] = $Headers[$key] }
-    $bundle = Invoke-RestMethod -UseBasicParsing -Method Post -Headers $enrollHeaders -Uri "$HubURL/api/v1/pki/enroll" -Body $body
-    if (-not $bundle.pfx_base64) { throw "hub returned no endpoint certificate" }
+    $form = "code=$([uri]::EscapeDataString($EnrollmentCode))&platform=windows&hostname=$([uri]::EscapeDataString($env:COMPUTERNAME))"
+    $bundlePath = Join-Path $Temp "bundle.json"
+    $form | curl.exe @CurlTLS -fsSL --max-time 30 -H "Content-Type: application/x-www-form-urlencoded" --data-binary '@-' "$HubURL/api/v1/enrollment/redeem" -o $bundlePath
+    $bundle = Get-Content -LiteralPath $bundlePath -Raw | ConvertFrom-Json
+    if (-not $bundle.device_credential -or -not $bundle.pfx_base64) { throw "hub returned no device identity" }
     $pfx = Join-Path $Temp "client.pfx"
     [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($bundle.pfx_base64))
-
+    $caSource = if ($PinHubCA -eq 1) { $ca } else { "" }
     $config = @"
-hub_url=$AgentHubURL
-api_key=$APIKey
-endpoint_id=$EndpointID
+hub_url=$($bundle.agent_hub_url)
+device_credential=$($bundle.device_credential)
+endpoint_id=$($bundle.endpoint_id)
 role_tag=$RoleTag
 location_id=$LocationID
-ca_source=$ca
+ca_source=$caSource
+pin_hub_ca=$PinHubCA
 client_pfx_source=$pfx
-__CF_CONFIG__
 "@
     $agent = Join-Path $env:ProgramFiles "Ominull\ominulld.exe"
     $config | & $agent --configure-stdin
@@ -282,21 +315,19 @@ __CF_CONFIG__
     Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
 }
 `
-
 	return render(template, map[string]string{
 		"HUB_URL":       powershellQuote(o.HubURL),
 		"AGENT_HUB_URL": powershellQuote(o.AgentHubURL),
-		"API_KEY":       powershellQuote(o.TenantAPIKey),
-		"ENROLL_TOKEN":  powershellQuote(o.EnrollmentToken),
 		"ROLE_TAG":      powershellQuote(o.RoleTag),
 		"LOCATION_ID":   powershellQuote(o.LocationID),
 		"ENDPOINT_ID":   endpoint,
 		"VERSION":       powershellQuote(o.AgentVersion),
-		"CF_ID_PRESENT": cfPresent,
-		"CF_ID":         cfID,
-		"CF_SECRET":     cfSecret,
-		"CF_CONFIG":     cfBlock,
-		"PUBLIC_KEY_X":  "71CpMPEGtyUpx3ZSuvcf+YMiwM1F0e6k7D05y7jLxXQ=",
-		"PUBLIC_KEY_Y":  "G5ZN3e2YqwR9zDSZaO2lG7ZpUNos8/7ucExts7SfUwc=",
+		"USE_SYSTEM_CA": func() string {
+			if o.UseSystemCA {
+				return "$true"
+			}
+			return "$false"
+		}(),
+		"PUBLIC_KEY": releasePublicKeyPEM,
 	})
 }

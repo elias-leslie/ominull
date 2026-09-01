@@ -2117,6 +2117,14 @@ p.pending {
   left: 50%;
   transform: translate(-50%, -50%);
   width: min(720px, calc(100vw - 2 * var(--s-4)));
+}
+
+/* A sheet that manages a list rather than filling in a form. 720px puts the
+   row action off the right edge of the table, where .tblwrap will scroll to it
+   and nobody will think to - so the sheet that holds a table gets the width the
+   table needs. */
+.sheet-wide {
+  width: min(940px, calc(100vw - 2 * var(--s-4)));
   max-height: calc(100vh - 2 * var(--s-4));
   display: flex;
   flex-direction: column;

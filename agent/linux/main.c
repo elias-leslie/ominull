@@ -31,7 +31,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.7.24"
+#define OMINULL_LINUX_AGENT_VERSION "1.7.25"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -71,16 +71,11 @@ typedef struct {
     char hostname[128];
     char location_id[64];
     char role_tag[64];
-    char cf_client_id[128];
-    char cf_client_secret[128];
     char primary_ip[64];
     char primary_mac[32];
     char ca_path[256];
-    /* The certificate this endpoint proves its identity with. The API key says
-     * which tenant is calling and every endpoint in a tenant carries the same
-     * one, so without this the hub has to take the endpoint id in the body on
-     * trust. Optional: a fleet has to be able to migrate onto certificates
-     * while it is still reporting. */
+    /* The certificate this endpoint proves its identity with. It is an
+     * additional matching proof alongside the unique device credential. */
     char client_cert_path[256];
     char client_key_path[256];
     char config_path[256];
@@ -88,15 +83,14 @@ typedef struct {
     char package_identifier[64];
     char registered_package_version[64];
     char provenance_status[16];
-    /* Where api_key was read from, when it came from a file rather than an
-     * argument. Every argument of every process is world-readable through
-     * /proc/<pid>/cmdline, so a key passed with --key is a key any account on
-     * this host can lift out of `ps` - and it is the tenant key, shared by the
-     * whole fleet. --key stays for the installer, which has no other channel;
-     * the daemon that runs afterwards should be given a path. */
+    /* Where the device credential was read from. New package services use a
+     * protected file; --key remains only as a compatibility migration input. */
     char key_path[256];
     bool verbose;
     bool auto_update;
+    /* Direct self-issued hubs use a pinned Ominull CA. Public ACME or
+     * Cloudflare endpoints use the operating system trust store instead. */
+    bool pin_hub_ca;
     bool allow_plaintext;
 } LINUX_AGENT_CONFIG;
 
@@ -323,29 +317,29 @@ static void DetectPackageProvenance(LINUX_AGENT_CONFIG* config) {
              strcmp(version, OMINULL_LINUX_AGENT_VERSION) == 0 ? "native" : "mismatch");
 }
 
-/* ReadKeyFile takes the first line of a file as the API key. A file is the only
+/* ReadKeyFile takes the first line of a file as the device credential. A file is the only
  * channel that keeps the credential off the command line, and the mode is
  * checked because a 0644 key file would give back exactly the exposure the
  * file was introduced to remove. */
 static bool ReadKeyFile(const char* path, char* out, size_t cap) {
     struct stat st;
     if (stat(path, &st) != 0) {
-        printf("[!] Cannot read the API key file %s: %s\n", path, strerror(errno));
+        printf("[!] Cannot read the device credential file %s: %s\n", path, strerror(errno));
         return false;
     }
     if (st.st_mode & (S_IRGRP | S_IROTH)) {
-        printf("[!] API key file %s is readable beyond its owner; tighten it to 0600.\n", path);
+        printf("[!] Device credential file %s is readable beyond its owner; tighten it to 0600.\n", path);
     }
     FILE* f = fopen(path, "r");
     if (!f) {
-        printf("[!] Cannot open the API key file %s: %s\n", path, strerror(errno));
+        printf("[!] Cannot open the device credential file %s: %s\n", path, strerror(errno));
         return false;
     }
     char line[512] = {0};
     char* got = fgets(line, sizeof(line), f);
     fclose(f);
     if (!got) {
-        printf("[!] API key file %s is empty.\n", path);
+        printf("[!] Device credential file %s is empty.\n", path);
         return false;
     }
     size_t n = strlen(line);
@@ -354,25 +348,33 @@ static bool ReadKeyFile(const char* path, char* out, size_t cap) {
         line[--n] = '\0';
     }
     if (!line[0]) {
-        printf("[!] API key file %s holds no key on its first line.\n", path);
+        printf("[!] Device credential file %s holds no credential on its first line.\n", path);
         return false;
     }
     snprintf(out, cap, "%s", line);
     return true;
 }
 
+static bool IsDeviceCredentialValue(const char* value) {
+    if (!value || strncmp(value, "omd_", 4) != 0 || strlen(value) != 68) return false;
+    for (size_t i = 4; i < 68; i++) {
+        if (!isxdigit((unsigned char)value[i])) return false;
+    }
+    return true;
+}
+
 static void SetConfigValue(LINUX_AGENT_CONFIG* config, const char* key, const char* value) {
     if (strcmp(key, "hub_url") == 0) snprintf(config->hub_url, sizeof(config->hub_url), "%s", value);
-    else if (strcmp(key, "key_path") == 0) snprintf(config->key_path, sizeof(config->key_path), "%s", value);
+	    else if (strcmp(key, "key_path") == 0 || strcmp(key, "device_credential_path") == 0) snprintf(config->key_path, sizeof(config->key_path), "%s", value);
     else if (strcmp(key, "endpoint_id") == 0) snprintf(config->endpoint_id, sizeof(config->endpoint_id), "%s", value);
     else if (strcmp(key, "role_tag") == 0) snprintf(config->role_tag, sizeof(config->role_tag), "%s", value);
     else if (strcmp(key, "location_id") == 0) snprintf(config->location_id, sizeof(config->location_id), "%s", value);
     else if (strcmp(key, "ca_path") == 0) snprintf(config->ca_path, sizeof(config->ca_path), "%s", value);
     else if (strcmp(key, "client_cert_path") == 0) snprintf(config->client_cert_path, sizeof(config->client_cert_path), "%s", value);
     else if (strcmp(key, "client_key_path") == 0) snprintf(config->client_key_path, sizeof(config->client_key_path), "%s", value);
-    else if (strcmp(key, "cf_client_id") == 0) snprintf(config->cf_client_id, sizeof(config->cf_client_id), "%s", value);
-    else if (strcmp(key, "cf_client_secret") == 0) snprintf(config->cf_client_secret, sizeof(config->cf_client_secret), "%s", value);
+	    else if (strcmp(key, "device_credential") == 0 || strcmp(key, "api_key") == 0) snprintf(config->api_key, sizeof(config->api_key), "%s", value);
     else if (strcmp(key, "auto_update") == 0) config->auto_update = strcmp(value, "0") != 0;
+	else if (strcmp(key, "pin_hub_ca") == 0) config->pin_hub_ca = strcmp(value, "0") != 0;
     else if (strcmp(key, "allow_plaintext") == 0) config->allow_plaintext = strcmp(value, "1") == 0;
 }
 
@@ -412,8 +414,8 @@ static void LoadLegacyArguments(LINUX_AGENT_CONFIG* config, const char* raw) {
         else if (strcmp(option, "--ca") == 0) SetConfigValue(config, "ca_path", value);
         else if (strcmp(option, "--client-cert") == 0) SetConfigValue(config, "client_cert_path", value);
         else if (strcmp(option, "--client-key") == 0) SetConfigValue(config, "client_key_path", value);
-        else if (strcmp(option, "--cf-id") == 0) SetConfigValue(config, "cf_client_id", value);
-        else if (strcmp(option, "--cf-secret") == 0) SetConfigValue(config, "cf_client_secret", value);
+		/* Cloudflare service-token options are deliberately not accepted by new
+		 * steady-state agents. */
         option = strtok_r(NULL, " \t", &save);
     }
 }
@@ -483,13 +485,12 @@ static bool CopyPrivateFile(const char* source, const char* destination, mode_t 
 
 /* Package-owned enrollment writer. It receives the credential and staged
  * certificate paths on stdin, so bootstrap never writes a daemon or unit and
- * never places the tenant key in a privileged process argument. */
+ * never places the device credential in a privileged process argument. */
 static bool ConfigureFromStdin(void) {
     char hub[256] = {0}, key[128] = {0}, endpoint[64] = {0};
     char role[64] = "workstation", location[64] = "loc-home";
     char caSource[256] = {0}, certSource[256] = {0}, keySource[256] = {0};
-    char cfID[128] = {0}, cfSecret[128] = {0};
-    bool allowPlaintext = false;
+	bool pinHubCA = true, allowPlaintext = false;
     char line[1024];
     while (fgets(line, sizeof(line), stdin)) {
         char* value = strchr(line, '=');
@@ -498,34 +499,34 @@ static bool ConfigureFromStdin(void) {
         value[strcspn(value, "\r\n")] = '\0';
         if (strchr(value, '\r') || strchr(value, '\n')) return false;
         if (strcmp(line, "hub_url") == 0) snprintf(hub, sizeof(hub), "%s", value);
-        else if (strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
+		else if (strcmp(line, "device_credential") == 0 || strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
         else if (strcmp(line, "endpoint_id") == 0) snprintf(endpoint, sizeof(endpoint), "%s", value);
         else if (strcmp(line, "role_tag") == 0) snprintf(role, sizeof(role), "%s", value);
         else if (strcmp(line, "location_id") == 0) snprintf(location, sizeof(location), "%s", value);
         else if (strcmp(line, "ca_source") == 0) snprintf(caSource, sizeof(caSource), "%s", value);
         else if (strcmp(line, "client_cert_source") == 0) snprintf(certSource, sizeof(certSource), "%s", value);
         else if (strcmp(line, "client_key_source") == 0) snprintf(keySource, sizeof(keySource), "%s", value);
-        else if (strcmp(line, "cf_client_id") == 0) snprintf(cfID, sizeof(cfID), "%s", value);
-        else if (strcmp(line, "cf_client_secret") == 0) snprintf(cfSecret, sizeof(cfSecret), "%s", value);
+		else if (strcmp(line, "pin_hub_ca") == 0) pinHubCA = strcmp(value, "0") != 0;
         else if (strcmp(line, "allow_plaintext") == 0) allowPlaintext = strcmp(value, "1") == 0;
     }
-    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) return false;
+    if (!hub[0] || !key[0] || !endpoint[0] || (pinHubCA && !caSource[0])) return false;
     if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) return false;
     if (mkdir("/etc/ominull", 0755) != 0 && errno != EEXIST) return false;
     if (mkdir("/var/lib/ominull", 0755) != 0 && errno != EEXIST) return false;
     if (mkdir(OMINULL_UPDATE_DIR, 0700) != 0 && errno != EEXIST) return false;
     if (!WritePrivateFile("/etc/ominull/agent.key", key, 0600)) return false;
-    if (!CopyPrivateFile(caSource, "/etc/ominull/ca.crt", 0644)) return false;
+	if (pinHubCA && !CopyPrivateFile(caSource, "/etc/ominull/ca.crt", 0644)) return false;
     if (certSource[0] && !CopyPrivateFile(certSource, "/etc/ominull/client.crt", 0600)) return false;
     if (keySource[0] && !CopyPrivateFile(keySource, "/etc/ominull/client.key", 0600)) return false;
 
     char config[2048];
     int n = snprintf(config, sizeof(config),
                      "hub_url=%s\nkey_path=/etc/ominull/agent.key\nendpoint_id=%s\nrole_tag=%s\n"
-                     "location_id=%s\nca_path=/etc/ominull/ca.crt\nclient_cert_path=/etc/ominull/client.crt\n"
-                     "client_key_path=/etc/ominull/client.key\ncf_client_id=%s\ncf_client_secret=%s\n"
-                     "auto_update=1\nallow_plaintext=%d\n",
-                     hub, endpoint, role, location, cfID, cfSecret, allowPlaintext ? 1 : 0);
+	                 "location_id=%s\nca_path=%s\npin_hub_ca=%d\nclient_cert_path=/etc/ominull/client.crt\n"
+	                     "client_key_path=/etc/ominull/client.key\n"
+	                     "auto_update=1\nallow_plaintext=%d\n",
+	                     hub, endpoint, role, location, pinHubCA ? "/etc/ominull/ca.crt" : "",
+	                     pinHubCA ? 1 : 0, allowPlaintext ? 1 : 0);
     if (n < 0 || (size_t)n >= sizeof(config) || !WritePrivateFile("/etc/ominull/agent.conf", config, 0600)) {
         unlink("/etc/ominull/agent.key");
         return false;
@@ -537,15 +538,15 @@ static bool ConfigureFromStdin(void) {
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
-    printf("  %s --hub <url> --key-file <path> [--ca <path>] [--role <role>] [--location <id>] [--cf-id <id>] [--cf-secret <secret>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
+	printf("  %s --hub <url> --key-file <path> [--ca <path>] [--role <role>] [--location <id>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
     printf("\nOptions:\n");
-    printf("  --key-file <path>  Read the tenant API key from a file instead of --key. Prefer this:\n");
+	printf("  --key-file <path>  Read the unique device credential from a file. Prefer this:\n");
     printf("                     an argument is world-readable through /proc/<pid>/cmdline.\n");
     printf("  --ca <path>        CA certificate the hub is verified against (default %s).\n", OMINULL_DEFAULT_CA_PATH);
     printf("  --client-cert <p>  Certificate this endpoint identifies itself with, and --client-key\n");
     printf("                     its private key. Enrolment issues both; without them the hub has\n");
-    printf("                     only the tenant API key, which every endpoint shares.\n");
-    printf("  --allow-plaintext  Permit an http:// hub. Telemetry and the API key then cross the network in the clear.\n");
+	printf("                     direct native mTLS adds a second matching proof.\n");
+	printf("  --allow-plaintext  Permit an http:// hub. Credentials then cross the network in the clear.\n");
     printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
     printf("  --version          Print the version and exit.\n");
     printf("  --config <path>    Read package-owned runtime configuration.\n");
@@ -556,7 +557,7 @@ static void PrintUsage(const char* prog) {
 /* ---------------------------------------------------------------------------
  * Hub transport
  *
- * Everything this agent sends carries the tenant API key, and everything it
+ * Everything this agent sends carries its unique device credential, and everything it
  * receives can move the host: an isolation command, a mesh quarantine list, a
  * release to install. On plain HTTP all of that is readable and writable by
  * anyone on the path, so the transport is checked before a batch is built
@@ -591,7 +592,8 @@ static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
             "TLS address, or pass --allow-plaintext to accept a cleartext transport deliberately.");
         return false;
     }
-    if (config->ca_path[0] == '\0') {
+	if (!config->pin_hub_ca) return true;
+	if (config->ca_path[0] == '\0') {
         ReportTransportRefusal("no CA certificate is configured; pass --ca <path>.");
         return false;
     }
@@ -608,7 +610,7 @@ static bool HubTransportReady(const LINUX_AGENT_CONFIG* config) {
 
 /* The curl flags that make a hub connection verifiable: trust this CA and no
  * other, refuse to follow a redirect off TLS, and present this endpoint's own
- * certificate. Without --proto a redirect to http:// would hand the API key
+ * certificate. Without --proto a redirect to http:// would hand the device credential
  * over in the clear on the next hop. */
 #define HUB_CURL_ARGS_LEN 1024
 /* The hub answers a rejected batch with a status and a body, and curl reports
@@ -633,13 +635,24 @@ static void HubCurlSecurityArgs(const LINUX_AGENT_CONFIG* config, char* out, siz
      * config struct, so a single call has a maximum length the compiler can
      * check against HUB_CURL_ARGS_LEN. Appending to the first string leaves it
      * unable to prove anything about what is left. */
-    if (config->client_cert_path[0] && config->client_key_path[0] &&
+	bool pin = config->pin_hub_ca && config->ca_path[0];
+	if (config->client_cert_path[0] && config->client_key_path[0] &&
         access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
-        snprintf(out, outLen,
-                 "--cacert \"%s\" --proto =https --proto-redir =https --cert \"%s\" --key \"%s\"",
-                 config->ca_path, config->client_cert_path, config->client_key_path);
+		if (pin) {
+			snprintf(out, outLen,
+					 "--cacert \"%s\" --proto =https --proto-redir =https --cert \"%s\" --key \"%s\"",
+					 config->ca_path, config->client_cert_path, config->client_key_path);
+		} else {
+			snprintf(out, outLen,
+					 "--proto =https --proto-redir =https --cert \"%s\" --key \"%s\"",
+					 config->client_cert_path, config->client_key_path);
+		}
     } else {
-        snprintf(out, outLen, "--cacert \"%s\" --proto =https --proto-redir =https", config->ca_path);
+		if (pin) {
+			snprintf(out, outLen, "--cacert \"%s\" --proto =https --proto-redir =https", config->ca_path);
+		} else {
+			snprintf(out, outLen, "--proto =https --proto-redir =https");
+		}
     }
 }
 
@@ -1052,10 +1065,8 @@ static int RunTool(const char* const argv[]) {
  * daemon run `command` as root on the next heartbeat. The path is escaped for
  * JSON - which does not escape an apostrophe, because JSON has no reason to.
  *
- * The credentials are not arguments. `X-API-Key` was on the curl command line,
- * so the tenant key - the credential the whole fleet shares - was readable out
- * of /proc/<pid>/cmdline by every account on the box for as long as the request
- * lasted. It goes down a pipe the child reads with -K instead.
+ * The credential is loaded from a protected file and sent only in the
+ * device-authentication header.
  *
  * stderr is left alone: a refused certificate has to stay visible in the
  * journal, and that is the one failure this agent must not swallow. */
@@ -1096,24 +1107,15 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
         if (!curl) return false;
     }
 
-    char apiHeader[256];
-    if (snprintf(apiHeader, sizeof(apiHeader), "X-API-Key: %s", config->api_key) >= (int)sizeof(apiHeader)) {
-        return false;
-    }
-    struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
-    headers = curl_slist_append(headers, apiHeader);
-    if (!headers) return false;
-
-    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
-        char cfID[256], cfSecret[256];
-        if (snprintf(cfID, sizeof(cfID), "CF-Access-Client-Id: %s", config->cf_client_id) >= (int)sizeof(cfID) ||
-            snprintf(cfSecret, sizeof(cfSecret), "CF-Access-Client-Secret: %s", config->cf_client_secret) >= (int)sizeof(cfSecret)) {
-            curl_slist_free_all(headers);
-            return false;
-        }
-        headers = curl_slist_append(headers, cfID);
-        headers = curl_slist_append(headers, cfSecret);
-    }
+	char apiHeader[256];
+	const char* headerName = IsDeviceCredentialValue(config->api_key)
+	    ? "X-Ominull-Device-Credential" : "X-API-Key";
+	if (snprintf(apiHeader, sizeof(apiHeader), "%s: %s", headerName, config->api_key) >= (int)sizeof(apiHeader)) {
+		return false;
+	}
+	struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
+	headers = curl_slist_append(headers, apiHeader);
+	if (!headers) return false;
 
     HUB_RESPONSE_BUFFER response = {
         .data = out, .cap = outCap, .len = 0, .overflow = false
@@ -1133,7 +1135,8 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, HubUsesTLS(config) ? 1L : 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, HubUsesTLS(config) ? 2L : 0L);
     if (HubUsesTLS(config)) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, config->ca_path);
+		curl_easy_setopt(curl, CURLOPT_CAINFO,
+					 config->pin_hub_ca && config->ca_path[0] ? config->ca_path : NULL);
         if (config->client_cert_path[0] && config->client_key_path[0] &&
             access(config->client_cert_path, R_OK) == 0 && access(config->client_key_path, R_OK) == 0) {
             curl_easy_setopt(curl, CURLOPT_SSLCERT, config->client_cert_path);
@@ -1905,6 +1908,43 @@ static bool ExtractJsonString(const char* json, const char* key, char* out, size
     return idx > 0;
 }
 
+// AdoptDeviceCredential moves an upgraded legacy endpoint to its unique
+// identity when the hub includes the credential in a successful heartbeat.
+// The response is TLS-pinned, and the credential is written before the next
+// heartbeat. A legacy config with inline OMINULL_ARGS is rewritten without the
+// secret so a restart does not fall back to the shared tenant key.
+static void AdoptDeviceCredential(LINUX_AGENT_CONFIG* config, const char* respJson) {
+    if (!config || !respJson || IsDeviceCredentialValue(config->api_key)) return;
+    char credential[128] = {0};
+    if (!ExtractJsonString(respJson, "device_credential", credential, sizeof(credential)) ||
+        !IsDeviceCredentialValue(credential)) return;
+
+    const char* target = config->key_path[0] ? config->key_path : "/etc/ominull/agent.key";
+    if (!WritePrivateFile(target, credential, 0600)) {
+        printf("[!] The hub issued this endpoint a unique credential, but it could not be stored in %s.\n", target);
+        return;
+    }
+    snprintf(config->api_key, sizeof(config->api_key), "%s", credential);
+    if (!config->key_path[0]) {
+        snprintf(config->key_path, sizeof(config->key_path), "%s", target);
+    }
+    char rendered[2048];
+    int n = snprintf(rendered, sizeof(rendered),
+                     "hub_url=%s\nkey_path=%s\nendpoint_id=%s\nrole_tag=%s\n"
+                     "location_id=%s\nca_path=%s\nclient_cert_path=%s\n"
+					 "client_key_path=%s\npin_hub_ca=%d\nauto_update=%d\nallow_plaintext=%d\n",
+                     config->hub_url, config->key_path, config->endpoint_id,
+                     config->role_tag, config->location_id, config->ca_path,
+                     config->client_cert_path, config->client_key_path,
+					 config->pin_hub_ca ? 1 : 0,
+                     config->auto_update ? 1 : 0, config->allow_plaintext ? 1 : 0);
+    if (n < 0 || (size_t)n >= sizeof(rendered) ||
+        !WritePrivateFile(config->config_path, rendered, 0600)) {
+        printf("[!] The unique credential is active, but the old inline agent configuration could not be rewritten.\n");
+    }
+    printf("[+] Hub-issued unique device credential installed; legacy shared-key authentication is no longer used by this agent.\n");
+}
+
 // IsSafeToken rejects anything outside the character set a package URL or version can
 // legitimately use, so a malformed hub response can never reach the shell as an operator.
 static bool IsSafeToken(const char* s, bool allowUrlChars) {
@@ -2165,8 +2205,8 @@ static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
                    "which is not the endpoint named by %s; re-enrol or correct --id. Nothing is being "
                    "recorded until it is fixed.\n", status, config->endpoint_id, config->client_cert_path);
         } else if (status == 401 || status == 403) {
-            printf("[!] The hub refused this endpoint's telemetry with HTTP %ld. The API key in "
-                   "--key is not one it accepts; nothing is being recorded until it is fixed.\n", status);
+                printf("[!] The hub refused this endpoint's telemetry with HTTP %ld. The device credential is not accepted; "
+                   "nothing is being recorded until it is fixed.\n", status);
         } else {
             printf("[!] The hub refused this endpoint's telemetry with HTTP %ld; nothing is being "
                    "recorded.\n", status);
@@ -2177,7 +2217,7 @@ static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
     return true;
 }
 
-static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
+static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     /* Checked before the batch is built, not after it fails: the payload and
      * the header that authenticates it are the things being protected. */
     if (!HubTransportReady(config)) return;
@@ -2267,6 +2307,7 @@ static void SendTelemetryBatch(const LINUX_AGENT_CONFIG* config, const LINUX_FLO
         long status = SplitHubStatus(respBuf);
         if (!ReportHubRejection(config, status)) {
             accepted = true;
+            AdoptDeviceCredential(config, respBuf);
             SyncEnforcement(config, respBuf);
             ApplyAgentUpdate(config, respBuf);
         }
@@ -2291,6 +2332,7 @@ int main(int argc, char* argv[]) {
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-default");
     config.auto_update = true;
+	config.pin_hub_ca = true;
     strcpy(config.config_path, "/etc/ominull/agent.conf");
     gethostname(config.hostname, sizeof(config.hostname) - 1);
     snprintf(config.endpoint_id, sizeof(config.endpoint_id), "linux-%.50s", config.hostname);
@@ -2326,10 +2368,9 @@ int main(int argc, char* argv[]) {
             strncpy(config.role_tag, argv[++i], sizeof(config.role_tag) - 1);
         } else if (strcmp(argv[i], "--location") == 0 && i + 1 < argc) {
             strncpy(config.location_id, argv[++i], sizeof(config.location_id) - 1);
-        } else if (strcmp(argv[i], "--cf-id") == 0 && i + 1 < argc) {
-            strncpy(config.cf_client_id, argv[++i], sizeof(config.cf_client_id) - 1);
-        } else if (strcmp(argv[i], "--cf-secret") == 0 && i + 1 < argc) {
-            strncpy(config.cf_client_secret, argv[++i], sizeof(config.cf_client_secret) - 1);
+        } else if (strcmp(argv[i], "--cf-id") == 0 || strcmp(argv[i], "--cf-secret") == 0) {
+            fprintf(stderr, "[-] Cloudflare service-token authentication is not supported; use the unique device credential.\n");
+            return 2;
         } else if (strcmp(argv[i], "--client-cert") == 0 && i + 1 < argc) {
             strncpy(config.client_cert_path, argv[++i], sizeof(config.client_cert_path) - 1);
         } else if (strcmp(argv[i], "--client-key") == 0 && i + 1 < argc) {
@@ -2386,7 +2427,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 	if (!config.api_key[0] || strcmp(config.api_key, "<provision-via-bootstrap>") == 0) {
-		fprintf(stderr, "[-] No enrolled API key is configured; refusing to start.\n");
+		fprintf(stderr, "[-] No enrolled device credential is configured; refusing to start.\n");
 		return 1;
 	}
 
@@ -2405,12 +2446,16 @@ int main(int argc, char* argv[]) {
     printf("  Credential:    %s\n", config.key_path[0] ? config.key_path
                                                        : "--key (visible in /proc/<pid>/cmdline; prefer --key-file)");
     if (HubUsesTLS(&config)) {
-        printf("  Hub Trust:     TLS, pinned to %s\n", config.ca_path);
+        if (config.pin_hub_ca) {
+            printf("  Hub Trust:     TLS, pinned to %s\n", config.ca_path);
+        } else {
+            printf("  Hub Trust:     TLS, operating-system certificate trust\n");
+        }
         if (config.client_cert_path[0] && access(config.client_cert_path, R_OK) == 0) {
             printf("  Identity:      client certificate %s\n", config.client_cert_path);
         } else {
-            printf("  Identity:      tenant API key only (no client certificate; the hub cannot tell\n");
-            printf("                 this endpoint apart from any other holding the same key)\n");
+            printf("  Identity:      unique device credential only (no client certificate; direct native mTLS\n");
+            printf("                 adds a second matching proof)\n");
         }
     } else {
         printf("  Hub Trust:     NONE - cleartext transport%s\n",

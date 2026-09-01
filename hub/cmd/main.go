@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -12,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"ominull/hub/pkg/configuration"
 	"ominull/hub/pkg/server"
+	"ominull/hub/pkg/setup"
 	"ominull/hub/pkg/storage"
 )
 
@@ -28,7 +31,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.7.24"
+const defaultAgentVersion = "1.7.25"
 
 func main() {
 	configPath := findConfigArg(os.Args[1:])
@@ -57,6 +60,7 @@ func main() {
 	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
 	accessAdmin := flag.String("access-bootstrap-admin", envOr("OMINULL_ACCESS_BOOTSTRAP_ADMIN", ""), "Email guaranteed to hold the admin role at startup")
 	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
+	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
 	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
 
@@ -96,16 +100,8 @@ func main() {
 	} else if resolvedAdminKey != "" {
 		log.Printf("[!] The admin key was passed as --admin-key, so it is in this process's command line: readable by any local account through /proc/%d/cmdline and printed by systemctl show. Move it to a 0600 file and pass --admin-key-file.", os.Getpid())
 	}
-	adoptedTenantKey := false
 	if resolvedAdminKey == "" {
-		if t, err := store.GetTenant("default"); err == nil && t != nil {
-			resolvedAdminKey = t.APIKey
-			adoptedTenantKey = true
-		}
-	}
-	if resolvedAdminKey == "" {
-		resolvedAdminKey = os.Getenv("OMINULL_ADMIN_KEY")
-		adoptedTenantKey = false
+		log.Fatalf("[-] no admin key configured; install the package-owned admin.key or set --admin-key-file")
 	}
 	// A fingerprint, not the key. This line used to print the admin credential
 	// in full on every start, into a journal that is readable by more accounts
@@ -113,8 +109,52 @@ func main() {
 	// enough to tell one key from another across a rotation, which is the only
 	// thing an operator reads it for.
 	log.Printf("[+] Admin API key active: %s (fingerprint, not the key)", server.KeyFingerprint(resolvedAdminKey))
-	if adoptedTenantKey {
-		log.Printf("[!] No --admin-key was given, so the default tenant's API key is being used as the admin key. Agents are enrolled with the tenant key, so on this hub every endpoint holds an admin credential. Pass a distinct --admin-key.")
+	if err := setup.Ensure(*setupTokenFile); err != nil {
+		log.Fatalf("[-] setup token: %v", err)
+	}
+	if setupState, err := store.GetSetting("setup.complete"); err == nil && strings.TrimSpace(setupState) == "" {
+		if endpoints, endpointErr := store.ListEndpoints(""); endpointErr == nil && len(endpoints) > 0 {
+			// Existing production data is already configured. Upgrades must not
+			// reopen first-run setup or replace its identity model in place.
+			_ = store.SetSetting("setup.complete", "true")
+			_ = store.SetSetting("legacy_agent_auth", "migration")
+		}
+	}
+	// Older package installs kept their non-secret setup in hub.env flags. On
+	// the first start after this package is installed, project those flags into
+	// the wizard's durable configuration so recovery shows the real deployment
+	// instead of an empty form. Never replace a configuration the wizard has
+	// already saved, and never copy a credential into the database.
+	if raw, configErr := store.GetSetting("setup.configuration"); configErr == nil && strings.TrimSpace(raw) == "" {
+		mode := envOr("OMINULL_NETWORK_MODE", "lan")
+		agentURL := strings.TrimRight(strings.TrimSpace(*agentHubURL), "/")
+		consoleURL := strings.TrimRight(strings.TrimSpace(*hubURL), "/")
+		if agentURL == "" {
+			agentURL = consoleURL
+		}
+		tlsMode := envOr("OMINULL_TLS_MODE", "")
+		if tlsMode == "" {
+			tlsMode = "self-issued"
+			if strings.TrimSpace(*tlsCert) != "" || strings.TrimSpace(*tlsKey) != "" {
+				tlsMode = "custom"
+			}
+		}
+		legacyConfig := configuration.Config{
+			NetworkMode: mode, ConsoleURL: consoleURL, AgentURL: agentURL,
+			TLSMode: tlsMode, TLSCertFile: *tlsCert, TLSKeyFile: *tlsKey,
+			TLSHosts: splitList(*tlsHosts), ClientCerts: *clientCerts,
+			AccessTeam: *accessTeam, AccessAudience: *accessAUD,
+			Cloudflare: strings.EqualFold(strings.TrimSpace(mode), "cloudflare"),
+		}.Normalized()
+		if legacyConfig.ConsoleURL != "" || legacyConfig.AgentURL != "" {
+			if err := legacyConfig.Validate(); err != nil {
+				log.Printf("[!] Existing hub.env was not copied into setup state because it needs operator review: %v", err)
+			} else if encoded, err := json.Marshal(legacyConfig); err != nil {
+				log.Printf("[!] Existing hub.env setup state could not be encoded: %v", err)
+			} else if err := store.SetSetting("setup.configuration", string(encoded)); err != nil {
+				log.Printf("[!] Existing hub.env setup state could not be saved: %v", err)
+			}
+		}
 	}
 
 	clientCertMode, err := server.ParseClientCertMode(*clientCerts)
@@ -147,6 +187,7 @@ func main() {
 		ClientCerts: clientCertMode,
 	})
 	srv.SetAgentHubURL(*agentHubURL)
+	srv.SetSetupPaths(*setupTokenFile, configPath, *dbPath, *adminKeyFile, absBinDir)
 	if err := srv.SetAccess(server.AccessOptions{
 		Team:           *accessTeam,
 		AUD:            *accessAUD,
@@ -209,9 +250,9 @@ func main() {
 		case server.ClientCertsRequired:
 			log.Printf("[+] Agent authentication:     client certificate required, verified against the hub CA")
 		case server.ClientCertsOff:
-			log.Printf("[!] Agent authentication:     tenant API key only. No certificate is asked for, so any agent holding the key can report as any endpoint. Move to --client-certs optional once the fleet can answer the request.")
+			log.Printf("[!] Agent authentication:     unique device credential only; direct native mTLS is not an additional proof. Move to --client-certs optional to add certificate proof.")
 		default:
-			log.Printf("[*] Agent authentication:     client certificate verified when offered, API key otherwise. Set --client-certs required once every endpoint presents one.")
+			log.Printf("[*] Agent authentication:     unique device credential, with client certificate verified when offered. Set --client-certs required once every endpoint presents one.")
 		}
 		if agentTarget == "" || !strings.HasPrefix(agentTarget, "https://") {
 			log.Printf("[!] Agents are being enrolled against %q, which is not an https:// URL. Telemetry and the API key will cross the network in the clear; set --agent-hub-url to this hub's TLS address.", agentTarget)

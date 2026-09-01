@@ -671,6 +671,8 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             lastFlush = now;
             HubContact(accepted);
 
+            Service_AdoptDeviceCredential(config, hubResponse);
+
             // The hub answers with an agent_update descriptor when a newer
             // release is published. Update_Apply verifies it against the
             // pinned release key before anything is installed, and does not
@@ -886,6 +888,50 @@ static bool WriteProtectedFile(const char* path, const char* data) {
     return true;
 }
 
+static bool ExtractDeviceCredential(const char* json, char* out, size_t outLen) {
+    const char* marker = strstr(json, "\"device_credential\":\"");
+    if (!marker || outLen == 0) return false;
+    marker += strlen("\"device_credential\":\"");
+    size_t n = 0;
+    while (marker[n] && marker[n] != '"' && n < outLen - 1) n++;
+    if (marker[n] != '"') return false;
+    memcpy(out, marker, n);
+    out[n] = '\0';
+    return n == 68 && strncmp(out, "omd_", 4) == 0;
+}
+
+bool Service_AdoptDeviceCredential(AGENT_CONFIG* config, const char* responseJson) {
+    if (!config || !responseJson || strncmp(config->api_key, "omd_", 4) == 0) return false;
+
+    char credential[128] = {0};
+    if (!ExtractDeviceCredential(responseJson, credential, sizeof(credential))) return false;
+
+    const char* target = config->key_path[0] ? config->key_path : OMINULL_DEFAULT_KEY_PATH;
+    if (!WriteProtectedFile(target, credential)) {
+        fprintf(stderr, "[!] The hub issued this endpoint a unique credential, but it could not be stored in %s.\n", target);
+        return false;
+    }
+    snprintf(config->api_key, sizeof(config->api_key), "%s", credential);
+
+    if (!config->key_path[0]) {
+        snprintf(config->key_path, sizeof(config->key_path), "%s", target);
+    }
+    char rendered[2048];
+    int n = snprintf(rendered, sizeof(rendered),
+                     "hub_url=%s\nkey_path=%s\nendpoint_id=%s\nrole_tag=%s\n"
+                     "location_id=%s\nca_path=%s\npin_hub_ca=%d\nclient_pfx_path=%s\nallow_plaintext=%d\n",
+                     config->hub_url, config->key_path, config->endpoint_id,
+                     config->role_tag, config->location_id, config->ca_path,
+                     config->pin_hub_ca ? 1 : 0, config->client_pfx_path,
+                     config->allow_plaintext ? 1 : 0);
+    if (n < 0 || (size_t)n >= sizeof(rendered) ||
+        !WriteProtectedFile(config->config_path, rendered)) {
+        fprintf(stderr, "[!] The unique credential is active, but the old inline agent configuration could not be rewritten.\n");
+    }
+    printf("[+] Hub-issued unique device credential installed; legacy shared-key authentication is no longer used by this agent.\n");
+    return true;
+}
+
 static bool ProtectExistingFile(const char* path) {
     PSECURITY_DESCRIPTOR sd = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
@@ -914,15 +960,14 @@ static bool CopyProtectedFile(const char* source, const char* destination) {
 }
 
 /* Service_ConfigureFromStdin is the only package-facing enrollment writer.
- * Bootstrap supplies paths to staged CA/PFX files and the tenant credential on
+ * Bootstrap supplies paths to staged CA/PFX files and the device credential on
  * stdin; this process, installed by the MSI, places them under ProgramData and
  * applies the SYSTEM/Administrators ACL before the service can start. */
 bool Service_ConfigureFromStdin(void) {
     char hub[256] = {0}, key[128] = {0}, endpoint[64] = {0};
     char role[64] = "workstation", location[64] = "loc-home";
     char caSource[260] = {0}, pfxSource[260] = {0};
-    char cfID[128] = {0}, cfSecret[128] = {0};
-    bool allowPlaintext = false;
+    bool pinHubCA = true, allowPlaintext = false;
     char line[1024];
     while (fgets(line, sizeof(line), stdin)) {
         char* value = strchr(line, '=');
@@ -931,17 +976,16 @@ bool Service_ConfigureFromStdin(void) {
         value[strcspn(value, "\r\n")] = '\0';
         if (strchr(value, '\r') || strchr(value, '\n')) return false;
         if (strcmp(line, "hub_url") == 0) snprintf(hub, sizeof(hub), "%s", value);
-        else if (strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
+        else if (strcmp(line, "device_credential") == 0 || strcmp(line, "api_key") == 0) snprintf(key, sizeof(key), "%s", value);
         else if (strcmp(line, "endpoint_id") == 0) snprintf(endpoint, sizeof(endpoint), "%s", value);
         else if (strcmp(line, "role_tag") == 0) snprintf(role, sizeof(role), "%s", value);
         else if (strcmp(line, "location_id") == 0) snprintf(location, sizeof(location), "%s", value);
         else if (strcmp(line, "ca_source") == 0) snprintf(caSource, sizeof(caSource), "%s", value);
         else if (strcmp(line, "client_pfx_source") == 0) snprintf(pfxSource, sizeof(pfxSource), "%s", value);
-        else if (strcmp(line, "cf_client_id") == 0) snprintf(cfID, sizeof(cfID), "%s", value);
-        else if (strcmp(line, "cf_client_secret") == 0) snprintf(cfSecret, sizeof(cfSecret), "%s", value);
+        else if (strcmp(line, "pin_hub_ca") == 0) pinHubCA = strcmp(value, "0") != 0;
         else if (strcmp(line, "allow_plaintext") == 0) allowPlaintext = strcmp(value, "1") == 0;
     }
-    if (!hub[0] || !key[0] || !endpoint[0] || !caSource[0]) {
+    if (!hub[0] || !key[0] || !endpoint[0] || (pinHubCA && !caSource[0])) {
         fprintf(stderr, "[-] Package enrollment is missing a required field.\n");
         return false;
     }
@@ -955,10 +999,10 @@ bool Service_ConfigureFromStdin(void) {
     }
 
     if (!WriteProtectedFile(OMINULL_DEFAULT_KEY_PATH, key)) {
-        fprintf(stderr, "[-] Cannot install the package API key (Error: %lu).\n", GetLastError());
+        fprintf(stderr, "[-] Cannot install the package device credential (Error: %lu).\n", GetLastError());
         return false;
     }
-    if (!CopyProtectedFile(caSource, "C:\\ProgramData\\Ominull\\ca.crt")) {
+	if (pinHubCA && !CopyProtectedFile(caSource, "C:\\ProgramData\\Ominull\\ca.crt")) {
         fprintf(stderr, "[-] Cannot install the package CA file (Error: %lu)\n", GetLastError());
         return false;
     }
@@ -970,9 +1014,11 @@ bool Service_ConfigureFromStdin(void) {
     char config[2048];
     int n = snprintf(config, sizeof(config),
                      "hub_url=%s\nkey_path=%s\nendpoint_id=%s\nrole_tag=%s\nlocation_id=%s\n"
-                     "ca_path=C:\\ProgramData\\Ominull\\ca.crt\nclient_pfx_path=C:\\ProgramData\\Ominull\\client.pfx\n"
-                     "cf_client_id=%s\ncf_client_secret=%s\nallow_plaintext=%d\n",
-                     hub, OMINULL_DEFAULT_KEY_PATH, endpoint, role, location, cfID, cfSecret, allowPlaintext ? 1 : 0);
+                     "ca_path=%s\npin_hub_ca=%d\nclient_pfx_path=C:\\ProgramData\\Ominull\\client.pfx\n"
+                     "allow_plaintext=%d\n",
+                     hub, OMINULL_DEFAULT_KEY_PATH, endpoint, role, location,
+                     pinHubCA ? "C:\\ProgramData\\Ominull\\ca.crt" : "",
+                     pinHubCA ? 1 : 0, allowPlaintext ? 1 : 0);
     if (n < 0 || (size_t)n >= sizeof(config) || !WriteProtectedFile(OMINULL_DEFAULT_CONFIG_PATH, config)) {
         DeleteFileA(OMINULL_DEFAULT_KEY_PATH);
         return false;
@@ -993,27 +1039,21 @@ static int BuildServiceCommandLine(const AGENT_CONFIG* config, const char* binar
     int n;
     if (config->key_path[0]) {
         n = snprintf(out, cap,
-                     "\"%s\" --service --hub %s --key-file \"%s\" --role %s --location %s --id %s --ca \"%s\"",
+                     "\"%s\" --service --hub %s --key-file \"%s\" --role %s --location %s --id %s",
                      binaryPath, config->hub_url, config->key_path,
                      config->role_tag[0] ? config->role_tag : "workstation",
                      config->location_id[0] ? config->location_id : "loc-home",
-                     config->endpoint_id, config->ca_path);
+                     config->endpoint_id);
     } else {
-        n = snprintf(out, cap,
-                     "\"%s\" --service --hub %s --key %s --role %s --location %s --id %s --ca \"%s\"",
-                     binaryPath, config->hub_url, config->api_key,
-                     config->role_tag[0] ? config->role_tag : "workstation",
-                     config->location_id[0] ? config->location_id : "loc-home",
-                     config->endpoint_id, config->ca_path);
+        return -1;
     }
     if (n < 0 || (size_t)n >= cap) return -1;
+	if (config->pin_hub_ca && config->ca_path[0]) {
+		int m = snprintf(out + n, cap - n, " --ca \"%s\"", config->ca_path);
+		if (m < 0 || (size_t)(n + m) >= cap) return -1;
+		n += m;
+	}
 
-    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
-        int m = snprintf(out + n, cap - n, " --cf-id %s --cf-secret %s",
-                         config->cf_client_id, config->cf_client_secret);
-        if (m < 0 || (size_t)(n + m) >= cap) return -1;
-        n += m;
-    }
     if (config->allow_plaintext) {
         int m = snprintf(out + n, cap - n, " --allow-plaintext");
         if (m < 0 || (size_t)(n + m) >= cap) return -1;
@@ -1050,7 +1090,7 @@ void Service_MigrateKeyToFile(const AGENT_CONFIG* config) {
 
     AGENT_CONFIG moved = *config;
     if (!StoreKeyBesideBinary(config, moved.key_path, sizeof(moved.key_path))) {
-        fprintf(stderr, "[!] Could not move the API key off the service command line; "
+        fprintf(stderr, "[!] Could not move the device credential off the service command line; "
                         "it stays readable through `sc qc %s`.\n", SERVICE_NAME);
         return;
     }
@@ -1078,10 +1118,10 @@ void Service_MigrateKeyToFile(const AGENT_CONFIG* config) {
         /* The key is out of the live configuration from here. The 7045 record
          * the SCM wrote at install still holds the old one, and nothing can
          * redact that - the key it names has to be rotated. */
-        printf("[+] Moved the API key out of the service command line into %s.\n", moved.key_path);
+        printf("[+] Moved the device credential out of the service command line into %s.\n", moved.key_path);
     } else {
         fprintf(stderr, "[!] Could not rewrite the service command line (Error: %lu); "
-                        "the key stays readable through `sc qc %s`.\n", GetLastError(), SERVICE_NAME);
+                        "the credential stays readable through `sc qc %s`.\n", GetLastError(), SERVICE_NAME);
     }
 
     CloseServiceHandle(schService);

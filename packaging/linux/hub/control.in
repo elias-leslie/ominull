@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: systemd
+Depends: systemd, openssl
 Maintainer: Ominull Project <secops@example.invalid>
 Description: Ominull fleet management hub
  The hub stores telemetry, policy, identity, and release state for Ominull

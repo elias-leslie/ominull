@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define OMINULL_AGENT_VERSION "1.7.24"
+#define OMINULL_AGENT_VERSION "1.7.25"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
@@ -21,8 +21,6 @@ typedef struct _AGENT_CONFIG {
     char hostname[128];
     char location_id[64];
     char role_tag[64];
-    char cf_client_id[128];
-    char cf_client_secret[128];
     char primary_ip[64];
     char primary_mac[32];
     char os_version[128];
@@ -40,13 +38,16 @@ typedef struct _AGENT_CONFIG {
      * the key is still inline and Service_MigrateKeyToFile will move it. */
     char key_path[260];
     /* This endpoint's own certificate and key as a PKCS#12 archive, planted by
-     * enrolment. Presented on every hub connection so the hub can tell which
-     * endpoint is reporting; the API key alone only proves tenant membership. */
+     * enrolment. Presented on every hub connection as an additional matching
+     * proof alongside the unique device credential. */
     char client_pfx_path[260];
     bool is_service;
     bool verbose;
     /* Opt-in to a cleartext hub. Off by default: without it the agent refuses
-     * an http:// hub rather than putting the API key on the wire. */
+     * an http:// hub rather than putting the device credential on the wire. */
+    /* Direct self-issued hubs pin the Ominull CA. Public ACME or Cloudflare
+     * endpoints use the Windows machine certificate store instead. */
+    bool pin_hub_ca;
     bool allow_plaintext;
 } AGENT_CONFIG;
 
@@ -188,8 +189,11 @@ void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BO
 void Service_Run(void);
 void Service_SetConfig(const AGENT_CONFIG* config);
 // Reads enrollment fields from stdin and writes package-owned configuration
-// and private material without putting the tenant key in process arguments.
+// and private material without putting the device credential in process arguments.
 bool Service_ConfigureFromStdin(void);
+// Installs the unique device credential delivered in a successful migration
+// heartbeat and removes any legacy inline credential from package config.
+bool Service_AdoptDeviceCredential(AGENT_CONFIG* config, const char* responseJson);
 // Installs the service with the full running configuration. It takes the whole
 // config rather than a hub URL and key because the SCM command line is the only
 // place the service's arguments exist: anything left out here - the role, the

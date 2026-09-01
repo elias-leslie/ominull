@@ -637,6 +637,18 @@
         ],
         pending: []
       },
+      /* Demo mode has to reach the self-service screen too, or the only way to
+         see what a window looks like is to open a real one on a real network. */
+      "/api/v1/enrolment/windows": {
+        portal_url: "http://10.0.0.58:9999/install",
+        suggested_cidrs: ["10.0.4.0/24"],
+        enrollment_ttl: "30m0s",
+        windows: [
+          { id: "win-demo01", label: "Branch Clinic rollout", cidrs: ["10.0.4.0/24"], state: "open", used: 6, max_uses: 40, has_passcode: true, expires_at: new Date(Date.now() + 5 * 3600000).toISOString() },
+          { id: "win-demo02", label: "Server room", cidrs: ["10.0.2.0/24"], state: "spent", used: 4, max_uses: 4, has_passcode: false, expires_at: new Date(Date.now() + 2 * 3600000).toISOString() },
+          { id: "win-demo03", label: "Tuesday laptops", cidrs: ["10.0.9.0/24"], state: "expired", used: 11, max_uses: 0, has_passcode: false, expires_at: new Date(Date.now() - 26 * 3600000).toISOString() }
+        ]
+      },
       "/api/v1/mesh/quarantined": [
         { id: "mq-01", target_ip: "10.0.4.99", target_mac: "B8:27:EB:12:34:56", subnet: "10.0.4.0/24", reason: "Metasploit listener on 4444", active: true, created_at: mins(22) }
       ],
@@ -875,31 +887,26 @@
 
   /* Demo writes mutate the fixture so an isolate or an acknowledge visibly
      lands, the same way it would against a live hub. */
-  /* The demo installer is a real-shaped script with a demonstrably fake key, so
-     the copy and download buttons can be exercised without minting a ticket. */
+  /* The demo installer is a real-shaped script with a demonstrably fake code,
+     so the copy and download buttons can be exercised without minting a live
+     enrollment profile. */
   function demoInstaller(body) {
     var plat = body.platform || "linux";
     var host = "https://hub.demo.invalid:9443";
     var spec = {
-      linux: { file: "ominull-install.sh", one: "curl -fsSL " + host + "/bootstrap.sh?t=DEMOTICKET | sudo bash" },
-      windows: { file: "ominull-install.ps1", one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1?t=DEMOTICKET' | iex" }
+      linux: { file: "ominull-install.sh", one: "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash" },
+      windows: { file: "ominull-install.ps1", one: "iwr -UseBasicParsing '" + host + "/bootstrap.ps1' | iex" }
     }[plat] || {};
     var out = {
       platform: plat,
       filename: spec.file,
       script: "#!/bin/sh\n# Ominull agent installer (demo mode - this script installs nothing)\n"
-        + "OMINULL_HUB=\"" + host + "\"\n"
-        + "OMINULL_TENANT=\"" + (body.tenant_id || "default") + "\"\n"
-        + "OMINULL_LOCATION=\"" + (body.location_id || "") + "\"\n"
-        + "OMINULL_ROLE=\"" + (body.role || "workstation") + "\"\n"
-        + "OMINULL_ENROL_TOKEN=\"demo-token-not-a-credential\"\n"
-        + "set -eu\n"
-        + "curl -fsSL \"$OMINULL_HUB/download/ominull-agent_1.7.11_amd64.deb\" -o /tmp/ominull.deb\n"
-        + "dpkg -i /tmp/ominull.deb\n"
-        + "systemctl enable --now ominull-agent\n",
-      note: "Demo mode: nothing was minted and this script will not enrol anything."
+        + "# The live installer asks for a one-use enrollment code in its request body.\n"
+        + "curl -fsSL '" + host + "/bootstrap.sh' | sudo bash\n",
+      note: "Demo mode: nothing was minted and this script will not enroll anything."
     };
-    if (body.one_liner) { out.one_liner = spec.one; out.one_liner_expires_in = "30m0s"; }
+    out.enrollment_code = "one-demo-code";
+    if (body.one_liner) { out.one_liner = spec.one; out.one_liner_expires_in = "30 minutes"; }
     return out;
   }
 
@@ -1297,9 +1304,9 @@
       outdated: count(function (x) { return x.stale; }),
       risky: count(function (x) { return x.riskyPorts > 0; }),
       offline: count(function (x) { return x.evidence.agent && !x.online; }),
-      /* An agented asset reporting under the tenant API key alone cannot be
-         told from any other endpoint holding the same key. This is the number
-         that has to reach zero before --client-certs required is safe. */
+      /* A new agent can report with its unique device credential before direct
+         native mTLS is enabled. This is the number still missing the extra
+         certificate proof before --client-certs required is safe. */
       keyOnly: count(function (x) { return x.evidence.agent && !(x.endpoint && x.endpoint.cert_cn); })
     };
   }
@@ -2002,8 +2009,8 @@
         cls: "auth", "data-bound": cn ? "true" : "false",
         title: cn
           ? "Last reported under client certificate \u201c" + cn + "\u201d"
-          : "Reports under the tenant API key alone. Any agent holding that key can report as this endpoint.",
-        text: cn ? "\u00b7 cert" : "\u00b7 key only"
+          : "Reports with its unique device credential; direct native mTLS was not seen on the last heartbeat.",
+        text: cn ? "\u00b7 mTLS" : "\u00b7 device credential"
       }));
     }
 
@@ -2240,11 +2247,15 @@
   function addEndpointCard() {
     return card("Install an agent",
       h("div", { cls: "card-body stack" },
-        h("p", { cls: "pending", text: "Render a signed installer for one platform, copy it or download it, or take a one-line command to paste on the host. The command carries a single-use ticket that expires in 30 minutes \u2014 not the admin key." }),
+        h("p", { cls: "pending", text: "Render a signed native installer for one platform, copy it or download it, or take a one-line command to paste on the host. Each install uses a one-use enrollment code and receives its own device credential. For more than a couple of hosts, open a self-service window and let each machine ask for its own." }),
         h("div", { cls: "row-acts" },
           h("button", {
             cls: "btn btn-primary", type: "button", text: "Create an installer",
             on: { click: function () { openInstallerSheet(); } }
+          }),
+          h("button", {
+            cls: "btn", type: "button", text: "Self-service",
+            on: { click: function () { openSelfServiceSheet(); } }
           }),
         )));
   }
@@ -3201,10 +3212,10 @@
     sheetScrim = null;
   }
 
-  function openSheet(title, body, actions) {
+  function openSheet(title, body, actions, extraCls) {
     closeSheet();
     sheetScrim = h("div", { cls: "scrim scrim-sheet", on: { click: closeSheet } });
-    sheetEl = h("div", { cls: "sheet", role: "dialog", "aria-modal": "true", "aria-label": title },
+    sheetEl = h("div", { cls: "sheet" + (extraCls ? " " + extraCls : ""), role: "dialog", "aria-modal": "true", "aria-label": title },
       h("div", { cls: "sheet-head" },
         h("h2", { text: title }),
         h("span", { cls: "fill" }),
@@ -3277,6 +3288,17 @@
       h("option", { value: "appliance", text: "Appliance" }));
 
     var endpointID = h("input", { type: "text", value: pre.endpoint_id || "", placeholder: "derived from the hostname" });
+    var profileKind = h("select", { "aria-label": "Enrollment profile" },
+      h("option", { value: "invitation", text: "One-use invitation" }),
+      h("option", { value: "campaign", text: "Time-boxed campaign" }),
+      h("option", { value: "deployment", text: "Persistent deployment key" }));
+    var profileHours = h("select", { "aria-label": "Profile lifetime" },
+      h("option", { value: "1", text: "1 hour" }),
+      h("option", { value: "8", text: "8 hours" }),
+      h("option", { value: "24", text: "24 hours" }),
+      h("option", { value: "168", text: "7 days" }));
+    profileHours.value = "8";
+    var profileMaxUses = h("input", { type: "text", placeholder: "campaign: no limit" });
 
     var out = h("div", { cls: "stack" });
     var rendered = null;
@@ -3290,6 +3312,10 @@
         location_id: location.value,
         role: role.value,
         endpoint_id: endpointID.value.trim(),
+        kind: profileKind.value,
+        hours: profileKind.value === "campaign" ? (parseFloat(profileHours.value) || 8) : 0,
+        max_uses: profileKind.value === "campaign" ? (parseInt(profileMaxUses.value, 10) || 0) : (profileKind.value === "invitation" ? 1 : 0),
+        persistent: profileKind.value === "deployment",
         one_liner: !!wantOneLiner
       }).then(function (res) {
         rendered = res || {};
@@ -3304,11 +3330,11 @@
                 cls: "btn", type: "button", text: "Copy command",
                 on: { click: function () { copyText(rendered.one_liner, "the install command"); } }
               }),
-              h("span", { cls: "pending", text: "Works once, and expires in " + (rendered.one_liner_expires_in || "30m") + "." })),
+              h("span", { cls: "pending", text: "The code below works once and expires in " + (rendered.one_liner_expires_in || "30 minutes") + "." })),
             /* When the hub doubts the URL it just built, say so here rather
                than letting the operator find out as a shell syntax error on
-               the host. The alternate carries the same ticket: a command that
-               never reached the hub did not spend it. */
+               the host. The alternate carries no credential; the code below is
+               entered by the installer after it starts. */
             rendered.one_liner_warning
               ? h("p", { cls: "note note-warn", text: rendered.one_liner_warning })
               : null,
@@ -3321,8 +3347,20 @@
                       cls: "btn", type: "button", text: "Copy alternate",
                       on: { click: function () { copyText(rendered.one_liner_alternate, "the alternate install command"); } }
                     }),
-                    h("span", { cls: "pending", text: "Same single-use ticket \u2014 whichever command reaches the hub first spends it." })))
+                    h("span", { cls: "pending", text: "Same one-use code, entered at the host." })))
               : null));
+        }
+
+        if (rendered.enrollment_code) {
+          out.appendChild(h("div", { cls: "field" },
+            h("span", { text: "Enrollment code" }),
+            h("pre", { cls: "cmd", text: rendered.enrollment_code }),
+            h("div", { cls: "form-row" },
+              h("button", {
+                cls: "btn", type: "button", text: "Copy code",
+                on: { click: function () { copyText(rendered.enrollment_code, "the enrollment code"); } }
+              }),
+              h("span", { cls: "pending", text: "Keep it out of URLs, service arguments, logs, and screenshots." }))));
         }
 
         out.appendChild(h("div", { cls: "form-row" },
@@ -3348,13 +3386,16 @@
     };
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "The hub renders an installer carrying this client's key and a single-use enrolment token. Run it on the host, or hand the host the one-line command." }),
+      h("p", { cls: "why", text: "The hub renders a native package installer. It redeems an enrollment code, then writes a unique device credential and matching client certificate through the package's protected configuration input." }),
       h("div", { cls: "form-row" },
         h("label", { cls: "field" }, h("span", { text: "Platform" }), platform),
         h("label", { cls: "field" }, h("span", { text: "Client" }), tenant),
         h("label", { cls: "field" }, h("span", { text: "Location" }), location),
         h("label", { cls: "field" }, h("span", { text: "Role" }), role),
-        h("label", { cls: "field" }, h("span", { text: "Endpoint id" }), endpointID)),
+        h("label", { cls: "field" }, h("span", { text: "Endpoint id" }), endpointID),
+        h("label", { cls: "field" }, h("span", { text: "Enrollment profile" }), profileKind),
+        h("label", { cls: "field" }, h("span", { text: "Campaign lifetime" }), profileHours),
+        h("label", { cls: "field" }, h("span", { text: "Campaign use cap" }), profileMaxUses)),
       out);
 
     openSheet("Install an agent", body, [
@@ -3365,6 +3406,149 @@
     render(false);
   }
 
+  /* -------------------------------------------- self-service enrolment */
+
+  /* Pre-authorising a network instead of a host.
+
+     Minting a link per host is right for one host and wrong for forty: the
+     operator ends up in the console while somebody else walks the building.
+     A window says "for the next few hours, a machine on this network may ask
+     the hub for its own install command", and the hub still mints an ordinary
+     single-use enrollment code for each one. Everything that bounds it - the networks,
+     the expiry, the budget, whether a passcode is needed - is on this screen,
+     and so is the button that closes it. */
+
+  function windowStateTone(state_) {
+    return state_ === "open" ? "ok" : state_ === "revoked" ? "crit" : "warn";
+  }
+
+  function openSelfServiceSheet() {
+    var out = h("div", { cls: "stack" });
+    var portalURL = "";
+
+    var label = h("input", { type: "text", placeholder: "Ground floor, Tuesday rollout" });
+    var cidrs = h("input", { type: "text", placeholder: "10.0.0.0/24" });
+    var hours = h("select", {},
+      h("option", { value: "1", text: "1 hour" }),
+      h("option", { value: "4", text: "4 hours" }),
+      h("option", { value: "8", text: "8 hours" }),
+      h("option", { value: "24", text: "24 hours" }),
+      h("option", { value: "168", text: "7 days" }));
+    hours.value = "8";
+    var maxUses = h("input", { type: "text", value: "", placeholder: "no limit" });
+    var passcode = h("input", { type: "text", value: "", placeholder: "optional" });
+
+    var renderList = function (res) {
+      out.textContent = "";
+      var windows = arrayOf(res && res.windows);
+      portalURL = (res && res.portal_url) || "";
+
+      /* The hub's own networks, offered rather than prefilled. Joining them all
+         into the box is how a container or virtualisation bridge ends up
+         pre-authorised alongside the LAN that was actually meant. */
+      var suggestions = arrayOf(res && res.suggested_cidrs);
+      if (suggestions.length) {
+        var picks = h("div", { cls: "row-acts" },
+          h("span", { cls: "pending", text: "Networks this hub is on:" }));
+        suggestions.forEach(function (cidr) {
+          picks.appendChild(h("button", {
+            cls: "btn", type: "button", text: cidr,
+            on: { click: function () { cidrs.value = cidr; cidrs.focus(); } }
+          }));
+        });
+        out.appendChild(picks);
+        if (!cidrs.value) cidrs.value = suggestions[0];
+      }
+
+      /* The address to hand out is the point of the whole screen, so it is the
+         first thing on it rather than something to derive from the hub URL. */
+      out.appendChild(h("div", { cls: "field" },
+        h("span", { text: "Send people here" }),
+        h("pre", { cls: "cmd", text: portalURL }),
+        h("div", { cls: "form-row" },
+          h("button", {
+            cls: "btn", type: "button", text: "Copy address",
+            on: { click: function () { copyText(portalURL, "the enrolment address"); } }
+          }),
+          h("span", { cls: "pending", text: "The page shows whoever opens it the command for the machine they are on. It works only from a network with an open window below." }))));
+
+      var rows = windows.map(function (win) {
+        var state_ = win.state || "open";
+        var used = String(win.used || 0) + (win.max_uses > 0 ? " of " + win.max_uses : "");
+        return [
+          h("div", {},
+            h("div", { text: win.label || "(unlabelled)" }),
+            h("div", { cls: "pending ip", text: arrayOf(win.cidrs).join(", ") +
+              (win.has_passcode ? " \u00b7 passcode" : "") })),
+          h("span", { cls: "st", "data-state": windowStateTone(state_) }, h("span", { text: state_ })),
+          h("span", { text: used }),
+          stamp(parseTime(win.expires_at)),
+          state_ === "open"
+            ? h("button", {
+                cls: "btn", type: "button", text: "Close",
+                on: { click: function () { revoke(win.id); } }
+              })
+            : h("span", { cls: "pending", text: "\u2014" })
+        ];
+      });
+
+      out.appendChild(card("Open windows",
+        h("div", { cls: "card-body" },
+          simpleTable(["Window", "State", "Enrolled", "Expires", ""], rows))));
+
+    };
+
+    var load = function () {
+      request("/api/v1/enrolment/windows").then(renderList).catch(function (e) {
+        out.textContent = "";
+        out.appendChild(h("p", { cls: "note note-crit", text: "Could not read the enrolment windows: " + e.message }));
+      });
+    };
+
+    var revoke = function (id) {
+      request("/api/v1/enrolment/windows?id=" + encodeURIComponent(id), "DELETE")
+        .then(function () { toast("Window closed", "ok"); load(); })
+        .catch(function (e) { toast("Could not close it: " + e.message, "crit"); });
+    };
+
+    var open = function () {
+      var nets = cidrs.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+      if (!nets.length) { toast("Name at least one network", "warn"); return; }
+      request("/api/v1/enrolment/windows", "POST", {
+        label: label.value.trim(),
+        cidrs: nets,
+        hours: parseFloat(hours.value) || 8,
+        max_uses: parseInt(maxUses.value, 10) || 0,
+        passcode: passcode.value.trim()
+      }).then(function (res) {
+        toast("Enrolment window open", "ok");
+        /* The passcode is shown once, here, and the hub keeps only its hash -
+           so if it is not copied off this screen it cannot be recovered. */
+        if (passcode.value.trim()) {
+          toast("Passcode: " + passcode.value.trim() + " \u2014 it cannot be shown again", "warn");
+        }
+        label.value = ""; maxUses.value = ""; passcode.value = "";
+        load();
+      }).catch(function (e) { toast("Could not open it: " + e.message, "crit"); });
+    };
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "why", text: "Let machines on a network install the agent themselves. Each one still gets its own single-use enrollment code \u2014 the window only decides who may ask for one." }),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Label" }), label),
+        h("label", { cls: "field" }, h("span", { text: "Networks" }), cidrs),
+        h("label", { cls: "field" }, h("span", { text: "Stays open for" }), hours),
+        h("label", { cls: "field" }, h("span", { text: "Limit" }), maxUses),
+        h("label", { cls: "field" }, h("span", { text: "Passcode" }), passcode)),
+      out);
+
+    openSheet("Self-service enrolment", body, [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      h("button", { cls: "btn btn-primary", type: "button", text: "Open a window", on: { click: open } })
+    ], "sheet-wide");
+
+    load();
+  }
 
   /* -------------------------------------------------- isolation baseline */
 

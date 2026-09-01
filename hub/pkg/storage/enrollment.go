@@ -21,7 +21,7 @@ const EnrollmentTokenTTL = time.Hour
 //
 // It exists because the enrolment route had no notion of who was allowed to be
 // issued what: any caller the hub authenticated could ask for a certificate in
-// any endpoint's name, and the tenant key that authenticates them is on every
+// any endpoint's name, and the legacy shared key that authenticates them is on every
 // endpoint in the fleet. A certificate is the thing the hub tells endpoints
 // apart by, so that made the identity it proves worth nothing.
 //

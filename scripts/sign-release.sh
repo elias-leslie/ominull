@@ -44,17 +44,16 @@ if [ "${embedded}" != "${signing_pub}" ]; then
     exit 1
 fi
 
-packages=(
-    "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
-    "${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
-    "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi"
-)
+agent_deb="${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
+hub_deb="${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
+windows_msi="${DIST_DIR}/ominull-agent-windows-${VERSION}.msi"
+packages=("${agent_deb}" "${hub_deb}" "${windows_msi}")
 for pkg in "${packages[@]}"; do
     [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
 done
 
-echo "[*] Signing ${#packages[@]} package(s) with the release key..."
-for pkg in "${packages[@]}"; do
+sign_package() {
+    local pkg="$1"
     openssl dgst -sha256 -sign "${KEY}" -out "${pkg}.sig" "${pkg}"
     sha256sum "${pkg}" | awk '{print $1}' > "${pkg}.sha256"
 
@@ -68,7 +67,32 @@ for pkg in "${packages[@]}"; do
     fi
     rm -f "${DIST_DIR}/.verify.pub"
     echo "  [+] $(basename "${pkg}").sig  ($(cat "${pkg}.sha256"))"
+}
+
+echo "[*] Signing endpoint packages with the release key..."
+sign_package "${agent_deb}"
+sign_package "${windows_msi}"
+
+# A hub package downloaded by a new operator must be enough to reach the
+# enrollment screen and serve the retained native agents. Bundle the already
+# signed endpoint artifacts as data, outside the package's running binary
+# path; postinst copies them into the configured download directory. The copy
+# survives hub package purge so artifact availability follows the data-retention
+# contract, while the signed source remains part of the release package.
+bundle_dir="$(mktemp -d "${TMPDIR:-/tmp}/ominull-hub-bundle.XXXXXX")"
+trap 'rm -rf "${bundle_dir}"' EXIT
+dpkg-deb --raw-extract "${hub_deb}" "${bundle_dir}/root"
+install -d -m 0755 "${bundle_dir}/root/usr/share/ominull/packages"
+for artifact in "${agent_deb}" "${agent_deb}.sig" "${agent_deb}.sha256" \
+                "${windows_msi}" "${windows_msi}.sig" "${windows_msi}.sha256"; do
+    install -m 0644 "${artifact}" "${bundle_dir}/root/usr/share/ominull/packages/$(basename "${artifact}")"
 done
+bundled_hub="${bundle_dir}/ominull-hub_${VERSION}_amd64.deb"
+dpkg-deb --build --root-owner-group "${bundle_dir}/root" "${bundled_hub}" >/dev/null
+mv "${bundled_hub}" "${hub_deb}"
+
+echo "[*] Signing bundled hub package..."
+sign_package "${hub_deb}"
 
 mapfile -t package_names < <(printf '%s\n' "${packages[@]}" | xargs -n1 basename | sort)
 (cd "${DIST_DIR}" && sha256sum "${package_names[@]}") > "${DIST_DIR}/SHA256SUMS.txt"

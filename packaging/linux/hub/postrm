@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Database, PKI, release packages, and deployment configuration deliberately
-# survive package removal and purge. Data deletion requires a separate operator
-# action; a package lifecycle command must not destroy production state.
+# Database, PKI, release packages, backups, and deployment configuration
+# deliberately survive package removal and purge. Data deletion requires a
+# separate operator action; a package lifecycle command must not destroy state.
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
 fi

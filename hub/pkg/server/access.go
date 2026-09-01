@@ -70,13 +70,16 @@ type AccessOptions struct {
 }
 
 type accessOperator struct {
-	Email string
-	Role  string
+	Email   string
+	Role    string
+	Issuer  string
+	Subject string
 }
 
 type accessVerifier struct {
-	team string
-	aud  string
+	team   string
+	aud    string
+	issuer string
 	// lookup resolves an email to a role. It reads the operators table on every
 	// request rather than a snapshot, so revoking someone in the console takes
 	// effect on their next request instead of at the next restart.
@@ -110,6 +113,7 @@ func newAccessVerifier(opts AccessOptions, lookup func(string) (string, bool)) (
 	return &accessVerifier{
 		team:   team,
 		aud:    aud,
+		issuer: "https://" + team + ".cloudflareaccess.com",
 		lookup: lookup,
 		keys:   map[string]*rsa.PublicKey{},
 		client: &http.Client{Timeout: 10 * time.Second},
@@ -175,10 +179,16 @@ func (a *accessVerifier) Verify(r *http.Request) (accessOperator, bool) {
 		log.Printf("[+] Cloudflare Access verified %s as %s.", email, role)
 	}
 
-	return accessOperator{Email: email, Role: role}, true
+	subject := strings.TrimSpace(claims.Sub)
+	if subject == "" {
+		subject = email
+	}
+	return accessOperator{Email: email, Role: role, Issuer: a.issuer, Subject: subject}, true
 }
 
 type accessClaims struct {
+	Iss   string `json:"iss"`
+	Sub   string `json:"sub"`
 	Email string `json:"email"`
 	Exp   int64  `json:"exp"`
 	Nbf   int64  `json:"nbf"`
@@ -189,6 +199,8 @@ type accessClaims struct {
 // is what the JWT spec permits and what different issuers actually emit.
 func (c *accessClaims) UnmarshalJSON(b []byte) error {
 	var raw struct {
+		Iss   string          `json:"iss"`
+		Sub   string          `json:"sub"`
 		Email string          `json:"email"`
 		Exp   int64           `json:"exp"`
 		Nbf   int64           `json:"nbf"`
@@ -197,7 +209,7 @@ func (c *accessClaims) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	c.Email, c.Exp, c.Nbf = raw.Email, raw.Exp, raw.Nbf
+	c.Iss, c.Sub, c.Email, c.Exp, c.Nbf = raw.Iss, raw.Sub, raw.Email, raw.Exp, raw.Nbf
 	if len(raw.Aud) == 0 {
 		return nil
 	}
@@ -269,6 +281,9 @@ func (a *accessVerifier) verifyToken(raw string) (*accessClaims, error) {
 	}
 	if claims.Nbf != 0 && now < claims.Nbf {
 		return nil, errors.New("not yet valid")
+	}
+	if claims.Iss != a.issuer {
+		return nil, errors.New("issuer does not match this Access team")
 	}
 
 	// The audience pin. Without it, any Access application in this team issues

@@ -5,7 +5,10 @@ if [ "${1:-}" = purge ]; then
     # The hub package deliberately shares the parent directories. Remove only
     # endpoint-owned files and update state; never remove the hub database,
     # PKI, hub.env, or release directory on a co-installed host.
-    rm -f /etc/ominull/agent.conf /etc/ominull/agent.key /etc/ominull/ca.crt \
+	[ -L /etc/ominull ] && { echo "ominull-agent: refusing to purge symlinked /etc/ominull" >&2; exit 1; }
+	[ -L /var/lib/ominull ] && { echo "ominull-agent: refusing to purge symlinked /var/lib/ominull" >&2; exit 1; }
+	[ -L /var/lib/ominull/updates ] && { echo "ominull-agent: refusing to purge symlinked update directory" >&2; exit 1; }
+	rm -f /etc/ominull/agent.conf /etc/ominull/agent.key /etc/ominull/ca.crt \
         /etc/ominull/client.crt /etc/ominull/client.key
     rm -rf /var/lib/ominull/updates
     rmdir /etc/ominull 2>/dev/null || true

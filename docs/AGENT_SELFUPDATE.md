@@ -11,7 +11,9 @@ hub descriptor and never follow a descriptor to another host.
 
 ## Common sequence
 
-1. Receive a signed descriptor in an authenticated telemetry response.
+1. Receive a signed descriptor in an authenticated telemetry response. A
+   retained shared-key endpoint may receive its unique device credential in
+   this same response during the explicit migration window.
 2. Validate the package path and digest.
 3. Verify the detached signature against the pinned public key.
 4. Stage in a package-owned, administrator-only location.
@@ -30,7 +32,9 @@ then invokes `dpkg -i`. The package owns `/opt/ominull/bin/ominulld`,
 `/etc/ominull/agent.conf`, and `ominull-agent.service`. The maintainer scripts
 create and enable the unit, preserve enrollment identity on upgrade, refuse a
 downgrade, and remove endpoint identity only on purge. They never remove the
-hub database or PKI.
+hub database or PKI. New configuration uses a unique device credential file;
+legacy inline shared-key configuration is migrated out of the service path by
+the updated agent.
 
 The update is launched independently of the current daemon because the package
 transaction stops that daemon. A failed package transaction is logged and the

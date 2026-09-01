@@ -1,5 +1,9 @@
 package storage
 
+// This file keeps the old install_tickets table and its data-access methods so
+// an upgrade can open databases created by older releases. Current installers
+// use enrollment profiles and never call this compatibility surface.
+
 import (
 	"crypto/rand"
 	"database/sql"

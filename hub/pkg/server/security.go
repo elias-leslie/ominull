@@ -42,7 +42,7 @@ func KeyFingerprint(key string) string {
 // already resolved the caller; this only reads its verdict.
 //
 // The distinction it enforces is the one the deployment depends on: the tenant
-// key is on every endpoint in the fleet, so anything a tenant key can do is
+// key is on every endpoint in the fleet, so anything a legacy shared key can do is
 // something a single compromised host can do. Fleet-wide controls - creating
 // tenants, quarantining a peer on every agent, pushing a deploy, pointing the
 // another server - are operator actions and must not be reachable

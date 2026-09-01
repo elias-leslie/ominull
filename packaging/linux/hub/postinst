@@ -1,15 +1,72 @@
 #!/bin/sh
 set -eu
 
-install -d -o root -g root -m 0755 /etc/ominull /var/lib/ominull/packages
+for directory in /etc/ominull /var/lib/ominull /var/lib/ominull/packages /var/lib/ominull/backups; do
+    [ -L "${directory}" ] && { echo "ominull: refusing symlinked package directory ${directory}" >&2; exit 1; }
+    [ -e "${directory}" ] && [ ! -d "${directory}" ] && { echo "ominull: package path ${directory} is not a directory" >&2; exit 1; }
+done
+install -d -o root -g root -m 0755 /etc/ominull /var/lib/ominull/packages /var/lib/ominull/backups
 install -d -o root -g root -m 0700 /var/lib/ominull
-if [ ! -e /etc/ominull/hub.env ]; then
-    install -o root -g root -m 0600 /dev/null /etc/ominull/hub.env
+[ -L /etc/ominull/admin.key ] && { echo "ominull: refusing symlinked /etc/ominull/admin.key" >&2; exit 1; }
+[ -L /etc/ominull/hub.env ] && { echo "ominull: refusing symlinked /etc/ominull/hub.env" >&2; exit 1; }
+[ -e /etc/ominull/admin.key ] && [ ! -f /etc/ominull/admin.key ] && { echo "ominull: /etc/ominull/admin.key is not a regular file" >&2; exit 1; }
+[ -e /etc/ominull/hub.env ] && [ ! -f /etc/ominull/hub.env ] && { echo "ominull: /etc/ominull/hub.env is not a regular file" >&2; exit 1; }
+if [ ! -s /etc/ominull/admin.key ]; then
+    umask 077
+    openssl rand -hex 32 > /etc/ominull/admin.key
+    chown root:root /etc/ominull/admin.key
+    chmod 0600 /etc/ominull/admin.key
+fi
+chown root:root /etc/ominull/admin.key
+chmod 0600 /etc/ominull/admin.key
+if [ ! -s /etc/ominull/hub.env ]; then
+    umask 077
+    cat > /etc/ominull/hub.env <<'OMINULL_ENV'
+# Managed by ominullctl and the Ominull setup wizard. Do not edit.
+OMINULL_DB=/var/lib/ominull/ominull.db
+OMINULL_ADMIN_KEY_FILE=/etc/ominull/admin.key
+OMINULL_BINARY_DIR=/opt/ominull/bin
+OMINULL_SETUP_TOKEN_FILE=/var/lib/ominull/setup.token
+OMINULL_LISTEN=:9999
+OMINULL_TLS_LISTEN=:9443
+OMINULL_CLIENT_CERTS=optional
+OMINULL_AGENT_VERSION=@VERSION@
+OMINULL_ENV
+    chown root:root /etc/ominull/hub.env
+    chmod 0600 /etc/ominull/hub.env
+fi
+chown root:root /etc/ominull/hub.env
+chmod 0600 /etc/ominull/hub.env
+# Migrate the pre-package key form once. The old deployment accepted a raw
+# admin credential in hub.env; the package contract is a root-only file, so
+# move it before the service is restarted and remove the inline value.
+if grep -q '^OMINULL_ADMIN_KEY=' /etc/ominull/hub.env; then
+    legacy_admin_key="$(sed -n 's/^OMINULL_ADMIN_KEY=//p' /etc/ominull/hub.env | head -n 1)"
+    if [ -n "${legacy_admin_key}" ]; then
+        umask 077
+        printf '%s\n' "${legacy_admin_key}" > /etc/ominull/admin.key
+        chown root:root /etc/ominull/admin.key
+        chmod 0600 /etc/ominull/admin.key
+    fi
+    sed -i '/^OMINULL_ADMIN_KEY=/d' /etc/ominull/hub.env
+fi
+if ! grep -q '^OMINULL_ADMIN_KEY_FILE=' /etc/ominull/hub.env; then
+    printf '%s\n' 'OMINULL_ADMIN_KEY_FILE=/etc/ominull/admin.key' >> /etc/ominull/hub.env
+fi
+if [ -d /usr/share/ominull/packages ]; then
+    install -d -o root -g root -m 0755 /opt/ominull/bin
+    for artifact in /usr/share/ominull/packages/ominull-agent_*.deb \
+                    /usr/share/ominull/packages/ominull-agent_*.deb.sig \
+                    /usr/share/ominull/packages/ominull-agent_*.deb.sha256 \
+                    /usr/share/ominull/packages/ominull-agent-windows-*.msi \
+                    /usr/share/ominull/packages/ominull-agent-windows-*.msi.sig \
+                    /usr/share/ominull/packages/ominull-agent-windows-*.msi.sha256; do
+        [ -f "${artifact}" ] || continue
+        install -o root -g root -m 0644 "${artifact}" /opt/ominull/bin/"$(basename "${artifact}")"
+    done
 fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
 	systemctl enable ominull-hub.service
-    if [ -s /etc/ominull/hub.env ]; then
-        systemctl try-restart ominull-hub.service || systemctl start ominull-hub.service
-    fi
+    systemctl try-restart ominull-hub.service || systemctl start ominull-hub.service
 fi

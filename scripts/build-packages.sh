@@ -46,6 +46,8 @@ gcc -Wall -Wextra -Wformat=2 -O2 -I"${ROOT_DIR}/agent/include" \
 echo "[*] Building hub."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -ldflags "-X main.version=${VERSION}" -o "${BUILD_DIR}/ominull-hub" ./cmd)
+(cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
+    -o "${BUILD_DIR}/ominullctl" ./cmd/ominullctl)
 
 echo "[*] Building Windows user-mode agent and recovery tool."
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
@@ -67,15 +69,20 @@ x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
     -lws2_32 -ladvapi32 -lfwpuclnt -lole32
 
 make_deb() {
-    local name="$1" control="$2" preinst="$3" service="$4" postinst="$5" prerm="$6" postrm="$7" binary="$8" package="$9"
+    local name="$1" control="$2" preinst="$3" service="$4" postinst="$5" prerm="$6" postrm="$7" binary="$8" package="$9" ctl="${10:-}"
     local root="${WORK_DIR}/${name}"
     mkdir -p "${root}/DEBIAN" "${root}/opt/ominull/bin" "${root}/usr/share/doc/${package}"
     install -m 0755 "${binary}" "${root}/opt/ominull/bin/$(basename "${binary}")"
+    if [ -n "${ctl}" ]; then
+        mkdir -p "${root}/usr/bin"
+        install -m 0755 "${ctl}" "${root}/usr/bin/ominullctl"
+    fi
     install -m 0644 "${ROOT_DIR}/LICENSE" "${root}/usr/share/doc/${package}/LICENSE"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${control}" > "${root}/DEBIAN/control"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${preinst}" > "${root}/DEBIAN/preinst"
     chmod 0755 "${root}/DEBIAN/preinst"
-    install -m 0755 "${ROOT_DIR}/${postinst}" "${root}/DEBIAN/postinst"
+    sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${postinst}" > "${root}/DEBIAN/postinst"
+    chmod 0755 "${root}/DEBIAN/postinst"
     install -m 0755 "${ROOT_DIR}/${prerm}" "${root}/DEBIAN/prerm"
     install -m 0755 "${ROOT_DIR}/${postrm}" "${root}/DEBIAN/postrm"
     mkdir -p "${root}/lib/systemd/system"
@@ -92,7 +99,7 @@ make_deb "ominull-agent" \
     packaging/linux/agent/postinst \
     packaging/linux/agent/prerm \
     packaging/linux/agent/postrm \
-    "${BUILD_DIR}/ominulld" ominull-agent
+    "${BUILD_DIR}/ominulld" ominull-agent ""
 
 echo "[*] Packaging Linux hub .deb."
 make_deb "ominull-hub" \
@@ -102,7 +109,7 @@ make_deb "ominull-hub" \
     packaging/linux/hub/postinst \
     packaging/linux/hub/prerm \
     packaging/linux/hub/postrm \
-    "${BUILD_DIR}/ominull-hub" ominull-hub
+    "${BUILD_DIR}/ominull-hub" ominull-hub "${BUILD_DIR}/ominullctl"
 
 for deb in "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" "${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"; do
     bad_owner="$(dpkg-deb -c "${deb}" | awk '$2 != "root/root"')"

@@ -39,6 +39,12 @@ func setupTestServer(t *testing.T) (*Server, *storage.Store) {
 		APIKey:    "mock_tenant_token",
 		CreatedAt: time.Now().UTC(),
 	})
+	// Existing-route tests model an upgrade in the bounded migration window.
+	// Fresh package installs leave this unset, which means legacy shared-key
+	// agent authentication is disabled until an operator explicitly enables it.
+	if err := store.SetSetting("legacy_agent_auth", "migration"); err != nil {
+		t.Fatalf("enable test migration mode: %v", err)
+	}
 
 	srv := New(store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.1.0")
 	return srv, store
@@ -48,80 +54,73 @@ func TestBootstrapGenerators(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	// 0. Bootstrap must never be minted without the admin key (no defaults, no tenant keys).
+	// Public bootstrap routes contain no credential. They only provide a generic
+	// script that asks for a body-only enrollment code.
 	for _, path := range []string{"/bootstrap.ps1", "/bootstrap.sh"} {
-		for _, name := range []string{"no-key", "wrong-key"} {
-			url := path
-			if name == "wrong-key" {
-				url = path + "?key=mock_tenant_token"
-			}
-			req := httptest.NewRequest("GET", url, nil)
-			w := httptest.NewRecorder()
-			switch path {
-			case "/bootstrap.ps1":
-				srv.handleBootstrapPS1(w, req)
-			case "/bootstrap.sh":
-				srv.handleBootstrapSH(w, req)
-			}
-			if w.Code != http.StatusUnauthorized {
-				t.Errorf("%s (%s): expected 401 Unauthorized, got %d", path, name, w.Code)
-			}
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "/api/v1/enrollment/redeem") {
+			t.Errorf("%s: generic script has no body-only enrollment call", path)
+		}
+		if strings.Contains(w.Body.String(), "mock_admin_token") || strings.Contains(w.Body.String(), "mock_tenant_token") {
+			t.Errorf("%s: generic bootstrap contains a static hub credential", path)
+		}
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control=%q", path, got)
+		}
+		bad := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(bad, httptest.NewRequest("GET", path+"?key=mock_tenant_token", nil))
+		if bad.Code != http.StatusBadRequest {
+			t.Errorf("%s: credential in URL returned %d, want 400", path, bad.Code)
 		}
 	}
 
-	// Enrolment is the only step that plants the trust anchor, so every
-	// generated script has to fetch the CA and hand the agent both that file
-	// and the TLS address to use it against. A script that installs an agent
-	// pointed at plain HTTP is the defect this checks for.
+	// An administrator can render a script with a one-use code. It still has no
+	// admin key, tenant key, service token, or URL credential.
 	srv.SetAgentHubURL("https://10.0.0.57:9443")
 
-	// The credential a generated installer leaves behind on the endpoint is the
-	// tenant key, never the admin key that authorised generating it. Written
-	// into the agent's config, the admin key would give every host in the fleet
-	// full operator control of the hub for the life of the install.
-	defaultTenant, err := store.GetTenant("default")
-	if err != nil || defaultTenant == nil {
-		t.Fatalf("default tenant should exist: %v", err)
-	}
-
 	for _, tc := range []struct {
-		name    string
-		path    string
-		handler func(http.ResponseWriter, *http.Request)
-		want    []string
+		name string
+		path string
+		want []string
 	}{
 		{
-			name:    "powershell",
-			path:    "/bootstrap.ps1",
-			handler: srv.handleBootstrapPS1,
+			name: "powershell",
+			path: "/bootstrap.ps1",
 			want: []string{
 				"/api/v1/pki/ca.crt",
 				`$Package = "ominull-agent-windows-$Version.msi"`,
 				"msiexec.exe",
 				"/qn",
-				"/api/v1/pki/enroll",
+				"/api/v1/enrollment/redeem",
+				"ECDsaCng",
 				"--configure-stdin",
 				"Start-Service -Name ominulld",
 			},
 		},
 		{
-			name:    "bash",
-			path:    "/bootstrap.sh",
-			handler: srv.handleBootstrapSH,
+			name: "bash",
+			path: "/bootstrap.sh",
 			want: []string{
 				`PACKAGE="ominull-agent_${VERSION}_amd64.deb"`,
 				"dpkg -i",
 				"/api/v1/pki/ca.crt",
-				"/api/v1/pki/enroll",
+				"/api/v1/enrollment/redeem",
 				"--configure-stdin",
 				"systemctl start ominull-agent.service",
 			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tc.path+"?key=mock_admin_token", nil)
+			req := httptest.NewRequest("POST", "/api/v1/enrolment/script", strings.NewReader(`{"platform":"`+map[string]string{"/bootstrap.ps1": "windows", "/bootstrap.sh": "linux"}[tc.path]+`","one_liner":true}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-API-Key", "mock_admin_token")
 			w := httptest.NewRecorder()
-			tc.handler(w, req)
+			srv.Handler().ServeHTTP(w, req)
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d", w.Code)
@@ -130,29 +129,32 @@ func TestBootstrapGenerators(t *testing.T) {
 			if strings.Contains(body, "mock_admin_token") {
 				t.Errorf("bootstrap script carries the hub admin key onto the endpoint:\n%s", body)
 			}
-			if !strings.Contains(body, defaultTenant.APIKey) {
-				t.Errorf("bootstrap script does not carry the tenant key the agent reports with:\n%s", body)
+			var rendered map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &rendered); err != nil {
+				t.Fatalf("rendered installer response is not JSON: %v", err)
 			}
-			// The certificate credential is separate, single-use, and has to
-			// reach the enrolment call.
-			if !strings.Contains(body, "X-Enrollment-Token") {
-				t.Errorf("bootstrap script enrols without a single-use enrolment token:\n%s", body)
+			script, _ := rendered["script"].(string)
+			if !strings.Contains(body, "one_") {
+				t.Errorf("rendered response has no one-use enrollment code:\n%s", body)
+			}
+			if strings.Contains(script, "X-Enrollment-Token") || strings.Contains(script, "CF-Access-Client") {
+				t.Errorf("rendered script contains retired credential path:\n%s", script)
 			}
 			for _, want := range tc.want {
-				if !strings.Contains(body, want) {
-					t.Errorf("bootstrap script is missing %q:\n%s", want, body)
+				if !strings.Contains(script, want) {
+					t.Errorf("bootstrap script is missing %q:\n%s", want, script)
 				}
 			}
-			// The tenant key must reach the package-installed configuration writer,
-			// never the long-running service command line.
+			// Bootstrap only installs the native package and configures it through
+			// stdin; it never creates a service or downloads a raw binary.
 			switch tc.name {
 			case "bash":
-				if strings.Contains(body, "cat << UNIT") || strings.Contains(body, "download/ominulld") {
-					t.Errorf("linux bootstrap owns a service or raw binary path:\n%s", body)
+				if strings.Contains(script, "cat << UNIT") || strings.Contains(script, "download/ominulld") {
+					t.Errorf("linux bootstrap owns a service or raw binary path:\n%s", script)
 				}
 			case "powershell":
-				if strings.Contains(body, "download/ominulld.exe") || strings.Contains(body, "sc.exe create") {
-					t.Errorf("windows bootstrap owns a raw binary or service path:\n%s", body)
+				if strings.Contains(script, "download/ominulld.exe") || strings.Contains(script, "sc.exe create") {
+					t.Errorf("windows bootstrap owns a raw binary or service path:\n%s", script)
 				}
 			}
 		})

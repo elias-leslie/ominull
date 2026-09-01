@@ -222,6 +222,23 @@ func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedV
 		"isolation_allow_ips": allowIPs,
 		"isolation_baseline":  wire,
 	}
+	// A retained 1.7.x agent still arrives with the shared tenant key while
+	// migration mode is open. Issue its endpoint credential in the successful
+	// heartbeat response; the updated native agent writes it to its protected
+	// key file and uses the device header on the next beat. The store rotates an
+	// unused issuance if this response was lost, but stops rotating once the new
+	// credential has actually been used.
+	if r.Header.Get("X-Role") == "tenant" && strings.TrimSpace(r.Header.Get("X-Device-Endpoint-ID")) == "" {
+		credential, issued, err := s.store.EnsureDeviceCredential(endpointID)
+		if err != nil {
+			return nil, fmt.Errorf("ensure endpoint device credential: %w", err)
+		}
+		if issued {
+			resp["device_credential"] = credential
+			s.audit(r, "DEVICE_CREDENTIAL_MIGRATED", endpointID,
+				"Issued a unique device credential to replace legacy shared-key authentication")
+		}
+	}
 	if target, outdated := s.pendingAgentUpdate(endpointID, reportedVersion); outdated {
 		if pkg, ok := updatePackageFor(capability); ok {
 			if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {

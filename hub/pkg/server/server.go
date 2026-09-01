@@ -56,6 +56,16 @@ type Server struct {
 	throttle *authThrottle
 	// topology holds the rendered graph briefly; see responsecache.go.
 	topology responseCache
+	// setup is deliberately separate from console authentication. A fresh
+	// package has no operator session yet; the root-only setup token is the only
+	// way to create the first one.
+	setupMu         sync.Mutex
+	setupTokenPath  string
+	setupConfigPath string
+	setupDBPath     string
+	setupAdminPath  string
+	setupBinaryDir  string
+	setupSessions   map[string]setupSession
 }
 
 type TelemetryBatchMessage struct {
@@ -216,15 +226,17 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	}
 
 	s := &Server{
-		store:        store,
-		ti:           threatintel.New(store),
-		pki:          pkiMgr,
-		scanner:      scanner.New(store),
-		adminKey:     adminKey,
-		binaryDir:    binaryDir,
-		hubURL:       hubURL,
-		agentVersion: agentVersion,
-		throttle:     newAuthThrottle(),
+		store:          store,
+		ti:             threatintel.New(store),
+		pki:            pkiMgr,
+		scanner:        scanner.New(store),
+		adminKey:       adminKey,
+		binaryDir:      binaryDir,
+		hubURL:         hubURL,
+		agentVersion:   agentVersion,
+		throttle:       newAuthThrottle(),
+		setupTokenPath: "/var/lib/ominull/setup.token",
+		setupSessions:  map[string]setupSession{},
 	}
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
@@ -254,7 +266,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write(consoleGate())
+		w.Write(s.consoleGate())
 		return
 	}
 
@@ -322,7 +334,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write(consoleGate())
+		w.Write(s.consoleGate())
 		return
 	}
 	s.throttle.succeed(addr)
@@ -367,6 +379,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(doc)
+}
+
+func (s *Server) consoleGate() []byte {
+	issuer, _ := s.store.GetSetting("oidc.issuer")
+	return consoleGateDocument(strings.TrimSpace(issuer) != "")
 }
 
 // consoleSessionCookie carries a short-lived signed assertion that this browser
@@ -528,7 +545,7 @@ func (s *Server) tlsConfig() (*tls.Config, error) {
 		switch mode {
 		case ClientCertsOff:
 			base.ClientAuth = tls.NoClientCert
-			log.Printf("[!] TLS client certificates: not requested. Every agent holding the tenant key can report as any endpoint.")
+			log.Printf("[!] TLS client certificates: not requested. Device credentials still bind new agents; direct native mTLS is not an additional proof.")
 		case ClientCertsRequired:
 			base.ClientCAs = s.pki.ClientCAPool()
 			base.ClientAuth = tls.RequireAndVerifyClientCert
@@ -696,7 +713,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// sets it, so an inbound one survived. Not an escalation on its own -
 		// the caller already held the admin key - but the invariant is worth
 		// stating once here rather than re-deriving it per path.
-		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN"} {
+		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID"} {
 			r.Header.Del(h)
 		}
 		if cn := clientCertCN(r); cn != "" {
@@ -1273,164 +1290,46 @@ func contains(list []string, target string) bool {
 	return false
 }
 
-// bootstrapOptions authenticates a bootstrap request and gathers the enrolment
-// it describes. All three generators need the same inputs, and the one that
-// matters here is the split between the two URLs: the installer runs against
-// hubURL, while the agent it installs is pointed at the TLS transport the hub
-// was configured to advertise.
-func (s *Server) bootstrapOptions(w http.ResponseWriter, r *http.Request) (bootstrap.Options, bool) {
-	addr := clientIP(r)
-	if s.throttle.blocked(addr) {
-		w.Header().Set("Retry-After", "60")
-		writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
-		return bootstrap.Options{}, false
-	}
-	key := r.URL.Query().Get("key")
-	if !secretEqual(key, s.adminKey) {
-		if key != "" && s.throttle.fail(addr) {
-			log.Printf("[!] %s has failed bootstrap authentication %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
-		}
-		writeJSONError(w, http.StatusUnauthorized, "valid admin key required")
-		return bootstrap.Options{}, false
-	}
-	s.throttle.succeed(addr)
-
-	// These routes verify the admin key here rather than passing through
-	// authMiddleware, so the identity headers the audit log reads are set here
-	// too - and cleared first, because on this path nothing else would stop a
-	// caller naming itself in the record of what it did.
-	for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID"} {
-		r.Header.Del(h)
-	}
-	r.Header.Set("X-Role", "admin")
-	r.Header.Set("X-Username", "admin")
-
-	return s.buildEnrolmentOptions(w, r, storage.InstallTicket{
-		TenantID:   r.URL.Query().Get("tenant"),
-		LocationID: r.URL.Query().Get("location"),
-		Role:       r.URL.Query().Get("role"),
-		EndpointID: r.URL.Query().Get("endpoint_id"),
-	})
-}
-
-// buildEnrolmentOptions turns an authorised request into one enrolment. The
-// caller has already established that the requester may have it - with the
-// admin key, or with a single-use install ticket - and this is the part that is
-// the same either way.
-func (s *Server) buildEnrolmentOptions(w http.ResponseWriter, r *http.Request, t storage.InstallTicket) (bootstrap.Options, bool) {
-	// What the installer is authorised by and what it leaves behind are two
-	// different credentials, and used to be the same one.
-	//
-	// The admin key authorises generating this script. It was then written
-	// straight into the agent's configuration file on the endpoint, so every
-	// host in the fleet held the hub's admin key in a file on disk for the life
-	// of the install: one compromised endpoint could isolate the whole fleet,
-	// read every tenant's key and push an agent release. The agent needs a
-	// credential to report telemetry, and that is the tenant key - which is
-	// what least privilege meant here all along.
-	tenantID := strings.TrimSpace(t.TenantID)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	tenant, err := s.store.GetTenant(tenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "could not resolve the enrolment tenant: "+err.Error())
-		return bootstrap.Options{}, false
-	}
-	if tenant == nil || strings.TrimSpace(tenant.APIKey) == "" {
-		writeJSONError(w, http.StatusBadRequest,
-			"tenant "+tenantID+" has no API key to enrol against; create it through /api/v1/tenants first")
-		return bootstrap.Options{}, false
-	}
-	if secretEqual(tenant.APIKey, s.adminKey) {
-		// Started without --admin-key, the hub adopts the default tenant's key
-		// as the admin key and the two are one credential. Nothing here can fix
-		// that, but an operator should not have to infer it.
-		log.Printf("[!] Tenant %q's API key is also this hub's admin key, so the agent this installer enrols will hold admin. Start the hub with a --admin-key distinct from the tenant key.", tenantID)
-	}
-
-	// One certificate, once. The script cannot be replayed into a second
-	// identity and is worthless an hour after it was generated.
-	enrollToken, err := s.store.CreateEnrollmentToken(t.EndpointID, storage.EnrollmentTokenTTL)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "could not mint an enrolment token: "+err.Error())
-		return bootstrap.Options{}, false
-	}
-
-	hubURL := s.hubURL
-	if hubURL == "" {
-		hubURL = "https://" + r.Host
-	}
-
-	cfID := r.URL.Query().Get("cf_id")
-	if cfID == "" {
-		cfID = r.Header.Get("CF-Access-Client-Id")
-	}
-	cfSecret := r.URL.Query().Get("cf_secret")
-	if cfSecret == "" {
-		cfSecret = r.Header.Get("CF-Access-Client-Secret")
-	}
-
-	return bootstrap.Options{
-		HubURL:          hubURL,
-		AgentHubURL:     s.agentHubURL,
-		TenantAPIKey:    tenant.APIKey,
-		EnrollmentToken: enrollToken,
-		CFClientID:      cfID,
-		CFClientSecret:  cfSecret,
-		LocationID:      t.LocationID,
-		RoleTag:         t.Role,
-		EndpointID:      t.EndpointID,
-		AgentVersion:    s.agentVersion,
-	}, true
-}
-
 func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
-	// A single-use install link first, the admin key second. The link is
-	// what the console hands an operator to paste on the host; the key path
-	// stays for the scripted callers that already use it.
-	opts, presented, ok := s.installTicketOptions(w, r, "windows")
-	if presented && !ok {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !presented {
-		if opts, ok = s.bootstrapOptions(w, r); !ok {
-			return
-		}
+	if r.URL.Query().Get("t") != "" || r.URL.Query().Get("key") != "" {
+		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
+		return
 	}
-	// The script carries the tenant key and a live enrolment token off the hub.
-	// Generating one is how an endpoint joins the fleet, so it belongs in the
-	// record even though nothing has been installed yet.
-	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Windows installer carrying the tenant key and a single-use enrolment token")
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// The body is a credential. Nothing between here and the operator may keep
-	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
 }
 
 func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
-	// A single-use install link first, the admin key second. The link is
-	// what the console hands an operator to paste on the host; the key path
-	// stays for the scripted callers that already use it.
-	opts, presented, ok := s.installTicketOptions(w, r, "linux")
-	if presented && !ok {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !presented {
-		if opts, ok = s.bootstrapOptions(w, r); !ok {
-			return
-		}
+	if r.URL.Query().Get("t") != "" || r.URL.Query().Get("key") != "" {
+		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
+		return
 	}
-	// The script carries the tenant key and a live enrolment token off the hub.
-	// Generating one is how an endpoint joins the fleet, so it belongs in the
-	// record even though nothing has been installed yet.
-	s.audit(r, "BOOTSTRAP_GENERATED", opts.EndpointID, "Minted a Linux installer carrying the tenant key and a single-use enrolment token")
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// The body is a credential. Nothing between here and the operator may keep
-	// a copy: not a CDN, not a corporate proxy, not the browser's disk cache.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
+}
+
+// agentUsesSystemCA selects the trust model that matches the public endpoint.
+// A self-issued LAN hub is pinned to its Ominull CA. ACME, operator-supplied
+// certificates, and Cloudflare edge certificates are validated by the native
+// operating-system trust store instead; the Ominull device CA remains the
+// client-certificate identity proof.
+func (s *Server) agentUsesSystemCA() bool {
+	cfg := s.effectiveConfiguration()
+	return strings.EqualFold(cfg.NetworkMode, "cloudflare") ||
+		strings.EqualFold(cfg.TLSMode, "acme") ||
+		strings.EqualFold(cfg.TLSMode, "custom")
 }
 
 func (s *Server) handlePKICACert(w http.ResponseWriter, r *http.Request) {
@@ -1928,8 +1827,9 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 
 // endpointIdentityOK decides whether a caller may act as endpointID.
 //
-// The API key says which tenant is calling; it does not say which endpoint,
-// because every endpoint in a tenant carries the same key. Until client
+// The legacy API key says which tenant is calling; it does not say which endpoint,
+// because older endpoints shared one key. New endpoints carry a unique device
+// credential. Until client
 // certificates existed, the endpoint id in the request body was simply
 // believed, so anyone holding the key could post telemetry as any host, read
 // another host's configuration, or take its update descriptor. A verified
@@ -1940,8 +1840,17 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 // to migrate onto certificates while it is still reporting. That is what
 // --client-certs required closes, once every endpoint has one.
 func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endpointID string) bool {
+	if deviceID := strings.TrimSpace(r.Header.Get("X-Device-Endpoint-ID")); deviceID != "" {
+		if deviceID != endpointID {
+			writeJSONError(w, http.StatusForbidden, "the device credential does not name this endpoint")
+			return false
+		}
+	}
 	cn := r.Header.Get("X-Client-CN")
 	if cn != "" {
+		if r.Header.Get("X-Role") == "admin" {
+			return true
+		}
 		if cn == endpointID {
 			return true
 		}
@@ -2910,10 +2819,24 @@ func (s *Server) routes() *http.ServeMux {
 	// 0. Embedded operator console: the gated document at "/", plus the
 	// stylesheet, script and fonts it loads. Asset paths are registered
 	// individually so "/" keeps its own not-found behaviour.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/", s.handleDashboard)
 	for _, assetPath := range consoleAssetPaths() {
 		mux.HandleFunc(assetPath, s.handleConsoleAsset)
 	}
+	// First-run setup has its own token and CSRF session. It never falls through
+	// to the console's admin-key gate, and it stays available only until setup is
+	// complete or a locally rotated recovery token opens a new session.
+	mux.HandleFunc("/setup", s.handleSetup)
+	mux.HandleFunc("/api/v1/setup/session", s.handleSetupSession)
+	mux.HandleFunc("/api/v1/setup/status", s.setupOrAuthMiddleware(s.handleSetupStatus))
+	mux.HandleFunc("/api/v1/setup/apply", s.setupOrAuthMiddleware(s.handleSetupApply))
+	mux.HandleFunc("/api/v1/setup/complete", s.setupOrAuthMiddleware(s.handleSetupComplete))
+	mux.HandleFunc("/api/v1/diagnostics", s.authMiddleware(s.handleSetupStatus))
+	mux.HandleFunc("/status", s.handleStatusPage)
 
 	// 1. Static Bootstrap & Binary Downloads
 	// Reading the thresholds is open to any authenticated operator - an analyst
@@ -2923,6 +2846,17 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
 	mux.HandleFunc("/api/v1/enrolment/script", s.authMiddleware(requireAdmin(s.handleEnrolmentScript)))
+	mux.HandleFunc("/api/v1/enrolment/windows", s.authMiddleware(requireAdmin(s.handleEnrolmentWindows)))
+	mux.HandleFunc("/api/v1/enrollment/profiles", s.authMiddleware(requireAdmin(s.handleEnrollmentProfiles)))
+	mux.HandleFunc("/api/v1/enrollment/redeem", s.handleEnrollmentRedeem)
+	// The self-service portal. Unauthenticated by necessity - the machine that
+	// needs the agent has no credential yet, which is the whole problem it
+	// solves - and gated instead on the source address falling inside an
+	// enrolment window an administrator opened.
+	mux.HandleFunc("/install", s.handleEnrolPortal)
+	// /enrol remains an alias for already-distributed portal links; new links
+	// use the stable /install surface.
+	mux.HandleFunc("/enrol", s.handleEnrolPortal)
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
 	mux.HandleFunc("/download/", s.handleDownload)
@@ -2935,9 +2869,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/operators/remove", s.authMiddleware(requireAdmin(s.handleOperatorRemove)))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
-	mux.HandleFunc("/api/v1/agent/config", s.authMiddleware(s.handleAgentConfig))
+	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
+	mux.HandleFunc("/api/v1/device-auth/legacy", s.authMiddleware(s.handleLegacyAgentAuth))
+	mux.HandleFunc("/api/v1/device-auth/credentials", s.authMiddleware(requireAdmin(s.handleDeviceCredentials)))
 	// The baseline isolation policy: what an isolated host is still allowed to
 	// reach. Reading it is open to any authenticated operator - an analyst
 	// deciding whether to isolate has to be able to see what that would do -
@@ -2953,7 +2889,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.handleUnisolate))
 	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.handleBulkIsolate))
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.handleBulkUnisolate))
-	mux.HandleFunc("/api/v1/events", s.authMiddleware(s.handleEvents))
+	mux.HandleFunc("/api/v1/events", s.deviceOrLegacyMiddleware(s.handleEvents))
 
 	// 4. Exclusions, traffic profiles, detection, analytics, and threat intel.
 	mux.HandleFunc("/api/v1/network-profiles", s.authMiddleware(s.handleNetworkProfiles))
@@ -2969,6 +2905,8 @@ func (s *Server) routes() *http.ServeMux {
 	// 5. RBAC Auth & Audit Logging API
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
+	mux.HandleFunc("/oidc/start", s.handleOIDCStart)
+	mux.HandleFunc("/oidc/callback", s.handleOIDCCallback)
 
 	// 6. Autonomous PKI & Mutual TLS
 	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
@@ -2977,8 +2915,8 @@ func (s *Server) routes() *http.ServeMux {
 	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
 	// Discovery is an operator tool end to end: it sweeps a subnet from the
 	// hub and hands back an inventory of everything on it, agented or not.
-	// None of it is reachable by an agent, and the tenant key is on every
-	// agent, so none of it is reachable with the tenant key.
+	// None of it is reachable by a device credential; legacy tenant-key callers
+	// are also denied by route role checks.
 	mux.HandleFunc("/api/v1/scanner/scan", s.authMiddleware(requireAdmin(s.handleScannerScan)))
 	mux.HandleFunc("/api/v1/scanner/status", s.authMiddleware(requireAdmin(s.handleScannerStatus)))
 	mux.HandleFunc("/api/v1/scanner/results", s.authMiddleware(requireAdmin(s.handleScannerResults)))

@@ -1,8 +1,16 @@
 #!/bin/sh
 set -eu
 
+[ -L /etc/ominull ] && { echo "ominull-agent: refusing symlinked /etc/ominull" >&2; exit 1; }
+[ -L /var/lib/ominull ] && { echo "ominull-agent: refusing symlinked /var/lib/ominull" >&2; exit 1; }
+[ -L /var/lib/ominull/updates ] && { echo "ominull-agent: refusing symlinked update directory" >&2; exit 1; }
+[ -e /etc/ominull ] && [ ! -d /etc/ominull ] && { echo "ominull-agent: /etc/ominull is not a directory" >&2; exit 1; }
+[ -e /var/lib/ominull ] && [ ! -d /var/lib/ominull ] && { echo "ominull-agent: /var/lib/ominull is not a directory" >&2; exit 1; }
+[ -e /var/lib/ominull/updates ] && [ ! -d /var/lib/ominull/updates ] && { echo "ominull-agent: update path is not a directory" >&2; exit 1; }
 install -d -o root -g root -m 0755 /etc/ominull /var/lib/ominull
 install -d -o root -g root -m 0700 /var/lib/ominull/updates
+[ -L /etc/ominull/agent.conf ] && { echo "ominull-agent: refusing symlinked agent.conf" >&2; exit 1; }
+[ -e /etc/ominull/agent.conf ] && [ ! -f /etc/ominull/agent.conf ] && { echo "ominull-agent: agent.conf is not a regular file" >&2; exit 1; }
 if [ ! -e /etc/ominull/agent.conf ]; then
     install -o root -g root -m 0600 /dev/null /etc/ominull/agent.conf
 fi

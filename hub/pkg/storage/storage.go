@@ -644,6 +644,22 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
+	if err := s.initEnrolmentWindowSchema(); err != nil {
+		return err
+	}
+
+	if err := s.initDeviceIdentitySchema(); err != nil {
+		return err
+	}
+
+	if err := s.initEnrollmentProfileSchema(); err != nil {
+		return err
+	}
+
+	if err := s.initOperatorIdentitySchema(); err != nil {
+		return err
+	}
+
 	if err := s.initDetectionTuningSchema(); err != nil {
 		return err
 	}
@@ -940,10 +956,81 @@ func (s *Store) RetireEndpoint(id string) error {
 		_ = tx.Rollback()
 		return err
 	}
+	if _, err := tx.Exec("UPDATE device_credentials SET revoked_at = ? WHERE endpoint_id = ? AND revoked_at IS NULL", time.Now().UTC(), id); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// DeleteDisposableEndpoint removes only endpoints created by the bounded
+// native-transport diagnostic. The prefix guard keeps this cleanup primitive
+// from becoming a general endpoint deletion path; production fleet rows keep
+// their telemetry, assets, certificates, and audit history through
+// RetireEndpoint instead.
+func (s *Store) DeleteDisposableEndpoint(id string) error {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, "diagnostic-") {
+		return errors.New("only diagnostic endpoints may be deleted")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	rollback := func(err error) error {
+		_ = tx.Rollback()
+		return err
+	}
+	rows, err := tx.Query("SELECT id FROM assets WHERE agent_endpoint_id = ?", id)
+	if err != nil {
+		return rollback(err)
+	}
+	var assetIDs []string
+	for rows.Next() {
+		var assetID string
+		if err := rows.Scan(&assetID); err != nil {
+			_ = rows.Close()
+			return rollback(err)
+		}
+		assetIDs = append(assetIDs, assetID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return rollback(err)
+	}
+	if err := rows.Close(); err != nil {
+		return rollback(err)
+	}
+	for _, assetID := range assetIDs {
+		if _, err := tx.Exec("DELETE FROM asset_claims WHERE asset_id = ?", assetID); err != nil {
+			return rollback(err)
+		}
+		if _, err := tx.Exec("DELETE FROM asset_ports WHERE asset_id = ?", assetID); err != nil {
+			return rollback(err)
+		}
+	}
+	for _, query := range []string{
+		"DELETE FROM events WHERE endpoint_id = ?",
+		"DELETE FROM alerts WHERE endpoint_id = ?",
+		"DELETE FROM anomaly_alerts WHERE endpoint_id = ?",
+		"DELETE FROM comm_profiles WHERE endpoint_id = ?",
+		"DELETE FROM enrollment_tokens WHERE endpoint_id = ?",
+		"DELETE FROM agent_update_jobs WHERE endpoint_id = ?",
+		"DELETE FROM device_credentials WHERE endpoint_id = ?",
+		"DELETE FROM assets WHERE agent_endpoint_id = ?",
+		"DELETE FROM endpoints WHERE id = ?",
+	} {
+		if _, err := tx.Exec(query, id); err != nil {
+			return rollback(err)
+		}
+	}
+	return tx.Commit()
 }
 
 // GetEndpointIsolation reads back what an endpoint should be enforcing. It is

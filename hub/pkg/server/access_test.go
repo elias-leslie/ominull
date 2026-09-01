@@ -30,8 +30,9 @@ func testVerifier(t *testing.T, operators map[string]string) (*accessVerifier, *
 	}
 
 	v := &accessVerifier{
-		team: "testteam",
-		aud:  "aud-for-this-application",
+		team:   "testteam",
+		aud:    "aud-for-this-application",
+		issuer: "https://testteam.cloudflareaccess.com",
 		lookup: func(email string) (string, bool) {
 			role, ok := operators[email]
 			return role, ok
@@ -78,6 +79,7 @@ func requestWith(token string) *http.Request {
 
 func validClaims() map[string]interface{} {
 	return map[string]interface{}{
+		"iss":   "https://testteam.cloudflareaccess.com",
 		"email": "operator@example.com",
 		"aud":   []string{"aud-for-this-application"},
 		"exp":   time.Now().Add(time.Hour).Unix(),
@@ -109,6 +111,15 @@ func TestATokenForAnotherApplicationIsRefused(t *testing.T) {
 
 	if _, ok := v.Verify(requestWith(signToken(t, key, "RS256", "kid-1", claims))); ok {
 		t.Errorf("an assertion minted for a different Access application opened this console")
+	}
+}
+
+func TestATokenFromAnotherAccessTeamIsRefused(t *testing.T) {
+	v, key := testVerifier(t, oneAdmin())
+	claims := validClaims()
+	claims["iss"] = "https://another-team.cloudflareaccess.com"
+	if _, ok := v.Verify(requestWith(signToken(t, key, "RS256", "kid-1", claims))); ok {
+		t.Fatal("an assertion from another Access issuer was accepted")
 	}
 }
 

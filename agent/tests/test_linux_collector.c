@@ -143,7 +143,7 @@ static void test_legacy_config(void) {
     fputs("OMINULL_ARGS=--hub https://hub.example.test --key-file /etc/ominull/agent.key "
           "--role workstation --location loc-home --id linux-target --ca /etc/ominull/ca.crt "
           "--client-cert /etc/ominull/client.crt --client-key /etc/ominull/client.key "
-          "--cf-id client-id --cf-secret client-secret\n", config_file);
+          "\n", config_file);
     fclose(config_file);
 
     LINUX_AGENT_CONFIG config;
@@ -159,8 +159,6 @@ static void test_legacy_config(void) {
           "legacy config did not preserve CA path");
     check(strcmp(config.client_key_path, "/etc/ominull/client.key") == 0,
           "legacy config did not preserve client key path");
-    check(strcmp(config.cf_client_secret, "client-secret") == 0,
-          "legacy config did not preserve Cloudflare secret");
     unlink(path);
 }
 

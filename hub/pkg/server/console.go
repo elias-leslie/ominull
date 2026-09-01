@@ -174,6 +174,14 @@ func jsStringEscape(v string) string {
 // down: browser history, bookmarks, and the access log of every proxy and CDN
 // between the operator and the hub. None of those are reachable by a cache purge.
 func consoleGate() []byte {
+	return consoleGateDocument(false)
+}
+
+func consoleGateDocument(oidcConfigured bool) []byte {
+	oidcLink := ""
+	if oidcConfigured {
+		oidcLink = `<p><a href="/oidc/start">Sign in with OIDC</a></p>`
+	}
 	return []byte(`<!DOCTYPE html>
 <html lang="en" data-theme="ash">
 <head>
@@ -189,7 +197,7 @@ func consoleGate() []byte {
     <p>Admin API key required.</p>
     <input type="password" name="key" placeholder="Admin API key" autofocus aria-label="Admin API key">
     <button class="btn btn-primary" type="submit">Unlock</button>
-  </form>
+  </form>` + oidcLink + `
 </div>
 </body>
 </html>

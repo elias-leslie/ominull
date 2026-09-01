@@ -1,47 +1,45 @@
 # Trust fabric
 
-Ominull has three deliberate trust layers: operator authorization, endpoint
-identity, and signed release identity.
+Ominull has four deliberate trust layers: operator authorization, endpoint
+identity, transport proof, and signed release identity.
 
-## Operator and tenant roles
+## Operator roles
 
-The admin key may manage tenants, scans, containment, enrolment windows, and
-release jobs. A tenant key is scoped to its tenant and cannot perform those
-fleet-wide actions. Route tests exercise both sides of this boundary.
-
-Bootstrap generation is authenticated. A generated command carries a tenant
-credential and a single-use enrollment token, not the admin credential. The
-self-service portal may mint the same ticket only when the source address is
-inside an open, bounded enrollment window.
+The local admin key, a signed console session, native OIDC, or a verified
+Cloudflare Access assertion may establish an operator. Tenant credentials remain
+tenant-scoped and cannot perform fleet-wide operations. Cloudflare identity is
+not accepted from a plaintext email header; the signed assertion's issuer,
+audience, time claims, key, and explicit Ominull operator mapping are checked.
 
 ## Endpoint identity
 
-The hub CA issues a certificate for each endpoint. The telemetry request must
-use the endpoint identity named by the certificate when client-certificate mode
-is enabled. Heartbeat recency determines online status. Retired endpoints keep
-their rows, telemetry, certificates, and audit history, but a late heartbeat is
-rejected and cannot revive them.
+Enrollment creates a unique per-endpoint `omd_...` credential and device CA
+certificate. The credential binds agent routes to one endpoint and tenant. A
+direct native mTLS certificate, when offered, must name that same endpoint. A
+retained shared tenant-key request is accepted only during explicit migration;
+the updated agents automatically switch to unique credentials.
+
+Retired endpoints keep telemetry, certificates, and audit history. Late
+heartbeats are rejected and cannot revive them. Credential listing never returns
+secret material; rotation revokes the old credential, and revocation stops the
+endpoint.
 
 ## Release identity
 
 Each Debian package and MSI has a detached ECDSA signature and SHA-256 digest.
 The agent verifies both against the public key compiled into its release. Hub
-artifact serving requires both sidecars. Package manager registration is
-reported independently from the compiled binary version so a copied binary
-cannot look like a native install.
+artifact serving requires the sidecars. Package registration is reported apart
+from compiled version so a copied binary cannot look native.
 
-## Containment
+## Containment and preservation
 
 The hub stores desired isolation, baseline, mesh, and recovery state. Agents
-apply only authenticated state from their heartbeat response and report whether
-the local mechanism is ready and what it applied. Linux uses iptables or
-ip6tables; Windows uses user-mode Windows Filtering Platform rules. Recovery
-tools clear only Ominull-owned state and preserve unrelated host rules.
+apply only authenticated heartbeat state and report readiness and applied state.
+Linux uses iptables/ip6tables; Windows uses user-mode Windows Filtering
+Platform. Recovery tools clear only Ominull-owned state.
 
-## Data preservation
-
-Removing a product role retires its endpoint record instead of deleting durable
+Removing a product role retires endpoint records instead of deleting durable
 telemetry or audit data. Old feature tables and settings may remain as inert
-legacy rows during schema upgrade. New databases do not recreate retired
-feature tables. Retention bounds raw events, communication profiles, alerts,
-anomalies, and audit data according to the configured policy.
+legacy rows during schema upgrades. New installations do not recreate removed
+product paths. Retention bounds raw events, profiles, alerts, anomalies, and
+audit data by configured policy.

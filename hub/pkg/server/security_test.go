@@ -394,8 +394,8 @@ func TestTheGateFormPostsRatherThanGets(t *testing.T) {
 	}
 }
 
-// TestAnInstallerIsNeverCached. The bootstrap scripts carry the tenant key and a
-// live enrolment token, so nothing on the path may keep a copy.
+// TestAnInstallerIsNeverCached. The bootstrap scripts are generic but still
+// contain install instructions, so nothing on the path may keep a copy.
 func TestAnInstallerIsNeverCached(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -404,7 +404,7 @@ func TestAnInstallerIsNeverCached(t *testing.T) {
 		"/bootstrap.ps1": srv.handleBootstrapPS1,
 		"/bootstrap.sh":  srv.handleBootstrapSH,
 	} {
-		r := httptest.NewRequest("GET", path+"?key=mock_admin_token", nil)
+		r := httptest.NewRequest("GET", path, nil)
 		w := httptest.NewRecorder()
 		handler(w, r)
 
@@ -689,13 +689,13 @@ func TestPrivilegedOperationsAreAudited(t *testing.T) {
 	// A broadcast drop rule, applied by every agent as root.
 	srv.handleMeshQuarantine(httptest.NewRecorder(), adminReq("POST", "/api/v1/mesh/quarantine", `{"target_ip":"10.0.4.99","target_mac":"aa:bb:cc:dd:ee:ff","subnet":"10.0.4.0/24","reason":"test"}`))
 
-	// An installer, which carries the tenant key and a live enrolment token off
-	// the hub. This route verifies the admin key itself rather than passing
-	// through authMiddleware, so it is also the one where a forged X-Username
-	// would land in the record if the identity were not re-established.
-	forged := httptest.NewRequest("GET", "/bootstrap.sh?key=mock_admin_token", nil)
+	// An installer profile is a privileged action. Route it through the real
+	// admin middleware so a forged username cannot land in the audit record.
+	forged := httptest.NewRequest("POST", "/api/v1/enrolment/script", strings.NewReader(`{"platform":"linux","one_liner":true}`))
+	forged.Header.Set("Content-Type", "application/json")
+	forged.Header.Set("X-API-Key", "mock_admin_token")
 	forged.Header.Set("X-Username", "someone-else")
-	srv.handleBootstrapSH(httptest.NewRecorder(), forged)
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), forged)
 
 	entries, err := store.ListAuditLogs("", 50)
 	if err != nil {

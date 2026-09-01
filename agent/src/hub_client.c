@@ -370,7 +370,7 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     }
 
     /* Checked before the batch is built, not after the send fails. The payload
-     * and the X-API-Key header that authenticates it are the things being
+     * and the device credential header that authenticates it are the things being
      * protected, so the hub has to be proven to be the hub first. */
     if (!Hub_TransportReady(config)) {
         return false;
@@ -486,11 +486,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     }
     HINTERNET hConnect = g_http.connect;
 
-    /* The key travels in the X-API-Key header below and nowhere else. It used
-     * to be repeated in the query string, which put the credential the whole
-     * fleet shares into every access log, proxy log and browser-style referrer
-     * on the path to the hub - a URL is not a private channel, and the header
-     * was already carrying it. */
+    /* New identities use their endpoint credential header. A retained legacy
+     * install keeps its legacy shared key on X-API-Key only until the hub's
+     * successful response delivers the unique credential. */
     WCHAR wPath[512] = {0};
     MultiByteToWideChar(CP_UTF8, 0, "/api/v1/events", -1, wPath, 512);
 
@@ -525,22 +523,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     WCHAR wHeaders[1024] = {0};
     WCHAR wKey[128] = {0};
     MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
-    /* %ls, not %s. mingw-w64's swprintf follows ANSI C, where %s in a wide
-     * format string means a narrow char* - handed a wchar_t* it reads the first
-     * byte pair as a one-character string, so this header went out as
-     * "X-API-Key: T". It was never noticed because the key was also duplicated
-     * in the query string, which is what actually authenticated every Windows
-     * heartbeat. Removing the copy from the URL is what exposed it. */
-    swprintf(wHeaders, 1024, L"X-API-Key: %ls\r\nContent-Type: application/json\r\n", wKey);
-
-    if (config->cf_client_id[0] && config->cf_client_secret[0]) {
-        WCHAR wCfId[128] = {0}, wCfSecret[128] = {0};
-        MultiByteToWideChar(CP_UTF8, 0, config->cf_client_id, -1, wCfId, 128);
-        MultiByteToWideChar(CP_UTF8, 0, config->cf_client_secret, -1, wCfSecret, 128);
-        WCHAR wCfExtra[512];
-        swprintf(wCfExtra, 512, L"CF-Access-Client-Id: %ls\r\nCF-Access-Client-Secret: %ls\r\n", wCfId, wCfSecret);
-        wcscat(wHeaders, wCfExtra);
-    }
+    const wchar_t* credentialHeader = strncmp(config->api_key, "omd_", 4) == 0
+        ? L"X-Ominull-Device-Credential" : L"X-API-Key";
+    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: application/json\r\n", credentialHeader, wKey);
 
     WinHttpAddRequestHeaders(hRequest, wHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
