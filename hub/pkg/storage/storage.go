@@ -666,7 +666,126 @@ func (s *Store) initSchema() error {
 	if err := s.initInstallReportsTable(); err != nil {
 		return err
 	}
+	if err := s.initRollupCubesSchema(); err != nil {
+		return err
+	}
 	return s.initBaselineSchema()
+}
+
+func (s *Store) initRollupCubesSchema() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS bandwidth_buckets (
+		tenant_id TEXT NOT NULL,
+		hour_bucket TEXT NOT NULL,
+		country TEXT NOT NULL DEFAULT 'US',
+		direction TEXT NOT NULL DEFAULT 'OUTBOUND',
+		bytes_in INTEGER NOT NULL DEFAULT 0,
+		bytes_out INTEGER NOT NULL DEFAULT 0,
+		flow_count INTEGER NOT NULL DEFAULT 0,
+		block_count INTEGER NOT NULL DEFAULT 0,
+		measured_count INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (tenant_id, hour_bucket, country, direction)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bw_buckets_time ON bandwidth_buckets(hour_bucket);
+	CREATE INDEX IF NOT EXISTS idx_bw_buckets_tenant_time ON bandwidth_buckets(tenant_id, hour_bucket);
+
+	CREATE TABLE IF NOT EXISTS topology_edges_cube (
+		tenant_id TEXT NOT NULL,
+		day_bucket TEXT NOT NULL,
+		src_ip TEXT NOT NULL,
+		dst_ip TEXT NOT NULL,
+		protocol INTEGER NOT NULL,
+		dst_port INTEGER NOT NULL,
+		action TEXT NOT NULL DEFAULT 'PERMIT',
+		total_bytes INTEGER NOT NULL DEFAULT 0,
+		flow_count INTEGER NOT NULL DEFAULT 0,
+		measured_flows INTEGER NOT NULL DEFAULT 0,
+		last_seen_at DATETIME NOT NULL,
+		PRIMARY KEY (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action)
+	);
+	CREATE INDEX IF NOT EXISTS idx_topo_cube_day ON topology_edges_cube(day_bucket);
+	CREATE INDEX IF NOT EXISTS idx_topo_cube_tenant_day ON topology_edges_cube(tenant_id, day_bucket);
+
+	CREATE TRIGGER IF NOT EXISTS trg_events_rollups AFTER INSERT ON events
+	BEGIN
+		INSERT INTO bandwidth_buckets (tenant_id, hour_bucket, country, direction, bytes_in, bytes_out, flow_count, block_count, measured_count)
+		VALUES (
+			NEW.tenant_id,
+			strftime('%Y-%m-%dT%H:00:00Z', substr(NEW.timestamp, 1, 19) || 'Z'),
+			CASE WHEN NEW.country = '' THEN 'UNKNOWN' ELSE NEW.country END,
+			CASE WHEN NEW.direction = '' THEN 'OUTBOUND' ELSE NEW.direction END,
+			NEW.bytes_in,
+			NEW.bytes_out,
+			1,
+			CASE WHEN NEW.action = 'BLOCK' THEN 1 ELSE 0 END,
+			CASE WHEN NEW.bytes_in + NEW.bytes_out > 0 THEN 1 ELSE 0 END
+		)
+		ON CONFLICT(tenant_id, hour_bucket, country, direction) DO UPDATE SET
+			bytes_in = bandwidth_buckets.bytes_in + excluded.bytes_in,
+			bytes_out = bandwidth_buckets.bytes_out + excluded.bytes_out,
+			flow_count = bandwidth_buckets.flow_count + 1,
+			block_count = bandwidth_buckets.block_count + excluded.block_count,
+			measured_count = bandwidth_buckets.measured_count + excluded.measured_count;
+
+		INSERT INTO topology_edges_cube (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action, total_bytes, flow_count, measured_flows, last_seen_at)
+		VALUES (
+			NEW.tenant_id,
+			strftime('%Y-%m-%d', substr(NEW.timestamp, 1, 19) || 'Z'),
+			NEW.src_ip,
+			NEW.dst_ip,
+			NEW.protocol,
+			NEW.dst_port,
+			CASE WHEN NEW.action = '' THEN 'PERMIT' ELSE NEW.action END,
+			NEW.bytes_in + NEW.bytes_out,
+			1,
+			CASE WHEN NEW.bytes_in + NEW.bytes_out > 0 THEN 1 ELSE 0 END,
+			NEW.timestamp
+		)
+		ON CONFLICT(tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action) DO UPDATE SET
+			total_bytes = topology_edges_cube.total_bytes + excluded.total_bytes,
+			flow_count = topology_edges_cube.flow_count + 1,
+			measured_flows = topology_edges_cube.measured_flows + excluded.measured_flows,
+			last_seen_at = MAX(topology_edges_cube.last_seen_at, excluded.last_seen_at);
+	END;
+	`
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// One-time rollup backfill if cubes are empty but events exist
+	var bwCount int64
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM bandwidth_buckets").Scan(&bwCount); err == nil && bwCount == 0 {
+		var evCount int64
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&evCount); err == nil && evCount > 0 {
+			_, _ = s.db.Exec(`
+				INSERT OR IGNORE INTO bandwidth_buckets (tenant_id, hour_bucket, country, direction, bytes_in, bytes_out, flow_count, block_count, measured_count)
+				SELECT tenant_id, strftime('%Y-%m-%dT%H:00:00Z', substr(timestamp, 1, 19) || 'Z'), country, direction,
+				       COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COUNT(*),
+				       COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0),
+				       COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0)
+				FROM events GROUP BY tenant_id, strftime('%Y-%m-%dT%H:00:00Z', substr(timestamp, 1, 19) || 'Z'), country, direction
+			`)
+		}
+	}
+
+	var topoCount int64
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM topology_edges_cube").Scan(&topoCount); err == nil && topoCount == 0 {
+		var evCount int64
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&evCount); err == nil && evCount > 0 {
+			_, _ = s.db.Exec(`
+				INSERT OR IGNORE INTO topology_edges_cube (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action, total_bytes, flow_count, measured_flows, last_seen_at)
+				SELECT tenant_id, strftime('%Y-%m-%d', substr(timestamp, 1, 19) || 'Z'), src_ip, dst_ip, protocol, dst_port, action,
+				       COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
+				       COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0),
+				       MAX(timestamp)
+				FROM events
+				WHERE src_ip != '127.0.0.1' AND dst_ip != '127.0.0.1' AND src_ip != '' AND dst_ip != ''
+				GROUP BY tenant_id, strftime('%Y-%m-%d', substr(timestamp, 1, 19) || 'Z'), src_ip, dst_ip, protocol, dst_port, action
+			`)
+		}
+	}
+
+	return nil
 }
 
 func runAdditiveMigration(db *sql.DB, statement string) error {
@@ -1934,11 +2053,11 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 
 	var queryEvents string
 	var args []interface{}
-	queryEvents = `SELECT country, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
-		COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN action='PERMIT' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0)
-		FROM events`
+	queryEvents = `SELECT country, COALESCE(SUM(flow_count), 0), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
+		COALESCE(SUM(block_count), 0),
+		COALESCE(SUM(flow_count - block_count), 0),
+		COALESCE(SUM(measured_count), 0)
+		FROM bandwidth_buckets`
 	if tenantID != "" {
 		queryEvents += " WHERE tenant_id = ?"
 		args = append(args, tenantID)
@@ -1983,12 +2102,12 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		summary.Countries[r.country] = r.count
 	}
 
-	// 3. Process aggregation
+	// 3. Process aggregation from comm_profiles
 	var queryProc string
 	if tenantID != "" {
-		queryProc = "SELECT process_path, COUNT(*) FROM events WHERE tenant_id = ? GROUP BY process_path ORDER BY COUNT(*) DESC LIMIT 10"
+		queryProc = "SELECT process_name, SUM(event_count) FROM comm_profiles WHERE tenant_id = ? GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
 	} else {
-		queryProc = "SELECT process_path, COUNT(*) FROM events GROUP BY process_path ORDER BY COUNT(*) DESC LIMIT 10"
+		queryProc = "SELECT process_name, SUM(event_count) FROM comm_profiles GROUP BY process_name ORDER BY SUM(event_count) DESC LIMIT 10"
 	}
 	pRows, err := s.db.Query(queryProc, args...)
 	if err != nil {
@@ -2292,17 +2411,14 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 	const baselineDays = 7
 	baselineFrom := liveFrom.Add(-baselineDays * 24 * time.Hour)
 
-	// substr trims the fractional seconds and the zone, which is the only form
-	// SQLite will parse here.
+	// Query bandwidth_buckets by hour bucket
 	hourly := func(from, to time.Time) (map[int]int64, error) {
 		out := make(map[int]int64)
-		indexName := "idx_events_time_hour"
-		if tenantID != "" {
-			indexName = "idx_events_tenant_time_hour"
-		}
-		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
-			FROM events INDEXED BY ` + indexName + ` WHERE timestamp >= ? AND timestamp < ?`
-		args := []interface{}{from, to}
+		fromStr := from.UTC().Format("2006-01-02T15:04:05Z")
+		toStr := to.UTC().Format("2006-01-02T15:04:05Z")
+		query := `SELECT CAST(strftime('%H', hour_bucket) AS INTEGER) AS hr, COALESCE(SUM(flow_count), 0)
+			FROM bandwidth_buckets WHERE hour_bucket >= ? AND hour_bucket < ?`
+		args := []interface{}{fromStr, toStr}
 		if tenantID != "" {
 			query += " AND tenant_id = ?"
 			args = append(args, tenantID)
@@ -2640,13 +2756,14 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	}
 
 	cutoff := time.Now().UTC().Add(-timeWindow)
+	startDay := cutoff.Format("2006-01-02")
 	rows, err := s.db.Query(
-		`SELECT src_ip, dst_ip, protocol, dst_port, action, SUM(bytes_in + bytes_out), COUNT(*),
-		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
-		 FROM events INDEXED BY idx_events_topology_time
-		 WHERE timestamp >= ?
+		`SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(total_bytes), 0), COALESCE(SUM(flow_count), 0),
+		        COALESCE(SUM(measured_flows), 0), MAX(last_seen_at)
+		 FROM topology_edges_cube
+		 WHERE day_bucket >= ? AND last_seen_at >= ?
 		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
-		cutoff,
+		startDay, cutoff,
 	)
 	if err != nil {
 		return data, err

@@ -198,6 +198,7 @@ func (s *Store) InsertTelemetryBatch(events []Event, hostname, locationID string
 		if _, err := commStmt.Exec(communicationValues(ev, hostname, locationID)...); err != nil {
 			return fmt.Errorf("insert telemetry communication profile: %w", err)
 		}
+
 		tenantID := ev.TenantID
 		if tenantID == "" {
 			tenantID = "default"
