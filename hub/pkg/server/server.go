@@ -2875,6 +2875,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/enrolment/windows", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrolmentWindows)))
 	mux.HandleFunc("/api/v1/enrollment/profiles", s.setupOrAuthMiddleware(requireAdmin(s.handleEnrollmentProfiles)))
 	mux.HandleFunc("/api/v1/enrollment/redeem", s.handleEnrollmentRedeem)
+	mux.HandleFunc("/api/v1/enrolment/report-error", s.handleReportInstallError)
+	mux.HandleFunc("/api/v1/enrolment/install-errors", s.authMiddleware(requireAdmin(s.handleInstallReports)))
 	// The self-service portal. Unauthenticated by necessity - the machine that
 	// needs the agent has no credential yet, which is the whole problem it
 	// solves - and gated instead on the source address falling inside an

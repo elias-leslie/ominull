@@ -130,6 +130,17 @@ case "$cmd" in
         call_api POST "/api/v1/agents/update" "$body" | jq . 2>/dev/null || call_api POST "/api/v1/agents/update" "$body"
         ;;
 
+    install-errors|reports)
+        id="${1:-}"
+        if [ -n "$id" ]; then
+            echo "=== Installer Error Report: $id ==="
+            call_api GET "/api/v1/enrolment/install-errors?id=$id" | jq . 2>/dev/null || call_api GET "/api/v1/enrolment/install-errors?id=$id"
+        else
+            echo "=== Recent Installer Error Reports ==="
+            call_api GET "/api/v1/enrolment/install-errors" | jq . 2>/dev/null || call_api GET "/api/v1/enrolment/install-errors"
+        fi
+        ;;
+
     help|*)
         echo "Ominull CyberOps CLI Utility"
         echo "Usage: ominull-cli <command> [args]"
@@ -144,5 +155,6 @@ case "$cmd" in
         echo "  unquarantine-mesh <ip>       Lift subnet-wide mesh quarantine"
         echo "  agent-versions               Report fleet agent-version currency and pending updates"
         echo "  agent-update <id|all> [ver]  Publish an agent release to outdated endpoints"
+        echo "  install-errors [id]          View error reports pasted from the /install portal"
         ;;
 esac

@@ -60,6 +60,7 @@ type portalView struct {
 	ExpiresIn   string
 	Error       string
 	WindowLabel string
+	WindowID    string
 }
 
 type portalPlatform struct {
@@ -95,6 +96,7 @@ func (s *Server) handleEnrolPortal(w http.ResponseWriter, r *http.Request) {
 	} else if covering, ok := s.store.CoveringWindow(addr); ok {
 		view.NeedsPass = covering.HasPasscode
 		view.WindowLabel = covering.Label
+		view.WindowID = covering.ID
 	}
 
 	if view.Platform == "" {
@@ -194,6 +196,7 @@ func (s *Server) portalMint(w http.ResponseWriter, r *http.Request, addr string,
 	view.Covered = true
 	view.NeedsPass = false
 	view.WindowLabel = window.Label
+	view.WindowID = window.ID
 	view.Command = plat.oneLiner(s.downloadBase(r))
 	view.Filename = plat.filename
 	view.Script = plat.generate(bootstrap.Options{
@@ -304,6 +307,8 @@ code.inline{background:var(--bg);border:1px solid var(--line);border-radius:4px;
 ol.steps{margin-top:1.25rem}
 p.flush{margin:0}
 a{color:var(--brand)}
+textarea{width:100%;padding:.6rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical;min-height:110px}
+textarea:focus{outline:2px solid var(--brand);outline-offset:1px}
 </style>
 </head>
 <body>
@@ -362,6 +367,22 @@ a{color:var(--brand)}
     {{end}}
   </div>
 {{end}}
+  <div class="card" id="error-card">
+    <h2>Report an installation error</h2>
+    <p class="sub">Ran into an issue running the installer? Paste the error message or terminal output below. System context (IP, OS, browser environment) is captured automatically.</p>
+    <form id="error-report-form" method="POST" action="/api/v1/enrolment/report-error">
+      <label class="field">
+        <span>Error output or terminal log</span>
+        <textarea id="error-output" name="error_output" rows="6" placeholder="Paste PowerShell / Bash error output, traceback, or installer output here..." required></textarea>
+      </label>
+      <input type="hidden" name="platform" value="{{.Platform}}">
+      <input type="hidden" name="window_id" value="{{.WindowID}}">
+      <div class="actions">
+        <button type="submit" id="submit-error-btn">Send error report</button>
+      </div>
+      <p id="error-status" class="note note-ok" hidden></p>
+    </form>
+  </div>
 <footer>Ominull {{.HubVersion}}</footer>
 </main>
 <script nonce="{{.Nonce}}">
@@ -397,6 +418,67 @@ a{color:var(--brand)}
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   });
+
+  var errorForm = document.getElementById("error-report-form");
+  var submitBtn = document.getElementById("submit-error-btn");
+  var errorStatus = document.getElementById("error-status");
+  var errorText = document.getElementById("error-output");
+  if (errorForm && submitBtn && errorStatus && errorText) {
+    errorForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var output = errorText.value.trim();
+      if (!output) return;
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Sending report...";
+      errorStatus.hidden = true;
+      var sysInfo = {
+        userAgent: navigator.userAgent || "",
+        platform: navigator.platform || "",
+        language: navigator.language || "",
+        screenWidth: window.screen ? window.screen.width : null,
+        screenHeight: window.screen ? window.screen.height : null,
+        timezone: (window.Intl && Intl.DateTimeFormat) ? Intl.DateTimeFormat().resolvedOptions().timeZone : "",
+        timezoneOffset: new Date().getTimezoneOffset(),
+        clientTime: new Date().toISOString(),
+        referrer: document.referrer || "",
+        url: window.location.href,
+        cores: navigator.hardwareConcurrency || null
+      };
+      if (navigator.userAgentData) {
+        sysInfo.userAgentData = {
+          platform: navigator.userAgentData.platform || "",
+          mobile: navigator.userAgentData.mobile || false
+        };
+      }
+      var payload = {
+        error_output: output,
+        platform: {{.Platform}},
+        window_id: {{.WindowID}},
+        system_info: sysInfo
+      };
+      fetch("/api/v1/enrolment/report-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }).then(function (data) {
+        errorStatus.className = "note note-ok";
+        errorStatus.textContent = "Error report " + (data.id || "") + " recorded successfully. System details and logs have been saved.";
+        errorStatus.hidden = false;
+        errorText.value = "";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Send error report";
+      }).catch(function (err) {
+        errorStatus.className = "note note-crit";
+        errorStatus.textContent = "Could not send report: " + err.message;
+        errorStatus.hidden = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Try sending again";
+      });
+    });
+  }
 })();
 </script>
 </body>
