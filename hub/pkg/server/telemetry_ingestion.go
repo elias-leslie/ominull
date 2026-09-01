@@ -92,6 +92,13 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	if err := s.store.InsertTelemetryBatch(events, persisted.Hostname, persisted.LocationID); err != nil {
 		return nil, fmt.Errorf("persist telemetry batch: %w", err)
 	}
+
+	for _, da := range batch.DiscoveredAssets {
+		if da.IP != "" && da.IP != "127.0.0.1" && da.IP != "::1" {
+			_ = s.store.UpsertAssetFromScan(da.IP, da.MAC, da.Vendor, da.Hostname, "IoT/Network Device", "discovered", "CLEAN", 0.85, nil, now)
+		}
+	}
+
 	// Detection sees only durable rows. A detector failure is not allowed to
 	// erase accepted telemetry; it is surfaced by the detector's own metrics and
 	// logs while the request's durability contract remains true.

@@ -26,7 +26,7 @@ func TestFleetConsensusGroupingAndThreshold(t *testing.T) {
 		}
 		_, err := st.db.Exec(
 			"INSERT INTO endpoints (id, tenant_id, hostname, ip, mac, os, role_tag, status, driver_version, observed_services, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, tenant, id, "192.168.86."+string(rune('0'+i)), "00:11:22:33:44:0"+string(rune('0'+i)), "Linux Ubuntu 22.04", "workstation", "active", "1.7.25", obs, time.Now().UTC(), time.Now().UTC(),
+			id, tenant, id, "192.168.86."+string(rune('0'+i)), "00:11:22:33:44:0"+string(rune('0'+i)), "Linux Ubuntu 22.04", "workstation", "active", "1.8.0", obs, time.Now().UTC(), time.Now().UTC(),
 		)
 		if err != nil {
 			t.Fatalf("insert endpoint: %v", err)
@@ -38,7 +38,7 @@ func TestFleetConsensusGroupingAndThreshold(t *testing.T) {
 		obs := `[{"service":"dns","destination":"192.168.86.1"},{"service":"ntp","destination":"time.windows.com"}]`
 		_, err := st.db.Exec(
 			"INSERT INTO endpoints (id, tenant_id, hostname, ip, mac, os, role_tag, status, driver_version, observed_services, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, tenant, id, "192.168.86.10"+string(rune('0'+i)), "00:11:22:33:44:1"+string(rune('0'+i)), "Windows Server 2022", "server", "active", "1.7.25", obs, time.Now().UTC(), time.Now().UTC(),
+			id, tenant, id, "192.168.86.10"+string(rune('0'+i)), "00:11:22:33:44:1"+string(rune('0'+i)), "Windows Server 2022", "server", "active", "1.8.0", obs, time.Now().UTC(), time.Now().UTC(),
 		)
 		if err != nil {
 			t.Fatalf("insert endpoint: %v", err)

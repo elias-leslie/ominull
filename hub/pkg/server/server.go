@@ -100,10 +100,19 @@ type TelemetryBatchMessage struct {
 	// so the baseline isolation policy can be checked against reality instead
 	// of against an assumption. The agent reports; it never authors.
 	ObservedServices []storage.ObservedService `json:"observed_services"`
+	DiscoveredAssets []DiscoveredAsset         `json:"discovered_assets,omitempty"`
 	// Readiness is the endpoint's own answer to "can I still be released after
 	// this?". Absent from agents that predate the check, which is a state the
 	// gate distinguishes from a failing answer.
 	Readiness *storage.Readiness `json:"isolation_readiness"`
+}
+
+type DiscoveredAsset struct {
+	IP       string `json:"ip"`
+	MAC      string `json:"mac,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+	Vendor   string `json:"vendor,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // TLSOptions configures the hub's HTTPS listener. Agents carry the API key in
