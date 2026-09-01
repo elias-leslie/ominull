@@ -3284,8 +3284,10 @@
       h("div", { cls: "card-body" },
         geo.length
           ? barList(geo, function (g) { return Number(g.total_bytes) || 0; },
-              function (g) { return (g.country_name || g.country) + " \u00b7 " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " \u00b7 " + g.threat_count + " flagged" : ""); },
+              function (g) { return (g.country_name || g.country) + " · " + (Number(g.flow_count) || 0) + " flows" + (g.threat_count ? " · " + g.threat_count + " flagged" : ""); },
               function (g) { return Number(g.total_bytes) ? bytes(g.total_bytes) : "not measured"; })
+          : h("div", { cls: "empty", text: "No geo data." })));
+
     // Aggregate DNS queries from in-line socket attribution and router forwarder
     var dnsEvents = state.events.filter(function (e) {
       return e.layer === "dns-forwarder-v1" || e.dst_port === 53 || (e.domain && e.domain.length > 0);
