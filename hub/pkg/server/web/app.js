@@ -3346,6 +3346,22 @@
         ? simpleTable(["Time", "Action", "Client IP", "Queried Domain", "Origin / Process"], dnsRows)
         : h("div", { cls: "empty", text: "No DNS stream events captured." }));
 
+    var evRows = state.events.slice(0, 60).map(function (e) {
+      return [
+        stamp(parseTime(e.timestamp)),
+        h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
+          icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
+          h("span", { text: e.action || "PERMIT" })),
+        h("span", { cls: "dim-3", text: e.direction || "" }),
+        h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
+        h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
+        h("span", { cls: "dim", text: e.process_path || e.domain || "—" }),
+        h("span", { cls: "ago", text: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0)
+          ? bytes((Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0))
+          : "—", title: (Number(e.bytes_in) || 0) + (Number(e.bytes_out) || 0) ? "" : "not measured on this flow" })
+      ];
+    });
+
     view.appendChild(h("div", { cls: "pad stack" },
       chartCard,
       dnsStatsCard,
