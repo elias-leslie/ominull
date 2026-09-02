@@ -353,6 +353,11 @@ Required behavior:
    released v1.8.3 line records the bytes actually released, and make the package
    database, installed tree, reported version, and signed digests agree.
 
+The numbered behaviors above are what R0 must achieve. Dispatch them in the order
+given by the `R0.x` rows in the slice backlog, which groups them into six
+independently reviewable slices and puts the fleet download directory first
+because it is actively distributing the prototype.
+
 Acceptance:
 
 - `(cd hub && go build ./... && go vet ./... && go test -race ./...)` passes.
