@@ -306,7 +306,15 @@ Required behavior:
    `response-authority` service, remove or restrict its root-owned state, and
    record what was found and removed. Its key directory was empty on 2026-09-02;
    re-check before acting, and destroy rather than reuse anything found.
-7. Reconcile version identity. Three released v1.8.3 digests were overwritten and
+7. Decide and record what happens to the prototype schema already on the live
+   hub. As of 2026-09-02 the production database contains `response_jobs`,
+   `evidence_bundles`, `evidence_items`, `evidence_receipts`, `scripts`,
+   `script_versions`, `software_inventory`, `vulnerabilities`, and
+   `vulnerability_matches`, all with zero rows. Empty is not harmless: these
+   tables were created outside the repository migration sequence, so the real
+   migrations must either adopt them deliberately or replace them. Never mutate
+   an already released migration to paper over the difference.
+8. Reconcile version identity. Three released v1.8.3 digests were overwritten and
    a rebuilt 1.8.3 hub package is installed over the released one. Publish the
    containment build under a new version, restore `dist/SHA256SUMS.txt` so the
    released v1.8.3 line records the bytes actually released, and make the package
@@ -1055,6 +1063,28 @@ browser key, and WebAuthn for the preferred unlock method. A hub reached as
 `http://<address>` or over an untrusted certificate cannot generate the browser
 key, cannot run WebAuthn, and therefore cannot open a shell at all. TOTP does not
 rescue that case, because the browser proof itself needs WebCrypto.
+
+As of 2026-09-02 this deployment has no origin on which the intended secure shell
+can run, and that is a blocking unknown rather than a documentation task:
+
+- The public hostname is a trusted HTTPS origin, but the operations brief records
+  that its Cloudflare cache is stale and answers API paths with a 302
+  (`task-2feb9f324e814f28`). Phase 3 forbids following a redirect during a
+  terminal handshake, and a 302 on an API path breaks the response routes before
+  the terminal is reached.
+- The LAN paths are a cleartext `:9999` listener and a `:9443` listener with a
+  self-issued leaf. Neither is a trusted browser origin, so neither can generate
+  the browser key or run WebAuthn.
+- The two sides of the relay do not share an origin either. Agents are enrolled
+  against the LAN address and pin the internal CA, while the operator's browser
+  must use the public name. Decide explicitly whether the agent WSS target stays
+  on the LAN listener with CA pinning while the console side uses the public
+  origin, and what that means when the tunnel is down.
+
+Resolve this before slice 3A.1, not during it. The options are to fix the cache
+behavior on the public hostname, to serve the console on an internal name with a
+certificate the browser trusts, or to accept that shells work only through the
+public path and state that dependency plainly.
 
 Deliverables: document the supported console origins for a LAN or disconnected
 installation; specify a stable DNS name plus a certificate the operator's browser
