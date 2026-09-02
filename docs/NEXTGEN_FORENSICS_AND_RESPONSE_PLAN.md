@@ -263,7 +263,10 @@ For every task:
 7. Record measured results. Do not replace evidence with claims such as zero
    overhead, zero false positives, guaranteed safety, or fixed latency.
 8. Derive actor, tenant, role, and credential class from authenticated server
-   context. Never trust identity or scope headers supplied by the caller.
+   context. Never trust identity or scope headers supplied by the caller. Strip
+   every inbound identity header in one place before any handler runs, and add
+   each new identity header to that list in the same change that introduces it.
+   `X-Operator-ID` is currently missing from that list.
 9. Recompute every action digest from a validated typed request. Never accept a
    caller-supplied digest as proof that a different payload was authorized.
 10. Keep unreleased response routes absent or fail-closed. A placeholder that
@@ -290,9 +293,16 @@ Use only these status values:
 - `accepted`: dependent phases may use it because package, runtime, security,
   compatibility, and rollback gates all passed.
 
+The audit table at the top of this document is the single status ledger. Each
+slice updates its row in the same commit as the code, with file:line evidence for
+every remaining gap and the exact commands that produced the claim. A slice that
+changes behavior without updating that row is incomplete.
+
 An implementation agent may not mark a phase `verified` or `accepted` from unit
 tests, code inspection, a process being active, a route returning 2xx, or a UI
-screenshot alone. One failed required command keeps the phase below `verified`.
+screenshot alone. An agent may not mark its own slice `accepted`; `accepted`
+requires the recorded package, runtime, security, compatibility, and rollback
+evidence to be present in the repository where a later agent can re-run it. One failed required command keeps the phase below `verified`.
 Record failures as evidence; do not delete them from the handoff. Before release,
 compare the clean committed tree, package contents, installed files, service
 definitions, reported version, and signed artifact digests. They must identify
@@ -738,6 +748,12 @@ Acceptance:
   implementation until a provider or maintained delivery mechanism is selected.
 - Implement browser-key certification, response-session state, tenant method
   policy, typed action validation, per-target grant signing, and signer audit.
+- Put the signer store on durable storage before anything depends on it. Tenant
+  keys, memberships, authenticators, method policy, sessions, recovery tokens,
+  replay state, and audit records survive an authority restart. In-memory maps
+  are acceptable only in the test adapter. An authority restart must not silently
+  invalidate unlocked sessions or lose an enrollment, and whatever restart
+  behavior it does have must be documented and tested.
 - Keep response membership in the authority's minimal store. Hub roles may
   nominate an operator, but the hub cannot assert or rewrite response membership
   on each request. Tenant response administrators grant and revoke it through the
@@ -1296,7 +1312,7 @@ gates before a release checkpoint:
 
 ```bash
 scripts/version.sh check
-(cd hub && go test -race ./... && go vet ./...)
+(cd hub && go build ./... && go test -race ./... && go vet ./...)
 node --check hub/pkg/server/web/app.js
 bash -n scripts/*.sh
 scripts/build-packages.sh
@@ -1369,7 +1385,21 @@ The agent must return:
 - commands run and exact pass/fail result;
 - real route, package, or endpoint evidence where applicable;
 - measured resource deltas for agent or hot-path changes;
-- unresolved risks and the next dependency, without silently expanding scope.
+- unresolved risks and the next dependency, without silently expanding scope;
+- the updated audit-table row and an evidence record checked in under
+  `docs/evidence/<phase>-<slice>.md` using the field list above.
+
+An agent's report is rejected, and the slice stays below `verified`, when any of
+these is true:
+
+- a command is described rather than quoted with its exact output;
+- a gate was skipped and the report does not say which and why;
+- a capability is called working on the strength of a unit test, a 2xx response,
+  a running process, or a screenshot;
+- the working tree does not build, vet, and test clean at the final commit;
+- the console, CLI, or API presents a state the implementation cannot deliver;
+- a route that this plan marks console-only is reachable with a static API key;
+- a claim in the audit table is now stale.
 
 Do not assign hub schema, both endpoint implementations, console, and CLI as one
 task. Merge the contract and hub foundation first. Then Linux, Windows, CLI, and
