@@ -49,7 +49,7 @@ func TestDNSStorage(t *testing.T) {
 	now := time.Now().UTC()
 	ev := DNSEvent{
 		Timestamp:    now,
-		ClientIP:     "192.168.86.100",
+		ClientIP:     "10.0.0.100",
 		Domain:       "malicious.example.com",
 		QType:        "A",
 		Action:       "BLOCK",

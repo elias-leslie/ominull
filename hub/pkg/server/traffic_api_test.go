@@ -31,7 +31,7 @@ func TestTrafficAPIEndpoints(t *testing.T) {
 			Action:      "PERMIT",
 			Direction:   "OUTBOUND",
 			Protocol:    6,
-			SrcIP:       "192.168.86.10",
+			SrcIP:       "10.0.0.10",
 			DstIP:       "1.1.1.1",
 			SrcPort:     50000,
 			DstPort:     443,

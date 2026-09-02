@@ -2868,7 +2868,7 @@
     var ip = node.ip || node.id || "";
     var label = (node.label || node.id || "").toLowerCase();
     
-    if (ip === "192.168.86.1" || ip === "192.168.86.58" || label.indexOf("hub") !== -1 || label.indexOf("router") !== -1 || label.indexOf("gateway") !== -1) {
+    if (ip === "10.0.0.1" || ip === "10.0.0.58" || label.indexOf("hub") !== -1 || label.indexOf("router") !== -1 || label.indexOf("gateway") !== -1) {
       return "infra";
     }
     if (node.is_managed || nodeKind(node) === "managed" || (node.role && node.role !== "unknown" && node.role !== "unmanaged")) {

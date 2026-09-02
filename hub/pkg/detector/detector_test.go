@@ -223,7 +223,7 @@ func TestDockerAndInfrastructureExcludedFromLateralSweep(t *testing.T) {
 			Timestamp:   time.Now().UTC(),
 			Action:      "PERMIT",
 			Direction:   "OUTBOUND",
-			DstIP:       "192.168.86." + strconv.Itoa(i),
+			DstIP:       "10.0.0." + strconv.Itoa(i),
 			DstPort:     53,
 			ProcessPath: "/usr/sbin/dnsmasq",
 			ProcessID:   uint32(2000 + i),
