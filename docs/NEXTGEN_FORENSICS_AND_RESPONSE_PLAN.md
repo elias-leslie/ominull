@@ -427,6 +427,30 @@ acceptance gates before dependent work starts.
   release decision. Versions published before the date specified in `LICENSE`
   retain their existing license.
 
+## Installability constraint
+
+Ominull installs from its own packages and works immediately. An end user
+installs one or two Ominull packages, answers the installer's questions, and has
+a working console, agents, and response path. Additional components are added
+only when performance, isolation, or a genuinely complex environment requires
+them, and each one must be justified in the slice that introduces it.
+
+Concretely, and binding on every slice:
+
+- The default install is the hub and the response authority. Both ship in the
+  Ominull packages under Ominull's own service identities.
+- Nothing in the product may depend on software the operator has to install and
+  configure separately, on a host that is not part of the Ominull deployment, or
+  on a developer's workstation. A reverse proxy, an external identity provider,
+  a managed key service, and a cloud account are all optional shapes for
+  organizations that already run them.
+- Everything the browser needs, including console TLS, is served by Ominull
+  itself. See Phase 3.0.
+- The installer asks for what it cannot infer, such as the console hostname, and
+  provides a working default for everything else.
+- Anything a slice sets up by hand on the live deployment must land in packaging
+  and the installer in the same slice, or the slice is not finished.
+
 ## Scope decision: build the multi-tenant foundation, defer the isolation adapters
 
 Decided 2026-09-02 by the owner. Ominull runs today as a single-tenant home
@@ -1189,31 +1213,65 @@ Cloudflare, so split-horizon naming is already in place. A related trap is
 already recorded for that stack: local DNS must suppress HTTPS/SVCB records for
 `example.invalid` so Chrome does not send an ECH SNI to Caddy (`[M:a402b858]`).
 
-Recommended resolution, in order:
+**Three separate trust systems. Do not conflate them.** Earlier revisions of this
+section blurred the second and third:
 
-1. For this deployment now, add a site block to the existing Caddy configuration
-   for an Ominull console name and proxy it to the hub's `:9999` listener, with
-   the LAN DNS record pointing at the Caddy host. This yields a browser-trusted
-   origin with no new infrastructure, no certificate copying, automatic renewal,
-   and WebSocket upgrade already working. Cloudflare stays out of the terminal
-   data path entirely, so edge restarts, idle timeouts, and Access session expiry
-   cannot drop a shell. Set the WebAuthn relying-party ID to that name and treat
-   it as permanent, because changing it invalidates enrolled passkeys.
-2. Keep the Cloudflare tunnel and Access for ordinary remote console use. Do not
-   make the shell depend on them at this stage.
-3. Record the reverse-proxy requirements from this section against the Caddy
-   configuration actually used, and re-verify them after any Caddy change.
+1. *Agent transport PKI.* The hub's existing internal CA issues each endpoint's
+   client certificate and the `:9443` leaf. Mutual TLS, machine to machine, no
+   browser involvement. Already working; leave it alone.
+2. *Console TLS.* The certificate the operator's browser must trust before it
+   will allow WebCrypto or WebAuthn. This is purely about the browser's secure
+   context. It is not a security boundary for response authorization.
+3. *Response signing key.* The per-tenant Ed25519 key held by the response
+   authority under its own identity, unreadable by the hub process. This is the
+   dedicated holder that response security actually depends on. It never holds,
+   issues, or needs a TLS certificate, and console TLS does not substitute for it
+   in any way.
 
-**Product gap this exposes.** A shipped Ominull cannot assume a Caddy host on the
-operator's LAN. The hub already accepts `-tls-cert` and `-tls-key`, and the live
-hub runs `--client-certs optional`, so its `:9443` listener does complete a
-handshake for a browser and answers `401` rather than rejecting at the TLS layer.
-That makes an operator-supplied certificate on a browser-facing listener a
-workable second deployment shape, but it is unproven and it breaks the moment a
-deployment sets `--client-certs required`. Phase 3.0 must therefore deliver both:
-the reverse-proxy deployment used here, and a documented supported path for a
-customer who has no proxy. State plainly which listener serves browsers, which
-serves agents, and why they are not the same.
+**The console TLS terminator ships with Ominull.** A customer installs a package
+and gets a working console; they do not stand up a proxy first, and the product
+does not depend on any host other than the ones Ominull is installed on. The
+default install stays at two services, hub and response authority. A reverse
+proxy in front remains a supported and documented shape for organizations that
+already run one, never a requirement and never a component of the default
+install.
+
+The hub therefore needs a dedicated console HTTPS listener, separate from the
+`:9443` agent listener, because the two have incompatible trust models: agents
+present client certificates and pin the internal CA, browsers do neither and must
+not be affected by `--client-certs required`. Support three certificate sources
+on that listener and have the installer choose one:
+
+- **Operator-supplied certificate.** `-tls-cert` and `-tls-key` already exist.
+  This is the path for anyone with an internal CA or an existing certificate.
+  Document it and test it; almost no work.
+- **Built-in ACME using DNS-01.** For an operator who owns a domain. DNS-01 needs
+  no inbound port and works for a hub on a private address, which HTTP-01 and
+  TLS-ALPN-01 do not. Requires a DNS provider credential from the operator.
+- **Hub-issued console certificate plus guided trust installation.** For LAN-only
+  and disconnected installs with no domain and no internet. The hub already has a
+  CA; issue a console leaf from it, and give the operator a one-command export
+  and per-platform instructions to trust that root on the machines they browse
+  from. A browser-installed root produces a genuine secure context, so WebCrypto
+  and WebAuthn both work.
+
+All three need a hostname, not an address. A WebAuthn relying-party ID must be
+the origin's effective domain or a registrable suffix of it, so an IP-address
+origin cannot register a passkey at all. The installer must therefore ask for the
+console hostname, and the plan must state that changing it later invalidates
+every enrolled passkey.
+
+**For this deployment specifically.** Build the product path and run it here,
+rather than propping the console up on the developer workstation. The workstation
+Caddy proved that DNS-01 issuance and WebSocket proxying work on this network,
+which is useful evidence, but it is not the deployment of record and no slice may
+depend on it: it puts the console origin on a machine that is not part of Ominull
+and that a customer will never have. If a browser-trusted console is needed
+before the in-hub listener lands, run the proxy inside LXC 150 next to the hub and
+label it explicitly as temporary.
+
+Keep the Cloudflare tunnel and Access for ordinary remote console use, and do not
+let the shell depend on them at this stage.
 
 **Cloudflare facts confirmed from the vendor documentation**, for the later
 remote-access work rather than for slice 3A.1:
@@ -1744,9 +1802,11 @@ ownership before starting and do not run two slices that share a file.
 | 2.3 | Endpoint manifest signing and hub receipt signing, with verification | 2.2 | `hub/pkg/evidence`, agents |
 | 2.4 | Safe export layout, streaming limits, honest failure, offline verify | 2.3 | `hub/pkg/evidence`, `ominullctl` |
 | 2.5 | Retention enforcement and legal hold with actor and reason | 2.2 | `hub/pkg/evidence` |
-| 3.0a | Add the Ominull console vhost to the existing LAN Caddy, point DNS at it, verify secure context and WebAuthn in a real browser | R0 | `/etc/caddy/Caddyfile`, LAN DNS |
-| 3.0b | Remaining Phase 3.0 prerequisites and the no-proxy deployment path | 3.0a, 1B.3, 2.3 | deployment, `docs/` |
-| 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0b, 1D.2 | `hub/pkg/terminal`, agents |
+| 3.0a | Dedicated console HTTPS listener in the hub, separate from the agent `:9443` listener | R0 | `hub/pkg/server`, hub flags |
+| 3.0b | Console certificate sources: operator-supplied, ACME DNS-01, and hub-CA leaf with guided root trust; installer asks for the console hostname | 3.0a | hub, `ominullctl`, packaging, installer |
+| 3.0c | Verify secure context, WebCrypto, and WebAuthn in a real browser against the packaged install on the hub host | 3.0b | live deployment, `docs/evidence/` |
+| 3.0d | Remaining Phase 3.0 prerequisites and the documented reverse-proxy shape | 3.0c, 1B.3, 2.3 | deployment, `docs/` |
+| 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0d, 1D.2 | `hub/pkg/terminal`, agents |
 | 3A.2 | Durable session state, limits, sweeper, hashed one-use relay tokens | 3A.1 | `hub/pkg/terminal` |
 | 3B.1 | Linux `forkpty` worker with resize and child-tree kill | 3A.2 | `agent/linux` |
 | 3B.2 | Windows ConPTY worker in a Job Object; raise the Windows build baseline to `NTDDI_VERSION 0x0A000006` and record the new OS floor | 3B.1, 0.3 | `agent/` Windows sources, `scripts/build-packages.sh` |
