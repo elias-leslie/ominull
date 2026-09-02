@@ -32,7 +32,7 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.8.1"
+const defaultAgentVersion = "1.8.2"
 
 func main() {
 	configPath := findConfigArg(os.Args[1:])

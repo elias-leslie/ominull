@@ -20,7 +20,7 @@ The supported hub host is a Debian-family Linux machine. Install the registered
 package as root:
 
 ```bash
-sudo dpkg -i ./ominull-hub_1.8.0_amd64.deb
+sudo dpkg -i ./ominull-hub_1.8.2_amd64.deb
 sudo ominullctl setup-token
 ```
 

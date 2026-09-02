@@ -316,9 +316,17 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 		resp.Id = req.Id
 		s.adjustCachedTTLs(resp, entry.ExpiresAt)
 
-		// Honor EDNS buffer
+		// Honor EDNS buffer or clean for legacy non-EDNS clients
 		if opt := req.IsEdns0(); opt != nil {
 			resp.SetEdns0(opt.UDPSize(), opt.Do())
+		} else {
+			extra := make([]dns.RR, 0, len(resp.Extra))
+			for _, rr := range resp.Extra {
+				if rr.Header().Rrtype != dns.TypeOPT {
+					extra = append(extra, rr)
+				}
+			}
+			resp.Extra = extra
 		}
 
 		_ = w.WriteMsg(resp)
@@ -364,29 +372,38 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// Check for UDP truncation vs client buffer
-	if transport == "udp" {
-		maxSize := dns.MinMsgSize
-		if opt := req.IsEdns0(); opt != nil {
-			maxSize = int(opt.UDPSize())
-		}
-		if resp.Len() > maxSize {
-			resp.Truncated = true
-			resp.Answer = nil
-			resp.Ns = nil
-			resp.Extra = nil
-		}
-	}
-
-	_ = w.WriteMsg(resp)
-
-	// 4. Cache valid responses
+	// 4. Cache full valid upstream response before any client-specific formatting
 	if resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError {
 		ttl := s.calculateMinTTL(resp)
 		if ttl > 0 {
 			s.putCache(cacheKey, resp, ttl)
 		}
 	}
+
+	// 5. Client response delivery (DNS Flag Day 2020: default UDP buffer size 1232 bytes)
+	if transport == "udp" {
+		maxSize := 1232
+		if opt := req.IsEdns0(); opt != nil && opt.UDPSize() > 512 {
+			maxSize = int(opt.UDPSize())
+		}
+		if resp.Len() > maxSize {
+			// Strip non-essential authority and extra sections first
+			resp.Ns = nil
+			resp.Extra = nil
+			if opt := req.IsEdns0(); opt != nil {
+				resp.SetEdns0(opt.UDPSize(), opt.Do())
+			}
+			if resp.Len() > maxSize {
+				resp.Truncated = true
+			}
+		}
+	} else {
+		if opt := req.IsEdns0(); opt != nil {
+			resp.SetEdns0(opt.UDPSize(), opt.Do())
+		}
+	}
+
+	_ = w.WriteMsg(resp)
 
 	action := "PERMIT"
 	if isAllowed {
