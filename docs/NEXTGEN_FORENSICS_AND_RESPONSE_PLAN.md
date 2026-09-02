@@ -16,7 +16,7 @@ replace, not as released behavior.
 | Phase | Audited state | Evidence and blocking gaps |
 |---|---|---|
 | Phase 0 | Not accepted | Go DTOs and copied JSON examples exist. Both C agents do not consume the fixtures. Bounds, old-version behavior, canonical signed-byte fixtures, baseline measurements, and the response threat model are absent. |
-| Phase 1A | Unsafe prototype deployed | A second service and Unix socket exist, including on the observed production installation. Both the hub and authority run as `root`; signer state is root-owned; `NoNewPrivileges` is disabled. This provides no hub-process key isolation and conflicts with the documented one-service v1.8.3 package contract. |
+| Phase 1A | Unsafe prototype deployed under a reused release version | Confirmed on the live hub. Both services run as `root` with `NoNewPrivileges=no`, and the rebuilt package was installed over the released v1.8.3 without a version change. The rebuilt agent artifacts are also live in the hub's fleet download directory. Detailed findings are listed under "Phase 1A re-verification" below. |
 | Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
 | Phase 1D | Reject, unsafe to execute | Linux and Windows use substring searches rather than a bounded protocol parser (`agent/src/service.c` `ProcessResponseOffersWindows`, `agent/linux/main.c`). They do not verify the grant signature, action digest, tenant, endpoint, expiry, signer key, nonce, or replay state; the word `grant` does not appear in the agent tree at all. They acknowledge before validation and then post a hard-coded `"state":"succeeded"` result for work that was never performed. The Windows parser also reads `lease_id` from the whole response body rather than from the matched offer. There is no worker isolation or durable duplicate prevention. |
@@ -130,6 +130,49 @@ Endpoint:
     verification, and neither recognizes the `terminal_session` action kind. Any
     offer reaching an agent is acknowledged and reported `succeeded` by the
     generic handler described in the Phase 1D row.
+
+### Phase 1A re-verification (deployed state)
+
+Observed directly on the live hub (LXC 150) on 2026-09-02 with read-only
+commands. This is the most consequential finding in this review.
+
+1. Both services are active. `ominull-response-authority.service` runs
+   `User=root`, `Group=root`, `NoNewPrivileges=no`, with
+   `RuntimeDirectoryMode=0755` and its control socket at
+   `srw-rw---- root:root /run/ominull-response-authority/authority.sock`. The hub
+   also runs as root, so the socket restriction separates nothing and there is no
+   key isolation of any kind. The unit is also ordered `Before=ominull-hub.service`
+   with no dependency or failure handling between them.
+2. `/var/lib/ominull-response-authority/keys` exists, mode `0700`, and is
+   **empty**. No tenant response key has been generated on the live hub, so there
+   is no compromised signing key material to destroy today. Re-verify this before
+   R0 rather than assuming it, and destroy anything found.
+3. `dpkg -S` attributes both `/opt/ominull/bin/ominull-response-authority` and
+   `/lib/systemd/system/ominull-response-authority.service` to package
+   `ominull-hub` version **1.8.3**, and `dpkg -V` reports no drift. A rebuilt
+   1.8.3 package was installed over the released 1.8.3, and the local package
+   database now certifies the new bytes as that version.
+4. All three v1.8.3 artifact digests in `dist/SHA256SUMS.txt` were overwritten in
+   the working tree: the hub deb, the Linux agent deb, and the Windows agent MSI.
+   The released digests were `025d2c1e...` (hub), `04e2be61...` (agent deb), and
+   `efb10616...` (MSI).
+5. The hub's `--binary-dir`, which is what `/download/` serves to the fleet for
+   self-update, now holds the rebuilt artifacts:
+   `ominull-agent_1.8.3_amd64.deb` is `f173f308...` and
+   `ominull-agent-windows-1.8.3.msi` is `6987760f...`, matching the modified
+   working tree rather than the release. Any endpoint that converges on "1.8.3"
+   therefore receives different bytes than the released 1.8.3, and the bytes it
+   receives contain the Phase 1D offer handler that acknowledges work it never
+   performed.
+
+Consequences for Slice R0: the containment work is not only local. The fleet
+download directory must be corrected before anything else, because it is actively
+distributing the prototype. Withdraw the rebuilt 1.8.3 artifacts, restore or
+remove them so no endpoint can converge on them, publish the containment build
+under a new version, and reconcile `dist/SHA256SUMS.txt`, the hub package
+database, and the deployed tree against that new version. Then confirm what each
+retained endpoint is actually running and whether any of them already took the
+rebuilt bytes.
 
 ### Phase 2 re-verification (evidence store)
 
@@ -252,13 +295,20 @@ Required behavior:
    without doing work (`agent/src/service.c`, `agent/linux/main.c`). An agent
    that cannot verify a grant must ignore the offer and continue normal
    heartbeats; it must not ACK.
-5. Reconcile the production host: stop and disable the unaccepted
+5. Correct the fleet download directory first. The hub's `--binary-dir` is
+   currently serving rebuilt 1.8.3 agent artifacts to every endpoint that
+   self-updates. Withdraw them, verify no endpoint can converge on them, and
+   record what each retained endpoint is running now and whether it already took
+   the rebuilt bytes.
+6. Reconcile the production host: stop and disable the unaccepted
    `response-authority` service, remove or restrict its root-owned state, and
-   record what was found and removed. Any tenant key material generated by the
-   prototype is compromised by definition and must be destroyed, not reused.
-6. Reconcile version identity. The deployed bytes must not remain published under
-   an already released version number. State the version this containment ships
-   as and rebuild the signed artifacts for it.
+   record what was found and removed. Its key directory was empty on 2026-09-02;
+   re-check before acting, and destroy rather than reuse anything found.
+7. Reconcile version identity. Three released v1.8.3 digests were overwritten and
+   a rebuilt 1.8.3 hub package is installed over the released one. Publish the
+   containment build under a new version, restore `dist/SHA256SUMS.txt` so the
+   released v1.8.3 line records the bytes actually released, and make the package
+   database, installed tree, reported version, and signed digests agree.
 
 Acceptance:
 
