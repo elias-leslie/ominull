@@ -1163,27 +1163,76 @@ browser key, and WebAuthn for the preferred unlock method. A hub reached as
 key, cannot run WebAuthn, and therefore cannot open a shell at all. TOTP does not
 rescue that case, because the browser proof itself needs WebCrypto.
 
-As of 2026-09-02 this deployment has no origin on which the intended secure shell
-can run, and that is a blocking unknown rather than a documentation task:
+Investigated on 2026-09-02. Two corrections to earlier assumptions, then the
+recommendation.
 
-- The public hostname is a trusted HTTPS origin, but the operations brief records
-  that its Cloudflare cache is stale and answers API paths with a 302
-  (`task-2feb9f324e814f28`). Phase 3 forbids following a redirect during a
-  terminal handshake, and a 302 on an API path breaks the response routes before
-  the terminal is reached.
-- The LAN paths are a cleartext `:9999` listener and a `:9443` listener with a
-  self-issued leaf. Neither is a trusted browser origin, so neither can generate
-  the browser key or run WebAuthn.
-- The two sides of the relay do not share an origin either. Agents are enrolled
-  against the LAN address and pin the internal CA, while the operator's browser
-  must use the public name. Decide explicitly whether the agent WSS target stays
-  on the LAN listener with CA pinning while the console side uses the public
-  origin, and what that means when the tunnel is down.
+**The public hostname's 302 is Cloudflare Access, not a stale cache.** A request
+to `https://omi.example.invalid/api/v1/status` returns `302` to
+`example.cloudflareaccess.com/cdn-cgi/access/login/...`, which is the Access
+identity gate behaving normally for an unauthenticated client. A browser that has
+signed in through Access carries the authorization cookie and is not redirected.
+The operations brief attributes this to an unpurged cache
+(`task-2feb9f324e814f28`); that attribution is wrong and should be corrected
+there. The practical consequence is unchanged for non-browser clients such as
+`curl` and `ominullctl`, which have no Access token and must keep using the LAN
+listener.
 
-Resolve this before slice 3A.1, not during it. The options are to fix the cache
-behavior on the public hostname, to serve the console on an internal name with a
-certificate the browser trusts, or to accept that shells work only through the
-public path and state that dependency plainly.
+**A trusted-origin pattern already exists on this network; do not rebuild it.**
+Caddy runs on the workstation at `10.0.0.57` (`caddy.service`, "Caddy LAN
+reverse proxy") serving `*.example.invalid` with a wildcard certificate obtained
+through Let's Encrypt using the Cloudflare DNS-01 challenge and an already
+provisioned `CLOUDFLARE_API_TOKEN`. It already proxies a WebSocket route
+(`terminal.example.invalid/ws/*`), so WebSocket upgrade through this path is
+proven in this environment rather than assumed. Local DNS resolves
+`*.example.invalid` to the LAN host while public DNS for `omi.` resolves to
+Cloudflare, so split-horizon naming is already in place. A related trap is
+already recorded for that stack: local DNS must suppress HTTPS/SVCB records for
+`example.invalid` so Chrome does not send an ECH SNI to Caddy (`[M:a402b858]`).
+
+Recommended resolution, in order:
+
+1. For this deployment now, add a site block to the existing Caddy configuration
+   for an Ominull console name and proxy it to the hub's `:9999` listener, with
+   the LAN DNS record pointing at the Caddy host. This yields a browser-trusted
+   origin with no new infrastructure, no certificate copying, automatic renewal,
+   and WebSocket upgrade already working. Cloudflare stays out of the terminal
+   data path entirely, so edge restarts, idle timeouts, and Access session expiry
+   cannot drop a shell. Set the WebAuthn relying-party ID to that name and treat
+   it as permanent, because changing it invalidates enrolled passkeys.
+2. Keep the Cloudflare tunnel and Access for ordinary remote console use. Do not
+   make the shell depend on them at this stage.
+3. Record the reverse-proxy requirements from this section against the Caddy
+   configuration actually used, and re-verify them after any Caddy change.
+
+**Product gap this exposes.** A shipped Ominull cannot assume a Caddy host on the
+operator's LAN. The hub already accepts `-tls-cert` and `-tls-key`, and the live
+hub runs `--client-certs optional`, so its `:9443` listener does complete a
+handshake for a browser and answers `401` rather than rejecting at the TLS layer.
+That makes an operator-supplied certificate on a browser-facing listener a
+workable second deployment shape, but it is unproven and it breaks the moment a
+deployment sets `--client-certs required`. Phase 3.0 must therefore deliver both:
+the reverse-proxy deployment used here, and a documented supported path for a
+customer who has no proxy. State plainly which listener serves browsers, which
+serves agents, and why they are not the same.
+
+**Cloudflare facts confirmed from the vendor documentation**, for the later
+remote-access work rather than for slice 3A.1:
+
+- WebSockets are supported on all plans but require the zone's WebSockets setting
+  to be on, and Argo Smart Routing is explicitly incompatible with WebSockets.
+- Cloudflare closes a WebSocket after a period with no data in either direction,
+  and a custom idle timeout is Enterprise-only. Any Cloudflare-fronted terminal
+  needs an application-level ping/pong heartbeat, which also means the plan's
+  15-minute idle timeout must be enforced from real user activity rather than
+  from socket traffic.
+- Cloudflare may restart edge servers during code releases, terminating live
+  WebSocket connections. A Cloudflare-fronted terminal must treat an abrupt close
+  as normal and must never report it as a completed session.
+
+If the product later supports Cloudflare-fronted terminals, confirm the zone
+WebSockets toggle, the Argo setting, and the Access application session duration
+against the response-session lifetime. Those three are dashboard state that
+cannot be read from the repository.
 
 Deliverables: document the supported console origins for a LAN or disconnected
 installation; specify a stable DNS name plus a certificate the operator's browser
@@ -1695,8 +1744,9 @@ ownership before starting and do not run two slices that share a file.
 | 2.3 | Endpoint manifest signing and hub receipt signing, with verification | 2.2 | `hub/pkg/evidence`, agents |
 | 2.4 | Safe export layout, streaming limits, honest failure, offline verify | 2.3 | `hub/pkg/evidence`, `ominullctl` |
 | 2.5 | Retention enforcement and legal hold with actor and reason | 2.2 | `hub/pkg/evidence` |
-| 3.0 | Phase 3.0 prerequisites, including the trusted-origin deployment | 1B.3, 2.3 | deployment, `docs/` |
-| 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0, 1D.2 | `hub/pkg/terminal`, agents |
+| 3.0a | Add the Ominull console vhost to the existing LAN Caddy, point DNS at it, verify secure context and WebAuthn in a real browser | R0 | `/etc/caddy/Caddyfile`, LAN DNS |
+| 3.0b | Remaining Phase 3.0 prerequisites and the no-proxy deployment path | 3.0a, 1B.3, 2.3 | deployment, `docs/` |
+| 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0b, 1D.2 | `hub/pkg/terminal`, agents |
 | 3A.2 | Durable session state, limits, sweeper, hashed one-use relay tokens | 3A.1 | `hub/pkg/terminal` |
 | 3B.1 | Linux `forkpty` worker with resize and child-tree kill | 3A.2 | `agent/linux` |
 | 3B.2 | Windows ConPTY worker in a Job Object; raise the Windows build baseline to `NTDDI_VERSION 0x0A000006` and record the new OS floor | 3B.1, 0.3 | `agent/` Windows sources, `scripts/build-packages.sh` |
