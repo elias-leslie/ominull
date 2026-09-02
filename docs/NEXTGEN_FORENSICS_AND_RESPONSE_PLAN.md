@@ -1,10 +1,189 @@
 # Ominull next-generation forensics and response execution plan
 
-Status: proposed; owner decisions recorded; implementation not started
+Status: **AUDITED WORKING TREE; NOT RELEASE-READY; RESPONSE EXECUTION AND
+INTERACTIVE SHELL ARE NOT SAFE TO USE**
 
 Last reviewed: 2026-09-02
 
 Supported endpoints: Linux and Windows
+
+## Implementation audit as of 2026-09-02
+
+Code presence is not completion. None of the new response phases has passed its
+acceptance gate. Treat the current files as an unsafe prototype to salvage or
+replace, not as released behavior.
+
+| Phase | Audited state | Evidence and blocking gaps |
+|---|---|---|
+| Phase 0 | Not accepted | Go DTOs and copied JSON examples exist. Both C agents do not consume the fixtures. Bounds, old-version behavior, canonical signed-byte fixtures, baseline measurements, and the response threat model are absent. |
+| Phase 1A | Unsafe prototype deployed | A second service and Unix socket exist, including on the observed production installation. Both the hub and authority run as `root`; signer state is root-owned; `NoNewPrivileges` is disabled. This provides no hub-process key isolation and conflicts with the documented one-service v1.8.3 package contract. |
+| Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
+| Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
+| Phase 1D | Reject, unsafe to execute | Linux and Windows use substring searches rather than a bounded protocol parser (`agent/src/service.c` `ProcessResponseOffersWindows`, `agent/linux/main.c`). They do not verify the grant signature, action digest, tenant, endpoint, expiry, signer key, nonce, or replay state; the word `grant` does not appear in the agent tree at all. They acknowledge before validation and then post a hard-coded `"state":"succeeded"` result for work that was never performed. The Windows parser also reads `lease_id` from the whole response body rather than from the matched offer. There is no worker isolation or durable duplicate prevention. |
+| Phase 1E | Failing | `ominullctl` does not compile at this checkpoint (`hub/cmd/ominullctl/main.go:750`, `declared and not used: raw`). It retains a plaintext API-key environment fallback (`main.go:174`, `OMINULL_API_KEY`), contains forbidden `shell open`/`shell exec` paths (`main.go:695-725`), prints the terminal connection token to stdout (`main.go:718`), and reports any parseable forensic manifest as `"verified": true` without cryptographic checks (`main.go:592`). Parity and pagination are incomplete. |
+| Phase 2 | Unsafe storage prototype | AES-GCM helpers and basic SQLite rows exist. Uploads are unbounded and non-resumable; writes follow paths without the required no-follow, atomic, fsync, quota, and transaction controls; tenant scoping is missing on item, hold, finalize, and export paths; manifests are not verified; endpoint signatures and hub receipt signatures do not exist; archive names are unsafe; legal hold has no retention enforcement; offline verification is a stub. |
+| Phase 3 | No usable shell; unsafe surface exposed | There is no WebSocket route, PTY, ConPTY, pairing, or byte relay. Detailed findings are listed under "Phase 3 re-verification" below. |
+| Phase 4 | Unsafe demo collector | Linux uploads one `uname` JSON object, hard-codes `"tenant_id":"default"` in the manifest, sends an empty `"sha256":""` for the single item, performs no grant verification, and runs inline with the heartbeat (`agent/linux/main.c`). Windows collection profiles and all bounded profile contracts are absent. |
+| Phase 5 | Storage prototype only | Immutable rows and source hashes exist. Interpreter and source bounds, parameter-schema validation, tenant checks on direct object access, schedules, safe parameter delivery, endpoint execution, cancellation, and signed payload binding do not. |
+| Phase 6 | DTO fields only | Optional fields were added to the Go `Event` struct, but no durable schema path, agent production, boot identity, process lineage, ETW provider, executable hashing, or measurement evidence exists. |
+| Phase 7 | Schema demo only | Tables and caller-supplied ingestion exist. There is no endpoint inventory collector, NVD/KEV fetcher, feed snapshot lifecycle, CPE/version-range implementation, or scheduler. The current matcher is `strings.Contains(strings.ToLower(product), strings.ToLower(pattern))` (`hub/pkg/vuln/store.go:231`) and ignores version ranges while labeling results as authoritative. |
+
+Audit evidence captured on 2026-09-02:
+
+- Production observation showed both services active as `root`, with root-owned
+  authority runtime and state paths. Service presence proves deployment only.
+- `go build ./...` in `hub/` fails on `cmd/ominullctl/main.go:750`. `go test` for
+  the touched Go packages therefore cannot pass as a set. The server package
+  passed on its own, but that does not clear the failed gate.
+- `README.md` still defines v1.8.3 as one hub service and labels this document as
+  proposed future work. Reconcile package, documentation, commit, version, and
+  signed artifact identity before another deployment. Never publish different
+  bytes under an already released version.
+
+### Phase 3 re-verification (interactive shell)
+
+Every item below was confirmed in the working tree on 2026-09-02 and must be
+fixed or removed before any shell work is called usable. This list is the Phase 3
+starting defect set, not a summary.
+
+Authorization path:
+
+1. `POST /api/v1/terminal/sessions` is registered behind `s.authMiddleware`
+   (`hub/pkg/server/server.go:3156`), so a static admin API key or an ordinary
+   console session reaches the shell-creation route. The plan requires that route
+   to reject static keys, CLI credentials, and ordinary sessions.
+2. The handler reads the operator from the caller-supplied `X-Operator-ID` header
+   and falls back to the literal `"admin"` (`hub/pkg/server/terminal_handlers.go:73-76`).
+   `authMiddleware` strips `X-Role`, `X-Tenant-ID`, `X-Username`, `X-User-ID`,
+   `X-Client-CN`, and `X-Device-Endpoint-ID` (`server.go:811`) but not
+   `X-Operator-ID`. Operator identity is therefore forgeable and is never derived
+   from authenticated server context.
+3. The handler forwards the caller's `action_digest` to the authority unchanged
+   and never recomputes it from `endpoint_id` and `program`
+   (`terminal_handlers.go:88-99`). A proof signed for one action authorizes a
+   different endpoint or program with the same digest string.
+4. `Authority.SignGrant` compares only `Proof.ActionDigest` to the requested
+   digest (`hub/pkg/responseauth/authority.go:252-255`). It never checks
+   `Proof.TenantID`, `Proof.ActionKind`, or `Proof.TargetEndpoints` against the
+   request, so a proof issued for one tenant, kind, or endpoint set is accepted
+   for another.
+5. `ActionProof.Nonce` is signed but never stored or consumed
+   (`hub/pkg/responseauth/dto.go:79-98`). Within the +/-300s window one captured
+   proof mints unlimited grants. Grant nonces are generated but no hub or agent
+   replay cache exists.
+6. Both `EndpointGrant.CanonicalString` (`hub/pkg/response/dto.go:60-74`) and
+   `ActionProof.CanonicalString` (`responseauth/dto.go:65-76`) are colon-joined
+   `fmt.Sprintf` strings over unescaped free-text fields. The plan requires
+   deterministic length-prefixed bytes and explicitly forbids delimiter-joined
+   signing input. Any field containing `:` shifts the field boundaries.
+7. `Authority` sessions are in-memory, so restarting the authority silently
+   invalidates every unlocked response session and every grant it could issue.
+
+Session, token, and state handling:
+
+8. `TerminalSession.Summary()` marshals the whole struct, so the REST response,
+   the session list, and `ominullctl shell show` all return `connect_token` and
+   the full signed `Grant` (`hub/pkg/terminal/session.go:55,64,195-204`). The plan
+   requires that neither ever appear in a normal API DTO.
+9. The connect token is also written in cleartext into the response job's
+   `request_json` (`terminal_handlers.go:109-113`) and therefore into the hub
+   database, and printed to stdout by the CLI (`ominullctl/main.go:718`). It is
+   never hashed and never marked one-use.
+10. `GetSession`, `CloseSession`, and `RecordFrame` take a session ID with no
+    tenant argument (`terminal/session.go:129,155,175`), and the handlers do not
+    re-check tenant. Any authenticated caller who knows a session ID reads,
+    writes frames to, or closes another tenant's session.
+11. `ExpiresAt` and `IdleExpiresAt` are set but never enforced. No sweeper exists;
+    sessions stay in the map forever and `CloseSession` does not remove them.
+    Only the per-endpoint check in `CreateSession` reads `ExpiresAt`. The
+    four-per-tenant cap is not implemented anywhere.
+12. `Frames` is an unbounded `[]TerminalFrame` in process memory
+    (`terminal/session.go:65`), never persisted, never encrypted, and lost on
+    restart.
+13. `POST /api/v1/terminal/frames` is registered behind
+    `s.deviceOrLegacyMiddleware` (`server.go:3158`), so any endpoint device
+    credential can append forged "audit" frames to any session ID, while the
+    console calls the same route from a browser context it was not scoped for.
+14. The console posts `{kind, payload, timestamp}` but `terminal.TerminalFrame`
+    decodes `{type, data, rows, cols}` (`app.js:5173-5180` against
+    `terminal/session.go:36-43`). Every recorded frame is currently empty with an
+    unknown type, and the mismatch is silently accepted.
+
+Console:
+
+15. `openTerminalSession` posts only `{endpoint_id, program}` with no response
+    session, no browser key, and no action proof (`app.js:5133-5135`). There is
+    no unlock flow, no response-authority controller window, and no browser key
+    generation in the console at all, so the intended secure path is not merely
+    incomplete, it is absent.
+16. The modal renders `SESSION ACTIVE`, `Connected to <endpoint> ... via Ominull
+    Relay`, `Interactive pseudoterminal ready`, and `Frames encrypted & audited`
+    (`app.js:5150-5194`) when no relay, pseudoterminal, encryption, or recording
+    exists. A queued frame is reported to the operator as
+    `[Command queued on endpoint heartbeat relay]`.
+17. No terminal emulator is vendored. The control is a single-line text input
+    that cannot carry control characters, resize, or full-screen output.
+
+Endpoint:
+
+18. Neither agent implements a pseudoterminal, ConPTY, WSS client, or grant
+    verification, and neither recognizes the `terminal_session` action kind. Any
+    offer reaching an agent is acknowledged and reported `succeeded` by the
+    generic handler described in the Phase 1D row.
+
+Until Phase 3 is accepted, production must not expose a shell action or terminal
+mutation/stream route. Agents must reject terminal offers. Do not use the current
+response-auth, job, script-run, collection-launch, terminal, or evidence mutation
+prototypes against real endpoints or evidence.
+
+## Slice R0: contain the deployed prototype (do this first)
+
+This slice precedes Phase 0. The unsafe surface described above is present in a
+running production installation, so containment is not optional cleanup and is
+not to be merged into a later feature slice.
+
+Required behavior:
+
+1. Make every unreleased response mutation route fail closed behind one
+   build/config gate that is off by default: terminal session create/close/frames,
+   response job create/cancel, script run, evidence mutation and export, response
+   auth enroll/unlock/lock, and vulnerability sync. Fail closed means the route
+   is absent or returns a 404/503 with no side effect. Returning 2xx, creating a
+   session object, or signing a grant is a release blocker.
+2. Remove `shell open`, `shell exec`, and any connection-token printing from
+   `hub/cmd/ominullctl`. Fix the build error at `main.go:750` and remove the
+   `OMINULL_API_KEY` plaintext environment fallback in the same change.
+3. Remove the console shell modal and its entry points, or replace their text
+   with an explicit "not implemented" state. No control may claim connected,
+   active, encrypted, relayed, or audited while item 16 of the Phase 3
+   re-verification list stands.
+4. Remove the agent-side offer handlers that acknowledge and report `succeeded`
+   without doing work (`agent/src/service.c`, `agent/linux/main.c`). An agent
+   that cannot verify a grant must ignore the offer and continue normal
+   heartbeats; it must not ACK.
+5. Reconcile the production host: stop and disable the unaccepted
+   `response-authority` service, remove or restrict its root-owned state, and
+   record what was found and removed. Any tenant key material generated by the
+   prototype is compromised by definition and must be destroyed, not reused.
+6. Reconcile version identity. The deployed bytes must not remain published under
+   an already released version number. State the version this containment ships
+   as and rebuild the signed artifacts for it.
+
+Acceptance:
+
+- `(cd hub && go build ./... && go vet ./... && go test -race ./...)` passes.
+- An authenticated request with the admin API key to each gated route returns a
+  fail-closed status with no database row, session object, grant, or audit entry
+  claiming work was done. Record the exact requests and responses.
+- A packaged agent receiving a synthetic terminal or job offer neither ACKs nor
+  posts a result. Show the hub-side log for the offer and the agent log.
+- `scripts/build-packages.sh` and the package lifecycle test pass, and the
+  installed tree on the production host matches the committed tree, package
+  contents, reported version, and signed digests.
+- The console contains no control that claims a capability listed as absent in
+  the audit table.
+
+Until R0 is accepted, no Phase 0-7 slice may be dispatched.
 
 ## Objective
 
@@ -83,6 +262,41 @@ For every task:
    static API keys and CLI credentials instead of mirroring them in the CLI.
 7. Record measured results. Do not replace evidence with claims such as zero
    overhead, zero false positives, guaranteed safety, or fixed latency.
+8. Derive actor, tenant, role, and credential class from authenticated server
+   context. Never trust identity or scope headers supplied by the caller.
+9. Recompute every action digest from a validated typed request. Never accept a
+   caller-supplied digest as proof that a different payload was authorized.
+10. Keep unreleased response routes absent or fail-closed. A placeholder that
+    acknowledges work, returns success, or renders an active-looking control is
+    a release blocker.
+11. Use a new version for every changed release artifact. Do not rebuild or
+    deploy different bytes under an existing version.
+
+Each numbered slice maintains an evidence record in the task or checked-in test
+documentation with these fields:
+
+```text
+slice, prerequisite commit, owned files, protocol/schema version,
+claims, test commands, exact results, package artifact digests,
+runtime target, observed behavior, resource measurements,
+known gaps, rollback result, final commit, release version
+```
+
+Use only these status values:
+
+- `planned`: no implementation claim;
+- `implemented`: code exists, but one or more acceptance gates remain;
+- `verified`: every slice gate passed with recorded evidence;
+- `accepted`: dependent phases may use it because package, runtime, security,
+  compatibility, and rollback gates all passed.
+
+An implementation agent may not mark a phase `verified` or `accepted` from unit
+tests, code inspection, a process being active, a route returning 2xx, or a UI
+screenshot alone. One failed required command keeps the phase below `verified`.
+Record failures as evidence; do not delete them from the handoff. Before release,
+compare the clean committed tree, package contents, installed files, service
+definitions, reported version, and signed artifact digests. They must identify
+the same build.
 
 Do not run parallel agents against the same shared files. In particular,
 `hub/pkg/server/server.go`, storage migrations, embedded console assets, agent
@@ -100,11 +314,11 @@ is safe only after a contract is merged and file ownership does not overlap.
   certificate. Tenant and endpoint identity checks remain mandatory.
 - Existing roles are administrator, analyst, and auditor. Auditor access is
   read-only.
-- The current packaged hub runs as `root` and owns one service. Same-host response
-  key isolation is not credible until the normal hub runs under a dedicated
-  unprivileged identity and the response authority runs under another identity.
-  This plan intentionally changes the package to own those two services while
-  preserving one-command installation, upgrade, recovery, and removal.
+- The published v1.8.3 documentation defines one root-run hub service. The
+  observed installation now also has a root-run response-authority service.
+  Treat this as unaccepted release drift, not the target architecture. Same-host
+  response key isolation begins only when the hub and authority use different
+  unprivileged identities and package/runtime evidence proves the split.
 - Linux and Windows packages, signed release metadata, rollback, containment,
   dead-man release, and standalone Windows recovery are retained capabilities.
 - `ominullctl` currently handles local setup-token recovery. Fleet operations
@@ -114,15 +328,29 @@ is safe only after a contract is merged and file ownership does not overlap.
 ## Security and correctness invariants
 
 - Authenticate every API and stream before allocating expensive resources.
+- Require trusted HTTPS for response unlock and terminal UI. Require `wss://`
+  end to end from each peer to the hub. Never permit `ws://` for terminal data,
+  even on a LAN, and never follow a redirect during a terminal handshake.
 - Reject static API keys, CLI credentials, and ordinary console sessions on
   shell creation and script run/schedule routes. Those routes require a valid
   tenant response session and a proof from its browser-bound key.
-- Bind endpoint operations to tenant, endpoint ID, job ID, and an expiring nonce.
+- Apply exact-origin and CSRF checks to cookie-authenticated mutations. The
+  server must distinguish console-cookie, OIDC/Access, static-key, CLI, tenant,
+  and device authentication classes rather than treating all successful login
+  methods as interchangeable.
+- Bind endpoint operations to tenant, endpoint ID, job or terminal ID, complete
+  typed action payload, signer key ID, issued/expiry times, and an expiring
+  nonce. Sign deterministic length-prefixed bytes. Do not sign delimiter-joined
+  strings or language-default JSON encodings.
 - Reject replayed, expired, cross-tenant, and wrong-endpoint messages.
 - Persist state transitions before exposing them to callers. Retried requests
   must be idempotent.
 - Never place credentials, secret parameter values, or terminal contents in URLs,
   process arguments, normal application logs, or telemetry events.
+- Never return a response grant, raw relay token, browser private key, wrapped
+  evidence key, TOTP secret after enrollment, or authority private state in a
+  normal API DTO. Store one-use relay tokens as hashes and redact headers at
+  every proxy and log layer.
 - Treat all endpoint data, archive paths, filenames, terminal bytes, and script
   output as hostile input. Never trust client paths or extract an endpoint-made
   archive directly into hub storage.
@@ -137,6 +365,16 @@ is safe only after a contract is merged and file ownership does not overlap.
   keys. There is no fleet-wide response key and no platform-admin override.
 - The response authority accepts typed actions only. It must never expose an
   interface that signs caller-supplied bytes.
+- A terminal agent connection requires its unique device credential, its one-use
+  relay proof, and the endpoint identity proof required by the deployment. A
+  browser connection requires its signed console session, exact allowed Origin,
+  active response session, and one-use HttpOnly attach cookie. Session IDs are
+  identifiers, not credentials.
+- Revoking an operator, response membership, authenticator, endpoint credential,
+  response key, grant, or session closes affected live terminals and prevents
+  reconnect. Closing a browser terminal socket closes the endpoint child tree.
+- Never emit a success result for an unknown action kind, unverified grant,
+  unsupported worker, dropped frame, incomplete collection, or failed recording.
 - Keep the release-signing private key offline and outside both hub processes.
   Otherwise the update path bypasses every response control in this plan.
 - Record actor, tenant, endpoint, action, timestamps, outcome, and reason where a
@@ -183,18 +421,23 @@ bound to:
 
 ```text
 operator_id, tenant_id, browser_session_id, browser_public_key,
-allowed_action_kinds, issued_at, idle_expires_at, absolute_expires_at
+credential_id, authentication_method, authenticated_at,
+allowed_action_kinds, issued_at, last_activity_at,
+idle_expires_at, absolute_expires_at
 ```
 
 - Default absolute lifetime is eight hours. Default response idle lock is 30
   minutes. Activity may move the idle deadline but never the absolute deadline.
-- Generate a non-exportable ephemeral signing key inside the response-authority
-  browser context during unlock. The hub receives only its public key. A stolen
-  normal session cookie is not enough to create response actions from another
-  browser.
-- Keep the ephemeral key in that context's memory. Closing the browser loses it
-  and locks response. Do not expose it to the hub page or persist it in local
-  storage, IndexedDB, or a downloadable file.
+- Generate a non-exportable ephemeral signing key in a dedicated
+  response-authority controller window during unlock. The authority certifies
+  the public key into the response session. The hub receives only the public key
+  and signed action proofs. A stolen normal session cookie is not enough to
+  create response actions from another browser.
+- Keep the controller window and key in memory. Communicate with the console only
+  through schema-checked `postMessage` calls with exact `targetOrigin`, source
+  window, tenant, session, request nonce, and action digest checks. Closing the
+  controller locks response. Never put the key in the hub page, a URL,
+  `localStorage`, `sessionStorage`, IndexedDB, a service worker cache, or a file.
 - Browser binding prevents reuse of a stolen cookie from another browser. It does
   not defeat malicious code already running in the unlocked console origin. The
   tenant scope, idle lock, absolute limit, target caps, and signer partition bound
@@ -202,10 +445,14 @@ allowed_action_kinds, issued_at, idle_expires_at, absolute_expires_at
   every action when it needs stronger protection.
 - Scope one response session to one tenant. Switching tenants locks response and
   requires another strong authentication event.
+- Bind `operator_id` and `browser_session_id` to server-authenticated context.
+  Reject caller-supplied identity headers. Re-read hub role and authority
+  membership for every grant and close sessions after either is revoked.
 - Display the active tenant, operator, remaining time, idle state, active shells,
   running scripts, and a persistent `Lock response` control in the console.
-- Locking or absolute expiration rejects new actions and expires unstarted grants.
-  Give active shells a short reauthentication grace period, then close them.
+- Explicit `Lock response` closes active shells immediately, rejects new actions,
+  and expires unstarted grants. Idle or absolute expiry rejects new actions and
+  gives active shells the Phase 3 reauthentication grace period before closing.
   Already running scripts obey their signed execution limit; an explicit lock-all
   action may request cooperative cancellation.
 
@@ -220,7 +467,10 @@ provider, managed key service, or purchased authenticator.
   support it. Require a trusted HTTPS relying-party origin.
 - Compatibility fallback: built-in TOTP using any standards-compatible
   authenticator application. Rate-limit attempts, lock after repeated failures,
-  and never represent TOTP as phishing-resistant.
+  accept a time-step value only once, encrypt secrets with an authority-owned key,
+  and never represent TOTP as phishing-resistant. Rate limits bind tenant,
+  operator, authenticator, source, and a global ceiling so identifier rotation
+  cannot bypass them.
 - Optional methods: device-bound FIDO keys and external WebAuthn providers.
 - Optional push adapter: require number matching and show deployment, tenant,
   operator, request time, and response-session expiration. Never send a blind
@@ -238,6 +488,11 @@ requirement; it must not generate, parse, or reimplement the QR protocol. Before
 starting the ceremony, the authority page displays the deployment, tenant, and
 requested eight-hour scope. If the supported browser cannot offer hybrid
 transport, use a current-device passkey, security key, or built-in TOTP instead.
+WebAuthn registration and authentication set user verification to `required`,
+verify the exact configured origin and RP ID, consume each challenge once, and
+store credential ID, public key, transports, backup state, signature counter, and
+last use. Counter behavior is risk evidence, not a universal clone verdict for
+syncable passkeys.
 
 ### Browser-bound action proof
 
@@ -613,6 +868,87 @@ Start with a transport spike. Do not merge console work until the supported Linu
 and Windows agents can establish and cleanly tear down an authenticated loopback
 session through the hub.
 
+### 3.0 Prerequisites and contracts (blocking, resolve before 3A)
+
+These were undefined in earlier revisions and are the practical reason a
+correctly implemented shell can still be unusable or insecure in this
+deployment. Each one is a named deliverable with its own evidence.
+
+**Trusted browser origin.** The response path depends on two browser APIs that
+only exist in a secure context: WebCrypto for the non-exportable ephemeral
+browser key, and WebAuthn for the preferred unlock method. A hub reached as
+`http://<address>` or over an untrusted certificate cannot generate the browser
+key, cannot run WebAuthn, and therefore cannot open a shell at all. TOTP does not
+rescue that case, because the browser proof itself needs WebCrypto.
+
+Deliverables: document the supported console origins for a LAN or disconnected
+installation; specify a stable DNS name plus a certificate the operator's browser
+trusts, obtained from an internal CA or ACME; define the WebAuthn relying-party ID
+for that name; state that changing the name or RP ID invalidates enrolled
+passkeys; and confirm the hub serves HSTS and rejects mixed content on that
+origin. Provide the operator-facing setup procedure in the same slice. Record a
+real browser check on the actual deployment, not a localhost check, since
+`localhost` is a secure context and will hide this failure.
+
+**Canonical signing bytes.** Replace both colon-joined `fmt.Sprintf`
+canonicalizations with one shared deterministic length-prefixed encoding:
+a fixed domain-separation label, then for each field in a fixed order a 4-byte
+big-endian length followed by the raw field bytes, with integers encoded as
+fixed-width big-endian. Ambiguity between adjacent fields must be impossible.
+Ship it as one function used by the hub, the authority, and both agents, with
+byte-exact cross-language fixtures. Old prototype signatures are not accepted;
+bump the grant and proof versions.
+
+**Action digest definition.** Define, per action kind, the exact typed payload
+that is digested. For `terminal_session` it is at minimum: protocol version,
+tenant ID, endpoint ID, terminal session ID, program identifier from the fixed
+allowlist, requested TTL, and the response session ID. The hub recomputes the
+digest from its own validated typed request and passes only that value to the
+authority. A caller-supplied digest is never used; the authority rejects a
+request whose recomputed digest is absent. The authority additionally verifies
+that the proof's tenant, action kind, and target endpoint set match the request.
+
+**Proof and grant replay state.** Proof nonces are recorded and single-use for
+the proof freshness window. Grant IDs and nonces are recorded at the hub and, per
+1D, cached durably at the endpoint for the grant lifetime. Define the store,
+retention, and eviction for both.
+
+**Relay token handling.** The one-use connection token is delivered only inside
+the signed grant payload carried by the authenticated heartbeat and, for the
+operator side, as a one-use HttpOnly attach cookie set on the response-session
+origin. It is stored at the hub only as a hash. It must never appear in a REST
+DTO, a session summary, the response job `request_json`, CLI output, logs,
+telemetry, or a URL. Add a test that greps the API responses, database rows, and
+log output for the issued token value and fails if it is found.
+
+**Agent connection target and proxy path.** Specify how the agent learns the WSS
+address, which is not necessarily the hub API address; whether the agent presents
+its existing client certificate on that connection; and the required behavior
+behind a reverse proxy. State the proxy requirements explicitly: `Upgrade` and
+`Connection` headers preserved, no redirect during handshake, per-connection
+idle timeout at least the terminal idle timeout, and no response buffering.
+Document the observable failure for each unmet requirement rather than letting
+the session hang in `connecting`. Provide a working reference proxy
+configuration for the deployment's actual front end.
+
+**Restart and revocation semantics.** Define what happens to a `waiting`,
+`connecting`, and `active` session when the hub restarts, the response authority
+restarts, the agent restarts, or the network drops. The authority's session and
+authenticator state must be durable before Phase 3 begins; an authority restart
+that silently invalidates every unlocked session is a Phase 1B defect, not a
+Phase 3 one. Persist every terminal state transition with a final reason, and
+close the endpoint child tree on every path.
+
+**Enforcement of the stated limits.** The caps in 3A are contract, not
+documentation. Implement and test: one active shell per endpoint, four per
+tenant, connect timeout, idle timeout, absolute maximum, queued-bytes cap per
+direction, and a sweeper that expires and removes sessions. Every read, write,
+frame, and close path takes a tenant and verifies it against the session.
+
+**Frame schema ownership.** `hub/pkg/terminal` owns the frame wire schema. The
+console and both agents consume the same fixtures. A frame that does not match
+the schema is rejected, counted, and surfaced, never silently recorded as empty.
+
 ### 3A. Session and transport
 
 Flow:
@@ -702,6 +1038,46 @@ Acceptance:
 - Browser sessions leave no orphan shell or persisted ephemeral browser key.
 - Packaged fresh installs provide the full console workflow using platform
   passkeys or built-in TOTP without an external service or purchased hardware.
+- The response-session, terminal-session, and frame routes reject a static API
+  key, a CLI credential, and an ordinary console session with no side effect.
+  Record the request and response for each.
+- Operator identity, tenant, and role on every response route come from
+  authenticated server context. A request that sets `X-Operator-ID` or any other
+  identity header is unaffected by it. Add the header to the sanitized set in
+  `authMiddleware` and test that the forged value never reaches a grant, a
+  session record, or an audit row.
+- The issued connection token does not appear in any API response, database row,
+  log line, CLI output, or exported artifact.
+- Every claim rendered next to the terminal is true at the moment it is shown.
+  Connection state comes from the live socket, recording state from the recorder,
+  and encryption state from the evidence module. No static "encrypted & audited"
+  text.
+
+**Operator walkthrough (required end-to-end evidence).** Run this on the real
+deployment, from the operator's own browser, and record each step with its
+observed result. A passing unit suite does not substitute for it.
+
+1. Load the console over its trusted HTTPS name. Confirm the secure context and
+   that the response controller can generate a browser key.
+2. Unlock response for one tenant with a platform passkey, then repeat the whole
+   walkthrough with TOTP as the only enrolled method.
+3. Confirm the endpoint has no pseudoterminal, shell process, listener, or
+   outbound WSS connection before the click. Capture the process and socket state
+   on the endpoint.
+4. Open a shell on one endpoint. Type an interactive command, a long-running
+   command interrupted with Ctrl-C, a full-screen program, and a resize.
+5. Confirm the recording contains the exact frames, is encrypted at rest, and is
+   readable only through the intended path.
+6. Close the session from the console. Confirm the child tree is gone on the
+   endpoint and the session's final state and reason are persisted.
+7. Repeat and instead let the idle timeout, then the absolute timeout, then an
+   explicit `Lock response` close the session. Confirm each path closes the
+   endpoint side.
+8. Restart the hub, then the authority, then the agent, each with a session open.
+   Confirm the documented behavior occurs and no orphan shell survives.
+9. Attempt the same shell from a second browser using a copied session cookie,
+   from a static API key, and from `ominullctl`. All must fail with no endpoint
+   side effect.
 
 ## Phase 4: forensic collection profiles
 
