@@ -183,6 +183,10 @@ operations brief and keep all credentials outside Git.
   `gitleaks` reports only the one documented historical placeholder. The required tracked
   scan exposed one real subnet in unrelated dirty `ominullctl` work; it was substituted as
   documented in the shared-checkout section above and will be re-scanned before commit.
+- [x] Commit the isolated remediation as `e7beaf9` with no unrelated response-authority
+  files or hunks.
+- [x] Create a clean release clone from `e7beaf9` and bump all retained version sites to
+  1.8.3. Production packages must come only from this clean release tree.
 - [x] Document safe listener defaults in `README.md` and mark the older v1.8.1 production
   port assumptions as superseded by this incident plan.
 - [ ] Pass full repository gates and private-identifier scans.
