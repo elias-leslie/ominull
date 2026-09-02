@@ -21,7 +21,7 @@ replace, not as released behavior.
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
 | Phase 1D | Reject, unsafe to execute | Linux and Windows use substring searches rather than a bounded protocol parser (`agent/src/service.c` `ProcessResponseOffersWindows`, `agent/linux/main.c`). They do not verify the grant signature, action digest, tenant, endpoint, expiry, signer key, nonce, or replay state; the word `grant` does not appear in the agent tree at all. They acknowledge before validation and then post a hard-coded `"state":"succeeded"` result for work that was never performed. The Windows parser also reads `lease_id` from the whole response body rather than from the matched offer. There is no worker isolation or durable duplicate prevention. |
 | Phase 1E | Failing | `ominullctl` does not compile at this checkpoint (`hub/cmd/ominullctl/main.go:750`, `declared and not used: raw`). It retains a plaintext API-key environment fallback (`main.go:174`, `OMINULL_API_KEY`), contains forbidden `shell open`/`shell exec` paths (`main.go:695-725`), prints the terminal connection token to stdout (`main.go:718`), and reports any parseable forensic manifest as `"verified": true` without cryptographic checks (`main.go:592`). Parity and pagination are incomplete. |
-| Phase 2 | Unsafe storage prototype | AES-GCM helpers and basic SQLite rows exist. Uploads are unbounded and non-resumable; writes follow paths without the required no-follow, atomic, fsync, quota, and transaction controls; tenant scoping is missing on item, hold, finalize, and export paths; manifests are not verified; endpoint signatures and hub receipt signatures do not exist; archive names are unsafe; legal hold has no retention enforcement; offline verification is a stub. |
+| Phase 2 | Unsafe storage prototype | AES-GCM helpers and basic SQLite rows exist and the item encryption path works. Every gap in the original row is confirmed. Detailed findings are listed under "Phase 2 re-verification" below. |
 | Phase 3 | No usable shell; unsafe surface exposed | There is no WebSocket route, PTY, ConPTY, pairing, or byte relay. Detailed findings are listed under "Phase 3 re-verification" below. |
 | Phase 4 | Unsafe demo collector | Linux uploads one `uname` JSON object, hard-codes `"tenant_id":"default"` in the manifest, sends an empty `"sha256":""` for the single item, performs no grant verification, and runs inline with the heartbeat (`agent/linux/main.c`). Windows collection profiles and all bounded profile contracts are absent. |
 | Phase 5 | Storage prototype only | Immutable rows and source hashes exist. Interpreter and source bounds, parameter-schema validation, tenant checks on direct object access, schedules, safe parameter delivery, endpoint execution, cancellation, and signed payload binding do not. |
@@ -130,6 +130,63 @@ Endpoint:
     verification, and neither recognizes the `terminal_session` action kind. Any
     offer reaching an agent is acknowledged and reported `succeeded` by the
     generic handler described in the Phase 1D row.
+
+### Phase 2 re-verification (evidence store)
+
+Confirmed in the working tree on 2026-09-02. Object encryption itself is sound:
+a random per-item data key, AES-GCM, a wrapped key, and a content-digest object
+name. Everything around it is not.
+
+1. Uploads are unbounded and buffered whole: `io.ReadAll(r.Body)`
+   (`hub/pkg/server/evidence_handlers.go:109`) into `StoreItem(..., plaintext
+   []byte)`. There is no `MaxBytesReader`, no chunking, no resume, no range
+   tracking, and no quota. One endpoint can exhaust hub memory and disk.
+2. Object writes use `os.WriteFile(objectPath, ciphertext, 0600)`
+   (`hub/pkg/evidence/store.go:176`): no temporary file, no atomic rename, no
+   `O_NOFOLLOW`, no fsync, no free-space or quota check, and no transaction
+   spanning the object write and the row insert. A crash between them leaves an
+   orphan object or a row pointing at nothing.
+3. No store method takes a caller tenant. `StoreItem`, `FinalizeBundle`,
+   `GetBundle`, `SetLegalHold`, and `ExportBundleToTarGz` all read the tenant
+   *out of* the bundle row and never compare it to the requester. The handlers do
+   not compare it either: the hold handler acts on `req.BundleID` alone
+   (`evidence_handlers.go:180`) and the export handler on `?id=` alone
+   (`evidence_handlers.go:198-215`). Any authenticated caller who knows a bundle
+   ID reads, exports, or holds another tenant's evidence.
+4. `FinalizeBundle` accepts the caller's manifest, marshals it, and hashes the
+   result (`store.go:217-240`). It never checks the manifest against the stored
+   items, their hashes, their count, or their sizes, and there is no endpoint
+   signature to verify because no endpoint evidence-signing key exists.
+5. The receipt is a hash chain with no signature (`store.go:262-280`). Anything
+   that can write the database can rewrite the whole chain, so the current
+   construction is not tamper-evident against the threat it is meant to cover.
+   Chain order comes from `ORDER BY ingested_at DESC LIMIT 1`, which is ambiguous
+   under equal timestamps and clock movement.
+6. The upload response serializes the item DTO including
+   `"encrypted_key"` (`hub/pkg/evidence/dto.go:48`,
+   `evidence_handlers.go:118`). The plan forbids returning a wrapped evidence key
+   in a normal API DTO.
+7. Export writes `tar.Header{Name: it.Name}` from the endpoint-supplied item name
+   (`store.go:378-383`). A name containing `../` or an absolute path escapes on
+   extraction. The export also decrypts each item fully into memory with no size
+   limit.
+8. `handleEvidenceExport` swallows a mid-stream error after headers are sent
+   (`evidence_handlers.go:214-219`), so a truncated archive is indistinguishable
+   from a complete one, and the `EVIDENCE_EXPORTED` audit row is written even
+   when the export failed. The download filename is built from the
+   endpoint-controlled `bundle.EndpointID` without sanitizing, and `bundleID[:8]`
+   assumes a length the code never checks.
+9. Retention is stored and never enforced. `retention_expires_at` is written on
+   create and read back on get; nothing anywhere deletes or reviews it, so legal
+   hold currently blocks a process that does not exist. `SetLegalHold` also does
+   not record who set it or why.
+10. Encryption associated data is `fmt.Sprintf("%s:%s:%s", tenantID, bundleID,
+    name)` (`store.go:166`). The item name is attacker-controlled and unescaped,
+    so the same delimiter ambiguity described for the grant and proof
+    canonicalization applies to the AEAD binding.
+11. Offline verification does not exist. `ominullctl forensics verify` reports
+    `"verified": true` for any parseable manifest file
+    (`hub/cmd/ominullctl/main.go:592`).
 
 Until Phase 3 is accepted, production must not expose a shell action or terminal
 mutation/stream route. Agents must reject terminal offers. Do not use the current
