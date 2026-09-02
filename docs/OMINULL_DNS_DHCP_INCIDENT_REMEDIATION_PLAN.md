@@ -137,6 +137,12 @@ to reach its own commit or build from a clean directory at the exact remediation
 a clean release directory is used, bring in only deployment helpers required by the private
 operations brief and keep all credentials outside Git.
 
+Final shared-checkout note: release work used a clean clone because the assigned checkout's
+uncommitted `agent/linux/main.c` work overlaps a required version site. Remote `main` contains
+the 1.8.3 release commits `4fb77b8` and `4df6e75`; the assigned checkout was intentionally not
+fast-forwarded over that user work. Do not reset, checkout, or overwrite the dirty files.
+Reconcile their owner changes first, then fast-forward to remote `main`.
+
 ## Progress checkpoints
 
 - [x] Read the private operations brief and applicable Ominull/debugging instructions.
