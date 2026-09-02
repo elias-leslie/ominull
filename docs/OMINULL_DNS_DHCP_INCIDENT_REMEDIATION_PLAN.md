@@ -29,9 +29,11 @@ DHCP observation explicit opt-ins.
 
 Production state at the latest checkpoint:
 
-- The affected client is online after account reset and re-enrollment.
+- The affected client is online after account reset and re-enrollment; the operator
+  reconfirmed it through the vendor application after Hub 1.8.3 returned to service.
 - The router uses automatic DNS.
-- The Ominull Hub container is stopped intentionally.
+- The Ominull Hub runs version 1.8.3 with its normal HTTP/TLS listeners active.
+- DNS reports `disabled`, and the Hub has no TCP/UDP 53 or UDP 67 listener.
 - No automatic Hub restart timer remains.
 - No endpoint isolation or mesh quarantine targeted the affected client.
 - Thirty forced, cache-cleared ARP probes each received exactly one response from the same
@@ -41,10 +43,11 @@ Production state at the latest checkpoint:
 
 ## Status
 
-Active incident follow-up, 2026-09-02. The production Hub is intentionally stopped while
-this work is in progress. The network router has been returned to automatic DNS. The
-affected legacy IoT client recovered only after its cloud account data was reset and the
-device was removed and re-added in its vendor application.
+Remediated and deployed, 2026-09-02. Production Hub 1.8.3 is active with DNS and passive
+DHCP observation disabled. The network router remains on automatic DNS. The affected legacy
+IoT client recovered only after its cloud account data was reset and the device was removed
+and re-added in its vendor application; the operator confirmed it still online after the
+corrected Hub deployment.
 
 Do not copy private fleet addresses, hostnames, account data, or hardware identifiers into
 this file. Use the repository's documented `10.0.0.x` stand-ins in any added test fixture.
@@ -189,11 +192,28 @@ operations brief and keep all credentials outside Git.
   1.8.3. Production packages must come only from this clean release tree.
 - [x] Document safe listener defaults in `README.md` and mark the older v1.8.1 production
   port assumptions as superseded by this incident plan.
-- [ ] Pass full repository gates and private-identifier scans.
-- [ ] Produce a clean patch-version release without unrelated working-tree code.
-- [ ] Deploy Hub first and converge required agents.
-- [ ] Verify live Hub health with TCP/UDP 53 and UDP 67 closed.
-- [ ] Confirm the recovered client remains online.
+- [x] Pass full repository gates and private-identifier scans. The clean 1.8.3 release tree
+  passed the full Hub race/vet suite, JavaScript and shell syntax, retained native tests,
+  warning-clean package builds, signing verification, and isolated MSI/Debian lifecycle.
+- [x] Produce clean signed 1.8.3 packages without unrelated working-tree code.
+- [x] Deploy Hub first, then converge every reachable retained agent. One intentionally
+  powered-off laptop correctly retains a pending update until it returns.
+- [x] Verify live Hub health: package 1.8.3 and service active, normal HTTP/TLS listeners
+  open, DNS status `disabled`, and no TCP/UDP 53 or UDP 67 listener.
+- [x] Confirm the recovered client remains online in the vendor application after deployment.
+- [x] Verify deployed Hub and endpoint package hashes match the clean release artifacts and
+  record the exact checksums in the private operations brief.
+
+The first release attempt completed all local stages and produced signed 1.8.3
+packages from the clean tree. The deploy helper then stopped before installation because it
+cannot push files into the intentionally stopped Hub container. No production service was
+started and no package was installed during that attempt. Once the signed build was ready,
+the container was started and the canonical release resumed immediately.
+
+Deployment resumed after the corrected signed build was ready. Hub 1.8.3 installed first,
+then all reachable retained agents converged on 1.8.3 with native provenance. One Windows
+laptop remains at its older version with a pending update because it is intentionally powered
+off; this is expected deferred convergence, not a release failure.
 
 ## Required changes
 
