@@ -216,6 +216,10 @@ See [`docs/AGENT_TLS.md`](docs/AGENT_TLS.md),
 [`docs/SETUP.md`](docs/SETUP.md), and
 [`docs/CLOUDFLARE.md`](docs/CLOUDFLARE.md).
 
+Proposed future forensics and remote-response work is tracked in
+[`docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md`](docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md).
+It does not describe current release behavior.
+
 ## License
 
 See [`LICENSE`](LICENSE).
