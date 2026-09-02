@@ -427,6 +427,21 @@ acceptance gates before dependent work starts.
   release decision. Versions published before the date specified in `LICENSE`
   retain their existing license.
 
+## Owner decisions on record
+
+Each of these was decided by the owner during the 2026-09-02 review. An
+implementation agent follows them and does not relitigate them. Raise a concern
+only with new evidence, and say what the evidence is.
+
+| Date | Decision |
+|---|---|
+| 2026-09-02 | Multi-tenancy is a real requirement. Build the tenant foundation now; keep the isolation adapters as seams. See the scope decision below. |
+| 2026-09-02 | Ominull serves its own console TLS. No external terminator in the default install. See Phase 3.0. |
+| 2026-09-02 | No interim reverse proxy anywhere. The console waits for slice 3.0a. |
+| 2026-09-02 | Historical data in the current deployment is expendable. Availability of fleet control is not: recovery time and losing the ability to reach endpoints are the real risks in the privilege split. |
+| 2026-09-02 | The installability constraint below is binding on every slice. |
+| open | The Windows agent OS floor. ConPTY forces `NTDDI_VERSION 0x0A000006` (Windows 10 1809). Decide in Phase 0 and record which Windows versions remain supported. |
+
 ## Installability constraint
 
 Ominull installs from its own packages and works immediately. An end user
@@ -1266,9 +1281,13 @@ rather than propping the console up on the developer workstation. The workstatio
 Caddy proved that DNS-01 issuance and WebSocket proxying work on this network,
 which is useful evidence, but it is not the deployment of record and no slice may
 depend on it: it puts the console origin on a machine that is not part of Ominull
-and that a customer will never have. If a browser-trusted console is needed
-before the in-hub listener lands, run the proxy inside LXC 150 next to the hub and
-label it explicitly as temporary.
+and that a customer will never have.
+
+Owner decision, 2026-09-02: **no interim proxy.** The console waits for the
+in-hub listener in slice 3.0a. Do not stand up Caddy, nginx, or any other
+terminator inside LXC 150 as a stopgap, and do not point the console at the
+workstation Caddy. Nothing before 3.0a needs a browser-trusted origin, so there
+is nothing to unblock.
 
 Keep the Cloudflare tunnel and Access for ordinary remote console use, and do not
 let the shell depend on them at this stage.
