@@ -1,9 +1,10 @@
 # Ominull next-generation forensics and response execution plan
 
 Status: **AUDITED WORKING TREE AND LIVE HUB; NOT RELEASE-READY; RESPONSE
-EXECUTION AND INTERACTIVE SHELL ARE NOT SAFE TO USE. THE FLEET DOWNLOAD
-DIRECTORY IS SERVING REBUILT v1.8.3 AGENT ARTIFACTS AND MUST BE CORRECTED
-FIRST (Slice R0.1).**
+EXECUTION AND INTERACTIVE SHELL ARE NOT SAFE TO USE. The fleet download
+directory was corrected on 2026-09-02 by slice R0.1 and now serves the released
+v1.8.3 bytes; the installed hub package, `dist/`, and the deployed authority
+service are still the rebuilt prototype and are owned by slice R0.6.**
 
 Last reviewed: 2026-09-02
 
@@ -18,7 +19,7 @@ replace, not as released behavior.
 | Phase | Audited state | Evidence and blocking gaps |
 |---|---|---|
 | Phase 0 | Not accepted | Go DTOs and copied JSON examples exist. The fixture tree is duplicated byte-for-byte at `hub/tests/fixtures/response` and `tests/fixtures/response`; pick one canonical location before either drifts. Only `*_valid.json` cases exist: no missing-field, unknown-field, maximum-size, or old-agent fixtures, and no canonical signed-byte fixtures. Neither C agent consumes any of them. Bounds, old-version behavior, baseline measurements, and the response threat model are absent. |
-| Phase 1A | Unsafe prototype deployed under a reused release version | Confirmed on the live hub. Both services run as `root` with `NoNewPrivileges=no`, and the rebuilt package was installed over the released v1.8.3 without a version change. The rebuilt agent artifacts are also live in the hub's fleet download directory. Detailed findings are listed under "Phase 1A re-verification" below. |
+| Phase 1A | Unsafe prototype deployed under a reused release version | Confirmed on the live hub. Both services run as `root` with `NoNewPrivileges=no`, and the rebuilt package was installed over the released v1.8.3 without a version change. The rebuilt *agent* artifacts are no longer in the fleet download directory: slice R0.1 withdrew them on 2026-09-02 and restored the released bytes (`docs/evidence/R0-1.md`). Everything else in the "Phase 1A re-verification" list below still stands, including the rebuilt hub package that `dpkg` certifies as 1.8.3. |
 | Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
 | Phase 1D | Reject, unsafe to execute | Linux and Windows use substring searches rather than a bounded protocol parser (`agent/src/service.c` `ProcessResponseOffersWindows`, `agent/linux/main.c`). They do not verify the grant signature, action digest, tenant, endpoint, expiry, signer key, nonce, or replay state; the word `grant` does not appear in the agent tree at all. They acknowledge before validation and then post a hard-coded `"state":"succeeded"` result for work that was never performed. The Windows parser also reads `lease_id` from the whole response body rather than from the matched offer. There is no worker isolation or durable duplicate prevention. |
@@ -158,14 +159,18 @@ commands. This is the most consequential finding in this review.
    the working tree: the hub deb, the Linux agent deb, and the Windows agent MSI.
    The released digests were `025d2c1e...` (hub), `04e2be61...` (agent deb), and
    `efb10616...` (MSI).
-5. The hub's `--binary-dir`, which is what `/download/` serves to the fleet for
-   self-update, now holds the rebuilt artifacts:
-   `ominull-agent_1.8.3_amd64.deb` is `f173f308...` and
-   `ominull-agent-windows-1.8.3.msi` is `6987760f...`, matching the modified
-   working tree rather than the release. Any endpoint that converges on "1.8.3"
-   therefore receives different bytes than the released 1.8.3, and the bytes it
-   receives contain the Phase 1D offer handler that acknowledges work it never
-   performed.
+5. **Corrected by slice R0.1 on 2026-09-02.** The hub's `--binary-dir`, which is
+   what `/download/` serves to the fleet for self-update, held the rebuilt
+   artifacts: `ominull-agent_1.8.3_amd64.deb` was `f173f308...` and
+   `ominull-agent-windows-1.8.3.msi` was `6987760f...`, matching the modified
+   working tree rather than the release. Any endpoint that converged on "1.8.3"
+   would have received different bytes than the released 1.8.3, containing the
+   Phase 1D offer handler that acknowledges work it never performed. The released
+   artifacts were recovered from the `scripts/release.sh` build tree, verified
+   against the release key pinned in `agent/include/release_key.h`, and restored;
+   `/download/` now returns `04e2be61...`, `efb10616...` and `025d2c1e...`, which
+   is the signed release record. No endpoint had taken the rebuilt bytes.
+   Evidence: `docs/evidence/R0-1.md`.
 
 Consequences for Slice R0: the containment work is not only local. The fleet
 download directory must be corrected before anything else, because it is actively
@@ -373,6 +378,21 @@ Acceptance:
   the audit table.
 
 Until R0 is accepted, no Phase 0-7 slice may be dispatched.
+
+### Slice R0 status ledger
+
+One row per `R0.x` slice. A slice updates its own row in the same commit as its
+change, with file:line or host evidence for what remains. No agent marks its own
+row `accepted`.
+
+| Slice | Status | Evidence | Remaining gaps |
+|---|---|---|---|
+| R0.1 | `implemented` | `docs/evidence/R0-1.md` | The R0 gate does not pass at this checkpoint: `cd hub && go build ./...` fails with `cmd/ominullctl/main.go:750:3: declared and not used: raw`, which is R0.3's defect and which R0.1 changed no Go source to cause or clear. The working tree still carries the rebuilt bytes under released filenames (`dist/ominull-agent_1.8.3_amd64.deb` = `f173f308...`, `dist/SHA256SUMS.txt` modified), so no deploy or release script may be run against the live hub until R0.6. `windows-laptop-b` (offline, v1.8.1) was inferred from `agent_update_jobs`, not hashed. |
+| R0.2 | `planned` | - | - |
+| R0.3 | `planned` | - | - |
+| R0.4 | `planned` | - | - |
+| R0.5 | `planned` | - | - |
+| R0.6 | `planned` | - | - |
 
 ## Objective
 
