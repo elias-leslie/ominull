@@ -1,5 +1,11 @@
 # Ominull v1.8.1 corrective hardening and UX plan
 
+> Historical plan. The 2026-09-02 incident remediation in
+> [`OMINULL_DNS_DHCP_INCIDENT_REMEDIATION_PLAN.md`](OMINULL_DNS_DHCP_INCIDENT_REMEDIATION_PLAN.md)
+> supersedes the production-port assumptions below. DNS and DHCP observation now default
+> off and must not be re-enabled on a client network path without the newer plan's tests
+> and operator approval.
+
 ## Objective
 
 Keep Ominull DNS forwarding and sinkholing. Replace ineffective DNS internals without changing the current DNS address, port, or clients. Correct the resource, security, data-integrity, installer, Traffic, and broader UI defects found during the v1.8.0 audit. Preserve Ominull's industrial operations-console identity.

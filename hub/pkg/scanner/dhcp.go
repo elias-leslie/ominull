@@ -27,17 +27,23 @@ type DHCPPacket struct {
 
 // DHCPSnooper passively listens for DHCP broadcast traffic on the local segment
 type DHCPSnooper struct {
-	scanner   *Scanner
-	conn      net.PacketConn
-	stopChan  chan struct{}
-	mu        sync.Mutex
-	isServing bool
+	scanner    *Scanner
+	listenAddr string
+	conn       net.PacketConn
+	stopChan   chan struct{}
+	mu         sync.Mutex
+	isServing  bool
 }
 
 func NewDHCPSnooper(scanner *Scanner) *DHCPSnooper {
+	return newDHCPSnooper(scanner, "0.0.0.0:67")
+}
+
+func newDHCPSnooper(scanner *Scanner, listenAddr string) *DHCPSnooper {
 	return &DHCPSnooper{
-		scanner:  scanner,
-		stopChan: make(chan struct{}),
+		scanner:    scanner,
+		listenAddr: listenAddr,
+		stopChan:   make(chan struct{}),
 	}
 }
 
@@ -50,7 +56,7 @@ func (d *DHCPSnooper) Start() error {
 		return nil
 	}
 
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:67")
+	conn, err := net.ListenPacket("udp4", d.listenAddr)
 	if err != nil {
 		d.isServing = false
 		return err

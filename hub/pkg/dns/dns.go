@@ -23,6 +23,7 @@ const (
 	StateProtecting ServerState = "protecting"
 	StateDegraded   ServerState = "degraded"
 	StateFailed     ServerState = "failed"
+	safeUDPSize                 = 1232
 )
 
 type CacheEntry struct {
@@ -250,6 +251,7 @@ func (s *Server) detectForwardingLoop() error {
 
 func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 	atomic.AddInt64(&s.queriesTotal, 1)
+	transport := responseTransport(w)
 
 	// Bound concurrency
 	select {
@@ -260,21 +262,17 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 		atomic.AddInt64(&s.errorsTotal, 1)
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
-		_ = w.WriteMsg(resp)
+		_ = w.WriteMsg(formatResponseForClient(resp, req, transport))
 		return
 	}
 
 	start := time.Now()
-	transport := "udp"
-	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
-		transport = "tcp"
-	}
 	clientHost, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 
-	if len(req.Question) == 0 {
+	if len(req.Question) != 1 {
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeFormatError)
-		_ = w.WriteMsg(resp)
+		_ = w.WriteMsg(formatResponseForClient(resp, req, transport))
 		return
 	}
 
@@ -290,7 +288,7 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 
 	if isBlocked && !isAllowed {
 		atomic.AddInt64(&s.blockedTotal, 1)
-		resp := s.buildSinkholeResponse(req, q)
+		resp := formatResponseForClient(s.buildSinkholeResponse(req, q), req, transport)
 		_ = w.WriteMsg(resp)
 
 		latency := time.Since(start).Microseconds()
@@ -309,26 +307,13 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	// 2. Cache Lookup
-	cacheKey := fmt.Sprintf("%s:%d:%t", rawDomain, q.Qtype, req.CheckingDisabled)
-	if entry, found := s.getCache(cacheKey); found {
+	cacheKey := responseCacheKey(rawDomain, q, req)
+	cacheable := cacheableRequest(req)
+	if entry, found := s.getCache(cacheKey); cacheable && found {
 		atomic.AddInt64(&s.cacheHits, 1)
 		resp := entry.Msg.Copy()
-		resp.Id = req.Id
 		s.adjustCachedTTLs(resp, entry.ExpiresAt)
-
-		// Honor EDNS buffer or clean for legacy non-EDNS clients
-		if opt := req.IsEdns0(); opt != nil {
-			resp.SetEdns0(opt.UDPSize(), opt.Do())
-		} else {
-			extra := make([]dns.RR, 0, len(resp.Extra))
-			for _, rr := range resp.Extra {
-				if rr.Header().Rrtype != dns.TypeOPT {
-					extra = append(extra, rr)
-				}
-			}
-			resp.Extra = extra
-		}
-
+		resp = formatResponseForClient(resp, req, transport)
 		_ = w.WriteMsg(resp)
 		latency := time.Since(start).Microseconds()
 		action := "PERMIT"
@@ -356,7 +341,7 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 		atomic.AddInt64(&s.errorsTotal, 1)
 		failResp := new(dns.Msg)
 		failResp.SetRcode(req, dns.RcodeServerFailure)
-		_ = w.WriteMsg(failResp)
+		_ = w.WriteMsg(formatResponseForClient(failResp, req, transport))
 
 		s.emitEvent(storage.DNSEvent{
 			ClientIP:     clientHost,
@@ -373,36 +358,16 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	// 4. Cache full valid upstream response before any client-specific formatting
-	if resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError {
+	if cacheable && !resp.Truncated && (resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError) {
 		ttl := s.calculateMinTTL(resp)
 		if ttl > 0 {
 			s.putCache(cacheKey, resp, ttl)
 		}
 	}
 
-	// 5. Client response delivery (DNS Flag Day 2020: default UDP buffer size 1232 bytes)
-	if transport == "udp" {
-		maxSize := 1232
-		if opt := req.IsEdns0(); opt != nil && opt.UDPSize() > 512 {
-			maxSize = int(opt.UDPSize())
-		}
-		if resp.Len() > maxSize {
-			// Strip non-essential authority and extra sections first
-			resp.Ns = nil
-			resp.Extra = nil
-			if opt := req.IsEdns0(); opt != nil {
-				resp.SetEdns0(opt.UDPSize(), opt.Do())
-			}
-			if resp.Len() > maxSize {
-				resp.Truncated = true
-			}
-		}
-	} else {
-		if opt := req.IsEdns0(); opt != nil {
-			resp.SetEdns0(opt.UDPSize(), opt.Do())
-		}
-	}
-
+	// 5. Format a copy for this client. Cache entries remain full upstream
+	// responses and never retain one client's transport or EDNS constraints.
+	resp = formatResponseForClient(resp, req, transport)
 	_ = w.WriteMsg(resp)
 
 	action := "PERMIT"
@@ -420,6 +385,71 @@ func (s *Server) handleDNSQuery(w dns.ResponseWriter, req *dns.Msg) {
 		Upstream:     upstreamUsed,
 		Transport:    transport,
 	})
+}
+
+func responseTransport(w dns.ResponseWriter) string {
+	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+		return "tcp"
+	}
+	return "udp"
+}
+
+func responseCacheKey(domain string, q dns.Question, req *dns.Msg) string {
+	do := false
+	if opt := req.IsEdns0(); opt != nil {
+		do = opt.Do()
+	}
+	return fmt.Sprintf("%s:%d:%d:cd=%t:do=%t:rd=%t", domain, q.Qclass, q.Qtype,
+		req.CheckingDisabled, do, req.RecursionDesired)
+}
+
+// EDNS options can carry client-specific or answer-changing state such as DNS
+// Cookies or Client Subnet. Until each supported option has explicit cache-key
+// semantics, bypass the shared cache rather than replaying it across clients.
+func cacheableRequest(req *dns.Msg) bool {
+	opt := req.IsEdns0()
+	return opt == nil || len(opt.Option) == 0
+}
+
+// formatResponseForClient returns a client-specific copy. The cache must keep
+// the complete upstream response because UDP size, EDNS support, and transport
+// belong to the current request rather than the domain name.
+func formatResponseForClient(resp, req *dns.Msg, transport string) *dns.Msg {
+	out := resp.Copy()
+	out.Id = req.Id
+	out.Question = append([]dns.Question(nil), req.Question...)
+
+	// Never replay an upstream or cached OPT record. Rebuild one only when this
+	// client sent EDNS, using Ominull's safe maximum and the request's DO bit.
+	extra := make([]dns.RR, 0, len(out.Extra))
+	for _, rr := range out.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			extra = append(extra, rr)
+		}
+	}
+	out.Extra = extra
+
+	opt := req.IsEdns0()
+	if opt != nil {
+		advertised := int(opt.UDPSize())
+		if advertised < dns.MinMsgSize {
+			advertised = dns.MinMsgSize
+		}
+		responseSize := advertised
+		if responseSize > safeUDPSize {
+			responseSize = safeUDPSize
+		}
+		out.SetEdns0(uint16(responseSize), opt.Do())
+		if transport == "udp" {
+			out.Truncate(responseSize)
+		}
+		return out
+	}
+
+	if transport == "udp" {
+		out.Truncate(dns.MinMsgSize)
+	}
+	return out
 }
 
 func (s *Server) evaluateDomain(domain string) (allowed bool, blocked bool, reason string) {

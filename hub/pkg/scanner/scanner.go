@@ -110,14 +110,25 @@ func New(store *storage.Store) *Scanner {
 	return s
 }
 
-// StartBackground launches the passive DHCP listener and periodic sweep scheduler
+// StartBackground launches only the explicitly configured sweep scheduler.
+// DHCP uses the server port and therefore has its own opt-in start path.
 func (s *Scanner) StartBackground() {
-	if s.dhcpSnooper != nil {
-		_ = s.dhcpSnooper.Start()
-	}
 	if s.scheduler != nil {
 		s.scheduler.Start()
 	}
+}
+
+// StartDHCPSnooping enables passive DHCP observation explicitly.
+func (s *Scanner) StartDHCPSnooping() error {
+	if s.dhcpSnooper == nil {
+		return nil
+	}
+	return s.dhcpSnooper.Start()
+}
+
+// DHCPSnooping reports whether the passive listener currently owns its port.
+func (s *Scanner) DHCPSnooping() bool {
+	return s.dhcpSnooper != nil && s.dhcpSnooper.IsServing()
 }
 
 // StopBackground stops the passive DHCP listener and sweep scheduler

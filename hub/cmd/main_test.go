@@ -67,3 +67,27 @@ func TestOnlyTheFirstLineIsTheKey(t *testing.T) {
 		t.Fatalf("got %q, want only the first line", key)
 	}
 }
+
+func TestNetworkObservationDefaultsOff(t *testing.T) {
+	t.Setenv("OMINULL_DNS_LISTEN", "")
+	t.Setenv("OMINULL_DHCP_SNOOP", "")
+
+	if got := envOr("OMINULL_DNS_LISTEN", defaultDNSListen); got != "disabled" {
+		t.Fatalf("default DNS listener = %q; want disabled", got)
+	}
+	if envBool("OMINULL_DHCP_SNOOP", false) {
+		t.Fatal("DHCP snooping defaulted on")
+	}
+}
+
+func TestNetworkObservationRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("OMINULL_DNS_LISTEN", "127.0.0.1:5353")
+	t.Setenv("OMINULL_DHCP_SNOOP", "true")
+
+	if got := envOr("OMINULL_DNS_LISTEN", defaultDNSListen); got != "127.0.0.1:5353" {
+		t.Fatalf("explicit DNS listener = %q", got)
+	}
+	if !envBool("OMINULL_DHCP_SNOOP", false) {
+		t.Fatal("explicit DHCP-snoop opt-in was ignored")
+	}
+}

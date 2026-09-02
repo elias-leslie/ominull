@@ -32,7 +32,10 @@ const banner = `
 // defaultAgentVersion is the agent release bundled with this hub build. It must track
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
-const defaultAgentVersion = "1.8.2"
+const (
+	defaultAgentVersion = "1.8.2"
+	defaultDNSListen    = "disabled"
+)
 
 func main() {
 	configPath := findConfigArg(os.Args[1:])
@@ -61,7 +64,8 @@ func main() {
 	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
 	accessAdmin := flag.String("access-bootstrap-admin", envOr("OMINULL_ACCESS_BOOTSTRAP_ADMIN", ""), "Email guaranteed to hold the admin role at startup")
 	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
-	dnsListen := flag.String("dns-listen", envOr("OMINULL_DNS_LISTEN", ":53"), "DNS forwarder and threat sinkhole listen address (:53 or empty to disable)")
+	dnsListen := flag.String("dns-listen", envOr("OMINULL_DNS_LISTEN", defaultDNSListen), "DNS forwarder and threat sinkhole listen address (disabled by default; for example :53)")
+	dhcpSnoop := flag.Bool("dhcp-snoop", envBool("OMINULL_DHCP_SNOOP", false), "Passively observe DHCP broadcasts on UDP/67 (disabled by default)")
 	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
 	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
@@ -196,6 +200,15 @@ func main() {
 		BootstrapAdmin: *accessAdmin,
 	}); err != nil {
 		log.Fatalf("[-] Cloudflare Access: %v", err)
+	}
+	if *dhcpSnoop {
+		if err := srv.StartDHCPSnooping(); err != nil {
+			log.Printf("[!] Warning: passive DHCP snooping could not start: %v", err)
+		} else {
+			log.Printf("[+] Passive DHCP snooping active on UDP/67 (explicitly enabled)")
+		}
+	} else {
+		log.Printf("[*] Passive DHCP snooping disabled (enable explicitly with --dhcp-snoop)")
 	}
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
@@ -338,6 +351,19 @@ func envInt(name string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		log.Printf("[!] Ignoring invalid %s value; using %d.", name, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("[!] Ignoring invalid %s value; using %t.", name, fallback)
 		return fallback
 	}
 	return parsed
