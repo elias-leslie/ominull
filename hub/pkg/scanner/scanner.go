@@ -89,6 +89,8 @@ type Scanner struct {
 	customSigs   []DeviceSignature
 	activeScans  map[string]*ScanStatus
 	cachedAssets map[string]DiscoveredAsset
+	dhcpSnooper  *DHCPSnooper
+	scheduler    *Scheduler
 	mu           sync.RWMutex
 }
 
@@ -99,11 +101,83 @@ func New(store *storage.Store) *Scanner {
 		activeScans:  make(map[string]*ScanStatus),
 		cachedAssets: make(map[string]DiscoveredAsset),
 	}
+	s.dhcpSnooper = NewDHCPSnooper(s)
+	s.scheduler = NewScheduler(s, store, 4*time.Hour, nil)
 	// Discovery used to live only in cachedAssets, so a hub restart erased
 	// every host the scanner had ever found. The assets table is now the
 	// record of truth and this map is a read cache over it.
 	s.hydrateFromStore()
 	return s
+}
+
+// StartBackground launches the passive DHCP listener and periodic sweep scheduler
+func (s *Scanner) StartBackground() {
+	if s.dhcpSnooper != nil {
+		_ = s.dhcpSnooper.Start()
+	}
+	if s.scheduler != nil {
+		s.scheduler.Start()
+	}
+}
+
+// StopBackground stops the passive DHCP listener and sweep scheduler
+func (s *Scanner) StopBackground() {
+	if s.dhcpSnooper != nil {
+		s.dhcpSnooper.Stop()
+	}
+	if s.scheduler != nil {
+		s.scheduler.Stop()
+	}
+}
+
+// RecordPassiveDHCP handles a passively snooped DHCP packet from the local network segment
+func (s *Scanner) RecordPassiveDHCP(ip, mac, hostname, vendorClass string, params []byte) {
+	if mac == "" {
+		return
+	}
+
+	vendor := LookupVendor(mac)
+	dhcpStr := fmt.Sprintf("dhcp:vendor=%s,host=%s", vendorClass, hostname)
+	ident := identityFromDHCP(dhcpStr)
+
+	osGuess := "Generic Network Host"
+	category := "Workstation"
+	confidence := 0.60
+	method := "dhcp-snoop"
+	evidence := []string{dhcpStr}
+
+	if ident != nil {
+		osGuess = ident.Name
+		category = ident.Category
+		confidence = ident.Confidence
+		method = ident.Method
+		evidence = ident.Evidence
+	} else if vendor != "Generic / Unassigned Hardware" {
+		osGuess = vendor + " Device"
+	}
+
+	asset := DiscoveredAsset{
+		IP:             ip,
+		MAC:            mac,
+		Vendor:         vendor,
+		Hostname:       hostname,
+		OSGuess:        osGuess,
+		Category:       category,
+		Confidence:     confidence,
+		RiskScore:      "LOW",
+		Weakpoints:     []string{"Passively Discovered via DHCP Broadcast"},
+		IdentityMethod: method,
+		IdentityWhy:    evidence,
+		LastSeen:       time.Now().UTC(),
+	}
+
+	s.mu.Lock()
+	if ip != "" {
+		s.cachedAssets[ip] = asset
+	}
+	s.mu.Unlock()
+
+	s.persist(asset)
 }
 
 // hydrateFromStore refills the in-memory cache from the persisted asset
@@ -202,19 +276,19 @@ func (s *Scanner) persist(a DiscoveredAsset) {
 		a.RiskScore, a.Confidence, ports, a.LastSeen)
 }
 
-// Common ports for Standard Profile (Top 30 High Value)
+// Common ports for Standard Profile (Top High Value Infra, Hypervisors, & IoT)
 var standardPorts = []int{
 	21, 22, 23, 25, 53, 80, 88, 110, 135, 139, 143, 389, 443, 445,
-	993, 995, 1433, 1521, 3306, 3389, 5000, 5432, 5900, 5985, 6379,
-	8000, 8008, 8080, 8443, 9000, 9100, 9999,
+	993, 995, 1433, 1521, 1883, 3000, 3306, 3389, 5000, 5001, 5432, 5900, 5985, 6379, 6443,
+	8000, 8006, 8008, 8080, 8123, 8443, 9000, 9090, 9100, 9443, 9999,
 }
 
 // Full ports for Aggressive IR Profile (Top 100)
 var aggressivePorts = append(standardPorts, []int{
 	69, 79, 111, 161, 162, 179, 512, 513, 514, 515, 631, 873, 902, 987,
-	1080, 1194, 2049, 2375, 2376, 3000, 3128, 4899, 5001, 5060, 5555,
-	5601, 5672, 6000, 7000, 7001, 8009, 8081, 8181, 8500, 8888, 9090,
-	9200, 9300, 10000, 10250, 11211, 27017, 27018, 50000, 6443,
+	1080, 1194, 2049, 2375, 2376, 3128, 4899, 5060, 5555,
+	5601, 5672, 6000, 7000, 7001, 8009, 8081, 8181, 8500, 8888,
+	9200, 9300, 10000, 10250, 11211, 27017, 27018, 50000,
 }...)
 
 func getServiceName(port int) string {
@@ -245,6 +319,10 @@ func getServiceName(port int) string {
 		return "MSSQL"
 	case 1521:
 		return "Oracle DB"
+	case 1883:
+		return "MQTT IoT Broker"
+	case 3000:
+		return "Grafana Dashboard"
 	case 3306:
 		return "MySQL"
 	case 3389:
@@ -261,12 +339,22 @@ func getServiceName(port int) string {
 		return "WinRM"
 	case 6379:
 		return "Redis DB"
+	case 6443:
+		return "Kubernetes API Server"
+	case 8006:
+		return "Proxmox VE Web Console"
 	case 8008, 8009:
 		return "Google Cast / DIAL"
+	case 8123:
+		return "Home Assistant HTTP"
+	case 9090:
+		return "Cockpit / Prometheus"
 	case 9100:
 		return "JetDirect Printer"
 	case 9200, 9300:
 		return "Elasticsearch"
+	case 9443:
+		return "Ominull Agent mTLS / Portainer"
 	case 9999:
 		return "Ominull Hub Control"
 	case 10250:
@@ -443,6 +531,7 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 	// "not measured" and scores as no evidence at all.
 	ttl := measureTTL(ip)
 	banners := make([]string, 0)
+	extras := make([]string, 0)
 
 	// In passive mode, skip TCP active probing unless we already know it
 	if profile != ProfilePassive {
@@ -468,6 +557,36 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 			if deltaMs > 0 {
 				totalAppDelta += deltaMs
 				deltaCount++
+			}
+
+			// Probe HTTP titles, Server headers, and TLS certificates on relevant ports
+			switch port {
+			case 80, 8000, 8080, 8081, 8123, 9090, 3000, 5000:
+				title, server, httpBanner := probeHTTPInfo(ip, port, false)
+				if title != "" {
+					extras = append(extras, "http-title:"+title)
+				}
+				if server != "" {
+					banners = append(banners, "Server: "+server)
+				}
+				if httpBanner != "" && banner == "" {
+					banner = httpBanner
+				}
+			case 443, 8443, 8006, 9443, 6443, 5001, 5986:
+				certInfo := probeTLSCert(ip, port)
+				if certInfo != "" {
+					extras = append(extras, certInfo)
+				}
+				title, server, httpBanner := probeHTTPInfo(ip, port, true)
+				if title != "" {
+					extras = append(extras, "http-title:"+title)
+				}
+				if server != "" {
+					banners = append(banners, "Server: "+server)
+				}
+				if httpBanner != "" && banner == "" {
+					banner = httpBanner
+				}
 			}
 
 			if banner != "" {
@@ -512,6 +631,9 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 			hostname = ep.Hostname
 		}
 	}
+	if hostname != "" {
+		extras = append(extras, "host:"+hostname)
+	}
 
 	// Calculate average application response delta
 	avgDelta := 1.5
@@ -536,12 +658,11 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 		openPortInts = append(openPortInts, p.Port)
 	}
 
-	// Ask the host to describe itself before guessing. NetBIOS, mDNS and SSDP
+	// Ask the host to describe itself before guessing. NetBIOS, mDNS, SSDP, and SNMP
 	// are all unprivileged and all answer with the host's own words; a passive
 	// sweep skips them because it is not supposed to send anything.
-	var extras []string
 	if profile != ProfilePassive {
-		extras = probeExtras(ip, hostname)
+		extras = append(extras, probeExtras(ip, hostname)...)
 	}
 
 	ident := IdentifyHost(mac, ttl, openPortInts, banners, extras, avgDelta, customSigs)

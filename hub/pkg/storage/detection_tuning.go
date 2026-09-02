@@ -112,11 +112,13 @@ func defaultQuietProcesses() []string {
 		// This fleet's own agent, which heartbeats on a fixed interval and is
 		// therefore the most perfect beacon on any host it is installed on.
 		"ominull-agent", "ominulld", "ominull_agent.exe",
+		// Trusted communication clients with known regular keepalive intervals
+		"telegram", "telegram-desktop", "Telegram.exe",
 	}
 }
 
 func defaultQuietOrgs() []string {
-	return []string{"apple", "microsoft", "google", "cloudflare", "amazon", "akamai", "fastly"}
+	return []string{"apple", "microsoft", "google", "cloudflare", "amazon", "akamai", "fastly", "telegram"}
 }
 
 func (s *Store) initDetectionTuningSchema() error {

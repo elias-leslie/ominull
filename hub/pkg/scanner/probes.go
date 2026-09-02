@@ -1,10 +1,15 @@
 package scanner
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
+	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,13 +30,14 @@ func probeExtras(ip string, hostname string) []string {
 		idx int
 		v   []string
 	}
-	out := make(chan multi, 3)
+	out := make(chan multi, 4)
 	go func() { out <- multi{0, []string{probeNetBIOS(ip)}} }()
 	go func() { out <- multi{1, probeMDNS(ip, hostname)} }()
 	go func() { out <- multi{2, []string{probeSSDP(ip)}} }()
+	go func() { out <- multi{3, []string{probeSNMP(ip)}} }()
 
-	slots := make([][]string, 3)
-	for i := 0; i < 3; i++ {
+	slots := make([][]string, 4)
+	for i := 0; i < 4; i++ {
 		r := <-out
 		slots[r.idx] = r.v
 	}
@@ -367,4 +373,182 @@ func probeSSDP(ip string) string {
 		return ""
 	}
 	return string(buf[:n])
+}
+
+// -------------------------------------------------- SNMP sysDescr Probe
+
+// probeSNMP sends an SNMPv2c GET request for sysDescr (1.3.6.1.2.1.1.1.0) with community 'public'
+func probeSNMP(ip string) string {
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(ip, "161"), probeTimeout)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(probeTimeout))
+
+	// SNMPv2c GET for OID 1.3.6.1.2.1.1.1.0 (sysDescr) with community "public"
+	req := []byte{
+		0x30, 0x29, // SEQUENCE len 41
+		0x02, 0x01, 0x01, // version 1 (v2c)
+		0x04, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, // community "public"
+		0xa0, 0x1c, // GetRequest-PDU len 28
+		0x02, 0x04, 0x12, 0x34, 0x56, 0x78, // request ID
+		0x02, 0x01, 0x00, // error-status 0
+		0x02, 0x01, 0x00, // error-index 0
+		0x30, 0x0e, // VarBindList len 14
+		0x30, 0x0c, // VarBind len 12
+		0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, // OID 1.3.6.1.2.1.1.1.0
+		0x05, 0x00, // NULL
+	}
+
+	if _, err := conn.Write(req); err != nil {
+		return ""
+	}
+
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil || n < 30 {
+		return ""
+	}
+
+	// Extract string payload from SNMP response
+	resp := buf[:n]
+	for i := 0; i < len(resp)-2; i++ {
+		if resp[i] == 0x04 { // OCTET STRING tag
+			strLen := int(resp[i+1])
+			if strLen > 3 && i+2+strLen <= len(resp) {
+				candidate := string(resp[i+2 : i+2+strLen])
+				if isPrintable(candidate) && (strings.Contains(strings.ToLower(candidate), "linux") ||
+					strings.Contains(strings.ToLower(candidate), "cisco") ||
+					strings.Contains(strings.ToLower(candidate), "switch") ||
+					strings.Contains(strings.ToLower(candidate), "router") ||
+					strings.Contains(strings.ToLower(candidate), "printer")) {
+					return "sysdescr:" + candidate
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// -------------------------------------------------- TLS Certificate Inspection
+
+// probeTLSCert performs a non-blocking TLS handshake to extract subject, SAN, and issuer data
+func probeTLSCert(ip string, port int) string {
+	target := net.JoinHostPort(ip, strconv.Itoa(port))
+	dialer := &net.Dialer{Timeout: probeTimeout}
+	conf := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         ip,
+	}
+	conn, err := tls.DialWithDialer(dialer, "tcp", target, conf)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return ""
+	}
+	cert := state.PeerCertificates[0]
+
+	var parts []string
+	if cert.Subject.CommonName != "" {
+		parts = append(parts, "CN="+cert.Subject.CommonName)
+	}
+	if len(cert.Subject.Organization) > 0 && cert.Subject.Organization[0] != "" {
+		parts = append(parts, "O="+cert.Subject.Organization[0])
+	}
+	if len(cert.DNSNames) > 0 {
+		sans := cert.DNSNames
+		if len(sans) > 4 {
+			sans = sans[:4]
+		}
+		parts = append(parts, "SAN="+strings.Join(sans, ","))
+	}
+	if len(cert.Issuer.Organization) > 0 && cert.Issuer.Organization[0] != "" {
+		parts = append(parts, "Issuer="+cert.Issuer.Organization[0])
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return "tls-cert:" + strings.Join(parts, " | ")
+}
+
+// -------------------------------------------------- HTTP Title & Header Fingerprinting
+
+// probeHTTPInfo fetches root HTTP response to extract HTML <title>, Server header, and status
+func probeHTTPInfo(ip string, port int, isTLS bool) (title string, server string, banner string) {
+	scheme := "http"
+	if isTLS {
+		scheme = "https"
+	}
+	target := net.JoinHostPort(ip, strconv.Itoa(port))
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: (&net.Dialer{
+			Timeout: probeTimeout,
+		}).DialContext,
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   probeTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 2 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s://%s/", scheme, target), nil)
+	if err != nil {
+		return "", "", ""
+	}
+	req.Header.Set("User-Agent", "Ominull-Scanner/1.8")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", ""
+	}
+	defer resp.Body.Close()
+
+	server = resp.Header.Get("Server")
+	if xp := resp.Header.Get("X-Powered-By"); xp != "" {
+		if server != "" {
+			server = server + " (" + xp + ")"
+		} else {
+			server = xp
+		}
+	}
+
+	lr := io.LimitReader(resp.Body, 8192)
+	body, _ := io.ReadAll(lr)
+	bodyStr := string(body)
+
+	titleRe := regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
+	if match := titleRe.FindStringSubmatch(bodyStr); len(match) > 1 {
+		title = strings.TrimSpace(match[1])
+		title = strings.ReplaceAll(title, "\n", " ")
+		title = strings.ReplaceAll(title, "\r", "")
+		if len(title) > 80 {
+			title = title[:80] + "..."
+		}
+	}
+
+	if title != "" && server != "" {
+		banner = fmt.Sprintf("HTTP %d | %s | %s", resp.StatusCode, server, title)
+	} else if title != "" {
+		banner = fmt.Sprintf("HTTP %d | %s", resp.StatusCode, title)
+	} else if server != "" {
+		banner = fmt.Sprintf("HTTP %d | %s", resp.StatusCode, server)
+	} else {
+		banner = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+
+	return title, server, banner
 }

@@ -495,9 +495,10 @@ func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request, opera
 }
 
 func (s *Server) Start(addr string) error {
-	// Start Threat Intelligence feed scheduler and behavioral detector.
+	// Start Threat Intelligence feed scheduler, behavioral detector, and autonomous scanner.
 	s.ti.Start(context.Background(), 1*time.Hour)
 	s.detector.Start(context.Background())
+	s.scanner.StartBackground()
 
 	mux := s.routes()
 
@@ -702,6 +703,7 @@ func (s *Server) hubOwnsAddress(ip string) string {
 func (s *Server) Close() error {
 	s.ti.Stop()
 	s.detector.Stop()
+	s.scanner.StopBackground()
 	var err error
 	if s.httpServer != nil {
 		err = s.httpServer.Close()
