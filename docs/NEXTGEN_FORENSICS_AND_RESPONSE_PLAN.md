@@ -445,7 +445,30 @@ only with new evidence, and say what the evidence is.
 | 2026-09-02 | No interim reverse proxy anywhere. The console waits for slice 3.0a. |
 | 2026-09-02 | Historical data in the current deployment is expendable. Availability of fleet control is not: recovery time and losing the ability to reach endpoints are the real risks in the privilege split. |
 | 2026-09-02 | The installability constraint below is binding on every slice. |
+| 2026-09-02 | The agent works the live deployment directly. Deploying the hub and agents, updating endpoints, restarting services, and exercising the real console and UI are expected task work, not actions to ask permission for. Verification means the real deployment, not a test container alone. |
 | open | The Windows agent OS floor. ConPTY forces `NTDDI_VERSION 0x0A000006` (Windows 10 1809). Decide in Phase 0 and record which Windows versions remain supported. |
+
+### Deployment authority
+
+The owner has authorized implementation agents to install, upgrade, restart,
+reconfigure, and roll back the live Ominull deployment as ordinary task work, and
+to drive the real console and endpoints when verifying. Do not stop to request
+approval for that. Historical telemetry, alerts, and evidence in the current
+deployment are expendable; say plainly when an action discards them.
+
+Approval is still required only for actions outside this program's scope or
+outside Ominull: destroying data that is not Ominull's, touching another
+project's systems, publishing anything publicly, spending money, or replacing
+release-signing trust. Two hard rules remain absolute because they cannot be
+undone by a rollback:
+
+- Never publish different bytes under an already released version.
+- Never leave the fleet download directory serving artifacts that do not match
+  the signed release record for that version.
+
+The privilege-split gate in slice 1A.0 stands: snapshot LXC 150 and prove the
+restore before the first packaging change reaches it. That is a rehearsal
+requirement, not an approval requirement.
 
 ## Installability constraint
 
