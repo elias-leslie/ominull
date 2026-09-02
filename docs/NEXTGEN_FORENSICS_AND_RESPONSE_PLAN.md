@@ -1,7 +1,9 @@
 # Ominull next-generation forensics and response execution plan
 
-Status: **AUDITED WORKING TREE; NOT RELEASE-READY; RESPONSE EXECUTION AND
-INTERACTIVE SHELL ARE NOT SAFE TO USE**
+Status: **AUDITED WORKING TREE AND LIVE HUB; NOT RELEASE-READY; RESPONSE
+EXECUTION AND INTERACTIVE SHELL ARE NOT SAFE TO USE. THE FLEET DOWNLOAD
+DIRECTORY IS SERVING REBUILT v1.8.3 AGENT ARTIFACTS AND MUST BE CORRECTED
+FIRST (Slice R0.1).**
 
 Last reviewed: 2026-09-02
 
@@ -15,7 +17,7 @@ replace, not as released behavior.
 
 | Phase | Audited state | Evidence and blocking gaps |
 |---|---|---|
-| Phase 0 | Not accepted | Go DTOs and copied JSON examples exist. Both C agents do not consume the fixtures. Bounds, old-version behavior, canonical signed-byte fixtures, baseline measurements, and the response threat model are absent. |
+| Phase 0 | Not accepted | Go DTOs and copied JSON examples exist. The fixture tree is duplicated byte-for-byte at `hub/tests/fixtures/response` and `tests/fixtures/response`; pick one canonical location before either drifts. Only `*_valid.json` cases exist: no missing-field, unknown-field, maximum-size, or old-agent fixtures, and no canonical signed-byte fixtures. Neither C agent consumes any of them. Bounds, old-version behavior, baseline measurements, and the response threat model are absent. |
 | Phase 1A | Unsafe prototype deployed under a reused release version | Confirmed on the live hub. Both services run as `root` with `NoNewPrivileges=no`, and the rebuilt package was installed over the released v1.8.3 without a version change. The rebuilt agent artifacts are also live in the hub's fleet download directory. Detailed findings are listed under "Phase 1A re-verification" below. |
 | Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
@@ -25,7 +27,7 @@ replace, not as released behavior.
 | Phase 3 | No usable shell; unsafe surface exposed | There is no WebSocket route, PTY, ConPTY, pairing, or byte relay. Detailed findings are listed under "Phase 3 re-verification" below. |
 | Phase 4 | Unsafe demo collector | Linux uploads one `uname` JSON object, hard-codes `"tenant_id":"default"` in the manifest, sends an empty `"sha256":""` for the single item, performs no grant verification, and runs inline with the heartbeat (`agent/linux/main.c`). Windows collection profiles and all bounded profile contracts are absent. |
 | Phase 5 | Storage prototype only, cross-tenant execution path | Immutable rows and source hashes exist. Every gap in the original row is confirmed, and the run route additionally reads a script version with no tenant check. Detailed findings are listed under "Phase 5 re-verification" below. |
-| Phase 6 | DTO fields only | Optional fields were added to the Go `Event` struct, but no durable schema path, agent production, boot identity, process lineage, ETW provider, executable hashing, or measurement evidence exists. |
+| Phase 6 | DTO fields only | Optional fields were added to the Go `Event` struct (`hub/pkg/storage/storage.go:95-100`) with no corresponding columns, migration, or write path, and no agent produces them. Boot identity, process lineage, ETW provider, executable hashing, and measurement evidence do not exist. |
 | Phase 7 | Schema demo only | Tables and caller-supplied ingestion exist. There is no endpoint inventory collector, NVD/KEV fetcher, feed snapshot lifecycle, CPE/version-range implementation, or scheduler. The current matcher is `strings.Contains(strings.ToLower(product), strings.ToLower(pattern))` (`hub/pkg/vuln/store.go:231`) and ignores version ranges while labeling results as authoritative. |
 
 Audit evidence captured on 2026-09-02:
@@ -1526,6 +1528,58 @@ durable signer store from Phase 1B and the trusted-origin work from Phase 3.0.
 Use the repository release process: install the signed hub package first, then a
 retained agent canary, then remaining retained endpoints. Never hand-copy agent
 binaries.
+
+## Slice backlog and dependency order
+
+Dispatch these in order. A slice is dispatchable when every prerequisite is
+`accepted`. Owned files are the seam, not an exhaustive list; confirm current
+ownership before starting and do not run two slices that share a file.
+
+| # | Slice | Prerequisite | Primary owned files |
+|---|---|---|---|
+| R0.1 | Withdraw rebuilt 1.8.3 artifacts from the fleet download directory; inventory what each endpoint runs | none | live hub `--binary-dir`, release notes |
+| R0.2 | Fail-close every unreleased response route behind one default-off gate | none | `hub/pkg/server/server.go` route table |
+| R0.3 | Fix the `ominullctl` build; remove `shell open`/`exec`, token printing, and the plaintext key env fallback | none | `hub/cmd/ominullctl/main.go` |
+| R0.4 | Remove the console shell modal and its entry points | none | `hub/pkg/server/web/app.js` |
+| R0.5 | Remove the agent offer handlers that ACK and fake success | none | `agent/src/service.c`, `agent/linux/main.c` |
+| R0.6 | Stop and disable the production authority service; reconcile version identity and `dist/SHA256SUMS.txt` under a new version | R0.1-R0.5 | packaging, `dist/`, live hub |
+| 0.1 | Consolidate the fixture tree; add missing-field, unknown-field, max-size, and old-agent cases | R0 | `hub/tests/fixtures/` |
+| 0.2 | Shared length-prefixed canonical encoder with byte-exact Go and C fixtures | 0.1 | `hub/pkg/response`, agent shared source |
+| 0.3 | Response threat model and the trusted-origin decision from Phase 3.0 | R0 | `docs/` |
+| 0.4 | Baseline measurement run and recorded workload | R0 | `TESTING.md`, `docs/evidence/` |
+| 1A.1 | Move the hub to an unprivileged account | 0.4 | packaging, units, `postinst` |
+| 1A.2 | Package the authority under its own identity with a restricted socket | 1A.1 | packaging, units |
+| 1B.1 | Durable signer store: keys, memberships, authenticators, policy, sessions, replay state, audit | 1A.2 | `hub/pkg/responseauth` |
+| 1B.2 | TOTP hardening: attempt limits, one-use time steps, encrypted secrets, lock, recovery | 1B.1 | `hub/pkg/responseauth` |
+| 1B.3 | WebAuthn registration and authentication | 1B.2, 0.3 | `hub/pkg/responseauth` |
+| 1B.4 | Typed action validation, proof binding to tenant/kind/targets, one-use proof nonces, grant signing | 0.2, 1B.1 | `hub/pkg/responseauth` |
+| 1C.1 | Job engine transitions, replay protection, tenant and endpoint binding, audit | 1B.4 | `hub/pkg/response`, migrations |
+| 1C.2 | Server-side digest recomputation and identity-header stripping on every response route | 1C.1 | `hub/pkg/server` handlers |
+| 1D.1 | Linux grant verifier, bounded offer parser, durable replay cache | 0.2, 1C.1 | `agent/linux`, `agent/src` |
+| 1D.2 | Windows grant verifier and worker containment | 1D.1 | `agent/` Windows sources |
+| 1E.1 | CLI subcommand refactor and parity with `scripts/ominull-cli` | 1C.1 | `hub/cmd/ominullctl` |
+| 2.1 | Bounded resumable chunked upload with quota and atomic no-follow writes | 1C.1 | `hub/pkg/evidence` |
+| 2.2 | Tenant scoping on every evidence store method and handler | 2.1 | `hub/pkg/evidence`, handlers |
+| 2.3 | Endpoint manifest signing and hub receipt signing, with verification | 2.2 | `hub/pkg/evidence`, agents |
+| 2.4 | Safe export layout, streaming limits, honest failure, offline verify | 2.3 | `hub/pkg/evidence`, `ominullctl` |
+| 2.5 | Retention enforcement and legal hold with actor and reason | 2.2 | `hub/pkg/evidence` |
+| 3.0 | Phase 3.0 prerequisites, including the trusted-origin deployment | 1B.3, 2.3 | deployment, `docs/` |
+| 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0, 1D.2 | `hub/pkg/terminal`, agents |
+| 3A.2 | Durable session state, limits, sweeper, hashed one-use relay tokens | 3A.1 | `hub/pkg/terminal` |
+| 3B.1 | Linux `forkpty` worker with resize and child-tree kill | 3A.2 | `agent/linux` |
+| 3B.2 | Windows ConPTY worker in a Job Object | 3B.1 | `agent/` Windows sources |
+| 3C.1 | Console response unlock, controller window, browser key, action proof | 3A.2 | `hub/pkg/server/web` |
+| 3C.2 | Vendored terminal emulator and honest session UI | 3C.1 | `hub/pkg/server/web` |
+| 3D.1 | Frame recording through the evidence store, bounded and encrypted | 3A.2, 2.3 | `hub/pkg/terminal`, `hub/pkg/evidence` |
+| 4.x | Collection profiles, one platform and profile per slice | 2.4, 1D.2 | agents, `hub/pkg/evidence` |
+| 5.x | Script bounds, tenant checks, parameter delivery, execution, schedules | 1D.2, 2.1 | `hub/pkg/scripts`, agents |
+| 6.x | Process lineage and executable hashing | 0.4 | agents, `hub/pkg/storage` |
+| 7.x | Inventory, feed ingestion, CPE matching | 1C.1 | `hub/pkg/vuln` |
+
+The shell the operator can actually use arrives at 3C.2, and it depends on 3.0,
+which depends on the trusted-origin work. Do not reorder the transport spike
+after the console work: a console built against a transport that does not exist
+is how the current prototype happened.
 
 ## Agent dispatch contract
 
