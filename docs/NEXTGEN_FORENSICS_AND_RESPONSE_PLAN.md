@@ -644,7 +644,9 @@ Contract requirements:
   default and hard maximum. Never dump an unbounded fleet or evidence index.
 - Exit `0` for success, `1` for runtime/API failure, and `2` for usage errors.
   Define a distinct documented exit for a completed remote job that failed.
-- The CLI cannot unlock response, open or attach to a shell, run or schedule a
+- `shell sessions|show|close` is read-and-close only, and its output omits the
+  grant, the connection token, and terminal contents. The CLI cannot unlock
+  response, open or attach to a shell, run or schedule a
   script, or launch a forensic collection. Those actions require the embedded
   console and its browser-bound response proof. CLI credentials cannot call the
   console-only mutation routes.
@@ -667,7 +669,10 @@ not a second command implementation. Add views as their backend phase lands:
 - immutable script versions, run form, and execution result;
 - software inventory and explainable vulnerability match detail.
 
-Keep fleet lists paginated and filters server-side. Show destructive or
+Every state the console displays comes from the server or a live connection.
+Do not hard-code a status badge, a connection line, or a claim about encryption,
+recording, or relaying. A view for an unimplemented capability shows that it is
+unimplemented. Keep fleet lists paginated and filters server-side. Show destructive or
 high-impact effects plainly, including shell service identity and collection
 size estimates. Enforce authorization in the server; hiding a control in the
 browser is not authorization. Vendor all new assets in the embedded package,
@@ -782,9 +787,20 @@ Acceptance:
 
 - Enroll or migrate a tenant response public key onto each Linux and Windows
   endpoint without weakening existing transport identity.
+- Parse offers with a bounded protocol parser over a fixed schema. Substring
+  scanning of the heartbeat body is not acceptable: it matches fields from
+  unrelated parts of the document, has no length or type discipline, and cannot
+  reject a malformed offer.
 - Verify the complete signed endpoint grant before parsing the larger action
-  payload or starting work. Cache used grant IDs and nonces across restart for the
-  grant lifetime.
+  payload, before acknowledging, and before starting work. Cache used grant IDs
+  and nonces across restart for the grant lifetime.
+- Acknowledge only after verification succeeds. An agent that cannot verify a
+  grant, does not recognize the action kind, or has no worker for it ignores the
+  offer and continues normal heartbeats. It never ACKs and never posts a result.
+- Never synthesize a terminal result. `succeeded` is written only by a worker
+  that ran the work and observed its outcome.
+- Do not print job identifiers, payloads, tokens, or terminal bytes to agent
+  stdout or the service log.
 - Implement a small bounded worker pool on Linux and Windows.
 - Persist enough local job state to prevent duplicate execution after restart.
 - Apply per-kind payload limits before spawning work.
@@ -1360,6 +1376,11 @@ Release one independently reversible phase at a time:
 6. Activate on one retained canary endpoint and observe the documented window.
 7. Expand to the retained fleet only after package, runtime, security, rollback,
    resource, and evidence-integrity gates pass.
+
+Slice R0 precedes step 1. Phase 3 recording depends on the Phase 2 evidence
+store being accepted, so the console shell workflow in step 5 cannot ship before
+it; a shell that cannot record is not releasable. Phase 3 also depends on the
+durable signer store from Phase 1B and the trusted-origin work from Phase 3.0.
 
 Use the repository release process: install the signed hub package first, then a
 retained agent canary, then remaining retained endpoints. Never hand-copy agent
