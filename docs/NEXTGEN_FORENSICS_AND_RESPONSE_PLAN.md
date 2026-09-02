@@ -176,6 +176,39 @@ database, and the deployed tree against that new version. Then confirm what each
 retained endpoint is actually running and whether any of them already took the
 rebuilt bytes.
 
+### Windows ConPTY verification (2026-09-02)
+
+Proven end to end on the real target rather than assumed. Result: the Windows
+build and test loop works, and ConPTY is available, but the agent's OS floor has
+to move.
+
+1. The repository toolchain (`x86_64-w64-mingw32-gcc 13-win32`, already required
+   by `scripts/build-packages.sh`) declares `CreatePseudoConsole`,
+   `ResizePseudoConsole`, and `ClosePseudoConsole` in
+   `/usr/share/mingw-w64/include/wincon.h`, gated behind
+   `NTDDI_VERSION >= 0x0A000006` (Windows 10 1809 / RS5).
+2. Without that define the symbols do not exist and a ConPTY source file fails to
+   compile with `unknown type name 'HPCON'`. With it, a probe cross-compiles
+   cleanly with `-Wall -Wextra`.
+3. The repository currently pins `_WIN32_WINNT 0x0601` (Windows 7) in
+   `agent/windows/wfp_user.c:1` and defines no `NTDDI_VERSION` anywhere.
+   **Slice 3B.2 therefore requires raising the Windows target baseline, which is
+   a product decision about the supported agent OS floor, not a build tweak.**
+   Decide it in Phase 0 and record which Windows versions the agent still
+   supports afterward.
+4. The probe was copied to VM 110 (`wfp-target-win11`, Windows 11 build
+   10.0.26100) over the existing jump-host SSH path and run in the elevated
+   `cmd.exe` session. It created a pseudoconsole (`hr=0x00000000`), resized it to
+   120x40 (`hr=0x00000000`), closed it, and exited 0. Building on Linux, copying
+   with `scp` through the jump host, and reading an exit code with
+   `<binary> & echo EXIT=%errorlevel%` is a working loop for slices 1D.2 and
+   3B.2.
+
+Still unproven for Windows, and to be spiked inside 3B.2 rather than assumed:
+attaching a real shell to the pseudoconsole through
+`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, containing that tree in a Job Object, and
+killing it on cancel.
+
 ### Phase 2 re-verification (evidence store)
 
 Confirmed in the working tree on 2026-09-02. Object encryption itself is sound:
@@ -393,6 +426,49 @@ acceptance gates before dependent work starts.
   executing this plan. A return to Apache License 2.0 is a separate owner and
   release decision. Versions published before the date specified in `LICENSE`
   retain their existing license.
+
+## Scope decision: build the multi-tenant foundation, defer the isolation adapters
+
+Decided 2026-09-02 by the owner. Ominull runs today as a single-tenant home
+production deployment, and the intended future is incident-response engagements,
+MSP/MSSP work, and possible licensing. Multi-tenancy is therefore a requirement,
+not a hypothetical, and the parts of it that are expensive to retrofit are built
+now.
+
+Build now, in every slice, no exceptions:
+
+- Tenant identity on every row, route, store method, and grant. The missing
+  tenant checks recorded in the Phase 2 and Phase 5 findings are corrected as
+  security defects, not deferred as multi-tenant features.
+- One independent response signing key per tenant, with rotation and revocation.
+- Response membership held by the authority, separate from hub role.
+- Per-tenant method policy, limits, and quotas as data, not constants.
+- Tenant-scoped audit, retention, and evidence separation.
+
+Build behind a seam, implement later:
+
+- MSP/MSSP signer partitioning across processes, accounts, or workload
+  identities. Keep `SignerPartition` in the interface and configuration; ship the
+  portable local partition only.
+- Cloud, KMS, HSM, and separate-VM authority adapters. The adapter interface is
+  part of 1B; the implementations are not.
+- The number-matched push adapter. Seam only, no provider.
+- S3-compatible and SFTP evidence export.
+
+Sequence within the built-now set:
+
+- TOTP first, WebAuthn immediately after. TOTP unblocks the operator; WebAuthn is
+  required before the product is offered to anyone else, because TOTP is not
+  phishing-resistant and must never be described as if it were.
+- A single-tenant deployment must exercise the multi-tenant paths in tests. Add a
+  second tenant in the test fixtures from the first slice that touches tenancy,
+  so cross-tenant rejection is proven continuously rather than at the end.
+
+The reason not to defer the foundation: every finding in this audit that lets one
+customer reach another customer's data is a missing tenant argument on a store
+method or a missing check in a handler. Retrofitting those later means touching
+every call site again with real data in place. The reason to defer the adapters:
+they change deployment topology, not data shape, and a seam preserves them.
 
 ## Source of truth and execution rules
 
@@ -849,8 +925,11 @@ Deliverables:
    missing optional fields, unknown fields, maximum sizes, and old-agent behavior.
 4. Capture baseline CPU, RSS, heartbeat size/latency, SQLite latency, package
    lifecycle time, and hub behavior under a documented representative workload.
-5. Record OS/toolchain minimums, especially Windows ConPTY availability and the
-   Linux HTTP/WebSocket library capabilities in supported distributions.
+5. Record OS/toolchain minimums and the Linux HTTP/WebSocket library
+   capabilities in supported distributions. The Windows ConPTY half of this is
+   already answered and verified; see "Windows ConPTY verification" below. Carry
+   that result forward rather than re-deriving it, and settle the agent OS floor
+   it forces.
 6. Write the response threat model for stolen cookies, static keys, hub process
    compromise, root compromise, signer compromise, malicious operators, tenant
    crossover, agent compromise, authenticator recovery, and signed updates.
@@ -871,6 +950,26 @@ Acceptance:
 ## Phase 1: response authorization, durable jobs, and CLI consolidation
 
 ### 1A. Hub privilege split and packaging
+
+The risk in this slice is not data loss. It is losing remote control of the
+fleet: the hub is currently the only path that issues certificates, serves agent
+packages for self-update, and drives containment. An unprivileged hub that cannot
+write `--binary-dir`, reissue a leaf certificate, or apply an enforcement change
+fails in ways that are quiet at first and then leave every endpoint stranded on
+the last thing it heard. Recovering that by hand means touching each endpoint
+individually, including a Windows VM and a macOS guest.
+
+Required before any packaging change reaches the live host:
+
+- Take a Proxmox snapshot of LXC 150 and confirm the restore actually works by
+  performing it once, before the change, not by assuming it.
+- Rehearse install, upgrade, rollback, and purge in a clean test container first.
+  The live host is never the first system the new package touches.
+- After the change, prove on the live host that certificate issuance, package
+  serving from `--binary-dir`, containment, mesh quarantine, and dead-man release
+  all still work. A hub that starts is not a hub that functions.
+- Keep a documented one-command path back to the previous package and ownership
+  layout for as long as the split is unproven.
 
 - Move the normal hub process from `root` to a dedicated unprivileged account.
   Inventory every file, socket, listener, package, certificate, database, backup,
@@ -1198,6 +1297,8 @@ Flow:
   selected executable, set a minimal environment, and propagate terminal resize.
 - Windows: use ConPTY with fixed choices Windows PowerShell, `cmd.exe`, and `pwsh`
   only when installed; contain the tree in a Job Object and propagate resize.
+  This requires building with `NTDDI_VERSION >= 0x0A000006`; see the ConPTY
+  verification above and settle the resulting OS floor before starting.
 - Do not accept arbitrary executable paths, startup commands, environment maps,
   working directories, or shell profile injection in the first release.
 - Close the pseudoterminal and full child tree on response lock, timeout,
@@ -1577,7 +1678,8 @@ ownership before starting and do not run two slices that share a file.
 | 0.2 | Shared length-prefixed canonical encoder with byte-exact Go and C fixtures | 0.1 | `hub/pkg/response`, agent shared source |
 | 0.3 | Response threat model and the trusted-origin decision from Phase 3.0 | R0 | `docs/` |
 | 0.4 | Baseline measurement run and recorded workload | R0 | `TESTING.md`, `docs/evidence/` |
-| 1A.1 | Move the hub to an unprivileged account | 0.4 | packaging, units, `postinst` |
+| 1A.0 | Snapshot LXC 150, prove the restore, rehearse the package lifecycle in a clean container | 0.4 | test container, Proxmox |
+| 1A.1 | Move the hub to an unprivileged account | 1A.0 | packaging, units, `postinst` |
 | 1A.2 | Package the authority under its own identity with a restricted socket | 1A.1 | packaging, units |
 | 1B.1 | Durable signer store: keys, memberships, authenticators, policy, sessions, replay state, audit | 1A.2 | `hub/pkg/responseauth` |
 | 1B.2 | TOTP hardening: attempt limits, one-use time steps, encrypted secrets, lock, recovery | 1B.1 | `hub/pkg/responseauth` |
@@ -1597,7 +1699,7 @@ ownership before starting and do not run two slices that share a file.
 | 3A.1 | WSS transport spike: agent to hub to console, authenticated loopback | 3.0, 1D.2 | `hub/pkg/terminal`, agents |
 | 3A.2 | Durable session state, limits, sweeper, hashed one-use relay tokens | 3A.1 | `hub/pkg/terminal` |
 | 3B.1 | Linux `forkpty` worker with resize and child-tree kill | 3A.2 | `agent/linux` |
-| 3B.2 | Windows ConPTY worker in a Job Object | 3B.1 | `agent/` Windows sources |
+| 3B.2 | Windows ConPTY worker in a Job Object; raise the Windows build baseline to `NTDDI_VERSION 0x0A000006` and record the new OS floor | 3B.1, 0.3 | `agent/` Windows sources, `scripts/build-packages.sh` |
 | 3C.1 | Console response unlock, controller window, browser key, action proof | 3A.2 | `hub/pkg/server/web` |
 | 3C.2 | Vendored terminal emulator and honest session UI | 3C.1 | `hub/pkg/server/web` |
 | 3D.1 | Frame recording through the evidence store, bounded and encrypted | 3A.2, 2.3 | `hub/pkg/terminal`, `hub/pkg/evidence` |
