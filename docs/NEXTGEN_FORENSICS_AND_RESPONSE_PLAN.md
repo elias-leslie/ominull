@@ -24,7 +24,7 @@ replace, not as released behavior.
 | Phase 2 | Unsafe storage prototype | AES-GCM helpers and basic SQLite rows exist and the item encryption path works. Every gap in the original row is confirmed. Detailed findings are listed under "Phase 2 re-verification" below. |
 | Phase 3 | No usable shell; unsafe surface exposed | There is no WebSocket route, PTY, ConPTY, pairing, or byte relay. Detailed findings are listed under "Phase 3 re-verification" below. |
 | Phase 4 | Unsafe demo collector | Linux uploads one `uname` JSON object, hard-codes `"tenant_id":"default"` in the manifest, sends an empty `"sha256":""` for the single item, performs no grant verification, and runs inline with the heartbeat (`agent/linux/main.c`). Windows collection profiles and all bounded profile contracts are absent. |
-| Phase 5 | Storage prototype only | Immutable rows and source hashes exist. Interpreter and source bounds, parameter-schema validation, tenant checks on direct object access, schedules, safe parameter delivery, endpoint execution, cancellation, and signed payload binding do not. |
+| Phase 5 | Storage prototype only, cross-tenant execution path | Immutable rows and source hashes exist. Every gap in the original row is confirmed, and the run route additionally reads a script version with no tenant check. Detailed findings are listed under "Phase 5 re-verification" below. |
 | Phase 6 | DTO fields only | Optional fields were added to the Go `Event` struct, but no durable schema path, agent production, boot identity, process lineage, ETW provider, executable hashing, or measurement evidence exists. |
 | Phase 7 | Schema demo only | Tables and caller-supplied ingestion exist. There is no endpoint inventory collector, NVD/KEV fetcher, feed snapshot lifecycle, CPE/version-range implementation, or scheduler. The current matcher is `strings.Contains(strings.ToLower(product), strings.ToLower(pattern))` (`hub/pkg/vuln/store.go:231`) and ignores version ranges while labeling results as authoritative. |
 
@@ -187,6 +187,40 @@ name. Everything around it is not.
 11. Offline verification does not exist. `ominullctl forensics verify` reports
     `"verified": true` for any parseable manifest file
     (`hub/cmd/ominullctl/main.go:592`).
+
+### Phase 5 re-verification (script library and execution)
+
+Confirmed in the working tree on 2026-09-02.
+
+1. `POST /api/v1/scripts/run` is registered behind `s.authMiddleware`
+   (`hub/pkg/server/server.go:3162`), so a static admin API key reaches the run
+   route. It also takes the operator from `X-Operator-ID` with an `"admin"`
+   fallback (`hub/pkg/server/script_handlers.go:155-158`) and forwards the
+   caller's `action_digest` to the authority unchanged
+   (`script_handlers.go:172`). The three defects described for the terminal route
+   apply here identically.
+2. `GetScriptVersion(req.ScriptID, req.Version)` takes no tenant
+   (`hub/pkg/scripts/store.go:189`, called at `script_handlers.go:149`). An
+   operator in one tenant can name another tenant's script ID and the handler
+   copies that tenant's full source into the job payload and dispatches it. The
+   same missing tenant check applies to `GetScript`, `UpdateScript`, and
+   `RetireScript`.
+3. The grant does not bind what the plan requires. It carries only the generic
+   caller-supplied digest: no script digest, no parameter digest, no execution
+   limit, and no attempt count, so nothing ties the signed authorization to the
+   source that actually runs.
+4. There is no interpreter allowlist. `CreateScript` accepts any interpreter
+   string and defaults to `/bin/bash` (`scripts/store.go:70-71`). There is no
+   source size bound, no parameter size bound, and no validation of
+   `parameter_schema_json`, which is stored as an opaque string and never parsed.
+5. Parameters are passed as a `map[string]string` straight into the job payload
+   JSON (`script_handlers.go:139,186`) and stored in the job's `request_json`.
+   There is no private parameter file, no typed validation against the declared
+   schema, and no redaction anywhere on that path.
+6. `TimeoutSeconds: 60` and `MaxOutputBytes: 1048576` are hard-coded in the
+   payload (`script_handlers.go:190-191`) and enforced by nothing, because no
+   endpoint worker exists. Concurrency limits, cancellation, retirement
+   semantics, and schedules are entirely absent.
 
 Until Phase 3 is accepted, production must not expose a shell action or terminal
 mutation/stream route. Agents must reject terminal offers. Do not use the current
