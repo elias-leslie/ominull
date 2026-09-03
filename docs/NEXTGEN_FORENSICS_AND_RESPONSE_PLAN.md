@@ -19,7 +19,7 @@ replace, not as released behavior.
 | Phase | Audited state | Evidence and blocking gaps |
 |---|---|---|
 | Phase 0 | Verified (Slices 0.1, 0.2, 0.3, 0.4 complete) | Slice 0.1 (`docs/evidence/0-1.md`) consolidated cross-language fixtures into `hub/tests/fixtures/response`. Slice 0.2 (`docs/evidence/0-2.md`) implemented length-prefixed canonical encoding and byte-exact verification. Slice 0.3 (`docs/evidence/0-3.md`) established the threat model, trusted-origin spec, and platform OS floors in `docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md`. Slice 0.4 (`docs/evidence/0-4.md`) captured baseline performance, SQLite latency, and packaging benchmarks in `TESTING.md`. Ready for operator acceptance. |
-| Phase 1A | Prototype deployed on live hub; packaging drift reverted | Live hub LXC 150 still runs rebuilt package from 2026-09-02; deployment authority required for live package update. In working tree, packaging drift was reverted by slice R0.6 on 2026-09-03 (`docs/evidence/R0-6.md`): `ominull-response-authority.service` was removed, postinst hooks and build-packages references were reverted, and clean sandbox packaging lifecycle tests passed. |
+| Phase 1A | Slice 1A.0 verified; privilege-split packaging in progress | Slice 1A.0 on 2026-09-03 (`docs/evidence/1A-0.md`) created Proxmox snapshot `pre-privilege-split` on LXC 150, conducted a live rollback test verifying container/service restart and telemetry resumption, and rehearsed package lifecycles in a clean sandbox. Slices 1A.1 (unprivileged hub account) and 1A.2 (separate authority service packaging) are underway. |
 | Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
 | Phase 1D | Reject, prototype hooks removed | Corrected by slice R0.5 on 2026-09-03 (`docs/evidence/R0-5.md`): prototype offer processing and unverified result submission were removed from `agent/linux/main.c` and `agent/src/service.c`. Both C agent builds compile cleanly under `-Wall -Wextra -Wformat=2 -O2` with zero warnings, exactly matching released v1.8.3 behavior. |
@@ -1084,6 +1084,12 @@ Required before any packaging change reaches the live host:
 - Make install, upgrade, rollback, backup, removal, purge, status, and recovery
   cover both services as one Ominull product. Update the current one-service
   package contract and tests explicitly rather than leaving hidden service drift.
+
+### Slice Phase 1A status ledger
+
+| Slice | Status | Evidence | Description |
+|---|---|---|---|
+| 1A.0 | `verified` | `docs/evidence/1A-0.md` | Snapshot `pre-privilege-split` created on LXC 150; live rollback and restart verified; service and telemetry resumption confirmed; package lifecycle rehearsed in clean sandbox. |
 
 ### 1B. Response authority foundation
 
