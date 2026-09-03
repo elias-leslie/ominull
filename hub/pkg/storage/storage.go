@@ -88,10 +88,16 @@ type Event struct {
 	BytesIn     int64     `json:"bytes_in"`
 	BytesOut    int64     `json:"bytes_out"`
 	Country     string    `json:"country"`
-	ProcessPath string    `json:"process_path"`
-	ProcessID   uint32    `json:"process_id"`
-	Domain      string    `json:"domain,omitempty"`
-	SNI         string    `json:"sni,omitempty"`
+	ProcessPath       string    `json:"process_path"`
+	ProcessID         uint32    `json:"process_id"`
+	Domain            string    `json:"domain,omitempty"`
+	SNI               string    `json:"sni,omitempty"`
+	ProcessInstanceID string    `json:"process_instance_id,omitempty"`
+	ParentPID         uint32    `json:"parent_pid,omitempty"`
+	CommandLine       string    `json:"command_line,omitempty"`
+	UserIdentity      string    `json:"user_identity,omitempty"`
+	ExecutableSHA256  string    `json:"executable_sha256,omitempty"`
+	AttributionStatus string    `json:"attribution_status,omitempty"`
 }
 
 type CommProfile struct {
@@ -356,6 +362,11 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("default seed failed: %w", err)
 	}
 	return s, nil
+}
+
+// DB returns the underlying SQLite database handle.
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 func (s *Store) Close() error {
