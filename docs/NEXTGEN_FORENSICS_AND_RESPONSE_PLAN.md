@@ -387,12 +387,12 @@ row `accepted`.
 
 | Slice | Status | Evidence | Remaining gaps |
 |---|---|---|---|
-| R0.1 | `implemented` | `docs/evidence/R0-1.md` | The R0 gate does not pass at this checkpoint: `cd hub && go build ./...` fails with `cmd/ominullctl/main.go:750:3: declared and not used: raw`, which is R0.3's defect and which R0.1 changed no Go source to cause or clear. `dist/` in working tree has been restored with authentic released bytes matching `SHA256SUMS.txt` verified against pinned release key. `windows-laptop-b` (offline, v1.8.1) was inferred from `agent_update_jobs`, not hashed. |
-| R0.2 | `implemented` | `docs/evidence/R0-2.md` | All 26 unreleased response routes fail closed (404 Not Found) by default, creating zero DB rows, sessions, grants, or audit entries, and heartbeat response offers are suppressed. `hub/pkg/server` passes `go test -race ./pkg/server`. |
-| R0.3 | `implemented` | `docs/evidence/R0-3.md` | Primary Go workspace gate `(cd hub && go build ./... && go vet ./... && go test -race ./...)` passes across all packages. `cmd/ominullctl` builds cleanly. `shell open`/`exec` and token printing removed. `OMINULL_API_KEY` plaintext env fallback removed. Full acceptance requires R0.4-R0.6 completion. |
-| R0.4 | `verified` | `docs/evidence/R0-4.md` | Console shell modal, context menu action, and response view card removed. `node --check` passes. `TestConsoleContainsNoUnimplementedShellControls` passes. Full R0 acceptance requires R0.5-R0.6 completion. |
-| R0.5 | `verified` | `docs/evidence/R0-5.md` | Prototype offer processing, fake results, and forensic collection hooks removed from agent tree. Both Linux and Windows agents compile cleanly with -Wall -Wextra -Wformat=2 -O2 with zero warnings. Full R0 acceptance requires R0.6 completion. |
-| R0.6 | `verified` | `docs/evidence/R0-6.md` | Packaging definitions reverted. `response-authority.service` removed. Sandbox package lifecycle tests pass for Linux Debian packages and Windows MSI. `dist/` holds clean verified 1.8.3 release bytes. |
+| R0.1 | `accepted` | `docs/evidence/R0-1.md` | Accepted by operator on 2026-09-03. Download directory verified clean; authentic released v1.8.3 bytes and signatures restored. |
+| R0.2 | `accepted` | `docs/evidence/R0-2.md` | Accepted by operator on 2026-09-03. All 26 unreleased response routes fail closed (404) by default, creating zero DB rows, sessions, grants, or audit entries; heartbeat offers suppressed. |
+| R0.3 | `accepted` | `docs/evidence/R0-3.md` | Accepted by operator on 2026-09-03. Primary Go workspace gate passes across all packages. `cmd/ominullctl` builds cleanly with forbidden shell commands, token printing, and plaintext key fallback removed. |
+| R0.4 | `accepted` | `docs/evidence/R0-4.md` | Accepted by operator on 2026-09-03. Console shell modal, context menu action, and response view card removed. `TestConsoleContainsNoUnimplementedShellControls` passes. |
+| R0.5 | `accepted` | `docs/evidence/R0-5.md` | Accepted by operator on 2026-09-03. Prototype offer processing, fake results, and forensic collection hooks removed from agent tree. Both Linux and Windows agents compile cleanly with zero warnings. |
+| R0.6 | `accepted` | `docs/evidence/R0-6.md` | Accepted by operator on 2026-09-03. Packaging definitions reverted. `response-authority.service` removed. Sandbox package lifecycle tests pass for Linux Debian packages and Windows MSI. |
 
 ## Objective
 
