@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "grant_id": "00000000-0000-0000-0000-000000000001",
   "tenant_id": "tenant-production",
   "endpoint_id": "linux-ominull-target-linux",
@@ -11,5 +11,5 @@
   "expires_at": 1788346800,
   "nonce": "0123456789abcdef0123456789abcdef",
   "signer_key_id": "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8",
-  "signature": "2f9564fcfbf17fb6f3b914b8b7cabcfd9ee5ece68d5023f91b91952b2b851720639809f86870ef367b5517b6e21b0719abff18e3468aded88f200ac17f1d2d0a"
+  "signature": "63f9029b46ed41e0a320a848b0ee8a88512856af7ed8d2212f8a54dc722a776b16aada7b031a64a55cb8f45a85f85bfadc784141e20f08f7f2a506eda26a3509"
 }

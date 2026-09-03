@@ -34,9 +34,8 @@ func TestEndpointGrant_Verification(t *testing.T) {
 		SignerKeyID:       keyID,
 	}
 
-	// Sign the canonical grant string
-	canonical := []byte(grant.CanonicalString())
-	sig := ed25519.Sign(privKey, canonical)
+	// Sign the canonical grant bytes
+	sig := ed25519.Sign(privKey, grant.CanonicalBytes())
 	grant.Signature = hex.EncodeToString(sig)
 
 	// Valid verification

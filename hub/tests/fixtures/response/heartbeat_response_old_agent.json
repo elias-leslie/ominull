@@ -15,7 +15,7 @@
       "lease_id": "lease-2000-0001",
       "lease_expires_at": 1788350700,
       "grant": {
-        "version": 1,
+        "version": 2,
         "grant_id": "00000000-0000-0000-0000-000000000001",
         "tenant_id": "tenant-production",
         "endpoint_id": "linux-ominull-target-linux",
@@ -27,7 +27,7 @@
         "expires_at": 1788354000,
         "nonce": "0123456789abcdef0123456789abcdef",
         "signer_key_id": "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8",
-        "signature": "92f460d63db9f4904e0f4f93dc71558692e1d716eb7e8aee4853bd84d6c1ce34755bec438f7d13cc9492dffad15dfed67b2aea6e49f376e3db0e94e99dab5107"
+        "signature": "2ade56ab5f979c5d11b8c97ad46dc8d6358cdb9ea31a74771c871bad4ba89ce206ad8fbfe3ada81eedc3932e06be83f2bc9950a4b59057aa67b0f018d731eb0b"
       },
       "payload_json": "{\"profile\":\"diagnostic\",\"max_bytes\":5242880,\"timeout_seconds\":60}"
     }

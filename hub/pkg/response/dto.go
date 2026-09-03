@@ -35,7 +35,7 @@ const (
 )
 
 // GrantVersion is the current version of the endpoint grant protocol.
-const GrantVersion = 1
+const GrantVersion = 2
 
 // EndpointGrant is an immutable, cryptographically signed authorization token
 // issued by a tenant's response authority. The endpoint verifies this grant before
@@ -56,7 +56,25 @@ type EndpointGrant struct {
 	Signature         string     `json:"signature"`  // hex ed25519 signature
 }
 
-// CanonicalString returns the deterministic string format for signature verification.
+// CanonicalBytes returns the deterministic length-prefixed bytes for signature verification.
+func (g *EndpointGrant) CanonicalBytes() []byte {
+	enc := NewCanonicalEncoder("OMINULL-ENDPOINT-GRANT-V2")
+	enc.WriteUint32(uint32(g.Version))
+	enc.WriteString(g.GrantID)
+	enc.WriteString(g.TenantID)
+	enc.WriteString(g.EndpointID)
+	enc.WriteString(string(g.ActionKind))
+	enc.WriteHexNormalized(g.ActionDigest)
+	enc.WriteString(g.OperatorID)
+	enc.WriteString(g.ResponseSessionID)
+	enc.WriteInt64(g.IssuedAt)
+	enc.WriteInt64(g.ExpiresAt)
+	enc.WriteHexNormalized(g.Nonce)
+	enc.WriteHexNormalized(g.SignerKeyID)
+	return enc.Bytes()
+}
+
+// CanonicalString returns a diagnostic string representation of the grant.
 func (g *EndpointGrant) CanonicalString() string {
 	return fmt.Sprintf("OMINULL-GRANT-V%d:%s:%s:%s:%s:%s:%s:%s:%d:%d:%s:%s",
 		g.Version,
@@ -74,9 +92,9 @@ func (g *EndpointGrant) CanonicalString() string {
 	)
 }
 
-// CanonicalDigest returns the SHA-256 digest of the grant's canonical string.
+// CanonicalDigest returns the SHA-256 digest of the grant's canonical bytes.
 func (g *EndpointGrant) CanonicalDigest() [32]byte {
-	return sha256.Sum256([]byte(g.CanonicalString()))
+	return sha256.Sum256(g.CanonicalBytes())
 }
 
 // Verify checks the signature against the provided tenant response Ed25519 public key.
@@ -113,8 +131,7 @@ func (g *EndpointGrant) Verify(pubKey ed25519.PublicKey, now time.Time) error {
 		return fmt.Errorf("invalid signature length: %d (expected %d)", len(sigBytes), ed25519.SignatureSize)
 	}
 
-	canonical := []byte(g.CanonicalString())
-	if !ed25519.Verify(pubKey, canonical, sigBytes) {
+	if !ed25519.Verify(pubKey, g.CanonicalBytes(), sigBytes) {
 		return errors.New("grant signature verification failed")
 	}
 	return nil

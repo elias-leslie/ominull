@@ -77,9 +77,18 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 		Nonce:             "0123456789abcdef0123456789abcdef",
 		SignerKeyID:       keyID1,
 	}
-	sigValid := ed25519.Sign(privKey1, []byte(grantValid.CanonicalString()))
+	sigValid := ed25519.Sign(privKey1, grantValid.CanonicalBytes())
 	grantValid.Signature = hex.EncodeToString(sigValid)
 	writeJSON("grant_valid.json", grantValid)
+
+	// Write byte-exact canonical binary and hex fixtures
+	canonicalGrantBytes := grantValid.CanonicalBytes()
+	if err := os.WriteFile(filepath.Join(fixtureDir, "grant_v2_canonical.bin"), canonicalGrantBytes, 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fixtureDir, "grant_v2_canonical.hex"), []byte(hex.EncodeToString(canonicalGrantBytes)+"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 
 	// 2. Valid baseline offer
 	offerValid := JobOffer{
@@ -173,7 +182,7 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 
 	// 7. Unknown fields (forward-compatible test cases)
 	grantUnknown := map[string]interface{}{
-		"version":              1,
+		"version":              grantValid.Version,
 		"grant_id":             grantValid.GrantID,
 		"tenant_id":            grantValid.TenantID,
 		"endpoint_id":          grantValid.EndpointID,
@@ -226,7 +235,7 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 	grantExpired := grantValid
 	grantExpired.IssuedAt = fixedTime.Add(-2 * time.Hour).Unix()
 	grantExpired.ExpiresAt = fixedTime.Add(-1 * time.Hour).Unix()
-	sigExp := ed25519.Sign(privKey1, []byte(grantExpired.CanonicalString()))
+	sigExp := ed25519.Sign(privKey1, grantExpired.CanonicalBytes())
 	grantExpired.Signature = hex.EncodeToString(sigExp)
 	writeJSON("grant_expired.json", grantExpired)
 
@@ -236,7 +245,7 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 	writeJSON("grant_tampered.json", grantTampered)
 
 	grantWrongKey := grantValid
-	sigWrong := ed25519.Sign(privKey2, []byte(grantWrongKey.CanonicalString()))
+	sigWrong := ed25519.Sign(privKey2, grantWrongKey.CanonicalBytes())
 	grantWrongKey.Signature = hex.EncodeToString(sigWrong)
 	writeJSON("grant_wrong_key.json", grantWrongKey)
 
@@ -257,7 +266,7 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 		Nonce:             strings.Repeat("0", 64),
 		SignerKeyID:       keyID1,
 	}
-	sigMax := ed25519.Sign(privKey1, []byte(grantMax.CanonicalString()))
+	sigMax := ed25519.Sign(privKey1, grantMax.CanonicalBytes())
 	grantMax.Signature = hex.EncodeToString(sigMax)
 	writeJSON("grant_max_size.json", grantMax)
 
@@ -327,8 +336,11 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 	// Unknown fields parse and validate cleanly
 	var gUnk EndpointGrant
 	bGrantUnk, _ := json.Marshal(grantUnknown)
-	if err := json.Unmarshal(bGrantUnk, &gUnk); err != nil || gUnk.Validate() != nil {
-		t.Fatalf("grant_unknown_fields failed to unmarshal or validate: %v", err)
+	if err := json.Unmarshal(bGrantUnk, &gUnk); err != nil {
+		t.Fatalf("grant_unknown_fields failed to unmarshal: %v", err)
+	}
+	if err := gUnk.Validate(); err != nil {
+		t.Fatalf("grant_unknown_fields failed Validate: %v", err)
 	}
 	if err := gUnk.Verify(pubKey1, fixedTime.Add(10*time.Minute)); err != nil {
 		t.Fatalf("grant_unknown_fields failed signature verification: %v", err)
