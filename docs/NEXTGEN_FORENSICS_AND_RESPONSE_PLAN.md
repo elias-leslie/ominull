@@ -18,7 +18,7 @@ replace, not as released behavior.
 
 | Phase | Audited state | Evidence and blocking gaps |
 |---|---|---|
-| Phase 0 | Slices 0.1, 0.2, and 0.3 implemented; baseline measurement pending | Slices 0.1 and 0.2 completed cross-language fixtures and length-prefixed canonical encoding. Slice 0.3 on 2026-09-03 (`docs/evidence/0-3.md`) established the formal response threat model, trusted-origin specification, and OS support floors in `docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md`. Slice 0.4 (baseline measurement run) remains to be completed for full Phase 0 acceptance. |
+| Phase 0 | Verified (Slices 0.1, 0.2, 0.3, 0.4 complete) | Slice 0.1 (`docs/evidence/0-1.md`) consolidated cross-language fixtures into `hub/tests/fixtures/response`. Slice 0.2 (`docs/evidence/0-2.md`) implemented length-prefixed canonical encoding and byte-exact verification. Slice 0.3 (`docs/evidence/0-3.md`) established the threat model, trusted-origin spec, and platform OS floors in `docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md`. Slice 0.4 (`docs/evidence/0-4.md`) captured baseline performance, SQLite latency, and packaging benchmarks in `TESTING.md`. Ready for operator acceptance. |
 | Phase 1A | Prototype deployed on live hub; packaging drift reverted | Live hub LXC 150 still runs rebuilt package from 2026-09-02; deployment authority required for live package update. In working tree, packaging drift was reverted by slice R0.6 on 2026-09-03 (`docs/evidence/R0-6.md`): `ominull-response-authority.service` was removed, postinst hooks and build-packages references were reverted, and clean sandbox packaging lifecycle tests passed. |
 | Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
@@ -1033,6 +1033,15 @@ Acceptance:
   which do not resist root or hypervisor compromise.
 - Baseline commands, fixture data, hardware, sample size, and results are checked
   into test documentation.
+
+### Slice Phase 0 status ledger
+
+| Slice | Status | Evidence | Description |
+|---|---|---|---|
+| 0.1 | `verified` | `docs/evidence/0-1.md` | Consolidated canonical fixture tree into `hub/tests/fixtures/response`; added 21 comprehensive edge and compatibility fixtures; validated across Go and C. |
+| 0.2 | `verified` | `docs/evidence/0-2.md` | Shared length-prefixed canonical binary encoder in Go (`canonical.go`) and C (`response_canonical.h`); bumped to V2; proved byte-exact identity against binary fixtures. |
+| 0.3 | `verified` | `docs/evidence/0-3.md` | Authored `docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md` covering 10 threat scenarios, 3 disjoint trust fabrics, in-hub console TLS architecture, and Windows ConPTY OS floor. |
+| 0.4 | `verified` | `docs/evidence/0-4.md` | Captured baseline heartbeat latency, SQLite write latency, gated reject latency, and package lifecycle execution times in `TESTING.md` via `scripts/measure-baseline.sh`. |
 
 ## Phase 1: response authorization, durable jobs, and CLI consolidation
 
