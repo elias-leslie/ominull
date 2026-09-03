@@ -39,6 +39,10 @@ func NewServer(auth *Authority, socketPath string) (*Server, error) {
 	mux.HandleFunc("/v1/auth/grant/sign", s.handleSignGrant)
 	mux.HandleFunc("/v1/auth/recovery/generate", s.handleGenerateRecovery)
 	mux.HandleFunc("/v1/auth/recovery/consume", s.handleConsumeRecovery)
+	mux.HandleFunc("/v1/auth/webauthn/register/options", s.handleWebAuthnRegisterOptions)
+	mux.HandleFunc("/v1/auth/webauthn/register/verify", s.handleWebAuthnRegisterVerify)
+	mux.HandleFunc("/v1/auth/webauthn/login/options", s.handleWebAuthnLoginOptions)
+	mux.HandleFunc("/v1/auth/webauthn/login/verify", s.handleWebAuthnLoginVerify)
 	mux.HandleFunc("/v1/auth/status", s.handleStatus)
 	mux.HandleFunc("/v1/auth/audit", s.handleAudit)
 
@@ -258,5 +262,95 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+func (s *Server) handleWebAuthnRegisterOptions(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.URL.Query().Get("tenant_id")
+	operatorID := r.URL.Query().Get("operator_id")
+	if r.Method == http.MethodPost {
+		var req struct {
+			TenantID   string `json:"tenant_id"`
+			OperatorID string `json:"operator_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.TenantID != "" {
+				tenantID = req.TenantID
+			}
+			if req.OperatorID != "" {
+				operatorID = req.OperatorID
+			}
+		}
+	}
+	opts, err := s.auth.BeginWebAuthnRegistration(tenantID, operatorID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(opts)
+}
+
+func (s *Server) handleWebAuthnRegisterVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req WebAuthnRegistrationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	rec, err := s.auth.FinishWebAuthnRegistration(&req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rec)
+}
+
+func (s *Server) handleWebAuthnLoginOptions(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.URL.Query().Get("tenant_id")
+	operatorID := r.URL.Query().Get("operator_id")
+	if r.Method == http.MethodPost {
+		var req struct {
+			TenantID   string `json:"tenant_id"`
+			OperatorID string `json:"operator_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.TenantID != "" {
+				tenantID = req.TenantID
+			}
+			if req.OperatorID != "" {
+				operatorID = req.OperatorID
+			}
+		}
+	}
+	opts, err := s.auth.BeginWebAuthnAuthentication(tenantID, operatorID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(opts)
+}
+
+func (s *Server) handleWebAuthnLoginVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req WebAuthnAuthenticationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	session, err := s.auth.FinishWebAuthnAuthentication(&req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(session)
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +49,7 @@ type Authority struct {
 	store      Store
 	tenantKeys map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
 	masterKey  []byte                        // 32-byte master key for encrypting secrets at rest
+	webauthn   *WebAuthnManager              // WebAuthn registration and assertion coordinator
 	startedAt  time.Time
 }
 
@@ -108,7 +110,17 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 		store:      store,
 		tenantKeys: make(map[string]ed25519.PrivateKey),
 		masterKey:  masterKey,
-		startedAt:  time.Now(),
+		webauthn: NewWebAuthnManager(WebAuthnRPConfig{
+			RPID:   "localhost",
+			RPName: "Ominull Response Authority",
+			AllowedOrigins: []string{
+				"http://localhost:9999",
+				"https://localhost:9999",
+				"https://ominull.example.invalid:8443",
+				"https://localhost:8443",
+			},
+		}),
+		startedAt: time.Now(),
 	}
 
 	// 1. Load keys from durable store
@@ -525,6 +537,219 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 		GrantID:    session.SessionID,
 		Status:     "success",
 		Details:    "Method: TOTP",
+	})
+
+	return session, nil
+}
+
+// BeginWebAuthnRegistration creates W3C WebAuthn creation options for navigator.credentials.create()
+func (a *Authority) BeginWebAuthnRegistration(tenantID, operatorID string) (*RegistrationOptions, error) {
+	if tenantID == "" || operatorID == "" {
+		return nil, errors.New("empty tenant ID or operator ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check response membership: if memberships exist for tenant, operator must be active member
+	members, err := a.store.ListMemberships(ctx, tenantID)
+	if err == nil && len(members) > 0 {
+		mem, err := a.store.GetMembership(ctx, tenantID, operatorID)
+		if err != nil || mem.Status != "active" {
+			return nil, errors.New("operator is not an active member of tenant response authority")
+		}
+	} else {
+		// Bootstrap initial administrator membership
+		_ = a.store.SaveMembership(ctx, &MembershipRecord{
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			Role:       RoleResponseAdmin,
+			Status:     "active",
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		})
+	}
+
+	return a.webauthn.CreateRegistrationOptions(tenantID, operatorID)
+}
+
+// FinishWebAuthnRegistration validates the client attestation and persists the WebAuthn credential.
+func (a *Authority) FinishWebAuthnRegistration(req *WebAuthnRegistrationRequest) (*AuthenticatorRecord, error) {
+	if req == nil {
+		return nil, errors.New("nil registration request")
+	}
+
+	cred, err := a.webauthn.VerifyRegistration(req)
+	if err != nil {
+		return nil, err
+	}
+
+	credJSON, err := json.Marshal(cred)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	rec := &AuthenticatorRecord{
+		ID:          uuid.New().String(),
+		OperatorID:  req.OperatorID,
+		TenantID:    req.TenantID,
+		Type:        AuthMethodWebAuthn,
+		Label:       SecurityLabelWebAuthn,
+		SecretOrKey: string(credJSON),
+		Status:      "active",
+		EnrolledAt:  now,
+	}
+
+	if err := a.store.SaveAuthenticator(ctx, rec); err != nil {
+		return nil, err
+	}
+
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   req.TenantID,
+		OperatorID: req.OperatorID,
+		EventType:  "authenticator_enrolled",
+		Status:     "success",
+		Details:    fmt.Sprintf("Method: WebAuthn, Label: %s, CredentialID: %s", SecurityLabelWebAuthn, req.CredentialID),
+	})
+
+	return rec, nil
+}
+
+// BeginWebAuthnAuthentication generates challenge and credential request options for navigator.credentials.get()
+func (a *Authority) BeginWebAuthnAuthentication(tenantID, operatorID string) (*AuthenticationOptions, error) {
+	if tenantID == "" || operatorID == "" {
+		return nil, errors.New("empty tenant ID or operator ID")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	auths, err := a.store.ListAuthenticators(ctx, tenantID, operatorID)
+	if err != nil || len(auths) == 0 {
+		return nil, errors.New("no authenticators enrolled for operator")
+	}
+
+	var credIDs []string
+	for _, rec := range auths {
+		if rec.Type == AuthMethodWebAuthn && rec.Status == "active" {
+			var cred StoredWebAuthnCredential
+			if err := json.Unmarshal([]byte(rec.SecretOrKey), &cred); err == nil {
+				credIDs = append(credIDs, cred.CredentialID)
+			}
+		}
+	}
+
+	if len(credIDs) == 0 {
+		return nil, errors.New("no active WebAuthn credentials registered for operator")
+	}
+
+	return a.webauthn.CreateAuthenticationOptions(tenantID, operatorID, credIDs)
+}
+
+// FinishWebAuthnAuthentication validates assertion signature and issues an authenticated response session.
+func (a *Authority) FinishWebAuthnAuthentication(req *WebAuthnAuthenticationRequest) (*ResponseSession, error) {
+	if req == nil {
+		return nil, errors.New("nil authentication request")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	auths, err := a.store.ListAuthenticators(ctx, req.TenantID, req.OperatorID)
+	if err != nil || len(auths) == 0 {
+		return nil, errors.New("no authenticators enrolled for operator")
+	}
+
+	var matchedRec *AuthenticatorRecord
+	var matchedCred StoredWebAuthnCredential
+	for _, rec := range auths {
+		if rec.Type == AuthMethodWebAuthn && rec.Status == "active" {
+			var cred StoredWebAuthnCredential
+			if err := json.Unmarshal([]byte(rec.SecretOrKey), &cred); err == nil {
+				if cred.CredentialID == req.CredentialID {
+					matchedRec = rec
+					matchedCred = cred
+					break
+				}
+			}
+		}
+	}
+
+	if matchedRec == nil {
+		return nil, errors.New("matching WebAuthn credential not found")
+	}
+
+	// Validate browser public key hex
+	pubBytes, err := hex.DecodeString(req.BrowserPublicKey)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid browser public key encoding or length")
+	}
+
+	// Verify assertion signature and sign counter
+	if err := a.webauthn.VerifyAssertion(req, &matchedCred); err != nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "auth_failed",
+			Status:     "denied",
+			Details:    fmt.Sprintf("WebAuthn assertion failed: %v", err),
+		})
+		return nil, err
+	}
+
+	// Update sign count in stored authenticator
+	updatedJSON, err := json.Marshal(&matchedCred)
+	if err == nil {
+		matchedRec.SecretOrKey = string(updatedJSON)
+		_ = a.store.SaveAuthenticator(ctx, matchedRec)
+	}
+
+	policy, _ := a.store.GetPolicy(ctx, req.TenantID)
+	sessionTTL := a.cfg.DefaultSessionTTL
+	if policy != nil && policy.MaxSessionTTLSec > 0 {
+		sessionTTL = time.Duration(policy.MaxSessionTTLSec) * time.Second
+	}
+	idleTTL := a.cfg.DefaultIdleTTL
+	if policy != nil && policy.MaxIdleTTLSec > 0 {
+		idleTTL = time.Duration(policy.MaxIdleTTLSec) * time.Second
+	}
+
+	session := &ResponseSession{
+		SessionID:        uuid.New().String(),
+		OperatorID:       req.OperatorID,
+		TenantID:         req.TenantID,
+		BrowserSessionID: req.BrowserSessionID,
+		BrowserPublicKey: req.BrowserPublicKey,
+		AllowedActionKinds: []response.ActionKind{
+			response.ActionKindForensicCollect,
+			response.ActionKindScriptExec,
+			response.ActionKindTerminalSession,
+		},
+		IssuedAt:          now,
+		IdleExpiresAt:     now.Add(idleTTL),
+		AbsoluteExpiresAt: now.Add(sessionTTL),
+		Locked:            false,
+		AuthMethod:        AuthMethodWebAuthn,
+	}
+
+	if err := a.store.SaveSession(ctx, session); err != nil {
+		return nil, fmt.Errorf("failed to save response session: %w", err)
+	}
+
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   req.TenantID,
+		OperatorID: req.OperatorID,
+		EventType:  "session_unlocked",
+		GrantID:    session.SessionID,
+		Status:     "success",
+		Details:    "Method: WebAuthn (Phishing-Resistant Hardware Bound)",
 	})
 
 	return session, nil
