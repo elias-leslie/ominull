@@ -20,7 +20,7 @@ replace, not as released behavior.
 |---|---|---|
 | Phase 0 | Verified (Slices 0.1, 0.2, 0.3, 0.4 complete) | Slice 0.1 (`docs/evidence/0-1.md`) consolidated cross-language fixtures into `hub/tests/fixtures/response`. Slice 0.2 (`docs/evidence/0-2.md`) implemented length-prefixed canonical encoding and byte-exact verification. Slice 0.3 (`docs/evidence/0-3.md`) established the threat model, trusted-origin spec, and platform OS floors in `docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md`. Slice 0.4 (`docs/evidence/0-4.md`) captured baseline performance, SQLite latency, and packaging benchmarks in `TESTING.md`. Ready for operator acceptance. |
 | Phase 1A | Verified (Slices 1A.0, 1A.1, 1A.2 complete) | Slice 1A.0 (`docs/evidence/1A-0.md`) verified snapshot restore on LXC 150. Slice 1A.1 (`docs/evidence/1A-1.md`) migrated hub to `ominull:ominull`. Slice 1A.2 (`docs/evidence/1A-2.md`) packaged the response authority under dedicated system identity `ominull-authority:ominull-authority` with restricted socket access (`0660`), verified mutual isolation, package lifecycle, and live dual-service execution on LXC 150. Ready for operator acceptance. |
-| Phase 1B | Unsafe prototype | Per-tenant Ed25519 key files, basic TOTP calculation, and Unix-socket RPC exist. There is no SQLite signer store: `Authority` keeps `authenticators`, `sessions`, and `recoveryTokens` in Go maps (`hub/pkg/responseauth/authority.go:40-47`), so every session, enrollment, and recovery token is lost on restart and no signer audit record is written anywhere. Memberships, method policy, TOTP attempt/reuse controls, and WebAuthn are absent. General hub authentication can reach enrollment, and handlers trust caller-supplied operator identifiers. |
+| Phase 1B | Slice 1B.1 verified; slices 1B.2-1B.4 in progress | Slice 1B.1 on 2026-09-03 (`docs/evidence/1B-1.md`) replaced in-memory maps with durable SQLite signer store (`hub/pkg/responseauth/store.go`). Keys, memberships, authenticators, policy, sessions, replay state, recovery tokens, and audit logs survive authority restarts. Proved persistence in automated tests and live on LXC 150. Slices 1B.2 (TOTP hardening), 1B.3 (WebAuthn), and 1B.4 (grant validation) underway. |
 | Phase 1C | Incomplete prototype | `response_jobs`, basic leases, REST handlers, and heartbeat offers exist. The full transition model, progress, tenant and endpoint binding on ACK/result/cancel, replay protection, retry-safety policy, durable cancellation, and complete audit do not. Handlers do not recompute the action digest from the typed payload. |
 | Phase 1D | Reject, prototype hooks removed | Corrected by slice R0.5 on 2026-09-03 (`docs/evidence/R0-5.md`): prototype offer processing and unverified result submission were removed from `agent/linux/main.c` and `agent/src/service.c`. Both C agent builds compile cleanly under `-Wall -Wextra -Wformat=2 -O2` with zero warnings, exactly matching released v1.8.3 behavior. |
 | Phase 1E | Unsafe prototype, CLI build restored | Corrected by slice R0.3 on 2026-09-03 (`docs/evidence/R0-3.md`): `ominullctl` compiles cleanly, `shell open`/`exec` and connection-token printing are removed, and the `OMINULL_API_KEY` plaintext environment fallback is removed. Parity and pagination are incomplete, and forensic manifest verification remains unhardened. |
@@ -1125,6 +1125,12 @@ Required before any packaging change reaches the live host:
   static API-key authorization, method-policy downgrade, and unbounded target sets.
 - Add a production local-socket adapter and an in-memory adapter for tests. Add a
   private-network adapter only when the separate-VM or cloud deployment exists.
+
+### Slice Phase 1B status ledger
+
+| Slice | Status | Evidence | Description |
+|---|---|---|---|
+| 1B.1 | `verified` | `docs/evidence/1B-1.md` | Durable SQLite signer store implemented in `hub/pkg/responseauth/store.go`; relational schemas for keys, memberships, authenticators, policy, sessions, nonces, and audit log; proved restart persistence in test suite and live on LXC 150. |
 
 ### 1C. Hub job engine
 

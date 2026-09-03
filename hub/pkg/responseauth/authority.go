@@ -1,6 +1,7 @@
 package responseauth
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,35 +20,37 @@ import (
 
 // Config holds settings for the Response Authority.
 type Config struct {
-	StateDir        string        // e.g. /var/lib/ominull-response-authority
-	SignerPartition string        // e.g. "portable-local" or "hsm-partition-1"
+	StateDir          string        // e.g. /var/lib/ominull-response-authority
+	SignerPartition   string        // e.g. "portable-local" or "hsm-partition-1"
 	DefaultSessionTTL time.Duration // e.g. 8h
 	DefaultIdleTTL    time.Duration // e.g. 30m
 }
 
 // AuthenticatorRecord stores enrolled credentials (TOTP, WebAuthn) for an operator.
 type AuthenticatorRecord struct {
-	ID          string     `json:"id"`
-	OperatorID  string     `json:"operator_id"`
-	TenantID    string     `json:"tenant_id"`
-	Type        AuthMethod `json:"type"`
-	SecretOrKey string     `json:"secret_or_key"` // encrypted or public key
-	EnrolledAt  time.Time  `json:"enrolled_at"`
-	LastUsedAt  time.Time  `json:"last_used_at"`
+	ID           string     `json:"id"`
+	OperatorID   string     `json:"operator_id"`
+	TenantID     string     `json:"tenant_id"`
+	Type         AuthMethod `json:"type"`
+	Label        string     `json:"label"`
+	SecretOrKey  string     `json:"secret_or_key"` // encrypted or public key
+	Status       string     `json:"status"`        // "active", "disabled", "revoked"
+	EnrolledAt   time.Time  `json:"enrolled_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	FailureCount int        `json:"failure_count"`
+	LockedUntil  *time.Time `json:"locked_until,omitempty"`
 }
 
 // Authority manages tenant response keys, sessions, and endpoint grant signing.
 type Authority struct {
-	mu             sync.RWMutex
-	cfg            Config
-	tenantKeys     map[string]ed25519.PrivateKey // tenant_id -> private key
-	authenticators map[string][]*AuthenticatorRecord // tenant_id:operator_id -> authenticators
-	sessions       map[string]*ResponseSession // session_id -> session
-	recoveryTokens map[string]*RecoveryToken   // token -> recovery token
-	startedAt      time.Time
+	mu         sync.RWMutex
+	cfg        Config
+	store      Store
+	tenantKeys map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
+	startedAt  time.Time
 }
 
-// NewAuthority creates a new Response Authority instance.
+// NewAuthority creates a new Response Authority instance backed by SQLite.
 func NewAuthority(cfg Config) (*Authority, error) {
 	if cfg.StateDir == "" {
 		cfg.StateDir = "/tmp/ominull-response-authority-test"
@@ -66,129 +69,391 @@ func NewAuthority(cfg Config) (*Authority, error) {
 		return nil, fmt.Errorf("failed to create authority key dir: %w", err)
 	}
 
-	auth := &Authority{
-		cfg:            cfg,
-		tenantKeys:     make(map[string]ed25519.PrivateKey),
-		authenticators: make(map[string][]*AuthenticatorRecord),
-		sessions:       make(map[string]*ResponseSession),
-		recoveryTokens: make(map[string]*RecoveryToken),
-		startedAt:      time.Now(),
+	dbPath := filepath.Join(cfg.StateDir, "authority.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize sqlite store: %w", err)
 	}
 
-	if err := auth.loadKeys(); err != nil {
-		return nil, fmt.Errorf("failed to load existing tenant keys: %w", err)
+	return NewAuthorityWithStore(cfg, store)
+}
+
+// NewAuthorityWithStore creates an Authority with a specific Store implementation.
+func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
+	if cfg.DefaultSessionTTL <= 0 {
+		cfg.DefaultSessionTTL = 8 * time.Hour
+	}
+	if cfg.DefaultIdleTTL <= 0 {
+		cfg.DefaultIdleTTL = 30 * time.Minute
+	}
+	if cfg.SignerPartition == "" {
+		cfg.SignerPartition = "portable-local"
+	}
+
+	auth := &Authority{
+		cfg:        cfg,
+		store:      store,
+		tenantKeys: make(map[string]ed25519.PrivateKey),
+		startedAt:  time.Now(),
+	}
+
+	// 1. Load keys from durable store
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	records, err := store.ListTenantKeys(ctx)
+	if err == nil {
+		for _, rec := range records {
+			keyBytes, err := hex.DecodeString(rec.PrivateKey)
+			if err == nil && len(keyBytes) == ed25519.PrivateKeySize {
+				auth.tenantKeys[rec.TenantID] = ed25519.PrivateKey(keyBytes)
+			}
+		}
+	}
+
+	// 2. Import any legacy file keys from keys/ directory into store
+	if cfg.StateDir != "" {
+		_ = auth.importLegacyFileKeys(ctx)
 	}
 
 	return auth, nil
 }
 
-func (a *Authority) loadKeys() error {
+func (a *Authority) importLegacyFileKeys(ctx context.Context) error {
 	keyDir := filepath.Join(a.cfg.StateDir, "keys")
 	entries, err := os.ReadDir(keyDir)
 	if err != nil {
-		return err
+		return nil
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".key") {
 			continue
 		}
 		tenantID := strings.TrimSuffix(entry.Name(), ".key")
-		keyPath := filepath.Join(keyDir, entry.Name())
-		data, err := os.ReadFile(keyPath)
+		if _, exists := a.tenantKeys[tenantID]; exists {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(keyDir, entry.Name()))
 		if err != nil {
-			return err
+			continue
 		}
 		rawHex := strings.TrimSpace(string(data))
 		keyBytes, err := hex.DecodeString(rawHex)
 		if err != nil || len(keyBytes) != ed25519.PrivateKeySize {
 			continue
 		}
-		a.tenantKeys[tenantID] = ed25519.PrivateKey(keyBytes)
+		priv := ed25519.PrivateKey(keyBytes)
+		pub := priv.Public().(ed25519.PublicKey)
+		fp := sha256.Sum256(pub)
+		keyID := hex.EncodeToString(fp[:])
+
+		rec := &TenantKeyRecord{
+			TenantID:   tenantID,
+			KeyID:      keyID,
+			PublicKey:  hex.EncodeToString(pub),
+			PrivateKey: rawHex,
+			Partition:  a.cfg.SignerPartition,
+			Status:     "active",
+			CreatedAt:  time.Now(),
+		}
+		_ = a.store.SaveTenantKey(ctx, rec)
+		a.tenantKeys[tenantID] = priv
+	}
+	return nil
+}
+
+// Close closes the authority and its underlying durable store.
+func (a *Authority) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store != nil {
+		return a.store.Close()
 	}
 	return nil
 }
 
 // GetOrCreateTenantKey returns or generates the Ed25519 response keypair for a tenant.
 func (a *Authority) GetOrCreateTenantKey(tenantID string) (ed25519.PublicKey, string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if tenantID == "" {
 		return nil, "", errors.New("empty tenant ID")
 	}
 
-	privKey, exists := a.tenantKeys[tenantID]
-	if !exists {
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, "", fmt.Errorf("generate ed25519 key failed: %w", err)
-		}
-		privKey = priv
-		a.tenantKeys[tenantID] = privKey
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-		keyPath := filepath.Join(a.cfg.StateDir, "keys", tenantID+".key")
-		keyHex := hex.EncodeToString(priv)
-		if err := os.WriteFile(keyPath, []byte(keyHex), 0600); err != nil {
-			return nil, "", fmt.Errorf("failed to persist tenant key: %w", err)
-		}
-		pubKey := pub
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if privKey, exists := a.tenantKeys[tenantID]; exists {
+		pubKey := privKey.Public().(ed25519.PublicKey)
 		fp := sha256.Sum256(pubKey)
 		return pubKey, hex.EncodeToString(fp[:]), nil
 	}
 
-	pubKey := privKey.Public().(ed25519.PublicKey)
-	fp := sha256.Sum256(pubKey)
-	return pubKey, hex.EncodeToString(fp[:]), nil
+	// Check store
+	rec, err := a.store.GetTenantKey(ctx, tenantID)
+	if err == nil && rec.Status == "active" {
+		keyBytes, err := hex.DecodeString(rec.PrivateKey)
+		if err == nil && len(keyBytes) == ed25519.PrivateKeySize {
+			priv := ed25519.PrivateKey(keyBytes)
+			a.tenantKeys[tenantID] = priv
+			pub := priv.Public().(ed25519.PublicKey)
+			return pub, rec.KeyID, nil
+		}
+	}
+
+	// Generate new key
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, "", fmt.Errorf("generate ed25519 key failed: %w", err)
+	}
+	fp := sha256.Sum256(pub)
+	keyID := hex.EncodeToString(fp[:])
+	keyHex := hex.EncodeToString(priv)
+
+	newRec := &TenantKeyRecord{
+		TenantID:   tenantID,
+		KeyID:      keyID,
+		PublicKey:  hex.EncodeToString(pub),
+		PrivateKey: keyHex,
+		Partition:  a.cfg.SignerPartition,
+		Status:     "active",
+		CreatedAt:  time.Now(),
+	}
+	if err := a.store.SaveTenantKey(ctx, newRec); err != nil {
+		return nil, "", fmt.Errorf("failed to persist tenant key: %w", err)
+	}
+
+	// Maintain file key for legacy backwards compatibility
+	if a.cfg.StateDir != "" {
+		keyPath := filepath.Join(a.cfg.StateDir, "keys", tenantID+".key")
+		_ = os.WriteFile(keyPath, []byte(keyHex), 0600)
+	}
+
+	a.tenantKeys[tenantID] = priv
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  time.Now(),
+		TenantID:   tenantID,
+		OperatorID: "system",
+		EventType:  "key_created",
+		GrantID:    keyID,
+		Status:     "success",
+		Details:    fmt.Sprintf("Partition: %s", a.cfg.SignerPartition),
+	})
+
+	return pub, keyID, nil
+}
+
+// GrantMembership adds or updates an operator's membership in a tenant.
+func (a *Authority) GrantMembership(tenantID, operatorID string, role MembershipRole) error {
+	if tenantID == "" || operatorID == "" {
+		return errors.New("empty tenant ID or operator ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	rec := &MembershipRecord{
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		Role:       role,
+		Status:     "active",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := a.store.SaveMembership(ctx, rec); err != nil {
+		return err
+	}
+	return a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "membership_granted",
+		Status:     "success",
+		Details:    fmt.Sprintf("Role: %s", role),
+	})
+}
+
+// RevokeMembership revokes an operator's response authority membership.
+func (a *Authority) RevokeMembership(tenantID, operatorID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := a.store.RevokeMembership(ctx, tenantID, operatorID); err != nil {
+		return err
+	}
+	return a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  time.Now(),
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "membership_revoked",
+		Status:     "success",
+	})
 }
 
 // EnrollTOTP registers a new TOTP authenticator for an operator in a tenant.
 func (a *Authority) EnrollTOTP(tenantID, operatorID string) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if tenantID == "" || operatorID == "" {
+		return "", errors.New("empty tenant ID or operator ID")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check response membership: if memberships exist for tenant, operator must be active member
+	members, err := a.store.ListMemberships(ctx, tenantID)
+	if err == nil && len(members) > 0 {
+		mem, err := a.store.GetMembership(ctx, tenantID, operatorID)
+		if err != nil || mem.Status != "active" {
+			_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+				Timestamp:  time.Now(),
+				TenantID:   tenantID,
+				OperatorID: operatorID,
+				EventType:  "auth_failed",
+				Status:     "denied",
+				Details:    "operator not an active member of tenant response authority",
+			})
+			return "", errors.New("operator is not an active member of tenant response authority")
+		}
+	} else {
+		// Bootstrap initial administrator membership
+		_ = a.store.SaveMembership(ctx, &MembershipRecord{
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			Role:       RoleResponseAdmin,
+			Status:     "active",
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		})
+	}
 
 	secret, err := GenerateTOTPSecret()
 	if err != nil {
 		return "", err
 	}
 
-	key := fmt.Sprintf("%s:%s", tenantID, operatorID)
+	now := time.Now()
 	rec := &AuthenticatorRecord{
 		ID:          uuid.New().String(),
 		OperatorID:  operatorID,
 		TenantID:    tenantID,
 		Type:        AuthMethodTOTP,
+		Label:       "Primary TOTP",
 		SecretOrKey: secret,
-		EnrolledAt:  time.Now(),
+		Status:      "active",
+		EnrolledAt:  now,
 	}
-	a.authenticators[key] = append(a.authenticators[key], rec)
+
+	if err := a.store.SaveAuthenticator(ctx, rec); err != nil {
+		return "", err
+	}
+
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "authenticator_enrolled",
+		Status:     "success",
+		Details:    "Method: TOTP",
+	})
+
 	return secret, nil
 }
 
 // UnlockSessionWithTOTP verifies a TOTP code and issues an 8-hour browser-bound response session.
 func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID, browserPubKeyHex, totpCode string) (*ResponseSession, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if tenantID == "" || operatorID == "" {
+		return nil, errors.New("empty tenant ID or operator ID")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	now := time.Now()
-	key := fmt.Sprintf("%s:%s", tenantID, operatorID)
-	recs := a.authenticators[key]
-
-	var validSecret string
-	for _, rec := range recs {
-		if rec.Type == AuthMethodTOTP && VerifyTOTPCode(rec.SecretOrKey, totpCode, now) {
-			validSecret = rec.SecretOrKey
-			rec.LastUsedAt = now
-			break
-		}
-	}
-	if validSecret == "" {
-		return nil, errors.New("invalid or expired TOTP code")
+	recs, err := a.store.ListAuthenticators(ctx, tenantID, operatorID)
+	if err != nil || len(recs) == 0 {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			EventType:  "auth_failed",
+			Status:     "denied",
+			Details:    "no active authenticators enrolled",
+		})
+		return nil, errors.New("no authenticators enrolled for operator")
 	}
 
 	// Validate browser public key hex
 	pubBytes, err := hex.DecodeString(browserPubKeyHex)
 	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
 		return nil, errors.New("invalid browser public key encoding or length")
+	}
+
+	var matchedAuth *AuthenticatorRecord
+	for _, rec := range recs {
+		if rec.Type != AuthMethodTOTP || rec.Status != "active" {
+			continue
+		}
+		if rec.LockedUntil != nil && now.Before(*rec.LockedUntil) {
+			continue // locked due to too many failed attempts
+		}
+		if VerifyTOTPCode(rec.SecretOrKey, totpCode, now) {
+			matchedAuth = rec
+			break
+		}
+	}
+
+	if matchedAuth == nil {
+		// Increment failure count on first active totp authenticator
+		for _, rec := range recs {
+			if rec.Type == AuthMethodTOTP && rec.Status == "active" {
+				newCount := rec.FailureCount + 1
+				var lockUntil *time.Time
+				if newCount >= 5 {
+					t := now.Add(15 * time.Minute)
+					lockUntil = &t
+				}
+				_ = a.store.UpdateAuthenticatorUsage(ctx, rec.ID, now, newCount, lockUntil)
+				break
+			}
+		}
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			EventType:  "auth_failed",
+			Status:     "denied",
+			Details:    "invalid TOTP code",
+		})
+		return nil, errors.New("invalid or expired TOTP code")
+	}
+
+	// Enforce single-use timestep replay protection
+	step := now.Unix() / 30
+	nonce := fmt.Sprintf("totp:%s:%s:%d", tenantID, operatorID, step)
+	if err := a.store.CheckAndRecordNonce(ctx, nonce, "totp_timestep", tenantID, now.Add(60*time.Second)); err != nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			EventType:  "auth_failed",
+			Status:     "denied",
+			Details:    "replayed TOTP code within same timestep",
+		})
+		return nil, errors.New("TOTP code already used; wait for next 30-second window")
+	}
+
+	// Reset failure count on success
+	_ = a.store.UpdateAuthenticatorUsage(ctx, matchedAuth.ID, now, 0, nil)
+
+	policy, _ := a.store.GetPolicy(ctx, tenantID)
+	sessionTTL := a.cfg.DefaultSessionTTL
+	if policy != nil && policy.MaxSessionTTLSec > 0 {
+		sessionTTL = time.Duration(policy.MaxSessionTTLSec) * time.Second
+	}
+	idleTTL := a.cfg.DefaultIdleTTL
+	if policy != nil && policy.MaxIdleTTLSec > 0 {
+		idleTTL = time.Duration(policy.MaxIdleTTLSec) * time.Second
 	}
 
 	session := &ResponseSession{
@@ -203,31 +468,65 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 			response.ActionKindTerminalSession,
 		},
 		IssuedAt:          now,
-		IdleExpiresAt:     now.Add(a.cfg.DefaultIdleTTL),
-		AbsoluteExpiresAt: now.Add(a.cfg.DefaultSessionTTL),
+		IdleExpiresAt:     now.Add(idleTTL),
+		AbsoluteExpiresAt: now.Add(sessionTTL),
 		Locked:            false,
 		AuthMethod:        AuthMethodTOTP,
 	}
 
-	a.sessions[session.SessionID] = session
+	if err := a.store.SaveSession(ctx, session); err != nil {
+		return nil, fmt.Errorf("failed to save response session: %w", err)
+	}
+
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "session_unlocked",
+		GrantID:    session.SessionID,
+		Status:     "success",
+		Details:    "Method: TOTP",
+	})
+
 	return session, nil
 }
 
 // SignGrant validates an action proof and creates a signed endpoint grant.
 func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	now := time.Now()
 	if req == nil || req.Proof == nil {
 		return nil, errors.New("missing sign grant request or proof")
 	}
 
-	session, exists := a.sessions[req.SessionID]
-	if !exists || !session.IsValid(now) {
+	now := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := a.store.GetSession(ctx, req.SessionID)
+	if err != nil || !session.IsValid(now) {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "grant_denied",
+			ActionKind: string(req.ActionKind),
+			EndpointID: req.EndpointID,
+			Status:     "denied",
+			Details:    "invalid or expired response session",
+		})
 		return nil, errors.New("invalid or expired response session")
 	}
+
 	if session.TenantID != req.TenantID || session.OperatorID != req.OperatorID {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "grant_denied",
+			ActionKind: string(req.ActionKind),
+			EndpointID: req.EndpointID,
+			Status:     "denied",
+			Details:    "session tenant or operator mismatch",
+		})
 		return nil, errors.New("session tenant or operator mismatch")
 	}
 
@@ -249,19 +548,69 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 		return nil, fmt.Errorf("invalid browser public key: %w", err)
 	}
 	if err := req.Proof.Verify(ed25519.PublicKey(browserPubBytes), now); err != nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "grant_denied",
+			ActionKind: string(req.ActionKind),
+			EndpointID: req.EndpointID,
+			Status:     "denied",
+			Details:    fmt.Sprintf("proof verification failed: %v", err),
+		})
 		return nil, fmt.Errorf("action proof verification failed: %w", err)
 	}
+
 	if !strings.EqualFold(req.Proof.ActionDigest, req.ActionDigest) {
 		return nil, errors.New("proof action digest does not match requested action digest")
 	}
 
-	// Update session idle deadline on successful action
-	session.IdleExpiresAt = now.Add(a.cfg.DefaultIdleTTL)
-
-	privKey, exists := a.tenantKeys[req.TenantID]
-	if !exists {
-		return nil, fmt.Errorf("no response signing key found for tenant %q", req.TenantID)
+	// Replay protection: verify and record proof nonce
+	proofNonceKey := fmt.Sprintf("proof:%s:%s", req.TenantID, req.Proof.Nonce)
+	if err := a.store.CheckAndRecordNonce(ctx, proofNonceKey, "action_proof", req.TenantID, now.Add(10*time.Minute)); err != nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "grant_denied",
+			ActionKind: string(req.ActionKind),
+			EndpointID: req.EndpointID,
+			Status:     "denied",
+			Details:    "proof nonce replayed",
+		})
+		return nil, errors.New("action proof nonce already used")
 	}
+
+	// Update session idle deadline on successful action
+	policy, _ := a.store.GetPolicy(ctx, req.TenantID)
+	idleTTL := a.cfg.DefaultIdleTTL
+	if policy != nil && policy.MaxIdleTTLSec > 0 {
+		idleTTL = time.Duration(policy.MaxIdleTTLSec) * time.Second
+	}
+	session.IdleExpiresAt = now.Add(idleTTL)
+	_ = a.store.UpdateSession(ctx, session)
+
+	// Fetch tenant signing key
+	a.mu.RLock()
+	privKey, exists := a.tenantKeys[req.TenantID]
+	a.mu.RUnlock()
+
+	if !exists {
+		// Try load from store
+		rec, err := a.store.GetTenantKey(ctx, req.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("no response signing key found for tenant %q", req.TenantID)
+		}
+		keyBytes, err := hex.DecodeString(rec.PrivateKey)
+		if err != nil || len(keyBytes) != ed25519.PrivateKeySize {
+			return nil, errors.New("corrupted tenant private key in store")
+		}
+		privKey = ed25519.PrivateKey(keyBytes)
+		a.mu.Lock()
+		a.tenantKeys[req.TenantID] = privKey
+		a.mu.Unlock()
+	}
+
 	pubKey := privKey.Public().(ed25519.PublicKey)
 	keyFP := sha256.Sum256(pubKey)
 	keyID := hex.EncodeToString(keyFP[:])
@@ -294,48 +643,94 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 	sig := ed25519.Sign(privKey, grant.CanonicalBytes())
 	grant.Signature = hex.EncodeToString(sig)
 
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   req.TenantID,
+		OperatorID: req.OperatorID,
+		EventType:  "grant_signed",
+		ActionKind: string(req.ActionKind),
+		EndpointID: req.EndpointID,
+		GrantID:    grant.GrantID,
+		Status:     "success",
+		Details:    fmt.Sprintf("TTL: %ds, Nonce: %s", ttl, grant.Nonce),
+	})
+
 	return grant, nil
 }
 
 // LockSession explicitly locks a response session.
 func (a *Authority) LockSession(sessionID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	session, exists := a.sessions[sessionID]
-	if !exists {
-		return errors.New("session not found")
+	if err := a.store.LockSession(ctx, sessionID); err != nil {
+		return err
 	}
-	session.Locked = true
+	sess, err := a.store.GetSession(ctx, sessionID)
+	if err == nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  time.Now(),
+			TenantID:   sess.TenantID,
+			OperatorID: sess.OperatorID,
+			EventType:  "session_locked",
+			GrantID:    sessionID,
+			Status:     "success",
+		})
+	}
 	return nil
 }
 
 // GenerateRecoveryToken creates a short-lived single-use root recovery token.
 func (a *Authority) GenerateRecoveryToken(tenantID, operatorID string) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	tokenBytes := make([]byte, 24)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return "", err
 	}
 	token := hex.EncodeToString(tokenBytes)
+	hash := sha256.Sum256([]byte(token))
+	hashHex := hex.EncodeToString(hash[:])
 
-	a.recoveryTokens[token] = &RecoveryToken{
-		Token:      token,
+	now := time.Now()
+	rec := &RecoveryTokenRecord{
+		TokenHash:  hashHex,
 		TenantID:   tenantID,
 		OperatorID: operatorID,
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(15 * time.Minute),
 		Used:       false,
 	}
+
+	if err := a.store.SaveRecoveryToken(ctx, rec); err != nil {
+		return "", err
+	}
+
+	_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "recovery_generated",
+		Status:     "success",
+	})
+
 	return token, nil
+}
+
+// GetSession retrieves a response session from the durable store.
+func (a *Authority) GetSession(sessionID string) (*ResponseSession, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.store.GetSession(ctx, sessionID)
 }
 
 // Status returns summary health metrics for the authority.
 func (a *Authority) Status(tenantID string) ResponseAuthorityStatus {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
+	a.mu.RLock()
 	var keyID, pubHex string
 	if priv, exists := a.tenantKeys[tenantID]; exists {
 		pub := priv.Public().(ed25519.PublicKey)
@@ -343,12 +738,17 @@ func (a *Authority) Status(tenantID string) ResponseAuthorityStatus {
 		keyID = hex.EncodeToString(fp[:])
 		pubHex = hex.EncodeToString(pub)
 	}
+	a.mu.RUnlock()
 
-	activeCount := 0
+	activeSessions := 0
+	authCount := 0
 	now := time.Now()
-	for _, s := range a.sessions {
-		if s.IsValid(now) {
-			activeCount++
+	if a.store != nil {
+		if c, err := a.store.CountActiveSessions(ctx, tenantID, now); err == nil {
+			activeSessions = c
+		}
+		if c, err := a.store.CountAuthenticators(ctx, tenantID); err == nil {
+			authCount = c
 		}
 	}
 
@@ -357,8 +757,15 @@ func (a *Authority) Status(tenantID string) ResponseAuthorityStatus {
 		SignerPartition:     a.cfg.SignerPartition,
 		TenantKeyID:         keyID,
 		TenantPublicKey:     pubHex,
-		AuthenticatorsCount: len(a.authenticators),
-		ActiveSessions:      activeCount,
+		AuthenticatorsCount: authCount,
+		ActiveSessions:      activeSessions,
 		StartedAt:           a.startedAt,
 	}
+}
+
+// GetAuditLog queries the audit log for a tenant.
+func (a *Authority) GetAuditLog(tenantID string, limit int) ([]*SignerAuditEntry, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.store.QueryAudit(ctx, tenantID, limit)
 }

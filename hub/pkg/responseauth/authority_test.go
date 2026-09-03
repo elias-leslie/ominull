@@ -114,7 +114,11 @@ func TestAuthority_FullLifecycle(t *testing.T) {
 	if err := auth.LockSession(session.SessionID); err != nil {
 		t.Fatalf("LockSession failed: %v", err)
 	}
-	if session.IsValid(now) {
+	reloaded, err := auth.GetSession(session.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+	if reloaded.IsValid(now) {
 		t.Fatalf("expected session to be invalid after lock")
 	}
 

@@ -39,6 +39,7 @@ func NewServer(auth *Authority, socketPath string) (*Server, error) {
 	mux.HandleFunc("/v1/auth/grant/sign", s.handleSignGrant)
 	mux.HandleFunc("/v1/auth/recovery/generate", s.handleGenerateRecovery)
 	mux.HandleFunc("/v1/auth/status", s.handleStatus)
+	mux.HandleFunc("/v1/auth/audit", s.handleAudit)
 
 	s.httpServer = &http.Server{
 		Handler:      mux,
@@ -220,3 +221,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
 }
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	tenantID := r.URL.Query().Get("tenant_id")
+	entries, err := s.auth.GetAuditLog(tenantID, 100)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(entries)
+}
+
