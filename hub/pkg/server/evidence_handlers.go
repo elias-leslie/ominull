@@ -133,6 +133,18 @@ func (s *Server) handleEvidenceItems(w http.ResponseWriter, r *http.Request) {
 			req.ContentType = "application/octet-stream"
 		}
 
+		if callerEndpoint := r.Header.Get("X-Device-Endpoint-ID"); callerEndpoint != "" {
+			bundle, err := s.evidenceStore.GetBundle(tenantID, req.BundleID)
+			if err != nil {
+				writeJSONError(w, http.StatusNotFound, "bundle not found")
+				return
+			}
+			if bundle.EndpointID != callerEndpoint {
+				writeJSONError(w, http.StatusForbidden, "device credential cannot register item for another endpoint")
+				return
+			}
+		}
+
 		item, err := s.evidenceStore.CreateItem(tenantID, req.BundleID, req.Name, req.ContentType, req.ExpectedSize, req.CollectorStatus)
 		if err != nil {
 			if errors.Is(err, evidence.ErrTenantMismatch) {
@@ -223,6 +235,18 @@ func (s *Server) handleEvidenceItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if callerEndpoint := r.Header.Get("X-Device-Endpoint-ID"); callerEndpoint != "" {
+		bundle, err := s.evidenceStore.GetBundle(tenantID, bundleID)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "bundle not found")
+			return
+		}
+		if bundle.EndpointID != callerEndpoint {
+			writeJSONError(w, http.StatusForbidden, "device credential cannot upload to another endpoint's bundle")
+			return
+		}
+	}
+
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to read body: "+err.Error())
@@ -272,6 +296,18 @@ func (s *Server) handleEvidenceFinalize(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BundleID == "" || req.Manifest == nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid finalize payload")
 		return
+	}
+
+	if callerEndpoint := r.Header.Get("X-Device-Endpoint-ID"); callerEndpoint != "" {
+		bundle, err := s.evidenceStore.GetBundle(tenantID, req.BundleID)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "bundle not found")
+			return
+		}
+		if bundle.EndpointID != callerEndpoint {
+			writeJSONError(w, http.StatusForbidden, "device credential cannot finalize another endpoint's bundle")
+			return
+		}
 	}
 
 	receipt, err := s.evidenceStore.FinalizeBundle(tenantID, req.BundleID, req.Manifest)

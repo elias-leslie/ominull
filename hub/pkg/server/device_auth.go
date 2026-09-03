@@ -57,12 +57,28 @@ func (s *Server) deviceOrLegacyMiddleware(next http.HandlerFunc) http.HandlerFun
 		r.Header.Set("X-Tenant-ID", identity.TenantID)
 		r.Header.Set("X-Username", "device:"+identity.EndpointID)
 		r.Header.Set("X-Device-Endpoint-ID", identity.EndpointID)
-		if (r.URL.Path != "/api/v1/events" || r.Method != http.MethodPost) &&
-			(r.URL.Path != "/api/v1/agent/config" || r.Method != http.MethodGet) {
-			writeJSONError(w, http.StatusForbidden, "device credentials may only read configuration or post telemetry")
+		if !isAllowedDeviceRoute(r.Method, r.URL.Path) {
+			writeJSONError(w, http.StatusForbidden, "device credentials may only access permitted agent endpoints")
 			return
 		}
 		next(w, r)
+	}
+}
+
+func isAllowedDeviceRoute(method, path string) bool {
+	switch {
+	case method == http.MethodPost && path == "/api/v1/events":
+		return true
+	case method == http.MethodGet && path == "/api/v1/agent/config":
+		return true
+	case method == http.MethodPost && (path == "/api/v1/response/jobs/ack" || path == "/api/v1/response/jobs/result"):
+		return true
+	case (method == http.MethodPost || method == http.MethodPut) && path == "/api/v1/evidence/items":
+		return true
+	case method == http.MethodPost && path == "/api/v1/evidence/finalize":
+		return true
+	default:
+		return false
 	}
 }
 
