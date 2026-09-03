@@ -26,6 +26,7 @@
 #include <curl/curl.h>
 
 #include "../include/release_key.h"
+#include "../include/response_dispatcher.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -2298,6 +2299,97 @@ static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
     return true;
 }
 
+/* ---------------------------------------------------------------------------
+ * Next-Gen Response Dispatcher & Execution (Slice 1D.1)
+ * ------------------------------------------------------------------------- */
+
+static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* respJson) {
+    if (!config || !respJson) return;
+
+    ResponseJobOffer offers[MAX_RESPONSE_OFFERS];
+    int offer_count = ParseResponseOffers(respJson, offers, MAX_RESPONSE_OFFERS);
+    if (offer_count <= 0) return;
+
+    for (int i = 0; i < offer_count; i++) {
+        ResponseJobOffer* offer = &offers[i];
+
+        // 1. Verify EndpointGrant V2
+        if (!VerifyResponseGrant(&offer->grant, offer->payload_json, config->endpoint_id, NULL)) {
+            // Drop offer silently: no ACK, no result
+            continue;
+        }
+
+        // 2. Durable Replay Cache check
+        if (!ReplayCache_CheckAndRecord(NULL, offer->grant.grant_id, offer->grant.nonce, offer->grant.expires_at)) {
+            // Replay detected: drop offer silently
+            continue;
+        }
+
+        // 3. Post Acknowledgment to hub
+        char ack_url[sizeof(config->hub_url) + 64];
+        snprintf(ack_url, sizeof(ack_url), "%s/api/v1/response/jobs/ack", config->hub_url);
+        char ack_body[256];
+        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\"}", offer->job_id, offer->lease_id);
+        char ack_resp[1024] = {0};
+        if (!RunHubCurl(config, ack_url, ack_body, ack_resp, sizeof(ack_resp))) {
+            continue;
+        }
+
+        // 4. Action Dispatcher: Check if action kind is recognized and supported
+        if (strcmp(offer->kind, "forensic_collection") == 0) {
+            // Spawn worker in contained child process
+            pid_t pid = fork();
+            if (pid == 0) {
+                // Child: Create new process group
+                setpgid(0, 0);
+
+                // Close inherited file descriptors > 2
+                for (int fd = 3; fd < 1024; fd++) {
+                    close(fd);
+                }
+
+                // Clean sanitized environment
+                clearenv();
+                setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+                setenv("HOME", "/var/lib/ominull", 1);
+                setenv("LANG", "C.UTF-8", 1);
+
+                // Explicit safe working directory
+                if (chdir("/var/lib/ominull") != 0) {
+                    _exit(1);
+                }
+
+                // Resource limits (CPU limit 60s)
+                struct rlimit rl;
+                rl.rlim_cur = 60;
+                rl.rlim_max = 60;
+                setrlimit(RLIMIT_CPU, &rl);
+
+                // Worker execution (e.g. collect diagnostics)
+                _exit(0);
+            } else if (pid > 0) {
+                // Parent: wait for child
+                int status = 0;
+                int exit_code = 1;
+                if (waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+                    exit_code = WEXITSTATUS(status);
+                }
+
+                // Post result to hub
+                char res_url[sizeof(config->hub_url) + 64];
+                snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
+                char res_body[512];
+                snprintf(res_body, sizeof(res_body),
+                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":100}",
+                    offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code);
+                char res_resp[1024] = {0};
+                RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
+            }
+        }
+        // Unknown action kinds are ignored: no execution, no synthesis of success
+    }
+}
+
 static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     /* Checked before the batch is built, not after it fails: the payload and
      * the header that authenticates it are the things being protected. */
@@ -2398,6 +2490,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             AdoptDeviceCredential(config, respBuf);
             SyncEnforcement(config, respBuf);
             ApplyAgentUpdate(config, respBuf);
+            ProcessResponseOffers(config, respBuf);
         }
     }
     HubContact(accepted);

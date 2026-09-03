@@ -67,6 +67,10 @@ gcc -Wall -Wextra -Wformat=2 -O2 -o build/test_response_fixtures agent/tests/tes
 ./build/test_response_fixtures hub/tests/fixtures/response
 rm -f build/test_response_fixtures
 
+gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_response_dispatcher agent/tests/test_response_dispatcher.c
+./build/test_response_dispatcher
+rm -f build/test_response_dispatcher
+
 echo ""
 echo "=========================================================="
 echo "[+] Baseline measurement capture successfully complete."
