@@ -24,6 +24,7 @@ type Client interface {
 	LockSession(ctx context.Context, sessionID string) error
 	SignGrant(ctx context.Context, req *SignGrantRequest) (*response.EndpointGrant, error)
 	GenerateRecoveryToken(ctx context.Context, tenantID, operatorID string) (string, error)
+	ConsumeRecoveryToken(ctx context.Context, tenantID, operatorID, token string) error
 	Status(ctx context.Context, tenantID string) (*ResponseAuthorityStatus, error)
 }
 
@@ -201,6 +202,27 @@ func (c *UDSClient) GenerateRecoveryToken(ctx context.Context, tenantID, operato
 	return res.Token, nil
 }
 
+func (c *UDSClient) ConsumeRecoveryToken(ctx context.Context, tenantID, operatorID, token string) error {
+	payload, _ := json.Marshal(map[string]string{
+		"tenant_id":      tenantID,
+		"operator_id":    operatorID,
+		"recovery_token": token,
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/v1/auth/recovery/consume", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 func (c *UDSClient) Status(ctx context.Context, tenantID string) (*ResponseAuthorityStatus, error) {
 	reqURL := fmt.Sprintf("http://unix/v1/auth/status?tenant_id=%s", url.QueryEscape(tenantID))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -253,6 +275,10 @@ func (c *InProcessClient) SignGrant(_ context.Context, req *SignGrantRequest) (*
 
 func (c *InProcessClient) GenerateRecoveryToken(_ context.Context, tenantID, operatorID string) (string, error) {
 	return c.auth.GenerateRecoveryToken(tenantID, operatorID)
+}
+
+func (c *InProcessClient) ConsumeRecoveryToken(_ context.Context, tenantID, operatorID, token string) error {
+	return c.auth.ResetLockoutWithRecovery(tenantID, operatorID, token)
 }
 
 func (c *InProcessClient) Status(_ context.Context, tenantID string) (*ResponseAuthorityStatus, error) {

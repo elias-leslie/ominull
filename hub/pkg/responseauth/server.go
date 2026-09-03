@@ -38,6 +38,7 @@ func NewServer(auth *Authority, socketPath string) (*Server, error) {
 	mux.HandleFunc("/v1/auth/session/lock", s.handleSessionLock)
 	mux.HandleFunc("/v1/auth/grant/sign", s.handleSignGrant)
 	mux.HandleFunc("/v1/auth/recovery/generate", s.handleGenerateRecovery)
+	mux.HandleFunc("/v1/auth/recovery/consume", s.handleConsumeRecovery)
 	mux.HandleFunc("/v1/auth/status", s.handleStatus)
 	mux.HandleFunc("/v1/auth/audit", s.handleAudit)
 
@@ -213,6 +214,28 @@ func (s *Server) handleGenerateRecovery(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+}
+
+func (s *Server) handleConsumeRecovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		TenantID      string `json:"tenant_id"`
+		OperatorID    string `json:"operator_id"`
+		RecoveryToken string `json:"recovery_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.auth.ResetLockoutWithRecovery(req.TenantID, req.OperatorID, req.RecoveryToken); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

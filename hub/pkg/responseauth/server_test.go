@@ -116,4 +116,21 @@ func TestUDSClientAndServer(t *testing.T) {
 	if err := client.LockSession(ctx, session.SessionID); err != nil {
 		t.Fatalf("LockSession failed: %v", err)
 	}
+
+	// 7. Recovery Token over UDS
+	tok, err := client.GenerateRecoveryToken(ctx, tenantID, opID)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryToken failed: %v", err)
+	}
+	if tok == "" {
+		t.Fatalf("empty recovery token returned")
+	}
+
+	if err := client.ConsumeRecoveryToken(ctx, tenantID, opID, tok); err != nil {
+		t.Fatalf("ConsumeRecoveryToken failed: %v", err)
+	}
+	// Consuming a second time should fail
+	if err := client.ConsumeRecoveryToken(ctx, tenantID, opID, tok); err == nil {
+		t.Fatalf("expected second ConsumeRecoveryToken to fail")
+	}
 }

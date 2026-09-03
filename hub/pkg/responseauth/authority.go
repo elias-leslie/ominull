@@ -47,6 +47,7 @@ type Authority struct {
 	cfg        Config
 	store      Store
 	tenantKeys map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
+	masterKey  []byte                        // 32-byte master key for encrypting secrets at rest
 	startedAt  time.Time
 }
 
@@ -90,10 +91,23 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 		cfg.SignerPartition = "portable-local"
 	}
 
+	var masterKey []byte
+	if cfg.StateDir != "" {
+		keyPath := filepath.Join(cfg.StateDir, "secret.key")
+		if mk, err := GetOrGenerateMasterKey(keyPath); err == nil {
+			masterKey = mk
+		}
+	}
+	if len(masterKey) != 32 {
+		h := sha256.Sum256([]byte("ominull-response-authority:" + cfg.SignerPartition))
+		masterKey = h[:]
+	}
+
 	auth := &Authority{
 		cfg:        cfg,
 		store:      store,
 		tenantKeys: make(map[string]ed25519.PrivateKey),
+		masterKey:  masterKey,
 		startedAt:  time.Now(),
 	}
 
@@ -332,14 +346,21 @@ func (a *Authority) EnrollTOTP(tenantID, operatorID string) (string, error) {
 		return "", err
 	}
 
+	storedSecret := secret
+	if len(a.masterKey) == 32 {
+		if enc, err := EncryptSecret(secret, a.masterKey); err == nil {
+			storedSecret = enc
+		}
+	}
+
 	now := time.Now()
 	rec := &AuthenticatorRecord{
 		ID:          uuid.New().String(),
 		OperatorID:  operatorID,
 		TenantID:    tenantID,
 		Type:        AuthMethodTOTP,
-		Label:       "Primary TOTP",
-		SecretOrKey: secret,
+		Label:       SecurityLabelTOTP,
+		SecretOrKey: storedSecret,
 		Status:      "active",
 		EnrolledAt:  now,
 	}
@@ -354,7 +375,7 @@ func (a *Authority) EnrollTOTP(tenantID, operatorID string) (string, error) {
 		OperatorID: operatorID,
 		EventType:  "authenticator_enrolled",
 		Status:     "success",
-		Details:    "Method: TOTP",
+		Details:    fmt.Sprintf("Method: TOTP, Label: %s", SecurityLabelTOTP),
 	})
 
 	return secret, nil
@@ -390,15 +411,34 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 	}
 
 	var matchedAuth *AuthenticatorRecord
+	var matchedStep int64
 	for _, rec := range recs {
 		if rec.Type != AuthMethodTOTP || rec.Status != "active" {
 			continue
 		}
 		if rec.LockedUntil != nil && now.Before(*rec.LockedUntil) {
-			continue // locked due to too many failed attempts
+			_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+				Timestamp:  now,
+				TenantID:   tenantID,
+				OperatorID: operatorID,
+				EventType:  "auth_failed",
+				Status:     "denied",
+				Details:    fmt.Sprintf("authenticator locked until %s", rec.LockedUntil.Format(time.RFC3339)),
+			})
+			return nil, fmt.Errorf("%w until %s", ErrAuthenticatorLocked, rec.LockedUntil.Format(time.RFC3339))
 		}
-		if VerifyTOTPCode(rec.SecretOrKey, totpCode, now) {
+
+		// Decrypt secret if encrypted
+		rawSecret := rec.SecretOrKey
+		if len(a.masterKey) == 32 {
+			if dec, err := DecryptSecret(rec.SecretOrKey, a.masterKey); err == nil {
+				rawSecret = dec
+			}
+		}
+
+		if step, ok := VerifyTOTPCodeWithStep(rawSecret, totpCode, now); ok {
 			matchedAuth = rec
+			matchedStep = step
 			break
 		}
 	}
@@ -409,8 +449,8 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 			if rec.Type == AuthMethodTOTP && rec.Status == "active" {
 				newCount := rec.FailureCount + 1
 				var lockUntil *time.Time
-				if newCount >= 5 {
-					t := now.Add(15 * time.Minute)
+				if newCount >= MaxFailedAttempts {
+					t := now.Add(LockoutDuration)
 					lockUntil = &t
 				}
 				_ = a.store.UpdateAuthenticatorUsage(ctx, rec.ID, now, newCount, lockUntil)
@@ -429,9 +469,8 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 	}
 
 	// Enforce single-use timestep replay protection
-	step := now.Unix() / 30
-	nonce := fmt.Sprintf("totp:%s:%s:%d", tenantID, operatorID, step)
-	if err := a.store.CheckAndRecordNonce(ctx, nonce, "totp_timestep", tenantID, now.Add(60*time.Second)); err != nil {
+	nonce := fmt.Sprintf("totp:%s:%s:%d", tenantID, operatorID, matchedStep)
+	if err := a.store.CheckAndRecordNonce(ctx, nonce, "totp_timestep", tenantID, now.Add(90*time.Second)); err != nil {
 		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
 			Timestamp:  now,
 			TenantID:   tenantID,
@@ -440,7 +479,7 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 			Status:     "denied",
 			Details:    "replayed TOTP code within same timestep",
 		})
-		return nil, errors.New("TOTP code already used; wait for next 30-second window")
+		return nil, ErrTOTPReplayed
 	}
 
 	// Reset failure count on success
@@ -716,6 +755,50 @@ func (a *Authority) GenerateRecoveryToken(tenantID, operatorID string) (string, 
 	})
 
 	return token, nil
+}
+
+// ResetLockoutWithRecovery consumes a recovery token to clear authenticator lockouts for an operator.
+func (a *Authority) ResetLockoutWithRecovery(tenantID, operatorID, recoveryToken string) error {
+	if tenantID == "" || operatorID == "" || recoveryToken == "" {
+		return errors.New("missing parameters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hash := sha256.Sum256([]byte(recoveryToken))
+	hashHex := hex.EncodeToString(hash[:])
+	now := time.Now()
+
+	if err := a.store.ConsumeRecoveryToken(ctx, hashHex, now); err != nil {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   tenantID,
+			OperatorID: operatorID,
+			EventType:  "recovery_failed",
+			Status:     "denied",
+			Details:    fmt.Sprintf("consume error: %v", err),
+		})
+		return fmt.Errorf("invalid or expired recovery token: %w", err)
+	}
+
+	// Clear lockouts on authenticators
+	auths, err := a.store.ListAuthenticators(ctx, tenantID, operatorID)
+	if err == nil {
+		for _, rec := range auths {
+			if rec.FailureCount > 0 || rec.LockedUntil != nil {
+				_ = a.store.UpdateAuthenticatorUsage(ctx, rec.ID, now, 0, nil)
+			}
+		}
+	}
+
+	return a.store.RecordAudit(ctx, &SignerAuditEntry{
+		Timestamp:  now,
+		TenantID:   tenantID,
+		OperatorID: operatorID,
+		EventType:  "recovery_consumed",
+		Status:     "success",
+		Details:    "lockout reset via root emergency recovery token",
+	})
 }
 
 // GetSession retrieves a response session from the durable store.
