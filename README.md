@@ -160,8 +160,8 @@ sudo ominullctl setup-token --rotate
 sudo ominullctl setup-status
 ```
 
-For fleet operations, `scripts/ominull-cli` reads `OMINULL_HUB_URL` and
-`OMINULL_API_KEY`. Never commit those values.
+For fleet operations and CyberOps control, `ominullctl` reads `OMINULL_HUB_URL`
+and `OMINULL_API_KEY_FILE` (or `--api-key-file /etc/ominull/admin.key`). Never commit credentials.
 
 Protected operator routes use the admin key, a signed console session, native
 OIDC session, or verified Cloudflare Access assertion. Tenant routes remain

@@ -69,14 +69,30 @@ func main() {
 		err = client.cmdEndpoints(rest)
 	case "scanner":
 		err = client.cmdScanner(rest)
+	case "scan":
+		err = client.cmdScanner(append([]string{"scan"}, rest...))
+	case "assets":
+		err = client.cmdScanner([]string{"assets"})
+	case "train":
+		err = client.cmdScanner(append([]string{"train"}, rest...))
 	case "alerts":
 		err = client.cmdAlerts(rest)
 	case "mesh":
 		err = client.cmdMesh(rest)
+	case "quarantine-mesh":
+		err = client.cmdMesh(append([]string{"quarantine"}, rest...))
+	case "unquarantine-mesh":
+		err = client.cmdMesh(append([]string{"release"}, rest...))
 	case "agents":
 		err = client.cmdAgents(rest)
+	case "agent-versions":
+		err = client.cmdAgents([]string{"versions"})
+	case "agent-update":
+		err = client.cmdAgents(append([]string{"update"}, rest...))
 	case "install":
 		err = client.cmdInstall(rest)
+	case "install-errors", "reports":
+		err = client.cmdInstall(append([]string{"reports"}, rest...))
 	case "response":
 		err = client.cmdResponse(rest)
 	case "response-auth":
@@ -229,16 +245,36 @@ func (c *APIClient) printOutput(data interface{}, humanFunc func()) {
 }
 
 func (c *APIClient) cmdStatus(args []string) error {
-	raw, err := c.doRequest(http.MethodGet, "/api/v1/hierarchy", nil)
+	_ = args
+	rawHierarchy, err := c.doRequest(http.MethodGet, "/api/v1/hierarchy", nil)
 	if err != nil {
 		return err
 	}
-	var res interface{}
-	_ = json.Unmarshal(raw, &res)
+	rawEndpoints, _ := c.doRequest(http.MethodGet, "/api/v1/endpoints", nil)
 
-	c.printOutput(res, func() {
+	var hRes, epRes interface{}
+	_ = json.Unmarshal(rawHierarchy, &hRes)
+	if len(rawEndpoints) > 0 {
+		_ = json.Unmarshal(rawEndpoints, &epRes)
+	}
+
+	c.printOutput(map[string]interface{}{
+		"hierarchy": hRes,
+		"endpoints": epRes,
+	}, func() {
 		fmt.Printf("=== Ominull Hub Status (%s) ===\n", c.cfg.HubURL)
-		fmt.Println(string(raw))
+		fmt.Println(string(rawHierarchy))
+		if len(rawEndpoints) > 0 {
+			fmt.Println("\n=== Online Endpoints ===")
+			var eps []map[string]interface{}
+			if err := json.Unmarshal(rawEndpoints, &eps); err == nil && len(eps) > 0 {
+				for _, ep := range eps {
+					fmt.Printf("- %-24v %-16v %-15v %v\n", ep["id"], ep["hostname"], ep["ip"], ep["status"])
+				}
+			} else {
+				fmt.Println(string(rawEndpoints))
+			}
+		}
 	})
 	return nil
 }
@@ -466,20 +502,31 @@ func (c *APIClient) cmdAgents(args []string) error {
 }
 
 func (c *APIClient) cmdInstall(args []string) error {
-	if len(args) == 0 || args[0] == "reports" {
-		raw, err := c.doRequest(http.MethodGet, "/api/v1/enrolment/install-errors", nil)
-		if err != nil {
-			return err
-		}
-		var res interface{}
-		_ = json.Unmarshal(raw, &res)
-		c.printOutput(res, func() {
-			fmt.Println("=== Installer Error Reports ===")
-			fmt.Println(string(raw))
-		})
-		return nil
+	id := ""
+	if len(args) > 1 {
+		id = args[1]
+	} else if len(args) == 1 && args[0] != "reports" && args[0] != "errors" && args[0] != "list" {
+		id = args[0]
 	}
-	return fmt.Errorf("usage: ominullctl install reports [list|show]")
+	endpoint := "/api/v1/enrolment/install-errors"
+	if id != "" {
+		endpoint += "?id=" + url.QueryEscape(id)
+	}
+	raw, err := c.doRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	var res interface{}
+	_ = json.Unmarshal(raw, &res)
+	c.printOutput(res, func() {
+		if id != "" {
+			fmt.Printf("=== Installer Error Report: %s ===\n", id)
+		} else {
+			fmt.Println("=== Recent Installer Error Reports ===")
+		}
+		fmt.Println(string(raw))
+	})
+	return nil
 }
 
 func (c *APIClient) cmdResponse(args []string) error {
@@ -559,6 +606,9 @@ func (c *APIClient) cmdForensics(args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
+	if action == "launch" || action == "collect" {
+		return fmt.Errorf("forensic collection launch is console-only and requires dual-operator authorization")
+	}
 	switch action {
 	case "list":
 		raw, err := c.doRequest(http.MethodGet, fmt.Sprintf("/api/v1/response/jobs?kind=forensic_collection&limit=%d", c.cfg.Limit), nil)
@@ -603,6 +653,9 @@ func (c *APIClient) cmdScripts(args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
+	if action == "run" || action == "schedule" {
+		return fmt.Errorf("script execution and scheduling are console-only and require dual-operator authorization")
+	}
 	switch action {
 	case "list":
 		raw, err := c.doRequest(http.MethodGet, "/api/v1/scripts", nil)
@@ -633,6 +686,9 @@ func (c *APIClient) cmdShell(args []string) error {
 	action := "sessions"
 	if len(args) > 0 {
 		action = args[0]
+	}
+	if action == "open" || action == "exec" || action == "attach" {
+		return fmt.Errorf("shell session launch is console-only and requires dual-operator authorization")
 	}
 	switch action {
 	case "sessions":
