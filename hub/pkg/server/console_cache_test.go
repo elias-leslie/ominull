@@ -45,3 +45,32 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 		t.Errorf("the asset lost its validator")
 	}
 }
+
+func TestConsoleContainsNoUnimplementedShellControls(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	r := httptest.NewRequest("GET", "/app.js?v="+srv.agentVersion, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fetching /app.js returned %d", w.Code)
+	}
+
+	body := w.Body.String()
+	forbiddenStrings := []string{
+		"openTerminalSession",
+		"terminal-modal",
+		"SESSION ACTIVE",
+		"Open remote shell",
+		"Interactive Remote Shell",
+		"Command queued on endpoint heartbeat relay",
+		"via Ominull Relay",
+	}
+
+	for _, forbidden := range forbiddenStrings {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("served app.js contains forbidden unimplemented shell claim: %q", forbidden)
+		}
+	}
+}

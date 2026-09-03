@@ -40,6 +40,8 @@
     { id: "traffic", label: "Traffic" },
     { id: "policy", label: "Policy" },
     { id: "alerts", label: "Alerts" },
+    { id: "response", label: "Response" },
+    { id: "forensics", label: "Forensics" },
     { id: "audit", label: "Audit" }
   ];
 
@@ -300,6 +302,11 @@
     // it is a per-host answer and only one host is ever on screen.
     baselineByEndpoint: {},
     audit: [],
+    responseAuthStatus: null,
+    responseJobs: [],
+    scripts: [],
+    evidenceBundles: [],
+    vulnerabilities: [],
     operators: [],
     operatorRoles: ["admin", "analyst", "auditor"],
     you: "",
@@ -5115,6 +5122,92 @@
       card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows))));
   }
 
+
+  function renderResponse() {
+    var view = $("view");
+    clear(view);
+
+    var auth = state.responseAuthStatus || { active_sessions: 0 };
+    var authCard = card("Response Authority (Ring-0/Proof)", h("div", { cls: "card-body" },
+      h("div", { cls: "form-row" },
+        h("div", { cls: "badge badge-ok", text: auth.active_sessions > 0 ? "Response Unlocked" : "Response Authority Ready" }),
+        h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
+      ),
+      h("p", { cls: "pending", text: "Autonomous threat nullification and endpoint response actions require ephemeral operator proof signed by an authenticated response session." })
+    ));
+
+    var jobRows = (state.responseJobs || []).map(function (j) {
+      return [
+        h("span", { cls: "ip", text: j.id ? j.id.slice(0, 8) + "..." : "" }),
+        h("span", { text: j.endpoint_id || "" }),
+        h("span", { text: j.action_kind || j.kind || "" }),
+        h("span", { cls: j.state === "succeeded" ? "badge badge-ok" : "badge badge-warn", text: j.state || "queued" }),
+        h("span", { cls: "dim", text: j.operator_id || "" }),
+        stamp(parseTime(j.created_at))
+      ];
+    });
+
+    var jobsCard = card("Active Response Jobs",
+      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created"], jobRows) : h("div", { cls: "card-body", text: "No active response jobs in queue." })
+    );
+
+    var scriptRows = (state.scripts || []).map(function (sc) {
+      return [
+        h("b", { text: sc.name || "" }),
+        h("span", { text: sc.interpreter || "" }),
+        h("span", { text: "v" + (sc.latest_version || 1) }),
+        h("span", { cls: "dim-3", text: sc.description || "" }),
+        stamp(parseTime(sc.updated_at))
+      ];
+    });
+
+    var scriptsCard = card("Immutable Script Library",
+      scriptRows.length ? simpleTable(["Script", "Interpreter", "Version", "Description", "Updated"], scriptRows) : h("div", { cls: "card-body", text: "No registered response scripts." })
+    );
+
+    view.appendChild(h("div", { cls: "pad stack" }, authCard, jobsCard, scriptsCard));
+  }
+
+  function renderForensics() {
+    var view = $("view");
+    clear(view);
+
+    var bundleRows = (state.evidenceBundles || []).map(function (b) {
+      return [
+        h("span", { cls: "ip", text: b.id ? b.id.slice(0, 8) + "..." : "" }),
+        h("span", { text: b.endpoint_id || "" }),
+        h("span", { text: b.profile || "" }),
+        h("span", { cls: b.status === "completed" ? "badge badge-ok" : "badge badge-warn", text: b.status || "" }),
+        h("span", { text: b.item_count ? String(b.item_count) : "0" }),
+        h("span", { text: b.legal_hold ? "LOCKED (HOLD)" : "normal" }),
+        stamp(parseTime(b.created_at)),
+        h("a", { cls: "btn btn-subtle", href: "/api/v1/evidence/export?id=" + encodeURIComponent(b.id), text: "Export (.tar.gz)" })
+      ];
+    });
+
+    var evidenceCard = card("Forensic Evidence Bundles (AES-256-GCM Encrypted)",
+      bundleRows.length ? simpleTable(["Bundle ID", "Endpoint", "Profile", "Status", "Items", "Hold", "Collected", "Actions"], bundleRows) : h("div", { cls: "card-body", text: "No forensic collections recorded yet." })
+    );
+
+    var vulRows = (state.vulnerabilities || []).map(function (v) {
+      return [
+        h("b", { text: v.cve_id || "" }),
+        h("span", { cls: v.severity === "CRITICAL" || v.severity === "HIGH" ? "badge badge-crit" : "badge badge-warn", text: v.severity || "MEDIUM" }),
+        h("span", { text: v.is_kev ? "CISA KEV" : "\u2014" }),
+        h("span", { text: v.product_name || "" }),
+        h("span", { text: v.version || "" }),
+        h("span", { cls: "dim-3", text: v.match_reason || "" }),
+        stamp(parseTime(v.detected_at))
+      ];
+    });
+
+    var vulCard = card("Vulnerability Correlation (NVD 2.0 / CISA KEV)",
+      vulRows.length ? simpleTable(["CVE", "Severity", "Catalog", "Product", "Version", "Match Reason", "Detected"], vulRows) : h("div", { cls: "card-body", text: "No correlated vulnerabilities found." })
+    );
+
+    view.appendChild(h("div", { cls: "pad stack" }, evidenceCard, vulCard));
+  }
+
   /* Roles, in the words an operator uses about people rather than the words the
      hub uses about routes. */
   var ROLE_LABELS = {
@@ -5984,6 +6077,8 @@
     else if (state.section === "traffic") renderTraffic();
     else if (state.section === "policy") renderPolicy();
     else if (state.section === "alerts") renderAlerts();
+    else if (state.section === "response") renderResponse();
+    else if (state.section === "forensics") renderForensics();
     else if (state.section === "audit") renderAudit();
     else if (state.section === "access") renderAccess();
     else renderAssets();
@@ -6079,6 +6174,15 @@
         if (d && Array.isArray(d.roles) && d.roles.length) state.operatorRoles = d.roles;
         state.you = (d && d.you) || "";
       }));
+    }
+    if (state.section === "response") {
+      jobs.push(request("/api/v1/response/auth/status").then(function (d) { state.responseAuthStatus = d || null; }).catch(function () {}));
+      jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
+      jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
+    }
+    if (state.section === "forensics") {
+      jobs.push(request("/api/v1/evidence/bundles").then(function (d) { state.evidenceBundles = arrayOf(d && d.bundles || d); }).catch(function () {}));
+      jobs.push(request("/api/v1/vulnerabilities").then(function (d) { state.vulnerabilities = arrayOf(d && d.vulnerabilities || d); }).catch(function () {}));
     }
     if (state.section === "audit") {
       jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
