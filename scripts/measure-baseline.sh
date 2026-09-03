@@ -71,6 +71,13 @@ gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_response_dispatch
 ./build/test_response_dispatcher
 rm -f build/test_response_dispatcher
 
+if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && command -v wine >/dev/null 2>&1; then
+    x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include \
+        agent/tests/test_response_dispatcher_win.c -o build/test_response_dispatcher_win.exe
+    wine build/test_response_dispatcher_win.exe
+    rm -f build/test_response_dispatcher_win.exe
+fi
+
 echo ""
 echo "=========================================================="
 echo "[+] Baseline measurement capture successfully complete."

@@ -734,6 +734,8 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             SyncEnforcement(config, hubResponse);
 
             Update_Apply(config, hubResponse);
+
+            ProcessResponseOffersWindows(config, hubResponse);
         }
 
         Sleep(100);

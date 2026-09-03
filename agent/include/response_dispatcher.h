@@ -2,18 +2,21 @@
 #define OMINULL_RESPONSE_DISPATCHER_H
 
 /*
- * Ominull Response Dispatcher: Bounded Offer Parser, Grant Verifier, and Replay Cache.
+ * Ominull Response Dispatcher: Bounded Offer Parser, In-Process Grant Verifier,
+ * Durable Replay Cache, and Contained Worker Execution (Slice 1D.1 & Slice 1D.2).
  *
- * Implements Slice 1D.1:
+ * Implements:
  * - Bounded parsing of heartbeat response_offers over a fixed schema (no loose substrings).
  * - Cryptographic verification of EndpointGrant V2 using canonical binary encoding
- *   (response_canonical.h) and tenant Ed25519 public key.
+ *   (response_canonical.h) and tenant Ed25519 public key (ed25519_verify.h).
  * - Independent SHA-256 digest recomputation over action payload.
  * - Clock window checks with +/- 60s tolerance.
  * - Endpoint ID binding check against local endpoint identity.
  * - Durable replay cache with atomic file locking and expiration pruning.
- * - Contained worker child execution with process groups, sanitized environment,
- *   closed descriptors, and resource limits.
+ * - Linux worker containment: fork(), setpgid(), clearenv(), safe cwd, closed descriptors, RLIMIT_CPU.
+ * - Windows worker containment: CreateJobObjectW, KILL_ON_JOB_CLOSE, suspended CreateProcessA,
+ *   bInheritHandles=FALSE, sanitized envBlock, safe cwd, kill-on-cancel.
+ * - Confidentiality: Zero logging of job IDs, tokens, payloads, or terminal bytes.
  */
 
 #include <stdint.h>
@@ -24,6 +27,20 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH "C:\\ProgramData\\Ominull\\response.pub"
+#define OMINULL_DEFAULT_REPLAY_CACHE_PATH    "C:\\ProgramData\\Ominull\\replay_cache.state"
+#ifndef strcasecmp
+#define strcasecmp _stricmp
+#endif
+#ifndef strncasecmp
+#define strncasecmp _strnicmp
+#endif
+#else
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -31,194 +48,278 @@
 #include <sys/wait.h>
 #include <sys/file.h>
 #include <sys/resource.h>
-#include <errno.h>
+#define OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH "/etc/ominull/response.pub"
+#define OMINULL_DEFAULT_REPLAY_CACHE_PATH    "/var/lib/ominull/replay_cache.state"
+#endif
 
 #include "response_canonical.h"
+#include "ed25519_verify.h"
 
 #define MAX_RESPONSE_OFFERS 4
 #define MAX_PAYLOAD_JSON_LEN 65536
-#define OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH "/etc/ominull/response.pub"
-#define OMINULL_DEFAULT_REPLAY_CACHE_PATH "/var/lib/ominull/replay_cache.state"
-
-typedef struct {
-    uint32_t version;
-    char grant_id[64];
-    char tenant_id[64];
-    char endpoint_id[64];
-    char action_kind[64];
-    char action_digest[65]; // 64 hex chars + null
-    char operator_id[128];
-    char response_session_id[64];
-    int64_t issued_at;
-    int64_t expires_at;
-    char nonce[65];
-    char signer_key_id[65];
-    char signature[130];    // 128 hex chars (64 bytes Ed25519) + null
-} ResponseGrant;
-
-typedef struct {
-    char job_id[64];
-    char lease_id[64];
-    char kind[64];
-    ResponseGrant grant;
-    char payload_json[MAX_PAYLOAD_JSON_LEN];
-    size_t payload_len;
-} ResponseJobOffer;
 
 /* ---------------------------------------------------------------------------
- * Pure C In-Process SHA-256 (FIPS 180-4)
+ * In-Process SHA-256 Implementation (FIPS 180-4)
  * ------------------------------------------------------------------------- */
 
 typedef struct {
     uint32_t state[8];
     uint64_t count;
-    uint8_t buffer[64];
-} Response_SHA256_CTX;
+    uint8_t  buffer[64];
+} ResponseSHA256Context;
 
-#define RESP_ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
-#define RESP_CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
-#define RESP_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
-#define RESP_SIGMA0(x) (RESP_ROTR(x, 2) ^ RESP_ROTR(x, 13) ^ RESP_ROTR(x, 22))
-#define RESP_SIGMA1(x) (RESP_ROTR(x, 6) ^ RESP_ROTR(x, 11) ^ RESP_ROTR(x, 25))
-#define RESP_GAMMA0(x) (RESP_ROTR(x, 7) ^ RESP_ROTR(x, 18) ^ ((x) >> 3))
-#define RESP_GAMMA1(x) (RESP_ROTR(x, 17) ^ RESP_ROTR(x, 19) ^ ((x) >> 10))
-
-static const uint32_t RESP_K[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-};
-
-static inline void Response_SHA256_Transform(uint32_t state[8], const uint8_t block[64]) {
-    uint32_t w[64];
-    for (int i = 0; i < 16; i++) {
-        w[i] = ((uint32_t)block[i * 4 + 0] << 24) |
-               ((uint32_t)block[i * 4 + 1] << 16) |
-               ((uint32_t)block[i * 4 + 2] << 8)  |
-               ((uint32_t)block[i * 4 + 3]);
-    }
-    for (int i = 16; i < 64; i++) {
-        w[i] = RESP_GAMMA1(w[i - 2]) + w[i - 7] + RESP_GAMMA0(w[i - 15]) + w[i - 16];
-    }
-    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-    for (int i = 0; i < 64; i++) {
-        uint32_t t1 = h + RESP_SIGMA1(e) + RESP_CH(e, f, g) + RESP_K[i] + w[i];
-        uint32_t t2 = RESP_SIGMA0(a) + RESP_MAJ(a, b, c);
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
-    }
-    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+static inline uint32_t Response_ROTR32(uint32_t x, uint32_t n) {
+    return (x >> n) | (x << (32 - n));
 }
 
-static inline void Response_SHA256_Init(Response_SHA256_CTX* ctx) {
-    ctx->state[0] = 0x6a09e667;
-    ctx->state[1] = 0xbb67ae85;
-    ctx->state[2] = 0x3c6ef372;
-    ctx->state[3] = 0xa54ff53a;
-    ctx->state[4] = 0x510e527f;
-    ctx->state[5] = 0x9b05688c;
-    ctx->state[6] = 0x1f83d9ab;
-    ctx->state[7] = 0x5be0cd19;
+static inline void Response_SHA256_Transform(ResponseSHA256Context* ctx, const uint8_t data[64]) {
+    static const uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    };
+
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)data[i * 4] << 24) |
+               ((uint32_t)data[i * 4 + 1] << 16) |
+               ((uint32_t)data[i * 4 + 2] << 8) |
+               ((uint32_t)data[i * 4 + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = Response_ROTR32(w[i - 15], 7) ^ Response_ROTR32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = Response_ROTR32(w[i - 2], 17) ^ Response_ROTR32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+
+    uint32_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
+    uint32_t e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = Response_ROTR32(e, 6) ^ Response_ROTR32(e, 11) ^ Response_ROTR32(e, 25);
+        uint32_t ch = (e & f) ^ ((~e) & g);
+        uint32_t temp1 = h + S1 + ch + K[i] + w[i];
+        uint32_t S0 = Response_ROTR32(a, 2) ^ Response_ROTR32(a, 13) ^ Response_ROTR32(a, 22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+
+        h = g; g = f; f = e; e = d + temp1;
+        d = c; c = b; b = a; a = temp1 + temp2;
+    }
+
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+}
+
+static inline void Response_SHA256_Init(ResponseSHA256Context* ctx) {
+    ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
     ctx->count = 0;
 }
 
-static inline void Response_SHA256_Update(Response_SHA256_CTX* ctx, const uint8_t* data, size_t len) {
-    size_t buf_idx = (size_t)(ctx->count & 0x3F);
+static inline void Response_SHA256_Update(ResponseSHA256Context* ctx, const uint8_t* data, size_t len) {
+    size_t buffer_idx = (size_t)(ctx->count & 0x3F);
     ctx->count += len;
-    size_t data_idx = 0;
-    if (buf_idx > 0 && (buf_idx + len) >= 64) {
-        size_t fill = 64 - buf_idx;
-        memcpy(ctx->buffer + buf_idx, data, fill);
-        Response_SHA256_Transform(ctx->state, ctx->buffer);
-        data_idx += fill;
-        buf_idx = 0;
+
+    if (buffer_idx > 0 && buffer_idx + len >= 64) {
+        size_t fill = 64 - buffer_idx;
+        memcpy(ctx->buffer + buffer_idx, data, fill);
+        Response_SHA256_Transform(ctx, ctx->buffer);
+        data += fill;
+        len -= fill;
+        buffer_idx = 0;
     }
-    while (data_idx + 64 <= len) {
-        Response_SHA256_Transform(ctx->state, data + data_idx);
-        data_idx += 64;
+
+    while (len >= 64) {
+        Response_SHA256_Transform(ctx, data);
+        data += 64;
+        len -= 64;
     }
-    if (data_idx < len) {
-        memcpy(ctx->buffer + buf_idx, data + data_idx, len - data_idx);
+
+    if (len > 0) {
+        memcpy(ctx->buffer + buffer_idx, data, len);
     }
 }
 
-static inline void Response_SHA256_Final(Response_SHA256_CTX* ctx, uint8_t hash[32]) {
+static inline void Response_SHA256_Final(ResponseSHA256Context* ctx, uint8_t hash[32]) {
     uint64_t total_bits = ctx->count * 8;
-    size_t buf_idx = (size_t)(ctx->count & 0x3F);
-    ctx->buffer[buf_idx++] = 0x80;
-    if (buf_idx > 56) {
-        memset(ctx->buffer + buf_idx, 0, 64 - buf_idx);
-        Response_SHA256_Transform(ctx->state, ctx->buffer);
-        buf_idx = 0;
+    size_t buffer_idx = (size_t)(ctx->count & 0x3F);
+
+    ctx->buffer[buffer_idx++] = 0x80;
+    if (buffer_idx > 56) {
+        memset(ctx->buffer + buffer_idx, 0, 64 - buffer_idx);
+        Response_SHA256_Transform(ctx, ctx->buffer);
+        buffer_idx = 0;
     }
-    memset(ctx->buffer + buf_idx, 0, 56 - buf_idx);
-    for (int i = 7; i >= 0; i--) {
-        ctx->buffer[56 + (7 - i)] = (uint8_t)((total_bits >> (i * 8)) & 0xFF);
-    }
-    Response_SHA256_Transform(ctx->state, ctx->buffer);
+    memset(ctx->buffer + buffer_idx, 0, 56 - buffer_idx);
+
     for (int i = 0; i < 8; i++) {
-        hash[i * 4 + 0] = (uint8_t)((ctx->state[i] >> 24) & 0xFF);
-        hash[i * 4 + 1] = (uint8_t)((ctx->state[i] >> 16) & 0xFF);
-        hash[i * 4 + 2] = (uint8_t)((ctx->state[i] >> 8)  & 0xFF);
-        hash[i * 4 + 3] = (uint8_t)(ctx->state[i] & 0xFF);
+        ctx->buffer[56 + i] = (uint8_t)(total_bits >> ((7 - i) * 8));
+    }
+    Response_SHA256_Transform(ctx, ctx->buffer);
+
+    for (int i = 0; i < 8; i++) {
+        hash[i * 4]     = (uint8_t)(ctx->state[i] >> 24);
+        hash[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
+        hash[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
+        hash[i * 4 + 3] = (uint8_t)(ctx->state[i]);
     }
 }
 
 static inline void Response_SHA256_Sum(const uint8_t* data, size_t len, uint8_t hash[32]) {
-    Response_SHA256_CTX ctx;
+    ResponseSHA256Context ctx;
     Response_SHA256_Init(&ctx);
     Response_SHA256_Update(&ctx, data, len);
     Response_SHA256_Final(&ctx, hash);
 }
 
-static inline bool Response_HexToBytes(const char* hex, uint8_t* out, size_t out_len) {
-    if (!hex) return false;
-    size_t hex_len = strlen(hex);
-    if (hex_len != out_len * 2) return false;
-    for (size_t i = 0; i < out_len; i++) {
-        char high = hex[i * 2];
-        char low = hex[i * 2 + 1];
-        int h = isdigit((unsigned char)high) ? high - '0' : (tolower((unsigned char)high) - 'a' + 10);
-        int l = isdigit((unsigned char)low)  ? low - '0'  : (tolower((unsigned char)low) - 'a' + 10);
-        if (h < 0 || h > 15 || l < 0 || l > 15) return false;
-        out[i] = (uint8_t)((h << 4) | l);
+static inline void Response_BytesToHex(const uint8_t* bytes, size_t len, char* hexOut) {
+    static const char hexChars[] = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        hexOut[i * 2]     = hexChars[(bytes[i] >> 4) & 0x0F];
+        hexOut[i * 2 + 1] = hexChars[bytes[i] & 0x0F];
+    }
+    hexOut[len * 2] = '\0';
+}
+
+static inline bool Response_HexToBytes(const char* hex, uint8_t* out, size_t outLen) {
+    if (!hex || strlen(hex) < outLen * 2) return false;
+    for (size_t i = 0; i < outLen; i++) {
+        unsigned int val;
+        if (sscanf(hex + (i * 2), "%02x", &val) != 1) return false;
+        out[i] = (uint8_t)val;
     }
     return true;
 }
 
-static inline void Response_BytesToHex(const uint8_t* data, size_t len, char* out_hex) {
-    static const char hexchars[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out_hex[i * 2 + 0] = hexchars[(data[i] >> 4) & 0x0F];
-        out_hex[i * 2 + 1] = hexchars[data[i] & 0x0F];
+/* ---------------------------------------------------------------------------
+ * Public Key Loader (PEM, Hex, and Raw Binary)
+ * ------------------------------------------------------------------------- */
+
+static inline int Response_B64Val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static inline size_t Response_Base64Decode(const char* in, size_t in_len, uint8_t* out, size_t out_cap) {
+    size_t out_len = 0;
+    int buf = 0, bits = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        char c = in[i];
+        if (c == '=') break;
+        int v = Response_B64Val(c);
+        if (v < 0) continue;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (out_len < out_cap) {
+                out[out_len++] = (uint8_t)((buf >> bits) & 0xFF);
+            }
+        }
     }
-    out_hex[len * 2] = '\0';
+    return out_len;
+}
+
+static inline bool Response_LoadPublicKey(const char* key_path, uint8_t pub_bytes[32]) {
+    if (!key_path || !pub_bytes) return false;
+    FILE* f = fopen(key_path, "rb");
+    if (!f) return false;
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return false;
+    buf[n] = '\0';
+
+    // 1. Check if PEM format
+    char* begin = strstr(buf, "-----BEGIN");
+    if (begin) {
+        char* end_header = strstr(begin, "\n");
+        if (!end_header) return false;
+        char* footer = strstr(end_header, "-----END");
+        if (!footer) return false;
+        uint8_t der[256];
+        size_t der_len = Response_Base64Decode(end_header, (size_t)(footer - end_header), der, sizeof(der));
+        if (der_len == 44) {
+            memcpy(pub_bytes, der + 12, 32);
+            return true;
+        }
+        if (der_len == 32) {
+            memcpy(pub_bytes, der, 32);
+            return true;
+        }
+        return false;
+    }
+
+    // 2. Check if 64-character hex string
+    if (n >= 64) {
+        bool is_hex = true;
+        for (int i = 0; i < 64; i++) {
+            char c = buf[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                is_hex = false; break;
+            }
+        }
+        if (is_hex) {
+            return Response_HexToBytes(buf, pub_bytes, 32);
+        }
+    }
+
+    // 3. Raw 32 bytes
+    if (n >= 32) {
+        memcpy(pub_bytes, buf, 32);
+        return true;
+    }
+    return false;
 }
 
 /* ---------------------------------------------------------------------------
- * Bounded Fixed-Schema JSON Parser
+ * Bounded Fixed-Schema JSON Parser for Response Offers
  * ------------------------------------------------------------------------- */
 
+typedef struct {
+    uint32_t version;
+    char     grant_id[64];
+    char     tenant_id[64];
+    char     endpoint_id[64];
+    char     action_kind[64];
+    char     action_digest[65];
+    char     operator_id[64];
+    char     response_session_id[64];
+    int64_t  issued_at;
+    int64_t  expires_at;
+    char     nonce[65];
+    char     signer_key_id[65];
+    char     signature[130];
+} ResponseGrant;
+
+typedef struct {
+    char          job_id[64];
+    char          lease_id[64];
+    char          kind[64];
+    ResponseGrant grant;
+    char          payload_json[MAX_PAYLOAD_JSON_LEN];
+    size_t        payload_len;
+} ResponseJobOffer;
+
 static inline void SkipWhitespace(const char** p) {
-    while (**p && (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n')) {
+    while (**p && (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r')) {
         (*p)++;
     }
 }
 
-static inline bool ParseBoundedString(const char** p, char* out, size_t out_cap) {
+static inline bool ParseBoundedString(const char** p, char* out, size_t outCap) {
     SkipWhitespace(p);
     if (**p != '"') return false;
     (*p)++;
@@ -226,16 +327,11 @@ static inline bool ParseBoundedString(const char** p, char* out, size_t out_cap)
     while (**p && **p != '"') {
         if (**p == '\\' && *(*p + 1)) {
             (*p)++;
-            char escaped = **p;
-            if (escaped == '"') out[i++] = '"';
-            else if (escaped == '\\') out[i++] = '\\';
-            else if (escaped == 'n') out[i++] = '\n';
-            else if (escaped == 'r') out[i++] = '\r';
-            else if (escaped == 't') out[i++] = '\t';
-            else out[i++] = escaped;
-        } else {
-            if (i + 1 >= out_cap) return false; // Overflow prevented
+        }
+        if (i + 1 < outCap) {
             out[i++] = **p;
+        } else {
+            return false;
         }
         (*p)++;
     }
@@ -341,7 +437,6 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
         }
     }
 
-    // Validate presence of required grant fields
     if (grant->version != 2 || grant->grant_id[0] == '\0' ||
         grant->endpoint_id[0] == '\0' || grant->action_kind[0] == '\0' ||
         grant->action_digest[0] == '\0' || grant->signature[0] == '\0') {
@@ -374,7 +469,7 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
             p++;
             continue;
         }
-        if (*p != '{') return count; // Malformed element
+        if (*p != '{') return count;
         p++;
 
         ResponseJobOffer offer;
@@ -407,7 +502,6 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
                         offer.payload_len = strlen(offer.payload_json);
                     }
                 } else if (*p == '{') {
-                    // Raw JSON object
                     const char* start = p;
                     int depth = 1;
                     p++;
@@ -424,7 +518,6 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
                     }
                 }
             } else {
-                // Skip unknown offer fields
                 if (*p == '"') {
                     char dummy[256];
                     ParseBoundedString(&p, dummy, sizeof(dummy));
@@ -500,63 +593,101 @@ static inline bool VerifyResponseGrant(
     uint8_t sig_bytes[64];
     if (!Response_HexToBytes(grant->signature, sig_bytes, 64)) return false;
 
-    // 7. Verify Ed25519 signature against trusted tenant public key
+    // 7. Load trusted tenant public key and verify in-process
     const char* key_path = pubkey_path ? pubkey_path : OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH;
-    if (access(key_path, R_OK) != 0) {
-        return false; // Trust anchor missing
+    uint8_t pub_bytes[32];
+    if (!Response_LoadPublicKey(key_path, pub_bytes)) {
+        return false; // Public key missing or unreadable
     }
 
-    // Write canonical bytes and signature to secure temp files for OpenSSL pkeyutl verification
-    char tmp_data[64] = "/tmp/ominull_grant_data_XXXXXX";
-    char tmp_sig[64]  = "/tmp/ominull_grant_sig_XXXXXX";
-    int fd_data = mkstemp(tmp_data);
-    int fd_sig  = mkstemp(tmp_sig);
-    if (fd_data < 0 || fd_sig < 0) {
-        if (fd_data >= 0) { close(fd_data); unlink(tmp_data); }
-        if (fd_sig >= 0)  { close(fd_sig);  unlink(tmp_sig);  }
-        return false;
-    }
-    if (write(fd_data, canonical_bytes, canonical_len) != (ssize_t)canonical_len ||
-        write(fd_sig, sig_bytes, 64) != 64) {
-        close(fd_data); unlink(tmp_data);
-        close(fd_sig);  unlink(tmp_sig);
-        return false;
-    }
-    close(fd_data);
-    close(fd_sig);
-
-    // Run openssl pkeyutl -verify -rawin -pubin -inkey key_path -sigfile tmp_sig -in tmp_data
-    pid_t pid = fork();
-    if (pid < 0) {
-        unlink(tmp_data);
-        unlink(tmp_sig);
-        return false;
-    }
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        execlp("openssl", "openssl", "pkeyutl", "-verify", "-rawin", "-pubin",
-               "-inkey", key_path, "-sigfile", tmp_sig, "-in", tmp_data, (char*)NULL);
-        _exit(127);
-    }
-    int status = 0;
-    bool verified = false;
-    if (waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        verified = true;
-    }
-    unlink(tmp_data);
-    unlink(tmp_sig);
-    return verified;
+    return Ed25519_Verify(sig_bytes, canonical_bytes, canonical_len, pub_bytes);
 }
 
 /* ---------------------------------------------------------------------------
  * Durable Replay Cache
  * ------------------------------------------------------------------------- */
 
+#ifdef _WIN32
+static inline bool ReplayCache_CheckAndRecord(
+    const char* cache_path,
+    const char* grant_id,
+    const char* nonce,
+    int64_t expires_at
+) {
+    if (!grant_id || grant_id[0] == '\0') return false;
+    const char* path = cache_path ? cache_path : OMINULL_DEFAULT_REPLAY_CACHE_PATH;
+
+    HANDLE hFile = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    OVERLAPPED ov;
+    ZeroMemory(&ov, sizeof(ov));
+    if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov)) {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    char* buf = (char*)malloc(fileSize + 1);
+    if (!buf) {
+        UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &ov);
+        CloseHandle(hFile);
+        return false;
+    }
+
+    DWORD bytesRead = 0;
+    ReadFile(hFile, buf, fileSize, &bytesRead, NULL);
+    buf[bytesRead] = '\0';
+
+    int64_t now = (int64_t)time(NULL);
+    bool replay_detected = false;
+
+    char** retained = (char**)malloc(1024 * sizeof(char*));
+    size_t retained_count = 0;
+
+    char* line = strtok(buf, "\r\n");
+    while (line) {
+        char g_id[64] = {0}, n_id[65] = {0};
+        int64_t exp = 0;
+        if (sscanf(line, "%63s %64s %lld", g_id, n_id, (long long*)&exp) >= 1) {
+            if (strcmp(g_id, grant_id) == 0 || (nonce && nonce[0] && strcmp(n_id, nonce) == 0)) {
+                replay_detected = true;
+            }
+            if (exp > now && retained && retained_count < 1024) {
+                retained[retained_count++] = strdup(line);
+            }
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    free(buf);
+
+    if (!replay_detected) {
+        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+        SetEndOfFile(hFile);
+        DWORD written = 0;
+        for (size_t i = 0; i < retained_count; i++) {
+            WriteFile(hFile, retained[i], (DWORD)strlen(retained[i]), &written, NULL);
+            WriteFile(hFile, "\r\n", 2, &written, NULL);
+        }
+        char new_entry[256];
+        int nlen = snprintf(new_entry, sizeof(new_entry), "%s %s %lld\r\n", grant_id, nonce ? nonce : "-", (long long)expires_at);
+        if (nlen > 0) {
+            WriteFile(hFile, new_entry, (DWORD)nlen, &written, NULL);
+        }
+        FlushFileBuffers(hFile);
+    }
+
+    if (retained) {
+        for (size_t i = 0; i < retained_count; i++) free(retained[i]);
+        free(retained);
+    }
+
+    UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &ov);
+    CloseHandle(hFile);
+    return !replay_detected;
+}
+#else
 static inline bool ReplayCache_CheckAndRecord(
     const char* cache_path,
     const char* grant_id,
@@ -569,7 +700,6 @@ static inline bool ReplayCache_CheckAndRecord(
     int fd = open(path, O_RDWR | O_CREAT, 0600);
     if (fd < 0) return false;
 
-    // Exclusive advisory lock for cross-process coordination
     if (flock(fd, LOCK_EX) < 0) {
         close(fd);
         return false;
@@ -586,7 +716,6 @@ static inline bool ReplayCache_CheckAndRecord(
     char line[256];
     bool replay_detected = false;
 
-    // Buffer unexpired entries for pruning
     char** retained = (char**)malloc(1024 * sizeof(char*));
     size_t retained_count = 0;
 
@@ -604,7 +733,6 @@ static inline bool ReplayCache_CheckAndRecord(
     }
 
     if (!replay_detected) {
-        // Truncate and write unexpired entries + new entry
         fseek(fp, 0, SEEK_SET);
         if (ftruncate(fd, 0) == 0) {
             for (size_t i = 0; i < retained_count; i++) {
@@ -622,8 +750,97 @@ static inline bool ReplayCache_CheckAndRecord(
     }
 
     flock(fd, LOCK_UN);
-    fclose(fp); // Also closes fd
+    fclose(fp);
     return !replay_detected;
 }
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Windows Worker Containment (Job Objects & Suspended Process Execution)
+ * ------------------------------------------------------------------------- */
+
+#ifdef _WIN32
+static inline int ExecuteContainedWorkerWindows(const char* cmdLine, DWORD timeoutMs) {
+    if (!cmdLine || cmdLine[0] == '\0') return -1;
+
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    if (!hJob) return -1;
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+    ZeroMemory(&jeli, sizeof(jeli));
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+        CloseHandle(hJob);
+        return -1;
+    }
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    ZeroMemory(&pi, sizeof(pi));
+
+    const char envBlock[] = "PATH=C:\\Windows\\System32;C:\\Windows\0SYSTEMROOT=C:\\Windows\0\0";
+
+    char cmdBuf[2048];
+    strncpy(cmdBuf, cmdLine, sizeof(cmdBuf) - 1);
+    cmdBuf[sizeof(cmdBuf) - 1] = '\0';
+
+    CreateDirectoryA("C:\\ProgramData", NULL);
+    CreateDirectoryA("C:\\ProgramData\\Ominull", NULL);
+
+    const char* workDir = "C:\\ProgramData\\Ominull";
+    DWORD attr = GetFileAttributesA(workDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        workDir = NULL;
+    }
+
+    BOOL created = CreateProcessA(
+        NULL,
+        cmdBuf,
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
+        (LPVOID)envBlock,
+        workDir,
+        &si,
+        &pi
+    );
+
+    if (!created) {
+        CloseHandle(hJob);
+        return -1;
+    }
+
+    if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseHandle(hJob);
+        return -1;
+    }
+
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    DWORD waitRes = WaitForSingleObject(pi.hProcess, timeoutMs);
+    int exitCode = -1;
+    if (waitRes == WAIT_OBJECT_0) {
+        DWORD dwCode = 0;
+        if (GetExitCodeProcess(pi.hProcess, &dwCode)) {
+            exitCode = (int)dwCode;
+        }
+    } else {
+        TerminateJobObject(hJob, 1);
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(hJob);
+    return exitCode;
+}
+#endif
 
 #endif /* OMINULL_RESPONSE_DISPATCHER_H */

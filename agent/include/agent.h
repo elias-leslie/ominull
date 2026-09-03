@@ -147,6 +147,8 @@ bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
 // body (truncated to respCap) so the caller can act on it; pass NULL to ignore.
 bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
                             char* respOut, size_t respCap);
+bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody,
+                      char* respOut, size_t respCap);
 
 // Fills primary_ip, primary_mac and os_version from the running system. Called
 // once at startup: the hub keys asset identity on the hardware address, so
@@ -188,6 +190,7 @@ void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BO
 // Service dispatcher
 void Service_Run(void);
 void Service_SetConfig(const AGENT_CONFIG* config);
+void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJson);
 // Reads enrollment fields from stdin and writes package-owned configuration
 // and private material without putting the device credential in process arguments.
 bool Service_ConfigureFromStdin(void);

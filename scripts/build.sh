@@ -18,6 +18,7 @@ x86_64-w64-mingw32-gcc \
   "$ROOT_DIR/agent/src/service.c" \
   "$ROOT_DIR/agent/src/updater.c" \
   "$ROOT_DIR/agent/src/provenance_windows.c" \
+  "$ROOT_DIR/agent/src/response_windows.c" \
   "$ROOT_DIR/agent/windows/wfp_user.c" \
   -o "$BUILD_DIR/ominulld.exe" \
   -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \

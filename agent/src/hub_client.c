@@ -630,3 +630,109 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
 
     return (bResults && (dwStatusCode == 200 || dwStatusCode == 204));
 }
+
+bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody, char* respOut, size_t respCap) {
+    if (!Hub_TransportReady(config) || !apiPath || !jsonBody) return false;
+
+    char host[256] = {0};
+    WORD port = 0;
+    BOOL isHttps = FALSE;
+    Hub_SplitURL(config->hub_url, host, sizeof(host), &port, &isHttps);
+    WCHAR wHost[256] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, host, -1, wHost, 256);
+
+    if (!HubHTTPEnter()) {
+        return false;
+    }
+
+    if (!HubHTTPPrepare(wHost, port, isHttps)) {
+        LeaveCriticalSection(&g_http.lock);
+        return false;
+    }
+    HINTERNET hConnect = g_http.connect;
+
+    WCHAR wPath[512] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, apiPath, -1, wPath, 512);
+
+    HINTERNET hRequest = WinHttpOpenRequest(
+        hConnect,
+        L"POST",
+        wPath,
+        NULL,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        isHttps ? WINHTTP_FLAG_SECURE : 0
+    );
+
+    if (!hRequest) {
+        HubHTTPDropConnection();
+        LeaveCriticalSection(&g_http.lock);
+        return false;
+    }
+
+    Hub_AttachClientCert(hRequest, config);
+
+    WCHAR wHeaders[1024] = {0};
+    WCHAR wKey[128] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
+    const wchar_t* credentialHeader = strncmp(config->api_key, "omd_", 4) == 0
+        ? L"X-Ominull-Device-Credential" : L"X-API-Key";
+    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: application/json\r\n", credentialHeader, wKey);
+
+    WinHttpAddRequestHeaders(hRequest, wHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    BOOL bResults = WinHttpSendRequest(
+        hRequest,
+        WINHTTP_NO_ADDITIONAL_HEADERS,
+        0,
+        (LPVOID)jsonBody,
+        (DWORD)strlen(jsonBody),
+        (DWORD)strlen(jsonBody),
+        0
+    );
+
+    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+        bResults = WinHttpSendRequest(
+            hRequest,
+            WINHTTP_NO_ADDITIONAL_HEADERS,
+            0,
+            (LPVOID)jsonBody,
+            (DWORD)strlen(jsonBody),
+            (DWORD)strlen(jsonBody),
+            0
+        );
+    }
+
+    DWORD dwStatusCode = 0;
+    if (bResults) {
+        bResults = WinHttpReceiveResponse(hRequest, NULL);
+        if (bResults && !Hub_VerifyRequestPin(hRequest, config)) {
+            bResults = FALSE;
+        }
+        if (bResults) {
+            DWORD dwSize = sizeof(dwStatusCode);
+            if (!WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                     WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize,
+                                     WINHTTP_NO_HEADER_INDEX)) {
+                bResults = FALSE;
+            }
+
+            if (bResults && respOut && respCap > 0) {
+                if (!HubHTTPReadBody(hRequest, respOut, respCap)) {
+                    bResults = FALSE;
+                }
+            } else if (bResults) {
+                char sink[512];
+                HubHTTPReadBody(hRequest, sink, sizeof(sink));
+            }
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    if (!bResults) {
+        HubHTTPDropConnection();
+    }
+    LeaveCriticalSection(&g_http.lock);
+
+    return (bResults && (dwStatusCode >= 200 && dwStatusCode < 300));
+}
