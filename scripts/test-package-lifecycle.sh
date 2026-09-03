@@ -122,7 +122,7 @@ SANDBOX=(
     --ro-bind /usr/lib64 /lib64
     --proc /proc --dev /dev
 )
-for tool in dpkg dpkg-deb dpkg-query dpkg-split awk basename cat chown chmod grep head install openssl sed; do
+for tool in dpkg dpkg-deb dpkg-query dpkg-split awk basename cat chown chmod getent grep head id install openssl sed; do
     SANDBOX+=(--ro-bind "/usr/bin/${tool}" "/usr/bin/${tool}")
 done
 sandbox() { "${SANDBOX[@]}" "$@"; }

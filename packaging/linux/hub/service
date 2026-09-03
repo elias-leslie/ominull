@@ -5,13 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=ominull
+Group=ominull
 EnvironmentFile=-/etc/ominull/hub.env
 ExecStart=/opt/ominull/bin/ominull-hub --config /etc/ominull/hub.env
 Restart=always
 RestartSec=5s
-NoNewPrivileges=no
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
