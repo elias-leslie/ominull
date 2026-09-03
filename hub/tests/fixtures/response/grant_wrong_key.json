@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "grant_id": "00000000-0000-0000-0000-000000000001",
+  "tenant_id": "tenant-production",
+  "endpoint_id": "linux-ominull-target-linux",
+  "action_kind": "forensic_collection",
+  "action_digest": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  "operator_id": "operator-secops",
+  "response_session_id": "sess-0000-0000-0001",
+  "issued_at": 1788350400,
+  "expires_at": 1788354000,
+  "nonce": "0123456789abcdef0123456789abcdef",
+  "signer_key_id": "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8",
+  "signature": "055bcb04e4ef4f5ac0fba572aae0aee0da8bb6844d0e0ec7deaedf3f628938a786dd818706e7e5f9c5ace017ab74117695c07d3d928d41301d20021c25569d09"
+}

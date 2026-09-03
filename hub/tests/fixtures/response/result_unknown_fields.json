@@ -1,0 +1,11 @@
+{
+  "diagnostic_metadata": {
+    "collector": "v1.8.3"
+  },
+  "duration_ms": 420,
+  "exit_code": 0,
+  "job_id": "job-1000-0001",
+  "lease_id": "lease-2000-0001",
+  "manifest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "state": "succeeded"
+}

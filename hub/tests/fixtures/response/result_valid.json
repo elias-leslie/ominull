@@ -1,0 +1,8 @@
+{
+  "job_id": "job-1000-0001",
+  "lease_id": "lease-2000-0001",
+  "state": "succeeded",
+  "exit_code": 0,
+  "duration_ms": 420,
+  "manifest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

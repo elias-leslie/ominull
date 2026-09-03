@@ -1,0 +1,6 @@
+{
+  "action_kind": "forensic_collection",
+  "grant_id": "00000000-0000-0000-0000-000000000001",
+  "tenant_id": "tenant-production",
+  "version": 1
+}
