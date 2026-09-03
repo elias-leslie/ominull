@@ -806,6 +806,70 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 		return nil, fmt.Errorf("action kind %q not permitted by response session", req.ActionKind)
 	}
 
+	// Action kind verification
+	switch req.ActionKind {
+	case response.ActionKindForensicCollect, response.ActionKindScriptExec, response.ActionKindTerminalSession:
+		// valid
+	default:
+		return nil, fmt.Errorf("unrecognized or unsupported action kind: %q", req.ActionKind)
+	}
+
+	// Proof binding verification
+	if req.Proof.TenantID != req.TenantID {
+		return nil, errors.New("cross-tenant grant signing denied; proof tenant does not match requested tenant")
+	}
+	if req.Proof.ActionKind != req.ActionKind {
+		return nil, fmt.Errorf("action kind mismatch: proof specifies %q but request asks for %q", req.Proof.ActionKind, req.ActionKind)
+	}
+
+	// Target endpoints verification: unbounded target sets are denied per threat model
+	if len(req.Proof.TargetEndpoints) == 0 {
+		return nil, errors.New("unbounded target sets are denied; proof must specify explicit target endpoints")
+	}
+	if len(req.Proof.TargetEndpoints) > 1000 {
+		return nil, errors.New("target endpoints count exceeds maximum allowable limit of 1000")
+	}
+
+	endpointAllowed := false
+	for _, target := range req.Proof.TargetEndpoints {
+		if target == req.EndpointID {
+			endpointAllowed = true
+			break
+		}
+	}
+	if !endpointAllowed {
+		_ = a.store.RecordAudit(ctx, &SignerAuditEntry{
+			Timestamp:  now,
+			TenantID:   req.TenantID,
+			OperatorID: req.OperatorID,
+			EventType:  "grant_denied",
+			ActionKind: string(req.ActionKind),
+			EndpointID: req.EndpointID,
+			Status:     "denied",
+			Details:    fmt.Sprintf("requested endpoint %q not in proof target list", req.EndpointID),
+		})
+		return nil, fmt.Errorf("requested endpoint %q is not in proof's authorized target endpoints list", req.EndpointID)
+	}
+
+	// Independent action digest validation
+	if len(req.ActionPayload) > 0 {
+		computedDigest := sha256.Sum256(req.ActionPayload)
+		computedDigestHex := hex.EncodeToString(computedDigest[:])
+		if !strings.EqualFold(computedDigestHex, req.ActionDigest) {
+			return nil, fmt.Errorf("action payload digest (%s) does not match requested action digest (%s)", computedDigestHex, req.ActionDigest)
+		}
+		if !strings.EqualFold(computedDigestHex, req.Proof.ActionDigest) {
+			return nil, fmt.Errorf("action payload digest (%s) does not match proof action digest (%s)", computedDigestHex, req.Proof.ActionDigest)
+		}
+	} else {
+		if len(req.ActionDigest) != 64 {
+			return nil, fmt.Errorf("invalid action digest length %d (expected 64)", len(req.ActionDigest))
+		}
+		if _, err := hex.DecodeString(req.ActionDigest); err != nil {
+			return nil, fmt.Errorf("invalid hex encoding in action digest: %w", err)
+		}
+	}
+
 	// Verify browser action proof
 	browserPubBytes, err := hex.DecodeString(session.BrowserPublicKey)
 	if err != nil {

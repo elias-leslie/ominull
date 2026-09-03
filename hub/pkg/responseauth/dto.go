@@ -3,6 +3,7 @@ package responseauth
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -126,14 +127,15 @@ func (p *ActionProof) Verify(browserPubKey ed25519.PublicKey, now time.Time) err
 
 // SignGrantRequest is sent to the response authority to request an endpoint grant.
 type SignGrantRequest struct {
-	TenantID    string              `json:"tenant_id"`
-	OperatorID  string              `json:"operator_id"`
-	SessionID   string              `json:"session_id"`
-	EndpointID  string              `json:"endpoint_id"`
-	ActionKind  response.ActionKind `json:"action_kind"`
-	ActionDigest string             `json:"action_digest"`
-	TTLSeconds  int64               `json:"ttl_seconds"`
-	Proof       *ActionProof        `json:"proof"`
+	TenantID      string              `json:"tenant_id"`
+	OperatorID    string              `json:"operator_id"`
+	SessionID     string              `json:"session_id"`
+	EndpointID    string              `json:"endpoint_id"`
+	ActionKind    response.ActionKind `json:"action_kind"`
+	ActionDigest  string              `json:"action_digest"`
+	ActionPayload json.RawMessage     `json:"action_payload,omitempty"`
+	TTLSeconds    int64               `json:"ttl_seconds"`
+	Proof         *ActionProof        `json:"proof"`
 }
 
 // SignGrantResponse is returned by the response authority.
