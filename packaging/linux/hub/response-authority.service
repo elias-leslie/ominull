@@ -1,0 +1,24 @@
+[Unit]
+Description=Ominull Response Authorization Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ominull-authority
+Group=ominull-authority
+EnvironmentFile=-/etc/ominull/response-authority.env
+ExecStart=/opt/ominull/bin/ominull-response-authority
+Restart=always
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RuntimeDirectory=ominull-response-authority
+RuntimeDirectoryMode=0750
+StateDirectory=ominull-response-authority
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

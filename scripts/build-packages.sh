@@ -43,11 +43,13 @@ echo "[*] Building Linux agent."
 gcc -Wall -Wextra -Wformat=2 -O2 -I"${ROOT_DIR}/agent/include" \
     "${ROOT_DIR}/agent/linux/main.c" -lcurl -o "${BUILD_DIR}/ominulld"
 
-echo "[*] Building hub."
+echo "[*] Building hub and response authority."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -ldflags "-X main.version=${VERSION}" -o "${BUILD_DIR}/ominull-hub" ./cmd)
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -o "${BUILD_DIR}/ominullctl" ./cmd/ominullctl)
+(cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
+    -o "${BUILD_DIR}/ominull-response-authority" ./cmd/ominull-response-authority)
 
 echo "[*] Building Windows user-mode agent and recovery tool."
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
@@ -76,6 +78,15 @@ make_deb() {
     if [ -n "${ctl}" ]; then
         mkdir -p "${root}/usr/bin"
         install -m 0755 "${ctl}" "${root}/usr/bin/ominullctl"
+    fi
+    if [ "${name}" = "ominull-hub" ]; then
+        if [ -f "${BUILD_DIR}/ominull-response-authority" ]; then
+            install -m 0755 "${BUILD_DIR}/ominull-response-authority" "${root}/opt/ominull/bin/ominull-response-authority"
+        fi
+        if [ -f "${ROOT_DIR}/packaging/linux/hub/response-authority.service" ]; then
+            mkdir -p "${root}/lib/systemd/system"
+            install -m 0644 "${ROOT_DIR}/packaging/linux/hub/response-authority.service" "${root}/lib/systemd/system/ominull-response-authority.service"
+        fi
     fi
     install -m 0644 "${ROOT_DIR}/LICENSE" "${root}/usr/share/doc/${package}/LICENSE"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${control}" > "${root}/DEBIAN/control"

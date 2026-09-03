@@ -38,8 +38,12 @@ gcc -Wall -Wextra -Wformat=2 -O2 \
   "$ROOT_DIR/agent/linux/main.c" -lcurl -o "$BUILD_DIR/ominulld"
 file "$BUILD_DIR/ominulld"
 
-echo "[*] Compiling Linux hub..."
+echo "[*] Compiling Linux hub, control CLI, and response authority..."
 (cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$VERSION" -o "$BUILD_DIR/ominull-hub" ./cmd)
+(cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -o "$BUILD_DIR/ominullctl" ./cmd/ominullctl)
+(cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -o "$BUILD_DIR/ominull-response-authority" ./cmd/ominull-response-authority)
 file "$BUILD_DIR/ominull-hub"
+file "$BUILD_DIR/ominullctl"
+file "$BUILD_DIR/ominull-response-authority"
 
 echo "[+] Retained binaries built for version $VERSION."
