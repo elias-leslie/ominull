@@ -387,8 +387,8 @@ row `accepted`.
 
 | Slice | Status | Evidence | Remaining gaps |
 |---|---|---|---|
-| R0.1 | `implemented` | `docs/evidence/R0-1.md` | The R0 gate does not pass at this checkpoint: `cd hub && go build ./...` fails with `cmd/ominullctl/main.go:750:3: declared and not used: raw`, which is R0.3's defect and which R0.1 changed no Go source to cause or clear. The working tree still carries the rebuilt bytes under released filenames (`dist/ominull-agent_1.8.3_amd64.deb` = `f173f308...`, `dist/SHA256SUMS.txt` modified), so no deploy or release script may be run against the live hub until R0.6. `windows-laptop-b` (offline, v1.8.1) was inferred from `agent_update_jobs`, not hashed. |
-| R0.2 | `planned` | - | - |
+| R0.1 | `implemented` | `docs/evidence/R0-1.md` | The R0 gate does not pass at this checkpoint: `cd hub && go build ./...` fails with `cmd/ominullctl/main.go:750:3: declared and not used: raw`, which is R0.3's defect and which R0.1 changed no Go source to cause or clear. `dist/` in working tree has been restored with authentic released bytes matching `SHA256SUMS.txt` verified against pinned release key. `windows-laptop-b` (offline, v1.8.1) was inferred from `agent_update_jobs`, not hashed. |
+| R0.2 | `implemented` | `docs/evidence/R0-2.md` | The R0 gate does not pass at this checkpoint: `cd hub && go build ./...` fails with `cmd/ominullctl/main.go:750:3: declared and not used: raw`, which is R0.3's defect. `hub/pkg/server` builds, vets, and passes `go test -race ./pkg/server`. All 26 unreleased response routes fail closed (404 Not Found) by default, creating zero DB rows, sessions, grants, or audit entries, and heartbeat response offers are suppressed. |
 | R0.3 | `planned` | - | - |
 | R0.4 | `planned` | - | - |
 | R0.5 | `planned` | - | - |

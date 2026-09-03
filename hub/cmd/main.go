@@ -67,6 +67,7 @@ func main() {
 	dnsListen := flag.String("dns-listen", envOr("OMINULL_DNS_LISTEN", defaultDNSListen), "DNS forwarder and threat sinkhole listen address (disabled by default; for example :53)")
 	dhcpSnoop := flag.Bool("dhcp-snoop", envBool("OMINULL_DHCP_SNOOP", false), "Passively observe DHCP broadcasts on UDP/67 (disabled by default)")
 	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
+	enableResponse := flag.Bool("enable-unreleased-response", envBool("OMINULL_ENABLE_UNRELEASED_RESPONSE", false), "Enable unreleased response, evidence, terminal, script, and vulnerability routes (disabled by default)")
 	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
 
@@ -194,6 +195,7 @@ func main() {
 	})
 	srv.SetAgentHubURL(*agentHubURL)
 	srv.SetSetupPaths(*setupTokenFile, configPath, *dbPath, *adminKeyFile, absBinDir)
+	srv.SetResponseEnabled(*enableResponse)
 	if err := srv.SetAccess(server.AccessOptions{
 		Team:           *accessTeam,
 		AUD:            *accessAUD,

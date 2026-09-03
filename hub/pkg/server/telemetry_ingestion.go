@@ -104,7 +104,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	// logs while the request's durability contract remains true.
 	s.detector.EvaluateBatch(events, snapshot)
 
-	return s.telemetryControlResponse(r, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
+	return s.telemetryControlResponse(r, tenantID, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
 }
 
 func requestRemoteIP(r *http.Request) string {
@@ -194,7 +194,7 @@ func applyThreatIntel(ti *threatintel.Manager, events []storage.Event, endpointI
 	}
 }
 
-func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedVersion, capability string) (map[string]interface{}, error) {
+func (s *Server) telemetryControlResponse(r *http.Request, tenantID, endpointID, reportedVersion, capability string) (map[string]interface{}, error) {
 	qPeers, err := s.store.GetQuarantinedPeers()
 	if err != nil {
 		return nil, fmt.Errorf("load quarantined peers: %w", err)
@@ -254,6 +254,11 @@ func (s *Server) telemetryControlResponse(r *http.Request, endpointID, reportedV
 			if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {
 				resp["agent_update"] = desc
 			}
+		}
+	}
+	if s.responseEnabled && s.responseStore != nil {
+		if offers, err := s.responseStore.OfferPendingJobs(tenantID, endpointID, 4, 2*time.Minute); err == nil && len(offers) > 0 {
+			resp["response_offers"] = offers
 		}
 	}
 	return resp, nil

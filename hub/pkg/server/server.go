@@ -23,10 +23,16 @@ import (
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/dns"
+	"ominull/hub/pkg/evidence"
 	"ominull/hub/pkg/pki"
+	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scanner"
+	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/terminal"
 	"ominull/hub/pkg/threatintel"
+	"ominull/hub/pkg/vuln"
 )
 
 type Server struct {
@@ -56,6 +62,21 @@ type Server struct {
 	// throttle bounds online credential guessing across every route that
 	// accepts a key.
 	throttle *authThrottle
+	// responseStore coordinates durable response jobs and offers
+	responseStore *response.Store
+	// responseAuth communicates with the Response Authority daemon
+	responseAuth  responseauth.Client
+	// evidenceStore manages encrypted forensic collections
+	evidenceStore *evidence.Store
+	// terminalMgr coordinates interactive pseudoterminals and recording
+	terminalMgr   *terminal.Manager
+	// scriptsStore manages versioned immutable scripts
+	scriptsStore  *scripts.Store
+	// vulnStore manages installed software inventory and vulnerability correlation
+	vulnStore     *vuln.Store
+	// responseEnabled toggles the unreleased response, evidence, script, terminal,
+	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
+	responseEnabled bool
 	// topology holds the rendered graph briefly; see responsecache.go.
 	topology responseCache
 	// setup is deliberately separate from console authentication. A fresh
@@ -255,18 +276,60 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		log.Printf("[-] Warning: Failed to backfill the asset graph from endpoints: %v", err)
 	}
 
+	respStore, err := response.NewStore(store.DB())
+	if err != nil {
+		log.Printf("[-] Warning: Failed to initialize response store: %v", err)
+	}
+
+	evidKeyPath := filepath.Join(binaryDir, "evidence.key")
+	masterKey, err := evidence.LoadOrCreateMasterKey(evidKeyPath)
+	var evidStore *evidence.Store
+	if err == nil {
+		evidStore, err = evidence.NewStore(store.DB(), filepath.Join(binaryDir, "evidence"), masterKey)
+		if err != nil {
+			log.Printf("[-] Warning: Failed to initialize evidence store: %v", err)
+		}
+	}
+
+	scriptsStore, err := scripts.NewStore(store.DB())
+	if err != nil {
+		log.Printf("[-] Warning: Failed to initialize scripts store: %v", err)
+	}
+
+	vulnStore, err := vuln.NewStore(store.DB())
+	if err != nil {
+		log.Printf("[-] Warning: Failed to initialize vuln store: %v", err)
+	}
+
+	authSocket := os.Getenv("OMINULL_AUTH_SOCKET")
+	if authSocket == "" {
+		authSocket = "/run/ominull-response-authority/authority.sock"
+	}
+
+	responseEnabled := false
+	if v := os.Getenv("OMINULL_ENABLE_UNRELEASED_RESPONSE"); v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+		responseEnabled = true
+	}
+
 	s := &Server{
-		store:          store,
-		ti:             threatintel.New(store),
-		pki:            pkiMgr,
-		scanner:        scanner.New(store),
-		adminKey:       adminKey,
-		binaryDir:      binaryDir,
-		hubURL:         hubURL,
-		agentVersion:   agentVersion,
-		throttle:       newAuthThrottle(),
-		setupTokenPath: "/var/lib/ominull/setup.token",
-		setupSessions:  map[string]setupSession{},
+		store:           store,
+		ti:              threatintel.New(store),
+		pki:             pkiMgr,
+		scanner:         scanner.New(store),
+		adminKey:        adminKey,
+		binaryDir:       binaryDir,
+		hubURL:          hubURL,
+		agentVersion:    agentVersion,
+		throttle:        newAuthThrottle(),
+		responseStore:   respStore,
+		responseAuth:    responseauth.NewUDSClient(authSocket),
+		evidenceStore:   evidStore,
+		terminalMgr:     terminal.NewManager(60*time.Minute, 15*time.Minute),
+		scriptsStore:    scriptsStore,
+		vulnStore:       vulnStore,
+		responseEnabled: responseEnabled,
+		setupTokenPath:  "/var/lib/ominull/setup.token",
+		setupSessions:   map[string]setupSession{},
 	}
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
@@ -275,6 +338,35 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		return nil
 	})
 	return s
+}
+
+// SetResponseEnabled toggles the unreleased response subsystem routes and offers.
+func (s *Server) SetResponseEnabled(enabled bool) {
+	s.responseEnabled = enabled
+}
+
+// ResponseEnabled reports whether the unreleased response subsystem is enabled.
+func (s *Server) ResponseEnabled() bool {
+	return s.responseEnabled
+}
+
+// responseGate guards unreleased response routes behind responseEnabled.
+// When disabled (the default), requests fail closed with HTTP 404 Not Found.
+func (s *Server) responseGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.responseEnabled {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("{\"error\":\"not_found\",\"message\":\"response subsystem is disabled\"}\n"))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// SetResponseAuth allows injecting a custom or in-process Response Authority client.
+func (s *Server) SetResponseAuth(client responseauth.Client) {
+	s.responseAuth = client
 }
 
 func (s *Server) ThreatIntel() *threatintel.Manager {
@@ -3075,6 +3167,37 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.handleMeshQuarantine)))
 	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.handleMeshUnquarantine)))
 	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
+
+	// 10. Next-Gen Response & Forensic Collection API (Fail-closed behind responseGate)
+	mux.HandleFunc("/api/v1/response/jobs", s.authMiddleware(s.responseGate(s.handleResponseJobs)))
+	mux.HandleFunc("/api/v1/response/jobs/cancel", s.authMiddleware(s.responseGate(s.handleResponseJobsCancel)))
+	mux.HandleFunc("/api/v1/response/jobs/ack", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseAck)))
+	mux.HandleFunc("/api/v1/response/jobs/result", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseResult)))
+	mux.HandleFunc("/api/v1/response/auth/totp/enroll", s.authMiddleware(s.responseGate(s.handleResponseAuthTOTPEnroll)))
+	mux.HandleFunc("/api/v1/response/auth/unlock", s.authMiddleware(s.responseGate(s.handleResponseAuthUnlock)))
+	mux.HandleFunc("/api/v1/response/auth/lock", s.authMiddleware(s.responseGate(s.handleResponseAuthLock)))
+	mux.HandleFunc("/api/v1/response/auth/status", s.authMiddleware(s.responseGate(s.handleResponseAuthStatus)))
+
+	// 11. Encrypted Evidence Storage & Export API (Fail-closed behind responseGate)
+	mux.HandleFunc("/api/v1/evidence/bundles", s.authMiddleware(s.responseGate(s.handleEvidenceBundles)))
+	mux.HandleFunc("/api/v1/evidence/items", s.deviceOrLegacyMiddleware(s.responseGate(s.handleEvidenceItems)))
+	mux.HandleFunc("/api/v1/evidence/finalize", s.deviceOrLegacyMiddleware(s.responseGate(s.handleEvidenceFinalize)))
+	mux.HandleFunc("/api/v1/evidence/bundles/hold", s.authMiddleware(s.responseGate(s.handleEvidenceHold)))
+	mux.HandleFunc("/api/v1/evidence/export", s.authMiddleware(s.responseGate(s.handleEvidenceExport)))
+
+	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
+	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.handleTerminalSessions)))
+	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
+	mux.HandleFunc("/api/v1/terminal/frames", s.deviceOrLegacyMiddleware(s.responseGate(s.handleTerminalFrames)))
+
+	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
+	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))
+	mux.HandleFunc("/api/v1/scripts/run", s.authMiddleware(s.responseGate(s.handleScriptsRun)))
+
+	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
+	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))
+	mux.HandleFunc("/api/v1/vulnerabilities", s.authMiddleware(s.responseGate(s.handleVulnerabilities)))
+	mux.HandleFunc("/api/v1/vulnerabilities/sync", s.authMiddleware(requireAdmin(s.responseGate(s.handleVulnerabilities))))
 
 	return mux
 }

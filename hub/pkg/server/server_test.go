@@ -1158,3 +1158,103 @@ func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
 		t.Errorf("an endpoint that stopped presenting a certificate still shows cert_cn %q; want empty", cn)
 	}
 }
+
+func TestResponseRoutesFailClosedByDefault(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	if srv.ResponseEnabled() {
+		t.Fatalf("unreleased response routes must be disabled by default")
+	}
+
+	routes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		// 10. Next-Gen Response & Forensic Collection API
+		{http.MethodPost, "/api/v1/response/jobs", `{"action_kind":"forensic_collect"}`},
+		{http.MethodGet, "/api/v1/response/jobs", ""},
+		{http.MethodPost, "/api/v1/response/jobs/cancel", `{"job_id":"test-job-1"}`},
+		{http.MethodPost, "/api/v1/response/jobs/ack", `{"job_id":"test-job-1","lease_id":"lease-1"}`},
+		{http.MethodPost, "/api/v1/response/jobs/result", `{"job_id":"test-job-1","lease_id":"lease-1","state":"succeeded"}`},
+		{http.MethodPost, "/api/v1/response/auth/totp/enroll", `{"operator_id":"admin"}`},
+		{http.MethodPost, "/api/v1/response/auth/unlock", `{"operator_id":"admin","code":"123456"}`},
+		{http.MethodPost, "/api/v1/response/auth/lock", `{}`},
+		{http.MethodGet, "/api/v1/response/auth/status", ""},
+
+		// 11. Encrypted Evidence Storage & Export API
+		{http.MethodPost, "/api/v1/evidence/bundles", `{"endpoint_id":"ep-1","profile":"diagnostic"}`},
+		{http.MethodGet, "/api/v1/evidence/bundles", ""},
+		{http.MethodPost, "/api/v1/evidence/items?bundle_id=b-1&name=sys.txt", "data"},
+		{http.MethodPost, "/api/v1/evidence/finalize", `{"bundle_id":"b-1"}`},
+		{http.MethodPost, "/api/v1/evidence/bundles/hold", `{"bundle_id":"b-1","reason":"legal"}`},
+		{http.MethodGet, "/api/v1/evidence/export?bundle_id=b-1", ""},
+
+		// 12. Interactive Remote Pseudoterminal Shell API
+		{http.MethodPost, "/api/v1/terminal/sessions", `{"endpoint_id":"ep-1","program":"/bin/bash"}`},
+		{http.MethodGet, "/api/v1/terminal/sessions", ""},
+		{http.MethodPost, "/api/v1/terminal/sessions/close", `{"session_id":"s-1"}`},
+		{http.MethodPost, "/api/v1/terminal/frames", `{"session_id":"s-1","type":"stdin","data":"dGVzdA=="}`},
+
+		// 13. Versioned Immutable Script Library & Execution API
+		{http.MethodPost, "/api/v1/scripts", `{"name":"test.sh","interpreter":"/bin/sh","source":"echo 1\n"}`},
+		{http.MethodGet, "/api/v1/scripts", ""},
+		{http.MethodPost, "/api/v1/scripts/run", `{"script_id":"sc-1","endpoint_id":"ep-1"}`},
+
+		// 14. Software Inventory & CVE Vulnerability Correlation API
+		{http.MethodPost, "/api/v1/software", `{"endpoint_id":"ep-1","items":[{"name":"openssh","version":"9.0"}]}`},
+		{http.MethodGet, "/api/v1/software?endpoint_id=ep-1", ""},
+		{http.MethodGet, "/api/v1/vulnerabilities", ""},
+		{http.MethodPost, "/api/v1/vulnerabilities/sync", `{}`},
+	}
+
+	handler := srv.Handler()
+
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			var bodyReader io.Reader
+			if rt.body != "" {
+				bodyReader = strings.NewReader(rt.body)
+			}
+			req := httptest.NewRequest(rt.method, rt.path, bodyReader)
+			req.Header.Set("X-API-Key", "mock_admin_token")
+			if rt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNotFound {
+				t.Errorf("%s %s returned %d, want 404", rt.method, rt.path, w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "response subsystem is disabled") {
+				t.Errorf("%s %s body %q does not mention response subsystem disabled", rt.method, rt.path, w.Body.String())
+			}
+		})
+	}
+
+	// Verify database remains untouched (zero rows in all response/evidence/script/vuln tables)
+	for _, tbl := range []string{
+		"response_jobs", "evidence_bundles", "evidence_items",
+		"scripts", "software_inventory", "vulnerabilities",
+	} {
+		var count int
+		row := store.DB().QueryRow("SELECT COUNT(*) FROM " + tbl)
+		if err := row.Scan(&count); err == nil {
+			if count != 0 {
+				t.Errorf("table %s has %d rows, expected 0", tbl, count)
+			}
+		}
+	}
+
+	// Verify telemetry response does not emit response_offers
+	telemetryReq := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(`[{"endpoint_id":"ep-1","event_type":"heartbeat"}]`))
+	telemetryReq.Header.Set("X-API-Key", "mock_tenant_token")
+	telemetryReq.Header.Set("Content-Type", "application/json")
+	wTel := httptest.NewRecorder()
+	handler.ServeHTTP(wTel, telemetryReq)
+	if strings.Contains(wTel.Body.String(), "response_offers") {
+		t.Errorf("telemetry response contained response_offers while gated off: %s", wTel.Body.String())
+	}
+}
