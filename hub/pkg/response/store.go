@@ -12,6 +12,38 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var (
+	ErrJobNotFound          = errors.New("response job not found")
+	ErrTenantMismatch       = errors.New("tenant id mismatch")
+	ErrEndpointMismatch     = errors.New("endpoint id mismatch")
+	ErrLeaseMismatch        = errors.New("lease id mismatch")
+	ErrLeaseExpired         = errors.New("lease has expired")
+	ErrInvalidJobTransition = errors.New("invalid job state transition")
+)
+
+// IsValidTransition returns true if the transition from currentState to targetState is allowed.
+func IsValidTransition(from, to JobState) bool {
+	if from == to {
+		return true // idempotent
+	}
+	switch from {
+	case StateQueued:
+		return to == StateOffered || to == StateCancelled
+	case StateOffered:
+		return to == StateAcknowledged || to == StateFailed || to == StateQueued || to == StateCancelled
+	case StateAcknowledged:
+		return to == StateRunning || to == StateSucceeded || to == StateFailed || to == StateCancelRequested || to == StateCancelled
+	case StateRunning:
+		return to == StateSucceeded || to == StateFailed || to == StateCancelRequested || to == StateCancelled
+	case StateCancelRequested:
+		return to == StateCancelled || to == StateSucceeded || to == StateFailed
+	case StateSucceeded, StateFailed, StateCancelled:
+		return false // terminal states are immutable
+	default:
+		return false
+	}
+}
+
 // JobRecord represents a durable response job in the store.
 type JobRecord struct {
 	ID                   string     `json:"id"`
@@ -34,6 +66,20 @@ type JobRecord struct {
 	ErrorCode            string     `json:"error_code,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+// JobAuditEntry represents an audit log entry for job state transitions.
+type JobAuditEntry struct {
+	ID         int64     `json:"id"`
+	Timestamp  time.Time `json:"timestamp"`
+	TenantID   string    `json:"tenant_id"`
+	EndpointID string    `json:"endpoint_id"`
+	JobID      string    `json:"job_id"`
+	GrantID    string    `json:"grant_id,omitempty"`
+	FromState  string    `json:"from_state"`
+	ToState    string    `json:"to_state"`
+	Actor      string    `json:"actor"`
+	Details    string    `json:"details,omitempty"`
 }
 
 // Store manages persistence and state transitions for response jobs.
@@ -81,8 +127,31 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_response_jobs_tenant ON response_jobs(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_response_jobs_endpoint_state ON response_jobs(endpoint_id, state);
 	CREATE INDEX IF NOT EXISTS idx_response_jobs_idempotency ON response_jobs(tenant_id, idempotency_key);
+
+	CREATE TABLE IF NOT EXISTS response_job_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp TIMESTAMP NOT NULL,
+		tenant_id TEXT NOT NULL,
+		endpoint_id TEXT NOT NULL,
+		job_id TEXT NOT NULL,
+		grant_id TEXT,
+		from_state TEXT NOT NULL,
+		to_state TEXT NOT NULL,
+		actor TEXT NOT NULL,
+		details TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_response_job_audit_job ON response_job_audit(job_id);
+	CREATE INDEX IF NOT EXISTS idx_response_job_audit_tenant ON response_job_audit(tenant_id);
 	`
 	_, err := s.db.Exec(query)
+	return err
+}
+
+func (s *Store) recordAudit(tenantID, endpointID, jobID, grantID string, fromState, toState JobState, actor, details string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO response_job_audit (timestamp, tenant_id, endpoint_id, job_id, grant_id, from_state, to_state, actor, details)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, time.Now().UTC(), tenantID, endpointID, jobID, grantID, string(fromState), string(toState), actor, details)
 	return err
 }
 
@@ -171,6 +240,7 @@ func (s *Store) CreateJob(tenantID, endpointID string, kind ActionKind, requeste
 		return nil, err
 	}
 
+	_ = s.recordAudit(tenantID, endpointID, job.ID, grant.GrantID, "", StateQueued, requestedBy, "job created")
 	_ = grantJSON
 	return job, nil
 }
@@ -189,7 +259,7 @@ func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, lea
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, kind, request_json
+		SELECT id, kind, state, attempt, authorization_grant_id, request_json
 		FROM response_jobs
 		WHERE tenant_id = ? AND endpoint_id = ? AND (
 			state = ? OR (state = ? AND lease_expires_at < ?)
@@ -206,15 +276,20 @@ func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, lea
 	type item struct {
 		id      string
 		kind    ActionKind
+		state   JobState
+		attempt int
+		grantID string
 		reqJSON string
 	}
 	var items []item
 
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.id, &it.kind, &it.reqJSON); err != nil {
+		var stateStr string
+		if err := rows.Scan(&it.id, &it.kind, &stateStr, &it.attempt, &it.grantID, &it.reqJSON); err != nil {
 			return nil, err
 		}
+		it.state = JobState(stateStr)
 		items = append(items, it)
 	}
 
@@ -230,14 +305,17 @@ func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, lea
 			continue
 		}
 
+		newAttempt := it.attempt + 1
 		_, err := s.db.Exec(`
 			UPDATE response_jobs
-			SET state = ?, lease_id = ?, lease_expires_at = ?, attempt = attempt + 1, updated_at = ?
+			SET state = ?, lease_id = ?, lease_expires_at = ?, attempt = ?, updated_at = ?
 			WHERE id = ?
-		`, string(StateOffered), leaseID, leaseExpiresAt, now, it.id)
+		`, string(StateOffered), leaseID, leaseExpiresAt, newAttempt, now, it.id)
 		if err != nil {
 			continue
 		}
+
+		_ = s.recordAudit(tenantID, endpointID, it.id, it.grantID, it.state, StateOffered, "scheduler", fmt.Sprintf("leased to %s attempt %d", leaseID, newAttempt))
 
 		offers = append(offers, &JobOffer{
 			JobID:          it.id,
@@ -252,19 +330,46 @@ func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, lea
 	return offers, nil
 }
 
-// AcknowledgeJob records an endpoint's ACK or rejection of an offered job.
-func (s *Store) AcknowledgeJob(jobID, leaseID string, accepted bool, rejectionReason string) error {
+// AcknowledgeJob records an endpoint's ACK or rejection of an offered job with tenant and endpoint binding.
+func (s *Store) AcknowledgeJob(tenantID, endpointID, jobID, leaseID string, accepted bool, rejectionReason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	var currentState, currentLease string
-	err := s.db.QueryRow(`SELECT state, lease_id FROM response_jobs WHERE id = ?`, jobID).Scan(&currentState, &currentLease)
+	var curTenant, curEndpoint, currentState, currentLease, grantID string
+	var leaseExp sql.NullTime
+	err := s.db.QueryRow(`
+		SELECT tenant_id, endpoint_id, state, lease_id, lease_expires_at, authorization_grant_id
+		FROM response_jobs
+		WHERE id = ?
+	`, jobID).Scan(&curTenant, &curEndpoint, &currentState, &currentLease, &leaseExp, &grantID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrJobNotFound
+		}
 		return err
 	}
+
+	if tenantID != "" && curTenant != tenantID {
+		return ErrTenantMismatch
+	}
+	if endpointID != "" && curEndpoint != endpointID {
+		return ErrEndpointMismatch
+	}
 	if currentLease != leaseID {
-		return errors.New("lease id mismatch")
+		return ErrLeaseMismatch
+	}
+	if leaseExp.Valid && now.After(leaseExp.Time) {
+		return ErrLeaseExpired
+	}
+
+	targetState := StateAcknowledged
+	if !accepted {
+		targetState = StateFailed
+	}
+
+	if !IsValidTransition(JobState(currentState), targetState) {
+		return fmt.Errorf("%w: cannot transition from %s to %s", ErrInvalidJobTransition, currentState, targetState)
 	}
 
 	if accepted {
@@ -280,11 +385,84 @@ func (s *Store) AcknowledgeJob(jobID, leaseID string, accepted bool, rejectionRe
 			WHERE id = ?
 		`, string(StateFailed), rejectionReason, now, now, jobID)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	actor := fmt.Sprintf("endpoint:%s", curEndpoint)
+	details := "job accepted by endpoint"
+	if !accepted {
+		details = fmt.Sprintf("job rejected: %s", rejectionReason)
+	}
+	_ = s.recordAudit(curTenant, curEndpoint, jobID, grantID, JobState(currentState), targetState, actor, details)
+	return nil
 }
 
-// CompleteJob transitions a job to a terminal outcome (succeeded, failed, or cancelled).
-func (s *Store) CompleteJob(jobID, leaseID string, result *JobResult) error {
+// RecordProgress records incremental progress reported by an endpoint.
+func (s *Store) RecordProgress(tenantID, endpointID, jobID, leaseID string, progress *JobProgress) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if progress == nil {
+		return errors.New("nil progress")
+	}
+
+	now := time.Now().UTC()
+	var curTenant, curEndpoint, currentState, currentLease, grantID string
+	var leaseExp sql.NullTime
+	err := s.db.QueryRow(`
+		SELECT tenant_id, endpoint_id, state, lease_id, lease_expires_at, authorization_grant_id
+		FROM response_jobs
+		WHERE id = ?
+	`, jobID).Scan(&curTenant, &curEndpoint, &currentState, &currentLease, &leaseExp, &grantID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrJobNotFound
+		}
+		return err
+	}
+
+	if tenantID != "" && curTenant != tenantID {
+		return ErrTenantMismatch
+	}
+	if endpointID != "" && curEndpoint != endpointID {
+		return ErrEndpointMismatch
+	}
+	if currentLease != leaseID {
+		return ErrLeaseMismatch
+	}
+	if leaseExp.Valid && now.After(leaseExp.Time) {
+		return ErrLeaseExpired
+	}
+
+	// Progress transitions an acknowledged job to running
+	fromState := JobState(currentState)
+	toState := fromState
+	if fromState == StateAcknowledged {
+		toState = StateRunning
+		_, err = s.db.Exec(`
+			UPDATE response_jobs
+			SET state = ?, updated_at = ?
+			WHERE id = ?
+		`, string(StateRunning), now, jobID)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = s.db.Exec(`UPDATE response_jobs SET updated_at = ? WHERE id = ?`, now, jobID)
+		if err != nil {
+			return err
+		}
+	}
+
+	actor := fmt.Sprintf("endpoint:%s", curEndpoint)
+	details := fmt.Sprintf("progress %d%%: %s", progress.ProgressPct, progress.Message)
+	_ = s.recordAudit(curTenant, curEndpoint, jobID, grantID, fromState, toState, actor, details)
+	return nil
+}
+
+// CompleteJob transitions a job to a terminal outcome (succeeded, failed, or cancelled) with tenant and endpoint binding.
+func (s *Store) CompleteJob(tenantID, endpointID, jobID, leaseID string, result *JobResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -293,18 +471,33 @@ func (s *Store) CompleteJob(jobID, leaseID string, result *JobResult) error {
 	}
 
 	now := time.Now().UTC()
-	var currentState, currentLease string
-	err := s.db.QueryRow(`SELECT state, lease_id FROM response_jobs WHERE id = ?`, jobID).Scan(&currentState, &currentLease)
+	var curTenant, curEndpoint, currentState, currentLease, grantID string
+	err := s.db.QueryRow(`
+		SELECT tenant_id, endpoint_id, state, lease_id, authorization_grant_id
+		FROM response_jobs
+		WHERE id = ?
+	`, jobID).Scan(&curTenant, &curEndpoint, &currentState, &currentLease, &grantID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrJobNotFound
+		}
 		return err
 	}
 
-	// Check terminal idempotency
-	if currentState == string(StateSucceeded) || currentState == string(StateFailed) || currentState == string(StateCancelled) {
-		return nil // terminal already reached
+	if tenantID != "" && curTenant != tenantID {
+		return ErrTenantMismatch
 	}
+	if endpointID != "" && curEndpoint != endpointID {
+		return ErrEndpointMismatch
+	}
+
+	// Replay protection: if terminal state already reached, idempotent success
+	if currentState == string(StateSucceeded) || currentState == string(StateFailed) || currentState == string(StateCancelled) {
+		return nil
+	}
+
 	if currentLease != leaseID {
-		return errors.New("lease id mismatch")
+		return ErrLeaseMismatch
 	}
 
 	state := result.State
@@ -315,6 +508,10 @@ func (s *Store) CompleteJob(jobID, leaseID string, result *JobResult) error {
 		}
 	}
 
+	if !IsValidTransition(JobState(currentState), state) {
+		return fmt.Errorf("%w: cannot transition from %s to %s", ErrInvalidJobTransition, currentState, state)
+	}
+
 	resultBytes, _ := json.Marshal(result)
 
 	_, err = s.db.Exec(`
@@ -322,30 +519,63 @@ func (s *Store) CompleteJob(jobID, leaseID string, result *JobResult) error {
 		SET state = ?, result_json = ?, error_code = ?, completed_at = ?, updated_at = ?
 		WHERE id = ?
 	`, string(state), string(resultBytes), result.ErrorCode, now, now, jobID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	actor := fmt.Sprintf("endpoint:%s", curEndpoint)
+	details := fmt.Sprintf("completed state=%s exit_code=%d", state, result.ExitCode)
+	_ = s.recordAudit(curTenant, curEndpoint, jobID, grantID, JobState(currentState), state, actor, details)
+	return nil
 }
 
 // CancelJob requests cooperative cancellation of a job.
-func (s *Store) CancelJob(jobID, requestedBy string) error {
+func (s *Store) CancelJob(tenantID, jobID, requestedBy string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	var state string
-	err := s.db.QueryRow(`SELECT state FROM response_jobs WHERE id = ?`, jobID).Scan(&state)
+	var curTenant, curEndpoint, currentState, grantID string
+	err := s.db.QueryRow(`
+		SELECT tenant_id, endpoint_id, state, authorization_grant_id
+		FROM response_jobs
+		WHERE id = ?
+	`, jobID).Scan(&curTenant, &curEndpoint, &currentState, &grantID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrJobNotFound
+		}
 		return err
 	}
-	if state == string(StateSucceeded) || state == string(StateFailed) || state == string(StateCancelled) {
+
+	if tenantID != "" && curTenant != tenantID {
+		return ErrTenantMismatch
+	}
+
+	if currentState == string(StateSucceeded) || currentState == string(StateFailed) || currentState == string(StateCancelled) {
 		return nil // already terminal
+	}
+
+	targetState := StateCancelRequested
+	if currentState == string(StateQueued) {
+		targetState = StateCancelled
+	}
+
+	if !IsValidTransition(JobState(currentState), targetState) {
+		return fmt.Errorf("%w: cannot transition from %s to %s", ErrInvalidJobTransition, currentState, targetState)
 	}
 
 	_, err = s.db.Exec(`
 		UPDATE response_jobs
 		SET state = ?, cancel_requested_at = ?, updated_at = ?
 		WHERE id = ?
-	`, string(StateCancelRequested), now, now, jobID)
-	return err
+	`, string(targetState), now, now, jobID)
+	if err != nil {
+		return err
+	}
+
+	_ = s.recordAudit(curTenant, curEndpoint, jobID, grantID, JobState(currentState), targetState, requestedBy, "cancellation requested")
+	return nil
 }
 
 // ListJobs returns jobs matching tenant, optional endpoint filter, and pagination.
@@ -415,4 +645,39 @@ func (s *Store) ListJobs(tenantID, endpointID string, limit int) ([]*JobRecord, 
 		jobs = append(jobs, &j)
 	}
 	return jobs, nil
+}
+
+// GetJobAuditLog retrieves the transition audit log for a job.
+func (s *Store) GetJobAuditLog(tenantID, jobID string, limit int) ([]*JobAuditEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, tenant_id, endpoint_id, job_id, grant_id, from_state, to_state, actor, details
+		FROM response_job_audit
+		WHERE tenant_id = ? AND job_id = ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, tenantID, jobID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*JobAuditEntry
+	for rows.Next() {
+		var e JobAuditEntry
+		var grantID, details sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.TenantID, &e.EndpointID, &e.JobID, &grantID, &e.FromState, &e.ToState, &e.Actor, &details); err != nil {
+			return nil, err
+		}
+		if grantID.Valid { e.GrantID = grantID.String }
+		if details.Valid { e.Details = details.String }
+		entries = append(entries, &e)
+	}
+	return entries, nil
 }

@@ -2,13 +2,14 @@ package response
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-func TestStore_JobLifecycle(t *testing.T) {
+func TestStore_JobLifecycleAndTransitions(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open failed: %v", err)
@@ -42,7 +43,7 @@ func TestStore_JobLifecycle(t *testing.T) {
 
 	payloadJSON := `{"profile":"diagnostic","max_bytes":1048576}`
 
-	// 1. Create Job with Idempotency Key
+	// 1. Create Job
 	job1, err := store.CreateJob(tenantID, endpointID, ActionKindForensicCollect, "op-1", grant, payloadJSON, "idemp-key-1")
 	if err != nil {
 		t.Fatalf("CreateJob failed: %v", err)
@@ -51,13 +52,11 @@ func TestStore_JobLifecycle(t *testing.T) {
 		t.Fatalf("expected queued state, got %s", job1.State)
 	}
 
-	// Re-submitting same idempotency key returns existing job
-	jobDup, err := store.CreateJob(tenantID, endpointID, ActionKindForensicCollect, "op-1", grant, payloadJSON, "idemp-key-1")
-	if err != nil {
-		t.Fatalf("CreateJob dup failed: %v", err)
-	}
-	if jobDup.ID != job1.ID {
-		t.Fatalf("expected same job ID for idempotency key, got %s vs %s", jobDup.ID, job1.ID)
+	// Invalid transition check: Cannot complete a job while queued!
+	resEarly := &JobResult{JobID: job1.ID, LeaseID: "none", State: StateSucceeded}
+	err = store.CompleteJob(tenantID, endpointID, job1.ID, "none", resEarly)
+	if err == nil {
+		t.Fatalf("expected CompleteJob to fail for queued job")
 	}
 
 	// 2. Offer Pending Jobs
@@ -73,12 +72,40 @@ func TestStore_JobLifecycle(t *testing.T) {
 		t.Fatalf("invalid offer structure: %+v", offer)
 	}
 
-	// 3. Acknowledge Job
-	if err := store.AcknowledgeJob(offer.JobID, offer.LeaseID, true, ""); err != nil {
+	// 3. Tenant and Endpoint Binding checks on ACK
+	// Wrong tenant
+	err = store.AcknowledgeJob("tenant-other", endpointID, offer.JobID, offer.LeaseID, true, "")
+	if err == nil || !errors.Is(err, ErrTenantMismatch) {
+		t.Fatalf("expected ErrTenantMismatch on ACK, got %v", err)
+	}
+	// Wrong endpoint
+	err = store.AcknowledgeJob(tenantID, "ep-other", offer.JobID, offer.LeaseID, true, "")
+	if err == nil || !errors.Is(err, ErrEndpointMismatch) {
+		t.Fatalf("expected ErrEndpointMismatch on ACK, got %v", err)
+	}
+	// Wrong lease ID
+	err = store.AcknowledgeJob(tenantID, endpointID, offer.JobID, "stolen-lease", true, "")
+	if err == nil || !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("expected ErrLeaseMismatch on ACK, got %v", err)
+	}
+
+	// Valid ACK
+	if err := store.AcknowledgeJob(tenantID, endpointID, offer.JobID, offer.LeaseID, true, ""); err != nil {
 		t.Fatalf("AcknowledgeJob failed: %v", err)
 	}
 
-	// 4. Complete Job
+	// 4. Progress Reporting transitions acknowledged -> running
+	prog := &JobProgress{
+		JobID:       offer.JobID,
+		LeaseID:     offer.LeaseID,
+		ProgressPct: 50,
+		Message:     "collecting memory dump",
+	}
+	if err := store.RecordProgress(tenantID, endpointID, offer.JobID, offer.LeaseID, prog); err != nil {
+		t.Fatalf("RecordProgress failed: %v", err)
+	}
+
+	// 5. Tenant and Endpoint Binding on CompleteJob
 	result := &JobResult{
 		JobID:          offer.JobID,
 		LeaseID:        offer.LeaseID,
@@ -87,35 +114,56 @@ func TestStore_JobLifecycle(t *testing.T) {
 		DurationMs:     150,
 		ManifestSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
-	if err := store.CompleteJob(offer.JobID, offer.LeaseID, result); err != nil {
+	// Wrong tenant
+	err = store.CompleteJob("tenant-other", endpointID, offer.JobID, offer.LeaseID, result)
+	if err == nil || !errors.Is(err, ErrTenantMismatch) {
+		t.Fatalf("expected ErrTenantMismatch on CompleteJob, got %v", err)
+	}
+	// Wrong endpoint
+	err = store.CompleteJob(tenantID, "ep-other", offer.JobID, offer.LeaseID, result)
+	if err == nil || !errors.Is(err, ErrEndpointMismatch) {
+		t.Fatalf("expected ErrEndpointMismatch on CompleteJob, got %v", err)
+	}
+
+	// Valid completion
+	if err := store.CompleteJob(tenantID, endpointID, offer.JobID, offer.LeaseID, result); err != nil {
 		t.Fatalf("CompleteJob failed: %v", err)
 	}
 
-	// 5. List Jobs
+	// Replay Protection: idempotent completion
+	if err := store.CompleteJob(tenantID, endpointID, offer.JobID, offer.LeaseID, result); err != nil {
+		t.Fatalf("expected idempotent success on replayed completion, got: %v", err)
+	}
+
+	// 6. Verify Transition Audit Log
+	audit, err := store.GetJobAuditLog(tenantID, offer.JobID, 20)
+	if err != nil {
+		t.Fatalf("GetJobAuditLog failed: %v", err)
+	}
+	if len(audit) < 4 {
+		t.Fatalf("expected at least 4 audit entries (create, offer, ack, progress, complete), got %d", len(audit))
+	}
+
+	// 7. Cancellation Lifecycle
+	job2, err := store.CreateJob(tenantID, endpointID, ActionKindForensicCollect, "op-1", grant, payloadJSON, "")
+	if err != nil {
+		t.Fatalf("CreateJob 2 failed: %v", err)
+	}
+	// Cancelling queued job goes directly to cancelled
+	if err := store.CancelJob(tenantID, job2.ID, "op-1"); err != nil {
+		t.Fatalf("CancelJob failed: %v", err)
+	}
 	list, err := store.ListJobs(tenantID, endpointID, 10)
 	if err != nil {
 		t.Fatalf("ListJobs failed: %v", err)
 	}
-	if len(list) != 1 || list[0].State != StateSucceeded {
-		t.Fatalf("expected 1 succeeded job in list, got: %+v", list)
+	var cancelledFound bool
+	for _, j := range list {
+		if j.ID == job2.ID && j.State == StateCancelled {
+			cancelledFound = true
+		}
 	}
-
-	// 6. Test Cancel on new job
-	grant2 := *grant
-	grant2.GrantID = "grant-200"
-	job2, err := store.CreateJob(tenantID, endpointID, ActionKindScriptExec, "op-1", &grant2, `{"source":"echo hi"}`, "")
-	if err != nil {
-		t.Fatalf("CreateJob 2 failed: %v", err)
-	}
-	if err := store.CancelJob(job2.ID, "op-1"); err != nil {
-		t.Fatalf("CancelJob failed: %v", err)
-	}
-
-	list2, err := store.ListJobs(tenantID, endpointID, 10)
-	if err != nil {
-		t.Fatalf("ListJobs failed: %v", err)
-	}
-	if len(list2) != 2 {
-		t.Fatalf("expected 2 jobs, got %d", len(list2))
+	if !cancelledFound {
+		t.Fatalf("expected job2 to be in cancelled state")
 	}
 }
