@@ -47,7 +47,7 @@ func (s *Server) deviceOrLegacyMiddleware(next http.HandlerFunc) http.HandlerFun
 			return
 		}
 		s.throttle.succeed(addr)
-		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID"} {
+		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID", "X-Operator-ID"} {
 			r.Header.Del(h)
 		}
 		if cn := clientCertCN(r); cn != "" {

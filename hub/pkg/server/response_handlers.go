@@ -1,10 +1,13 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
@@ -69,9 +72,20 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		operatorID := r.Header.Get("X-Operator-ID")
-		if operatorID == "" {
-			operatorID = "admin"
+		operatorID := s.operatorFromRequest(r)
+
+		// Independently recompute canonical SHA-256 action digest from payload
+		hasher := sha256.New()
+		hasher.Write([]byte(req.PayloadJSON))
+		computedDigestHex := hex.EncodeToString(hasher.Sum(nil))
+
+		if req.ActionDigest != "" && !strings.EqualFold(req.ActionDigest, computedDigestHex) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("action digest mismatch: client supplied %s but recomputed payload digest is %s", req.ActionDigest, computedDigestHex))
+			return
+		}
+		if req.Proof != nil && req.Proof.ActionDigest != "" && !strings.EqualFold(req.Proof.ActionDigest, computedDigestHex) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("proof action digest mismatch: proof binds to %s but recomputed payload digest is %s", req.Proof.ActionDigest, computedDigestHex))
+			return
 		}
 
 		if s.responseAuth == nil {
@@ -81,14 +95,15 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 
 		// Request grant signing from Response Authority
 		grant, err := s.responseAuth.SignGrant(r.Context(), &responseauth.SignGrantRequest{
-			TenantID:     tenantID,
-			OperatorID:   operatorID,
-			SessionID:    req.SessionID,
-			EndpointID:   req.EndpointID,
-			ActionKind:   req.Kind,
-			ActionDigest: req.ActionDigest,
-			TTLSeconds:   300,
-			Proof:        req.Proof,
+			TenantID:      tenantID,
+			OperatorID:    operatorID,
+			SessionID:     req.SessionID,
+			EndpointID:    req.EndpointID,
+			ActionKind:    req.Kind,
+			ActionDigest:  computedDigestHex,
+			ActionPayload: json.RawMessage(req.PayloadJSON),
+			TTLSeconds:    300,
+			Proof:         req.Proof,
 		})
 		if err != nil {
 			writeJSONError(w, http.StatusForbidden, "response authority denied grant: "+err.Error())
@@ -127,10 +142,7 @@ func (s *Server) handleResponseJobsCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	operatorID := r.Header.Get("X-Operator-ID")
-	if operatorID == "" {
-		operatorID = "admin"
-	}
+	operatorID := s.operatorFromRequest(r)
 
 	if s.responseStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "response engine not initialized")
@@ -228,15 +240,13 @@ func (s *Server) handleResponseAuthTOTPEnroll(w http.ResponseWriter, r *http.Req
 	if tenantID == "" {
 		tenantID = "default"
 	}
+	operatorID := s.operatorFromRequest(r)
 	var req struct {
 		OperatorID string `json:"operator_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.OperatorID == "" {
-		req.OperatorID = r.Header.Get("X-Operator-ID")
-	}
-	if req.OperatorID == "" {
-		req.OperatorID = "admin"
+	if req.OperatorID != "" && r.Header.Get("X-Role") == "admin" {
+		operatorID = req.OperatorID
 	}
 
 	if s.responseAuth == nil {
@@ -244,7 +254,7 @@ func (s *Server) handleResponseAuthTOTPEnroll(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	secret, err := s.responseAuth.EnrollTOTP(r.Context(), tenantID, req.OperatorID)
+	secret, err := s.responseAuth.EnrollTOTP(r.Context(), tenantID, operatorID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to enroll totp: "+err.Error())
 		return
@@ -253,7 +263,7 @@ func (s *Server) handleResponseAuthTOTPEnroll(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"secret": secret,
-		"otpauth_url": fmt.Sprintf("otpauth://totp/Ominull:%s@%s?secret=%s&issuer=Ominull", req.OperatorID, tenantID, secret),
+		"otpauth_url": fmt.Sprintf("otpauth://totp/Ominull:%s@%s?secret=%s&issuer=Ominull", operatorID, tenantID, secret),
 	})
 }
 

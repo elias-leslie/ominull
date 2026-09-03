@@ -262,6 +262,13 @@ func (s *Server) tenantFromRequest(r *http.Request) string {
 	return r.Header.Get("X-Tenant-ID")
 }
 
+func (s *Server) operatorFromRequest(r *http.Request) string {
+	if u := r.Header.Get("X-Username"); u != "" {
+		return u
+	}
+	return "admin"
+}
+
 func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string) *Server {
 	pkiMgr, err := pki.New(filepath.Join(binaryDir, "certs"))
 	if err != nil {
@@ -841,7 +848,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// sets it, so an inbound one survived. Not an escalation on its own -
 		// the caller already held the admin key - but the invariant is worth
 		// stating once here rather than re-deriving it per path.
-		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID"} {
+		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID", "X-Operator-ID"} {
 			r.Header.Del(h)
 		}
 		if cn := clientCertCN(r); cn != "" {
