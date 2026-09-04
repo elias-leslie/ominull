@@ -315,10 +315,15 @@ func (s *Server) handleResponseAuthTOTPEnroll(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	label := operatorID
+	if tenantID != "" && tenantID != "default" {
+		label = fmt.Sprintf("%s (%s)", operatorID, tenantID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"secret": secret,
-		"otpauth_url": fmt.Sprintf("otpauth://totp/Ominull:%s@%s?secret=%s&issuer=Ominull", operatorID, tenantID, secret),
+		"otpauth_url": fmt.Sprintf("otpauth://totp/Ominull:%s?secret=%s&issuer=Ominull", label, secret),
 	})
 }
 
