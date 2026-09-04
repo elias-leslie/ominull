@@ -56,6 +56,10 @@ func main() {
 	tlsCert := flag.String("tls-cert", envOr("OMINULL_TLS_CERT", ""), "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
 	tlsKey := flag.String("tls-key", envOr("OMINULL_TLS_KEY", ""), "PEM private key for --tls-cert")
 	tlsHosts := flag.String("tls-hosts", envOr("OMINULL_TLS_HOSTS", ""), "Comma-separated extra SANs for the self-issued certificate")
+	consoleTLSListen := flag.String("console-tls-listen", envOr("OMINULL_CONSOLE_TLS_LISTEN", ""), "Dedicated HTTPS listen address for operator console (e.g. :8443)")
+	consoleTLSCert := flag.String("console-tls-cert", envOr("OMINULL_CONSOLE_TLS_CERT", ""), "PEM certificate for the console HTTPS listener")
+	consoleTLSKey := flag.String("console-tls-key", envOr("OMINULL_CONSOLE_TLS_KEY", ""), "PEM private key for --console-tls-cert")
+	consoleHostname := flag.String("console-hostname", envOr("OMINULL_CONSOLE_HOSTNAME", ""), "Canonical DNS hostname for the operator console (required for WebAuthn RP ID)")
 	retentionDays := flag.Int("retention-days", envInt("OMINULL_RETENTION_DAYS", 14), "Days of raw flow telemetry to keep (0 disables pruning)")
 	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 14), "Days of aggregated communication profiles to keep (0 disables pruning)")
 	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 30), "Days of alerts to keep (0 disables pruning)")
@@ -193,6 +197,15 @@ func main() {
 		Hosts:       splitList(*tlsHosts),
 		ClientCerts: clientCertMode,
 	})
+	if *consoleTLSListen != "" {
+		srv.SetConsoleTLS(server.ConsoleTLSOptions{
+			Listen:   *consoleTLSListen,
+			CertFile: *consoleTLSCert,
+			KeyFile:  *consoleTLSKey,
+			Hostname: *consoleHostname,
+			Hosts:    splitList(*tlsHosts),
+		})
+	}
 	srv.SetAgentHubURL(*agentHubURL)
 	srv.SetSetupPaths(*setupTokenFile, configPath, *dbPath, *adminKeyFile, absBinDir)
 	srv.SetResponseEnabled(*enableResponse)
@@ -291,6 +304,9 @@ func main() {
 		}
 	} else {
 		log.Printf("[!] TLS listener disabled (--tls-listen is empty): all agent traffic to this hub is in the clear.")
+	}
+	if *consoleTLSListen != "" {
+		log.Printf("[+] Console TLS transport:    %s (dedicated browser listener, HSTS enabled, no client-cert requirement)", *consoleTLSListen)
 	}
 
 	// Graceful shutdown

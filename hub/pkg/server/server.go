@@ -52,9 +52,11 @@ type Server struct {
 	publicURLAt  time.Time
 	agentHubURL  string
 	agentVersion string
-	httpServer   *http.Server
-	tlsServer    *http.Server
-	tlsOpts      TLSOptions
+	httpServer       *http.Server
+	tlsServer        *http.Server
+	tlsOpts          TLSOptions
+	consoleTLSServer *http.Server
+	consoleTLSOpts   ConsoleTLSOptions
 	// access verifies Cloudflare Access assertions when the hub sits behind
 	// Access. nil means it is not configured, which is the default.
 	access *accessVerifier
@@ -210,6 +212,28 @@ func ParseClientCertMode(v string) (ClientCertMode, error) {
 // SetTLS installs the HTTPS configuration. Call it before Start.
 func (s *Server) SetTLS(opts TLSOptions) {
 	s.tlsOpts = opts
+}
+
+// ConsoleTLSOptions configures the hub's dedicated HTTPS listener for the operator web console.
+// This listener is separate from the agent TLS listener (:9443):
+// - It never requests or enforces agent client certificates (ClientAuth = NoClientCert).
+// - It presents a browser-trusted certificate (operator-supplied, ACME, or hub CA leaf).
+// - It enforces HSTS to ensure browsers maintain a secure context for WebCrypto and WebAuthn.
+type ConsoleTLSOptions struct {
+	// Listen is the HTTPS bind address for the console (e.g. :8443). Empty disables the listener.
+	Listen string
+	// CertFile and KeyFile are an operator-supplied certificate and private key.
+	CertFile string
+	KeyFile  string
+	// Hostname is the console's canonical domain name (e.g. omi.example.com).
+	Hostname string
+	// Extra SANs
+	Hosts []string
+}
+
+// SetConsoleTLS installs the dedicated console HTTPS configuration. Call it before Start.
+func (s *Server) SetConsoleTLS(opts ConsoleTLSOptions) {
+	s.consoleTLSOpts = opts
 }
 
 // SetAgentHubURL sets the transport enrolment writes into an agent's config.
@@ -605,7 +629,7 @@ func (s *Server) Start(addr string) error {
 	// whether it was encrypted, never what it is allowed to do - an endpoint
 	// that behaved differently per listener would be a second policy surface
 	// to keep in step with the first.
-	errs := make(chan error, 2)
+	errs := make(chan error, 3)
 	listeners := 0
 
 	if s.tlsOpts.Listen != "" {
@@ -626,6 +650,24 @@ func (s *Server) Start(addr string) error {
 		go func() { errs <- s.tlsServer.ListenAndServeTLS("", "") }()
 	}
 
+	if s.consoleTLSOpts.Listen != "" {
+		consoleCfg, err := s.consoleTLSConfig()
+		if err != nil {
+			return fmt.Errorf("console TLS listener on %s: %w", s.consoleTLSOpts.Listen, err)
+		}
+		s.consoleTLSServer = &http.Server{
+			Addr:         s.consoleTLSOpts.Listen,
+			Handler:      limitRequestBodies(s.withHSTS(mux)),
+			TLSConfig:    consoleCfg,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
+		listeners++
+		log.Printf("[+] Ominull Hub listening on %s over TLS (console web interface)", s.consoleTLSOpts.Listen)
+		go func() { errs <- s.consoleTLSServer.ListenAndServeTLS("", "") }()
+	}
+
 	if addr != "" {
 		s.httpServer = &http.Server{
 			Addr:         addr,
@@ -640,7 +682,7 @@ func (s *Server) Start(addr string) error {
 	}
 
 	if listeners == 0 {
-		return fmt.Errorf("no listener configured: --listen and --tls-listen are both empty")
+		return fmt.Errorf("no listener configured: --listen, --tls-listen, and --console-tls-listen are all empty")
 	}
 
 	// Whichever listener fails first ends Start. A shutdown closes both, and
@@ -717,6 +759,53 @@ func (s *Server) tlsConfig() (*tls.Config, error) {
 	}
 	base.Certificates = []tls.Certificate{*cert}
 	log.Printf("[+] TLS certificate: issued by the hub CA for %s (expires %s)",
+		strings.Join(hosts, ", "), cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
+	return base, nil
+}
+
+func (s *Server) withHSTS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// consoleTLSConfig builds the TLS configuration for the dedicated console HTTPS listener.
+// Invariant: ClientAuth is always NoClientCert (browsers never present or get challenged
+// for agent certificates).
+func (s *Server) consoleTLSConfig() (*tls.Config, error) {
+	base := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.NoClientCert,
+	}
+
+	if s.consoleTLSOpts.CertFile != "" || s.consoleTLSOpts.KeyFile != "" {
+		if s.consoleTLSOpts.CertFile == "" || s.consoleTLSOpts.KeyFile == "" {
+			return nil, fmt.Errorf("--console-tls-cert and --console-tls-key must be given together")
+		}
+		cert, err := tls.LoadX509KeyPair(s.consoleTLSOpts.CertFile, s.consoleTLSOpts.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load supplied console certificate: %w", err)
+		}
+		base.Certificates = []tls.Certificate{cert}
+		log.Printf("[+] Console TLS certificate: operator-supplied (%s)", s.consoleTLSOpts.CertFile)
+		return base, nil
+	}
+
+	if s.pki == nil {
+		return nil, fmt.Errorf("the PKI manager failed to initialize; pass --console-tls-cert/--console-tls-key")
+	}
+
+	hosts := hubSANs(s.hubURL, s.consoleTLSOpts.Hosts)
+	if s.consoleTLSOpts.Hostname != "" {
+		hosts = append([]string{s.consoleTLSOpts.Hostname}, hosts...)
+	}
+	cert, err := s.pki.ServerCertificate(hosts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to issue console certificate: %w", err)
+	}
+	base.Certificates = []tls.Certificate{*cert}
+	log.Printf("[+] Console TLS certificate: issued by hub CA for %s (expires %s)",
 		strings.Join(hosts, ", "), cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
 	return base, nil
 }
@@ -810,6 +899,11 @@ func (s *Server) Close() error {
 	if s.tlsServer != nil {
 		if tlsErr := s.tlsServer.Close(); err == nil {
 			err = tlsErr
+		}
+	}
+	if s.consoleTLSServer != nil {
+		if cErr := s.consoleTLSServer.Close(); err == nil {
+			err = cErr
 		}
 	}
 	return err
