@@ -42,15 +42,29 @@ func (w *recordingResponseWriter) Hijack()                       {}
 func startTestUpstream(t *testing.T, handler mdns.Handler) string {
 	t.Helper()
 
-	packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for fake DNS upstream: %v", err)
+	var (
+		packetConn net.PacketConn
+		listener   net.Listener
+		listenAddr string
+	)
+	for i := 0; i < 20; i++ {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			continue
+		}
+		addr := l.Addr().String()
+		pc, err := net.ListenPacket("udp4", addr)
+		if err != nil {
+			l.Close()
+			continue
+		}
+		listener = l
+		packetConn = pc
+		listenAddr = addr
+		break
 	}
-	listenAddr := packetConn.LocalAddr().String()
-	listener, err := net.Listen("tcp4", listenAddr)
-	if err != nil {
-		_ = packetConn.Close()
-		t.Fatalf("listen for fake TCP DNS upstream: %v", err)
+	if listener == nil || packetConn == nil {
+		t.Fatalf("failed to allocate matching tcp/udp port for fake DNS upstream")
 	}
 	udpServer := &mdns.Server{
 		PacketConn: packetConn,

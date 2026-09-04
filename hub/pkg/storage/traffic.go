@@ -124,10 +124,18 @@ type TrafficFlowItem struct {
 	ProcessName string    `json:"process_name"`
 	Domain      string    `json:"domain"`
 	Country     string    `json:"country"`
-	BytesIn     int64     `json:"bytes_in"`
-	BytesOut    int64     `json:"bytes_out"`
-	IsAnomalous bool      `json:"is_anomalous"`
-	AnomalyType string    `json:"anomaly_type,omitempty"`
+	BytesIn                 int64      `json:"bytes_in"`
+	BytesOut                int64      `json:"bytes_out"`
+	IsAnomalous             bool       `json:"is_anomalous"`
+	AnomalyType             string     `json:"anomaly_type,omitempty"`
+	ProcessInstanceID       string     `json:"process_instance_id,omitempty"`
+	ParentPID               uint32     `json:"parent_pid,omitempty"`
+	ParentProcessInstanceID string     `json:"parent_process_instance_id,omitempty"`
+	CommandLine             string     `json:"command_line,omitempty"`
+	UserIdentity            string     `json:"user_identity,omitempty"`
+	ExecutableSHA256        string     `json:"executable_sha256,omitempty"`
+	AttributionStatus       string     `json:"attribution_status,omitempty"`
+	ObservedAt              *time.Time `json:"observed_at,omitempty"`
 }
 
 type TrafficFlowsResult struct {
@@ -1085,7 +1093,15 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			domain,
 			country,
 			bytes_in,
-			bytes_out
+			bytes_out,
+			COALESCE(process_instance_id, ''),
+			COALESCE(parent_pid, 0),
+			COALESCE(parent_process_instance_id, ''),
+			COALESCE(command_line, ''),
+			COALESCE(user_identity, ''),
+			COALESCE(executable_sha256, ''),
+			COALESCE(attribution_status, ''),
+			observed_at
 		FROM events
 		%s
 		ORDER BY timestamp DESC, rowid DESC
@@ -1125,10 +1141,25 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			country     string
 			bytesIn     int64
 			bytesOut    int64
+			procInstID  string
+			pPID        uint32
+			pProcInst   string
+			cmdLine     string
+			userIdent   string
+			exeSHA      string
+			attrStat    string
+			obsAtNull   sql.NullTime
 		)
 		if err := rows.Scan(&rowID, &tenantID, &timestamp, &endpointID, &layer, &action, &direction,
-			&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut); err != nil {
+			&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
+			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull); err != nil {
 			return nil, err
+		}
+
+		var obsAt *time.Time
+		if obsAtNull.Valid {
+			t := obsAtNull.Time.UTC()
+			obsAt = &t
 		}
 
 		protoName := "TCP"
@@ -1146,25 +1177,33 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 		}
 
 		flows = append(flows, TrafficFlowItem{
-			ID:          strconv.FormatInt(rowID, 10),
-			TenantID:    tenantID,
-			Timestamp:   timestamp,
-			EndpointID:  endpointID,
-			Layer:       layer,
-			Action:      action,
-			Direction:   direction,
-			Protocol:    protocol,
-			ProtoName:   protoName,
-			SrcIP:       srcIP,
-			DstIP:       dstIP,
-			SrcPort:     srcPort,
-			DstPort:     dstPort,
-			ProcessPath: processPath,
-			ProcessName: procName,
-			Domain:      domain,
-			Country:     country,
-			BytesIn:     bytesIn,
-			BytesOut:    bytesOut,
+			ID:                      strconv.FormatInt(rowID, 10),
+			TenantID:                tenantID,
+			Timestamp:               timestamp,
+			EndpointID:              endpointID,
+			Layer:                   layer,
+			Action:                  action,
+			Direction:               direction,
+			Protocol:                protocol,
+			ProtoName:               protoName,
+			SrcIP:                   srcIP,
+			DstIP:                   dstIP,
+			SrcPort:                 srcPort,
+			DstPort:                 dstPort,
+			ProcessPath:             processPath,
+			ProcessName:             procName,
+			Domain:                  domain,
+			Country:                 country,
+			BytesIn:                 bytesIn,
+			BytesOut:                bytesOut,
+			ProcessInstanceID:       procInstID,
+			ParentPID:               pPID,
+			ParentProcessInstanceID: pProcInst,
+			CommandLine:             cmdLine,
+			UserIdentity:            userIdent,
+			ExecutableSHA256:        exeSHA,
+			AttributionStatus:       attrStat,
+			ObservedAt:              obsAt,
 		})
 	}
 
@@ -1218,7 +1257,15 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 			domain,
 			country,
 			bytes_in,
-			bytes_out
+			bytes_out,
+			COALESCE(process_instance_id, ''),
+			COALESCE(parent_pid, 0),
+			COALESCE(parent_process_instance_id, ''),
+			COALESCE(command_line, ''),
+			COALESCE(user_identity, ''),
+			COALESCE(executable_sha256, ''),
+			COALESCE(attribution_status, ''),
+			observed_at
 		FROM events
 		WHERE rowid = ?
 	`
@@ -1239,10 +1286,19 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 		country     string
 		bytesIn     int64
 		bytesOut    int64
+		procInstID  string
+		pPID        uint32
+		pProcInst   string
+		cmdLine     string
+		userIdent   string
+		exeSHA      string
+		attrStat    string
+		obsAtNull   sql.NullTime
 	)
 
 	err = s.db.QueryRow(query, rowID).Scan(&rowID, &tID, &timestamp, &endpointID, &layer, &action, &direction,
-		&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut)
+		&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
+		&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1252,6 +1308,12 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 
 	if tenantID != "" && tID != tenantID {
 		return nil, nil
+	}
+
+	var obsAt *time.Time
+	if obsAtNull.Valid {
+		t := obsAtNull.Time.UTC()
+		obsAt = &t
 	}
 
 	protoName := "TCP"
@@ -1268,24 +1330,32 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 	}
 
 	return &TrafficFlowItem{
-		ID:          strconv.FormatInt(rowID, 10),
-		TenantID:    tID,
-		Timestamp:   timestamp,
-		EndpointID:  endpointID,
-		Layer:       layer,
-		Action:      action,
-		Direction:   direction,
-		Protocol:    protocol,
-		ProtoName:   protoName,
-		SrcIP:       srcIP,
-		DstIP:       dstIP,
-		SrcPort:     srcPort,
-		DstPort:     dstPort,
-		ProcessPath: processPath,
-		ProcessName: procName,
-		Domain:      domain,
-		Country:     country,
-		BytesIn:     bytesIn,
-		BytesOut:    bytesOut,
+		ID:                      strconv.FormatInt(rowID, 10),
+		TenantID:                tID,
+		Timestamp:               timestamp,
+		EndpointID:              endpointID,
+		Layer:                   layer,
+		Action:                  action,
+		Direction:               direction,
+		Protocol:                protocol,
+		ProtoName:               protoName,
+		SrcIP:                   srcIP,
+		DstIP:                   dstIP,
+		SrcPort:                 srcPort,
+		DstPort:                 dstPort,
+		ProcessPath:             processPath,
+		ProcessName:             procName,
+		Domain:                  domain,
+		Country:                 country,
+		BytesIn:                 bytesIn,
+		BytesOut:                bytesOut,
+		ProcessInstanceID:       procInstID,
+		ParentPID:               pPID,
+		ParentProcessInstanceID: pProcInst,
+		CommandLine:             cmdLine,
+		UserIdentity:            userIdent,
+		ExecutableSHA256:        exeSHA,
+		AttributionStatus:       attrStat,
+		ObservedAt:              obsAt,
 	}, nil
 }

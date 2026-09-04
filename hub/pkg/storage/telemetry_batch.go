@@ -5,6 +5,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // RecordNetworkCommsBatch persists the communication projection for one
@@ -178,8 +179,8 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 	defer tx.Rollback()
 
 	eventStmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare telemetry events: %w", err)
@@ -207,10 +208,15 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 		if country == "" {
 			country = CountryUnknown
 		}
+		var obsVal interface{}
+		if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
+			obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
+		}
 		if _, err := eventStmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, country,
 			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
+			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
 		); err != nil {
 			return fmt.Errorf("insert telemetry event: %w", err)
 		}

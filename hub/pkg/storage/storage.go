@@ -92,13 +92,15 @@ type Event struct {
 	ProcessPath       string    `json:"process_path"`
 	ProcessID         uint32    `json:"process_id"`
 	Domain            string    `json:"domain,omitempty"`
-	SNI               string    `json:"sni,omitempty"`
-	ProcessInstanceID string    `json:"process_instance_id,omitempty"`
-	ParentPID         uint32    `json:"parent_pid,omitempty"`
-	CommandLine       string    `json:"command_line,omitempty"`
-	UserIdentity      string    `json:"user_identity,omitempty"`
-	ExecutableSHA256  string    `json:"executable_sha256,omitempty"`
-	AttributionStatus string    `json:"attribution_status,omitempty"`
+	SNI                     string     `json:"sni,omitempty"`
+	ProcessInstanceID       string     `json:"process_instance_id,omitempty"`
+	ParentPID               uint32     `json:"parent_pid,omitempty"`
+	ParentProcessInstanceID string     `json:"parent_process_instance_id,omitempty"`
+	CommandLine             string     `json:"command_line,omitempty"`
+	UserIdentity            string     `json:"user_identity,omitempty"`
+	ExecutableSHA256        string     `json:"executable_sha256,omitempty"`
+	AttributionStatus       string     `json:"attribution_status,omitempty"`
+	ObservedAt              *time.Time `json:"observed_at,omitempty"`
 }
 
 type CommProfile struct {
@@ -458,7 +460,17 @@ func (s *Store) initSchema() error {
 		bytes_out INTEGER NOT NULL DEFAULT 0,
 		country TEXT NOT NULL DEFAULT "US",
 		process_path TEXT NOT NULL,
-		process_id INTEGER NOT NULL
+		process_id INTEGER NOT NULL,
+		domain TEXT DEFAULT '',
+		sni TEXT DEFAULT '',
+		process_instance_id TEXT DEFAULT '',
+		parent_pid INTEGER NOT NULL DEFAULT 0,
+		parent_process_instance_id TEXT DEFAULT '',
+		command_line TEXT DEFAULT '',
+		user_identity TEXT DEFAULT '',
+		executable_sha256 TEXT DEFAULT '',
+		attribution_status TEXT DEFAULT '',
+		observed_at DATETIME
 	);
 
 	CREATE TABLE IF NOT EXISTS comm_profiles (
@@ -637,6 +649,14 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN domain TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN sni TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN process_instance_id TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN parent_pid INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE events ADD COLUMN parent_process_instance_id TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN command_line TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN user_identity TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN executable_sha256 TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN attribution_status TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
 	}
 	for _, m := range migrations {
@@ -1559,9 +1579,15 @@ func (s *Store) InsertEvent(ev Event) error {
 		ev.Country = CountryUnknown
 	}
 
+	var obsVal interface{}
+	if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
+		obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
+	}
+
 	_, err := s.db.Exec(
-		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
+		ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
 	)
 	return err
 }
@@ -1577,8 +1603,8 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1592,10 +1618,15 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 		if ev.Country == "" {
 			ev.Country = CountryUnknown
 		}
+		var obsVal interface{}
+		if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
+			obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
+		}
 		if _, err := stmt.Exec(
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country,
 			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
+			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
 		); err != nil {
 			return fmt.Errorf("insert event batch: %w", err)
 		}
@@ -1623,19 +1654,20 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 		rows *sql.Rows
 		err  error
 	)
+	const queryCols = "id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, ''), COALESCE(process_instance_id, ''), COALESCE(parent_pid, 0), COALESCE(parent_process_instance_id, ''), COALESCE(command_line, ''), COALESCE(user_identity, ''), COALESCE(executable_sha256, ''), COALESCE(attribution_status, ''), observed_at"
 	if tenantID != "" && endpointID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT " + queryCols + " FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, endpointID, limit,
 		)
 	} else if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT " + queryCols + " FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, '') FROM events ORDER BY timestamp DESC LIMIT ?",
+			"SELECT " + queryCols + " FROM events ORDER BY timestamp DESC LIMIT ?",
 			limit,
 		)
 	}
@@ -1647,12 +1679,34 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 	var list []Event
 	for rows.Next() {
 		var ev Event
+		var (
+			procInstID string
+			pPID       uint32
+			pProcInst  string
+			cmdLine    string
+			userIdent  string
+			exeSHA     string
+			attrStat   string
+			obsAtNull  sql.NullTime
+		)
 		if err := rows.Scan(
 			&ev.ID, &ev.TenantID, &ev.EndpointID, &ev.Timestamp, &ev.Layer, &ev.Action, &ev.Direction, &ev.Protocol,
 			&ev.SrcIP, &ev.DstIP, &ev.SrcPort, &ev.DstPort, &ev.BytesIn, &ev.BytesOut, &ev.Country, &ev.ProcessPath, &ev.ProcessID,
 			&ev.Domain, &ev.SNI,
+			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull,
 		); err != nil {
 			return nil, err
+		}
+		ev.ProcessInstanceID = procInstID
+		ev.ParentPID = pPID
+		ev.ParentProcessInstanceID = pProcInst
+		ev.CommandLine = cmdLine
+		ev.UserIdentity = userIdent
+		ev.ExecutableSHA256 = exeSHA
+		ev.AttributionStatus = attrStat
+		if obsAtNull.Valid {
+			t := obsAtNull.Time.UTC()
+			ev.ObservedAt = &t
 		}
 		list = append(list, ev)
 	}
