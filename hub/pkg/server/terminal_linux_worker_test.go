@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
 
 	srv := &Server{
 		store:           store,
-		terminalMgr:     terminal.NewManager(store.DB(), 30*time.Minute, 10*time.Minute),
+		terminalMgr:     terminal.NewManager(store.DB(), nil, 30*time.Minute, 10*time.Minute),
 		pki:             &pki.Manager{},
 		adminKey:        "test-admin-key",
 		responseEnabled: true,

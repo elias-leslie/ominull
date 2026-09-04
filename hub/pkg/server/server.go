@@ -48,11 +48,11 @@ type Server struct {
 	hubURL    string
 	// Whether hubURL actually serves this hub, and when that was last checked.
 	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
-	publicURLMu  sync.Mutex
-	publicURLOK  bool
-	publicURLAt  time.Time
-	agentHubURL  string
-	agentVersion string
+	publicURLMu      sync.Mutex
+	publicURLOK      bool
+	publicURLAt      time.Time
+	agentHubURL      string
+	agentVersion     string
 	httpServer       *http.Server
 	tlsServer        *http.Server
 	tlsOpts          TLSOptions
@@ -68,15 +68,15 @@ type Server struct {
 	// responseStore coordinates durable response jobs and offers
 	responseStore *response.Store
 	// responseAuth communicates with the Response Authority daemon
-	responseAuth  responseauth.Client
+	responseAuth responseauth.Client
 	// evidenceStore manages encrypted forensic collections
 	evidenceStore *evidence.Store
 	// terminalMgr coordinates interactive pseudoterminals and recording
-	terminalMgr   *terminal.Manager
+	terminalMgr *terminal.Manager
 	// scriptsStore manages versioned immutable scripts
-	scriptsStore  *scripts.Store
+	scriptsStore *scripts.Store
 	// vulnStore manages installed software inventory and vulnerability correlation
-	vulnStore     *vuln.Store
+	vulnStore *vuln.Store
 	// responseEnabled toggles the unreleased response, evidence, script, terminal,
 	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
 	responseEnabled bool
@@ -320,13 +320,34 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		log.Printf("[-] Warning: Failed to initialize response store: %v", err)
 	}
 
-	evidKeyPath := filepath.Join(binaryDir, "evidence.key")
+	var dataDir string
+	if testFile, err := os.CreateTemp(binaryDir, ".write_test*"); err == nil {
+		_ = testFile.Close()
+		_ = os.Remove(testFile.Name())
+		dataDir = binaryDir
+	} else if fi, err := os.Stat("/var/lib/ominull"); err == nil && fi.IsDir() {
+		dataDir = "/var/lib/ominull"
+	} else {
+		dataDir = binaryDir
+	}
+
+	evidDir := os.Getenv("OMINULL_EVIDENCE_DIR")
+	if evidDir == "" {
+		evidDir = filepath.Join(dataDir, "evidence")
+	}
+	evidKeyPath := os.Getenv("OMINULL_EVIDENCE_KEY")
+	if evidKeyPath == "" {
+		evidKeyPath = filepath.Join(dataDir, "evidence.key")
+	}
+
 	masterKey, err := evidence.LoadOrCreateMasterKey(evidKeyPath)
 	var evidStore *evidence.Store
-	if err == nil {
-		evidStore, err = evidence.NewStore(store.DB(), filepath.Join(binaryDir, "evidence"), masterKey)
+	if err != nil {
+		log.Printf("[-] Warning: Failed to load/create evidence master key at %s: %v", evidKeyPath, err)
+	} else {
+		evidStore, err = evidence.NewStore(store.DB(), evidDir, masterKey)
 		if err != nil {
-			log.Printf("[-] Warning: Failed to initialize evidence store: %v", err)
+			log.Printf("[-] Warning: Failed to initialize evidence store at %s: %v", evidDir, err)
 		}
 	}
 
@@ -363,7 +384,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		responseStore:   respStore,
 		responseAuth:    responseauth.NewUDSClient(authSocket),
 		evidenceStore:   evidStore,
-		terminalMgr:     terminal.NewManager(store.DB(), 60*time.Minute, 15*time.Minute),
+		terminalMgr:     terminal.NewManager(store.DB(), evidStore, 60*time.Minute, 15*time.Minute),
 		scriptsStore:    scriptsStore,
 		vulnStore:       vulnStore,
 		responseEnabled: responseEnabled,
@@ -995,7 +1016,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// sets it, so an inbound one survived. Not an escalation on its own -
 		// the caller already held the admin key - but the invariant is worth
 		// stating once here rather than re-deriving it per path.
-		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID", "X-Operator-ID"} {
+		for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID", "X-Operator-ID", "X-Auth-Method"} {
 			r.Header.Del(h)
 		}
 		if cn := clientCertCN(r); cn != "" {
@@ -1010,6 +1031,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("X-Role", claims.Role)
 				r.Header.Set("X-User-ID", claims.UserID)
 				r.Header.Set("X-Username", claims.Username)
+				r.Header.Set("X-Auth-Method", "jwt")
 				if claims.TenantID != "" {
 					r.Header.Set("X-Tenant-ID", claims.TenantID)
 				}
@@ -1027,6 +1049,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if op, ok := s.consoleSession(r); ok {
 			r.Header.Set("X-Role", op.Role)
 			r.Header.Set("X-Username", op.Email)
+			r.Header.Set("X-Auth-Method", "console")
 			proceed(w, r)
 			return
 		}
@@ -1056,6 +1079,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				s.throttle.succeed(addr)
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
+				r.Header.Set("X-Auth-Method", "api-key")
 				proceed(w, r)
 				return
 			}
@@ -1065,6 +1089,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("X-Role", "tenant")
 				r.Header.Set("X-Tenant-ID", tenant.ID)
 				r.Header.Set("X-Username", tenant.Name)
+				r.Header.Set("X-Auth-Method", "api-key")
 				proceed(w, r)
 				return
 			}
@@ -3384,7 +3409,7 @@ func (s *Server) routes() *http.ServeMux {
 	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.handleTerminalSessions)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
-	mux.HandleFunc("/api/v1/terminal/frames", s.deviceOrLegacyMiddleware(s.responseGate(s.handleTerminalFrames)))
+	mux.HandleFunc("/api/v1/terminal/frames", s.authMiddleware(s.responseGate(s.handleTerminalFrames)))
 	mux.HandleFunc("/api/v1/terminal/ws/operator", s.handleTerminalWSOperator)
 	mux.HandleFunc("/api/v1/terminal/ws/agent", s.handleTerminalWSAgent)
 

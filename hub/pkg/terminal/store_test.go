@@ -27,7 +27,7 @@ func newTestGrant(tenantID, endpointID, opID string) *response.EndpointGrant {
 }
 
 func TestStore_CapsEnforcement(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 10*time.Minute)
+	mgr := NewManager(nil, nil, 30*time.Minute, 10*time.Minute)
 	defer mgr.Close()
 
 	tenantID := "tenant-caps-test"
@@ -91,7 +91,7 @@ func TestStore_CapsEnforcement(t *testing.T) {
 }
 
 func TestStore_DurablePersistenceAndTokenPrivacy(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 10*time.Minute)
+	mgr := NewManager(nil, nil, 30*time.Minute, 10*time.Minute)
 	defer mgr.Close()
 
 	tenantID := "tenant-persist"
@@ -174,7 +174,7 @@ func TestStore_DurablePersistenceAndTokenPrivacy(t *testing.T) {
 }
 
 func TestStore_SweeperConnectTimeout(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 10*time.Minute)
+	mgr := NewManager(nil, nil, 30*time.Minute, 10*time.Minute)
 	defer mgr.Close()
 
 	// Shorten connect timeout for test
@@ -220,7 +220,7 @@ func TestStore_SweeperConnectTimeout(t *testing.T) {
 }
 
 func TestStore_SweeperIdleTimeout(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 50*time.Millisecond)
+	mgr := NewManager(nil, nil, 30*time.Minute, 50*time.Millisecond)
 	defer mgr.Close()
 
 	tenantID := "tenant-sweep-idle"
@@ -305,7 +305,7 @@ func TestStore_StartupDaemonRestartRecovery(t *testing.T) {
 	}
 
 	// 3. Spin up NewManager with this DB -> runs initStore() and recovery
-	mgr := NewManager(db, 30*time.Minute, 10*time.Minute)
+	mgr := NewManager(db, nil, 30*time.Minute, 10*time.Minute)
 	defer mgr.Close()
 
 	// 4. Verify all dangling sessions transitioned to failed with daemon_restarted

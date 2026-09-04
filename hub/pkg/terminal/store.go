@@ -38,7 +38,12 @@ func (m *Manager) initStore() error {
 		close_reason TEXT,
 		operator_connected BOOLEAN NOT NULL DEFAULT 0,
 		agent_connected BOOLEAN NOT NULL DEFAULT 0,
-		grant_json TEXT
+		grant_json TEXT,
+		bundle_id TEXT DEFAULT '',
+		evidence_item_id TEXT DEFAULT '',
+		recording_state TEXT DEFAULT 'recording',
+		recording_bytes INTEGER DEFAULT 0,
+		frame_count INTEGER DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_terminal_sessions_tenant ON terminal_sessions(tenant_id, state);
 	CREATE INDEX IF NOT EXISTS idx_terminal_sessions_endpoint ON terminal_sessions(endpoint_id, state);
@@ -46,6 +51,13 @@ func (m *Manager) initStore() error {
 	if _, err := m.db.Exec(schema); err != nil {
 		return fmt.Errorf("init terminal_sessions schema: %w", err)
 	}
+
+	// Schema migrations for backward compatibility
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN bundle_id TEXT DEFAULT ''")
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN evidence_item_id TEXT DEFAULT ''")
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN recording_state TEXT DEFAULT 'recording'")
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN recording_bytes INTEGER DEFAULT 0")
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN frame_count INTEGER DEFAULT 0")
 
 	// Startup Recovery: Any sessions left in active/connecting/waiting states are marked failed
 	recoveryQuery := `
@@ -75,15 +87,26 @@ func (m *Manager) insertDurableSession(s *TerminalSession) error {
 	INSERT INTO terminal_sessions (
 		session_id, tenant_id, endpoint_id, operator_id, program,
 		state, token_hash, created_at, expires_at, idle_expires_at,
-		grant_json
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err := m.db.Exec(
 		query,
 		s.SessionID, s.TenantID, s.EndpointID, s.OperatorID, s.Program,
 		string(s.State), s.TokenHash, s.CreatedAt, s.ExpiresAt, s.IdleExpiresAt,
-		string(grantJSON),
+		string(grantJSON), s.BundleID, s.EvidenceItemID, s.RecordingState, s.RecordingBytes, s.FrameCount,
 	)
+	return err
+}
+
+// updateRecordingMetadata persists updated recording state, bytes, and frame count to SQLite.
+func (m *Manager) updateRecordingMetadata(sessionID, bundleID, evidenceItemID, recordingState string, recordingBytes int64, frameCount int) error {
+	query := `
+	UPDATE terminal_sessions
+	SET bundle_id = ?, evidence_item_id = ?, recording_state = ?, recording_bytes = ?, frame_count = ?
+	WHERE session_id = ?;
+	`
+	_, err := m.db.Exec(query, bundleID, evidenceItemID, recordingState, recordingBytes, frameCount, sessionID)
 	return err
 }
 
@@ -212,7 +235,7 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 	SELECT session_id, tenant_id, endpoint_id, operator_id, program,
 	       state, token_hash, created_at, expires_at, idle_expires_at,
 	       started_at, closed_at, close_reason, operator_connected, agent_connected,
-	       grant_json
+	       grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count
 	FROM terminal_sessions
 	WHERE session_id = ?;
 	`
@@ -222,12 +245,14 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 	var stateStr, grantJSON string
 	var startedAt, closedAt sql.NullTime
 	var closeReason sql.NullString
+	var bundleID, evidenceItemID, recordingState sql.NullString
+	var recordingBytes, frameCount sql.NullInt64
 
 	err := row.Scan(
 		&s.SessionID, &s.TenantID, &s.EndpointID, &s.OperatorID, &s.Program,
 		&stateStr, &s.TokenHash, &s.CreatedAt, &s.ExpiresAt, &s.IdleExpiresAt,
 		&startedAt, &closedAt, &closeReason, &s.OperatorConnected, &s.AgentConnected,
-		&grantJSON,
+		&grantJSON, &bundleID, &evidenceItemID, &recordingState, &recordingBytes, &frameCount,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -235,6 +260,15 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 		}
 		return nil, err
 	}
+
+	s.BundleID = bundleID.String
+	s.EvidenceItemID = evidenceItemID.String
+	s.RecordingState = recordingState.String
+	if s.RecordingState == "" {
+		s.RecordingState = "recording"
+	}
+	s.RecordingBytes = recordingBytes.Int64
+	s.FrameCount = int(frameCount.Int64)
 
 	s.State = SessionState(stateStr)
 	if startedAt.Valid {

@@ -14,7 +14,7 @@ import (
 )
 
 func TestTerminalRelay_AuthenticatedLoopback(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 15*time.Minute)
+	mgr := NewManager(nil, nil, 30*time.Minute, 15*time.Minute)
 	defer mgr.Close()
 	tenantID := "tenant-alpha"
 	endpointID := "linux-agent-01"
@@ -239,19 +239,19 @@ func TestTerminalRelay_AuthenticatedLoopback(t *testing.T) {
 }
 
 func TestTerminalRelay_ForbiddenFrameTypes(t *testing.T) {
-	mgr := NewManager(nil, 30*time.Minute, 15*time.Minute)
+	mgr := NewManager(nil, nil, 30*time.Minute, 15*time.Minute)
 	defer mgr.Close()
 	tenantID := "tenant-beta"
 	endpointID := "linux-agent-02"
 
 	grant := &response.EndpointGrant{
-		Version:      response.GrantVersion,
-		GrantID:      "grant-forbidden-test",
-		TenantID:     tenantID,
-		EndpointID:   endpointID,
-		ActionKind:   response.ActionKindTerminalSession,
-		IssuedAt:     time.Now().Unix(),
-		ExpiresAt:    time.Now().Add(10 * time.Minute).Unix(),
+		Version:    response.GrantVersion,
+		GrantID:    "grant-forbidden-test",
+		TenantID:   tenantID,
+		EndpointID: endpointID,
+		ActionKind: response.ActionKindTerminalSession,
+		IssuedAt:   time.Now().Unix(),
+		ExpiresAt:  time.Now().Add(10 * time.Minute).Unix(),
 	}
 
 	sess, err := mgr.CreateSession(tenantID, endpointID, "admin", "/bin/sh", grant)

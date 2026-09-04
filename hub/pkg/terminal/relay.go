@@ -79,9 +79,6 @@ func (pr *PairedRelay) Close(reason string) {
 		pr.cancel()
 		close(pr.done)
 
-		pr.mu.Lock()
-		defer pr.mu.Unlock()
-
 		now := time.Now().UTC()
 		pr.sess.mu.Lock()
 		pr.sess.State = StateClosed
@@ -96,25 +93,35 @@ func (pr *PairedRelay) Close(reason string) {
 
 		_ = pr.mgr.updateDurableState(pr.sess.SessionID, StateClosed, startedAt, &now, reason, opConn, agConn)
 
+		pr.mu.Lock()
+		opWS := pr.opConn
+		agWS := pr.agentConn
+		pr.opConn = nil
+		pr.agentConn = nil
+		pr.mu.Unlock()
+
 		// Send close frame and close operator connection
-		if pr.opConn != nil {
-			_ = pr.opConn.WriteControl(
+		if opWS != nil {
+			_ = opWS.WriteControl(
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
 				time.Now().Add(WriteWait),
 			)
-			_ = pr.opConn.Close()
+			_ = opWS.Close()
 		}
 
 		// Send close frame and close agent connection
-		if pr.agentConn != nil {
-			_ = pr.agentConn.WriteControl(
+		if agWS != nil {
+			_ = agWS.WriteControl(
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
 				time.Now().Add(WriteWait),
 			)
-			_ = pr.agentConn.Close()
+			_ = agWS.Close()
 		}
+
+		// Seal session recording into evidence store
+		_ = pr.mgr.SealSessionRecording(pr.sess.SessionID)
 	})
 }
 
@@ -280,11 +287,16 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn) {
 		}
 
 		if frame.Type == FrameClose {
+			frame.Timestamp = time.Now().UTC()
+			_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 			pr.Close("operator_requested_close")
 			return
 		}
 
 		frame.Timestamp = time.Now().UTC()
+
+		// Audit record operator frame (stdin, resize)
+		_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 
 		// Enforce bounded queue (1 MiB cap)
 		frameSize := int64(len(frame.Data) + 64)
@@ -334,6 +346,8 @@ func (pr *PairedRelay) agentReadPump(conn *websocket.Conn) {
 		}
 
 		if frame.Type == FrameClose {
+			frame.Timestamp = time.Now().UTC()
+			_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 			pr.Close("agent_process_terminated")
 			return
 		}

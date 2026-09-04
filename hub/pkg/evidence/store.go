@@ -168,6 +168,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 	_, _ = s.db.Exec("ALTER TABLE evidence_bundles ADD COLUMN manifest_raw TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE evidence_bundles ADD COLUMN legal_hold_actor TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE evidence_bundles ADD COLUMN legal_hold_reason TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE evidence_items ADD COLUMN received_bytes INTEGER DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE evidence_items ADD COLUMN status TEXT DEFAULT 'completed'")
+	_, _ = s.db.Exec("ALTER TABLE evidence_items ADD COLUMN completed_at TIMESTAMP")
 	_, _ = s.db.Exec("ALTER TABLE evidence_receipts ADD COLUMN receipt_signature TEXT DEFAULT ''")
 	return nil
 }

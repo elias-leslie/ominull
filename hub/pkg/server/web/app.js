@@ -5630,7 +5630,8 @@
     var fitAddon = null;
     var ws = null;
     var resizeObserver = null;
-    var frameCount = 0;
+    var frameCount = session.frame_count || 0;
+    var encLabel = session.encryption || (session.bundle_id ? "AES-256-GCM Evidence" : "AES-256-GCM");
     var termContainer = h("div", { cls: "terminal-container", id: "active-terminal-container" });
 
     // Status elements
@@ -5638,7 +5639,7 @@
       cls: "badge " + (session.state === "active" ? "badge-ok" : "badge-warn"),
       text: session.state === "active" ? "Agent Connected" : "Connecting to Relay\u2026"
     });
-    var frameCountEl = h("span", { cls: "dim-2", text: "Frames: 0 (AES-GCM encrypted)" });
+    var frameCountEl = h("span", { cls: "dim-2", text: "Frames: " + frameCount + " (" + encLabel + ")" });
     var limitsEl = h("span", { cls: "dim-3", text: "Duration: 60m \u00b7 Idle: 15m \u00b7 Tenant slots: " + activeSessionsCount + "/4" });
 
     var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
@@ -5845,7 +5846,7 @@
       try {
         var frame = JSON.parse(event.data);
         frameCount++;
-        frameCountEl.textContent = "Frames: " + frameCount + " (AES-GCM encrypted)";
+        frameCountEl.textContent = "Frames: " + frameCount + " (" + encLabel + ")";
 
         if (frame.type === "stdout") {
           if (overlayMsg.parentNode) {
@@ -5860,6 +5861,11 @@
             for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             term.write(bytes);
           }
+        } else if (frame.type === "bounded") {
+          statusBadge.className = "badge badge-warn";
+          statusBadge.textContent = "Recording Bounded";
+          frameCountEl.textContent = "Frames: " + frameCount + " (Bounded / " + encLabel + ")";
+          term.write("\r\n\x1b[33m[Session recording bounded: 10MB limit reached]\x1b[0m\r\n");
         } else if (frame.type === "close") {
           statusBadge.className = "badge badge-neutral";
           statusBadge.textContent = "Session Terminated";
@@ -5952,6 +5958,7 @@
         h("span", { text: ts.endpoint_id || "" }),
         h("span", { text: ts.program || "" }),
         h("span", { cls: ts.state === "active" ? "badge badge-ok" : (ts.state === "waiting" || ts.state === "connecting" ? "badge badge-warn" : "badge badge-crit"), text: ts.state || "unknown" }),
+        h("span", { cls: "dim-2", text: (ts.recording_state || (ts.closed_at ? "sealed" : "recording")) + (ts.frame_count !== undefined ? " (" + ts.frame_count + " frames)" : "") }),
         h("span", { cls: "dim", text: ts.operator_id || "" }),
         stamp(parseTime(ts.created_at)),
         h("div", { cls: "row-actions" },
@@ -5979,7 +5986,7 @@
     );
 
     var termCard = card("Remote Terminal Sessions (ConPTY / forkpty)",
-      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No active terminal sessions. Click 'Launch Endpoint Shell' to open a session." }),
+      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Recording", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No active terminal sessions. Click 'Launch Endpoint Shell' to open a session." }),
       [termCardHead]
     );
 

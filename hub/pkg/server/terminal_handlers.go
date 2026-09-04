@@ -26,11 +26,25 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method == http.MethodGet {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot list or inspect terminal sessions")
+			return
+		}
+		role := r.Header.Get("X-Role")
+		if role != "admin" && role != "operator" && role != "auditor" {
+			writeJSONError(w, http.StatusForbidden, "unauthorized role for terminal session inspection")
+			return
+		}
+
 		id := r.URL.Query().Get("id")
 		if id != "" {
 			sess, err := s.terminalMgr.GetSession(id)
 			if err != nil {
 				writeJSONError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			if sess.TenantID != tenantID {
+				writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -54,6 +68,11 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method == http.MethodPost {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot create terminal sessions; response authorization required")
+			return
+		}
+
 		var req struct {
 			EndpointID   string                    `json:"endpoint_id"`
 			Program      string                    `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
@@ -151,6 +170,16 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method == http.MethodDelete {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot close terminal sessions")
+			return
+		}
+		role := r.Header.Get("X-Role")
+		if role != "admin" && role != "operator" {
+			writeJSONError(w, http.StatusForbidden, "insufficient role permissions to close terminal session")
+			return
+		}
+
 		id := r.URL.Query().Get("id")
 		if id == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing session id")
@@ -268,6 +297,22 @@ func (s *Server) handleTerminalSessionClose(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if r.Header.Get("X-Auth-Method") == "api-key" {
+		writeJSONError(w, http.StatusForbidden, "static API keys cannot close terminal sessions")
+		return
+	}
+
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	role := r.Header.Get("X-Role")
+	if role != "admin" && role != "operator" {
+		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to close terminal session")
+		return
+	}
+
 	var req struct {
 		SessionID string `json:"session_id"`
 		Reason    string `json:"reason"`
@@ -277,48 +322,95 @@ func (s *Server) handleTerminalSessionClose(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	sess, err := s.terminalMgr.GetSession(req.SessionID)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.TenantID != tenantID {
+		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
+		return
+	}
+
 	reason := req.Reason
 	if reason == "" {
 		reason = "operator_close"
 	}
 
 	if err := s.terminalMgr.CloseSession(req.SessionID, reason); err != nil {
-		writeJSONError(w, http.StatusNotFound, "close failed: "+err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "close failed: "+err.Error())
 		return
 	}
 
 	s.audit(r, "TERMINAL_SESSION_CLOSED", req.SessionID, fmt.Sprintf("Closed terminal session (%s)", reason))
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"closed": true})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"closed": true, "session_id": req.SessionID})
 }
 
-// handleTerminalFrames records an input/output/resize frame for audit.
+// handleTerminalFrames inspects recorded frames or rejects external frame injection.
 func (s *Server) handleTerminalFrames(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	if s.terminalMgr == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
 		return
 	}
 
-	var req struct {
-		SessionID string                 `json:"session_id"`
-		Frame     terminal.TerminalFrame `json:"frame"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
-		writeJSONError(w, http.StatusBadRequest, "invalid frame payload")
+	if r.Method == http.MethodGet {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot inspect terminal frames")
+			return
+		}
+
+		role := r.Header.Get("X-Role")
+		if role != "admin" && role != "operator" && role != "auditor" {
+			writeJSONError(w, http.StatusForbidden, "unauthorized role for terminal frame inspection")
+			return
+		}
+
+		tenantID := s.tenantFromRequest(r)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			sessionID = r.URL.Query().Get("id")
+		}
+		if sessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing session_id")
+			return
+		}
+
+		frames, meta, err := s.terminalMgr.GetSessionRecording(tenantID, sessionID)
+		if err != nil {
+			if strings.Contains(err.Error(), "tenant mismatch") {
+				writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
+				return
+			}
+			if strings.Contains(err.Error(), "not found") {
+				writeJSONError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to read recording: "+err.Error())
+			return
+		}
+
+		if frames == nil {
+			frames = []terminal.TerminalFrame{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"metadata": meta,
+			"frames":   frames,
+		})
 		return
 	}
 
-	if err := s.terminalMgr.RecordFrame(req.SessionID, req.Frame); err != nil {
-		writeJSONError(w, http.StatusNotFound, "failed to record frame: "+err.Error())
+	if r.Method == http.MethodPost {
+		writeJSONError(w, http.StatusForbidden, "external frame injection rejected: frames must stream over authenticated websocket relay")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"recorded": true})
+	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
