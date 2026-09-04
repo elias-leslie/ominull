@@ -566,7 +566,33 @@ static inline bool VerifyResponseGrant(
     Response_BytesToHex(computed_hash, 32, computed_hex);
 
     if (strcasecmp(grant->action_digest, computed_hex) != 0) {
-        return false; // Action digest tampered or mismatched
+        // For terminal_session, the operator ActionProof binds specifically to the authorized program {"program":"..."}
+        if (grant->action_kind[0] && strcmp(grant->action_kind, "terminal_session") == 0 && payload_json) {
+            const char* p_pr = strstr(payload_json, "\"program\"");
+            if (p_pr) {
+                const char* val = strchr(p_pr, ':');
+                if (val) {
+                    val++;
+                    while (*val == ' ' || *val == '\t' || *val == '"') val++;
+                    char prog[128] = {0};
+                    size_t plen = 0;
+                    while (val[plen] && val[plen] != '"' && val[plen] != ',' && val[plen] != '}' && plen < sizeof(prog) - 1) {
+                        prog[plen] = val[plen];
+                        plen++;
+                    }
+                    prog[plen] = '\0';
+                    char prog_payload[256];
+                    int n = snprintf(prog_payload, sizeof(prog_payload), "{\"program\":\"%s\"}", prog);
+                    if (n > 0) {
+                        Response_SHA256_Sum((const uint8_t*)prog_payload, (size_t)n, computed_hash);
+                        Response_BytesToHex(computed_hash, 32, computed_hex);
+                    }
+                }
+            }
+        }
+        if (strcasecmp(grant->action_digest, computed_hex) != 0) {
+            return false; // Action digest tampered or mismatched
+        }
     }
 
     // 5. Binary canonical encoding (OMINULL-ENDPOINT-GRANT-V2)
