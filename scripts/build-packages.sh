@@ -54,6 +54,8 @@ echo "[*] Building hub and response authority."
 echo "[*] Building Windows user-mode agent and recovery tool."
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
 	-DOMINULL_WFP_EMBEDDED \
+	-D_WIN32_WINNT=0x0A00 \
+	-DNTDDI_VERSION=0x0A000006 \
     -I"${ROOT_DIR}/agent/include" \
     "${ROOT_DIR}/agent/src/main.c" \
     "${ROOT_DIR}/agent/src/hub_client.c" \
@@ -67,6 +69,8 @@ x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
     -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \
     -lfwpuclnt -lole32
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
+	-D_WIN32_WINNT=0x0A00 \
+	-DNTDDI_VERSION=0x0A000006 \
     -I"${ROOT_DIR}/agent/include" "${ROOT_DIR}/agent/windows/wfp_user.c" \
     -o "${BUILD_DIR}/ominull_wfp_user.exe" \
     -lws2_32 -ladvapi32 -lfwpuclnt -lole32

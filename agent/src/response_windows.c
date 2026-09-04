@@ -20,6 +20,30 @@
 
 #include "../include/agent.h"
 #include "../include/response_dispatcher.h"
+#include "../include/terminal_windows.h"
+
+typedef struct {
+    AGENT_CONFIG config;
+    TerminalSessionParamsWin params;
+} TerminalWorkerThreadArgs;
+
+static DWORD WINAPI TerminalWorkerThreadProc(LPVOID lpParam) {
+    TerminalWorkerThreadArgs* args = (TerminalWorkerThreadArgs*)lpParam;
+    if (!args) return 1;
+
+    bool is_https = (strncmp(args->config.hub_url, "https://", 8) == 0);
+    Terminal_RunWindowsWorker(
+        args->config.hub_url,
+        is_https,
+        args->config.endpoint_id,
+        args->params.session_id,
+        args->params.connect_token,
+        args->params.program
+    );
+
+    free(args);
+    return 0;
+}
 
 void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJson) {
     if (!config || !respJson) return;
@@ -62,6 +86,23 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
                 "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":100}",
                 offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code);
             Hub_PostPathJSON(config, "/api/v1/response/jobs/result", res_body, NULL, 0);
+        } else if (strcmp(offer->kind, "terminal_session") == 0) {
+            TerminalSessionParamsWin params;
+            if (!Terminal_ParsePayloadWindows(offer->payload_json, &params)) {
+                continue;
+            }
+
+            TerminalWorkerThreadArgs* args = (TerminalWorkerThreadArgs*)malloc(sizeof(TerminalWorkerThreadArgs));
+            if (args) {
+                memcpy(&args->config, config, sizeof(AGENT_CONFIG));
+                memcpy(&args->params, &params, sizeof(TerminalSessionParamsWin));
+                HANDLE hThread = CreateThread(NULL, 0, TerminalWorkerThreadProc, args, 0, NULL);
+                if (hThread) {
+                    CloseHandle(hThread);
+                } else {
+                    free(args);
+                }
+            }
         }
         // Unknown action kinds are ignored: no execution, no synthesis of success
     }

@@ -197,7 +197,7 @@ The installer prompts for the console fully-qualified domain name (FQDN) and con
 - **Operating System Floor:**
   - Interactive pseudoterminals on Windows require the **Windows Pseudo Console (ConPTY)** subsystem (`CreatePseudoConsole`, `ResizePseudoConsole`, `ClosePseudoConsole`).
   - ConPTY was introduced in **Windows 10 Version 1809 (Build 17763)** and **Windows Server 2019**.
-  - Windows headers require `NTDDI_VERSION >= 0x0A000006` (`NTDDI_WIN10_RS5`) and `_WIN32_WINNT >= 0x0600`.
+  - Windows headers require `NTDDI_VERSION >= 0x0A000006` (`NTDDI_WIN10_RS5`) and `_WIN32_WINNT >= 0x0A00`.
 - **Support Matrix:**
   - **Full Capability (Telemetry, Forensic Collection, Interactive Shell):**
     - Windows 10 (Version 1809 and later)

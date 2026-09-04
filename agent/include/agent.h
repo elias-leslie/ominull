@@ -1,6 +1,13 @@
 #ifndef OMINULL_AGENT_H
 #define OMINULL_AGENT_H
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000006
+#endif
+
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>

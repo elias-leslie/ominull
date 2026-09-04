@@ -156,11 +156,14 @@ static inline int b64_val(char c) {
 
 static inline size_t Terminal_Base64Decode(const char* in, size_t in_len, unsigned char* out, size_t out_max) {
     size_t i = 0, j = 0;
-    while (i < in_len && in[i] != '=' && j < out_max) {
+    while (i < in_len && j < out_max) {
+        while (i < in_len && (in[i] == ' ' || in[i] == '\r' || in[i] == '\n' || in[i] == '\t')) i++;
+        if (i >= in_len) break;
+
         int a = b64_val(in[i++]);
-        int b = (i < in_len && in[i] != '=') ? b64_val(in[i++]) : 0;
-        int c = (i < in_len && in[i] != '=') ? b64_val(in[i++]) : 0;
-        int d = (i < in_len && in[i] != '=') ? b64_val(in[i++]) : 0;
+        int b = (i < in_len) ? b64_val(in[i++]) : -1;
+        int c = (i < in_len) ? b64_val(in[i++]) : -1;
+        int d = (i < in_len) ? b64_val(in[i++]) : -1;
 
         if (a < 0 || b < 0) break;
         uint32_t triple = (a << 18) | (b << 12) | ((c < 0 ? 0 : c) << 6) | (d < 0 ? 0 : d);
