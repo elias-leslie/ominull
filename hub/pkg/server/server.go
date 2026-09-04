@@ -363,7 +363,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		responseStore:   respStore,
 		responseAuth:    responseauth.NewUDSClient(authSocket),
 		evidenceStore:   evidStore,
-		terminalMgr:     terminal.NewManager(60*time.Minute, 15*time.Minute),
+		terminalMgr:     terminal.NewManager(store.DB(), 60*time.Minute, 15*time.Minute),
 		scriptsStore:    scriptsStore,
 		vulnStore:       vulnStore,
 		responseEnabled: responseEnabled,
@@ -942,6 +942,9 @@ func (s *Server) Close() error {
 	s.ti.Stop()
 	s.detector.Stop()
 	s.scanner.StopBackground()
+	if s.terminalMgr != nil {
+		_ = s.terminalMgr.Close()
+	}
 	var err error
 	if s.httpServer != nil {
 		err = s.httpServer.Close()

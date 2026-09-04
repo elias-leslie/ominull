@@ -8,7 +8,8 @@ import (
 )
 
 func TestTerminalManager_SessionLifecycle(t *testing.T) {
-	mgr := NewManager(30*time.Minute, 10*time.Minute)
+	mgr := NewManager(nil, 30*time.Minute, 10*time.Minute)
+	defer mgr.Close()
 
 	tenantID := "tenant-test"
 	endpointID := "linux-node-1"

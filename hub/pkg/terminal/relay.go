@@ -89,7 +89,12 @@ func (pr *PairedRelay) Close(reason string) {
 		if pr.sess.CloseReason == "" {
 			pr.sess.CloseReason = reason
 		}
+		startedAt := pr.sess.StartedAt
+		opConn := pr.sess.OperatorConnected
+		agConn := pr.sess.AgentConnected
 		pr.sess.mu.Unlock()
+
+		_ = pr.mgr.updateDurableState(pr.sess.SessionID, StateClosed, startedAt, &now, reason, opConn, agConn)
 
 		// Send close frame and close operator connection
 		if pr.opConn != nil {
@@ -146,7 +151,15 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 	} else {
 		sess.State = StateConnecting
 	}
+	st := sess.State
+	startedAt := sess.StartedAt
+	closedAt := sess.ClosedAt
+	reason := sess.CloseReason
+	opConn := sess.OperatorConnected
+	agConn := sess.AgentConnected
 	sess.mu.Unlock()
+
+	_ = m.updateDurableState(sess.SessionID, st, startedAt, closedAt, reason, opConn, agConn)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -204,7 +217,15 @@ func (m *Manager) AttachAgent(w http.ResponseWriter, r *http.Request, sessionID,
 	} else {
 		sess.State = StateConnecting
 	}
+	st := sess.State
+	startedAt := sess.StartedAt
+	closedAt := sess.ClosedAt
+	reason := sess.CloseReason
+	opConn := sess.OperatorConnected
+	agConn := sess.AgentConnected
 	sess.mu.Unlock()
+
+	_ = m.updateDurableState(sess.SessionID, st, startedAt, closedAt, reason, opConn, agConn)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

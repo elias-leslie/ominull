@@ -14,7 +14,8 @@ import (
 )
 
 func TestTerminalRelay_AuthenticatedLoopback(t *testing.T) {
-	mgr := NewManager(30*time.Minute, 15*time.Minute)
+	mgr := NewManager(nil, 30*time.Minute, 15*time.Minute)
+	defer mgr.Close()
 	tenantID := "tenant-alpha"
 	endpointID := "linux-agent-01"
 	opID := "operator-alice"
@@ -238,7 +239,8 @@ func TestTerminalRelay_AuthenticatedLoopback(t *testing.T) {
 }
 
 func TestTerminalRelay_ForbiddenFrameTypes(t *testing.T) {
-	mgr := NewManager(30*time.Minute, 15*time.Minute)
+	mgr := NewManager(nil, 30*time.Minute, 15*time.Minute)
+	defer mgr.Close()
 	tenantID := "tenant-beta"
 	endpointID := "linux-agent-02"
 

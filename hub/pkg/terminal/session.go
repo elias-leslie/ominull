@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,26 +68,119 @@ type TerminalSession struct {
 	relay             *PairedRelay            `json:"-"`
 }
 
-// Manager manages active terminal sessions and pairing.
+// Manager manages active terminal sessions, persistence, and pairing.
 type Manager struct {
-	mu          sync.RWMutex
-	sessions    map[string]*TerminalSession
-	maxDuration time.Duration
-	idleTimeout time.Duration
+	mu              sync.RWMutex
+	db              *sql.DB
+	sessions        map[string]*TerminalSession
+	maxDuration     time.Duration
+	idleTimeout     time.Duration
+	connectTimeout  time.Duration
+	stopSweeper     chan struct{}
+	sweeperDone     chan struct{}
+	stopSweeperOnce sync.Once
 }
 
-// NewManager creates a new Terminal Session Manager.
-func NewManager(maxDuration, idleTimeout time.Duration) *Manager {
+// NewManager creates a new Terminal Session Manager backed by SQLite.
+func NewManager(db *sql.DB, maxDuration, idleTimeout time.Duration) *Manager {
 	if maxDuration <= 0 {
 		maxDuration = 60 * time.Minute
 	}
 	if idleTimeout <= 0 {
 		idleTimeout = 15 * time.Minute
 	}
-	return &Manager{
-		sessions:    make(map[string]*TerminalSession),
-		maxDuration: maxDuration,
-		idleTimeout: idleTimeout,
+	m := &Manager{
+		db:             db,
+		sessions:       make(map[string]*TerminalSession),
+		maxDuration:    maxDuration,
+		idleTimeout:    idleTimeout,
+		connectTimeout: 30 * time.Second,
+		stopSweeper:    make(chan struct{}),
+		sweeperDone:    make(chan struct{}),
+	}
+	_ = m.initStore()
+	m.startSweeper(5 * time.Second)
+	return m
+}
+
+// Close gracefully terminates the sweeper and cleans up active sessions.
+func (m *Manager) Close() error {
+	m.stopSweeperOnce.Do(func() {
+		close(m.stopSweeper)
+		<-m.sweeperDone
+	})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sess := range m.sessions {
+		sess.mu.Lock()
+		relay := sess.relay
+		sess.mu.Unlock()
+		if relay != nil {
+			relay.Close("manager_closed")
+		}
+	}
+	return nil
+}
+
+// DB returns the underlying database handle.
+func (m *Manager) DB() *sql.DB {
+	return m.db
+}
+
+// SetConnectTimeout overrides the default 30-second connect timeout for testing.
+func (m *Manager) SetConnectTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.connectTimeout = d
+}
+
+// startSweeper runs background sweeping for expired sessions.
+func (m *Manager) startSweeper(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer func() {
+			ticker.Stop()
+			close(m.sweeperDone)
+		}()
+
+		for {
+			select {
+			case <-m.stopSweeper:
+				return
+			case <-ticker.C:
+				m.Sweep()
+			}
+		}
+	}()
+}
+
+// Sweep checks for and expires sessions exceeding timeouts.
+func (m *Manager) Sweep() {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	expired, err := m.sweepExpiredSessions(now, m.connectTimeout)
+	if err != nil {
+		return
+	}
+
+	for _, item := range expired {
+		if sess, exists := m.sessions[item.SessionID]; exists {
+			sess.mu.Lock()
+			sess.State = item.NewState
+			sess.ClosedAt = &now
+			if sess.CloseReason == "" {
+				sess.CloseReason = item.Reason
+			}
+			relay := sess.relay
+			sess.mu.Unlock()
+
+			if relay != nil {
+				relay.Close(item.Reason)
+			}
+		}
 	}
 }
 
@@ -95,28 +189,24 @@ func (m *Manager) CreateSession(tenantID, endpointID, operatorID, program string
 	return m.CreateSessionWithID("", "", tenantID, endpointID, operatorID, program, grant)
 }
 
-// CreateSessionWithID initializes a new waiting terminal session with explicit IDs.
+// CreateSessionWithID initializes a new waiting terminal session with explicit IDs and limits enforcement.
 func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, operatorID, program string, grant *response.EndpointGrant) (*TerminalSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check per-endpoint concurrency limit (1 active per endpoint)
 	now := time.Now().UTC()
-	tenantActive := 0
-	for _, s := range m.sessions {
-		if s.TenantID == tenantID && (s.State == StateWaiting || s.State == StateConnecting || s.State == StateActive) {
-			if now.Before(s.ExpiresAt) {
-				tenantActive++
-			}
+
+	// 1. Enforce caps via SQLite store:
+	// - 1 active session per endpoint
+	// - 4 active sessions per tenant
+	activeTenant, activeEndpoint, err := m.countActiveSessions(tenantID, endpointID, now)
+	if err == nil {
+		if activeTenant >= 4 {
+			return nil, fmt.Errorf("active terminal session limit reached: max 4 active terminal sessions allowed per tenant (%s)", tenantID)
 		}
-		if s.EndpointID == endpointID && (s.State == StateWaiting || s.State == StateConnecting || s.State == StateActive) {
-			if now.Before(s.ExpiresAt) {
-				return nil, fmt.Errorf("active terminal session %s already exists for endpoint %s", s.SessionID, endpointID)
-			}
+		if activeEndpoint >= 1 {
+			return nil, fmt.Errorf("active terminal session already exists: max 1 active terminal session allowed per endpoint (%s)", endpointID)
 		}
-	}
-	if tenantActive >= 4 {
-		return nil, fmt.Errorf("active terminal session limit reached for tenant %s (max 4)", tenantID)
 	}
 
 	if sessionID == "" {
@@ -142,23 +232,36 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 		Frames:        make([]TerminalFrame, 0, 128),
 	}
 
+	// Persist to SQLite
+	if err := m.insertDurableSession(sess); err != nil {
+		return nil, fmt.Errorf("persist terminal session: %w", err)
+	}
+
 	m.sessions[sessionID] = sess
 	return sess, nil
 }
 
-// GetSession returns a session by ID.
+// GetSession returns a session by ID, loading from DB if not in memory.
 func (m *Manager) GetSession(sessionID string) (*TerminalSession, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	sess, exists := m.sessions[sessionID]
-	if !exists {
-		return nil, errors.New("terminal session not found")
+	if exists {
+		return sess, nil
 	}
-	return sess, nil
+
+	// Load from database
+	loaded, err := m.loadDurableSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	loaded.Frames = make([]TerminalFrame, 0, 128)
+	m.sessions[sessionID] = loaded
+	return loaded, nil
 }
 
-// ListSessions returns active terminal sessions for a tenant.
+// ListSessions returns terminal sessions for a tenant.
 func (m *Manager) ListSessions(tenantID string) []*TerminalSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -195,10 +298,13 @@ func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
 	frame.Timestamp = now
 	sess.Frames = append(sess.Frames, frame)
 	sess.IdleExpiresAt = now.Add(m.idleTimeout)
+
+	// Update idle expiration in database
+	_ = m.updateDurableState(sessionID, sess.State, sess.StartedAt, sess.ClosedAt, sess.CloseReason, sess.OperatorConnected, sess.AgentConnected)
 	return nil
 }
 
-// CloseSession transitions a session to closed and closes paired relays.
+// CloseSession transitions a session to closed, persists to DB, and closes paired relays.
 func (m *Manager) CloseSession(sessionID, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -215,6 +321,8 @@ func (m *Manager) CloseSession(sessionID, reason string) error {
 	sess.ClosedAt = &now
 	sess.CloseReason = reason
 	sess.mu.Unlock()
+
+	_ = m.updateDurableState(sessionID, StateClosed, sess.StartedAt, &now, reason, sess.OperatorConnected, sess.AgentConnected)
 
 	if relay != nil {
 		relay.Close(reason)
