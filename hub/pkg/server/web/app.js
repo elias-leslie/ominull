@@ -3683,6 +3683,237 @@
     return list;
   }
 
+  /* --------------------------------- Process Lineage & Forensics Components */
+
+  function processAttributionBadge(status) {
+    var st = status || "unknown";
+    var label = st;
+    var tip = "Unknown process attribution confidence";
+    if (st === "authoritative") {
+      label = "authoritative";
+      tip = "Authoritative process lineage and hash verified directly via OS kernel / ETW";
+    } else if (st === "inferred_cached") {
+      label = "inferred (cached)";
+      tip = "Cryptographic hash inferred from stable filesystem inode / file ID LRU cache";
+    } else if (st === "race_suspected") {
+      label = "race suspected";
+      tip = "Process exited or terminated rapidly before socket attribution completed; zero lineage invented";
+    } else if (st === "permission_denied") {
+      label = "permission denied";
+      tip = "OS security boundaries prevented process descriptor or token inspection";
+    }
+    return h("span", { cls: "attribution-badge", "data-status": st, title: tip },
+      h("span", { text: label }));
+  }
+
+  function processHashBadge(hash, onSearch) {
+    if (!hash) return null;
+    var short = hash.length > 16 ? (hash.slice(0, 8) + "…" + hash.slice(-6)) : hash;
+    var nodes = [
+      h("span", { cls: "hash-text", text: short, title: hash }),
+      h("button", {
+        cls: "btn-icon-mini", type: "button", title: "Copy SHA-256 Digest (" + hash + ")",
+        on: {
+          click: function (e) {
+            e.stopPropagation();
+            copyText(hash, "executable SHA-256");
+          }
+        }
+      }, icon("i-copy"))
+    ];
+    if (typeof onSearch === "function") {
+      nodes.push(h("button", {
+        cls: "btn-icon-mini", type: "button", title: "Filter Fleet Telemetry by this SHA-256",
+        on: {
+          click: function (e) {
+            e.stopPropagation();
+            onSearch(hash);
+          }
+        }
+      }, icon("i-search")));
+    }
+    return h("span", { cls: "hash-badge" }, nodes);
+  }
+
+  function processLineageTree(item) {
+    var tree = h("div", { cls: "process-lineage-tree" });
+    var hasParent = !!(item.parent_pid || item.parent_process_instance_id);
+
+    // Parent Node
+    var parentNode;
+    if (hasParent) {
+      parentNode = h("div", { cls: "lineage-node parent-node" },
+        h("div", { cls: "lineage-node-header" },
+          h("span", { cls: "lineage-role", text: "Parent Process" }),
+          h("span", { cls: "lineage-pid", text: "PPID " + (item.parent_pid || "—") })),
+        item.parent_process_instance_id
+          ? h("div", { cls: "lineage-instance-id", text: item.parent_process_instance_id, title: "Parent Process Instance ID: " + item.parent_process_instance_id })
+          : h("div", { cls: "lineage-dim", text: "(Parent exited before start time verification — zero false state invented)" }));
+    } else {
+      parentNode = h("div", { cls: "lineage-node parent-node muted" },
+        h("div", { cls: "lineage-node-header" },
+          h("span", { cls: "lineage-role", text: "Parent Process" }),
+          h("span", { cls: "lineage-dim", text: "Root or Ancestor terminated prior to observation" })));
+    }
+
+    // Tree branch connector
+    var connector = h("div", { cls: "lineage-tree-connector", "aria-hidden": "true" },
+      h("span", { cls: "connector-glyph", text: "↳" }));
+
+    // Child Node
+    var childNode = h("div", { cls: "lineage-node child-node" },
+      h("div", { cls: "lineage-node-header" },
+        h("span", { cls: "lineage-role", text: "Observed Process" }),
+        h("span", { cls: "lineage-pid", text: "PID " + (item.process_id || item.pid || "—") }),
+        processAttributionBadge(item.attribution_status)),
+      (item.process_path || item.process_name)
+        ? h("div", { cls: "lineage-path", text: item.process_path || item.process_name })
+        : null,
+      item.process_instance_id
+        ? h("div", { cls: "lineage-instance-id", text: item.process_instance_id, title: "Process Instance ID: " + item.process_instance_id })
+        : null);
+
+    tree.appendChild(parentNode);
+    tree.appendChild(connector);
+    tree.appendChild(childNode);
+    return tree;
+  }
+
+  function commandLineInspector(cmdline) {
+    if (!cmdline) {
+      return h("div", { cls: "dim", style: "font-style: italic;", text: "No command line arguments captured for this process." });
+    }
+    return h("div", { cls: "cmdline-inspector-wrap" },
+      h("div", { cls: "cmdline-inspector-head" },
+        h("span", { cls: "dim-3", text: "Full Execution Command Line" }),
+        h("button", {
+          cls: "btn mini", type: "button", text: "Copy Command",
+          on: { click: function () { copyText(cmdline, "command line"); } }
+        })),
+      h("pre", { cls: "cmdline-box" }, h("code", { text: cmdline })));
+  }
+
+  function openEventInspectionSheet(item) {
+    var action = item.action || "PERMIT";
+    var direction = item.direction || "OUTBOUND";
+    var proto = item.proto_name || (item.protocol === 6 ? "TCP" : item.protocol === 17 ? "UDP" : String(item.protocol || "IP"));
+    var epID = item.endpoint_id || "—";
+
+    var headGroup = h("div", { cls: "drawer-kv-group" },
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Verdict & Direction" }),
+        h("div", { style: "display:flex;gap:6px;align-items:center;" },
+          h("span", { cls: "st", "data-state": action === "BLOCK" ? "crit" : "ok", text: action }),
+          h("span", { cls: "dim-3", text: direction }))),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Timestamp" }),
+        h("span", { cls: "drawer-kv-val", text: item.timestamp ? String(item.timestamp) : "—" })),
+      item.observed_at ? h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Observed At (Host Clock)" }),
+        h("span", { cls: "drawer-kv-val", text: String(item.observed_at) })) : null,
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Endpoint" }),
+        h("span", { cls: "drawer-kv-val", text: epID })),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Transport / Protocol" }),
+        h("span", { cls: "drawer-kv-val", text: proto + (item.layer ? " (" + item.layer + ")" : "") })),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Source Socket" }),
+        h("span", { cls: "drawer-kv-val", text: (item.src_ip || "—") + (item.src_port ? ":" + item.src_port : "") })),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Destination Socket" }),
+        h("span", { cls: "drawer-kv-val", text: (item.dst_ip || "—") + (item.dst_port ? ":" + item.dst_port : "") })),
+      item.domain ? h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Queried Domain" }),
+        h("span", { cls: "drawer-kv-val", text: item.domain })) : null,
+      (item.bytes_in || item.bytes_out) ? h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Traffic Volume" }),
+        h("span", { cls: "drawer-kv-val", text: bytes(item.bytes_in) + " in / " + bytes(item.bytes_out) + " out" })) : null);
+
+    var treeCard = card("Process Hierarchy & Instance Identity", processLineageTree(item));
+
+    var binRows = [
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Process Path" }),
+        h("span", { cls: "drawer-kv-val", text: item.process_path || item.process_name || "—" })),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "User Principal" }),
+        h("span", { cls: "drawer-kv-val", text: item.user_identity || "—" })),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Attribution Status" }),
+        processAttributionBadge(item.attribution_status))
+    ];
+    if (item.executable_sha256) {
+      binRows.push(h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Executable SHA-256" }),
+        processHashBadge(item.executable_sha256, function (hsh) {
+          closeSheet();
+          state.section = "traffic";
+          state.trafficFilter = state.trafficFilter || {};
+          state.trafficFilter.hash = hsh;
+          refresh();
+        })));
+    }
+    var binGroup = h("div", { cls: "drawer-kv-group" }, binRows);
+    var binCard = card("Binary Provenance & Cryptographic Signature", binGroup);
+
+    var cmdCard = card("Command Line Execution Arguments", commandLineInspector(item.command_line));
+
+    var body = h("div", { cls: "stack", style: "gap: var(--s-3);" },
+      headGroup,
+      treeCard,
+      binCard,
+      cmdCard);
+
+    var actions = [];
+    if (item.executable_sha256) {
+      actions.push(h("button", {
+        cls: "btn btn-primary", type: "button", text: "Filter Fleet by Hash",
+        on: {
+          click: function () {
+            closeSheet();
+            state.section = "traffic";
+            state.trafficFilter = state.trafficFilter || {};
+            state.trafficFilter.hash = item.executable_sha256;
+            refresh();
+          }
+        }
+      }));
+    }
+    if (item.user_identity) {
+      actions.push(h("button", {
+        cls: "btn", type: "button", text: "Filter by User (" + item.user_identity + ")",
+        on: {
+          click: function () {
+            closeSheet();
+            state.section = "traffic";
+            state.trafficFilter = state.trafficFilter || {};
+            state.trafficFilter.user = item.user_identity;
+            refresh();
+          }
+        }
+      }));
+    }
+    if (item.process_name || item.process_path) {
+      var procName = item.process_name || (item.process_path ? item.process_path.split("/").pop() : "");
+      actions.push(h("button", {
+        cls: "btn", type: "button", text: "Filter by Process (" + procName + ")",
+        on: {
+          click: function () {
+            closeSheet();
+            state.section = "traffic";
+            state.trafficFilter = state.trafficFilter || {};
+            state.trafficFilter.process = procName;
+            refresh();
+          }
+        }
+      }));
+    }
+    actions.push(h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }));
+
+    openSheet("Process Forensics & Event Inspection", body, actions, "sheet-forensics");
+  }
+
   function renderTraffic() {
     var view = $("view");
     clear(view);
@@ -3738,6 +3969,21 @@
       chips.push(h("span", { cls: "traffic-chip" },
         h("span", { text: "Action: " + tf.action }),
         h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.action; refresh(); } } })));
+    }
+    if (tf.hash) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Hash: " + tf.hash.slice(0, 10) + "…" }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.hash; refresh(); } } })));
+    }
+    if (tf.user) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "User: " + tf.user }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.user; refresh(); } } })));
+    }
+    if (tf.attribution) {
+      chips.push(h("span", { cls: "traffic-chip" },
+        h("span", { text: "Attribution: " + tf.attribution }),
+        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.attribution; refresh(); } } })));
     }
 
     var measuredCheck = h("label", { cls: "traffic-chip", style: "cursor:pointer" },
@@ -3922,6 +4168,15 @@
     var flowsList = arrayOf(flowsData.flows);
     var flowRows = flowsList.map(function (f) {
       var isSelected = state.selectedFlow && state.selectedFlow.id === f.id;
+      var procCell = [
+        h("span", { cls: "dim", text: f.process_name || f.domain || "—", on: { click: function (e) { e.stopPropagation(); if (f.process_name) tf.process = f.process_name; refresh(); } } })
+      ];
+      if (f.attribution_status && f.attribution_status !== "unknown") {
+        procCell.push(h("span", { style: "margin-left: 6px;" }, processAttributionBadge(f.attribution_status)));
+      }
+      if (f.executable_sha256) {
+        procCell.push(h("span", { style: "margin-left: 6px;" }, processHashBadge(f.executable_sha256, function (hsh) { tf.hash = hsh; refresh(); })));
+      }
       var row = [
         stamp(parseTime(f.timestamp)),
         h("span", { cls: "st", "data-state": f.action === "BLOCK" ? "crit" : "ok" },
@@ -3932,7 +4187,7 @@
         h("span", { cls: "ip", text: f.src_ip + (f.src_port ? ":" + f.src_port : "") }),
         h("span", { cls: "ip", text: f.dst_ip + (f.dst_port ? ":" + f.dst_port : ""), on: { click: function (e) { e.stopPropagation(); tf.dst_ip = f.dst_ip; refresh(); } } }),
         h("span", { cls: "dim-3", text: f.proto_name || "TCP" }),
-        h("span", { cls: "dim", text: f.process_name || f.domain || "—", on: { click: function (e) { e.stopPropagation(); if (f.process_name) tf.process = f.process_name; refresh(); } } }),
+        h("div", { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;" }, procCell),
         h("span", { cls: "ago", text: (Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0)
           ? bytes((Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0))
           : "—" })
@@ -3973,7 +4228,7 @@
     var flowStreamCard = card("Active Flow Telemetry (" + (flowsData.total || flowsList.length) + " matching events)",
       h("div", { cls: "stack" }, flowsTable, pagination));
 
-    // 7. DNS Gateway & Sinkhole Telemetry (Driven by real DNS APIs)
+    // 7. DNS Gateway & Threat Sinkhole Telemetry (Driven by real DNS APIs)
     var dnsStatus = state.dnsStatus || {};
     var dnsEventsList = arrayOf(state.dnsEvents);
     var dnsGrid = h("div", { cls: "card-body dns-grid" },
@@ -4029,10 +4284,15 @@
           h("div", { cls: "stack" },
             h("b", { text: "Flow Investigation #" + (sel.id || sel.ID || "") }),
             h("span", { cls: "dim-3", text: sel.timestamp ? String(sel.timestamp) : "" })),
-          h("button", {
-            cls: "btn mini ghost", type: "button", text: "✕ Close",
-            on: { click: function () { state.selectedFlow = null; renderTraffic(); } }
-          })),
+          h("div", { style: "display:flex;gap:6px;align-items:center;" },
+            h("button", {
+              cls: "btn mini btn-primary", type: "button", text: "Forensics Sheet ↗",
+              on: { click: function () { openEventInspectionSheet(sel); } }
+            }),
+            h("button", {
+              cls: "btn mini ghost", type: "button", text: "✕ Close",
+              on: { click: function () { state.selectedFlow = null; renderTraffic(); } }
+            }))),
         h("div", { cls: "drawer-body" },
           h("div", { cls: "drawer-kv-group" },
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Action Verdict" }), h("span", { cls: "st", "data-state": sel.action === "BLOCK" ? "crit" : "ok", text: sel.action || "PERMIT" })),
@@ -4042,10 +4302,27 @@
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Source IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.src_ip + ":" + sel.src_port })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Destination IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.dst_ip + ":" + sel.dst_port })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Remote Country" }), h("span", { cls: "drawer-kv-val", text: sel.country || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Process Path" }), h("span", { cls: "drawer-kv-val", text: sel.process_path || "—" })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Queried Domain" }), h("span", { cls: "drawer-kv-val", text: sel.domain || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes In" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_in) })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes Out" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_out) }))),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes In / Out" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_in) + " / " + bytes(sel.bytes_out) }))),
+
+          // Process Lineage Hierarchy Tree
+          h("div", { cls: "stack", style: "gap: 4px;" },
+            h("span", { cls: "drawer-kv-label", text: "Process Lineage Tree" }),
+            processLineageTree(sel)),
+
+          // Process Provenance & Signature
+          h("div", { cls: "drawer-kv-group" },
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Process Path" }), h("span", { cls: "drawer-kv-val", text: sel.process_path || sel.process_name || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "User Principal" }), h("span", { cls: "drawer-kv-val", text: sel.user_identity || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Attribution Status" }), processAttributionBadge(sel.attribution_status)),
+            sel.executable_sha256 ? h("div", { cls: "drawer-kv-row" },
+              h("span", { cls: "drawer-kv-label", text: "Executable SHA-256" }),
+              processHashBadge(sel.executable_sha256, function (hsh) { tf.hash = hsh; state.selectedFlow = null; refresh(); })) : null),
+
+          // Command Line Inspector
+          h("div", { cls: "stack", style: "gap: 4px;" },
+            commandLineInspector(sel.command_line)),
+
           h("div", { cls: "drawer-actions" },
             h("button", {
               cls: "btn mini btn-primary", type: "button", text: "Filter by this Endpoint",
@@ -4055,6 +4332,14 @@
               cls: "btn mini", type: "button", text: "Filter by this Destination IP",
               on: { click: function () { tf.dst_ip = sel.dst_ip; state.selectedFlow = null; refresh(); } }
             }),
+            sel.executable_sha256 ? h("button", {
+              cls: "btn mini", type: "button", text: "Filter by Executable Hash",
+              on: { click: function () { tf.hash = sel.executable_sha256; state.selectedFlow = null; refresh(); } }
+            }) : null,
+            sel.user_identity ? h("button", {
+              cls: "btn mini", type: "button", text: "Filter by User (" + sel.user_identity + ")",
+              on: { click: function () { tf.user = sel.user_identity; state.selectedFlow = null; refresh(); } }
+            }) : null,
             sel.process_name ? h("button", {
               cls: "btn mini", type: "button", text: "Filter by Process (" + sel.process_name + ")",
               on: { click: function () { tf.process = sel.process_name; state.selectedFlow = null; refresh(); } }
@@ -7542,8 +7827,16 @@
     var flows = state.events.filter(function (e) {
       return (ep && e.endpoint_id === ep.id) || (asset.ip && (e.src_ip === asset.ip || e.dst_ip === asset.ip));
     }).slice(0, 25);
-    var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process"],
+    var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process", "Forensics"],
       flows.map(function (e) {
+        var procNode = [h("span", { cls: "dim", text: e.process_path || e.domain || "—" })];
+        if (e.attribution_status && e.attribution_status !== "unknown") {
+          procNode.push(h("span", { style: "margin-left: 6px;" }, processAttributionBadge(e.attribution_status)));
+        }
+        var forensicsBtn = h("button", {
+          cls: "btn mini", type: "button", text: "Inspect",
+          on: { click: function (ev) { ev.stopPropagation(); openEventInspectionSheet(e); } }
+        });
         return [
           stamp(parseTime(e.timestamp)),
           h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
@@ -7551,7 +7844,8 @@
             h("span", { text: e.action || "" })),
           h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
           h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
-          h("span", { cls: "dim", text: e.process_path || e.domain || "\u2014" })
+          h("div", { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;" }, procNode),
+          forensicsBtn
         ];
       })), null, true);
 
@@ -8248,6 +8542,9 @@
       if (tf.port) qs += "&port=" + encodeURIComponent(tf.port);
       if (tf.direction) qs += "&direction=" + encodeURIComponent(tf.direction);
       if (tf.action) qs += "&action=" + encodeURIComponent(tf.action);
+      if (tf.hash) qs += "&hash=" + encodeURIComponent(tf.hash);
+      if (tf.user) qs += "&user=" + encodeURIComponent(tf.user);
+      if (tf.attribution) qs += "&attribution=" + encodeURIComponent(tf.attribution);
       if (tf.measured_only) qs += "&measured_only=true";
       if (tf.cursor) qs += "&cursor=" + encodeURIComponent(tf.cursor);
 
@@ -8396,6 +8693,8 @@
     window.__openJobOutputModal = openJobOutputModal;
     window.__retireScriptConfirm = retireScriptConfirm;
     window.__cancelScriptScheduleConfirm = cancelScriptScheduleConfirm;
+    window.__openEventInspectionSheet = openEventInspectionSheet;
+    window.__openRoute = openRoute;
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

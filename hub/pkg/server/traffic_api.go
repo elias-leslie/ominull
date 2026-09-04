@@ -64,24 +64,40 @@ func parseTrafficFilter(s *Server, r *http.Request) storage.TrafficFilter {
 		measuredOnly = true
 	}
 
+	hash := strings.TrimSpace(q.Get("executable_sha256"))
+	if hash == "" {
+		hash = strings.TrimSpace(q.Get("hash"))
+	}
+	user := strings.TrimSpace(q.Get("user_identity"))
+	if user == "" {
+		user = strings.TrimSpace(q.Get("user"))
+	}
+	attribution := strings.TrimSpace(q.Get("attribution_status"))
+	if attribution == "" {
+		attribution = strings.TrimSpace(q.Get("attribution"))
+	}
+
 	return storage.TrafficFilter{
-		TenantID:     tenantID,
-		Range:        q.Get("range"),
-		From:         from,
-		To:           to,
-		EndpointID:   strings.TrimSpace(q.Get("endpoint_id")),
-		SrcIP:        strings.TrimSpace(q.Get("src_ip")),
-		DstIP:        strings.TrimSpace(q.Get("dst_ip")),
-		Process:      strings.TrimSpace(q.Get("process")),
-		Domain:       strings.TrimSpace(q.Get("domain")),
-		Country:      strings.TrimSpace(q.Get("country")),
-		Protocol:     proto,
-		Port:         port,
-		Direction:    strings.TrimSpace(q.Get("direction")),
-		Action:       strings.TrimSpace(q.Get("action")),
-		MeasuredOnly: measuredOnly,
-		Cursor:       strings.TrimSpace(q.Get("cursor")),
-		Limit:        limit,
+		TenantID:          tenantID,
+		Range:             q.Get("range"),
+		From:              from,
+		To:                to,
+		EndpointID:        strings.TrimSpace(q.Get("endpoint_id")),
+		SrcIP:             strings.TrimSpace(q.Get("src_ip")),
+		DstIP:             strings.TrimSpace(q.Get("dst_ip")),
+		Process:           strings.TrimSpace(q.Get("process")),
+		Domain:            strings.TrimSpace(q.Get("domain")),
+		Country:           strings.TrimSpace(q.Get("country")),
+		Protocol:          proto,
+		Port:              port,
+		Direction:         strings.TrimSpace(q.Get("direction")),
+		Action:            strings.TrimSpace(q.Get("action")),
+		MeasuredOnly:      measuredOnly,
+		Cursor:            strings.TrimSpace(q.Get("cursor")),
+		Limit:             limit,
+		ExecutableSHA256:  hash,
+		UserIdentity:      user,
+		AttributionStatus: attribution,
 	}
 }
 

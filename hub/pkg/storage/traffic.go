@@ -27,7 +27,10 @@ type TrafficFilter struct {
 	Action       string
 	MeasuredOnly bool
 	Cursor       string
-	Limit        int
+	Limit             int
+	ExecutableSHA256  string
+	UserIdentity      string
+	AttributionStatus string
 }
 
 type TrafficOverview struct {
@@ -279,6 +282,21 @@ func buildTrafficWhere(filter TrafficFilter, start, end time.Time) (string, []in
 	if filter.MeasuredOnly {
 		where = append(where, "(bytes_in + bytes_out > 0)")
 		active["measured_only"] = true
+	}
+	if filter.ExecutableSHA256 != "" {
+		where = append(where, "executable_sha256 = ?")
+		args = append(args, strings.ToLower(filter.ExecutableSHA256))
+		active["executable_sha256"] = filter.ExecutableSHA256
+	}
+	if filter.UserIdentity != "" {
+		where = append(where, "user_identity = ?")
+		args = append(args, filter.UserIdentity)
+		active["user_identity"] = filter.UserIdentity
+	}
+	if filter.AttributionStatus != "" {
+		where = append(where, "attribution_status = ?")
+		args = append(args, filter.AttributionStatus)
+		active["attribution_status"] = filter.AttributionStatus
 	}
 
 	whereClause := " WHERE " + strings.Join(where, " AND ")

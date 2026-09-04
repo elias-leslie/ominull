@@ -216,4 +216,40 @@ func TestServer_LineageAndHashing_IngestionAndAPI(t *testing.T) {
 	if singleDetail.ProcessInstanceID != flowItem.ProcessInstanceID {
 		t.Errorf("singleDetail.ProcessInstanceID mismatch: %q", singleDetail.ProcessInstanceID)
 	}
+
+	// 5. Query /api/v1/traffic/flows with hash filter
+	reqHash := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows?hash=ea8f5a11c080b0800b46296766d0c242013f9ae05b1de1efc6fc525ad21c0836", nil)
+	reqHash.Header.Set("X-API-Key", adminKey)
+	wHash := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleTrafficFlows).ServeHTTP(wHash, reqHash)
+	if wHash.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/traffic/flows?hash=... failed: %d", wHash.Code)
+	}
+	var hashResult storage.TrafficFlowsResult
+	if err := json.Unmarshal(wHash.Body.Bytes(), &hashResult); err != nil || len(hashResult.Flows) != 1 {
+		t.Fatalf("expected 1 flow matching hash, got %d (err: %v)", len(hashResult.Flows), err)
+	}
+
+	// 6. Query /api/v1/traffic/flows with user filter
+	reqUser := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows?user=developer", nil)
+	reqUser.Header.Set("X-API-Key", adminKey)
+	wUser := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleTrafficFlows).ServeHTTP(wUser, reqUser)
+	if wUser.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/traffic/flows?user=developer failed: %d", wUser.Code)
+	}
+	var userResult storage.TrafficFlowsResult
+	if err := json.Unmarshal(wUser.Body.Bytes(), &userResult); err != nil || len(userResult.Flows) != 1 {
+		t.Fatalf("expected 1 flow matching user=developer, got %d (err: %v)", len(userResult.Flows), err)
+	}
+
+	// 7. Query with non-matching hash filter returns empty
+	reqNone := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows?hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", nil)
+	reqNone.Header.Set("X-API-Key", adminKey)
+	wNone := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleTrafficFlows).ServeHTTP(wNone, reqNone)
+	var noneResult storage.TrafficFlowsResult
+	if err := json.Unmarshal(wNone.Body.Bytes(), &noneResult); err != nil || len(noneResult.Flows) != 0 {
+		t.Fatalf("expected 0 flows matching dummy hash, got %d", len(noneResult.Flows))
+	}
 }
