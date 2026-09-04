@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #include "../include/agent.h"
 #include "../include/forensics_windows.h"
+#include "../include/software_inventory_windows.h"
 
 static SERVICE_STATUS g_ServiceStatus;
 static SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
@@ -708,6 +709,35 @@ static void HubContact(bool accepted) {
     missed = 0;
 }
 
+static ULONGLONG g_LastSoftwareInventorySyncWin = 0;
+#define SOFTWARE_INVENTORY_SYNC_INTERVAL_WIN_MS (3600ULL * 1000ULL)
+
+static void SyncSoftwareInventoryWin(const AGENT_CONFIG* config) {
+    if (!config || !config->hub_url[0]) return;
+
+    SoftwareInventoryBatchWin* batch = (SoftwareInventoryBatchWin*)calloc(1, sizeof(SoftwareInventoryBatchWin));
+    if (!batch) return;
+
+    if (SoftwareInvWin_Collect(batch) == 0 && batch->count > 0) {
+        if (config->verbose) {
+            printf("[*] Collected %zu authoritative Windows software packages; uploading to Hub...\n", batch->count);
+        }
+
+        size_t cap = 2 * 1024 * 1024;
+        char* jsonBuf = (char*)malloc(cap);
+        if (jsonBuf) {
+            size_t written = SoftwareInvWin_SerializeJSON(config->endpoint_id, batch, jsonBuf, cap);
+            if (written > 0) {
+                char respBuf[2048] = {0};
+                Hub_PostPathJSON(config, "/api/v1/software", jsonBuf, respBuf, sizeof(respBuf));
+            }
+            free(jsonBuf);
+        }
+    }
+    free(batch);
+    g_LastSoftwareInventorySyncWin = GetTickCount64();
+}
+
 void RunAgentLoop(AGENT_CONFIG* config) {
     printf("[+] Windows collection layer: user-mode TCP socket table and ESTATS.\n");
 
@@ -722,6 +752,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
 
     printf("[+] Ominull Agent running. Streaming network flows to Hub: %s\n", config->hub_url);
     ProcessLineageWin_InitETW();
+    SyncSoftwareInventoryWin(config);
 
     while (1) {
         if (g_StopEvent && WaitForSingleObject(g_StopEvent, 0) == WAIT_OBJECT_0) {
@@ -756,6 +787,10 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             Update_Apply(config, hubResponse);
 
             ProcessResponseOffersWindows(config, hubResponse);
+
+            if (GetTickCount64() - g_LastSoftwareInventorySyncWin >= SOFTWARE_INVENTORY_SYNC_INTERVAL_WIN_MS) {
+                SyncSoftwareInventoryWin(config);
+            }
         }
 
         Sleep(100);

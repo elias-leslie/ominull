@@ -31,6 +31,7 @@
 #include "../include/forensics_linux.h"
 #include "../include/script_exec_linux.h"
 #include "../include/process_lineage_linux.h"
+#include "../include/software_inventory_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -2702,6 +2703,41 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     free(jsonBuf);
 }
 
+static time_t g_LastSoftwareInventorySync = 0;
+#define SOFTWARE_INVENTORY_SYNC_INTERVAL_SECS 3600
+
+static void SyncSoftwareInventory(const LINUX_AGENT_CONFIG* config) {
+    if (!config || !config->hub_url[0]) return;
+
+    SoftwareInventoryBatch* batch = (SoftwareInventoryBatch*)calloc(1, sizeof(SoftwareInventoryBatch));
+    if (!batch) return;
+
+    if (SoftwareInv_CollectLinux(NULL, batch) == 0 && batch->count > 0) {
+        if (config->verbose) {
+            printf("[*] Collected %zu authoritative software packages; uploading to Hub...\n", batch->count);
+        }
+
+        size_t cap = 2 * 1024 * 1024;
+        char* jsonBuf = (char*)malloc(cap);
+        if (jsonBuf) {
+            size_t written = SoftwareInv_SerializeJSON(config->endpoint_id, batch, jsonBuf, cap);
+            if (written > 0) {
+                char url[sizeof(config->hub_url) + 32];
+                snprintf(url, sizeof(url), "%s/api/v1/software", config->hub_url);
+                char respBuf[2048] = {0};
+                if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
+                    if (config->verbose) {
+                        printf("[+] Software inventory synced: %s\n", respBuf);
+                    }
+                }
+            }
+            free(jsonBuf);
+        }
+    }
+    free(batch);
+    g_LastSoftwareInventorySync = time(NULL);
+}
+
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);
 	if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
@@ -2878,6 +2914,7 @@ int main(int argc, char* argv[]) {
     LINUX_FLOW_EVENT flows[MAX_FLOWS_PER_BATCH];
     size_t flowCount = CollectActiveFlows(flows, MAX_FLOWS_PER_BATCH);
     SendTelemetryBatch(&config, flows, flowCount);
+    SyncSoftwareInventory(&config);
 
     int count = 0;
     while (g_Running) {
@@ -2886,6 +2923,9 @@ int main(int argc, char* argv[]) {
             flowCount = CollectActiveFlows(flows, MAX_FLOWS_PER_BATCH);
             SendTelemetryBatch(&config, flows, flowCount);
             count = 0;
+        }
+        if (time(NULL) - g_LastSoftwareInventorySync >= SOFTWARE_INVENTORY_SYNC_INTERVAL_SECS) {
+            SyncSoftwareInventory(&config);
         }
     }
 

@@ -61,6 +61,10 @@ gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_process_lineage_l
 ./build/test_process_lineage_linux
 rm -f build/test_process_lineage_linux
 
+gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_software_inventory_linux agent/tests/test_software_inventory_linux.c
+./build/test_software_inventory_linux
+rm -f build/test_software_inventory_linux
+
 echo ""
 echo "[*] 5. Running C response cross-language & canonical encoder tests..."
 gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_response_canonical agent/tests/test_response_canonical.c
@@ -85,6 +89,11 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && command -v wine >/dev/nu
         agent/tests/test_process_lineage_windows.c -o build/test_process_lineage_windows.exe -ladvapi32 -lole32
     wine build/test_process_lineage_windows.exe
     rm -f build/test_process_lineage_windows.exe
+
+    x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include \
+        agent/tests/test_software_inventory_windows.c -o build/test_software_inventory_windows.exe -ladvapi32 -lole32
+    wine build/test_software_inventory_windows.exe
+    rm -f build/test_software_inventory_windows.exe
 fi
 
 echo ""
