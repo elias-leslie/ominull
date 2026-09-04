@@ -29,6 +29,7 @@
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_linux.h"
 #include "../include/forensics_linux.h"
+#include "../include/script_exec_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -2488,6 +2489,58 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 );
                 _exit(exit_code == 0 ? 0 : 1);
             }
+        } else if (strcmp(offer->kind, "script_exec") == 0) {
+            ScriptExecParams params;
+            if (!ScriptExec_ParsePayload(offer->payload_json, &params)) {
+                char res_url[sizeof(config->hub_url) + 64];
+                snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
+                char res_body[512];
+                snprintf(res_body, sizeof(res_body),
+                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"failed\",\"exit_code\":1,\"duration_ms\":0,\"error_code\":\"INVALID_PAYLOAD\"}",
+                    offer->job_id, offer->lease_id);
+                char res_resp[1024] = {0};
+                RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
+                continue;
+            }
+
+            char output_buf[65536] = {0};
+            bool truncated = false;
+            bool timed_out = false;
+            int64_t duration_ms = 0;
+
+            int exit_code = ScriptExec_RunContained(
+                &params,
+                offer->job_id,
+                output_buf,
+                sizeof(output_buf),
+                &truncated,
+                &timed_out,
+                &duration_ms
+            );
+
+            const char* state = (exit_code == 0) ? "succeeded" : "failed";
+            const char* error_code = timed_out ? "TIMED_OUT" : "";
+
+            char* escaped_out = ScriptExec_EscapeJSON(output_buf);
+            size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
+            char* res_body = (char*)malloc(body_sz);
+            if (res_body) {
+                snprintf(res_body, body_sz,
+                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
+                    offer->job_id, offer->lease_id, state, exit_code, (long long)duration_ms,
+                    (escaped_out ? ",\"stdout\":\"" : ""),
+                    (escaped_out ? escaped_out : ""),
+                    (escaped_out ? "\"" : ""),
+                    (error_code[0] ? ",\"error_code\":\"" : ""),
+                    (error_code[0] ? error_code : ""),
+                    (error_code[0] ? "\"" : ""));
+                char res_url[sizeof(config->hub_url) + 64];
+                snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
+                char res_resp[1024] = {0};
+                RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
+                free(res_body);
+            }
+            if (escaped_out) free(escaped_out);
         }
         // Unknown action kinds are ignored: no execution, no synthesis of success
     }
