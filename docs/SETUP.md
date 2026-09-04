@@ -85,6 +85,58 @@ self-issued LAN mode, they pin the hub's Ominull CA. Both modes use the
 hub-issued device credential, and direct connections may add the matching
 client certificate.
 
+## Console Secure Origin & Browser Trust (LAN & Disconnected Setup)
+
+Modern browser security standards require a **Secure Context** (HTTPS with a trusted certificate on a valid DNS domain) to activate:
+1. **WebCrypto (`window.crypto.subtle`)**: Used to generate ephemeral browser session keys and sign `ActionProof` payloads for remote response actions.
+2. **WebAuthn (`navigator.credentials`)**: Used for FIDO2/passkey hardware token authentication.
+
+### Supported Console Origins
+- **Valid Domain Name Required**: Console origins must use a valid DNS domain name (e.g. `https://hub.lan:8443` or `https://console.example.org`).
+- **IP Address Prohibition**: Under W3C WebAuthn Level 2 (§5.4.3), relying party IDs (RP IDs) cannot be IP addresses (`https://10.0.0.58:8443` fails passkey enrollment with `SecurityError`).
+- **Hostname Immutability**: Changing the console hostname at a later date invalidates all enrolled WebAuthn passkeys because stored credentials are permanently bound to the RP ID.
+
+### Certificate Modes
+1. **Source A (Operator-Supplied)**: Supply PEM certificate and private key paths via `OMINULL_CONSOLE_TLS_CERT` and `OMINULL_CONSOLE_TLS_KEY`.
+2. **Source B (Automated ACME DNS-01)**: Enable via `OMINULL_ACME_ENABLED=true`, `OMINULL_ACME_DOMAIN=<domain>`, `OMINULL_ACME_EMAIL=<email>`, `OMINULL_ACME_DNS_PROVIDER=cloudflare`, and `OMINULL_CLOUDFLARE_API_TOKEN=<token>`. Automates Let's Encrypt certificates via DNS-01 challenge with 30-day renewal threshold.
+3. **Source C (Hub CA Leaf with Guided Root Trust)**: The hub issues a leaf certificate signed by its internal Root CA covering the configured `OMINULL_CONSOLE_HOSTNAME`. The root CA certificate is exported and installed in operator client workstations.
+
+### Guided Root Trust Setup
+To trust the Hub CA on operator machines for LAN or disconnected deployments:
+
+```bash
+# 1. Export the root CA from the hub (or download from /api/v1/pki/ca.crt)
+sudo ominullctl console export-ca --out /tmp/ca.crt
+
+# 2. View platform-specific installation instructions
+ominullctl console trust-instructions
+```
+
+Platform trust store commands:
+- **Debian / Ubuntu**:
+  ```bash
+  sudo cp ca.crt /usr/local/share/ca-certificates/ominull-ca.crt
+  sudo update-ca-certificates
+  ```
+- **RHEL / Fedora**:
+  ```bash
+  sudo cp ca.crt /etc/pki/ca-trust/source/anchors/
+  sudo update-ca-trust
+  ```
+- **macOS**:
+  ```bash
+  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt
+  ```
+- **Windows (PowerShell as Administrator)**:
+  ```powershell
+  Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+  ```
+- **Chrome / Firefox**:
+  Import `ca.crt` into the browser's certificate authority store under **Authorities** and enable "Trust this CA to identify websites".
+
+### HSTS & Transport Isolation
+The console listener (`:8443`) automatically serves `Strict-Transport-Security: max-age=31536000; includeSubDomains` and rejects mixed content. It enforces `ClientAuth: tls.NoClientCert`, completely isolating browser operators from agent client-certificate requirements on `:9443`.
+
 ## Recovery checks
 
 Use the local commands when OIDC or Cloudflare is unavailable:

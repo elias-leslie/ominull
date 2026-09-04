@@ -1,3 +1,5 @@
 scripts/fleet-unisolate.sh:generic-api-key:3
 scripts/fleet-status.sh:generic-api-key:3
 scripts/fleet-isolate.sh:generic-api-key:3
+docs/evidence/3-0c.md:generic-api-key:116
+docs/evidence/3-0c.md:generic-api-key:132
