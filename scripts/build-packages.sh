@@ -41,7 +41,7 @@ echo "[*] Building retained Ominull packages v${VERSION}."
 
 echo "[*] Building Linux agent."
 gcc -Wall -Wextra -Wformat=2 -O2 -I"${ROOT_DIR}/agent/include" \
-    "${ROOT_DIR}/agent/linux/main.c" -lcurl -o "${BUILD_DIR}/ominulld"
+    "${ROOT_DIR}/agent/linux/main.c" -lcurl -lutil -o "${BUILD_DIR}/ominulld"
 
 echo "[*] Building hub and response authority."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \

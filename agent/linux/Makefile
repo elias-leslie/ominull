@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -I../../include
-LDLIBS ?= -lcurl
+LDLIBS ?= -lcurl -lutil
 TARGET = ../../build/ominulld
 
 all: $(TARGET)

@@ -27,6 +27,7 @@
 
 #include "../include/release_key.h"
 #include "../include/response_dispatcher.h"
+#include "../include/terminal_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -2385,6 +2386,33 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 char res_resp[1024] = {0};
                 RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
             }
+        } else if (strcmp(offer->kind, "terminal_session") == 0) {
+            TerminalSessionParams params;
+            if (!Terminal_ParsePayload(offer->payload_json, &params)) {
+                continue;
+            }
+
+            // Spawn worker in dedicated process
+            pid_t worker_pid = fork();
+            if (worker_pid == 0) {
+                // Child worker process: close inherited file descriptors
+                for (int fd = 3; fd < 1024; fd++) {
+                    close(fd);
+                }
+                int exit_code = Terminal_RunLinuxWorker(
+                    config->hub_url,
+                    HubUsesTLS(config),
+                    config->ca_path,
+                    config->pin_hub_ca,
+                    config->client_cert_path,
+                    config->client_key_path,
+                    config->endpoint_id,
+                    params.session_id,
+                    params.connect_token,
+                    params.program
+                );
+                _exit(exit_code == 0 ? 0 : 1);
+            }
         }
         // Unknown action kinds are ignored: no execution, no synthesis of success
     }
@@ -2651,6 +2679,8 @@ int main(int argc, char* argv[]) {
     /* The heartbeat writes its body into a child's stdin. A child that exits
      * first would otherwise take the daemon down with a SIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
+    /* Auto-reap terminated worker child processes so no zombies accumulate. */
+    signal(SIGCHLD, SIG_IGN);
 
     printf("[+] Initializing Linux socket collection and firewall control...\n");
     /* Says what is about to happen, not what has happened. This line used to
