@@ -36,7 +36,7 @@ static DWORD WINAPI ForensicsWorkerThreadProcWin(LPVOID lpParam) {
 
     DWORD t0 = GetTickCount();
     char manifest_sha256[65] = {0};
-    bool ok = Forensics_RunDiagnosticCollectionWin(
+    bool ok = Forensics_RunCollectionWin(
         &args->config,
         args->payload_json,
         args->job_id,

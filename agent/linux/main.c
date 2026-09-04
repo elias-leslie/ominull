@@ -2392,24 +2392,22 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 setrlimit(RLIMIT_CPU, &rl);
 
                 char manifest_sha[65] = {0};
-                bool success = false;
-                if (strcmp(params.profile, "diagnostic") == 0) {
-                    success = Forensics_RunDiagnosticCollection(
-                        config->hub_url,
-                        config->api_key,
-                        IsDeviceCredentialValue(config->api_key),
-                        config->client_cert_path,
-                        config->client_key_path,
-                        config->ca_path,
-                        config->endpoint_id,
-                        offer->grant.tenant_id,
-                        offer->job_id,
-                        bundle_id,
-                        params.max_bytes,
-                        manifest_sha,
-                        sizeof(manifest_sha)
-                    );
-                }
+                bool success = Forensics_RunCollection(
+                    params.profile,
+                    config->hub_url,
+                    config->api_key,
+                    IsDeviceCredentialValue(config->api_key),
+                    config->client_cert_path,
+                    config->client_key_path,
+                    config->ca_path,
+                    config->endpoint_id,
+                    offer->grant.tenant_id,
+                    offer->job_id,
+                    bundle_id,
+                    params.max_bytes,
+                    manifest_sha,
+                    sizeof(manifest_sha)
+                );
 
                 if (pipefd[1] >= 0) {
                     if (manifest_sha[0]) {

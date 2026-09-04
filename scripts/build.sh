@@ -24,7 +24,7 @@ x86_64-w64-mingw32-gcc \
   "$ROOT_DIR/agent/windows/wfp_user.c" \
   -o "$BUILD_DIR/ominulld.exe" \
   -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \
-  -lfwpuclnt -lole32
+  -lfwpuclnt -lole32 -lpsapi -lwtsapi32
 file "$BUILD_DIR/ominulld.exe"
 
 x86_64-w64-mingw32-gcc \

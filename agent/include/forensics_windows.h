@@ -27,6 +27,9 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <bcrypt.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <wtsapi32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -242,6 +245,46 @@ static inline bool Forensics_GetOrCreateEndpointKeyWin(
     }
 
     return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Safe JSON String Escaping Helper
+ * ------------------------------------------------------------------------- */
+
+static inline void Forensics_EscapeJsonWin(const char* src, char* dst, size_t dst_cap) {
+    if (!dst || dst_cap == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    size_t out = 0;
+    for (size_t in = 0; src[in] != '\0' && out + 2 < dst_cap; in++) {
+        unsigned char c = (unsigned char)src[in];
+        if (c == '"') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = '"';
+        } else if (c == '\\') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = '\\';
+        } else if (c == '\b') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'b';
+        } else if (c == '\f') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'f';
+        } else if (c == '\n') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'n';
+        } else if (c == '\r') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'r';
+        } else if (c == '\t') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 't';
+        } else if (c < 0x20) {
+            dst[out++] = ' ';
+        } else {
+            dst[out++] = (char)c;
+        }
+    }
+    dst[out] = '\0';
 }
 
 /* ---------------------------------------------------------------------------
@@ -891,22 +934,660 @@ static inline bool Forensics_CollectAgentDiagWin(const AGENT_CONFIG* config, For
 }
 
 /* ---------------------------------------------------------------------------
- * High-Level Diagnostic Profile Collection Routine
+ * Artifact Collectors (Windows Live Volatile Profile)
  * ------------------------------------------------------------------------- */
 
-static inline bool Forensics_RunDiagnosticCollectionWin(
+// 1. Process Snapshot
+static inline bool Forensics_CollectProcessSnapshotWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "process_snapshot.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED) item->status = COLLECTOR_STATUS_PERMISSION_DENIED;
+        else item->status = COLLECTOR_STATUS_FAILED;
+        return false;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) {
+        CloseHandle(hSnap);
+        item->status = COLLECTOR_STATUS_FAILED;
+        return false;
+    }
+
+    int off = snprintf(buf, cap, "{\n  \"processes\": [\n");
+    const char* sep = "";
+    int total_procs = 0;
+    bool truncated = false;
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(pe);
+    if (Process32First(hSnap, &pe)) {
+        do {
+            char exe_path[MAX_PATH] = {0};
+            unsigned long long working_set = 0;
+
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (hProc) {
+                DWORD pLen = sizeof(exe_path);
+                if (!QueryFullProcessImageNameA(hProc, 0, exe_path, &pLen)) {
+                    exe_path[0] = '\0';
+                }
+                PROCESS_MEMORY_COUNTERS pmc;
+                memset(&pmc, 0, sizeof(pmc));
+                pmc.cb = sizeof(pmc);
+                if (GetProcessMemoryInfo(hProc, &pmc, sizeof(pmc))) {
+                    working_set = (unsigned long long)pmc.WorkingSetSize;
+                }
+                CloseHandle(hProc);
+            }
+
+            char esc_name[MAX_PATH * 2], esc_exe[MAX_PATH * 2];
+            Forensics_EscapeJsonWin(pe.szExeFile, esc_name, sizeof(esc_name));
+            Forensics_EscapeJsonWin(exe_path, esc_exe, sizeof(esc_exe));
+
+            char entry[2048];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"pid\": %lu,\n"
+                "      \"ppid\": %lu,\n"
+                "      \"name\": \"%s\",\n"
+                "      \"exe\": \"%s\",\n"
+                "      \"threads\": %lu,\n"
+                "      \"working_set_bytes\": %llu\n"
+                "    }",
+                sep, (unsigned long)pe.th32ProcessID, (unsigned long)pe.th32ParentProcessID,
+                esc_name, esc_exe, (unsigned long)pe.cntThreads, working_set
+            );
+
+            if ((size_t)(off + elen + 256) >= cap) {
+                size_t new_cap = cap * 2;
+                if (new_cap > max_bytes) new_cap = max_bytes;
+                if ((size_t)(off + elen + 256) >= new_cap) {
+                    truncated = true;
+                    break;
+                }
+                char* grown = (char*)realloc(buf, new_cap);
+                if (!grown) {
+                    truncated = true;
+                    break;
+                }
+                buf = grown;
+                cap = new_cap;
+            }
+
+            memcpy(buf + off, entry, elen);
+            off += elen;
+            buf[off] = '\0';
+            sep = ",\n";
+            total_procs++;
+        } while (Process32Next(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_processes\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_procs, truncated ? "true" : "false"
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = truncated ? COLLECTOR_STATUS_TRUNCATED : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 2. Socket to Process Mapping
+static inline const char* Forensics_TcpStateToStringWin(DWORD state) {
+    switch (state) {
+        case MIB_TCP_STATE_CLOSED: return "CLOSED";
+        case MIB_TCP_STATE_LISTEN: return "LISTEN";
+        case MIB_TCP_STATE_SYN_SENT: return "SYN_SENT";
+        case MIB_TCP_STATE_SYN_RCVD: return "SYN_RCVD";
+        case MIB_TCP_STATE_ESTAB: return "ESTABLISHED";
+        case MIB_TCP_STATE_FIN_WAIT1: return "FIN_WAIT1";
+        case MIB_TCP_STATE_FIN_WAIT2: return "FIN_WAIT2";
+        case MIB_TCP_STATE_CLOSE_WAIT: return "CLOSE_WAIT";
+        case MIB_TCP_STATE_CLOSING: return "CLOSING";
+        case MIB_TCP_STATE_LAST_ACK: return "LAST_ACK";
+        case MIB_TCP_STATE_TIME_WAIT: return "TIME_WAIT";
+        case MIB_TCP_STATE_DELETE_TCB: return "DELETE_TCB";
+        default: return "UNKNOWN";
+    }
+}
+
+static inline bool Forensics_CollectSocketToProcessWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "socket_to_process.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"sockets\": [\n");
+    const char* sep = "";
+    int total_sockets = 0;
+    bool truncated = false;
+
+    // 1. TCP Table (IPv4)
+    DWORD tcpSize = 0;
+    GetExtendedTcpTable(NULL, &tcpSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    if (tcpSize > 0) {
+        PMIB_TCPTABLE_OWNER_PID tcpTable = (PMIB_TCPTABLE_OWNER_PID)malloc(tcpSize);
+        if (tcpTable) {
+            if (GetExtendedTcpTable(tcpTable, &tcpSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+                for (DWORD i = 0; i < tcpTable->dwNumEntries; i++) {
+                    MIB_TCPROW_OWNER_PID* r = &tcpTable->table[i];
+                    struct in_addr lia, ria;
+                    lia.s_addr = r->dwLocalAddr;
+                    ria.s_addr = r->dwRemoteAddr;
+
+                    char laddr[32], raddr[32];
+                    strncpy(laddr, inet_ntoa(lia), sizeof(laddr) - 1);
+                    laddr[sizeof(laddr) - 1] = '\0';
+                    strncpy(raddr, inet_ntoa(ria), sizeof(raddr) - 1);
+                    raddr[sizeof(raddr) - 1] = '\0';
+
+                    char entry[512];
+                    int elen = snprintf(entry, sizeof(entry),
+                        "%s    {\n"
+                        "      \"protocol\": \"tcp4\",\n"
+                        "      \"local_address\": \"%s\",\n"
+                        "      \"local_port\": %u,\n"
+                        "      \"remote_address\": \"%s\",\n"
+                        "      \"remote_port\": %u,\n"
+                        "      \"state\": \"%s\",\n"
+                        "      \"pid\": %lu\n"
+                        "    }",
+                        sep, laddr, (unsigned int)ntohs((u_short)r->dwLocalPort),
+                        raddr, (unsigned int)ntohs((u_short)r->dwRemotePort),
+                        Forensics_TcpStateToStringWin(r->dwState),
+                        (unsigned long)r->dwOwningPid
+                    );
+
+                    if ((size_t)(off + elen + 256) >= cap) {
+                        size_t new_cap = cap * 2;
+                        if (new_cap > max_bytes) new_cap = max_bytes;
+                        if ((size_t)(off + elen + 256) >= new_cap) {
+                            truncated = true;
+                            break;
+                        }
+                        char* grown = (char*)realloc(buf, new_cap);
+                        if (!grown) {
+                            truncated = true;
+                            break;
+                        }
+                        buf = grown;
+                        cap = new_cap;
+                    }
+
+                    memcpy(buf + off, entry, elen);
+                    off += elen;
+                    buf[off] = '\0';
+                    sep = ",\n";
+                    total_sockets++;
+                }
+            }
+            free(tcpTable);
+        }
+    }
+
+    // 2. UDP Table (IPv4)
+    if (!truncated) {
+        DWORD udpSize = 0;
+        GetExtendedUdpTable(NULL, &udpSize, TRUE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+        if (udpSize > 0) {
+            PMIB_UDPTABLE_OWNER_PID udpTable = (PMIB_UDPTABLE_OWNER_PID)malloc(udpSize);
+            if (udpTable) {
+                if (GetExtendedUdpTable(udpTable, &udpSize, TRUE, AF_INET, UDP_TABLE_OWNER_PID, 0) == NO_ERROR) {
+                    for (DWORD i = 0; i < udpTable->dwNumEntries; i++) {
+                        MIB_UDPROW_OWNER_PID* r = &udpTable->table[i];
+                        struct in_addr lia;
+                        lia.s_addr = r->dwLocalAddr;
+
+                        char laddr[32];
+                        strncpy(laddr, inet_ntoa(lia), sizeof(laddr) - 1);
+                        laddr[sizeof(laddr) - 1] = '\0';
+
+                        char entry[512];
+                        int elen = snprintf(entry, sizeof(entry),
+                            "%s    {\n"
+                            "      \"protocol\": \"udp4\",\n"
+                            "      \"local_address\": \"%s\",\n"
+                            "      \"local_port\": %u,\n"
+                            "      \"remote_address\": \"0.0.0.0\",\n"
+                            "      \"remote_port\": 0,\n"
+                            "      \"state\": \"LISTEN\",\n"
+                            "      \"pid\": %lu\n"
+                            "    }",
+                            sep, laddr, (unsigned int)ntohs((u_short)r->dwLocalPort),
+                            (unsigned long)r->dwOwningPid
+                        );
+
+                        if ((size_t)(off + elen + 256) >= cap) {
+                            size_t new_cap = cap * 2;
+                            if (new_cap > max_bytes) new_cap = max_bytes;
+                            if ((size_t)(off + elen + 256) >= new_cap) {
+                                truncated = true;
+                                break;
+                            }
+                            char* grown = (char*)realloc(buf, new_cap);
+                            if (!grown) {
+                                truncated = true;
+                                break;
+                            }
+                            buf = grown;
+                            cap = new_cap;
+                        }
+
+                        memcpy(buf + off, entry, elen);
+                        off += elen;
+                        buf[off] = '\0';
+                        sep = ",\n";
+                        total_sockets++;
+                    }
+                }
+                free(udpTable);
+            }
+        }
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_sockets\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_sockets, truncated ? "true" : "false"
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = truncated ? COLLECTOR_STATUS_TRUNCATED : (total_sockets == 0 ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED);
+    return true;
+}
+
+// 3. Logged-in Sessions
+static inline bool Forensics_CollectLoggedInSessionsWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "logged_in_sessions.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 8192;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"sessions\": [\n");
+    const char* sep = "";
+    int total_sessions = 0;
+
+    PWTS_SESSION_INFOA pSessions = NULL;
+    DWORD count = 0;
+    if (WTSEnumerateSessionsA(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessions, &count) && pSessions) {
+        for (DWORD i = 0; i < count; i++) {
+            LPSTR userName = NULL;
+            DWORD uBytes = 0;
+            WTSQuerySessionInformationA(WTS_CURRENT_SERVER_HANDLE, pSessions[i].SessionId, WTSUserName, &userName, &uBytes);
+
+            LPSTR domainName = NULL;
+            DWORD dBytes = 0;
+            WTSQuerySessionInformationA(WTS_CURRENT_SERVER_HANDLE, pSessions[i].SessionId, WTSDomainName, &domainName, &dBytes);
+
+            const char* stateStr = "Unknown";
+            switch (pSessions[i].State) {
+                case WTSActive: stateStr = "Active"; break;
+                case WTSConnected: stateStr = "Connected"; break;
+                case WTSConnectQuery: stateStr = "ConnectQuery"; break;
+                case WTSShadow: stateStr = "Shadow"; break;
+                case WTSDisconnected: stateStr = "Disconnected"; break;
+                case WTSIdle: stateStr = "Idle"; break;
+                case WTSListen: stateStr = "Listen"; break;
+                case WTSReset: stateStr = "Reset"; break;
+                case WTSDown: stateStr = "Down"; break;
+                case WTSInit: stateStr = "Init"; break;
+            }
+
+            char esc_user[128], esc_dom[128], esc_win[128];
+            Forensics_EscapeJsonWin(userName ? userName : "", esc_user, sizeof(esc_user));
+            Forensics_EscapeJsonWin(domainName ? domainName : "", esc_dom, sizeof(esc_dom));
+            Forensics_EscapeJsonWin(pSessions[i].pWinStationName ? pSessions[i].pWinStationName : "", esc_win, sizeof(esc_win));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"session_id\": %lu,\n"
+                "      \"station_name\": \"%s\",\n"
+                "      \"state\": \"%s\",\n"
+                "      \"user\": \"%s\",\n"
+                "      \"domain\": \"%s\"\n"
+                "    }",
+                sep, (unsigned long)pSessions[i].SessionId,
+                esc_win, stateStr, esc_user, esc_dom
+            );
+
+            if (userName) WTSFreeMemory(userName);
+            if (domainName) WTSFreeMemory(domainName);
+
+            if ((size_t)(off + elen + 128) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_sessions++;
+            }
+        }
+        WTSFreeMemory(pSessions);
+    }
+
+    if (total_sessions == 0) {
+        char un[256] = {0};
+        DWORD unLen = sizeof(un);
+        if (GetUserNameA(un, &unLen) && un[0]) {
+            char esc_u[256];
+            Forensics_EscapeJsonWin(un, esc_u, sizeof(esc_u));
+            off += snprintf(buf + off, cap - off,
+                "    {\n"
+                "      \"session_id\": 1,\n"
+                "      \"station_name\": \"Console\",\n"
+                "      \"state\": \"Active\",\n"
+                "      \"user\": \"%s\",\n"
+                "      \"domain\": \"LOCAL\"\n"
+                "    }",
+                esc_u
+            );
+            total_sessions = 1;
+        }
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_sessions\": %d\n"
+        "}\n",
+        total_sessions
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = (total_sessions == 0) ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 4. Network Neighbors (ARP Table)
+static inline bool Forensics_CollectNetworkNeighborsWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "network_neighbors.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 16384;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"neighbors\": [\n");
+    const char* sep = "";
+    int total_neigh = 0;
+
+    DWORD size = 0;
+    GetIpNetTable(NULL, &size, FALSE);
+    if (size > 0) {
+        PMIB_IPNETTABLE table = (PMIB_IPNETTABLE)malloc(size);
+        if (table) {
+            if (GetIpNetTable(table, &size, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < table->dwNumEntries; i++) {
+                    MIB_IPNETROW* r = &table->table[i];
+                    struct in_addr ia;
+                    ia.s_addr = r->dwAddr;
+
+                    char ipStr[32];
+                    strncpy(ipStr, inet_ntoa(ia), sizeof(ipStr) - 1);
+                    ipStr[sizeof(ipStr) - 1] = '\0';
+
+                    char macStr[32] = {0};
+                    if (r->dwPhysAddrLen >= 6) {
+                        snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+                            r->bPhysAddr[0], r->bPhysAddr[1], r->bPhysAddr[2],
+                            r->bPhysAddr[3], r->bPhysAddr[4], r->bPhysAddr[5]);
+                    }
+
+                    const char* typeStr = "unknown";
+                    switch (r->dwType) {
+                        case MIB_IPNET_TYPE_DYNAMIC: typeStr = "dynamic"; break;
+                        case MIB_IPNET_TYPE_STATIC: typeStr = "static"; break;
+                        case MIB_IPNET_TYPE_INVALID: typeStr = "invalid"; break;
+                        case MIB_IPNET_TYPE_OTHER: typeStr = "other"; break;
+                    }
+
+                    char entry[512];
+                    int elen = snprintf(entry, sizeof(entry),
+                        "%s    {\n"
+                        "      \"ip\": \"%s\",\n"
+                        "      \"mac\": \"%s\",\n"
+                        "      \"interface_index\": %lu,\n"
+                        "      \"type\": \"%s\",\n"
+                        "      \"state\": \"%s\"\n"
+                        "    }",
+                        sep, ipStr, macStr, (unsigned long)r->dwIndex, typeStr,
+                        (r->dwType == MIB_IPNET_TYPE_DYNAMIC || r->dwType == MIB_IPNET_TYPE_STATIC) ? "reachable" : "stale"
+                    );
+
+                    if ((size_t)(off + elen + 128) < cap) {
+                        memcpy(buf + off, entry, elen);
+                        off += elen;
+                        buf[off] = '\0';
+                        sep = ",\n";
+                        total_neigh++;
+                    }
+                }
+            }
+            free(table);
+        }
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_neighbors\": %d\n"
+        "}\n",
+        total_neigh
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = (total_neigh == 0) ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 5. Firewall State
+static inline bool Forensics_CollectFirewallStateWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "firewall_state.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    (void)max_bytes;
+
+    size_t cap = 4096;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    DWORD domEnabled = 1, privEnabled = 1, pubEnabled = 1;
+    DWORD domInbound = 1, privInbound = 1, pubInbound = 1;
+
+    const char* baseKey = "SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy";
+    const char* profiles[] = { "DomainProfile", "StandardProfile", "PublicProfile" };
+    DWORD* enabledPtrs[] = { &domEnabled, &privEnabled, &pubEnabled };
+    DWORD* inboundPtrs[] = { &domInbound, &privInbound, &pubInbound };
+
+    for (int p = 0; p < 3; p++) {
+        char subKey[256];
+        snprintf(subKey, sizeof(subKey), "%s\\%s", baseKey, profiles[p]);
+        HKEY hKey = NULL;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD dwType = 0, dwVal = 0, dwSize = sizeof(dwVal);
+            if (RegQueryValueExA(hKey, "EnableFirewall", NULL, &dwType, (LPBYTE)&dwVal, &dwSize) == ERROR_SUCCESS) {
+                *enabledPtrs[p] = dwVal;
+            }
+            dwSize = sizeof(dwVal);
+            if (RegQueryValueExA(hKey, "DefaultInboundAction", NULL, &dwType, (LPBYTE)&dwVal, &dwSize) == ERROR_SUCCESS) {
+                *inboundPtrs[p] = dwVal;
+            }
+            CloseHandle(hKey);
+        }
+    }
+
+    int len = snprintf(buf, cap,
+        "{\n"
+        "  \"firewall_framework\": \"Windows Defender Firewall\",\n"
+        "  \"profiles\": {\n"
+        "    \"domain\": {\n"
+        "      \"enabled\": %s,\n"
+        "      \"default_inbound\": \"%s\"\n"
+        "    },\n"
+        "    \"private\": {\n"
+        "      \"enabled\": %s,\n"
+        "      \"default_inbound\": \"%s\"\n"
+        "    },\n"
+        "    \"public\": {\n"
+        "      \"enabled\": %s,\n"
+        "      \"default_inbound\": \"%s\"\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+        (domEnabled ? "true" : "false"), (domInbound == 0 ? "allow" : "block"),
+        (privEnabled ? "true" : "false"), (privInbound == 0 ? "allow" : "block"),
+        (pubEnabled ? "true" : "false"), (pubInbound == 0 ? "allow" : "block")
+    );
+
+    if (len < 0) { free(buf); item->status = COLLECTOR_STATUS_FAILED; return false; }
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)len;
+    item->status = COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 6. Loaded Modules (Kernel Device Drivers)
+static inline bool Forensics_CollectLoadedModulesWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "loaded_modules.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"modules\": [\n");
+    const char* sep = "";
+    int total_mods = 0;
+    bool truncated = false;
+
+    LPVOID drivers[1024];
+    DWORD cbNeeded = 0;
+    if (EnumDeviceDrivers(drivers, sizeof(drivers), &cbNeeded)) {
+        DWORD numDrivers = cbNeeded / sizeof(LPVOID);
+        for (DWORD i = 0; i < numDrivers; i++) {
+            char name[MAX_PATH] = {0};
+            char path[MAX_PATH] = {0};
+            GetDeviceDriverBaseNameA(drivers[i], name, sizeof(name));
+            GetDeviceDriverFileNameA(drivers[i], path, sizeof(path));
+
+            char esc_name[MAX_PATH * 2], esc_path[MAX_PATH * 2];
+            Forensics_EscapeJsonWin(name, esc_name, sizeof(esc_name));
+            Forensics_EscapeJsonWin(path, esc_path, sizeof(esc_path));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"base_address\": \"0x%p\",\n"
+                "      \"name\": \"%s\",\n"
+                "      \"path\": \"%s\"\n"
+                "    }",
+                sep, drivers[i], esc_name, esc_path
+            );
+
+            if ((size_t)(off + elen + 256) >= cap) {
+                size_t new_cap = cap * 2;
+                if (new_cap > max_bytes) new_cap = max_bytes;
+                if ((size_t)(off + elen + 256) >= new_cap) {
+                    truncated = true;
+                    break;
+                }
+                char* grown = (char*)realloc(buf, new_cap);
+                if (!grown) {
+                    truncated = true;
+                    break;
+                }
+                buf = grown;
+                cap = new_cap;
+            }
+
+            memcpy(buf + off, entry, elen);
+            off += elen;
+            buf[off] = '\0';
+            sep = ",\n";
+            total_mods++;
+        }
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_modules\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_mods, truncated ? "true" : "false"
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = truncated ? COLLECTOR_STATUS_TRUNCATED : (total_mods == 0 ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED);
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * High-Level Bundle Publishing & Manifest Finalization Routine (Win32)
+ * ------------------------------------------------------------------------- */
+
+static inline bool Forensics_PublishBundleAndFinalizeWin(
     const AGENT_CONFIG* config,
-    const char* payload_json,
+    const char* bundle_id,
+    const char* tenant_id,
     const char* job_id,
+    const char* profile,
+    int64_t max_bytes,
+    ForensicCollectedItemWin* items,
+    int item_count,
     char* out_manifest_sha256,
     size_t sha_cap
 ) {
-    if (!config || !job_id) return false;
-
-    ForensicCollectionParamsWin params;
-    Forensics_ParsePayloadWin(payload_json, &params);
-    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
-    const char* tenant_id = "default";
+    if (!config || !job_id || !bundle_id || !profile) return false;
     const char* endpoint_id = config->endpoint_id;
 
     // 1. Get or create endpoint evidence signing key
@@ -914,24 +1595,11 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
     uint8_t priv_key[64];
     char pub_hex[65];
     if (!Forensics_GetOrCreateEndpointKeyWin(FORENSICS_DEFAULT_KEY_PATH_WIN, pub_key, priv_key, pub_hex, sizeof(pub_hex))) {
+        for (int i = 0; i < item_count; i++) free(items[i].data);
         return false;
     }
 
-    // 2. Initialize collected items table
-    ForensicCollectedItemWin items[8];
-    memset(items, 0, sizeof(items));
-    int item_count = 8;
-
-    Forensics_CollectOSVersionWin(&items[0]);
-    Forensics_CollectInterfacesWin(&items[1]);
-    Forensics_CollectRoutesWin(&items[2]);
-    Forensics_CollectDNSWin(&items[3]);
-    Forensics_CollectResourcesWin(&items[4]);
-    Forensics_CollectServicesWin(&items[5]);
-    Forensics_CollectSystemLogsWin(&items[6]);
-    Forensics_CollectAgentDiagWin(config, &items[7]);
-
-    // 3. Upload each collected item and calculate SHA-256
+    // 2. Upload each collected item and calculate SHA-256
     int64_t total_bytes = 0;
     for (int i = 0; i < item_count; i++) {
         if (!items[i].data) {
@@ -947,7 +1615,7 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
 
         // Enforce max bytes cap
         total_bytes += items[i].size_bytes;
-        if (params.max_bytes > 0 && total_bytes > params.max_bytes) {
+        if (max_bytes > 0 && total_bytes > max_bytes) {
             items[i].status = COLLECTOR_STATUS_TRUNCATED;
         }
 
@@ -972,7 +1640,7 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
         }
     }
 
-    // 4. Encode canonical manifest and sign with Ed25519 key
+    // 3. Encode canonical manifest and sign with Ed25519 key
     time_t now_unix = time(NULL);
     uint8_t canonical_buf[8192];
     size_t canonical_len = Forensics_EncodeManifestCanonicalWin(
@@ -982,7 +1650,7 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
         endpoint_id,
         tenant_id,
         job_id,
-        "diagnostic",
+        profile,
         (int64_t)now_unix,
         items,
         item_count
@@ -1016,7 +1684,7 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
     for (int s = 0; s < 64; s++) snprintf(sig_hex + (s * 2), 3, "%02x", sig_bytes[s]);
     sig_hex[128] = '\0';
 
-    // 5. Build Finalize JSON payload
+    // 4. Build Finalize JSON payload
     char time_str[64];
     struct tm* tm_info = gmtime(&now_unix);
     strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%SZ", tm_info);
@@ -1037,10 +1705,10 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
         "    \"endpoint_id\": \"%s\",\n"
         "    \"tenant_id\": \"%s\",\n"
         "    \"job_id\": \"%s\",\n"
-        "    \"profile\": \"diagnostic\",\n"
+        "    \"profile\": \"%s\",\n"
         "    \"collected_at\": \"%s\",\n"
         "    \"items\": [\n",
-        bundle_id, bundle_id, endpoint_id, tenant_id, job_id, time_str
+        bundle_id, bundle_id, endpoint_id, tenant_id, job_id, profile, time_str
     );
 
     for (int i = 0; i < item_count; i++) {
@@ -1067,7 +1735,7 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
         sig_hex
     );
 
-    // 6. Post Finalize to Hub
+    // 5. Post Finalize to Hub
     char fin_resp[512] = {0};
     bool fin_ok = Hub_PostPathData(
         config,
@@ -1083,6 +1751,96 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
     for (int i = 0; i < item_count; i++) free(items[i].data);
 
     return fin_ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * High-Level Profile Collection Routines (Win32)
+ * ------------------------------------------------------------------------- */
+
+static inline bool Forensics_RunDiagnosticCollectionWin(
+    const AGENT_CONFIG* config,
+    const char* payload_json,
+    const char* job_id,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!config || !job_id) return false;
+
+    ForensicCollectionParamsWin params;
+    Forensics_ParsePayloadWin(payload_json, &params);
+    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* tenant_id = "default";
+
+    ForensicCollectedItemWin items[8];
+    memset(items, 0, sizeof(items));
+    int item_count = 8;
+
+    Forensics_CollectOSVersionWin(&items[0]);
+    Forensics_CollectInterfacesWin(&items[1]);
+    Forensics_CollectRoutesWin(&items[2]);
+    Forensics_CollectDNSWin(&items[3]);
+    Forensics_CollectResourcesWin(&items[4]);
+    Forensics_CollectServicesWin(&items[5]);
+    Forensics_CollectSystemLogsWin(&items[6]);
+    Forensics_CollectAgentDiagWin(config, &items[7]);
+
+    return Forensics_PublishBundleAndFinalizeWin(
+        config, bundle_id, tenant_id, job_id, "diagnostic", params.max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
+
+static inline bool Forensics_RunLiveVolatileCollectionWin(
+    const AGENT_CONFIG* config,
+    const char* payload_json,
+    const char* job_id,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!config || !job_id) return false;
+
+    ForensicCollectionParamsWin params;
+    Forensics_ParsePayloadWin(payload_json, &params);
+    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* tenant_id = "default";
+
+    ForensicCollectedItemWin items[6];
+    memset(items, 0, sizeof(items));
+    int item_count = 6;
+
+    Forensics_CollectProcessSnapshotWin(&items[0], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectSocketToProcessWin(&items[1], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectLoggedInSessionsWin(&items[2], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectNetworkNeighborsWin(&items[3], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectFirewallStateWin(&items[4], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectLoadedModulesWin(&items[5], FORENSICS_MAX_ITEM_BYTES);
+
+    return Forensics_PublishBundleAndFinalizeWin(
+        config, bundle_id, tenant_id, job_id, "live_volatile", params.max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
+
+static inline bool Forensics_RunCollectionWin(
+    const AGENT_CONFIG* config,
+    const char* payload_json,
+    const char* job_id,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!config || !job_id) return false;
+    ForensicCollectionParamsWin params;
+    Forensics_ParsePayloadWin(payload_json, &params);
+
+    if (strcmp(params.profile, "live_volatile") == 0) {
+        return Forensics_RunLiveVolatileCollectionWin(
+            config, payload_json, job_id, out_manifest_sha256, sha_cap
+        );
+    } else {
+        return Forensics_RunDiagnosticCollectionWin(
+            config, payload_json, job_id, out_manifest_sha256, sha_cap
+        );
+    }
 }
 
 #endif /* OMINULL_FORENSICS_WINDOWS_H */

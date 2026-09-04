@@ -167,11 +167,56 @@ static void test_manifest_encoding() {
     expect("verify canonical manifest", Ed25519_Verify(sig, buf, len, pk));
 }
 
+static void test_live_volatile_collectors() {
+    printf("[*] Testing Live Volatile Profile Collectors...\n");
+    char* data = NULL;
+    size_t sz = 0;
+    ForensicCollectorStatus status;
+
+    // 1. Process Snapshot
+    expect("collect process snapshot", Forensics_CollectProcessSnapshot(&data, &sz, &status, 512 * 1024));
+    expect("process snapshot status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_TRUNCATED);
+    expect("process snapshot has json procs", data != NULL && strstr(data, "\"processes\"") != NULL);
+    expect("process snapshot has total_processes", data != NULL && strstr(data, "\"total_processes\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 2. Socket to Process
+    expect("collect socket to process", Forensics_CollectSocketToProcess(&data, &sz, &status, 512 * 1024));
+    expect("socket to process status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY);
+    expect("socket to process has json sockets", data != NULL && strstr(data, "\"sockets\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 3. Logged-in Sessions
+    expect("collect logged in sessions", Forensics_CollectLoggedInSessions(&data, &sz, &status, 512 * 1024));
+    expect("sessions status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY);
+    expect("sessions has json", data != NULL && strstr(data, "\"sessions\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 4. Network Neighbors
+    expect("collect network neighbors", Forensics_CollectNetworkNeighbors(&data, &sz, &status, 512 * 1024));
+    expect("neighbors status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY);
+    expect("neighbors has json", data != NULL && strstr(data, "\"neighbors\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 5. Firewall State
+    expect("collect firewall state", Forensics_CollectFirewallState(&data, &sz, &status, 512 * 1024));
+    expect("firewall status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_UNSUPPORTED);
+    expect("firewall has json", data != NULL && strstr(data, "\"firewall_framework\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 6. Loaded Modules
+    expect("collect loaded modules", Forensics_CollectLoadedModules(&data, &sz, &status, 512 * 1024));
+    expect("modules status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY || status == COLLECTOR_STATUS_UNSUPPORTED);
+    expect("modules has json", data != NULL && strstr(data, "\"modules\"") != NULL);
+    free(data); data = NULL; sz = 0;
+}
+
 int main() {
     printf("=== Starting Linux Forensics C Tests ===\n");
     test_payload_parsing();
     test_key_management();
     test_collectors();
+    test_live_volatile_collectors();
     test_manifest_encoding();
 
     printf("\n=== Results: %d failures ===\n", failures);

@@ -43,6 +43,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <dirent.h>
+#include <utmp.h>
 #include <curl/curl.h>
 
 #include "ed25519_verify.h"
@@ -315,6 +317,117 @@ static inline size_t Forensics_EncodeManifestCanonical(
 
     if (b.overflow) return 0;
     return b.len;
+}
+
+/* ---------------------------------------------------------------------------
+ * Safe String & Command Execution Helpers
+ * ------------------------------------------------------------------------- */
+
+static inline void Forensics_EscapeJson(const char* src, char* dst, size_t dst_cap) {
+    if (!dst || dst_cap == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    size_t out = 0;
+    for (size_t in = 0; src[in] != '\0' && out + 2 < dst_cap; in++) {
+        unsigned char c = (unsigned char)src[in];
+        if (c == '"') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = '"';
+        } else if (c == '\\') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = '\\';
+        } else if (c == '\b') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'b';
+        } else if (c == '\f') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'f';
+        } else if (c == '\n') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'n';
+        } else if (c == '\r') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 'r';
+        } else if (c == '\t') {
+            if (out + 2 >= dst_cap) break;
+            dst[out++] = '\\'; dst[out++] = 't';
+        } else if (c < 0x20) {
+            dst[out++] = ' ';
+        } else {
+            dst[out++] = (char)c;
+        }
+    }
+    dst[out] = '\0';
+}
+
+static inline int Forensics_RunCommandCapture(const char* const argv[], char* buf, size_t cap, size_t* out_len, int timeout_sec) {
+    if (!argv || !argv[0] || !buf || cap == 0) return -1;
+    buf[0] = '\0';
+    if (out_len) *out_len = 0;
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        setpgid(0, 0);
+        for (int fd = 3; fd < 256; fd++) {
+            if (fd != pipefd[1]) close(fd);
+        }
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        close(pipefd[1]);
+
+        clearenv();
+        setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
+        setenv("LC_ALL", "C", 1);
+
+        execv(argv[0], (char* const*)argv);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+    size_t total_read = 0;
+    time_t start_t = time(NULL);
+    while (total_read + 1 < cap) {
+        ssize_t n = read(pipefd[0], buf + total_read, cap - total_read - 1);
+        if (n > 0) {
+            total_read += (size_t)n;
+        } else if (n == 0) {
+            break;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (timeout_sec > 0 && (time(NULL) - start_t) >= timeout_sec) {
+                    kill(-pid, SIGKILL);
+                    break;
+                }
+                usleep(10000);
+            } else {
+                break;
+            }
+        }
+    }
+    buf[total_read] = '\0';
+    if (out_len) *out_len = total_read;
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -757,6 +870,701 @@ static inline bool Forensics_CollectAgentDiagnostics(
 }
 
 /* ---------------------------------------------------------------------------
+ * Artifact Collectors (Linux Live Volatile Profile)
+ * ------------------------------------------------------------------------- */
+
+// 1. Process Snapshot
+static inline bool Forensics_CollectProcessSnapshot(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    DIR* d = opendir("/proc");
+    if (!d) return false;
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { closedir(d); return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"processes\": [\n");
+    const char* sep = "";
+    int total_procs = 0;
+    bool truncated = false;
+
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        int pid = atoi(de->d_name);
+        if (pid <= 0) continue;
+
+        char path[256];
+        snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+        FILE* sf = fopen(path, "r");
+        if (!sf) continue;
+
+        char stat_line[1024];
+        if (!fgets(stat_line, sizeof(stat_line), sf)) {
+            fclose(sf);
+            continue;
+        }
+        fclose(sf);
+
+        // Parse comm between '(' and ')'
+        char* lparen = strchr(stat_line, '(');
+        char* rparen = strrchr(stat_line, ')');
+        if (!lparen || !rparen || rparen <= lparen) continue;
+
+        char comm[64] = {0};
+        size_t c_len = (size_t)(rparen - lparen - 1);
+        if (c_len >= sizeof(comm)) c_len = sizeof(comm) - 1;
+        memcpy(comm, lparen + 1, c_len);
+        comm[c_len] = '\0';
+
+        char state = '?';
+        int ppid = 0;
+        long num_threads = 0;
+        unsigned long long starttime = 0;
+        unsigned long vsize = 0;
+        long rss = 0;
+
+        char* after = rparen + 1;
+        (void)sscanf(after, " %c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %ld %*d %llu %lu %ld",
+            &state, &ppid, &num_threads, &starttime, &vsize, &rss);
+
+        // Read cmdline
+        char cmdline[512] = {0};
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+        int cf = open(path, O_RDONLY);
+        if (cf >= 0) {
+            ssize_t cr = read(cf, cmdline, sizeof(cmdline) - 1);
+            close(cf);
+            if (cr > 0) {
+                for (ssize_t k = 0; k < cr - 1; k++) {
+                    if (cmdline[k] == '\0') cmdline[k] = ' ';
+                }
+                cmdline[cr] = '\0';
+            }
+        }
+
+        // Read UID from /proc/pid/status
+        int uid = -1;
+        snprintf(path, sizeof(path), "/proc/%d/status", pid);
+        FILE* stf = fopen(path, "r");
+        if (stf) {
+            char st_line[256];
+            while (fgets(st_line, sizeof(st_line), stf)) {
+                if (strncmp(st_line, "Uid:", 4) == 0) {
+                    (void)sscanf(st_line + 4, " %d", &uid);
+                    break;
+                }
+            }
+            fclose(stf);
+        }
+
+        // Read exe link
+        char exe_path[256] = {0};
+        snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+        ssize_t er = readlink(path, exe_path, sizeof(exe_path) - 1);
+        if (er > 0) exe_path[er] = '\0';
+
+        char esc_comm[128], esc_cmdline[1024], esc_exe[512];
+        Forensics_EscapeJson(comm, esc_comm, sizeof(esc_comm));
+        Forensics_EscapeJson(cmdline, esc_cmdline, sizeof(esc_cmdline));
+        Forensics_EscapeJson(exe_path, esc_exe, sizeof(esc_exe));
+
+        char entry[2048];
+        int elen = snprintf(entry, sizeof(entry),
+            "%s    {\n"
+            "      \"pid\": %d,\n"
+            "      \"ppid\": %d,\n"
+            "      \"name\": \"%s\",\n"
+            "      \"cmdline\": \"%s\",\n"
+            "      \"exe\": \"%s\",\n"
+            "      \"state\": \"%c\",\n"
+            "      \"uid\": %d,\n"
+            "      \"threads\": %ld,\n"
+            "      \"vsize_bytes\": %lu,\n"
+            "      \"rss_pages\": %ld,\n"
+            "      \"starttime\": %llu\n"
+            "    }",
+            sep, pid, ppid, esc_comm, esc_cmdline, esc_exe, state, uid, num_threads, vsize, rss, starttime
+        );
+
+        if ((size_t)(off + elen + 256) >= cap) {
+            size_t new_cap = cap * 2;
+            if (new_cap > max_bytes) new_cap = max_bytes;
+            if ((size_t)(off + elen + 256) >= new_cap) {
+                truncated = true;
+                break;
+            }
+            char* grown = (char*)realloc(buf, new_cap);
+            if (!grown) {
+                truncated = true;
+                break;
+            }
+            buf = grown;
+            cap = new_cap;
+        }
+
+        memcpy(buf + off, entry, elen);
+        off += elen;
+        buf[off] = '\0';
+        sep = ",\n";
+        total_procs++;
+    }
+    closedir(d);
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_processes\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_procs, truncated ? "true" : "false"
+    );
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = truncated ? COLLECTOR_STATUS_TRUNCATED : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 2. Socket to Process Mapping
+static inline const char* Forensics_LinuxTcpStateToString(unsigned int st) {
+    switch (st) {
+        case 0x01: return "ESTABLISHED";
+        case 0x02: return "SYN_SENT";
+        case 0x03: return "SYN_RECV";
+        case 0x04: return "FIN_WAIT1";
+        case 0x05: return "FIN_WAIT2";
+        case 0x06: return "TIME_WAIT";
+        case 0x07: return "CLOSE";
+        case 0x08: return "CLOSE_WAIT";
+        case 0x09: return "LAST_ACK";
+        case 0x0A: return "LISTEN";
+        case 0x0B: return "CLOSING";
+        default: return "UNKNOWN";
+    }
+}
+
+typedef struct {
+    unsigned long inode;
+    int pid;
+    char comm[32];
+} LinuxSocketInodeMap;
+
+static inline bool Forensics_CollectSocketToProcess(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t map_cap = 2048;
+    LinuxSocketInodeMap* map = (LinuxSocketInodeMap*)calloc(map_cap, sizeof(LinuxSocketInodeMap));
+    size_t map_count = 0;
+
+    DIR* d = opendir("/proc");
+    if (d && map) {
+        struct dirent* de;
+        while ((de = readdir(d)) != NULL && map_count < map_cap) {
+            if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+            int pid = atoi(de->d_name);
+            if (pid <= 0) continue;
+
+            char comm[32] = {0};
+            char cpath[128];
+            snprintf(cpath, sizeof(cpath), "/proc/%d/comm", pid);
+            FILE* cf = fopen(cpath, "r");
+            if (cf) {
+                if (fgets(comm, sizeof(comm), cf)) {
+                    size_t cl = strlen(comm);
+                    while (cl > 0 && (comm[cl - 1] == '\n' || comm[cl - 1] == '\r')) comm[--cl] = '\0';
+                }
+                fclose(cf);
+            }
+
+            char fdpath[128];
+            snprintf(fdpath, sizeof(fdpath), "/proc/%d/fd", pid);
+            DIR* fdd = opendir(fdpath);
+            if (!fdd) continue;
+
+            struct dirent* fde;
+            while ((fde = readdir(fdd)) != NULL && map_count < map_cap) {
+                if (fde->d_name[0] == '.') continue;
+                char linkpath[512];
+                snprintf(linkpath, sizeof(linkpath), "%s/%s", fdpath, fde->d_name);
+                char target[128];
+                ssize_t r = readlink(linkpath, target, sizeof(target) - 1);
+                if (r > 0) {
+                    target[r] = '\0';
+                    if (strncmp(target, "socket:[", 8) == 0) {
+                        unsigned long ino = strtoul(target + 8, NULL, 10);
+                        if (ino > 0) {
+                            map[map_count].inode = ino;
+                            size_t c_copy = strlen(comm);
+                            if (c_copy >= sizeof(map[map_count].comm)) c_copy = sizeof(map[map_count].comm) - 1;
+                            memcpy(map[map_count].comm, comm, c_copy);
+                            map[map_count].comm[c_copy] = '\0';
+                            map_count++;
+                        }
+                    }
+                }
+            }
+            closedir(fdd);
+        }
+        closedir(d);
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) {
+        if (map) free(map);
+        return false;
+    }
+
+    int off = snprintf(buf, cap, "{\n  \"sockets\": [\n");
+    const char* sep = "";
+    int total_sockets = 0;
+    bool truncated = false;
+
+    const char* net_files[] = { "/proc/net/tcp", "/proc/net/udp", "/proc/net/tcp6", "/proc/net/udp6", NULL };
+    for (int nf = 0; net_files[nf] && !truncated; nf++) {
+        FILE* fp = fopen(net_files[nf], "r");
+        if (!fp) continue;
+
+        const char* proto = strstr(net_files[nf], "tcp6") ? "tcp6" :
+                           (strstr(net_files[nf], "udp6") ? "udp6" :
+                           (strstr(net_files[nf], "tcp") ? "tcp" : "udp"));
+        bool is_v6 = (strstr(net_files[nf], "6") != NULL);
+
+        char line[512];
+        if (!fgets(line, sizeof(line), fp)) { fclose(fp); continue; } // skip header
+
+        while (fgets(line, sizeof(line), fp)) {
+            unsigned int l_ip = 0, l_port = 0, r_ip = 0, r_port = 0, st = 0;
+            unsigned long inode = 0;
+
+            if (!is_v6) {
+                if (sscanf(line, "%*d: %x:%x %x:%x %x %*x:%*x %*x:%*x %*x %*d %*d %lu",
+                    &l_ip, &l_port, &r_ip, &r_port, &st, &inode) != 6) continue;
+            } else {
+                char lip6[64] = {0}, rip6[64] = {0};
+                if (sscanf(line, "%*d: %32s:%x %32s:%x %x %*x:%*x %*x:%*x %*x %*d %*d %lu",
+                    lip6, &l_port, rip6, &r_port, &st, &inode) != 6) continue;
+            }
+
+            char local_addr[64], remote_addr[64];
+            if (!is_v6) {
+                struct in_addr lia, ria;
+                lia.s_addr = l_ip;
+                ria.s_addr = r_ip;
+                inet_ntop(AF_INET, &lia, local_addr, sizeof(local_addr));
+                inet_ntop(AF_INET, &ria, remote_addr, sizeof(remote_addr));
+            } else {
+                strncpy(local_addr, "::", sizeof(local_addr));
+                strncpy(remote_addr, "::", sizeof(remote_addr));
+            }
+
+            int proc_pid = 0;
+            const char* proc_comm = "";
+            if (map) {
+                for (size_t m = 0; m < map_count; m++) {
+                    if (map[m].inode == inode) {
+                        proc_pid = map[m].pid;
+                        proc_comm = map[m].comm;
+                        break;
+                    }
+                }
+            }
+
+            char esc_comm[64];
+            Forensics_EscapeJson(proc_comm, esc_comm, sizeof(esc_comm));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"protocol\": \"%s\",\n"
+                "      \"local_address\": \"%s\",\n"
+                "      \"local_port\": %u,\n"
+                "      \"remote_address\": \"%s\",\n"
+                "      \"remote_port\": %u,\n"
+                "      \"state\": \"%s\",\n"
+                "      \"inode\": %lu,\n"
+                "      \"pid\": %d,\n"
+                "      \"process\": \"%s\"\n"
+                "    }",
+                sep, proto, local_addr, l_port, remote_addr, r_port,
+                (strncmp(proto, "tcp", 3) == 0 ? Forensics_LinuxTcpStateToString(st) : (r_port == 0 ? "LISTEN" : "ESTABLISHED")),
+                inode, proc_pid, esc_comm
+            );
+
+            if ((size_t)(off + elen + 256) >= cap) {
+                size_t new_cap = cap * 2;
+                if (new_cap > max_bytes) new_cap = max_bytes;
+                if ((size_t)(off + elen + 256) >= new_cap) {
+                    truncated = true;
+                    break;
+                }
+                char* grown = (char*)realloc(buf, new_cap);
+                if (!grown) {
+                    truncated = true;
+                    break;
+                }
+                buf = grown;
+                cap = new_cap;
+            }
+
+            memcpy(buf + off, entry, elen);
+            off += elen;
+            buf[off] = '\0';
+            sep = ",\n";
+            total_sockets++;
+        }
+        fclose(fp);
+    }
+
+    if (map) free(map);
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_sockets\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_sockets, truncated ? "true" : "false"
+    );
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = truncated ? COLLECTOR_STATUS_TRUNCATED : (total_sockets == 0 ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED);
+    return true;
+}
+
+// 3. Logged-in Sessions
+static inline bool Forensics_CollectLoggedInSessions(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 8192;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return false;
+
+    int off = snprintf(buf, cap, "{\n  \"sessions\": [\n");
+    const char* sep = "";
+    int total_sessions = 0;
+
+    setutent();
+    struct utmp* u;
+    while ((u = getutent()) != NULL) {
+        if (u->ut_type == USER_PROCESS) {
+            char esc_user[128], esc_line[128], esc_host[256];
+            Forensics_EscapeJson(u->ut_user, esc_user, sizeof(esc_user));
+            Forensics_EscapeJson(u->ut_line, esc_line, sizeof(esc_line));
+            Forensics_EscapeJson(u->ut_host, esc_host, sizeof(esc_host));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"user\": \"%s\",\n"
+                "      \"line\": \"%s\",\n"
+                "      \"host\": \"%s\",\n"
+                "      \"login_time\": %ld,\n"
+                "      \"pid\": %d\n"
+                "    }",
+                sep, esc_user, esc_line, esc_host, (long)u->ut_tv.tv_sec, (int)u->ut_pid
+            );
+
+            if ((size_t)(off + elen + 128) >= cap) {
+                if (cap * 2 <= max_bytes) {
+                    char* grown = (char*)realloc(buf, cap * 2);
+                    if (grown) { buf = grown; cap *= 2; }
+                }
+            }
+
+            if ((size_t)(off + elen + 128) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_sessions++;
+            }
+        }
+    }
+    endutent();
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_sessions\": %d\n"
+        "}\n",
+        total_sessions
+    );
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = (total_sessions == 0) ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 4. Network Neighbors (ARP Table)
+static inline bool Forensics_CollectNetworkNeighbors(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    FILE* fp = fopen("/proc/net/arp", "r");
+    if (!fp) {
+        *status = COLLECTOR_STATUS_UNSUPPORTED;
+        return false;
+    }
+
+    size_t cap = 16384;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { fclose(fp); return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"neighbors\": [\n");
+    const char* sep = "";
+    int total_neigh = 0;
+
+    char line[256];
+    if (!fgets(line, sizeof(line), fp)) { // skip header
+        fclose(fp);
+        free(buf);
+        *status = COLLECTOR_STATUS_EMPTY;
+        return false;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        char ip[64], hw_type[16], flags[16], mac[32], mask[16], dev[32];
+        if (sscanf(line, "%63s %15s %15s %31s %15s %31s", ip, hw_type, flags, mac, mask, dev) == 6) {
+            const char* state_str = "stale";
+            if (strcmp(flags, "0x2") == 0) state_str = "reachable";
+            else if (strcmp(flags, "0x0") == 0) state_str = "incomplete";
+
+            char esc_dev[64];
+            Forensics_EscapeJson(dev, esc_dev, sizeof(esc_dev));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"ip\": \"%s\",\n"
+                "      \"mac\": \"%s\",\n"
+                "      \"interface\": \"%s\",\n"
+                "      \"flags\": \"%s\",\n"
+                "      \"state\": \"%s\"\n"
+                "    }",
+                sep, ip, mac, esc_dev, flags, state_str
+            );
+
+            if ((size_t)(off + elen + 128) >= cap) {
+                if (cap * 2 <= max_bytes) {
+                    char* grown = (char*)realloc(buf, cap * 2);
+                    if (grown) { buf = grown; cap *= 2; }
+                }
+            }
+
+            if ((size_t)(off + elen + 128) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_neigh++;
+            }
+        }
+    }
+    fclose(fp);
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_neighbors\": %d\n"
+        "}\n",
+        total_neigh
+    );
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = (total_neigh == 0) ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 5. Firewall State
+static inline bool Forensics_CollectFirewallState(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    char tables[256] = {0};
+    FILE* tf = fopen("/proc/net/ip_tables_names", "r");
+    if (tf) {
+        char tline[64];
+        while (fgets(tline, sizeof(tline), tf)) {
+            size_t tl = strlen(tline);
+            while (tl > 0 && (tline[tl - 1] == '\n' || tline[tl - 1] == '\r')) tline[--tl] = '\0';
+            if (tl > 0) {
+                if (tables[0]) strncat(tables, ", ", sizeof(tables) - strlen(tables) - 1);
+                strncat(tables, "\"", sizeof(tables) - strlen(tables) - 1);
+                strncat(tables, tline, sizeof(tables) - strlen(tables) - 1);
+                strncat(tables, "\"", sizeof(tables) - strlen(tables) - 1);
+            }
+        }
+        fclose(tf);
+    }
+
+    const char* iptables_bin = (access("/sbin/iptables-save", X_OK) == 0) ? "/sbin/iptables-save" :
+                               (access("/usr/sbin/iptables-save", X_OK) == 0 ? "/usr/sbin/iptables-save" : NULL);
+    const char* ip6tables_bin = (access("/sbin/ip6tables-save", X_OK) == 0) ? "/sbin/ip6tables-save" :
+                                (access("/usr/sbin/ip6tables-save", X_OK) == 0 ? "/usr/sbin/ip6tables-save" : NULL);
+
+    size_t cap = 65536;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return false;
+
+    char v4_out[32768] = {0};
+    size_t v4_len = 0;
+    if (iptables_bin) {
+        const char* const v4_cmd[] = { iptables_bin, "-c", NULL };
+        Forensics_RunCommandCapture(v4_cmd, v4_out, sizeof(v4_out), &v4_len, 5);
+    }
+
+    char v6_out[32768] = {0};
+    size_t v6_len = 0;
+    if (ip6tables_bin) {
+        const char* const v6_cmd[] = { ip6tables_bin, "-c", NULL };
+        Forensics_RunCommandCapture(v6_cmd, v6_out, sizeof(v6_out), &v6_len, 5);
+    }
+
+    bool has_ominull_chains = (strstr(v4_out, "OMINULL") != NULL || strstr(v6_out, "OMINULL") != NULL);
+
+    char* esc_v4 = (char*)malloc(v4_len * 2 + 16);
+    char* esc_v6 = (char*)malloc(v6_len * 2 + 16);
+    if (esc_v4) Forensics_EscapeJson(v4_out, esc_v4, v4_len * 2 + 16);
+    if (esc_v6) Forensics_EscapeJson(v6_out, esc_v6, v6_len * 2 + 16);
+
+    int len = snprintf(buf, cap,
+        "{\n"
+        "  \"firewall_framework\": \"%s\",\n"
+        "  \"tables\": [%s],\n"
+        "  \"has_ominull_chains\": %s,\n"
+        "  \"ipv4_rules_bytes\": %zu,\n"
+        "  \"ipv6_rules_bytes\": %zu,\n"
+        "  \"ipv4_rules\": \"%s\",\n"
+        "  \"ipv6_rules\": \"%s\"\n"
+        "}\n",
+        (iptables_bin ? "iptables" : "none"),
+        tables[0] ? tables : "\"filter\"",
+        has_ominull_chains ? "true" : "false",
+        v4_len,
+        v6_len,
+        esc_v4 ? esc_v4 : "",
+        esc_v6 ? esc_v6 : ""
+    );
+
+    if (esc_v4) free(esc_v4);
+    if (esc_v6) free(esc_v6);
+
+    if (len < 0) { free(buf); return false; }
+    *out_data = buf;
+    *out_size = (size_t)len;
+
+    if (!iptables_bin && !ip6tables_bin && !tables[0]) {
+        *status = COLLECTOR_STATUS_UNSUPPORTED;
+    } else {
+        *status = COLLECTOR_STATUS_COLLECTED;
+    }
+    return true;
+}
+
+// 6. Loaded Kernel Modules
+static inline bool Forensics_CollectLoadedModules(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    FILE* fp = fopen("/proc/modules", "r");
+    if (!fp) {
+        if (errno == ENOENT) *status = COLLECTOR_STATUS_UNSUPPORTED;
+        else if (errno == EACCES) *status = COLLECTOR_STATUS_PERMISSION_DENIED;
+        else *status = COLLECTOR_STATUS_FAILED;
+        return false;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { fclose(fp); return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"modules\": [\n");
+    const char* sep = "";
+    int total_mods = 0;
+    bool truncated = false;
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        char mod_name[64], state[32];
+        unsigned long size_bytes = 0;
+        unsigned int ref_count = 0;
+        char deps[128] = {0};
+
+        if (sscanf(line, "%63s %lu %u %127s %31s", mod_name, &size_bytes, &ref_count, deps, state) >= 4) {
+            char esc_name[128], esc_deps[256], esc_state[64];
+            Forensics_EscapeJson(mod_name, esc_name, sizeof(esc_name));
+            Forensics_EscapeJson(deps, esc_deps, sizeof(esc_deps));
+            Forensics_EscapeJson(state, esc_state, sizeof(esc_state));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"name\": \"%s\",\n"
+                "      \"size_bytes\": %lu,\n"
+                "      \"ref_count\": %u,\n"
+                "      \"dependencies\": \"%s\",\n"
+                "      \"state\": \"%s\"\n"
+                "    }",
+                sep, esc_name, size_bytes, ref_count, esc_deps, esc_state
+            );
+
+            if ((size_t)(off + elen + 256) >= cap) {
+                size_t new_cap = cap * 2;
+                if (new_cap > max_bytes) new_cap = max_bytes;
+                if ((size_t)(off + elen + 256) >= new_cap) {
+                    truncated = true;
+                    break;
+                }
+                char* grown = (char*)realloc(buf, new_cap);
+                if (!grown) {
+                    truncated = true;
+                    break;
+                }
+                buf = grown;
+                cap = new_cap;
+            }
+
+            memcpy(buf + off, entry, elen);
+            off += elen;
+            buf[off] = '\0';
+            sep = ",\n";
+            total_mods++;
+        }
+    }
+    fclose(fp);
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_modules\": %d,\n"
+        "  \"truncated\": %s\n"
+        "}\n",
+        total_mods, truncated ? "true" : "false"
+    );
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = truncated ? COLLECTOR_STATUS_TRUNCATED : (total_mods == 0 ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED);
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
  * Forensic Evidence Upload & Finalization Protocol
  * ------------------------------------------------------------------------- */
 
@@ -897,7 +1705,190 @@ static inline bool Forensics_FinalizeBundleHTTP(
 }
 
 /* ---------------------------------------------------------------------------
- * High-Level Diagnostic Profile Collection Routine
+ * High-Level Bundle Publishing & Manifest Finalization Routine
+ * ------------------------------------------------------------------------- */
+
+static inline bool Forensics_PublishBundleAndFinalize(
+    const char* hub_url,
+    const char* api_key_or_cred,
+    bool is_device_credential,
+    const char* client_cert,
+    const char* client_key,
+    const char* ca_path,
+    const char* endpoint_id,
+    const char* tenant_id,
+    const char* job_id,
+    const char* bundle_id,
+    const char* profile,
+    int64_t max_bytes,
+    ForensicCollectedItem* items,
+    int item_count,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!hub_url || !endpoint_id || !tenant_id || !job_id || !bundle_id || !profile) return false;
+
+    // 1. Get or create endpoint evidence signing key
+    uint8_t pub_key[32];
+    uint8_t priv_key[64];
+    char pub_hex[65];
+    if (!Forensics_GetOrCreateEndpointKey(FORENSICS_DEFAULT_KEY_PATH, pub_key, priv_key, pub_hex, sizeof(pub_hex))) {
+        for (int i = 0; i < item_count; i++) free(items[i].data);
+        return false;
+    }
+
+    // 2. Upload each collected item and calculate SHA-256
+    int64_t total_bytes = 0;
+    for (int i = 0; i < item_count; i++) {
+        if (!items[i].data) {
+            items[i].data = (uint8_t*)strdup("");
+            items[i].size_bytes = 0;
+        }
+
+        // Compute SHA-256
+        uint8_t digest[32];
+        Response_SHA256_Sum(items[i].data, items[i].size_bytes, digest);
+        for (int d = 0; d < 32; d++) snprintf(items[i].sha256 + (d * 2), 3, "%02x", digest[d]);
+        items[i].sha256[64] = '\0';
+
+        // Enforce max bytes cap
+        total_bytes += items[i].size_bytes;
+        if (max_bytes > 0 && total_bytes > max_bytes) {
+            items[i].status = COLLECTOR_STATUS_TRUNCATED;
+        }
+
+        // Upload to Hub Evidence Store
+        bool uploaded = Forensics_UploadItemHTTP(
+            hub_url,
+            api_key_or_cred,
+            is_device_credential,
+            client_cert,
+            client_key,
+            ca_path,
+            bundle_id,
+            items[i].name,
+            CollectorStatusToString(items[i].status),
+            items[i].data,
+            items[i].size_bytes
+        );
+
+        if (!uploaded) {
+            items[i].status = COLLECTOR_STATUS_FAILED;
+        }
+    }
+
+    // 3. Encode canonical manifest and sign with Ed25519 key
+    time_t now_unix = time(NULL);
+    uint8_t canonical_buf[8192];
+    size_t canonical_len = Forensics_EncodeManifestCanonical(
+        canonical_buf,
+        sizeof(canonical_buf),
+        bundle_id,
+        endpoint_id,
+        tenant_id,
+        job_id,
+        profile,
+        (int64_t)now_unix,
+        items,
+        item_count
+    );
+
+    if (canonical_len == 0) {
+        for (int i = 0; i < item_count; i++) free(items[i].data);
+        return false;
+    }
+
+    // SHA-256 of canonical bytes
+    uint8_t manifest_hash[32];
+    Response_SHA256_Sum(canonical_buf, canonical_len, manifest_hash);
+    char manifest_hash_hex[65];
+    for (int d = 0; d < 32; d++) snprintf(manifest_hash_hex + (d * 2), 3, "%02x", manifest_hash[d]);
+    manifest_hash_hex[64] = '\0';
+    if (out_manifest_sha256 && sha_cap >= 65) {
+        strncpy(out_manifest_sha256, manifest_hash_hex, sha_cap - 1);
+        out_manifest_sha256[sha_cap - 1] = '\0';
+    }
+
+    // Detached Ed25519 signature
+    uint8_t sig_bytes[64];
+    if (!Ed25519_Sign(sig_bytes, canonical_buf, canonical_len, priv_key)) {
+        for (int i = 0; i < item_count; i++) free(items[i].data);
+        return false;
+    }
+    char sig_hex[129];
+    for (int s = 0; s < 64; s++) snprintf(sig_hex + (s * 2), 3, "%02x", sig_bytes[s]);
+    sig_hex[128] = '\0';
+
+    // 4. Build Finalize JSON payload
+    char time_str[64];
+    struct tm* tm_info = gmtime(&now_unix);
+    strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%SZ", tm_info);
+
+    size_t json_cap = 16384;
+    char* fin_json = (char*)malloc(json_cap);
+    if (!fin_json) {
+        for (int i = 0; i < item_count; i++) free(items[i].data);
+        return false;
+    }
+
+    size_t jlen = 0;
+    jlen += snprintf(fin_json + jlen, json_cap - jlen,
+        "{\n"
+        "  \"bundle_id\": \"%s\",\n"
+        "  \"manifest\": {\n"
+        "    \"bundle_id\": \"%s\",\n"
+        "    \"endpoint_id\": \"%s\",\n"
+        "    \"tenant_id\": \"%s\",\n"
+        "    \"job_id\": \"%s\",\n"
+        "    \"profile\": \"%s\",\n"
+        "    \"collected_at\": \"%s\",\n"
+        "    \"items\": [\n",
+        bundle_id, bundle_id, endpoint_id, tenant_id, job_id, profile, time_str
+    );
+
+    for (int i = 0; i < item_count; i++) {
+        jlen += snprintf(fin_json + jlen, json_cap - jlen,
+            "%s      {\n"
+            "        \"name\": \"%s\",\n"
+            "        \"size_bytes\": %llu,\n"
+            "        \"sha256\": \"%s\",\n"
+            "        \"collector_status\": \"%s\"\n"
+            "      }",
+            (i > 0) ? ",\n" : "",
+            items[i].name,
+            (unsigned long long)items[i].size_bytes,
+            items[i].sha256,
+            CollectorStatusToString(items[i].status)
+        );
+    }
+
+    jlen += snprintf(fin_json + jlen, json_cap - jlen,
+        "\n    ],\n"
+        "    \"signature\": \"%s\"\n"
+        "  }\n"
+        "}\n",
+        sig_hex
+    );
+
+    // 5. Post Finalize to Hub
+    bool fin_ok = Forensics_FinalizeBundleHTTP(
+        hub_url,
+        api_key_or_cred,
+        is_device_credential,
+        client_cert,
+        client_key,
+        ca_path,
+        fin_json
+    );
+
+    free(fin_json);
+    for (int i = 0; i < item_count; i++) free(items[i].data);
+
+    return fin_ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * High-Level Profile Collection Routines
  * ------------------------------------------------------------------------- */
 
 static inline bool Forensics_RunDiagnosticCollection(
@@ -915,17 +1906,6 @@ static inline bool Forensics_RunDiagnosticCollection(
     char* out_manifest_sha256,
     size_t sha_cap
 ) {
-    if (!hub_url || !endpoint_id || !tenant_id || !job_id || !bundle_id) return false;
-
-    // 1. Get or create endpoint evidence signing key
-    uint8_t pub_key[32];
-    uint8_t priv_key[64];
-    char pub_hex[65];
-    if (!Forensics_GetOrCreateEndpointKey(FORENSICS_DEFAULT_KEY_PATH, pub_key, priv_key, pub_hex, sizeof(pub_hex))) {
-        return false;
-    }
-
-    // 2. Initialize collected items table
     ForensicCollectedItem items[8];
     memset(items, 0, sizeof(items));
     int item_count = 8;
@@ -962,152 +1942,91 @@ static inline bool Forensics_RunDiagnosticCollection(
     strncpy(items[7].content_type, "application/json", sizeof(items[7].content_type) - 1);
     Forensics_CollectAgentDiagnostics(endpoint_id, hub_url, (char**)&items[7].data, &items[7].size_bytes, &items[7].status);
 
-    // 3. Upload each collected item and calculate SHA-256
-    int64_t total_bytes = 0;
-    for (int i = 0; i < item_count; i++) {
-        if (!items[i].data) {
-            items[i].data = (uint8_t*)strdup("");
-            items[i].size_bytes = 0;
-        }
+    return Forensics_PublishBundleAndFinalize(
+        hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+        endpoint_id, tenant_id, job_id, bundle_id, "diagnostic", max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
 
-        // Compute SHA-256
-        uint8_t digest[32];
-        Response_SHA256_Sum(items[i].data, items[i].size_bytes, digest);
-        for (int d = 0; d < 32; d++) snprintf(items[i].sha256 + (d * 2), 3, "%02x", digest[d]);
+static inline bool Forensics_RunLiveVolatileCollection(
+    const char* hub_url,
+    const char* api_key_or_cred,
+    bool is_device_credential,
+    const char* client_cert,
+    const char* client_key,
+    const char* ca_path,
+    const char* endpoint_id,
+    const char* tenant_id,
+    const char* job_id,
+    const char* bundle_id,
+    int64_t max_bytes,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    ForensicCollectedItem items[6];
+    memset(items, 0, sizeof(items));
+    int item_count = 6;
 
-        // Enforce max bytes cap
-        total_bytes += items[i].size_bytes;
-        if (max_bytes > 0 && total_bytes > max_bytes) {
-            items[i].status = COLLECTOR_STATUS_TRUNCATED;
-        }
+    strncpy(items[0].name, "process_snapshot.json", sizeof(items[0].name) - 1);
+    strncpy(items[0].content_type, "application/json", sizeof(items[0].content_type) - 1);
+    Forensics_CollectProcessSnapshot((char**)&items[0].data, &items[0].size_bytes, &items[0].status, FORENSICS_MAX_ITEM_BYTES);
 
-        // Upload to Hub Evidence Store
-        bool uploaded = Forensics_UploadItemHTTP(
-            hub_url,
-            api_key_or_cred,
-            is_device_credential,
-            client_cert,
-            client_key,
-            ca_path,
-            bundle_id,
-            items[i].name,
-            CollectorStatusToString(items[i].status),
-            items[i].data,
-            items[i].size_bytes
+    strncpy(items[1].name, "socket_to_process.json", sizeof(items[1].name) - 1);
+    strncpy(items[1].content_type, "application/json", sizeof(items[1].content_type) - 1);
+    Forensics_CollectSocketToProcess((char**)&items[1].data, &items[1].size_bytes, &items[1].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[2].name, "logged_in_sessions.json", sizeof(items[2].name) - 1);
+    strncpy(items[2].content_type, "application/json", sizeof(items[2].content_type) - 1);
+    Forensics_CollectLoggedInSessions((char**)&items[2].data, &items[2].size_bytes, &items[2].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[3].name, "network_neighbors.json", sizeof(items[3].name) - 1);
+    strncpy(items[3].content_type, "application/json", sizeof(items[3].content_type) - 1);
+    Forensics_CollectNetworkNeighbors((char**)&items[3].data, &items[3].size_bytes, &items[3].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[4].name, "firewall_state.json", sizeof(items[4].name) - 1);
+    strncpy(items[4].content_type, "application/json", sizeof(items[4].content_type) - 1);
+    Forensics_CollectFirewallState((char**)&items[4].data, &items[4].size_bytes, &items[4].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[5].name, "loaded_modules.json", sizeof(items[5].name) - 1);
+    strncpy(items[5].content_type, "application/json", sizeof(items[5].content_type) - 1);
+    Forensics_CollectLoadedModules((char**)&items[5].data, &items[5].size_bytes, &items[5].status, FORENSICS_MAX_ITEM_BYTES);
+
+    return Forensics_PublishBundleAndFinalize(
+        hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+        endpoint_id, tenant_id, job_id, bundle_id, "live_volatile", max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
+
+static inline bool Forensics_RunCollection(
+    const char* profile,
+    const char* hub_url,
+    const char* api_key_or_cred,
+    bool is_device_credential,
+    const char* client_cert,
+    const char* client_key,
+    const char* ca_path,
+    const char* endpoint_id,
+    const char* tenant_id,
+    const char* job_id,
+    const char* bundle_id,
+    int64_t max_bytes,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!profile || profile[0] == '\0' || strcmp(profile, "diagnostic") == 0) {
+        return Forensics_RunDiagnosticCollection(
+            hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+            endpoint_id, tenant_id, job_id, bundle_id, max_bytes, out_manifest_sha256, sha_cap
         );
-
-        if (!uploaded) {
-            items[i].status = COLLECTOR_STATUS_FAILED;
-        }
-    }
-
-    // 4. Encode canonical manifest and sign with Ed25519 key
-    time_t now_unix = time(NULL);
-    uint8_t canonical_buf[8192];
-    size_t canonical_len = Forensics_EncodeManifestCanonical(
-        canonical_buf,
-        sizeof(canonical_buf),
-        bundle_id,
-        endpoint_id,
-        tenant_id,
-        job_id,
-        "diagnostic",
-        (int64_t)now_unix,
-        items,
-        item_count
-    );
-
-    if (canonical_len == 0) {
-        for (int i = 0; i < item_count; i++) free(items[i].data);
-        return false;
-    }
-
-    // SHA-256 of canonical bytes
-    uint8_t manifest_hash[32];
-    Response_SHA256_Sum(canonical_buf, canonical_len, manifest_hash);
-    char manifest_hash_hex[65];
-    for (int d = 0; d < 32; d++) snprintf(manifest_hash_hex + (d * 2), 3, "%02x", manifest_hash[d]);
-    if (out_manifest_sha256 && sha_cap >= 65) {
-        strncpy(out_manifest_sha256, manifest_hash_hex, sha_cap - 1);
-        out_manifest_sha256[sha_cap - 1] = '\0';
-    }
-
-    // Detached Ed25519 signature
-    uint8_t sig_bytes[64];
-    if (!Ed25519_Sign(sig_bytes, canonical_buf, canonical_len, priv_key)) {
-        for (int i = 0; i < item_count; i++) free(items[i].data);
-        return false;
-    }
-    char sig_hex[129];
-    for (int s = 0; s < 64; s++) snprintf(sig_hex + (s * 2), 3, "%02x", sig_bytes[s]);
-    sig_hex[128] = '\0';
-
-    // 5. Build Finalize JSON payload
-    char time_str[64];
-    struct tm* tm_info = gmtime(&now_unix);
-    strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%SZ", tm_info);
-
-    size_t json_cap = 16384;
-    char* fin_json = (char*)malloc(json_cap);
-    if (!fin_json) {
-        for (int i = 0; i < item_count; i++) free(items[i].data);
-        return false;
-    }
-
-    size_t jlen = 0;
-    jlen += snprintf(fin_json + jlen, json_cap - jlen,
-        "{\n"
-        "  \"bundle_id\": \"%s\",\n"
-        "  \"manifest\": {\n"
-        "    \"bundle_id\": \"%s\",\n"
-        "    \"endpoint_id\": \"%s\",\n"
-        "    \"tenant_id\": \"%s\",\n"
-        "    \"job_id\": \"%s\",\n"
-        "    \"profile\": \"diagnostic\",\n"
-        "    \"collected_at\": \"%s\",\n"
-        "    \"items\": [\n",
-        bundle_id, bundle_id, endpoint_id, tenant_id, job_id, time_str
-    );
-
-    for (int i = 0; i < item_count; i++) {
-        jlen += snprintf(fin_json + jlen, json_cap - jlen,
-            "%s      {\n"
-            "        \"name\": \"%s\",\n"
-            "        \"size_bytes\": %llu,\n"
-            "        \"sha256\": \"%s\",\n"
-            "        \"collector_status\": \"%s\"\n"
-            "      }",
-            (i > 0) ? ",\n" : "",
-            items[i].name,
-            (unsigned long long)items[i].size_bytes,
-            items[i].sha256,
-            CollectorStatusToString(items[i].status)
+    } else if (strcmp(profile, "live_volatile") == 0) {
+        return Forensics_RunLiveVolatileCollection(
+            hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+            endpoint_id, tenant_id, job_id, bundle_id, max_bytes, out_manifest_sha256, sha_cap
         );
     }
-
-    jlen += snprintf(fin_json + jlen, json_cap - jlen,
-        "\n    ],\n"
-        "    \"signature\": \"%s\"\n"
-        "  }\n"
-        "}\n",
-        sig_hex
-    );
-
-    // 6. Post Finalize to Hub
-    bool fin_ok = Forensics_FinalizeBundleHTTP(
-        hub_url,
-        api_key_or_cred,
-        is_device_credential,
-        client_cert,
-        client_key,
-        ca_path,
-        fin_json
-    );
-
-    free(fin_json);
-    for (int i = 0; i < item_count; i++) free(items[i].data);
-
-    return fin_ok;
+    return false;
 }
 
 #endif /* OMINULL_FORENSICS_LINUX_H */

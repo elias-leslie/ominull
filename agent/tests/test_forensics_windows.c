@@ -233,13 +233,78 @@ static void test_run_diagnostic_collection_e2e(void) {
     expect("manifest sha256 computed (len 64)", strlen(manifest_sha256) == 64);
 }
 
+static void test_live_volatile_collectors_win(void) {
+    printf("[*] Testing Windows Live Volatile Profile Collectors...\n");
+    ForensicCollectedItemWin item;
+
+    // 1. Process Snapshot
+    expect("collect win process snapshot", Forensics_CollectProcessSnapshotWin(&item, 512 * 1024));
+    expect("win process snapshot status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_TRUNCATED);
+    expect("win process snapshot has json", item.data != NULL && strstr((char*)item.data, "\"processes\"") != NULL);
+    free(item.data);
+
+    // 2. Socket to Process
+    expect("collect win sockets", Forensics_CollectSocketToProcessWin(&item, 512 * 1024));
+    expect("win sockets status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win sockets has json", item.data != NULL && strstr((char*)item.data, "\"sockets\"") != NULL);
+    free(item.data);
+
+    // 3. Logged-in Sessions
+    expect("collect win sessions", Forensics_CollectLoggedInSessionsWin(&item, 512 * 1024));
+    expect("win sessions status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win sessions has json", item.data != NULL && strstr((char*)item.data, "\"sessions\"") != NULL);
+    free(item.data);
+
+    // 4. Network Neighbors
+    expect("collect win neighbors", Forensics_CollectNetworkNeighborsWin(&item, 512 * 1024));
+    expect("win neighbors status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win neighbors has json", item.data != NULL && strstr((char*)item.data, "\"neighbors\"") != NULL);
+    free(item.data);
+
+    // 5. Firewall State
+    expect("collect win firewall", Forensics_CollectFirewallStateWin(&item, 512 * 1024));
+    expect("win firewall status collected", item.status == COLLECTOR_STATUS_COLLECTED);
+    expect("win firewall has json", item.data != NULL && strstr((char*)item.data, "\"firewall_framework\"") != NULL);
+    free(item.data);
+
+    // 6. Loaded Modules
+    expect("collect win modules", Forensics_CollectLoadedModulesWin(&item, 512 * 1024));
+    expect("win modules status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win modules has json", item.data != NULL && strstr((char*)item.data, "\"modules\"") != NULL);
+    free(item.data);
+}
+
+static void test_run_live_volatile_collection_e2e(void) {
+    printf("[*] Testing Windows Forensics_RunCollectionWin (live_volatile) E2E...\n");
+
+    AGENT_CONFIG config;
+    ZeroMemory(&config, sizeof(config));
+    strcpy(config.endpoint_id, "win11-volatile-test");
+    strcpy(config.hub_url, "https://10.0.0.58:9443");
+    strcpy(config.api_key, "omd_test_credential");
+
+    s_mock_upload_count = 0;
+    s_mock_finalize_called = false;
+
+    const char* payload = "{\"profile\":\"live_volatile\",\"max_bytes\":5242880,\"timeout_seconds\":60}";
+    char manifest_sha256[65] = {0};
+
+    bool ok = Forensics_RunCollectionWin(&config, payload, "win-job-volatile-01", manifest_sha256, sizeof(manifest_sha256));
+    expect("run live_volatile collection e2e succeeds", ok);
+    expect("uploaded 6 items", s_mock_upload_count == 6);
+    expect("finalize called", s_mock_finalize_called);
+    expect("manifest sha256 computed (len 64)", strlen(manifest_sha256) == 64);
+}
+
 int main(void) {
     printf("=== Starting Windows Forensics C Tests ===\n");
     test_payload_parsing();
     test_key_management();
     test_collectors();
+    test_live_volatile_collectors_win();
     test_manifest_encoding();
     test_run_diagnostic_collection_e2e();
+    test_run_live_volatile_collection_e2e();
 
     printf("\n=== Results: %d failures ===\n", failures);
     return (failures == 0) ? 0 : 1;
