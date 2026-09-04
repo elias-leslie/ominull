@@ -787,10 +787,256 @@ func (c *APIClient) cmdScripts(args []string) error {
 				return
 			}
 			for _, sc := range res.Scripts {
-				fmt.Printf("[%s] %s (v%v, %s) - %s\n", sc["id"], sc["name"], sc["latest_version"], sc["interpreter"], sc["description"])
+				retiredMarker := ""
+				if r, ok := sc["retired"].(bool); ok && r {
+					retiredMarker = " [RETIRED]"
+				}
+				fmt.Printf("[%s] %s (v%v, %s)%s - %s\n", sc["id"], sc["name"], sc["latest_version"], sc["interpreter"], retiredMarker, sc["description"])
 			}
 		})
 		return nil
+
+	case "show":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ominullctl scripts show <id> [--version <v>]")
+		}
+		id := args[1]
+		versionFlag := ""
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--version" && i+1 < len(args) {
+				versionFlag = args[i+1]
+				i++
+			}
+		}
+
+		if versionFlag != "" {
+			path := fmt.Sprintf("/api/v1/scripts?id=%s&version=%s", url.QueryEscape(id), url.QueryEscape(versionFlag))
+			raw, err := c.doRequest(http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			var sv map[string]interface{}
+			_ = json.Unmarshal(raw, &sv)
+			c.printOutput(sv, func() {
+				fmt.Printf("=== Script Version Details ===\n")
+				fmt.Printf("Script ID:        %v\n", sv["script_id"])
+				fmt.Printf("Version:          %v\n", sv["version"])
+				fmt.Printf("Digest (SHA-256): %v\n", sv["digest_sha256"])
+				fmt.Printf("Created At:       %v\n", sv["created_at"])
+				fmt.Printf("Created By:       %v\n", sv["created_by"])
+				fmt.Printf("Parameter Schema: %v\n", sv["parameter_schema_json"])
+				fmt.Printf("--- Source Code ---\n%v\n", sv["source"])
+			})
+			return nil
+		}
+
+		path := fmt.Sprintf("/api/v1/scripts?id=%s", url.QueryEscape(id))
+		raw, err := c.doRequest(http.MethodGet, path, nil)
+		if err != nil {
+			return err
+		}
+		var sc map[string]interface{}
+		_ = json.Unmarshal(raw, &sc)
+		c.printOutput(sc, func() {
+			fmt.Printf("=== Script Details ===\n")
+			fmt.Printf("ID:             %v\n", sc["id"])
+			fmt.Printf("Name:           %v\n", sc["name"])
+			fmt.Printf("Description:    %v\n", sc["description"])
+			fmt.Printf("Interpreter:    %v\n", sc["interpreter"])
+			fmt.Printf("Latest Version: %v\n", sc["latest_version"])
+			fmt.Printf("Retired:        %v\n", sc["retired"])
+			fmt.Printf("Created At:     %v\n", sc["created_at"])
+			fmt.Printf("Updated At:     %v\n", sc["updated_at"])
+			if versions, ok := sc["versions"].([]interface{}); ok && len(versions) > 0 {
+				fmt.Println("--- Versions ---")
+				for _, v := range versions {
+					if vm, ok := v.(map[string]interface{}); ok {
+						fmt.Printf("  v%v (%s): %s by %s\n", vm["version"], vm["created_at"], vm["digest_sha256"], vm["created_by"])
+					}
+				}
+			}
+		})
+		return nil
+
+	case "create":
+		var name, desc, interpreter, sourceFile, schemaFile string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--name":
+				if i+1 < len(args) {
+					name = args[i+1]
+					i++
+				}
+			case "--desc", "--description":
+				if i+1 < len(args) {
+					desc = args[i+1]
+					i++
+				}
+			case "--interpreter":
+				if i+1 < len(args) {
+					interpreter = args[i+1]
+					i++
+				}
+			case "--source-file", "--source":
+				if i+1 < len(args) {
+					sourceFile = args[i+1]
+					i++
+				}
+			case "--schema-file", "--schema":
+				if i+1 < len(args) {
+					schemaFile = args[i+1]
+					i++
+				}
+			}
+		}
+
+		if name == "" || interpreter == "" || sourceFile == "" {
+			return fmt.Errorf("usage: ominullctl scripts create --name <name> --interpreter <interp> [--desc <desc>] --source-file <path|-> [--schema-file <path|->]")
+		}
+
+		var sourceBytes []byte
+		var err error
+		if sourceFile == "-" {
+			sourceBytes, err = io.ReadAll(os.Stdin)
+		} else {
+			sourceBytes, err = os.ReadFile(sourceFile)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read source file: %w", err)
+		}
+
+		var schemaJSON string
+		if schemaFile != "" {
+			var schemaBytes []byte
+			if schemaFile == "-" {
+				schemaBytes, err = io.ReadAll(os.Stdin)
+			} else {
+				schemaBytes, err = os.ReadFile(schemaFile)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read schema file: %w", err)
+			}
+			schemaJSON = string(schemaBytes)
+		}
+
+		payload := map[string]string{
+			"name":                  name,
+			"description":           desc,
+			"interpreter":           interpreter,
+			"source":                string(sourceBytes),
+			"parameter_schema_json": schemaJSON,
+		}
+
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/scripts", payload)
+		if err != nil {
+			return err
+		}
+		var res map[string]interface{}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(res, func() {
+			script, _ := res["script"].(map[string]interface{})
+			version, _ := res["version"].(map[string]interface{})
+			fmt.Printf("[+] Script created successfully\n")
+			if script != nil {
+				fmt.Printf("    ID:          %v\n", script["id"])
+				fmt.Printf("    Name:        %v\n", script["name"])
+				fmt.Printf("    Interpreter: %v\n", script["interpreter"])
+			}
+			if version != nil {
+				fmt.Printf("    Version:     %v\n", version["version"])
+				fmt.Printf("    Digest:      %v\n", version["digest_sha256"])
+			}
+		})
+		return nil
+
+	case "update":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ominullctl scripts update <id> --source-file <path|-> [--schema-file <path|->]")
+		}
+		id := args[1]
+		var sourceFile, schemaFile string
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--source-file", "--source":
+				if i+1 < len(args) {
+					sourceFile = args[i+1]
+					i++
+				}
+			case "--schema-file", "--schema":
+				if i+1 < len(args) {
+					schemaFile = args[i+1]
+					i++
+				}
+			}
+		}
+
+		if sourceFile == "" {
+			return fmt.Errorf("usage: ominullctl scripts update <id> --source-file <path|-> [--schema-file <path|->]")
+		}
+
+		var sourceBytes []byte
+		var err error
+		if sourceFile == "-" {
+			sourceBytes, err = io.ReadAll(os.Stdin)
+		} else {
+			sourceBytes, err = os.ReadFile(sourceFile)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read source file: %w", err)
+		}
+
+		var schemaJSON string
+		if schemaFile != "" {
+			var schemaBytes []byte
+			if schemaFile == "-" {
+				schemaBytes, err = io.ReadAll(os.Stdin)
+			} else {
+				schemaBytes, err = os.ReadFile(schemaFile)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read schema file: %w", err)
+			}
+			schemaJSON = string(schemaBytes)
+		}
+
+		payload := map[string]string{
+			"id":                    id,
+			"source":                string(sourceBytes),
+			"parameter_schema_json": schemaJSON,
+		}
+
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/scripts", payload)
+		if err != nil {
+			return err
+		}
+		var sv map[string]interface{}
+		_ = json.Unmarshal(raw, &sv)
+		c.printOutput(sv, func() {
+			fmt.Printf("[+] Script updated to new version\n")
+			fmt.Printf("    Script ID:   %v\n", sv["script_id"])
+			fmt.Printf("    Version:     %v\n", sv["version"])
+			fmt.Printf("    Digest:      %v\n", sv["digest_sha256"])
+			fmt.Printf("    Created By:  %v\n", sv["created_by"])
+		})
+		return nil
+
+	case "retire":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ominullctl scripts retire <id>")
+		}
+		id := args[1]
+		path := fmt.Sprintf("/api/v1/scripts?id=%s", url.QueryEscape(id))
+		raw, err := c.doRequest(http.MethodDelete, path, nil)
+		if err != nil {
+			return err
+		}
+		var res map[string]interface{}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(res, func() {
+			fmt.Printf("[+] Script %s retired successfully\n", id)
+		})
+		return nil
+
 	default:
 		return fmt.Errorf("usage: ominullctl scripts list|show|create|update|retire")
 	}
@@ -1086,7 +1332,7 @@ Forensics & Response Commands:
   response jobs list|cancel <id>          Inspect and manage durable response jobs
   response-auth status|recovery-token     Inspect Response Authority and issue emergency recovery
   forensics list|show|verify <manifest>   Manage and verify forensic evidence collections
-  scripts list|show|create|retire         Manage versioned immutable script library
+  scripts list|show|create|update|retire  Manage versioned immutable script library
   shell sessions|show|close <id>          List and close active terminal sessions
   software list                           Inspect authoritative endpoint package inventory
   vulnerabilities list|show|sync          Correlate endpoint packages with NVD/KEV feeds

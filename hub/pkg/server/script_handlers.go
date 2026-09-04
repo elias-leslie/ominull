@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -30,10 +31,18 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
 		verStr := r.URL.Query().Get("version")
 		if id != "" && verStr != "" {
-			ver, _ := strconv.Atoi(verStr)
-			sv, err := s.scriptsStore.GetScriptVersion(id, ver)
+			ver, err := strconv.Atoi(verStr)
+			if err != nil || ver <= 0 {
+				writeJSONError(w, http.StatusBadRequest, "invalid version parameter")
+				return
+			}
+			sv, err := s.scriptsStore.GetScriptVersion(tenantID, id, ver)
 			if err != nil {
-				writeJSONError(w, http.StatusNotFound, "script version not found")
+				if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+					writeJSONError(w, http.StatusNotFound, "script version not found")
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, "failed to get script version: "+err.Error())
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -41,9 +50,13 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if id != "" {
-			sc, err := s.scriptsStore.GetScript(id)
+			sc, err := s.scriptsStore.GetScript(tenantID, id)
 			if err != nil {
-				writeJSONError(w, http.StatusNotFound, "script not found")
+				if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+					writeJSONError(w, http.StatusNotFound, "script not found")
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, "failed to get script: "+err.Error())
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -81,11 +94,26 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		operatorID := s.operatorFromRequest(r)
+		if operatorID == "" {
+			operatorID = "operator"
+		}
 
 		if req.ID != "" {
-			// Update version
-			sv, err := s.scriptsStore.UpdateScript(req.ID, req.Source, req.ParameterSchemaJSON, operatorID)
+			// Append new version under tenant control
+			sv, err := s.scriptsStore.UpdateScript(tenantID, req.ID, req.Source, req.ParameterSchemaJSON, operatorID)
 			if err != nil {
+				if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+					writeJSONError(w, http.StatusNotFound, "script not found")
+					return
+				}
+				if errors.Is(err, scripts.ErrScriptRetired) {
+					writeJSONError(w, http.StatusBadRequest, "cannot update retired script")
+					return
+				}
+				if errors.Is(err, scripts.ErrScriptTooLarge) {
+					writeJSONError(w, http.StatusBadRequest, "script source exceeds size limit (64 KiB)")
+					return
+				}
 				writeJSONError(w, http.StatusBadRequest, "failed to update script: "+err.Error())
 				return
 			}
@@ -95,10 +123,18 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Create new
+		// Create new script definition and version 1
 		sc, sv, err := s.scriptsStore.CreateScript(tenantID, req.Name, req.Description, req.Interpreter, req.Source, req.ParameterSchemaJSON, operatorID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to create script: "+err.Error())
+			if errors.Is(err, scripts.ErrInvalidInterpreter) {
+				writeJSONError(w, http.StatusBadRequest, "unsupported interpreter; must be /bin/sh, /bin/bash, powershell.exe, cmd.exe, or pwsh.exe")
+				return
+			}
+			if errors.Is(err, scripts.ErrScriptTooLarge) {
+				writeJSONError(w, http.StatusBadRequest, "script source exceeds size limit (64 KiB)")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "failed to create script: "+err.Error())
 			return
 		}
 		s.audit(r, "SCRIPT_CREATED", sc.ID, fmt.Sprintf("Created script %s (digest: %s)", sc.Name, sv.DigestSHA256))
@@ -108,6 +144,30 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"script":  sc,
 			"version": sv,
+		})
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing script id parameter")
+			return
+		}
+		err := s.scriptsStore.RetireScript(tenantID, id)
+		if err != nil {
+			if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+				writeJSONError(w, http.StatusNotFound, "script not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to retire script: "+err.Error())
+			return
+		}
+		s.audit(r, "SCRIPT_RETIRED", id, fmt.Sprintf("Retired script %s", id))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"retired": true,
+			"id":      id,
 		})
 		return
 	}
@@ -122,6 +182,12 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fail-closed check: static API keys cannot execute scripts; active console session required
+	if r.Header.Get("X-Auth-Method") == "api-key" {
+		writeJSONError(w, http.StatusForbidden, "static API keys cannot execute scripts; an active console response session is required")
+		return
+	}
+
 	tenantID := s.tenantFromRequest(r)
 	if tenantID == "" {
 		tenantID = "default"
@@ -133,9 +199,9 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ScriptID     string                    `json:"script_id"`
-		Version      int                       `json:"version"`
-		EndpointID   string                    `json:"endpoint_id"`
+		ScriptID       string                    `json:"script_id"`
+		Version        int                       `json:"version"`
+		EndpointID     string                    `json:"endpoint_id"`
 		Parameters     map[string]string         `json:"parameters"`
 		TimeoutSeconds int                       `json:"timeout_seconds"`
 		MaxOutputBytes int64                     `json:"max_output_bytes"`
@@ -148,22 +214,82 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sv, err := s.scriptsStore.GetScriptVersion(req.ScriptID, req.Version)
+	if req.ScriptID == "" || req.Version <= 0 || req.EndpointID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing script_id, version, or endpoint_id")
+		return
+	}
+
+	// Retrieve script and verify tenant ownership & non-retired status
+	sc, err := s.scriptsStore.GetScript(tenantID, req.ScriptID)
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "script version not found")
+		if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+			writeJSONError(w, http.StatusNotFound, "script not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to query script: "+err.Error())
+		return
+	}
+	if sc.Retired {
+		writeJSONError(w, http.StatusBadRequest, "cannot execute retired script")
+		return
+	}
+
+	sv, err := s.scriptsStore.GetScriptVersion(tenantID, req.ScriptID, req.Version)
+	if err != nil {
+		if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+			writeJSONError(w, http.StatusNotFound, "script version not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to query script version: "+err.Error())
+		return
+	}
+
+	// Validate typed parameter schema
+	paramSchema, err := scripts.ValidateSchema(sv.ParameterSchemaJSON)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "invalid script parameter schema: "+err.Error())
+		return
+	}
+	if err := scripts.ValidateParameters(paramSchema, req.Parameters); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "parameter validation failed: "+err.Error())
+		return
+	}
+
+	// Verify target endpoint exists and matches tenant
+	ep, err := s.store.GetEndpoint(req.EndpointID)
+	if err != nil || ep == nil {
+		writeJSONError(w, http.StatusNotFound, "endpoint not found")
+		return
+	}
+	if ep.TenantID != tenantID && tenantID != "default" {
+		writeJSONError(w, http.StatusForbidden, "endpoint tenant mismatch")
 		return
 	}
 
 	operatorID := s.operatorFromRequest(r)
+	if operatorID == "" {
+		operatorID = "operator"
+	}
+
+	// Bound execution parameters
+	timeout := req.TimeoutSeconds
+	if timeout <= 0 || timeout > 300 {
+		timeout = 60
+	}
+	maxOutput := req.MaxOutputBytes
+	if maxOutput <= 0 || maxOutput > 5242880 {
+		maxOutput = 1048576
+	}
 
 	payload := response.ScriptExecPayload{
 		ScriptID:       req.ScriptID,
 		ScriptVersion:  req.Version,
 		ScriptDigest:   sv.DigestSHA256,
+		Interpreter:    sc.Interpreter,
 		Source:         sv.Source,
 		Parameters:     req.Parameters,
-		TimeoutSeconds: req.TimeoutSeconds,
-		MaxOutputBytes: req.MaxOutputBytes,
+		TimeoutSeconds: timeout,
+		MaxOutputBytes: maxOutput,
 	}
 	payloadJSONBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -171,7 +297,7 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Server-side independent digest recomputation
+	// Server-side independent SHA-256 digest recomputation
 	hasher := sha256.New()
 	hasher.Write(payloadJSONBytes)
 	computedDigestHex := hex.EncodeToString(hasher.Sum(nil))
@@ -213,7 +339,7 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched script %s v%d to %s", req.ScriptID, req.Version, req.EndpointID))
+	s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched script %s v%d (%s) to %s", sc.Name, req.Version, sc.Interpreter, req.EndpointID))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

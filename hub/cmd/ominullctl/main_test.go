@@ -459,3 +459,172 @@ func TestOminullctl_ConsoleCommands(t *testing.T) {
 		t.Fatalf("expected unknown console subcommand to fail")
 	}
 }
+
+func TestOminullctl_ScriptsCommands(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Mock hub server for scripts API
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/scripts", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			id := r.URL.Query().Get("id")
+			ver := r.URL.Query().Get("version")
+			if id == "scr-1" && ver == "1" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"script_id":             "scr-1",
+					"version":               1,
+					"digest_sha256":         "abc123digest",
+					"source":                "echo hello",
+					"parameter_schema_json": `{"parameters":[]}`,
+					"created_at":            "2026-09-04T12:00:00Z",
+					"created_by":            "operator",
+				})
+				return
+			}
+			if id == "scr-1" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":             "scr-1",
+					"name":           "Test Script",
+					"description":    "A test script",
+					"interpreter":    "/bin/sh",
+					"latest_version": 1,
+					"retired":        false,
+					"created_at":     "2026-09-04T12:00:00Z",
+					"updated_at":     "2026-09-04T12:00:00Z",
+					"versions": []map[string]interface{}{
+						{
+							"version":       1,
+							"digest_sha256": "abc123digest",
+							"created_at":    "2026-09-04T12:00:00Z",
+							"created_by":    "operator",
+						},
+					},
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"scripts": []map[string]interface{}{
+					{
+						"id":             "scr-1",
+						"name":           "Test Script",
+						"description":    "A test script",
+						"interpreter":    "/bin/sh",
+						"latest_version": 1,
+						"retired":        false,
+					},
+				},
+			})
+		case http.MethodPost:
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			if id, ok := req["id"].(string); ok && id != "" {
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"script_id":     id,
+					"version":       2,
+					"digest_sha256": "updated123digest",
+					"created_by":    "operator",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"script": map[string]interface{}{
+					"id":          "scr-created-1",
+					"name":        req["name"],
+					"interpreter": req["interpreter"],
+				},
+				"version": map[string]interface{}{
+					"version":       1,
+					"digest_sha256": "new123digest",
+				},
+			})
+		case http.MethodDelete:
+			id := r.URL.Query().Get("id")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"retired": true,
+				"id":      id,
+			})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := newAPIClient(CLIConfig{
+		HubURL:     server.URL,
+		APIKey:     "test-key",
+		TenantID:   "default",
+		JSONOutput: true,
+	})
+
+	// 1. List
+	if err := client.cmdScripts([]string{"list"}); err != nil {
+		t.Fatalf("cmdScripts list failed: %v", err)
+	}
+
+	// 2. Show script
+	if err := client.cmdScripts([]string{"show", "scr-1"}); err != nil {
+		t.Fatalf("cmdScripts show failed: %v", err)
+	}
+
+	// 3. Show version
+	if err := client.cmdScripts([]string{"show", "scr-1", "--version", "1"}); err != nil {
+		t.Fatalf("cmdScripts show with version failed: %v", err)
+	}
+
+	// 4. Create
+	srcFile := filepath.Join(tempDir, "script.sh")
+	if err := os.WriteFile(srcFile, []byte("echo 42"), 0644); err != nil {
+		t.Fatalf("write srcFile failed: %v", err)
+	}
+	schemaFile := filepath.Join(tempDir, "schema.json")
+	if err := os.WriteFile(schemaFile, []byte(`{"parameters":[]}`), 0644); err != nil {
+		t.Fatalf("write schemaFile failed: %v", err)
+	}
+
+	if err := client.cmdScripts([]string{"create", "--name", "Echo 42", "--interpreter", "/bin/sh", "--source-file", srcFile, "--schema-file", schemaFile}); err != nil {
+		t.Fatalf("cmdScripts create failed: %v", err)
+	}
+
+	// 5. Update
+	if err := client.cmdScripts([]string{"update", "scr-1", "--source-file", srcFile}); err != nil {
+		t.Fatalf("cmdScripts update failed: %v", err)
+	}
+
+	// 6. Retire
+	if err := client.cmdScripts([]string{"retire", "scr-1"}); err != nil {
+		t.Fatalf("cmdScripts retire failed: %v", err)
+	}
+
+	// 7. Run and schedule are forbidden
+	if err := client.cmdScripts([]string{"run", "scr-1"}); err == nil {
+		t.Fatalf("cmdScripts run expected error")
+	}
+	if err := client.cmdScripts([]string{"schedule", "scr-1"}); err == nil {
+		t.Fatalf("cmdScripts schedule expected error")
+	}
+
+	// 8. Missing arguments validation
+	if err := client.cmdScripts([]string{"show"}); err == nil {
+		t.Fatalf("cmdScripts show without id expected error")
+	}
+	if err := client.cmdScripts([]string{"create"}); err == nil {
+		t.Fatalf("cmdScripts create without flags expected error")
+	}
+	if err := client.cmdScripts([]string{"update", "scr-1"}); err == nil {
+		t.Fatalf("cmdScripts update without source file expected error")
+	}
+	if err := client.cmdScripts([]string{"retire"}); err == nil {
+		t.Fatalf("cmdScripts retire without id expected error")
+	}
+}
+

@@ -4,11 +4,32 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
+)
+
+const (
+	MaxScriptSourceBytes = 65536 // 64 KiB source code bound
+)
+
+var (
+	ErrNotFound           = errors.New("script not found")
+	ErrTenantMismatch     = errors.New("tenant mismatch")
+	ErrInvalidInterpreter = errors.New("invalid interpreter; must be /bin/sh, /bin/bash, powershell.exe, cmd.exe, or pwsh.exe")
+	ErrScriptRetired      = errors.New("cannot update retired script")
+	ErrScriptTooLarge     = errors.New("script source exceeds maximum allowed size")
+
+	AllowedInterpreters = map[string]bool{
+		"/bin/sh":        true,
+		"/bin/bash":      true,
+		"powershell.exe": true,
+		"cmd.exe":        true,
+		"pwsh.exe":       true,
+	}
 )
 
 // Store manages the immutable script library in SQLite.
@@ -64,11 +85,27 @@ func (s *Store) CreateScript(tenantID, name, description, interpreter, source, p
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if tenantID == "" || name == "" || source == "" {
-		return nil, nil, errors.New("missing required script fields")
+	tenantID = strings.TrimSpace(tenantID)
+	name = strings.TrimSpace(name)
+	if tenantID == "" || name == "" || strings.TrimSpace(source) == "" {
+		return nil, nil, errors.New("missing required script fields (tenant_id, name, source)")
 	}
+
+	interpreter = strings.TrimSpace(interpreter)
 	if interpreter == "" {
 		interpreter = "/bin/bash"
+	}
+	if !AllowedInterpreters[interpreter] {
+		return nil, nil, fmt.Errorf("%w: %q", ErrInvalidInterpreter, interpreter)
+	}
+
+	if len(source) > MaxScriptSourceBytes {
+		return nil, nil, fmt.Errorf("%w: %d bytes (limit %d)", ErrScriptTooLarge, len(source), MaxScriptSourceBytes)
+	}
+
+	// Validate parameter schema if present
+	if _, err := ValidateSchema(paramSchema); err != nil {
+		return nil, nil, fmt.Errorf("parameter schema validation failed: %w", err)
 	}
 
 	scriptID := uuid.New().String()
@@ -116,19 +153,42 @@ func (s *Store) CreateScript(tenantID, name, description, interpreter, source, p
 	return script, version, nil
 }
 
-// UpdateScript appends a new immutable version to an existing script.
-func (s *Store) UpdateScript(scriptID, source, paramSchema, createdBy string) (*ScriptVersion, error) {
+// UpdateScript appends a new immutable version to an existing script under tenant control.
+func (s *Store) UpdateScript(tenantID, scriptID, source, paramSchema, createdBy string) (*ScriptVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("missing tenant_id")
+	}
+	if strings.TrimSpace(source) == "" {
+		return nil, errors.New("source cannot be empty")
+	}
+	if len(source) > MaxScriptSourceBytes {
+		return nil, fmt.Errorf("%w: %d bytes (limit %d)", ErrScriptTooLarge, len(source), MaxScriptSourceBytes)
+	}
+
+	// Validate parameter schema if present
+	if _, err := ValidateSchema(paramSchema); err != nil {
+		return nil, fmt.Errorf("parameter schema validation failed: %w", err)
+	}
+
+	var storedTenant string
 	var latestVer int
 	var retired int
-	err := s.db.QueryRow(`SELECT latest_version, retired FROM scripts WHERE id = ?`, scriptID).Scan(&latestVer, &retired)
+	err := s.db.QueryRow(`SELECT tenant_id, latest_version, retired FROM scripts WHERE id = ?`, scriptID).Scan(&storedTenant, &latestVer, &retired)
 	if err != nil {
-		return nil, fmt.Errorf("script not found: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to query script: %w", err)
+	}
+	if storedTenant != tenantID {
+		return nil, ErrTenantMismatch
 	}
 	if retired == 1 {
-		return nil, errors.New("cannot update retired script")
+		return nil, ErrScriptRetired
 	}
 
 	newVer := latestVer + 1
@@ -153,24 +213,53 @@ func (s *Store) UpdateScript(scriptID, source, paramSchema, createdBy string) (*
 		return nil, err
 	}
 
-	_, err = s.db.Exec(`UPDATE scripts SET latest_version = ?, updated_at = ? WHERE id = ?`, newVer, now, scriptID)
+	_, err = s.db.Exec(`UPDATE scripts SET latest_version = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`, newVer, now, scriptID, tenantID)
 	return version, err
 }
 
-// RetireScript marks a script retired.
-func (s *Store) RetireScript(scriptID string) error {
+// RetireScript marks a script retired under tenant control.
+func (s *Store) RetireScript(tenantID, scriptID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return errors.New("missing tenant_id")
+	}
+
+	var storedTenant string
+	err := s.db.QueryRow(`SELECT tenant_id FROM scripts WHERE id = ?`, scriptID).Scan(&storedTenant)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if storedTenant != tenantID {
+		return ErrTenantMismatch
+	}
 
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`UPDATE scripts SET retired = 1, updated_at = ? WHERE id = ?`, now, scriptID)
-	return err
+	res, err := s.db.Exec(`UPDATE scripts SET retired = 1, updated_at = ? WHERE id = ? AND tenant_id = ?`, now, scriptID, tenantID)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
-// GetScript returns a script by ID.
-func (s *Store) GetScript(scriptID string) (*Script, error) {
+// GetScript returns a script by ID verifying tenant ownership.
+func (s *Store) GetScript(tenantID, scriptID string) (*Script, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("missing tenant_id")
+	}
 
 	var sc Script
 	var ret int
@@ -179,25 +268,45 @@ func (s *Store) GetScript(scriptID string) (*Script, error) {
 		FROM scripts WHERE id = ?
 	`, scriptID).Scan(&sc.ID, &sc.TenantID, &sc.Name, &sc.Description, &sc.Interpreter, &sc.LatestVersion, &ret, &sc.CreatedAt, &sc.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
+	}
+	if sc.TenantID != tenantID {
+		return nil, ErrTenantMismatch
 	}
 	sc.Retired = (ret == 1)
 	return &sc, nil
 }
 
-// GetScriptVersion returns an exact immutable script version.
-func (s *Store) GetScriptVersion(scriptID string, version int) (*ScriptVersion, error) {
+// GetScriptVersion returns an exact immutable script version verifying tenant ownership.
+func (s *Store) GetScriptVersion(tenantID, scriptID string, version int) (*ScriptVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("missing tenant_id")
+	}
+
 	var sv ScriptVersion
 	var pSchema sql.NullString
+	var scriptTenant string
 	err := s.db.QueryRow(`
-		SELECT script_id, version, source, digest_sha256, parameter_schema_json, created_by, created_at
-		FROM script_versions WHERE script_id = ? AND version = ?
-	`, scriptID, version).Scan(&sv.ScriptID, &sv.Version, &sv.Source, &sv.DigestSHA256, &pSchema, &sv.CreatedBy, &sv.CreatedAt)
+		SELECT sv.script_id, sv.version, sv.source, sv.digest_sha256, sv.parameter_schema_json, sv.created_by, sv.created_at, s.tenant_id
+		FROM script_versions sv
+		JOIN scripts s ON s.id = sv.script_id
+		WHERE sv.script_id = ? AND sv.version = ?
+	`, scriptID, version).Scan(&sv.ScriptID, &sv.Version, &sv.Source, &sv.DigestSHA256, &pSchema, &sv.CreatedBy, &sv.CreatedAt, &scriptTenant)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
+	}
+	if scriptTenant != tenantID {
+		return nil, ErrTenantMismatch
 	}
 	if pSchema.Valid {
 		sv.ParameterSchemaJSON = pSchema.String
@@ -209,6 +318,11 @@ func (s *Store) GetScriptVersion(scriptID string, version int) (*ScriptVersion, 
 func (s *Store) ListScripts(tenantID string) ([]*Script, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("missing tenant_id")
+	}
 
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id, name, description, interpreter, latest_version, retired, created_at, updated_at
