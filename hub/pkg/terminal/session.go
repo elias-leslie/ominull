@@ -52,7 +52,8 @@ type TerminalSession struct {
 	OperatorID        string                  `json:"operator_id"`
 	Program           string                  `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
 	State             SessionState            `json:"state"`
-	ConnectToken      string                  `json:"connect_token"`
+	ConnectToken      string                  `json:"-"`
+	TokenHash         string                  `json:"-"`
 	CreatedAt         time.Time               `json:"created_at"`
 	ExpiresAt         time.Time               `json:"expires_at"`
 	IdleExpiresAt     time.Time               `json:"idle_expires_at"`
@@ -63,6 +64,7 @@ type TerminalSession struct {
 	AgentConnected    bool                    `json:"agent_connected"`
 	Grant             *response.EndpointGrant `json:"grant,omitempty"`
 	Frames            []TerminalFrame         `json:"-"`
+	relay             *PairedRelay            `json:"-"`
 }
 
 // Manager manages active terminal sessions and pairing.
@@ -100,12 +102,21 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 
 	// Check per-endpoint concurrency limit (1 active per endpoint)
 	now := time.Now().UTC()
+	tenantActive := 0
 	for _, s := range m.sessions {
+		if s.TenantID == tenantID && (s.State == StateWaiting || s.State == StateConnecting || s.State == StateActive) {
+			if now.Before(s.ExpiresAt) {
+				tenantActive++
+			}
+		}
 		if s.EndpointID == endpointID && (s.State == StateWaiting || s.State == StateConnecting || s.State == StateActive) {
 			if now.Before(s.ExpiresAt) {
 				return nil, fmt.Errorf("active terminal session %s already exists for endpoint %s", s.SessionID, endpointID)
 			}
 		}
+	}
+	if tenantActive >= 4 {
+		return nil, fmt.Errorf("active terminal session limit reached for tenant %s (max 4)", tenantID)
 	}
 
 	if sessionID == "" {
@@ -123,6 +134,7 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 		Program:       program,
 		State:         StateWaiting,
 		ConnectToken:  token,
+		TokenHash:     HashToken(token),
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(m.maxDuration),
 		IdleExpiresAt: now.Add(m.idleTimeout),
@@ -162,6 +174,12 @@ func (m *Manager) ListSessions(tenantID string) []*TerminalSession {
 
 // RecordFrame appends an input/output frame to the session audit log.
 func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
+	switch frame.Type {
+	case FrameStdin, FrameStdout, FrameResize, FrameClose:
+	default:
+		return fmt.Errorf("unknown or invalid frame type: %q", frame.Type)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -180,7 +198,7 @@ func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
 	return nil
 }
 
-// CloseSession transitions a session to closed.
+// CloseSession transitions a session to closed and closes paired relays.
 func (m *Manager) CloseSession(sessionID, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -191,12 +209,16 @@ func (m *Manager) CloseSession(sessionID, reason string) error {
 	}
 
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
-
+	relay := sess.relay
 	now := time.Now().UTC()
 	sess.State = StateClosed
 	sess.ClosedAt = &now
 	sess.CloseReason = reason
+	sess.mu.Unlock()
+
+	if relay != nil {
+		relay.Close(reason)
+	}
 	return nil
 }
 

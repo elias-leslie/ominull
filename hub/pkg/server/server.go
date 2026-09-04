@@ -3382,6 +3382,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.handleTerminalSessions)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
 	mux.HandleFunc("/api/v1/terminal/frames", s.deviceOrLegacyMiddleware(s.responseGate(s.handleTerminalFrames)))
+	mux.HandleFunc("/api/v1/terminal/ws/operator", s.handleTerminalWSOperator)
+	mux.HandleFunc("/api/v1/terminal/ws/agent", s.handleTerminalWSAgent)
 
 	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))

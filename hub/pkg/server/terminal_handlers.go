@@ -131,6 +131,17 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 			_, _ = s.responseStore.CreateJob(tenantID, req.EndpointID, response.ActionKindTerminalSession, operatorID, grant, payloadJSON, "")
 		}
 
+		// Set one-use HttpOnly attach cookie for the operator browser on this origin
+		http.SetCookie(w, &http.Cookie{
+			Name:     "ominull_terminal_token",
+			Value:    session.ConnectToken,
+			Path:     "/api/v1/terminal/ws/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   300,
+		})
+
 		s.audit(r, "TERMINAL_SESSION_CREATED", session.SessionID, fmt.Sprintf("Created shell session for %s with program %s", req.EndpointID, req.Program))
 
 		w.Header().Set("Content-Type", "application/json")
@@ -140,6 +151,80 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+// handleTerminalWSOperator handles WebSocket connections from the console operator.
+func (s *Server) handleTerminalWSOperator(w http.ResponseWriter, r *http.Request) {
+	if s.terminalMgr == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session_id")
+		return
+	}
+
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = r.Header.Get("X-Terminal-Token")
+	}
+	if token == "" {
+		if cookie, err := r.Cookie("ominull_terminal_token"); err == nil {
+			token = cookie.Value
+		}
+	}
+
+	if token == "" {
+		writeJSONError(w, http.StatusUnauthorized, "missing terminal token")
+		return
+	}
+
+	if err := s.terminalMgr.AttachOperator(w, r, sessionID, token); err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: "+err.Error())
+		return
+	}
+}
+
+// handleTerminalWSAgent handles WebSocket connections from the remote endpoint agent.
+func (s *Server) handleTerminalWSAgent(w http.ResponseWriter, r *http.Request) {
+	if s.terminalMgr == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session_id")
+		return
+	}
+
+	endpointID := r.URL.Query().Get("endpoint_id")
+	if endpointID == "" {
+		endpointID = strings.TrimSpace(r.Header.Get("X-Device-Endpoint-ID"))
+	}
+	if endpointID == "" {
+		endpointID = strings.TrimSpace(r.Header.Get("X-Client-CN"))
+	}
+	if endpointID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing endpoint_id")
+		return
+	}
+
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = r.Header.Get("X-Terminal-Token")
+	}
+	if token == "" {
+		writeJSONError(w, http.StatusUnauthorized, "missing terminal token")
+		return
+	}
+
+	if err := s.terminalMgr.AttachAgent(w, r, sessionID, endpointID, token); err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: "+err.Error())
+		return
+	}
 }
 
 // handleTerminalSessionClose handles closing a terminal session.

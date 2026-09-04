@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/terminal"
@@ -108,5 +110,161 @@ func TestServer_TerminalAPI(t *testing.T) {
 
 	if wClose.Code != http.StatusOK {
 		t.Fatalf("close session returned %d: %s", wClose.Code, wClose.Body.String())
+	}
+}
+
+func TestServer_TerminalWebSocketRelay(t *testing.T) {
+	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	tenantID := "default"
+	endpointID := "ep-shell-relay-test"
+	opID := "admin"
+
+	// 1. Setup tenant key and response session
+	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
+	secret, _ := auth.EnrollTOTP(tenantID, opID)
+	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
+	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
+	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-relay-sess", hex.EncodeToString(browserPub), code)
+	if err != nil {
+		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
+	}
+
+	// 2. Operator requests terminal session with signed browser proof
+	payload := response.TerminalSessionPayload{Program: "/bin/bash"}
+	actionDigest, _ := response.ComputeActionDigest(payload)
+	proof := &responseauth.ActionProof{
+		SessionID:       session.SessionID,
+		TenantID:        tenantID,
+		ActionKind:      response.ActionKindTerminalSession,
+		ActionDigest:    actionDigest,
+		TargetEndpoints: []string{endpointID},
+		Timestamp:       time.Now().Unix(),
+		Nonce:           "998877665544",
+	}
+	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
+	proof.Signature = hex.EncodeToString(sig)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"endpoint_id":   endpointID,
+		"program":       "/bin/bash",
+		"session_id":    session.SessionID,
+		"action_digest": actionDigest,
+		"proof":         proof,
+	})
+
+	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/terminal/sessions", bytes.NewReader(createBody))
+	postReq.Header.Set("X-API-Key", "test-admin-key-12345")
+	postReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/terminal/sessions failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create session returned status %d", resp.StatusCode)
+	}
+
+	// Verify token is NOT exposed in response body
+	var bodyMap map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&bodyMap)
+	if _, found := bodyMap["connect_token"]; found {
+		t.Fatalf("connect_token leaked in session DTO response: %+v", bodyMap)
+	}
+	sessionID := bodyMap["session_id"].(string)
+
+	// Verify HttpOnly attach cookie was delivered
+	var attachCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "ominull_terminal_token" {
+			attachCookie = c
+			break
+		}
+	}
+	if attachCookie == nil || attachCookie.Value == "" {
+		t.Fatalf("expected ominull_terminal_token cookie to be set on response")
+	}
+	if !attachCookie.HttpOnly {
+		t.Fatalf("expected attach cookie to have HttpOnly=true")
+	}
+	token := attachCookie.Value
+
+	// Helper for ws URLs
+	toWS := func(path string, query url.Values) string {
+		u, _ := url.Parse(ts.URL)
+		u.Scheme = "ws"
+		u.Path = path
+		u.RawQuery = query.Encode()
+		return u.String()
+	}
+
+	// 3. Connect Operator using token
+	opQuery := url.Values{"session_id": []string{sessionID}, "token": []string{token}}
+	opWS, _, err := websocket.DefaultDialer.Dial(toWS("/api/v1/terminal/ws/operator", opQuery), nil)
+	if err != nil {
+		t.Fatalf("operator dial failed: %v", err)
+	}
+	defer opWS.Close()
+
+	// 4. Connect Agent using token and endpoint_id
+	agQuery := url.Values{"session_id": []string{sessionID}, "endpoint_id": []string{endpointID}, "token": []string{token}}
+	agWS, _, err := websocket.DefaultDialer.Dial(toWS("/api/v1/terminal/ws/agent", agQuery), nil)
+	if err != nil {
+		t.Fatalf("agent dial failed: %v", err)
+	}
+	defer agWS.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 5. Test Operator -> Agent stdin transmission
+	inFrame := terminal.TerminalFrame{Type: terminal.FrameStdin, Data: []byte("ls -la\n")}
+	inBytes, _ := json.Marshal(inFrame)
+	if err := opWS.WriteMessage(websocket.TextMessage, inBytes); err != nil {
+		t.Fatalf("opWS write failed: %v", err)
+	}
+
+	_, agRcvd, err := agWS.ReadMessage()
+	if err != nil {
+		t.Fatalf("agWS read failed: %v", err)
+	}
+	var rcvdFrame terminal.TerminalFrame
+	_ = json.Unmarshal(agRcvd, &rcvdFrame)
+	if rcvdFrame.Type != terminal.FrameStdin || string(rcvdFrame.Data) != "ls -la\n" {
+		t.Fatalf("unexpected frame received by agent: %+v", rcvdFrame)
+	}
+
+	// 6. Test Agent -> Operator stdout transmission
+	outFrame := terminal.TerminalFrame{Type: terminal.FrameStdout, Data: []byte("total 0\n")}
+	outBytes, _ := json.Marshal(outFrame)
+	if err := agWS.WriteMessage(websocket.TextMessage, outBytes); err != nil {
+		t.Fatalf("agWS write failed: %v", err)
+	}
+
+	_, opRcvd, err := opWS.ReadMessage()
+	if err != nil {
+		t.Fatalf("opWS read failed: %v", err)
+	}
+	var rcvdOpFrame terminal.TerminalFrame
+	_ = json.Unmarshal(opRcvd, &rcvdOpFrame)
+	if rcvdOpFrame.Type != terminal.FrameStdout || string(rcvdOpFrame.Data) != "total 0\n" {
+		t.Fatalf("unexpected frame received by operator: %+v", rcvdOpFrame)
+	}
+
+	// 7. Clean close: agent sends close
+	clsFrame := terminal.TerminalFrame{Type: terminal.FrameClose}
+	clsBytes, _ := json.Marshal(clsFrame)
+	_ = agWS.WriteMessage(websocket.TextMessage, clsBytes)
+
+	opWS.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = opWS.ReadMessage()
+	if err == nil {
+		t.Fatalf("expected operator socket to close after agent close")
 	}
 }
