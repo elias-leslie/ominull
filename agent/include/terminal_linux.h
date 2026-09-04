@@ -404,6 +404,7 @@ static inline int Terminal_RunLinuxWorker(
 
     curl_easy_setopt(curl, CURLOPT_URL, connect_url);
     curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 10000L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -441,7 +442,7 @@ static inline int Terminal_RunLinuxWorker(
     char upgrade_req[1024];
     snprintf(upgrade_req, sizeof(upgrade_req),
         "GET /api/v1/terminal/ws/agent?session_id=%s&endpoint_id=%s&token=%s HTTP/1.1\r\n"
-        "Host: %s\r\n"
+        "Host: %s:%d\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: %s\r\n"
@@ -449,7 +450,7 @@ static inline int Terminal_RunLinuxWorker(
         "X-Device-Endpoint-ID: %s\r\n"
         "X-Terminal-Token: %s\r\n\r\n",
         session_id, endpoint_id, token,
-        host, ws_key, endpoint_id, token);
+        host, port, ws_key, endpoint_id, token);
 
     size_t sent = 0;
     while (1) {
