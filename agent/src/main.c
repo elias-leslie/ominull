@@ -1,4 +1,5 @@
 #include "../include/agent.h"
+#include "../include/forensics_windows.h"
 
 #define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
 #define OMINULL_DEFAULT_PFX_PATH "C:\\Program Files\\Ominull\\client.pfx"
@@ -103,6 +104,9 @@ int main(int argc, char* argv[]) {
     /* Observe the address, hardware address and OS once, before either the
        console or the service path takes the config. */
     Agent_DetectHostIdentity(&config);
+
+    uint8_t ep_pub[32], ep_priv[64];
+    Forensics_GetOrCreateEndpointKeyWin(NULL, ep_pub, ep_priv, config.evidence_signing_key, sizeof(config.evidence_signing_key));
 
     bool doConsole = false;
     bool doService = false;

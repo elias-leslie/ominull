@@ -394,13 +394,24 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     /* os, ip and mac are observed at startup rather than hardcoded. The hub
      * records the agent's claims at confidence 1.0, so a literal string here
      * would enter the asset model as ground truth and outrank a real scan. */
-    int offset = snprintf(jsonBuf, jsonCapacity,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
-        config->endpoint_id, loc, role, config->hostname,
-        config->os_version, config->primary_ip, config->primary_mac,
-        OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
-        config->registered_package_version, config->provenance_status
-    );
+    int offset = 0;
+    if (config->evidence_signing_key[0]) {
+        offset = snprintf(jsonBuf, jsonCapacity,
+            "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"evidence_signing_key\":\"%s\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
+            config->endpoint_id, config->evidence_signing_key, loc, role, config->hostname,
+            config->os_version, config->primary_ip, config->primary_mac,
+            OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
+            config->registered_package_version, config->provenance_status
+        );
+    } else {
+        offset = snprintf(jsonBuf, jsonCapacity,
+            "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
+            config->endpoint_id, loc, role, config->hostname,
+            config->os_version, config->primary_ip, config->primary_mac,
+            OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
+            config->registered_package_version, config->provenance_status
+        );
+    }
 
     for (size_t i = 0; events && i < count; i++) {
         const OMINULL_EVENT* e = &events[i];
@@ -631,8 +642,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     return (bResults && (dwStatusCode == 200 || dwStatusCode == 204));
 }
 
-bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody, char* respOut, size_t respCap) {
-    if (!Hub_TransportReady(config) || !apiPath || !jsonBody) return false;
+bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const char* contentType,
+                      const void* data, size_t dataLen, char* respOut, size_t respCap) {
+    if (!Hub_TransportReady(config) || !apiPath || (!data && dataLen > 0)) return false;
 
     char host[256] = {0};
     WORD port = 0;
@@ -651,8 +663,8 @@ bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const cha
     }
     HINTERNET hConnect = g_http.connect;
 
-    WCHAR wPath[512] = {0};
-    MultiByteToWideChar(CP_UTF8, 0, apiPath, -1, wPath, 512);
+    WCHAR wPath[1024] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, apiPath, -1, wPath, 1024);
 
     HINTERNET hRequest = WinHttpOpenRequest(
         hConnect,
@@ -674,10 +686,12 @@ bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const cha
 
     WCHAR wHeaders[1024] = {0};
     WCHAR wKey[128] = {0};
+    WCHAR wContentType[128] = {0};
     MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
+    MultiByteToWideChar(CP_UTF8, 0, (contentType && contentType[0]) ? contentType : "application/octet-stream", -1, wContentType, 128);
     const wchar_t* credentialHeader = strncmp(config->api_key, "omd_", 4) == 0
         ? L"X-Ominull-Device-Credential" : L"X-API-Key";
-    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: application/json\r\n", credentialHeader, wKey);
+    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: %ls\r\n", credentialHeader, wKey, wContentType);
 
     WinHttpAddRequestHeaders(hRequest, wHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
@@ -685,9 +699,9 @@ bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const cha
         hRequest,
         WINHTTP_NO_ADDITIONAL_HEADERS,
         0,
-        (LPVOID)jsonBody,
-        (DWORD)strlen(jsonBody),
-        (DWORD)strlen(jsonBody),
+        (LPVOID)data,
+        (DWORD)dataLen,
+        (DWORD)dataLen,
         0
     );
 
@@ -696,9 +710,9 @@ bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const cha
             hRequest,
             WINHTTP_NO_ADDITIONAL_HEADERS,
             0,
-            (LPVOID)jsonBody,
-            (DWORD)strlen(jsonBody),
-            (DWORD)strlen(jsonBody),
+            (LPVOID)data,
+            (DWORD)dataLen,
+            (DWORD)dataLen,
             0
         );
     }
@@ -735,4 +749,9 @@ bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const cha
     LeaveCriticalSection(&g_http.lock);
 
     return (bResults && (dwStatusCode >= 200 && dwStatusCode < 300));
+}
+
+bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody, char* respOut, size_t respCap) {
+    if (!jsonBody) return false;
+    return Hub_PostPathData(config, apiPath, "application/json", jsonBody, strlen(jsonBody), respOut, respCap);
 }

@@ -8,6 +8,7 @@
 #define NTDDI_VERSION 0x0A000006
 #endif
 
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +49,7 @@ typedef struct _AGENT_CONFIG {
      * enrolment. Presented on every hub connection as an additional matching
      * proof alongside the unique device credential. */
     char client_pfx_path[260];
+    char evidence_signing_key[65];
     bool is_service;
     bool verbose;
     /* Opt-in to a cleartext hub. Off by default: without it the agent refuses
@@ -156,6 +158,8 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
                             char* respOut, size_t respCap);
 bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody,
                       char* respOut, size_t respCap);
+bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const char* contentType,
+                      const void* data, size_t dataLen, char* respOut, size_t respCap);
 
 // Fills primary_ip, primary_mac and os_version from the running system. Called
 // once at startup: the hub keys asset identity on the hardware address, so

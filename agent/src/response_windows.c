@@ -21,6 +21,49 @@
 #include "../include/agent.h"
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_windows.h"
+#include "../include/forensics_windows.h"
+
+typedef struct {
+    AGENT_CONFIG config;
+    char job_id[64];
+    char lease_id[64];
+    char payload_json[4096];
+} ForensicsWorkerThreadArgsWin;
+
+static DWORD WINAPI ForensicsWorkerThreadProcWin(LPVOID lpParam) {
+    ForensicsWorkerThreadArgsWin* args = (ForensicsWorkerThreadArgsWin*)lpParam;
+    if (!args) return 1;
+
+    DWORD t0 = GetTickCount();
+    char manifest_sha256[65] = {0};
+    bool ok = Forensics_RunDiagnosticCollectionWin(
+        &args->config,
+        args->payload_json,
+        args->job_id,
+        manifest_sha256,
+        sizeof(manifest_sha256)
+    );
+    DWORD duration_ms = GetTickCount() - t0;
+    int exit_code = ok ? 0 : 1;
+
+    char res_body[1024];
+    if (manifest_sha256[0]) {
+        snprintf(res_body, sizeof(res_body),
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lu,\"manifest_sha256\":\"%s\"}",
+            args->job_id, args->lease_id, (exit_code == 0 ? "succeeded" : "failed"),
+            exit_code, (unsigned long)duration_ms, manifest_sha256);
+    } else {
+        snprintf(res_body, sizeof(res_body),
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lu}",
+            args->job_id, args->lease_id, (exit_code == 0 ? "succeeded" : "failed"),
+            exit_code, (unsigned long)duration_ms);
+    }
+
+    Hub_PostPathJSON(&args->config, "/api/v1/response/jobs/result", res_body, NULL, 0);
+
+    free(args);
+    return 0;
+}
 
 typedef struct {
     AGENT_CONFIG config;
@@ -77,15 +120,23 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
 
         // 4. Action Dispatcher: recognized and supported actions
         if (strcmp(offer->kind, "forensic_collection") == 0) {
-            // Spawn worker inside contained Windows Job Object
-            int exit_code = ExecuteContainedWorkerWindows("C:\\Windows\\System32\\cmd.exe /c exit 0", 60000);
+            ForensicsWorkerThreadArgsWin* args = (ForensicsWorkerThreadArgsWin*)malloc(sizeof(ForensicsWorkerThreadArgsWin));
+            if (args) {
+                memcpy(&args->config, config, sizeof(AGENT_CONFIG));
+                strncpy(args->job_id, offer->job_id, sizeof(args->job_id) - 1);
+                args->job_id[sizeof(args->job_id) - 1] = '\0';
+                strncpy(args->lease_id, offer->lease_id, sizeof(args->lease_id) - 1);
+                args->lease_id[sizeof(args->lease_id) - 1] = '\0';
+                strncpy(args->payload_json, offer->payload_json, sizeof(args->payload_json) - 1);
+                args->payload_json[sizeof(args->payload_json) - 1] = '\0';
 
-            // Post result to hub
-            char res_body[512];
-            snprintf(res_body, sizeof(res_body),
-                "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":100}",
-                offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code);
-            Hub_PostPathJSON(config, "/api/v1/response/jobs/result", res_body, NULL, 0);
+                HANDLE hThread = CreateThread(NULL, 0, ForensicsWorkerThreadProcWin, args, 0, NULL);
+                if (hThread) {
+                    CloseHandle(hThread);
+                } else {
+                    free(args);
+                }
+            }
         } else if (strcmp(offer->kind, "terminal_session") == 0) {
             TerminalSessionParamsWin params;
             if (!Terminal_ParsePayloadWindows(offer->payload_json, &params)) {

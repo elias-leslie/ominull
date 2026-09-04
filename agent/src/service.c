@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include "../include/agent.h"
+#include "../include/forensics_windows.h"
 
 static SERVICE_STATUS g_ServiceStatus;
 static SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
@@ -696,6 +697,11 @@ static void HubContact(bool accepted) {
 
 void RunAgentLoop(AGENT_CONFIG* config) {
     printf("[+] Windows collection layer: user-mode TCP socket table and ESTATS.\n");
+
+    if (config->evidence_signing_key[0] == '\0') {
+        uint8_t ep_pub[32], ep_priv[64];
+        Forensics_GetOrCreateEndpointKeyWin(NULL, ep_pub, ep_priv, config->evidence_signing_key, sizeof(config->evidence_signing_key));
+    }
 
     OMINULL_EVENT eventBatch[64];
     size_t batchCount = 0;
