@@ -150,3 +150,203 @@ func TestServer_VulnAPI(t *testing.T) {
 		t.Fatalf("expected 0 packages after delete, got %d", afterDelResp.Total)
 	}
 }
+
+func TestServer_VulnSnapshotsAndCatalog(t *testing.T) {
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	handler := srv.Handler()
+
+	nvdRaw := `{
+		"format": "NVD_CVE",
+		"version": "2.0",
+		"totalResults": 2,
+		"vulnerabilities": [
+			{
+				"cve": {
+					"id": "CVE-2024-6387",
+					"descriptions": [{"lang": "en", "value": "Signal handler race in OpenSSH server"}],
+					"metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 8.1, "baseSeverity": "HIGH"}}]},
+					"configurations": [{"nodes": [{"cpeMatch": [{"vulnerable": true, "criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*"}]}]}]
+				}
+			},
+			{
+				"cve": {
+					"id": "CVE-2023-4863",
+					"descriptions": [{"lang": "en", "value": "Heap buffer overflow in libwebp"}],
+					"metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}]},
+					"configurations": [{"nodes": [{"cpeMatch": [{"vulnerable": true, "criteria": "cpe:2.3:a:webmproject:libwebp:*:*:*:*:*:*:*:*"}]}]}]
+				}
+			}
+		]
+	}`
+
+	cisaRaw := `{
+		"catalogVersion": "2026.09.04",
+		"count": 1,
+		"vulnerabilities": [
+			{
+				"cveID": "CVE-2024-6387",
+				"vendorProject": "OpenBSD",
+				"product": "OpenSSH",
+				"vulnerabilityName": "OpenSSH Race Condition",
+				"dateAdded": "2024-07-08",
+				"shortDescription": "Signal handler race condition leads to RCE",
+				"requiredAction": "Apply vendor updates",
+				"dueDate": "2024-07-29",
+				"knownRansomwareCampaignUse": "Known"
+			}
+		]
+	}`
+
+	epssRaw := `{
+		"status": "OK",
+		"total": 1,
+		"data": [
+			{"cve": "CVE-2024-6387", "epss": "0.925", "percentile": "0.989", "date": "2026-09-04"}
+		]
+	}`
+
+	// 1. POST /api/v1/vulnerabilities/sync with raw feeds
+	syncReqBody, _ := json.Marshal(map[string]interface{}{
+		"snapshot_id":  "snap-20260904-api-1",
+		"metadata":     `{"source":"nist_nvd_cisa_epss"}`,
+		"raw_nvd":      nvdRaw,
+		"raw_cisa_kev": cisaRaw,
+		"raw_epss":     epssRaw,
+	})
+
+	reqSync := httptest.NewRequest(http.MethodPost, "/api/v1/vulnerabilities/sync", bytes.NewReader(syncReqBody))
+	reqSync.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqSync.Header.Set("Content-Type", "application/json")
+	wSync := httptest.NewRecorder()
+	handler.ServeHTTP(wSync, reqSync)
+
+	if wSync.Code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", wSync.Code, wSync.Body.String())
+	}
+
+	var syncResp struct {
+		Status       string `json:"status"`
+		SnapshotID   string `json:"snapshot_id"`
+		NVDCount     int    `json:"nvd_count"`
+		CISAKEVCount int    `json:"cisa_kev_count"`
+		EPSSCount    int    `json:"epss_count"`
+		Activated    bool   `json:"activated"`
+	}
+	if err := json.NewDecoder(wSync.Body).Decode(&syncResp); err != nil {
+		t.Fatalf("failed to decode sync response: %v", err)
+	}
+	if syncResp.SnapshotID != "snap-20260904-api-1" || syncResp.NVDCount != 2 || syncResp.CISAKEVCount != 1 || syncResp.EPSSCount != 1 || !syncResp.Activated {
+		t.Fatalf("unexpected sync response: %+v", syncResp)
+	}
+
+	// 2. GET /api/v1/vulnerabilities/snapshots
+	reqSnaps := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities/snapshots", nil)
+	reqSnaps.Header.Set("X-API-Key", "test-admin-key-12345")
+	wSnaps := httptest.NewRecorder()
+	handler.ServeHTTP(wSnaps, reqSnaps)
+
+	if wSnaps.Code != http.StatusOK {
+		t.Fatalf("list snapshots returned %d: %s", wSnaps.Code, wSnaps.Body.String())
+	}
+	var snapsResp struct {
+		Snapshots []*vuln.FeedSnapshot `json:"snapshots"`
+	}
+	if err := json.NewDecoder(wSnaps.Body).Decode(&snapsResp); err != nil {
+		t.Fatalf("failed to decode snapshots list: %v", err)
+	}
+	if len(snapsResp.Snapshots) != 1 || snapsResp.Snapshots[0].ID != "snap-20260904-api-1" {
+		t.Fatalf("unexpected snapshots list: %+v", snapsResp.Snapshots)
+	}
+
+	// 3. GET /api/v1/vulnerabilities/snapshots/active
+	reqActive := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities/snapshots/active", nil)
+	reqActive.Header.Set("X-API-Key", "test-admin-key-12345")
+	wActive := httptest.NewRecorder()
+	handler.ServeHTTP(wActive, reqActive)
+
+	if wActive.Code != http.StatusOK {
+		t.Fatalf("get active snapshot returned %d: %s", wActive.Code, wActive.Body.String())
+	}
+	var activeResp struct {
+		Snapshot *vuln.FeedSnapshot `json:"snapshot"`
+	}
+	if err := json.NewDecoder(wActive.Body).Decode(&activeResp); err != nil {
+		t.Fatalf("failed to decode active snapshot: %v", err)
+	}
+	if activeResp.Snapshot == nil || activeResp.Snapshot.Status != vuln.SnapshotActive {
+		t.Fatalf("unexpected active snapshot: %+v", activeResp.Snapshot)
+	}
+
+	// 4. GET /api/v1/vulnerabilities?scope=catalog
+	reqCat := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?scope=catalog", nil)
+	reqCat.Header.Set("X-API-Key", "test-admin-key-12345")
+	wCat := httptest.NewRecorder()
+	handler.ServeHTTP(wCat, reqCat)
+
+	if wCat.Code != http.StatusOK {
+		t.Fatalf("query catalog returned %d: %s", wCat.Code, wCat.Body.String())
+	}
+	var catResp struct {
+		Total           int                  `json:"total"`
+		Vulnerabilities []vuln.Vulnerability `json:"vulnerabilities"`
+	}
+	if err := json.NewDecoder(wCat.Body).Decode(&catResp); err != nil {
+		t.Fatalf("failed to decode catalog response: %v", err)
+	}
+	if catResp.Total != 2 || len(catResp.Vulnerabilities) != 2 {
+		t.Fatalf("expected 2 catalog items, got total=%d, len=%d", catResp.Total, len(catResp.Vulnerabilities))
+	}
+
+	// First item should be libwebp because CVSS 9.8 > 8.1
+	if catResp.Vulnerabilities[0].CVEID != "CVE-2023-4863" {
+		t.Fatalf("expected CVE-2023-4863 first due to CVSS ordering, got %s", catResp.Vulnerabilities[0].CVEID)
+	}
+
+	// 5. GET /api/v1/vulnerabilities?scope=catalog&is_kev=true
+	reqKEV := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?scope=catalog&is_kev=true", nil)
+	reqKEV.Header.Set("X-API-Key", "test-admin-key-12345")
+	wKEV := httptest.NewRecorder()
+	handler.ServeHTTP(wKEV, reqKEV)
+
+	var kevResp struct {
+		Total           int                  `json:"total"`
+		Vulnerabilities []vuln.Vulnerability `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wKEV.Body).Decode(&kevResp)
+	if kevResp.Total != 1 || len(kevResp.Vulnerabilities) != 1 || kevResp.Vulnerabilities[0].CVEID != "CVE-2024-6387" {
+		t.Fatalf("expected 1 KEV item (CVE-2024-6387), got %+v", kevResp)
+	}
+
+	// 6. GET /api/v1/vulnerabilities?scope=catalog&search=libwebp
+	reqSearch := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?scope=catalog&search=libwebp", nil)
+	reqSearch.Header.Set("X-API-Key", "test-admin-key-12345")
+	wSearch := httptest.NewRecorder()
+	handler.ServeHTTP(wSearch, reqSearch)
+
+	var searchResp struct {
+		Total           int                  `json:"total"`
+		Vulnerabilities []vuln.Vulnerability `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wSearch.Body).Decode(&searchResp)
+	if searchResp.Total != 1 || len(searchResp.Vulnerabilities) != 1 || searchResp.Vulnerabilities[0].CVEID != "CVE-2023-4863" {
+		t.Fatalf("expected 1 search result (CVE-2023-4863), got %+v", searchResp)
+	}
+
+	// 7. Reproducible query from snapshot_id
+	reqHist := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?scope=catalog&snapshot_id=snap-20260904-api-1", nil)
+	reqHist.Header.Set("X-API-Key", "test-admin-key-12345")
+	wHist := httptest.NewRecorder()
+	handler.ServeHTTP(wHist, reqHist)
+
+	var histResp struct {
+		Total           int                  `json:"total"`
+		Vulnerabilities []vuln.Vulnerability `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wHist.Body).Decode(&histResp)
+	if histResp.Total != 2 {
+		t.Fatalf("expected 2 items for historical snapshot, got %d", histResp.Total)
+	}
+}
+

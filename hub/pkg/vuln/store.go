@@ -80,6 +80,50 @@ func (s *Store) migrate() error {
 		detected_at TIMESTAMP NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_vuln_matches_endpoint ON vulnerability_matches(tenant_id, endpoint_id);
+
+	CREATE TABLE IF NOT EXISTS vuln_feed_snapshots (
+		id TEXT PRIMARY KEY,
+		created_at TIMESTAMP NOT NULL,
+		activated_at TIMESTAMP,
+		status TEXT NOT NULL,
+		nvd_count INTEGER DEFAULT 0,
+		cisa_kev_count INTEGER DEFAULT 0,
+		epss_count INTEGER DEFAULT 0,
+		source_metadata TEXT,
+		error_message TEXT DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_snapshots_status ON vuln_feed_snapshots(status);
+
+	CREATE TABLE IF NOT EXISTS snapshot_vulnerabilities (
+		snapshot_id TEXT NOT NULL,
+		cve_id TEXT NOT NULL,
+		title TEXT NOT NULL,
+		description TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		cvss REAL NOT NULL,
+		is_kev INTEGER DEFAULT 0,
+		epss REAL DEFAULT 0.0,
+		cpe_pattern TEXT NOT NULL,
+		published_at TIMESTAMP NOT NULL,
+		PRIMARY KEY (snapshot_id, cve_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_snap_vuln_cve ON snapshot_vulnerabilities(cve_id);
+	CREATE INDEX IF NOT EXISTS idx_snap_vuln_kev ON snapshot_vulnerabilities(snapshot_id, is_kev);
+	CREATE INDEX IF NOT EXISTS idx_snap_vuln_sev ON snapshot_vulnerabilities(snapshot_id, severity);
+
+	CREATE TABLE IF NOT EXISTS snapshot_cisa_kev (
+		snapshot_id TEXT NOT NULL,
+		cve_id TEXT NOT NULL,
+		vendor_project TEXT NOT NULL,
+		product TEXT NOT NULL,
+		vulnerability_name TEXT NOT NULL,
+		date_added TEXT NOT NULL,
+		short_description TEXT NOT NULL,
+		required_action TEXT NOT NULL,
+		due_date TEXT NOT NULL,
+		known_ransomware_campaign_use TEXT NOT NULL,
+		PRIMARY KEY (snapshot_id, cve_id)
+	);
 	`
 	if _, err := s.db.Exec(query); err != nil {
 		return err
