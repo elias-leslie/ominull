@@ -3417,6 +3417,8 @@ func (s *Server) routes() *http.ServeMux {
 	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))
 	mux.HandleFunc("/api/v1/scripts/run", s.authMiddleware(s.responseGate(s.handleScriptsRun)))
+	mux.HandleFunc("/api/v1/scripts/digest", s.authMiddleware(s.responseGate(s.handleScriptsDigest)))
+	mux.HandleFunc("/api/v1/scripts/schedules", s.authMiddleware(s.responseGate(s.handleScriptSchedules)))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))

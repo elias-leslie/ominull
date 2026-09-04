@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -21,17 +22,33 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet {
+		if s.responseStore == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "response engine not initialized")
+			return
+		}
+
+		jobID := r.URL.Query().Get("id")
+		if jobID != "" {
+			job, err := s.responseStore.GetJob(tenantID, jobID)
+			if err != nil {
+				if errors.Is(err, response.ErrJobNotFound) || errors.Is(err, response.ErrTenantMismatch) {
+					writeJSONError(w, http.StatusNotFound, "job not found")
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, "failed to get job: "+err.Error())
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(job)
+			return
+		}
+
 		endpointID := r.URL.Query().Get("endpoint_id")
 		limit := 50
 		if qLimit := r.URL.Query().Get("limit"); qLimit != "" {
 			if n, err := strconv.Atoi(qLimit); err == nil && n > 0 && n <= 100 {
 				limit = n
 			}
-		}
-
-		if s.responseStore == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "response engine not initialized")
-			return
 		}
 
 		jobs, err := s.responseStore.ListJobs(tenantID, endpointID, limit)

@@ -604,3 +604,352 @@ func TestServer_Scripts_RetirementAndConstraints(t *testing.T) {
 	}
 }
 
+func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	handler := srv.Handler()
+	tenantID := "default"
+	endpointID1 := "ep-sched-node-1"
+	endpointID2 := "ep-sched-node-2"
+	opID := "admin"
+
+	_ = store.UpsertEndpoint(storage.Endpoint{
+		ID:       endpointID1,
+		Hostname: "sched-host-1",
+		OS:       "linux",
+		TenantID: tenantID,
+	})
+	_ = store.UpsertEndpoint(storage.Endpoint{
+		ID:       endpointID2,
+		Hostname: "sched-host-2",
+		OS:       "linux",
+		TenantID: tenantID,
+	})
+
+	jwtToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: opID, Role: hubauth.RoleAdmin, TenantID: tenantID}, "test-admin-key-12345", time.Hour)
+
+	// 1. Create Script with Parameter Schema
+	paramSchemaJSON := `{
+		"parameters": [
+			{"name": "env", "type": "enum", "enum": ["prod", "stage"], "required": true},
+			{"name": "dry_run", "type": "boolean", "required": false}
+		]
+	}`
+	createBody, _ := json.Marshal(map[string]string{
+		"name":                  "backup_audit.sh",
+		"description":           "Nightly backup audit script",
+		"interpreter":           "/bin/sh",
+		"source":                "echo env=$env dry_run=$dry_run\n",
+		"parameter_schema_json": paramSchemaJSON,
+	})
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/scripts", bytes.NewReader(createBody))
+	reqCreate.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	handler.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusCreated {
+		t.Fatalf("create script failed: %d: %s", wCreate.Code, wCreate.Body.String())
+	}
+
+	var createResp struct {
+		Script  scripts.Script        `json:"script"`
+		Version scripts.ScriptVersion `json:"version"`
+	}
+	_ = json.NewDecoder(wCreate.Body).Decode(&createResp)
+	scriptID := createResp.Script.ID
+
+	// 2. Test POST /api/v1/scripts/digest
+	// 2a. Parameter validation error
+	digestBadParams, _ := json.Marshal(map[string]interface{}{
+		"script_id":  scriptID,
+		"version":    1,
+		"parameters": map[string]string{"env": "invalid-env"},
+	})
+	reqDigestBad := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/digest", bytes.NewReader(digestBadParams))
+	reqDigestBad.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqDigestBad.Header.Set("Content-Type", "application/json")
+	wDigestBad := httptest.NewRecorder()
+	handler.ServeHTTP(wDigestBad, reqDigestBad)
+	if wDigestBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid parameter enum in digest, got %d: %s", wDigestBad.Code, wDigestBad.Body.String())
+	}
+
+	// 2b. Valid digest calculation
+	validParams := map[string]string{"env": "prod", "dry_run": "true"}
+	digestReqBody, _ := json.Marshal(map[string]interface{}{
+		"script_id":       scriptID,
+		"version":         1,
+		"parameters":      validParams,
+		"timeout_seconds": 45,
+		"max_output_bytes": 2048,
+	})
+	reqDigest := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/digest", bytes.NewReader(digestReqBody))
+	reqDigest.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqDigest.Header.Set("Content-Type", "application/json")
+	wDigest := httptest.NewRecorder()
+	handler.ServeHTTP(wDigest, reqDigest)
+	if wDigest.Code != http.StatusOK {
+		t.Fatalf("failed to calculate digest: %d: %s", wDigest.Code, wDigest.Body.String())
+	}
+
+	var digestResp struct {
+		ActionDigest string `json:"action_digest"`
+		ScriptDigest string `json:"script_digest"`
+	}
+	if err := json.NewDecoder(wDigest.Body).Decode(&digestResp); err != nil {
+		t.Fatalf("failed to decode digest response: %v", err)
+	}
+
+	expectedPayload := response.ScriptExecPayload{
+		ScriptID:       scriptID,
+		ScriptVersion:  1,
+		ScriptDigest:   createResp.Version.DigestSHA256,
+		Interpreter:    createResp.Script.Interpreter,
+		Source:         createResp.Version.Source,
+		Parameters:     validParams,
+		TimeoutSeconds: 45,
+		MaxOutputBytes: 2048,
+	}
+	expectedDigest, _ := response.ComputeActionDigest(expectedPayload)
+	if digestResp.ActionDigest != expectedDigest {
+		t.Fatalf("action digest mismatch: expected %s, got %s", expectedDigest, digestResp.ActionDigest)
+	}
+	if digestResp.ScriptDigest != createResp.Version.DigestSHA256 {
+		t.Fatalf("script digest mismatch: expected %s, got %s", createResp.Version.DigestSHA256, digestResp.ScriptDigest)
+	}
+
+	// 3. Test POST /api/v1/scripts/schedules
+	// 3a. Static API key rejection (fail-closed)
+	schedBody, _ := json.Marshal(map[string]interface{}{
+		"script_id":        scriptID,
+		"version":          1,
+		"target_endpoints": []string{endpointID1, endpointID2},
+		"parameters":       validParams,
+		"recurrence":       "daily",
+		"start_time":       time.Now().Add(time.Hour),
+		"max_runs":         30,
+		"timeout_seconds":  45,
+		"max_output_bytes": 2048,
+	})
+	reqSchedAPIKey := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/schedules", bytes.NewReader(schedBody))
+	reqSchedAPIKey.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqSchedAPIKey.Header.Set("Content-Type", "application/json")
+	wSchedAPIKey := httptest.NewRecorder()
+	handler.ServeHTTP(wSchedAPIKey, reqSchedAPIKey)
+	if wSchedAPIKey.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for static API key scheduling, got %d: %s", wSchedAPIKey.Code, wSchedAPIKey.Body.String())
+	}
+
+	// 3b. Setup Response Authority Session for Console Operator
+	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
+	secret, _ := auth.EnrollTOTP(tenantID, opID)
+	bPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
+	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-sched-sess", hex.EncodeToString(bPub), code)
+	if err != nil {
+		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
+	}
+
+	schedWithSessionBody, _ := json.Marshal(map[string]interface{}{
+		"script_id":        scriptID,
+		"version":          1,
+		"target_endpoints": []string{endpointID1, endpointID2},
+		"parameters":       validParams,
+		"recurrence":       "daily",
+		"start_time":       time.Now().Add(time.Hour),
+		"max_runs":         30,
+		"timeout_seconds":  45,
+		"max_output_bytes": 2048,
+		"session_id":       session.SessionID,
+	})
+	reqSched := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/schedules", bytes.NewReader(schedWithSessionBody))
+	reqSched.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqSched.Header.Set("Content-Type", "application/json")
+	wSched := httptest.NewRecorder()
+	handler.ServeHTTP(wSched, reqSched)
+	if wSched.Code != http.StatusCreated {
+		t.Fatalf("create schedule failed: %d: %s", wSched.Code, wSched.Body.String())
+	}
+
+	var sched scripts.ScriptSchedule
+	if err := json.NewDecoder(wSched.Body).Decode(&sched); err != nil {
+		t.Fatalf("failed to decode schedule response: %v", err)
+	}
+	if sched.ID == "" || sched.ScriptDigest != createResp.Version.DigestSHA256 {
+		t.Fatalf("invalid schedule record: %+v", sched)
+	}
+	if len(sched.TargetEndpoints) != 2 || sched.TargetEndpoints[0] != endpointID1 || sched.TargetEndpoints[1] != endpointID2 {
+		t.Fatalf("frozen target endpoints mismatch: %v", sched.TargetEndpoints)
+	}
+
+	// 4. GET /api/v1/scripts/schedules (List and Get by ID)
+	reqListSched := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/schedules", nil)
+	reqListSched.Header.Set("Authorization", "Bearer "+jwtToken)
+	wListSched := httptest.NewRecorder()
+	handler.ServeHTTP(wListSched, reqListSched)
+	if wListSched.Code != http.StatusOK {
+		t.Fatalf("list schedules failed: %d: %s", wListSched.Code, wListSched.Body.String())
+	}
+	var listResp struct {
+		Schedules []*scripts.ScriptSchedule `json:"schedules"`
+		Count     int                       `json:"count"`
+	}
+	_ = json.NewDecoder(wListSched.Body).Decode(&listResp)
+	if listResp.Count != 1 || listResp.Schedules[0].ID != sched.ID {
+		t.Fatalf("unexpected schedules list: %+v", listResp)
+	}
+
+	reqGetSched := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/schedules?id="+sched.ID, nil)
+	reqGetSched.Header.Set("Authorization", "Bearer "+jwtToken)
+	wGetSched := httptest.NewRecorder()
+	handler.ServeHTTP(wGetSched, reqGetSched)
+	if wGetSched.Code != http.StatusOK {
+		t.Fatalf("get schedule by id failed: %d: %s", wGetSched.Code, wGetSched.Body.String())
+	}
+	var singleSched scripts.ScriptSchedule
+	_ = json.NewDecoder(wGetSched.Body).Decode(&singleSched)
+	if singleSched.ID != sched.ID || singleSched.Status != "active" {
+		t.Fatalf("unexpected single schedule: %+v", singleSched)
+	}
+
+	// 5. DELETE /api/v1/scripts/schedules?id=... (Cancel Schedule)
+	reqDelSched := httptest.NewRequest(http.MethodDelete, "/api/v1/scripts/schedules?id="+sched.ID, nil)
+	reqDelSched.Header.Set("Authorization", "Bearer "+jwtToken)
+	wDelSched := httptest.NewRecorder()
+	handler.ServeHTTP(wDelSched, reqDelSched)
+	if wDelSched.Code != http.StatusOK {
+		t.Fatalf("cancel schedule failed: %d: %s", wDelSched.Code, wDelSched.Body.String())
+	}
+
+	// 6. Second cancellation returns 404
+	reqDelSched2 := httptest.NewRequest(http.MethodDelete, "/api/v1/scripts/schedules?id="+sched.ID, nil)
+	reqDelSched2.Header.Set("Authorization", "Bearer "+jwtToken)
+	wDelSched2 := httptest.NewRecorder()
+	handler.ServeHTTP(wDelSched2, reqDelSched2)
+	if wDelSched2.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cancelling already cancelled schedule, got %d", wDelSched2.Code)
+	}
+}
+
+func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	handler := srv.Handler()
+	tenantID := "default"
+	endpointID := "ep-job-test-1"
+	opID := "admin"
+
+	_ = store.UpsertEndpoint(storage.Endpoint{
+		ID:       endpointID,
+		Hostname: "job-host",
+		OS:       "linux",
+		TenantID: tenantID,
+	})
+
+	jwtToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: opID, Role: hubauth.RoleAdmin, TenantID: tenantID}, "test-admin-key-12345", time.Hour)
+
+	// Create a script
+	createBody, _ := json.Marshal(map[string]string{
+		"name":        "lookup_test.sh",
+		"description": "Script for job lookup verification",
+		"interpreter": "/bin/sh",
+		"source":      "echo lookup test\n",
+	})
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/scripts", bytes.NewReader(createBody))
+	reqCreate.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	handler.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusCreated {
+		t.Fatalf("failed to create script: %d: %s", wCreate.Code, wCreate.Body.String())
+	}
+	var createResp struct {
+		Script  scripts.Script        `json:"script"`
+		Version scripts.ScriptVersion `json:"version"`
+	}
+	_ = json.NewDecoder(wCreate.Body).Decode(&createResp)
+
+	// Create a response session
+	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
+	secret, _ := auth.EnrollTOTP(tenantID, opID)
+	bPub, bPriv, _ := ed25519.GenerateKey(rand.Reader)
+	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
+	session, _ := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-job-sess", hex.EncodeToString(bPub), code)
+
+	// Dispatch a script exec job
+	actionPayload := response.ScriptExecPayload{
+		ScriptID:       createResp.Script.ID,
+		ScriptVersion:  1,
+		ScriptDigest:   createResp.Version.DigestSHA256,
+		Interpreter:    createResp.Script.Interpreter,
+		Source:         createResp.Version.Source,
+		TimeoutSeconds: 60,
+		MaxOutputBytes: 1048576,
+	}
+	actionDigest, _ := response.ComputeActionDigest(actionPayload)
+	proof := &responseauth.ActionProof{
+		SessionID:       session.SessionID,
+		TenantID:        tenantID,
+		ActionKind:      response.ActionKindScriptExec,
+		ActionDigest:    actionDigest,
+		TargetEndpoints: []string{endpointID},
+		Timestamp:       time.Now().Unix(),
+		Nonce:           "job-nonce-12345678",
+	}
+	sig := ed25519.Sign(bPriv, proof.CanonicalBytes())
+	proof.Signature = hex.EncodeToString(sig)
+
+	runBody, _ := json.Marshal(map[string]interface{}{
+		"script_id":       createResp.Script.ID,
+		"version":         1,
+		"endpoint_id":     endpointID,
+		"session_id":      session.SessionID,
+		"action_digest":   actionDigest,
+		"proof":           proof,
+		"timeout_seconds": 60,
+		"max_output_bytes": 1048576,
+	})
+	reqRun := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/run", bytes.NewReader(runBody))
+	reqRun.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqRun.Header.Set("Content-Type", "application/json")
+	wRun := httptest.NewRecorder()
+	handler.ServeHTTP(wRun, reqRun)
+	if wRun.Code != http.StatusCreated {
+		t.Fatalf("failed to create script exec job: %d: %s", wRun.Code, wRun.Body.String())
+	}
+
+	var createdJob response.JobRecord
+	_ = json.NewDecoder(wRun.Body).Decode(&createdJob)
+	if createdJob.ID == "" {
+		t.Fatalf("empty job id returned")
+	}
+
+	// Lookup specific job by ID: GET /api/v1/response/jobs?id=...
+	reqJob := httptest.NewRequest(http.MethodGet, "/api/v1/response/jobs?id="+createdJob.ID, nil)
+	reqJob.Header.Set("Authorization", "Bearer "+jwtToken)
+	wJob := httptest.NewRecorder()
+	handler.ServeHTTP(wJob, reqJob)
+	if wJob.Code != http.StatusOK {
+		t.Fatalf("failed to get job by id: %d: %s", wJob.Code, wJob.Body.String())
+	}
+
+	var fetchedJob response.JobRecord
+	if err := json.NewDecoder(wJob.Body).Decode(&fetchedJob); err != nil {
+		t.Fatalf("failed to decode job: %v", err)
+	}
+	if fetchedJob.ID != createdJob.ID || fetchedJob.Kind != response.ActionKindScriptExec {
+		t.Fatalf("job mismatch: %+v", fetchedJob)
+	}
+
+	// Non-existent job returns 404
+	reqNonExistent := httptest.NewRequest(http.MethodGet, "/api/v1/response/jobs?id=job-does-not-exist", nil)
+	reqNonExistent.Header.Set("Authorization", "Bearer "+jwtToken)
+	wNonExistent := httptest.NewRecorder()
+	handler.ServeHTTP(wNonExistent, reqNonExistent)
+	if wNonExistent.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent job, got %d", wNonExistent.Code)
+	}
+}
+

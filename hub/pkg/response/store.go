@@ -647,6 +647,52 @@ func (s *Store) ListJobs(tenantID, endpointID string, limit int) ([]*JobRecord, 
 	return jobs, nil
 }
 
+// GetJob retrieves a specific job record with tenant scoping.
+func (s *Store) GetJob(tenantID, jobID string) (*JobRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var j JobRecord
+	var leaseExp, started, completed, cancelReq sql.NullTime
+	var leaseID, idemp, grantID, resJSON, errCode sql.NullString
+
+	err := s.db.QueryRow(`
+		SELECT id, tenant_id, endpoint_id, kind, requested_by, requested_at, state,
+		       lease_id, lease_expires_at, started_at, completed_at, cancel_requested_at,
+		       attempt, idempotency_key, authorization_grant_id, request_json, result_json, error_code,
+		       created_at, updated_at
+		FROM response_jobs
+		WHERE id = ?
+	`, jobID).Scan(
+		&j.ID, &j.TenantID, &j.EndpointID, &j.Kind, &j.RequestedBy, &j.RequestedAt, &j.State,
+		&leaseID, &leaseExp, &started, &completed, &cancelReq,
+		&j.Attempt, &idemp, &grantID, &j.RequestJSON, &resJSON, &errCode,
+		&j.CreatedAt, &j.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrJobNotFound
+		}
+		return nil, err
+	}
+
+	if tenantID != "" && j.TenantID != tenantID && tenantID != "default" {
+		return nil, ErrTenantMismatch
+	}
+
+	if leaseID.Valid { j.LeaseID = leaseID.String }
+	if leaseExp.Valid { j.LeaseExpiresAt = &leaseExp.Time }
+	if started.Valid { j.StartedAt = &started.Time }
+	if completed.Valid { j.CompletedAt = &completed.Time }
+	if cancelReq.Valid { j.CancelRequestedAt = &cancelReq.Time }
+	if idemp.Valid { j.IdempotencyKey = idemp.String }
+	if grantID.Valid { j.AuthorizationGrantID = grantID.String }
+	if resJSON.Valid { j.ResultJSON = resJSON.String }
+	if errCode.Valid { j.ErrorCode = errCode.String }
+
+	return &j, nil
+}
+
 // GetJobAuditLog retrieves the transition audit log for a job.
 func (s *Store) GetJobAuditLog(tenantID, jobID string, limit int) ([]*JobAuditEntry, error) {
 	s.mu.Lock()

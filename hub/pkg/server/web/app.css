@@ -3649,3 +3649,71 @@ input[type="url"] {
   word-break: break-all;
 }
 
+/* Script Library, Parameter Form, and Response Output Inspection */
+.job-output-console {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: #0a0c10;
+  color: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 12px 14px;
+  margin: 4px 0 12px 0;
+  max-height: 380px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.job-output-console.stderr {
+  border-color: rgba(248, 81, 73, 0.4);
+  color: #ff7b72;
+  background: rgba(30, 10, 10, 0.6);
+}
+
+.script-source-preview {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  background: #0a0c10;
+  color: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.code-editor {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--ground);
+  color: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  width: 100%;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.script-param-group {
+  padding: var(--s-2);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+.target-endpoints-list {
+  max-height: 160px;
+  overflow-y: auto;
+  padding: var(--s-2);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+

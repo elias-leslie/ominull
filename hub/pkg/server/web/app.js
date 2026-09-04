@@ -307,6 +307,7 @@
     responseSession: null,
     terminalSessions: [],
     scripts: [],
+    scriptSchedules: [],
     evidenceBundles: [],
     vulnerabilities: [],
     operators: [],
@@ -5938,8 +5939,8 @@
         h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
       ),
       isUnlocked
-        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections and interactive pseudoterminals. An ephemeral browser key signed with TOTP is active in memory." })
-        : h("p", { cls: "pending", text: "Autonomous threat nullification and endpoint response actions require ephemeral operator proof signed by an authenticated response session. Unlock with TOTP/Passkey to issue commands." }),
+        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections, interactive pseudoterminals, and execute immutable scripts under signed ActionProof V2. An ephemeral browser key signed with TOTP is active in memory." })
+        : h("p", { cls: "pending", text: "Autonomous threat nullification, script execution, and endpoint response actions require ephemeral operator proof signed by an authenticated response session. Unlock with TOTP/Passkey to issue commands." }),
       h("div", { cls: "form-row" }, authActions)
     ));
 
@@ -5995,34 +5996,944 @@
 
     var jobRows = (state.responseJobs || []).map(function (j) {
       return [
-        h("span", { cls: "ip", text: j.id ? j.id.slice(0, 8) + "..." : "" }),
+        h("a", {
+          cls: "ip mono",
+          href: "#",
+          text: j.id ? j.id.slice(0, 8) + "..." : "",
+          on: {
+            click: function (e) {
+              e.preventDefault();
+              openJobOutputModal(j.id);
+            }
+          }
+        }),
         h("span", { text: j.endpoint_id || "" }),
         h("span", { text: j.action_kind || j.kind || "" }),
-        h("span", { cls: j.state === "succeeded" ? "badge badge-ok" : "badge badge-warn", text: j.state || "queued" }),
+        h("span", {
+          cls: j.state === "succeeded" ? "badge badge-ok" : (j.state === "failed" || j.state === "timed_out" ? "badge badge-crit" : "badge badge-warn"),
+          text: j.state || "queued"
+        }),
         h("span", { cls: "dim", text: j.operator_id || "" }),
-        stamp(parseTime(j.created_at))
+        stamp(parseTime(j.created_at)),
+        h("div", { cls: "row-actions" },
+          h("button", {
+            cls: "btn btn-subtle",
+            type: "button",
+            text: "Inspect",
+            on: {
+              click: function () {
+                openJobOutputModal(j.id);
+              }
+            }
+          })
+        )
       ];
     });
 
     var jobsCard = card("Active Response Jobs",
-      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created"], jobRows) : h("div", { cls: "card-body", text: "No active response jobs in queue." })
+      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: "No active response jobs in queue." })
     );
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
         h("b", { text: sc.name || "" }),
-        h("span", { text: sc.interpreter || "" }),
+        h("span", { cls: "mono", text: sc.interpreter || "" }),
         h("span", { text: "v" + (sc.latest_version || 1) }),
-        h("span", { cls: "dim-3", text: sc.description || "" }),
-        stamp(parseTime(sc.updated_at))
+        h("span", { cls: "dim-2", text: sc.description || "" }),
+        h("span", { cls: sc.retired ? "badge badge-crit" : "badge badge-ok", text: sc.retired ? "Retired" : "Active" }),
+        stamp(parseTime(sc.updated_at)),
+        h("div", { cls: "row-actions" },
+          !sc.retired ? h("button", {
+            cls: "btn btn-subtle btn-primary",
+            type: "button",
+            text: "Run",
+            on: {
+              click: function () {
+                openScriptRunSheet(sc);
+              }
+            }
+          }) : null,
+          h("button", {
+            cls: "btn btn-subtle",
+            type: "button",
+            text: "Versions",
+            on: {
+              click: function () {
+                openScriptVersionsSheet(sc);
+              }
+            }
+          }),
+          !sc.retired ? h("button", {
+            cls: "btn btn-subtle btn-danger",
+            type: "button",
+            text: "Retire",
+            on: {
+              click: function () {
+                retireScriptConfirm(sc);
+              }
+            }
+          }) : null
+        )
       ];
     });
 
-    var scriptsCard = card("Immutable Script Library",
-      scriptRows.length ? simpleTable(["Script", "Interpreter", "Version", "Description", "Updated"], scriptRows) : h("div", { cls: "card-body", text: "No registered response scripts." })
+    var scriptCardHead = h("div", { cls: "card-header-actions" },
+      h("button", {
+        cls: "btn btn-primary btn-s",
+        type: "button",
+        text: "New Script",
+        on: {
+          click: function () {
+            openCreateScriptSheet();
+          }
+        }
+      })
     );
 
-    view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard));
+    var scriptsCard = card("Immutable Script Library",
+      scriptRows.length ? simpleTable(["Script", "Interpreter", "Version", "Description", "Status", "Updated", "Actions"], scriptRows) : h("div", { cls: "card-body", text: "No registered response scripts. Click 'New Script' to register a script." }),
+      [scriptCardHead]
+    );
+
+    var schedRows = (state.scriptSchedules || []).map(function (sched) {
+      var targetCount = (sched.target_endpoints || []).length;
+      var targetPreview = targetCount === 1 ? sched.target_endpoints[0] : targetCount + " endpoints";
+      var isCancelled = sched.status === "cancelled";
+      return [
+        h("span", { cls: "ip mono", text: sched.id ? sched.id.slice(0, 12) + "..." : "" }),
+        h("span", { text: (sched.script_id || "").slice(0, 8) + "... v" + sched.version }),
+        h("span", { cls: "mono dim-2", text: (sched.script_digest || "").slice(0, 12) + "..." }),
+        h("span", { cls: "badge badge-neutral", text: sched.recurrence || "daily" }),
+        h("span", { title: (sched.target_endpoints || []).join(", "), text: targetPreview }),
+        h("span", { cls: "dim-2", text: (sched.runs_count || 0) + " / " + (sched.max_runs > 0 ? sched.max_runs : "indefinite") }),
+        h("span", { cls: isCancelled ? "badge badge-crit" : "badge badge-ok", text: sched.status || "active" }),
+        stamp(parseTime(sched.created_at)),
+        h("div", { cls: "row-actions" },
+          !isCancelled ? h("button", {
+            cls: "btn btn-subtle btn-danger",
+            type: "button",
+            text: "Cancel",
+            on: {
+              click: function () {
+                cancelScriptScheduleConfirm(sched.id);
+              }
+            }
+          }) : h("span", { cls: "dim-3", text: "cancelled" })
+        )
+      ];
+    });
+
+    var schedulesCard = card("Frozen Script Schedules",
+      schedRows.length ? simpleTable(["Schedule ID", "Script", "Frozen Digest", "Recurrence", "Target Snapshot", "Runs", "Status", "Created", "Action"], schedRows) : h("div", { cls: "card-body", text: "No scheduled script executions." })
+    );
+
+    view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard, schedulesCard));
+  }
+
+  function openJobOutputModal(jobId) {
+    if (!jobId) return;
+
+    var headTitle = "Response Job: " + (jobId.length > 16 ? jobId.slice(0, 16) + "..." : jobId);
+    var statusBadge = h("div", { cls: "badge badge-warn", text: "Loading..." });
+    var metaGrid = h("div", { cls: "alert-exp-grid" });
+    var stdoutBox = h("pre", { cls: "job-output-console stdout", text: "Fetching output..." });
+    var stderrBox = h("pre", { cls: "job-output-console stderr", hidden: true });
+    var truncNotice = h("div", { cls: "st-banner", "data-state": "warn", hidden: true, text: "Output exceeded maximum buffer size and was truncated by endpoint worker." });
+    var errBox = h("div", { cls: "msg-err", hidden: true });
+
+    var copyStdoutBtn = h("button", {
+      cls: "btn btn-subtle btn-s",
+      type: "button",
+      text: "Copy stdout",
+      on: {
+        click: function () {
+          copyText(stdoutBox.textContent, "stdout");
+        }
+      }
+    });
+
+    var copyStderrBtn = h("button", {
+      cls: "btn btn-subtle btn-s",
+      type: "button",
+      text: "Copy stderr",
+      hidden: true,
+      on: {
+        click: function () {
+          copyText(stderrBox.textContent, "stderr");
+        }
+      }
+    });
+
+    var stdoutHeader = h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+      h("label", { cls: "bold", text: "Standard Output (stdout):" }),
+      copyStdoutBtn
+    );
+
+    var stderrHeader = h("div", { cls: "form-row", hidden: true, style: "justify-content:space-between; align-items:center;" },
+      h("label", { cls: "bold", text: "Standard Error (stderr):" }),
+      copyStderrBtn
+    );
+
+    function renderJobData(job) {
+      if (!job) return;
+      var isSucceeded = job.state === "succeeded";
+      var isFailed = job.state === "failed" || job.state === "timed_out";
+      statusBadge.className = isSucceeded ? "badge badge-ok" : (isFailed ? "badge badge-crit" : "badge badge-warn");
+      statusBadge.textContent = (job.state || "queued").toUpperCase();
+
+      clear(metaGrid);
+      function addMeta(label, val) {
+        metaGrid.appendChild(h("div", { cls: "alert-exp-box" },
+          h("div", { cls: "alert-exp-label", text: label }),
+          h("div", { cls: "alert-exp-val", text: val || "—" })
+        ));
+      }
+
+      addMeta("Endpoint", job.endpoint_id);
+      addMeta("Action Kind", job.action_kind || job.kind);
+      addMeta("Operator", job.operator_id);
+      addMeta("Dispatched", job.created_at ? new Date(job.created_at).toLocaleString() : "—");
+
+      var res = null;
+      if (job.result_json) {
+        try { res = JSON.parse(job.result_json); } catch (e) { res = null; }
+      }
+
+      if (res) {
+        addMeta("Exit Code", res.exit_code !== undefined ? String(res.exit_code) : (isSucceeded ? "0" : "—"));
+        addMeta("Duration", res.duration_ms !== undefined ? res.duration_ms + " ms" : "—");
+        if (res.error_code) addMeta("Error Code", res.error_code);
+
+        stdoutBox.textContent = res.stdout || "(no standard output produced)";
+        if (res.stderr && res.stderr.trim()) {
+          stderrBox.textContent = res.stderr;
+          stderrBox.removeAttribute("hidden");
+          stderrHeader.removeAttribute("hidden");
+          copyStderrBtn.removeAttribute("hidden");
+        } else {
+          stderrBox.setAttribute("hidden", "");
+          stderrHeader.setAttribute("hidden", "");
+          copyStderrBtn.setAttribute("hidden", "");
+        }
+
+        if (res.truncated) {
+          truncNotice.removeAttribute("hidden");
+        } else {
+          truncNotice.setAttribute("hidden", "");
+        }
+      } else {
+        addMeta("Status Detail", job.state === "queued" ? "Queued in hub dispatch queue" : "Running on endpoint worker");
+        stdoutBox.textContent = "Job is currently " + (job.state || "queued") + ".\nWaiting for endpoint execution and telemetry return...";
+        stderrBox.setAttribute("hidden", "");
+        stderrHeader.setAttribute("hidden", "");
+        copyStderrBtn.setAttribute("hidden", "");
+        truncNotice.setAttribute("hidden", "");
+      }
+    }
+
+    var pollTimer = null;
+    function poll() {
+      request("/api/v1/response/jobs?id=" + encodeURIComponent(jobId))
+        .then(function (job) {
+          errBox.setAttribute("hidden", "");
+          renderJobData(job);
+          if (job && (job.state === "succeeded" || job.state === "failed" || job.state === "timed_out")) {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          }
+        })
+        .catch(function (err) {
+          errBox.textContent = err.message || "Failed to load job details.";
+          errBox.removeAttribute("hidden");
+        });
+    }
+
+    poll();
+    pollTimer = setInterval(poll, 2000);
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+        h("div", { cls: "form-row" },
+          statusBadge,
+          h("span", { cls: "ip mono dim-2", text: jobId })
+        ),
+        h("button", { cls: "btn btn-subtle", type: "button", text: "Refresh", on: { click: poll } })
+      ),
+      metaGrid,
+      truncNotice,
+      errBox,
+      stdoutHeader,
+      stdoutBox,
+      stderrHeader,
+      stderrBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } })
+    ];
+
+    openSheet(headTitle, body, foot, "sheet-wide");
+    if (sheetEl) {
+      sheetEl._cleanup = function () {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      };
+    }
+  }
+
+  function openCreateScriptSheet() {
+    var nameInput = h("input", { id: "create-script-name", type: "text", cls: "input", placeholder: "e.g. check_disk_usage.sh" });
+    var descInput = h("input", { id: "create-script-desc", type: "text", cls: "input", placeholder: "e.g. Check disk usage thresholds and mount points" });
+
+    var interpSel = h("select", { id: "create-script-interp", cls: "select" });
+    [
+      { val: "/bin/bash", label: "/bin/bash (GNU Bourne-Again Shell - Linux)" },
+      { val: "/bin/sh", label: "/bin/sh (POSIX Shell - Linux)" },
+      { val: "powershell.exe", label: "powershell.exe (Windows PowerShell 5.1+)" },
+      { val: "cmd.exe", label: "cmd.exe (Windows Command Prompt)" },
+      { val: "pwsh.exe", label: "pwsh.exe (PowerShell Core)" }
+    ].forEach(function (opt) {
+      interpSel.appendChild(h("option", { value: opt.val, text: opt.label }));
+    });
+
+    var sourceEditor = h("textarea", {
+      id: "create-script-source",
+      cls: "code-editor",
+      rows: "10",
+      placeholder: "#!/bin/bash\n# Script source executed verbatim without textual template injection\necho \"Starting audit on $(hostname)\"\n"
+    });
+
+    var schemaEditor = h("textarea", {
+      id: "create-script-schema",
+      cls: "code-editor",
+      rows: "6",
+      placeholder: "Optional JSON parameter schema (leave empty if script requires no parameters)"
+    });
+
+    var insertTemplateBtn = h("button", {
+      cls: "btn btn-subtle btn-s",
+      type: "button",
+      text: "Insert Schema Template",
+      on: {
+        click: function () {
+          schemaEditor.value = JSON.stringify({
+            parameters: [
+              { name: "threshold_pct", type: "number", required: true, "default": "80", description: "Alert threshold percentage" },
+              { name: "mount_point", type: "string", required: false, "default": "/", description: "Mount point to check" },
+              { name: "notify_level", type: "enum", "enum": ["info", "warning", "critical"], required: false, "default": "warning", description: "Severity tag" }
+            ]
+          }, null, 2);
+        }
+      }
+    });
+
+    var errBox = h("div", { id: "create-script-err", cls: "msg-err", hidden: true });
+
+    var submitBtn = h("button", {
+      id: "create-script-submit",
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Register Script",
+      on: {
+        click: function () {
+          var name = (nameInput.value || "").trim();
+          var desc = (descInput.value || "").trim();
+          var interp = interpSel.value;
+          var src = sourceEditor.value;
+          var schemaText = (schemaEditor.value || "").trim();
+
+          if (!name) {
+            errBox.textContent = "Please enter a script name.";
+            errBox.removeAttribute("hidden");
+            nameInput.focus();
+            return;
+          }
+          if (!src || !src.trim()) {
+            errBox.textContent = "Please provide script source code.";
+            errBox.removeAttribute("hidden");
+            sourceEditor.focus();
+            return;
+          }
+          if (schemaText) {
+            try {
+              JSON.parse(schemaText);
+            } catch (e) {
+              errBox.textContent = "Invalid Parameter Schema JSON: " + e.message;
+              errBox.removeAttribute("hidden");
+              schemaEditor.focus();
+              return;
+            }
+          }
+
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Registering...";
+          errBox.setAttribute("hidden", "");
+
+          request("/api/v1/scripts", "POST", {
+            name: name,
+            description: desc,
+            interpreter: interp,
+            source: src,
+            parameter_schema_json: schemaText
+          })
+            .then(function (res) {
+              closeSheet();
+              toast("Script '" + name + "' registered as v1.", "ok");
+              return request("/api/v1/scripts").then(function (d) {
+                state.scripts = arrayOf(d && d.scripts || d);
+                if (state.section === "response") renderResponse();
+              });
+            })
+            .catch(function (err) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = "Register Script";
+              errBox.textContent = err.message || "Failed to register script.";
+              errBox.removeAttribute("hidden");
+            });
+        }
+      }
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "Register an immutable script in the Ominull script library. Scripts are hashed with SHA-256 upon registration. Modifying a script creates a new immutable version." }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Script Name:" }),
+        nameInput
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Description:" }),
+        descInput
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Interpreter:" }),
+        interpSel
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Source Code (verbatim execution):" }),
+        sourceEditor
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+          h("label", { text: "Parameter Schema JSON (optional):" }),
+          insertTemplateBtn
+        ),
+        schemaEditor
+      ),
+      errBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      submitBtn
+    ];
+
+    openSheet("Register Immutable Script", body, foot, "sheet-wide");
+  }
+
+  function openScriptVersionsSheet(script) {
+    if (!script) return;
+
+    var headTitle = "Script Versions: " + (script.name || script.id);
+    var versionSelect = h("select", { cls: "select" });
+    for (var v = script.latest_version || 1; v >= 1; v--) {
+      versionSelect.appendChild(h("option", { value: String(v), text: "Version " + v + (v === script.latest_version ? " (Latest)" : "") }));
+    }
+
+    var digestSpan = h("span", { cls: "mono dim", text: "Loading..." });
+    var createdSpan = h("span", { cls: "dim-2", text: "—" });
+    var sourceBox = h("pre", { cls: "script-source-preview", text: "Loading version..." });
+    var schemaBox = h("pre", { cls: "script-source-preview", text: "—", hidden: true });
+    var schemaLabel = h("label", { cls: "bold", text: "Parameter Schema:", hidden: true });
+    var errBox = h("div", { cls: "msg-err", hidden: true });
+
+    function loadVersion(verNum) {
+      request("/api/v1/scripts?id=" + encodeURIComponent(script.id) + "&version=" + verNum)
+        .then(function (ver) {
+          errBox.setAttribute("hidden", "");
+          digestSpan.textContent = ver.digest_sha256 || "—";
+          createdSpan.textContent = (ver.created_by || "operator") + " · " + (ver.created_at ? new Date(ver.created_at).toLocaleString() : "");
+          sourceBox.textContent = ver.source || "";
+          if (ver.parameter_schema_json && ver.parameter_schema_json.trim()) {
+            try {
+              schemaBox.textContent = JSON.stringify(JSON.parse(ver.parameter_schema_json), null, 2);
+            } catch (e) {
+              schemaBox.textContent = ver.parameter_schema_json;
+            }
+            schemaBox.removeAttribute("hidden");
+            schemaLabel.removeAttribute("hidden");
+          } else {
+            schemaBox.setAttribute("hidden", "");
+            schemaLabel.setAttribute("hidden", "");
+          }
+        })
+        .catch(function (err) {
+          errBox.textContent = err.message || "Failed to load version.";
+          errBox.removeAttribute("hidden");
+        });
+    }
+
+    versionSelect.addEventListener("change", function () {
+      loadVersion(parseInt(versionSelect.value, 10));
+    });
+
+    loadVersion(script.latest_version || 1);
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+        h("div", { cls: "form-row" },
+          h("label", { text: "Select Version:" }),
+          versionSelect
+        ),
+        h("span", { cls: script.retired ? "badge badge-crit" : "badge badge-ok", text: script.retired ? "Retired" : "Active" })
+      ),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "SHA-256 Digest: " }),
+        digestSpan
+      ),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Created: " }),
+        createdSpan
+      ),
+      errBox,
+      h("label", { cls: "bold", text: "Script Source Code:" }),
+      sourceBox,
+      schemaLabel,
+      schemaBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } })
+    ];
+
+    openSheet(headTitle, body, foot, "sheet-wide");
+  }
+
+  function openScriptRunSheet(script, initialVersion) {
+    if (!script) return;
+    if (script.retired) {
+      toast("Cannot execute retired script.", "crit");
+      return;
+    }
+
+    var ver = initialVersion || script.latest_version || 1;
+    var headTitle = "Run Script: " + (script.name || script.id);
+
+    var verSelect = h("select", { cls: "select" });
+    for (var v = script.latest_version || 1; v >= 1; v--) {
+      verSelect.appendChild(h("option", { value: String(v), text: "v" + v + (v === script.latest_version ? " (Latest)" : "") }));
+    }
+    verSelect.value = String(ver);
+
+    var digestBadge = h("span", { cls: "mono dim", text: "Loading digest..." });
+    var paramFormContainer = h("div", { cls: "script-param-group stack-s" });
+    var errBox = h("div", { id: "run-script-err", cls: "msg-err", hidden: true });
+
+    // Mode Toggle: One-off vs Scheduled
+    var modeRunNow = h("input", { type: "radio", name: "script-mode", id: "mode-run-now", checked: true });
+    var modeSchedule = h("input", { type: "radio", name: "script-mode", id: "mode-schedule" });
+
+    var modeToggleRow = h("div", { cls: "form-row", style: "gap: var(--s-3); margin-bottom: var(--s-2);" },
+      h("label", { cls: "form-check-label", "for": "mode-run-now" }, modeRunNow, h("span", { text: " Run Now (One-Off)" })),
+      h("label", { cls: "form-check-label", "for": "mode-schedule" }, modeSchedule, h("span", { text: " Schedule Execution (Frozen Snapshot)" }))
+    );
+
+    // Endpoints for Run Now (single select)
+    var singleEndpointSel = h("select", { cls: "select", id: "script-single-endpoint" });
+    // Endpoints for Schedule (checkbox list)
+    var scheduleTargetsContainer = h("div", { cls: "target-endpoints-list stack-s", hidden: true });
+
+    var assetsWithEndpoints = (state.assets || []).filter(function (a) { return !!a.endpoint; });
+    if (!assetsWithEndpoints.length && state.endpoints && state.endpoints.length) {
+      assetsWithEndpoints = state.endpoints.map(function (ep) { return { endpoint: ep, name: ep.hostname, ip: ep.ip }; });
+    }
+
+    var targetCheckboxes = [];
+    assetsWithEndpoints.forEach(function (a) {
+      var ep = a.endpoint;
+      var label = (ep.hostname || a.name || ep.id) + " (" + (ep.ip || a.ip || "unknown") + " · " + (ep.os || "OS") + ")";
+      singleEndpointSel.appendChild(h("option", { value: ep.id, text: label }));
+
+      var cb = h("input", { type: "checkbox", value: ep.id, id: "sched-target-" + ep.id });
+      targetCheckboxes.push(cb);
+      scheduleTargetsContainer.appendChild(h("div", { cls: "form-row", style: "align-items:center;" },
+        cb,
+        h("label", { "for": "sched-target-" + ep.id, text: " " + label })
+      ));
+    });
+
+    // Execution Bounds
+    var timeoutInput = h("input", { id: "run-script-timeout", type: "number", cls: "input", min: "1", max: "300", value: "60" });
+    var maxOutputSel = h("select", { id: "run-script-max-output", cls: "select" });
+    [
+      { val: "1048576", label: "1 MiB (Default)" },
+      { val: "524288", label: "512 KiB" },
+      { val: "2097152", label: "2 MiB" },
+      { val: "5242880", label: "5 MiB (Maximum)" }
+    ].forEach(function (opt) {
+      maxOutputSel.appendChild(h("option", { value: opt.val, text: opt.label }));
+    });
+
+    // Schedule-specific fields
+    var schedSection = h("div", { cls: "stack-s", hidden: true });
+    var recurrenceSel = h("select", { cls: "select" });
+    ["hourly", "daily", "weekly"].forEach(function (r) {
+      recurrenceSel.appendChild(h("option", { value: r, text: r.charAt(0).toUpperCase() + r.slice(1) }));
+    });
+    recurrenceSel.value = "daily";
+
+    var maxRunsInput = h("input", { type: "number", cls: "input", min: "0", value: "0", placeholder: "0 = indefinite" });
+    var nowIso = new Date(Date.now() + 60000).toISOString().slice(0, 16);
+    var startTimeInput = h("input", { type: "datetime-local", cls: "input", value: nowIso });
+
+    schedSection.appendChild(h("div", { cls: "form-row stack-s" },
+      h("label", { text: "Recurrence Schedule:" }),
+      recurrenceSel
+    ));
+    schedSection.appendChild(h("div", { cls: "form-row stack-s" },
+      h("label", { text: "Start Time (Local):" }),
+      startTimeInput
+    ));
+    schedSection.appendChild(h("div", { cls: "form-row stack-s" },
+      h("label", { text: "Max Runs (0 for unlimited):" }),
+      maxRunsInput
+    ));
+
+    var singleTargetRow = h("div", { cls: "form-row stack-s" },
+      h("label", { text: "Target Endpoint:" }),
+      singleEndpointSel
+    );
+
+    var scheduleTargetRow = h("div", { cls: "form-row stack-s", hidden: true },
+      h("label", { text: "Target Endpoints Snapshot (Explicit endpoints to freeze):" }),
+      scheduleTargetsContainer
+    );
+
+    var actionBtn = h("button", {
+      id: "run-script-action-btn",
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Sign & Execute Script"
+    });
+
+    function updateMode() {
+      var isSched = modeSchedule.checked;
+      singleTargetRow.hidden = isSched;
+      scheduleTargetRow.hidden = !isSched;
+      scheduleTargetsContainer.hidden = !isSched;
+      schedSection.hidden = !isSched;
+      actionBtn.textContent = isSched ? "Freeze & Schedule Execution" : "Sign & Execute Script";
+    }
+
+    modeRunNow.addEventListener("change", updateMode);
+    modeSchedule.addEventListener("change", updateMode);
+
+    var currentVersionData = null;
+    var paramInputMap = {};
+
+    function loadVersionSchema(vNum) {
+      clear(paramFormContainer);
+      paramInputMap = {};
+      digestBadge.textContent = "Loading digest...";
+
+      request("/api/v1/scripts?id=" + encodeURIComponent(script.id) + "&version=" + vNum)
+        .then(function (sv) {
+          currentVersionData = sv;
+          digestBadge.textContent = sv.digest_sha256 || "—";
+
+          if (sv.parameter_schema_json && sv.parameter_schema_json.trim()) {
+            var schema = null;
+            try { schema = JSON.parse(sv.parameter_schema_json); } catch (e) { schema = null; }
+            if (schema && Array.isArray(schema.parameters) && schema.parameters.length) {
+              schema.parameters.forEach(function (p) {
+                var fieldEl = null;
+                if (p.type === "enum" && Array.isArray(p.enum)) {
+                  fieldEl = h("select", { cls: "select" });
+                  p.enum.forEach(function (optVal) {
+                    fieldEl.appendChild(h("option", { value: optVal, text: optVal }));
+                  });
+                  if (p.default !== undefined) fieldEl.value = String(p.default);
+                } else if (p.type === "boolean") {
+                  fieldEl = h("select", { cls: "select" });
+                  fieldEl.appendChild(h("option", { value: "true", text: "true" }));
+                  fieldEl.appendChild(h("option", { value: "false", text: "false" }));
+                  if (p.default !== undefined) fieldEl.value = String(p.default);
+                } else if (p.type === "number") {
+                  fieldEl = h("input", { type: "number", step: "any", cls: "input", value: p.default !== undefined ? String(p.default) : "" });
+                } else {
+                  fieldEl = h("input", { type: "text", cls: "input", value: p.default !== undefined ? String(p.default) : "", placeholder: p.type === "ipv4" ? "10.0.0.1" : (p.type === "cidr" ? "10.0.0.0/24" : "") });
+                }
+
+                paramInputMap[p.name] = { param: p, input: fieldEl };
+
+                paramFormContainer.appendChild(h("div", { cls: "form-row stack-s" },
+                  h("div", { cls: "form-row", style: "gap:var(--s-1); align-items:center;" },
+                    h("label", { cls: "bold", text: p.name }),
+                    p.required ? h("span", { cls: "badge badge-crit", style: "font-size:10px; padding:1px 4px;", text: "required" }) : h("span", { cls: "dim-3", text: "(optional)" }),
+                    h("span", { cls: "mono dim-2", text: "[" + p.type + "]" })
+                  ),
+                  p.description ? h("span", { cls: "dim-2", text: p.description }) : null,
+                  fieldEl
+                ));
+              });
+            } else {
+              paramFormContainer.appendChild(h("p", { cls: "dim-2", text: "No input parameters required for this script." }));
+            }
+          } else {
+            paramFormContainer.appendChild(h("p", { cls: "dim-2", text: "No input parameters required for this script." }));
+          }
+        })
+        .catch(function (err) {
+          errBox.textContent = err.message || "Failed to load script version.";
+          errBox.removeAttribute("hidden");
+        });
+    }
+
+    verSelect.addEventListener("change", function () {
+      loadVersionSchema(parseInt(verSelect.value, 10));
+    });
+    loadVersionSchema(ver);
+
+    actionBtn.addEventListener("click", function () {
+      var vNum = parseInt(verSelect.value, 10);
+      var toSec = parseInt(timeoutInput.value, 10) || 60;
+      var maxB = parseInt(maxOutputSel.value, 10) || 1048576;
+      var isSched = modeSchedule.checked;
+
+      // Collect typed parameters
+      var collectedParams = {};
+      var keys = Object.keys(paramInputMap);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        var item = paramInputMap[k];
+        var val = (item.input.value !== undefined ? String(item.input.value) : "").trim();
+        if (item.param.required && !val) {
+          errBox.textContent = "Required parameter '" + k + "' cannot be empty.";
+          errBox.removeAttribute("hidden");
+          item.input.focus();
+          return;
+        }
+        if (val !== "") {
+          collectedParams[k] = val;
+        }
+      }
+
+      if (!state.responseSession || !ephemeralResponseKey) {
+        openUnlockResponseSheet(function () {
+          openScriptRunSheet(script, vNum);
+        });
+        return;
+      }
+
+      errBox.setAttribute("hidden", "");
+
+      if (!isSched) {
+        // One-off Run Now
+        var epId = singleEndpointSel.value;
+        if (!epId) {
+          errBox.textContent = "Please select a target endpoint.";
+          errBox.removeAttribute("hidden");
+          return;
+        }
+
+        actionBtn.disabled = true;
+        actionBtn.textContent = "Signing Proof & Dispatching...";
+
+        // Request canonical action digest
+        request("/api/v1/scripts/digest", "POST", {
+          script_id: script.id,
+          version: vNum,
+          parameters: collectedParams,
+          timeout_seconds: toSec,
+          max_output_bytes: maxB
+        })
+          .then(function (res) {
+            return signActionProof("script_exec", res.action_digest, [epId])
+              .then(function (proof) {
+                return request("/api/v1/scripts/run", "POST", {
+                  script_id: script.id,
+                  version: vNum,
+                  endpoint_id: epId,
+                  parameters: collectedParams,
+                  timeout_seconds: toSec,
+                  max_output_bytes: maxB,
+                  session_id: state.responseSession.session_id,
+                  action_digest: res.action_digest,
+                  proof: proof
+                });
+              });
+          })
+          .then(function (job) {
+            closeSheet();
+            toast("Script execution job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "...) Target: " + epId, "ok");
+            request("/api/v1/response/jobs?limit=50").then(function (d) {
+              state.responseJobs = arrayOf(d && d.jobs || d);
+              if (state.section === "response") renderResponse();
+            });
+            openJobOutputModal(job.id);
+          })
+          .catch(function (err) {
+            actionBtn.disabled = false;
+            actionBtn.textContent = "Sign & Execute Script";
+            errBox.textContent = err.message || "Failed to dispatch script execution.";
+            errBox.removeAttribute("hidden");
+          });
+      } else {
+        // Schedule Execution
+        var selectedTargets = [];
+        targetCheckboxes.forEach(function (cb) {
+          if (cb.checked) selectedTargets.push(cb.value);
+        });
+        if (!selectedTargets.length) {
+          errBox.textContent = "Please select at least one target endpoint to freeze into the schedule snapshot.";
+          errBox.removeAttribute("hidden");
+          return;
+        }
+
+        var rec = recurrenceSel.value;
+        var maxR = parseInt(maxRunsInput.value, 10) || 0;
+        var startVal = startTimeInput.value ? new Date(startTimeInput.value).toISOString() : new Date().toISOString();
+
+        actionBtn.disabled = true;
+        actionBtn.textContent = "Freezing Schedule...";
+
+        request("/api/v1/scripts/schedules", "POST", {
+          script_id: script.id,
+          version: vNum,
+          target_endpoints: selectedTargets,
+          parameters: collectedParams,
+          recurrence: rec,
+          start_time: startVal,
+          max_runs: maxR,
+          timeout_seconds: toSec,
+          max_output_bytes: maxB,
+          session_id: state.responseSession.session_id
+        })
+          .then(function (sched) {
+            closeSheet();
+            toast("Frozen schedule created for " + selectedTargets.length + " endpoint(s).", "ok");
+            return request("/api/v1/scripts/schedules").then(function (d) {
+              state.scriptSchedules = arrayOf(d && d.schedules || d);
+              if (state.section === "response") renderResponse();
+            });
+          })
+          .catch(function (err) {
+            actionBtn.disabled = false;
+            actionBtn.textContent = "Freeze & Schedule Execution";
+            errBox.textContent = err.message || "Failed to create schedule.";
+            errBox.removeAttribute("hidden");
+          });
+      }
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+        h("div", { cls: "form-row" },
+          h("label", { text: "Script Version:" }),
+          verSelect
+        ),
+        h("div", { cls: "form-row", style: "gap:var(--s-1);" },
+          h("span", { cls: "dim-2", text: "Digest: " }),
+          digestBadge
+        )
+      ),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Interpreter: " }),
+        h("span", { cls: "mono bold", text: script.interpreter || "/bin/bash" })
+      ),
+      h("hr", { cls: "line" }),
+      modeToggleRow,
+      singleTargetRow,
+      scheduleTargetRow,
+      schedSection,
+      h("label", { cls: "bold", text: "Script Parameters:" }),
+      paramFormContainer,
+      h("hr", { cls: "line" }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Execution Timeout (seconds, 1-300):" }),
+        timeoutInput
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { text: "Output Buffer Bound:" }),
+        maxOutputSel
+      ),
+      errBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      actionBtn
+    ];
+
+    openSheet(headTitle, body, foot, "sheet-wide");
+  }
+
+  function retireScriptConfirm(script) {
+    if (!script) return;
+    openSheet("Retire Script: " + script.name,
+      h("div", { cls: "card-body stack" },
+        h("div", { cls: "st-banner", "data-state": "crit", text: "Permanent Script Retirement" }),
+        h("p", { cls: "pending", text: "Retiring script '" + script.name + "' permanently disables all future executions and schedules for all versions of this script. Completed jobs and historical telemetry are preserved." }),
+        h("p", { text: "Are you sure you wish to retire this script?" })
+      ),
+      [
+        h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+        h("button", {
+          cls: "btn btn-danger",
+          type: "button",
+          text: "Retire Script",
+          on: {
+            click: function () {
+              request("/api/v1/scripts?id=" + encodeURIComponent(script.id), "DELETE")
+                .then(function () {
+                  closeSheet();
+                  toast("Script '" + script.name + "' retired.", "ok");
+                  return request("/api/v1/scripts").then(function (d) {
+                    state.scripts = arrayOf(d && d.scripts || d);
+                    if (state.section === "response") renderResponse();
+                  });
+                })
+                .catch(function (err) {
+                  toast(err.message || "Failed to retire script.", "crit");
+                });
+            }
+          }
+        })
+      ]
+    );
+  }
+
+  function cancelScriptScheduleConfirm(schedId) {
+    if (!schedId) return;
+    openSheet("Cancel Frozen Schedule",
+      h("div", { cls: "card-body stack" },
+        h("p", { cls: "pending", text: "Are you sure you want to cancel schedule " + schedId + "? No further runs will be dispatched for this schedule." })
+      ),
+      [
+        h("button", { cls: "btn", type: "button", text: "Keep Schedule", on: { click: closeSheet } }),
+        h("button", {
+          cls: "btn btn-danger",
+          type: "button",
+          text: "Cancel Schedule",
+          on: {
+            click: function () {
+              request("/api/v1/scripts/schedules?id=" + encodeURIComponent(schedId), "DELETE")
+                .then(function () {
+                  closeSheet();
+                  toast("Schedule " + schedId + " cancelled.", "ok");
+                  return request("/api/v1/scripts/schedules").then(function (d) {
+                    state.scriptSchedules = arrayOf(d && d.schedules || d);
+                    if (state.section === "response") renderResponse();
+                  });
+                })
+                .catch(function (err) {
+                  toast(err.message || "Failed to cancel schedule.", "crit");
+                });
+            }
+          }
+        })
+      ]
+    );
   }
 
   function launchForensicsSheet(asset) {
@@ -7314,6 +8225,7 @@
       jobs.push(request("/api/v1/terminal/sessions").then(function (d) { state.terminalSessions = arrayOf(d && d.sessions || d); }).catch(function () {}));
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
+      jobs.push(request("/api/v1/scripts/schedules").then(function (d) { state.scriptSchedules = arrayOf(d && d.schedules || d); }).catch(function () {}));
     }
     if (state.section === "forensics") {
       jobs.push(request("/api/v1/evidence/bundles").then(function (d) { state.evidenceBundles = arrayOf(d && d.bundles || d); }).catch(function () {}));
@@ -7478,6 +8390,12 @@
     window.__openLaunchForensicsPicker = openLaunchForensicsPicker;
     window.__inspectBundle = inspectBundle;
     window.__toggleBundleHold = toggleBundleHold;
+    window.__openCreateScriptSheet = openCreateScriptSheet;
+    window.__openScriptRunSheet = openScriptRunSheet;
+    window.__openScriptVersionsSheet = openScriptVersionsSheet;
+    window.__openJobOutputModal = openJobOutputModal;
+    window.__retireScriptConfirm = retireScriptConfirm;
+    window.__cancelScriptScheduleConfirm = cancelScriptScheduleConfirm;
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
@@ -344,4 +345,256 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(job)
+}
+
+// handleScriptsDigest computes the canonical action digest for script execution with the given parameters and bounds.
+func (s *Server) handleScriptsDigest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	if s.scriptsStore == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "scripts store not initialized")
+		return
+	}
+
+	var req struct {
+		ScriptID       string            `json:"script_id"`
+		Version        int               `json:"version"`
+		Parameters     map[string]string `json:"parameters"`
+		TimeoutSeconds int               `json:"timeout_seconds"`
+		MaxOutputBytes int64             `json:"max_output_bytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	if req.ScriptID == "" || req.Version <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "missing script_id or version")
+		return
+	}
+
+	sc, err := s.scriptsStore.GetScript(tenantID, req.ScriptID)
+	if err != nil {
+		if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+			writeJSONError(w, http.StatusNotFound, "script not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to get script: "+err.Error())
+		return
+	}
+	if sc.Retired {
+		writeJSONError(w, http.StatusBadRequest, "cannot execute retired script")
+		return
+	}
+
+	sv, err := s.scriptsStore.GetScriptVersion(tenantID, req.ScriptID, req.Version)
+	if err != nil {
+		if errors.Is(err, scripts.ErrNotFound) || errors.Is(err, scripts.ErrTenantMismatch) {
+			writeJSONError(w, http.StatusNotFound, "script version not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to get script version: "+err.Error())
+		return
+	}
+
+	if sv.ParameterSchemaJSON != "" {
+		paramSchema, err := scripts.ValidateSchema(sv.ParameterSchemaJSON)
+		if err == nil {
+			if err := scripts.ValidateParameters(paramSchema, req.Parameters); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "parameter validation failed: "+err.Error())
+				return
+			}
+		}
+	}
+
+	timeout := req.TimeoutSeconds
+	if timeout <= 0 || timeout > 300 {
+		timeout = 60
+	}
+	maxOutput := req.MaxOutputBytes
+	if maxOutput <= 0 || maxOutput > 5242880 {
+		maxOutput = 1048576
+	}
+
+	payload := response.ScriptExecPayload{
+		ScriptID:       req.ScriptID,
+		ScriptVersion:  req.Version,
+		ScriptDigest:   sv.DigestSHA256,
+		Interpreter:    sc.Interpreter,
+		Source:         sv.Source,
+		Parameters:     req.Parameters,
+		TimeoutSeconds: timeout,
+		MaxOutputBytes: maxOutput,
+	}
+
+	digestHex, err := response.ComputeActionDigest(payload)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to compute action digest: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"action_digest": digestHex,
+		"script_digest": sv.DigestSHA256,
+	})
+}
+
+// handleScriptSchedules manages frozen script execution schedules.
+func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	if s.scriptsStore == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "scripts store not initialized")
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		id := r.URL.Query().Get("id")
+		if id != "" {
+			sched, err := s.scriptsStore.GetSchedule(tenantID, id)
+			if err != nil {
+				if errors.Is(err, scripts.ErrScheduleNotFound) {
+					writeJSONError(w, http.StatusNotFound, "schedule not found")
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, "failed to query schedule: "+err.Error())
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(sched)
+			return
+		}
+
+		schedules, err := s.scriptsStore.ListSchedules(tenantID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to list schedules: "+err.Error())
+			return
+		}
+		if schedules == nil {
+			schedules = []*scripts.ScriptSchedule{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"schedules": schedules,
+			"count":     len(schedules),
+		})
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Fail-closed gate: static API keys cannot create schedules
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot schedule scripts; an active console response session is required")
+			return
+		}
+
+		var req struct {
+			ScriptID        string                    `json:"script_id"`
+			Version         int                       `json:"version"`
+			TargetEndpoints []string                  `json:"target_endpoints"`
+			Parameters      map[string]string         `json:"parameters"`
+			Recurrence      string                    `json:"recurrence"`
+			StartTime       time.Time                 `json:"start_time"`
+			EndTime         *time.Time                `json:"end_time,omitempty"`
+			MaxRuns         int                       `json:"max_runs"`
+			TimeoutSeconds  int                       `json:"timeout_seconds"`
+			MaxOutputBytes  int64                     `json:"max_output_bytes"`
+			SessionID       string                    `json:"session_id"`
+			ActionDigest    string                    `json:"action_digest"`
+			Proof           *responseauth.ActionProof `json:"proof"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+
+		if req.ScriptID == "" || req.Version <= 0 || len(req.TargetEndpoints) == 0 {
+			writeJSONError(w, http.StatusBadRequest, "missing script_id, version, or target_endpoints")
+			return
+		}
+
+		operatorID := s.operatorFromRequest(r)
+		if operatorID == "" {
+			operatorID = "operator"
+		}
+
+		// Verify active response session if response authority configured
+		if s.responseAuth != nil && req.SessionID != "" {
+			st, err := s.responseAuth.Status(r.Context(), tenantID)
+			if err != nil || st.ActiveSessions <= 0 {
+				writeJSONError(w, http.StatusForbidden, "active response authority session required to create schedules")
+				return
+			}
+		}
+
+		sched, err := s.scriptsStore.CreateSchedule(
+			tenantID, req.ScriptID, req.Version,
+			req.TargetEndpoints, req.Parameters, req.Recurrence,
+			req.StartTime, req.EndTime, req.MaxRuns,
+			req.TimeoutSeconds, req.MaxOutputBytes, operatorID,
+		)
+		if err != nil {
+			if errors.Is(err, scripts.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "script or version not found")
+				return
+			}
+			if errors.Is(err, scripts.ErrScriptRetired) {
+				writeJSONError(w, http.StatusBadRequest, "cannot schedule retired script")
+				return
+			}
+			if errors.Is(err, scripts.ErrEmptyTargetEndpoints) {
+				writeJSONError(w, http.StatusBadRequest, "schedule requires explicit target endpoints")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "failed to create schedule: "+err.Error())
+			return
+		}
+
+		s.audit(r, "SCRIPT_SCHEDULE_CREATED", sched.ID, fmt.Sprintf("Created frozen schedule for script %s v%d (digest: %s, targets: %v)", sched.ScriptID, sched.Version, sched.ScriptDigest, sched.TargetEndpoints))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(sched)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing schedule id parameter")
+			return
+		}
+
+		if err := s.scriptsStore.CancelSchedule(tenantID, id); err != nil {
+			if errors.Is(err, scripts.ErrScheduleNotFound) {
+				writeJSONError(w, http.StatusNotFound, "schedule not found or already cancelled")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to cancel schedule: "+err.Error())
+			return
+		}
+
+		s.audit(r, "SCRIPT_SCHEDULE_CANCELLED", id, fmt.Sprintf("Cancelled schedule %s", id))
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"cancelled": true,
+			"id":        id,
+		})
+		return
+	}
+
+	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
