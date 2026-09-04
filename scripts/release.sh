@@ -79,6 +79,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
         -o "${ROOT_DIR}/build/test_linux_collector" "${ROOT_DIR}/agent/tests/test_linux_collector.c" -lcurl
     "${ROOT_DIR}/build/test_linux_collector"
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_process_lineage_linux" "${ROOT_DIR}/agent/tests/test_process_lineage_linux.c"
+    "${ROOT_DIR}/build/test_process_lineage_linux"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_der_sig" "${ROOT_DIR}/agent/tests/test_der_sig.c"
     "${ROOT_DIR}/build/test_der_sig"
 fi

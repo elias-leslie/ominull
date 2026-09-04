@@ -30,6 +30,7 @@
 #include "../include/terminal_linux.h"
 #include "../include/forensics_linux.h"
 #include "../include/script_exec_linux.h"
+#include "../include/process_lineage_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -112,6 +113,7 @@ typedef struct {
     uint32_t process_id;
     uint64_t bytes_in;
     uint64_t bytes_out;
+    PROCESS_ENRICHMENT enrichment;
 } LINUX_FLOW_EVENT;
 
 typedef struct {
@@ -1036,6 +1038,7 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
     PROC_SOCKET_OWNER owners[MAX_FLOWS_PER_BATCH];
     memset(targetInodes, 0, sizeof(targetInodes));
     memset(owners, 0, sizeof(owners));
+    memset(outEvents, 0, sizeof(LINUX_FLOW_EVENT) * maxEvents);
 
     CollectSocketTable("net/tcp", false, outEvents, maxEvents, targetInodes, &count);
     CollectSocketTable("net/tcp6", true, outEvents, maxEvents, targetInodes, &count);
@@ -1059,9 +1062,22 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
         if (owners[i].pid != 0) {
             outEvents[i].process_id = owners[i].pid;
             snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "%s", owners[i].path);
+
+            bool foundInBatch = false;
+            for (size_t j = 0; j < i; j++) {
+                if (outEvents[j].process_id == owners[i].pid) {
+                    outEvents[i].enrichment = outEvents[j].enrichment;
+                    foundInBatch = true;
+                    break;
+                }
+            }
+            if (!foundInBatch) {
+                ProcessLineage_InspectProcess(owners[i].pid, &outEvents[i].enrichment);
+            }
         } else {
             outEvents[i].process_id = 0;
             snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "/usr/bin/system");
+            ProcessLineage_InspectProcess(0, &outEvents[i].enrichment);
         }
     }
 
@@ -2578,7 +2594,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         config->evidence_pubkey_hex
     );
 
-    for (size_t i = 0; i < flowCount && offset < (int)bufCap - 1024; i++) {
+    for (size_t i = 0; i < flowCount && offset < (int)bufCap - 4096; i++) {
         const LINUX_FLOW_EVENT* f = &flows[i];
         const char* comma = (i == flowCount - 1) ? "" : ",";
 
@@ -2598,8 +2614,38 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             snprintf(domainJson, sizeof(domainJson), ",\"domain\":\"%s\"", domain);
         }
 
+        char escapedCmdline[2048] = {0};
+        ProcessLineage_EscapeJSON(f->enrichment.command_line, escapedCmdline, sizeof(escapedCmdline));
+
+        char escapedUser[128] = {0};
+        ProcessLineage_EscapeJSON(f->enrichment.user_identity, escapedUser, sizeof(escapedUser));
+
+        char obsTimeBuf[64] = {0};
+        if (f->enrichment.observed_at > 0) {
+            struct tm tmBuf;
+            time_t obsSec = (time_t)f->enrichment.observed_at;
+            gmtime_r(&obsSec, &tmBuf);
+            strftime(obsTimeBuf, sizeof(obsTimeBuf), "%Y-%m-%dT%H:%M:%SZ", &tmBuf);
+        }
+
+        char enrichmentJson[3072] = {0};
+        int enrichLen = snprintf(enrichmentJson, sizeof(enrichmentJson),
+            ",\"process_instance_id\":\"%s\",\"parent_pid\":%u,\"parent_process_instance_id\":\"%s\",\"command_line\":\"%s\",\"user_identity\":\"%s\",\"executable_sha256\":\"%s\",\"attribution_status\":\"%s\"",
+            f->enrichment.process_instance_id,
+            f->enrichment.ppid,
+            f->enrichment.parent_process_instance_id,
+            escapedCmdline,
+            escapedUser,
+            f->enrichment.executable_sha256,
+            f->enrichment.attribution_status[0] ? f->enrichment.attribution_status : "unknown"
+        );
+        if (obsTimeBuf[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - 64) {
+            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen,
+                ",\"observed_at\":\"%s\"", obsTimeBuf);
+        }
+
         int written = snprintf(jsonBuf + offset, bufCap - offset,
-            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u%s}%s",
+            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u%s%s}%s",
             f->direction,
             f->protocol,
             f->src_ip,
@@ -2611,6 +2657,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             escapedPath[0] ? escapedPath : "/usr/bin/system",
             f->process_id,
             domainJson,
+            enrichmentJson,
             comma
         );
 
