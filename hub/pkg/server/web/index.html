@@ -13,6 +13,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Ominull">
 <link rel="stylesheet" href="app.css?v={{HUB_VERSION}}">
+<link rel="stylesheet" href="vendor/xterm.css?v={{HUB_VERSION}}">
 <script nonce="{{CSP_NONCE}}">
 /* Serve-time substitution. The hub replaces these two tokens before it writes
    the document; they are template placeholders, never checked-in values. */
@@ -231,6 +232,8 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<script src="vendor/xterm.js?v={{HUB_VERSION}}"></script>
+<script src="vendor/addon-fit.js?v={{HUB_VERSION}}"></script>
 <script src="app.js?v={{HUB_VERSION}}"></script>
 </body>
 </html>

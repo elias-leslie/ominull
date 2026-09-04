@@ -3206,6 +3206,82 @@ input[type="url"] {
   display: block;
 }
 
+/* ------------------------------------------------------------- Terminal Window & Emulator */
+.sheet-terminal {
+  width: min(1080px, calc(100vw - 24px));
+  height: min(740px, calc(100vh - 24px));
+  background: var(--surface);
+}
+
+.terminal-meta-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: 6px var(--s-3);
+  background: var(--raised);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-2);
+  color: var(--ink-2);
+  flex: none;
+}
+
+.terminal-meta-left, .terminal-meta-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.terminal-container {
+  flex: 1;
+  min-height: 0;
+  background: #0a0c10;
+  padding: 8px 10px;
+  position: relative;
+  overflow: hidden;
+}
+
+.terminal-container .xterm {
+  height: 100%;
+}
+
+.terminal-container .xterm-viewport {
+  background-color: #0a0c10 !important;
+}
+
+.terminal-overlay-msg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(16, 19, 24, 0.94);
+  border: 1px solid var(--line);
+  padding: 16px 24px;
+  border-radius: var(--r);
+  text-align: center;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  max-width: 440px;
+  box-shadow: var(--overlay);
+}
+
+.terminal-foot-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.terminal-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .btn-sweep {
   display: inline-flex;
   align-items: center;

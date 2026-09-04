@@ -4070,6 +4070,9 @@
   var sheetScrim = null;
 
   function closeSheet() {
+    if (sheetEl && typeof sheetEl._cleanup === "function") {
+      try { sheetEl._cleanup(); } catch (e) {}
+    }
     if (sheetEl && sheetEl.parentNode) sheetEl.parentNode.removeChild(sheetEl);
     if (sheetScrim && sheetScrim.parentNode) sheetScrim.parentNode.removeChild(sheetScrim);
     sheetEl = null;
@@ -5513,9 +5516,10 @@
             })
             .then(function (sessionSummary) {
               closeSheet();
-              toast("Terminal shell session created (" + sessionSummary.session_id.slice(0, 8) + "\u2026). Waiting for agent connection.", "ok");
+              toast("Terminal shell session created (" + sessionSummary.session_id.slice(0, 8) + "\u2026). Connecting emulator.", "ok");
               state.section = "response";
               go("response");
+              openTerminalEmulator(sessionSummary);
             })
             .catch(function (err) {
               launchBtn.disabled = false;
@@ -5600,6 +5604,309 @@
       });
   }
 
+  function openTerminalEmulator(session) {
+    if (!session || !session.session_id) return;
+
+    var epId = session.endpoint_id || "unknown";
+    var asset = null;
+    for (var k in state.assetByKey) {
+      if (state.assetByKey[k].endpoint && state.assetByKey[k].endpoint.id === epId) {
+        asset = state.assetByKey[k];
+        break;
+      }
+    }
+    var hostName = asset ? (asset.name || asset.ip || epId) : epId;
+    var epOs = (asset && asset.endpoint && asset.endpoint.os) || "Linux";
+    var isWindows = epOs.indexOf("Windows") !== -1;
+    var identity = isWindows ? "LocalSystem" : "root";
+    var prog = session.program || (isWindows ? "powershell.exe" : "/bin/bash");
+
+    var activeSessionsCount = (state.terminalSessions || []).filter(function (s) {
+      return s.state === "active" || s.state === "connecting" || s.state === "waiting";
+    }).length;
+
+    // Terminal Emulator & WebSocket State
+    var term = null;
+    var fitAddon = null;
+    var ws = null;
+    var resizeObserver = null;
+    var frameCount = 0;
+    var termContainer = h("div", { cls: "terminal-container", id: "active-terminal-container" });
+
+    // Status elements
+    var statusBadge = h("div", {
+      cls: "badge " + (session.state === "active" ? "badge-ok" : "badge-warn"),
+      text: session.state === "active" ? "Agent Connected" : "Connecting to Relay\u2026"
+    });
+    var frameCountEl = h("span", { cls: "dim-2", text: "Frames: 0 (AES-GCM encrypted)" });
+    var limitsEl = h("span", { cls: "dim-3", text: "Duration: 60m \u00b7 Idle: 15m \u00b7 Tenant slots: " + activeSessionsCount + "/4" });
+
+    var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
+      h("div", { cls: "spin" }),
+      h("b", { text: "Establishing Encrypted Terminal Relay\u2026" }),
+      h("span", { cls: "dim-2", text: "Waiting for agent on " + hostName + " (" + epId + ") to connect via loopback WSS." }),
+      h("span", { cls: "dim-3", text: "Terminal supervisor process will spawn as " + identity + " with " + prog })
+    );
+    termContainer.appendChild(overlayMsg);
+
+    // Meta bar
+    var metaBar = h("div", { cls: "terminal-meta-bar" },
+      h("div", { cls: "terminal-meta-left" },
+        statusBadge,
+        h("span", { cls: "dim", text: "Endpoint: " }), h("b", { text: hostName }),
+        h("span", { cls: "dim-2", text: "(" + epId + ")" }),
+        h("span", { cls: "badge badge-neutral", text: identity }),
+        h("span", { cls: "ip", text: prog })
+      ),
+      h("div", { cls: "terminal-meta-right" },
+        frameCountEl,
+        limitsEl
+      )
+    );
+
+    function cleanup() {
+      if (resizeObserver) {
+        try { resizeObserver.disconnect(); } catch (e) {}
+        resizeObserver = null;
+      }
+      if (ws) {
+        try {
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.onmessage = null;
+          ws.close();
+        } catch (e) {}
+        ws = null;
+      }
+      if (term) {
+        try { term.dispose(); } catch (e) {}
+        term = null;
+      }
+    }
+
+    // Foot controls
+    var sendCtrlCBtn = h("button", {
+      cls: "btn btn-subtle",
+      type: "button",
+      text: "Ctrl+C",
+      title: "Send Interrupt (SIGINT)",
+      on: {
+        click: function () {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "stdin", data: btoa("\x03") }));
+          }
+          if (term) term.focus();
+        }
+      }
+    });
+
+    var sendCtrlDBtn = h("button", {
+      cls: "btn btn-subtle",
+      type: "button",
+      text: "Ctrl+D",
+      title: "Send EOF",
+      on: {
+        click: function () {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "stdin", data: btoa("\x04") }));
+          }
+          if (term) term.focus();
+        }
+      }
+    });
+
+    var clearBtn = h("button", {
+      cls: "btn btn-subtle",
+      type: "button",
+      text: "Clear",
+      title: "Clear Terminal Screen",
+      on: {
+        click: function () {
+          if (term) term.clear();
+        }
+      }
+    });
+
+    var closeSessBtn = h("button", {
+      cls: "btn btn-danger",
+      type: "button",
+      text: "Close Session",
+      title: "Terminate remote process tree and close terminal session",
+      on: {
+        click: function () {
+          if (confirm("Terminate remote pseudoterminal session on " + hostName + "? This will kill all processes in the session group.")) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "close" }));
+            }
+            closeTerminalSession(session.session_id);
+            closeSheet();
+          }
+        }
+      }
+    });
+
+    var detachBtn = h("button", {
+      cls: "btn",
+      type: "button",
+      text: "Detach Viewer",
+      title: "Close this window without terminating the remote session",
+      on: {
+        click: function () {
+          closeSheet();
+          refresh();
+        }
+      }
+    });
+
+    var foot = [
+      h("div", { cls: "terminal-foot-actions" },
+        h("div", { cls: "terminal-actions-group" },
+          sendCtrlCBtn,
+          sendCtrlDBtn,
+          clearBtn
+        ),
+        h("div", { cls: "terminal-actions-group" },
+          detachBtn,
+          closeSessBtn
+        )
+      )
+    ];
+
+    var body = h("div", { cls: "stack-s", style: { display: "flex", flexDirection: "column", height: "100%" } },
+      metaBar,
+      termContainer
+    );
+
+    openSheet("Pseudoterminal \u2014 " + hostName + " (" + session.session_id.slice(0, 8) + "\u2026)", body, foot, "sheet-terminal");
+    if (sheetEl) sheetEl._cleanup = cleanup;
+
+    // Check if xterm is available
+    if (!window.Terminal) {
+      overlayMsg.innerHTML = "";
+      overlayMsg.appendChild(h("div", { cls: "st-banner", "data-state": "crit", text: "Vendored Terminal Emulator Unavailable" }));
+      overlayMsg.appendChild(h("p", { text: "The xterm.js terminal engine could not be loaded from /vendor/xterm.js." }));
+      return;
+    }
+
+    // Initialize xterm
+    term = new window.Terminal({
+      cursorBlink: true,
+      cursorStyle: "block",
+      convertEol: true,
+      fontFamily: "IBM Plex Mono, Menlo, monospace",
+      fontSize: 13,
+      theme: {
+        background: "#0a0c10",
+        foreground: "#e2e6eb",
+        cursor: "#3498db",
+        selectionBackground: "rgba(52, 152, 219, 0.3)"
+      },
+      allowProposedApi: false,
+      scrollback: 5000
+    });
+
+    if (window.FitAddon && window.FitAddon.FitAddon) {
+      fitAddon = new window.FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+    }
+
+    term.open(termContainer);
+    if (fitAddon) {
+      try { fitAddon.fit(); } catch (e) {}
+    }
+    term.focus();
+
+    // Connect WebSocket
+    var wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var wsUrl = wsProto + "//" + window.location.host + "/api/v1/terminal/ws/operator?session_id=" + encodeURIComponent(session.session_id);
+
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      statusBadge.className = "badge badge-crit";
+      statusBadge.textContent = "Connection Failed";
+      term.write("\r\n[Failed to open WebSocket: " + e.message + "]\r\n");
+      return;
+    }
+
+    ws.onopen = function () {
+      statusBadge.className = "badge badge-warn";
+      statusBadge.textContent = "Awaiting Agent Connection";
+
+      // Send initial resize
+      ws.send(JSON.stringify({
+        type: "resize",
+        rows: term.rows,
+        cols: term.cols
+      }));
+    };
+
+    ws.onmessage = function (event) {
+      try {
+        var frame = JSON.parse(event.data);
+        frameCount++;
+        frameCountEl.textContent = "Frames: " + frameCount + " (AES-GCM encrypted)";
+
+        if (frame.type === "stdout") {
+          if (overlayMsg.parentNode) {
+            overlayMsg.parentNode.removeChild(overlayMsg);
+          }
+          statusBadge.className = "badge badge-ok";
+          statusBadge.textContent = "Live Pseudoterminal Active";
+
+          if (frame.data) {
+            var bin = atob(frame.data);
+            var bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            term.write(bytes);
+          }
+        } else if (frame.type === "close") {
+          statusBadge.className = "badge badge-neutral";
+          statusBadge.textContent = "Session Terminated";
+          term.write("\r\n\r\n[Remote session terminated by agent]\r\n");
+        }
+      } catch (e) {
+        console.error("Failed to parse incoming terminal frame:", e);
+      }
+    };
+
+    ws.onerror = function (e) {
+      statusBadge.className = "badge badge-crit";
+      statusBadge.textContent = "Relay Error";
+    };
+
+    ws.onclose = function (e) {
+      statusBadge.className = "badge badge-neutral";
+      statusBadge.textContent = "Disconnected (Code: " + e.code + ")";
+      term.write("\r\n[Terminal relay disconnected]\r\n");
+    };
+
+    // Terminal keyboard input
+    term.onData(function (data) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        var bytes = new TextEncoder().encode(data);
+        var bin = "";
+        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        ws.send(JSON.stringify({ type: "stdin", data: btoa(bin) }));
+      }
+    });
+
+    // Resize handling
+    if (window.ResizeObserver) {
+      resizeObserver = new ResizeObserver(function () {
+        if (fitAddon) {
+          try {
+            fitAddon.fit();
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+            }
+          } catch (e) {}
+        }
+      });
+      resizeObserver.observe(termContainer);
+    }
+  }
+
   function renderResponse() {
     var view = $("view");
     clear(view);
@@ -5631,7 +5938,17 @@
     var termSessions = state.terminalSessions || [];
     var termRows = termSessions.map(function (ts) {
       return [
-        h("span", { cls: "ip", text: ts.session_id ? ts.session_id.slice(0, 8) + "..." : "" }),
+        h("a", {
+          cls: "ip",
+          href: "#",
+          text: ts.session_id ? ts.session_id.slice(0, 8) + "..." : "",
+          on: {
+            click: function (e) {
+              e.preventDefault();
+              openTerminalEmulator(ts);
+            }
+          }
+        }),
         h("span", { text: ts.endpoint_id || "" }),
         h("span", { text: ts.program || "" }),
         h("span", { cls: ts.state === "active" ? "badge badge-ok" : (ts.state === "waiting" || ts.state === "connecting" ? "badge badge-warn" : "badge badge-crit"), text: ts.state || "unknown" }),
@@ -5639,7 +5956,10 @@
         stamp(parseTime(ts.created_at)),
         h("div", { cls: "row-actions" },
           ts.state === "active" || ts.state === "waiting" || ts.state === "connecting"
-            ? h("button", { cls: "btn btn-subtle btn-danger", type: "button", text: "Close", on: { click: function () { closeTerminalSession(ts.session_id); } } })
+            ? [
+                h("button", { cls: "btn btn-subtle", type: "button", text: "Open Console", on: { click: function () { openTerminalEmulator(ts); } } }),
+                h("button", { cls: "btn btn-subtle btn-danger", type: "button", text: "Close", on: { click: function () { closeTerminalSession(ts.session_id); } } })
+              ]
             : h("span", { cls: "dim-3", text: ts.close_reason || "closed" })
         )
       ];
@@ -6866,6 +7186,7 @@
     window.__lockResponseSession = lockResponseSession;
     window.__launchTerminalShell = launchTerminalShell;
     window.__openLaunchEndpointShellPicker = openLaunchEndpointShellPicker;
+    window.__openTerminalEmulator = openTerminalEmulator;
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

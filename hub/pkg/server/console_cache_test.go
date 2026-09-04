@@ -24,7 +24,13 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 	srv.Handler().ServeHTTP(w, r)
 
 	body := w.Body.String()
-	for _, want := range []string{"app.js?v=" + srv.agentVersion, "app.css?v=" + srv.agentVersion} {
+	for _, want := range []string{
+		"app.js?v=" + srv.agentVersion,
+		"app.css?v=" + srv.agentVersion,
+		"vendor/xterm.css?v=" + srv.agentVersion,
+		"vendor/xterm.js?v=" + srv.agentVersion,
+		"vendor/addon-fit.js?v=" + srv.agentVersion,
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the console does not ask for %s", want)
 		}
@@ -33,16 +39,22 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 		t.Errorf("the version placeholder survived into the served document")
 	}
 
-	// And the versioned URL still resolves: the query string is not part of the
+	// And the versioned URLs still resolve: the query string is not part of the
 	// path this handler matches on.
-	r = httptest.NewRequest("GET", "/app.js?v="+srv.agentVersion, nil)
-	w = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("a versioned asset URL answered %d", w.Code)
-	}
-	if w.Header().Get("ETag") == "" {
-		t.Errorf("the asset lost its validator")
+	for _, assetPath := range []string{
+		"/app.js?v=" + srv.agentVersion,
+		"/vendor/xterm.js?v=" + srv.agentVersion,
+		"/vendor/xterm.css?v=" + srv.agentVersion,
+	} {
+		r = httptest.NewRequest("GET", assetPath, nil)
+		w = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("a versioned asset URL %s answered %d", assetPath, w.Code)
+		}
+		if w.Header().Get("ETag") == "" {
+			t.Errorf("the asset %s lost its validator", assetPath)
+		}
 	}
 }
 
