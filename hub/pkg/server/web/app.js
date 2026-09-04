@@ -304,6 +304,8 @@
     audit: [],
     responseAuthStatus: null,
     responseJobs: [],
+    responseSession: null,
+    terminalSessions: [],
     scripts: [],
     evidenceBundles: [],
     vulnerabilities: [],
@@ -1614,6 +1616,12 @@
       } else {
         menu.appendChild(menuItem("Quarantine via peer mesh", "i-lock", null, function () { setMesh(asset, true); }, { danger: true }));
       }
+
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Response & Shell" }));
+      menu.appendChild(menuItem("Launch Terminal Shell\u2026", "i-unlock", null, function () {
+        launchTerminalShell(asset);
+      }));
     } else {
       // ----------------- Unassigned / Discovered asset menu
       menu.appendChild(h("div", { cls: "lbl", text: "Unmanaged Asset (" + (asset.ip || asset.name) + ")" }));
@@ -5123,18 +5131,537 @@
   }
 
 
+  /* ------------------------------------------------- response authority & crypto */
+
+  var ephemeralResponseKey = null;
+
+  function hasWebCrypto() {
+    return !!(window.crypto && window.crypto.subtle && window.crypto.subtle.generateKey && window.isSecureContext);
+  }
+
+  function bufToHex(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var hex = "";
+    for (var i = 0; i < bytes.length; i++) {
+      var b = bytes[i].toString(16);
+      hex += (b.length === 1 ? "0" : "") + b;
+    }
+    return hex;
+  }
+
+  function encodeActionProofV2(proof) {
+    var parts = [];
+    function writeString(str) {
+      var bytes = new TextEncoder().encode(str);
+      var lenBuf = new Uint8Array(4);
+      new DataView(lenBuf.buffer).setUint32(0, bytes.length, false);
+      parts.push(lenBuf, bytes);
+    }
+    function writeUint32(n) {
+      var buf = new Uint8Array(4);
+      new DataView(buf.buffer).setUint32(0, n, false);
+      parts.push(buf);
+    }
+    function writeInt64(n) {
+      var buf = new Uint8Array(8);
+      new DataView(buf.buffer).setBigInt64(0, BigInt(n), false);
+      parts.push(buf);
+    }
+    function writeHexNormalized(hexStr) {
+      writeString(String(hexStr || "").toLowerCase().trim());
+    }
+    function writeStringSlice(arr) {
+      writeUint32(arr.length);
+      for (var i = 0; i < arr.length; i++) {
+        writeString(arr[i]);
+      }
+    }
+
+    writeString("OMINULL-ACTION-PROOF-V2");
+    writeUint32(proof.version || 2);
+    writeString(proof.session_id);
+    writeString(proof.tenant_id);
+    writeString(proof.action_kind);
+    writeHexNormalized(proof.action_digest);
+    writeStringSlice(proof.target_endpoints || []);
+    writeInt64(proof.timestamp);
+    writeHexNormalized(proof.nonce);
+
+    var totalLen = 0;
+    for (var i = 0; i < parts.length; i++) totalLen += parts[i].length;
+    var out = new Uint8Array(totalLen);
+    var offset = 0;
+    for (var j = 0; j < parts.length; j++) {
+      out.set(parts[j], offset);
+      offset += parts[j].length;
+    }
+    return out;
+  }
+
+  function digestSHA256(str) {
+    var bytes = new TextEncoder().encode(str);
+    return window.crypto.subtle.digest("SHA-256", bytes).then(function (digestBuf) {
+      return bufToHex(digestBuf);
+    });
+  }
+
+  function signActionProof(actionKind, actionDigestHex, targetEndpoints) {
+    if (!state.responseSession || !ephemeralResponseKey) {
+      return Promise.reject(new Error("Response session is locked. Multi-factor unlock required."));
+    }
+    var nonceBytes = new Uint8Array(16);
+    window.crypto.getRandomValues(nonceBytes);
+    var nonceHex = bufToHex(nonceBytes);
+
+    var nowSec = Math.floor(Date.now() / 1000);
+    var targets = Array.isArray(targetEndpoints) ? targetEndpoints : [targetEndpoints];
+
+    var proof = {
+      version: 2,
+      session_id: state.responseSession.session_id,
+      tenant_id: state.responseSession.tenant_id || "default",
+      action_kind: actionKind,
+      action_digest: String(actionDigestHex || "").toLowerCase().trim(),
+      target_endpoints: targets,
+      timestamp: nowSec,
+      nonce: nonceHex
+    };
+
+    var canonicalBytes = encodeActionProofV2(proof);
+    return window.crypto.subtle.sign({ name: "Ed25519" }, ephemeralResponseKey.privateKey, canonicalBytes)
+      .then(function (sigBuf) {
+        proof.signature = bufToHex(sigBuf);
+        return proof;
+      });
+  }
+
+  function updateResponseButton() {
+    var btn = $("topbar-response-btn");
+    var txt = $("response-status-text");
+    if (!btn || !txt) return;
+
+    if (!state.responseSession) {
+      btn.setAttribute("data-status", "locked");
+      btn.title = "Response Authority Locked. Click to unlock with MFA/Passkey.";
+      txt.textContent = "Response Locked";
+      var icon = btn.querySelector("use");
+      if (icon) icon.setAttribute("href", "#i-lock");
+      return;
+    }
+
+    var now = Date.now();
+    var exp = state.responseSession.expires_at ? new Date(state.responseSession.expires_at).getTime() : 0;
+    var idleExp = state.responseSession.idle_expires_at ? new Date(state.responseSession.idle_expires_at).getTime() : 0;
+
+    if ((exp && now >= exp) || (idleExp && now >= idleExp)) {
+      state.responseSession = null;
+      ephemeralResponseKey = null;
+      btn.setAttribute("data-status", "locked");
+      btn.title = "Response session expired. Click to unlock.";
+      txt.textContent = "Response Locked";
+      var icon = btn.querySelector("use");
+      if (icon) icon.setAttribute("href", "#i-lock");
+      toast("Response session expired.", "warn");
+      if (state.section === "response") renderResponse();
+      return;
+    }
+
+    btn.setAttribute("data-status", "unlocked");
+    btn.title = "Response Authority Unlocked. Click to view session details or lock.";
+    var icon = btn.querySelector("use");
+    if (icon) icon.setAttribute("href", "#i-unlock");
+
+    var remMs = Math.min(exp ? exp - now : 86400000, idleExp ? idleExp - now : 86400000);
+    var remSec = Math.max(0, Math.floor(remMs / 1000));
+    var min = Math.floor(remSec / 60);
+    var sec = remSec % 60;
+    var timeStr = (min < 10 ? "0" : "") + min + ":" + (sec < 10 ? "0" : "") + sec;
+
+    txt.textContent = "Unlocked (" + timeStr + ")";
+  }
+
+  function updateResponseTimer() {
+    if (state.responseSession) {
+      updateResponseButton();
+    }
+  }
+
+  function lockResponseSession() {
+    if (state.responseSession && state.responseSession.session_id) {
+      request("/api/v1/response/auth/lock", "POST", { session_id: state.responseSession.session_id })
+        .catch(function () {});
+    }
+    state.responseSession = null;
+    ephemeralResponseKey = null;
+    updateResponseButton();
+    toast("Response authority locked.", "info");
+    if (state.section === "response") renderResponse();
+  }
+
+  function openResponseControllerSheet() {
+    if (!state.responseSession) return;
+    var sess = state.responseSession;
+    var keyFp = ephemeralResponseKey ? ephemeralResponseKey.publicKeyHex.slice(0, 16) + "\u2026" : "active";
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row" },
+        h("div", { cls: "badge badge-ok", text: "Session Active" }),
+        h("span", { cls: "dim-2", text: "Session ID: " + (sess.session_id ? sess.session_id.slice(0, 16) + "\u2026" : "") })
+      ),
+      h("dl", { cls: "kv" },
+        h("dt", { text: "Operator" }), h("dd", {}, h("b", { text: sess.operator_id || OPERATOR || "admin" })),
+        h("dt", { text: "Tenant" }), h("dd", { text: sess.tenant_id || "default" }),
+        h("dt", { text: "Auth Method" }), h("dd", { text: sess.auth_method || "totp" }),
+        h("dt", { text: "Browser Key" }), h("dd", { cls: "ip", text: keyFp }),
+        h("dt", { text: "Absolute Expiry" }), h("dd", { text: sess.expires_at ? new Date(sess.expires_at).toLocaleTimeString() : "8h" }),
+        h("dt", { text: "Idle Expiry" }), h("dd", { text: sess.idle_expires_at ? new Date(sess.idle_expires_at).toLocaleTimeString() : "30m" })
+      ),
+      h("p", { cls: "pending", text: "Locking the session immediately revokes the browser signing key and drops active response authority." })
+    );
+
+    var lockBtn = h("button", {
+      cls: "btn btn-danger",
+      type: "button",
+      text: "Lock Response Authority",
+      on: {
+        click: function () {
+          closeSheet();
+          lockResponseSession();
+        }
+      }
+    });
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      lockBtn
+    ];
+
+    openSheet("Response Authority Controller", body, foot);
+  }
+
+  function openUnlockResponseSheet(onSuccess) {
+    if (!hasWebCrypto()) {
+      openSheet("Secure Context Required",
+        h("div", { cls: "card-body stack" },
+          h("div", { cls: "st-banner", "data-state": "crit", text: "WebCrypto & Secure Context Unavailable" }),
+          h("p", { cls: "pending", text: "Response authority operations require an ephemeral in-memory Ed25519 browser key signed via the WebCrypto API. Browsers disable WebCrypto on unencrypted or non-secure origins." }),
+          h("p", { text: "To unlock response sessions, connect over HTTPS with a trusted certificate (such as the hub's dedicated console TLS listener)." })
+        ),
+        [h("button", { cls: "btn", type: "button", text: "Dismiss", on: { click: closeSheet } })]
+      );
+      return;
+    }
+
+    var op = state.you || OPERATOR || "admin";
+    var tenant = "default";
+    if (state.hierarchy && state.hierarchy.length && state.hierarchy[0].tenant) {
+      tenant = state.hierarchy[0].tenant.id || "default";
+    }
+
+    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var codeInput = h("input", {
+      type: "text",
+      id: "unlock-totp-code",
+      cls: "input-code",
+      placeholder: "000000",
+      maxlength: "8",
+      pattern: "[0-9]*",
+      autocomplete: "one-time-code",
+      autofocus: true
+    });
+
+    var submitBtn = h("button", {
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Unlock Response Session",
+      on: {
+        click: function () {
+          var code = (codeInput.value || "").trim().replace(/\s+/g, "");
+          if (code.length < 6) {
+            errBox.textContent = "Please enter a valid 6-digit TOTP code.";
+            errBox.removeAttribute("hidden");
+            codeInput.focus();
+            return;
+          }
+
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Generating Key & Unlocking\u2026";
+          errBox.setAttribute("hidden", "");
+
+          var browserSessionId = "sess-browser-" + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+          window.crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"])
+            .then(function (keyPair) {
+              return window.crypto.subtle.exportKey("raw", keyPair.publicKey)
+                .then(function (rawPub) {
+                  var pubHex = bufToHex(rawPub);
+                  return request("/api/v1/response/auth/unlock", "POST", {
+                    operator_id: op,
+                    browser_session_id: browserSessionId,
+                    browser_public_key: pubHex,
+                    totp_code: code
+                  }).then(function (session) {
+                    state.responseSession = session;
+                    ephemeralResponseKey = {
+                      keyPair: keyPair,
+                      privateKey: keyPair.privateKey,
+                      publicKeyHex: pubHex,
+                      browserSessionId: browserSessionId
+                    };
+                    closeSheet();
+                    updateResponseButton();
+                    toast("Response authority unlocked for 8 hours (30m idle).", "ok");
+                    if (state.section === "response") renderResponse();
+                    if (typeof onSuccess === "function") onSuccess(session);
+                  });
+                });
+            })
+            .catch(function (err) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = "Unlock Response Session";
+              errBox.textContent = err.message || "Failed to unlock response session.";
+              errBox.removeAttribute("hidden");
+              codeInput.focus();
+            });
+        }
+      }
+    });
+
+    codeInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitBtn.click();
+      }
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "Response authority operations require multi-factor proof and an ephemeral in-memory Ed25519 keypair. Your private key remains exclusively in browser memory and is never written to disk." }),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Operator: " }), h("b", { text: op }),
+        h("span", { cls: "dim-2", text: " \u00b7 Tenant: " }), h("b", { text: tenant })
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "unlock-totp-code", text: "Enter 6-Digit Authenticator Code (TOTP):" }),
+        codeInput
+      ),
+      errBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      submitBtn
+    ];
+
+    openSheet("Unlock Response Authority", body, foot);
+    setTimeout(function () { codeInput.focus(); }, 100);
+  }
+
+  function launchTerminalShell(asset) {
+    if (!asset || !asset.endpoint) {
+      toast("Cannot open terminal: host does not have an enrolled agent.", "crit");
+      return;
+    }
+
+    if (!state.responseSession || !ephemeralResponseKey) {
+      openUnlockResponseSheet(function () {
+        launchTerminalShell(asset);
+      });
+      return;
+    }
+
+    var ep = asset.endpoint;
+    var isWindows = (ep.os || "").toLowerCase().indexOf("windows") >= 0;
+
+    var progSel = h("select", { id: "shell-prog-select", cls: "select" });
+    if (isWindows) {
+      progSel.appendChild(h("option", { value: "powershell.exe", text: "powershell.exe (Windows PowerShell)" }));
+      progSel.appendChild(h("option", { value: "cmd.exe", text: "cmd.exe (Windows Command Prompt)" }));
+      progSel.appendChild(h("option", { value: "pwsh.exe", text: "pwsh.exe (PowerShell Core, if installed)" }));
+    } else {
+      progSel.appendChild(h("option", { value: "/bin/bash", text: "/bin/bash (Interactive Shell)" }));
+      progSel.appendChild(h("option", { value: "/bin/sh", text: "/bin/sh (POSIX Shell)" }));
+    }
+
+    var errBox = h("div", { cls: "msg-err", hidden: true });
+
+    var launchBtn = h("button", {
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Launch Terminal Shell",
+      on: {
+        click: function () {
+          var prog = progSel.value;
+          launchBtn.disabled = true;
+          launchBtn.textContent = "Signing Proof & Dispatching\u2026";
+          errBox.setAttribute("hidden", "");
+
+          var payload = { program: prog };
+          var payloadStr = JSON.stringify(payload);
+
+          digestSHA256(payloadStr)
+            .then(function (digestHex) {
+              return signActionProof("terminal_session", digestHex, [ep.id])
+                .then(function (proof) {
+                  return request("/api/v1/terminal/sessions", "POST", {
+                    endpoint_id: ep.id,
+                    program: prog,
+                    session_id: state.responseSession.session_id,
+                    action_digest: digestHex,
+                    proof: proof
+                  });
+                });
+            })
+            .then(function (sessionSummary) {
+              closeSheet();
+              toast("Terminal shell session created (" + sessionSummary.session_id.slice(0, 8) + "\u2026). Waiting for agent connection.", "ok");
+              state.section = "response";
+              go("response");
+            })
+            .catch(function (err) {
+              launchBtn.disabled = false;
+              launchBtn.textContent = "Launch Terminal Shell";
+              errBox.textContent = err.message || "Failed to launch terminal shell.";
+              errBox.removeAttribute("hidden");
+            });
+        }
+      }
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Target Host: " }), h("b", { text: asset.name || asset.ip }),
+        h("span", { cls: "dim-2", text: " \u00b7 Endpoint ID: " }), h("span", { cls: "ip", text: ep.id })
+      ),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Platform: " }), h("b", { text: ep.os || "Linux" }),
+        h("span", { cls: "dim-2", text: " \u00b7 Privilege Identity: " }), h("b", { cls: "st", "data-state": "crit", text: isWindows ? "LocalSystem" : "root" })
+      ),
+      h("p", { cls: "pending", text: "Terminal sessions run with full host supervisor identity. Your browser will sign a typed ActionProof V2 bound specifically to this endpoint and program choice. All input, output, and resize frames are encrypted and audited." }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "shell-prog-select", text: "Select Executable Allowlist Program:" }),
+        progSel
+      ),
+      errBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      launchBtn
+    ];
+
+    openSheet("Launch Remote Pseudoterminal", body, foot);
+  }
+
+  function openLaunchEndpointShellPicker() {
+    var managed = (state.assets || []).filter(function (a) { return a.endpoint; });
+    if (!managed.length) {
+      toast("No agent-managed endpoints online.", "warn");
+      return;
+    }
+
+    var sel = h("select", { cls: "select", id: "shell-target-picker" });
+    managed.forEach(function (a) {
+      sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ") - " + a.endpoint.id }));
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "Select an enrolled endpoint to open an interactive remote pseudoterminal session:" }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "shell-target-picker", text: "Target Endpoint:" }),
+        sel
+      )
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-primary", type: "button", text: "Next \u2192",
+        on: {
+          click: function () {
+            var asset = state.assetByKey[sel.value];
+            closeSheet();
+            if (asset) launchTerminalShell(asset);
+          }
+        }
+      })
+    ];
+
+    openSheet("Select Target Endpoint for Shell", body, foot);
+  }
+
+  function closeTerminalSession(sessionId) {
+    request("/api/v1/terminal/sessions?id=" + encodeURIComponent(sessionId), "DELETE")
+      .then(function () {
+        toast("Terminal session closed.", "ok");
+        refresh();
+      })
+      .catch(function (e) {
+        toast("Failed to close terminal session: " + e.message, "crit");
+      });
+  }
+
   function renderResponse() {
     var view = $("view");
     clear(view);
 
     var auth = state.responseAuthStatus || { active_sessions: 0 };
-    var authCard = card("Response Authority (Ring-0/Proof)", h("div", { cls: "card-body" },
+    var isUnlocked = !!state.responseSession;
+
+    var authActions = isUnlocked
+      ? [
+          h("button", { cls: "btn btn-danger", type: "button", text: "Lock Response Authority", on: { click: lockResponseSession } }),
+          h("button", { cls: "btn", type: "button", text: "Session Details", on: { click: openResponseControllerSheet } })
+        ]
+      : [
+          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock Response Session", on: { click: function () { openUnlockResponseSheet(); } } })
+        ];
+
+    var authCard = card("Response Authority (Ring-0/Proof)", h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
-        h("div", { cls: "badge badge-ok", text: auth.active_sessions > 0 ? "Response Unlocked" : "Response Authority Ready" }),
+        h("div", { cls: isUnlocked ? "badge badge-ok" : "badge badge-warn", text: isUnlocked ? "Response Unlocked" : "Response Locked" }),
         h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
       ),
-      h("p", { cls: "pending", text: "Autonomous threat nullification and endpoint response actions require ephemeral operator proof signed by an authenticated response session." })
+      isUnlocked
+        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections and interactive pseudoterminals. An ephemeral browser key signed with TOTP is active in memory." })
+        : h("p", { cls: "pending", text: "Autonomous threat nullification and endpoint response actions require ephemeral operator proof signed by an authenticated response session. Unlock with TOTP/Passkey to issue commands." }),
+      h("div", { cls: "form-row" }, authActions)
     ));
+
+    // Remote Terminal Sessions Card
+    var termSessions = state.terminalSessions || [];
+    var termRows = termSessions.map(function (ts) {
+      return [
+        h("span", { cls: "ip", text: ts.session_id ? ts.session_id.slice(0, 8) + "..." : "" }),
+        h("span", { text: ts.endpoint_id || "" }),
+        h("span", { text: ts.program || "" }),
+        h("span", { cls: ts.state === "active" ? "badge badge-ok" : (ts.state === "waiting" || ts.state === "connecting" ? "badge badge-warn" : "badge badge-crit"), text: ts.state || "unknown" }),
+        h("span", { cls: "dim", text: ts.operator_id || "" }),
+        stamp(parseTime(ts.created_at)),
+        h("div", { cls: "row-actions" },
+          ts.state === "active" || ts.state === "waiting" || ts.state === "connecting"
+            ? h("button", { cls: "btn btn-subtle btn-danger", type: "button", text: "Close", on: { click: function () { closeTerminalSession(ts.session_id); } } })
+            : h("span", { cls: "dim-3", text: ts.close_reason || "closed" })
+        )
+      ];
+    });
+
+    var termCardHead = h("div", { cls: "card-header-actions" },
+      h("button", {
+        cls: "btn btn-primary btn-s",
+        type: "button",
+        text: "Launch Endpoint Shell",
+        on: {
+          click: function () {
+            openLaunchEndpointShellPicker();
+          }
+        }
+      })
+    );
+
+    var termCard = card("Remote Terminal Sessions (ConPTY / forkpty)",
+      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No active terminal sessions. Click 'Launch Endpoint Shell' to open a session." }),
+      [termCardHead]
+    );
 
     var jobRows = (state.responseJobs || []).map(function (j) {
       return [
@@ -5165,7 +5692,7 @@
       scriptRows.length ? simpleTable(["Script", "Interpreter", "Version", "Description", "Updated"], scriptRows) : h("div", { cls: "card-body", text: "No registered response scripts." })
     );
 
-    view.appendChild(h("div", { cls: "pad stack" }, authCard, jobsCard, scriptsCard));
+    view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard));
   }
 
   function renderForensics() {
@@ -6177,6 +6704,7 @@
     }
     if (state.section === "response") {
       jobs.push(request("/api/v1/response/auth/status").then(function (d) { state.responseAuthStatus = d || null; }).catch(function () {}));
+      jobs.push(request("/api/v1/terminal/sessions").then(function (d) { state.terminalSessions = arrayOf(d && d.sessions || d); }).catch(function () {}));
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
     }
@@ -6310,10 +6838,34 @@
     if (state.demo) toast("Demo mode \u2014 synthetic fleet, no live hub data", "warn");
     if (READ_ONLY) toast("Read-only role \u2014 the hub refuses any action taken from this console", "warn");
 
+    var respBtn = $("topbar-response-btn");
+    if (respBtn) {
+      respBtn.addEventListener("click", function () {
+        if (state.responseSession) {
+          openResponseControllerSheet();
+        } else {
+          openUnlockResponseSheet();
+        }
+      });
+      updateResponseButton();
+    }
+    setInterval(updateResponseTimer, 1000);
+
     window.__state = state;
     window.__refresh = refresh;
     window.__request = request;
     window.__render = render;
+    window.__responseCrypto = {
+      hasWebCrypto: hasWebCrypto,
+      encodeActionProofV2: encodeActionProofV2,
+      digestSHA256: digestSHA256,
+      signActionProof: signActionProof
+    };
+    window.__openUnlockResponseSheet = openUnlockResponseSheet;
+    window.__openResponseControllerSheet = openResponseControllerSheet;
+    window.__lockResponseSession = lockResponseSession;
+    window.__launchTerminalShell = launchTerminalShell;
+    window.__openLaunchEndpointShellPicker = openLaunchEndpointShellPicker;
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

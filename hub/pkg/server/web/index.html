@@ -154,6 +154,16 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span class="tip" aria-hidden="true">Alerts</span>
       <span class="sr">Alerts</span>
     </button>
+    <button class="rail-btn" type="button" data-section="response" aria-current="false">
+      <svg class="ic"><use href="#i-unlock"/></svg>
+      <span class="tip" aria-hidden="true">Response</span>
+      <span class="sr">Response</span>
+    </button>
+    <button class="rail-btn" type="button" data-section="forensics" aria-current="false">
+      <svg class="ic"><use href="#i-download"/></svg>
+      <span class="tip" aria-hidden="true">Forensics</span>
+      <span class="sr">Forensics</span>
+    </button>
     <button class="rail-btn" type="button" data-section="audit" aria-current="false">
       <svg class="ic"><use href="#i-audit"/></svg>
       <span class="tip" aria-hidden="true">Audit</span>
@@ -191,6 +201,12 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span id="topbar-actions"></span>
 
       <!-- Universal Controls -->
+      <button class="btn btn-response" type="button" id="topbar-response-btn" title="Remote Response Session Status" data-status="locked">
+        <svg class="ic ic-s"><use href="#i-lock"/></svg>
+        <span class="btn-response-dot" id="response-status-dot"></span>
+        <span id="response-status-text">Response Locked</span>
+      </button>
+
       <button class="btn btn-sweep" type="button" id="topbar-sweep-btn" title="Subnet Sweep & Asset Discovery">
         <svg class="ic ic-s"><use href="#i-sweep"/></svg>
         <span class="sweep-dot" id="sweep-pulse-dot"></span>

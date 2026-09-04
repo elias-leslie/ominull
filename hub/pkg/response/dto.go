@@ -301,10 +301,10 @@ type ScriptExecPayload struct {
 
 // TerminalSessionPayload defines parameters for establishing an interactive pseudoterminal.
 type TerminalSessionPayload struct {
-	SessionID          string `json:"session_id"`
+	SessionID          string `json:"session_id,omitempty"`
 	Program            string `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
-	RelayURL           string `json:"relay_url"`
-	ConnectToken       string `json:"connect_token"`
-	MaxDurationSeconds int    `json:"max_duration_seconds"`
-	IdleTimeoutSeconds int    `json:"idle_timeout_seconds"`
+	RelayURL           string `json:"relay_url,omitempty"`
+	ConnectToken       string `json:"connect_token,omitempty"`
+	MaxDurationSeconds int    `json:"max_duration_seconds,omitempty"`
+	IdleTimeoutSeconds int    `json:"idle_timeout_seconds,omitempty"`
 }

@@ -150,6 +150,35 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if r.Method == http.MethodDelete {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing session id")
+			return
+		}
+
+		sess, err := s.terminalMgr.GetSession(id)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if sess.TenantID != tenantID {
+			writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
+			return
+		}
+
+		if err := s.terminalMgr.CloseSession(id, "operator_closed"); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to close session: "+err.Error())
+			return
+		}
+
+		s.audit(r, "TERMINAL_SESSION_CLOSED", id, fmt.Sprintf("Operator closed terminal session %s", id))
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "closed", "session_id": id})
+		return
+	}
+
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 

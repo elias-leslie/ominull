@@ -3152,6 +3152,60 @@ input[type="url"] {
 }
 
 /* ------------------------------------------------------------- Topbar Universal Items */
+.btn-response {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-2);
+  padding: 4px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: border-color var(--dur), background var(--dur), color var(--dur);
+}
+
+.btn-response:hover {
+  background: var(--raised);
+  border-color: var(--brand);
+}
+
+.btn-response[data-status="unlocked"] {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: rgba(46, 204, 113, 0.08);
+}
+
+.btn-response-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  display: inline-block;
+}
+
+.btn-response[data-status="unlocked"] .btn-response-dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+
+.input-code {
+  font-family: var(--f-mono);
+  font-size: var(--t-5, 1.25rem);
+  letter-spacing: 0.25em;
+  text-align: center;
+  padding: 8px 12px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--ground);
+  color: var(--ink-1);
+  width: 100%;
+  max-width: 240px;
+  margin: 4px auto;
+  display: block;
+}
+
 .btn-sweep {
   display: inline-flex;
   align-items: center;

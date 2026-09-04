@@ -268,3 +268,87 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 		t.Fatalf("expected operator socket to close after agent close")
 	}
 }
+
+func TestTerminalSession_DeleteClose(t *testing.T) {
+	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	endpointID := "ep-term-del-test"
+	tenantID := "default"
+	operatorID := "admin"
+
+	// 1. Setup response authority session
+	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
+	secret, _ := auth.EnrollTOTP(tenantID, operatorID)
+	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
+	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
+	session, err := auth.UnlockSessionWithTOTP(tenantID, operatorID, "browser-del", hex.EncodeToString(browserPub), code)
+	if err != nil {
+		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
+	}
+
+	payload := response.TerminalSessionPayload{Program: "/bin/sh"}
+	actionDigest, _ := response.ComputeActionDigest(payload)
+
+	proof := &responseauth.ActionProof{
+		Version:         2,
+		SessionID:       session.SessionID,
+		TenantID:        tenantID,
+		ActionKind:      response.ActionKindTerminalSession,
+		ActionDigest:    actionDigest,
+		TargetEndpoints: []string{endpointID},
+		Timestamp:       time.Now().Unix(),
+		Nonce:           "12345678123456781234567812345678",
+	}
+	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
+	proof.Signature = hex.EncodeToString(sig)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"endpoint_id":   endpointID,
+		"program":       "/bin/sh",
+		"session_id":    session.SessionID,
+		"action_digest": actionDigest,
+		"proof":         proof,
+	})
+
+	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/terminal/sessions", bytes.NewReader(createBody))
+	postReq.Header.Set("X-API-Key", "test-admin-key-12345")
+	postReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(postReq)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var bodyMap map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&bodyMap)
+	sessionID := bodyMap["session_id"].(string)
+
+	// DELETE /api/v1/terminal/sessions?id=sessionID
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/terminal/sessions?id="+sessionID, nil)
+	delReq.Header.Set("X-API-Key", "test-admin-key-12345")
+	delResp, err := client.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	defer delResp.Body.Close()
+
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from DELETE, got %d", delResp.StatusCode)
+	}
+
+	// Verify session is now in closed state
+	sess, err := srv.terminalMgr.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("failed to get session after delete: %v", err)
+	}
+	if sess.State != terminal.StateClosed {
+		t.Fatalf("expected session state to be closed, got %s", sess.State)
+	}
+}
+
