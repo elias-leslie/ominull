@@ -52,10 +52,14 @@ echo "[*] 3. Running Go hub benchmarks (Heartbeat, SQLite, Gate Fail-Closed)..."
 (cd hub && go test -bench=Benchmark -benchtime=1s -run=^$ ./pkg/server)
 
 echo ""
-echo "[*] 4. Running C agent baseline tests..."
+echo "[*] 4. Running C agent baseline & process lineage tests..."
 gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_baseline agent/tests/test_baseline.c -lcurl
 ./build/test_baseline
 rm -f build/test_baseline
+
+gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_process_lineage_linux agent/tests/test_process_lineage_linux.c
+./build/test_process_lineage_linux
+rm -f build/test_process_lineage_linux
 
 echo ""
 echo "[*] 5. Running C response cross-language & canonical encoder tests..."
@@ -76,6 +80,11 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && command -v wine >/dev/nu
         agent/tests/test_response_dispatcher_win.c -o build/test_response_dispatcher_win.exe
     wine build/test_response_dispatcher_win.exe
     rm -f build/test_response_dispatcher_win.exe
+
+    x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include \
+        agent/tests/test_process_lineage_windows.c -o build/test_process_lineage_windows.exe -ladvapi32 -lole32
+    wine build/test_process_lineage_windows.exe
+    rm -f build/test_process_lineage_windows.exe
 fi
 
 echo ""

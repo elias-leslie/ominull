@@ -453,8 +453,40 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
          * that rather than as an absence of traffic. */
         unsigned long long bIn = e->BytesIn;
         unsigned long long bOut = e->BytesOut;
+
+        char escapedCmdline[2048] = {0};
+        ProcessLineageWin_EscapeJSON(e->Enrichment.command_line, escapedCmdline, sizeof(escapedCmdline));
+
+        char escapedUser[128] = {0};
+        ProcessLineageWin_EscapeJSON(e->Enrichment.user_identity, escapedUser, sizeof(escapedUser));
+
+        char obsTimeBuf[64] = {0};
+        if (e->Enrichment.observed_at > 0) {
+            time_t obsSec = (time_t)e->Enrichment.observed_at;
+            struct tm* pTm = gmtime(&obsSec);
+            if (pTm) {
+                strftime(obsTimeBuf, sizeof(obsTimeBuf), "%Y-%m-%dT%H:%M:%SZ", pTm);
+            }
+        }
+
+        char enrichmentJson[3072] = {0};
+        int enrichLen = snprintf(enrichmentJson, sizeof(enrichmentJson),
+            ",\"process_instance_id\":\"%s\",\"parent_pid\":%u,\"parent_process_instance_id\":\"%s\",\"command_line\":\"%s\",\"user_identity\":\"%s\",\"executable_sha256\":\"%s\",\"attribution_status\":\"%s\"",
+            e->Enrichment.process_instance_id,
+            (unsigned int)e->Enrichment.ppid,
+            e->Enrichment.parent_process_instance_id,
+            escapedCmdline,
+            escapedUser,
+            e->Enrichment.executable_sha256,
+            e->Enrichment.attribution_status[0] ? e->Enrichment.attribution_status : "unknown"
+        );
+        if (obsTimeBuf[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - 64) {
+            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen,
+                ",\"observed_at\":\"%s\"", obsTimeBuf);
+        }
+
         int written = snprintf(jsonBuf + offset, jsonCapacity - offset,
-            "{\"layer\":\"%s\",\"action\":\"%s\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%llu,\"bytes_out\":%llu,\"process_path\":\"%s\",\"process_id\":%llu}%s",
+            "{\"layer\":\"%s\",\"action\":\"%s\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%llu,\"bytes_out\":%llu,\"process_path\":\"%s\",\"process_id\":%llu%s}%s",
             EventTypeToString(e->EventType),
             (e->Action == 1) ? "BLOCK" : "PERMIT",
             (e->Direction == 1) ? "OUTBOUND" : "INBOUND",
@@ -464,6 +496,7 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
             bIn, bOut,
             procJson,
             (unsigned long long)e->ProcessId,
+            enrichmentJson,
             comma
         );
 

@@ -15,6 +15,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "process_lineage_windows.h"
+
 #define OMINULL_AGENT_VERSION "1.8.3"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
@@ -92,6 +94,7 @@ typedef struct _OMINULL_EVENT {
     WCHAR  ProcessPath[OMINULL_MAX_PATH];
     UINT64 BytesIn;
     UINT64 BytesOut;
+    PROCESS_ENRICHMENT_WIN Enrichment;
 } OMINULL_EVENT, *POMINULL_EVENT;
 #pragma pack(pop)
 

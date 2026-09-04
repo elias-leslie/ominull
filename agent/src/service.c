@@ -286,6 +286,19 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
 
                     ProcessPathFor(row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
                     EstatsMeasure(&row, ev);
+
+                    bool foundInBatch = false;
+                    for (size_t j = 0; j < count; j++) {
+                        if (outEvents[j].ProcessId == row.dwOwningPid) {
+                            ev->Enrichment = outEvents[j].Enrichment;
+                            foundInBatch = true;
+                            break;
+                        }
+                    }
+                    if (!foundInBatch) {
+                        ProcessLineageWin_InspectProcess(row.dwOwningPid, &ev->Enrichment);
+                    }
+
                     count++;
                 }
             }
@@ -708,6 +721,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
     DWORD lastFlush = GetTickCount();
 
     printf("[+] Ominull Agent running. Streaming network flows to Hub: %s\n", config->hub_url);
+    ProcessLineageWin_InitETW();
 
     while (1) {
         if (g_StopEvent && WaitForSingleObject(g_StopEvent, 0) == WAIT_OBJECT_0) {
@@ -746,6 +760,8 @@ void RunAgentLoop(AGENT_CONFIG* config) {
 
         Sleep(100);
     }
+
+    ProcessLineageWin_StopETW();
 
     if (batchCount > 0) {
         Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0);
