@@ -359,7 +359,13 @@
     selectedAlerts: {},
     expandedAlertId: "",
     unackAlertsTotal: 0,
-    lastClickedAssetIndex: -1
+    lastClickedAssetIndex: -1,
+
+    // Phase 7: Software Inventory & Vulnerability Correlation
+    softwareByEndpoint: {},
+    activeSnapshot: null,
+    vulnFilterStatus: "",
+    softwareSearchQuery: ""
   };
 
   function selectedKeys() {
@@ -7469,6 +7475,342 @@
       });
   }
 
+  /* ------------------------------------------------- Software & Vulnerabilities */
+
+  function vulnStatusBadge(status) {
+    var st = status || "insufficient_data";
+    var label = st;
+    if (st === "matched") label = "Affected";
+    else if (st === "not_affected") label = "Not Affected";
+    else if (st === "possible") label = "Possible";
+    else if (st === "insufficient_data") label = "Inconclusive";
+    return h("span", { cls: "vuln-match-badge", "data-status": st, text: label });
+  }
+
+  function priorityScoreBadge(score) {
+    var num = typeof score === "number" ? score : parseFloat(score) || 0;
+    var cls = "priority-badge";
+    if (num >= 70) cls += " priority-crit";
+    else if (num >= 40) cls += " priority-high";
+    return h("span", { cls: cls, text: num.toFixed(1) });
+  }
+
+  function cisaKevBadge() {
+    return h("span", { cls: "cisa-kev-badge", title: "CISA Known Exploited Vulnerabilities Catalog" },
+      icon("i-alert", true),
+      h("span", { text: "CISA KEV" })
+    );
+  }
+
+  function epssBadge(score) {
+    var num = typeof score === "number" ? score : parseFloat(score) || 0;
+    if (num <= 0) return null;
+    var pct = (num * 100).toFixed(1) + "%";
+    return h("span", { cls: "epss-badge", title: "EPSS Exploit Prediction: " + pct },
+      h("span", { text: "EPSS " + pct })
+    );
+  }
+
+  function softwareSourceBadge(source) {
+    return h("span", { cls: "sw-source-badge", text: source || "unknown" });
+  }
+
+  function softwareScopeBadge(scope) {
+    if (!scope) return null;
+    return h("span", { cls: "sw-scope-badge", text: scope });
+  }
+
+  function openMatchEvidenceSheet(v) {
+    var ev = null;
+    if (v.evidence) {
+      try {
+        ev = typeof v.evidence === "string" ? JSON.parse(v.evidence) : v.evidence;
+      } catch (e) {}
+    }
+
+    var sevCls = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "badge badge-crit" : (v.severity === "MEDIUM" ? "badge badge-warn" : "badge");
+
+    var flags = [];
+    if (v.is_kev) flags.push(cisaKevBadge());
+    if (v.epss && v.epss > 0) flags.push(epssBadge(v.epss));
+
+    var kvRows = [
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Correlation Verdict" }),
+        vulnStatusBadge(v.status)
+      ),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "CVE & Severity" }),
+        h("div", { style: "display: flex; gap: 8px; align-items: center;" },
+          h("b", { text: v.cve_id || "—" }),
+          h("span", { cls: sevCls, text: (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : "") })
+        )
+      ),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Priority Score" }),
+        h("div", { style: "display: flex; gap: 8px; align-items: center;" },
+          priorityScoreBadge(v.priority_score),
+          h("span", { cls: "dim-3", style: "font-size: 11px;", text: "(CVSS × 6.0 + KEV × 25.0 + EPSS × 15.0) × confidence" })
+        )
+      )
+    ];
+
+    if (flags.length) {
+      kvRows.push(h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Threat Intelligence" }),
+        h("div", { style: "display: flex; gap: 6px; align-items: center;" }, flags)
+      ));
+    }
+
+    kvRows.push(
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Target Endpoint" }),
+        h("span", { cls: "mono", text: v.endpoint_id || "—" })
+      ),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Detected Package" }),
+        h("div", {},
+          h("b", { text: (ev && ev.product) || v.product_name || "—" }),
+          h("span", { text: " version " }),
+          h("span", { cls: "mono", text: (ev && ev.version) || v.version || "—" })
+        )
+      )
+    );
+
+    if (ev && ev.raw_version && ev.raw_version !== ((ev && ev.version) || v.version)) {
+      kvRows.push(h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Raw Installed Version" }),
+        h("span", { cls: "mono dim-2", text: ev.raw_version })
+      ));
+    }
+
+    if (ev && ev.source) {
+      kvRows.push(h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Package Source" }),
+        softwareSourceBadge(ev.source)
+      ));
+    }
+
+    var snapID = (ev && ev.snapshot_id) || v.feed_snapshot_id;
+    if (snapID) {
+      kvRows.push(h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Feed Snapshot ID" }),
+        h("span", { cls: "mono dim-2", text: snapID })
+      ));
+    }
+
+    var criteriaCard = card("Matching Criteria & Version Boundaries", h("div", { cls: "card-body stack" },
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "CPE Criteria Pattern" }),
+        h("code", { cls: "mono", style: "font-size: 11px; word-break: break-all;", text: (ev && ev.cpe) || "—" })
+      ),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Vulnerable Version Range" }),
+        h("code", { cls: "mono", style: "font-size: 11px;", text: (ev && ev.vulnerable_range) || "—" })
+      ),
+      h("div", { cls: "drawer-kv-row" },
+        h("span", { cls: "drawer-kv-label", text: "Comparison Verdict" }),
+        h("div", {
+          cls: "note " + (v.status === "matched" ? "note-crit" : (v.status === "not_affected" ? "note-ok" : "note-warn")),
+          style: "font-size: 12px; margin: 0;",
+          text: (ev && ev.version_comparison) || v.match_reason || "—"
+        })
+      )
+    ));
+
+    var auditEvidenceBox = h("pre", {
+      cls: "evidence-detail-box",
+      text: JSON.stringify(ev || v, null, 2)
+    });
+
+    var rawCard = card("Explainable Audit Evidence (Raw Structured Record)", h("div", { cls: "card-body" }, auditEvidenceBox));
+
+    var body = h("div", { cls: "stack" },
+      h("div", { cls: "drawer-kv-group" }, kvRows),
+      criteriaCard,
+      rawCard
+    );
+
+    var foot = [
+      h("button", {
+        cls: "btn btn-primary",
+        type: "button",
+        text: "Close",
+        on: { click: closeSheet }
+      })
+    ];
+
+    openSheet("Vulnerability Correlation Evidence — " + (v.cve_id || "CVE"), body, foot, "sheet-wide");
+  }
+
+  function openSyncFeedModal() {
+    var onlineCheck = h("input", { type: "checkbox", checked: true, id: "sync-online-check" });
+    var nvdUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official NVD 2.0 API)", value: "" });
+    var kevUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official CISA KEV JSON)", value: "" });
+    var epssUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official FIRST EPSS JSON)", value: "" });
+    var maxResultsInput = h("input", { type: "number", cls: "inp", value: "2000", min: "100", max: "50000" });
+    var statusText = h("div", { cls: "note dim-3", text: "Sync will fetch feeds in the background, validate schema boundaries, and atomically promote into the active snapshot." });
+
+    var body = h("div", { cls: "stack" },
+      h("p", { text: "Synchronize local vulnerability correlation database with authoritative upstream intelligence feeds." }),
+      h("label", { cls: "form-row", style: "align-items: center; gap: 8px; cursor: pointer;" },
+        onlineCheck,
+        h("span", {}, h("b", { text: "Online Feed Fetch" }), h("span", { cls: "dim-3", text: " (Query NVD, CISA KEV, and EPSS directly)" }))
+      ),
+      h("label", { cls: "lbl" }, "Max NVD Results", maxResultsInput),
+      h("label", { cls: "lbl" }, "Custom NVD URL (Optional)", nvdUrlInput),
+      h("label", { cls: "lbl" }, "Custom CISA KEV URL (Optional)", kevUrlInput),
+      h("label", { cls: "lbl" }, "Custom EPSS URL (Optional)", epssUrlInput),
+      statusText
+    );
+
+    var startBtn = h("button", {
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Start Feed Sync",
+      on: {
+        click: function () {
+          startBtn.disabled = true;
+          startBtn.textContent = "Syncing feeds…";
+          statusText.className = "note note-warn";
+          statusText.textContent = "Connecting to feeds, ingesting CVE catalog and computing correlation…";
+
+          var payload = {
+            online: onlineCheck.checked,
+            max_nvd_results: parseInt(maxResultsInput.value, 10) || 2000
+          };
+          if (nvdUrlInput.value.trim()) payload.nvd_url = nvdUrlInput.value.trim();
+          if (kevUrlInput.value.trim()) payload.cisa_kev_url = kevUrlInput.value.trim();
+          if (epssUrlInput.value.trim()) payload.epss_url = epssUrlInput.value.trim();
+
+          request("/api/v1/vulnerabilities/sync", {
+            method: "POST",
+            body: JSON.stringify(payload)
+          }).then(function (res) {
+            statusText.className = "note note-ok";
+            var msg = "Feed synchronization complete: Snapshot " + (res.snapshot_id || "") + " activated with " +
+              (res.nvd_count || 0) + " CVEs, " + (res.cisa_kev_count || 0) + " KEV items, " + (res.epss_count || 0) + " EPSS scores.";
+            statusText.textContent = msg;
+            startBtn.disabled = false;
+            startBtn.textContent = "Sync Complete";
+            toast("Vulnerability feeds synchronized", "ok");
+            refresh();
+          }).catch(function (err) {
+            statusText.className = "note note-crit";
+            statusText.textContent = "Sync failed: " + (err && err.message ? err.message : String(err));
+            startBtn.disabled = false;
+            startBtn.textContent = "Retry Sync";
+          });
+        }
+      }
+    });
+
+    var actions = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      startBtn
+    ];
+
+    openSheet("Vulnerability Feed Synchronization", body, actions);
+  }
+
+  function softwareInventoryCard(asset) {
+    var epID = asset.endpoint.id;
+    var pkgs = state.softwareByEndpoint[epID];
+    if (!pkgs) {
+      return card("Installed Software Inventory", h("div", { cls: "empty", text: "Reading installed software inventory…" }), null, true);
+    }
+    if (!pkgs.length) {
+      return card("Installed Software Inventory", h("div", { cls: "empty", text: "No installed software packages recorded for this host." }), null, true);
+    }
+
+    var q = (state.softwareSearchQuery || "").toLowerCase().trim();
+    var filtered = q ? pkgs.filter(function (p) {
+      var prod = (p.product || "").toLowerCase();
+      var rawProd = (p.raw_product || "").toLowerCase();
+      var vendor = (p.vendor || "").toLowerCase();
+      var rawVendor = (p.raw_vendor || "").toLowerCase();
+      var ver = (p.version || "").toLowerCase();
+      var src = (p.source || "").toLowerCase();
+      return prod.indexOf(q) !== -1 || rawProd.indexOf(q) !== -1 ||
+             vendor.indexOf(q) !== -1 || rawVendor.indexOf(q) !== -1 ||
+             ver.indexOf(q) !== -1 || src.indexOf(q) !== -1;
+    }) : pkgs;
+
+    var searchInput = h("input", {
+      type: "search",
+      cls: "inp",
+      style: "max-width: 260px; font-size: 12px; padding: 4px 8px;",
+      placeholder: "Filter software…",
+      value: state.softwareSearchQuery || "",
+      on: {
+        input: function (ev) {
+          state.softwareSearchQuery = ev.target.value;
+          renderRoute();
+        }
+      }
+    });
+
+    var countBadge = h("span", {
+      cls: "badge",
+      text: (q ? filtered.length + " of " : "") + pkgs.length + " packages"
+    });
+
+    var headControls = h("div", {
+      style: "display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;"
+    },
+      h("div", { style: "display: flex; align-items: center; gap: 8px;" },
+        countBadge,
+        q ? h("button", {
+          cls: "btn mini",
+          type: "button",
+          text: "Clear",
+          on: { click: function () { state.softwareSearchQuery = ""; renderRoute(); } }
+        }) : null
+      ),
+      searchInput
+    );
+
+    var displayLimit = 100;
+    var displayed = filtered.slice(0, displayLimit);
+
+    var rows = displayed.map(function (p) {
+      var prodNode = h("div", {},
+        h("b", { text: p.product || p.raw_product || "—" }),
+        (p.raw_product && p.raw_product !== p.product) ? h("div", { cls: "dim-3", style: "font-size: 11px;", text: p.raw_product }) : null,
+        (p.vendor || p.raw_vendor) ? h("div", { cls: "dim-3", style: "font-size: 11px;", text: p.vendor || p.raw_vendor }) : null
+      );
+
+      var verNode = h("div", {},
+        h("span", { cls: "mono", text: p.version || "—" }),
+        (p.raw_version && p.raw_version !== p.version) ? h("div", { cls: "dim-3 mono", style: "font-size: 10px;", text: p.raw_version }) : null
+      );
+
+      var confBadge = h("span", {
+        cls: p.confidence === "authoritative" ? "badge badge-ok" : "badge badge-warn",
+        style: "font-size: 10px;",
+        text: p.confidence || "inferred"
+      });
+
+      return [
+        prodNode,
+        verNode,
+        softwareSourceBadge(p.source),
+        h("span", { cls: "mono dim-2", text: p.architecture || "—" }),
+        softwareScopeBadge(p.install_scope) || h("span", { cls: "dim-3", text: "—" }),
+        confBadge,
+        stamp(parseTime(p.observed_at))
+      ];
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      headControls,
+      simpleTable(["Package / Product", "Version", "Source", "Arch", "Scope", "Confidence", "Observed"], rows),
+      (filtered.length > displayLimit) ? h("div", { cls: "dim-3", style: "text-align: center; font-size: 12px; margin-top: 4px;", text: "Showing first " + displayLimit + " of " + filtered.length + " matching packages. Use the filter to narrow results." }) : null
+    );
+
+    return card("Installed Software Inventory", body, null, true);
+  }
+
   function renderForensics() {
     var view = $("view");
     clear(view);
@@ -7519,21 +7861,99 @@
       true
     );
 
+    // Active Feed Snapshot Meta Strip
+    var snap = state.activeSnapshot;
+    var snapStrip = h("div", { cls: "snapshot-meta-strip" },
+      snap ? [
+        h("span", { cls: "badge badge-ok", text: "Feed: " + (snap.id || "Active") }),
+        h("span", {}, h("b", { text: String(snap.nvd_count || 0) }), " CVEs (NVD 2.0)"),
+        h("span", {}, h("b", { text: String(snap.cisa_kev_count || 0) }), " KEV Exploits"),
+        h("span", {}, h("b", { text: String(snap.epss_count || 0) }), " EPSS Scores"),
+        h("span", { cls: "dim-3" }, "Activated " + (snap.activated_at ? new Date(snap.activated_at).toLocaleDateString() : "recently")),
+        h("span", { cls: "fill" }),
+        h("button", { cls: "btn mini", type: "button", text: "Sync Feeds…", on: { click: openSyncFeedModal } })
+      ] : [
+        h("span", { cls: "badge badge-warn", text: "No Active Feed Snapshot" }),
+        h("span", { cls: "dim-3", text: "Vulnerability correlation requires active NVD 2.0 / CISA KEV feeds." }),
+        h("span", { cls: "fill" }),
+        h("button", { cls: "btn mini btn-primary", type: "button", text: "Sync Feeds…", on: { click: openSyncFeedModal } })
+      ]
+    );
+
+    // Filter Buttons
+    var filterBtns = h("div", { style: "display: flex; gap: 8px; align-items: center; margin-top: 8px; margin-bottom: 8px; flex-wrap: wrap;" },
+      h("button", {
+        cls: !state.vulnFilterStatus ? "btn btn-primary mini" : "btn mini",
+        type: "button",
+        text: "All Verdicts",
+        on: { click: function () { state.vulnFilterStatus = ""; refresh(); } }
+      }),
+      h("button", {
+        cls: state.vulnFilterStatus === "matched" ? "btn btn-primary mini" : "btn mini",
+        type: "button",
+        text: "Affected Only",
+        on: { click: function () { state.vulnFilterStatus = "matched"; refresh(); } }
+      }),
+      h("button", {
+        cls: state.vulnFilterStatus === "possible" ? "btn btn-primary mini" : "btn mini",
+        type: "button",
+        text: "Possible",
+        on: { click: function () { state.vulnFilterStatus = "possible"; refresh(); } }
+      }),
+      h("button", {
+        cls: state.vulnFilterStatus === "not_affected" ? "btn btn-primary mini" : "btn mini",
+        type: "button",
+        text: "Not Affected",
+        on: { click: function () { state.vulnFilterStatus = "not_affected"; refresh(); } }
+      }),
+      h("span", { cls: "dim-3", style: "font-size: 11px; margin-left: 8px;", text: (state.vulnerabilities || []).length + " correlated records" })
+    );
+
     var vulRows = (state.vulnerabilities || []).map(function (v) {
+      var flags = [];
+      if (v.is_kev) flags.push(cisaKevBadge());
+      if (v.epss && v.epss > 0) flags.push(epssBadge(v.epss));
+
+      var flagsNode = flags.length
+        ? h("div", { style: "display: flex; gap: 4px; align-items: center; flex-wrap: wrap;" }, flags)
+        : h("span", { cls: "dim-3", text: "—" });
+
+      var sevCls = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "badge badge-crit" : (v.severity === "MEDIUM" ? "badge badge-warn" : "badge");
+
+      var explainBtn = h("button", {
+        cls: "btn mini",
+        type: "button",
+        text: "Explain",
+        on: {
+          click: function (ev) {
+            ev.stopPropagation();
+            openMatchEvidenceSheet(v);
+          }
+        }
+      });
+
       return [
         h("b", { text: v.cve_id || "" }),
-        h("span", { cls: v.severity === "CRITICAL" || v.severity === "HIGH" ? "badge badge-crit" : "badge badge-warn", text: v.severity || "MEDIUM" }),
-        h("span", { text: v.is_kev ? "CISA KEV" : "\u2014" }),
-        h("span", { text: v.product_name || "" }),
-        h("span", { text: v.version || "" }),
-        h("span", { cls: "dim-3", text: v.match_reason || "" }),
-        stamp(parseTime(v.detected_at))
+        h("span", { cls: sevCls, text: (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : "") }),
+        priorityScoreBadge(v.priority_score),
+        flagsNode,
+        vulnStatusBadge(v.status),
+        h("span", { text: v.product_name || "—" }),
+        h("span", { cls: "mono dim", text: v.version || "—" }),
+        h("span", { cls: "dim-3", text: v.match_reason || "—" }),
+        explainBtn
       ];
     });
 
-    var vulCard = card("Vulnerability Correlation (NVD 2.0 / CISA KEV)",
-      vulRows.length ? simpleTable(["CVE", "Severity", "Catalog", "Product", "Version", "Match Reason", "Detected"], vulRows) : h("div", { cls: "card-body", text: "No correlated vulnerabilities found." })
+    var vulCardBody = h("div", { cls: "card-body stack" },
+      snapStrip,
+      filterBtns,
+      vulRows.length
+        ? simpleTable(["CVE", "Severity", "Priority", "Catalog / Flags", "Verdict", "Product", "Version", "Match Reason", "Actions"], vulRows)
+        : h("div", { cls: "empty", text: state.vulnFilterStatus ? "No vulnerabilities match the current filter (" + state.vulnFilterStatus + ")." : "No correlated vulnerabilities found." })
     );
+
+    var vulCard = card("Vulnerability Correlation (NVD 2.0 / CISA KEV / EPSS)", vulCardBody);
 
     view.appendChild(h("div", { cls: "pad stack" }, evidenceCard, vulCard));
   }
@@ -7708,6 +8128,10 @@
     var asset = state.assetByKey[key];
     if (asset && asset.endpoint) {
       var epID = asset.endpoint.id;
+      request("/api/v1/software?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
+        state.softwareByEndpoint[epID] = (d && d.packages) || [];
+        if (state.routeKey) renderRoute();
+      }).catch(function () {});
       request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
         state.baselineByEndpoint[epID] = d || {};
         if (state.routeKey) renderRoute();
@@ -7856,6 +8280,7 @@
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
       ep ? baselineEndpointCard(asset) : null,
+      ep ? softwareInventoryCard(asset) : null,
       card("Evidence", evBody), flowCard, alertCard);
 
     routeEl = h("div", { cls: "route", role: "dialog", "aria-label": "Asset " + asset.name },
@@ -8523,7 +8948,10 @@
     }
     if (state.section === "forensics") {
       jobs.push(request("/api/v1/evidence/bundles").then(function (d) { state.evidenceBundles = arrayOf(d && d.bundles || d); }).catch(function () {}));
-      jobs.push(request("/api/v1/vulnerabilities").then(function (d) { state.vulnerabilities = arrayOf(d && d.vulnerabilities || d); }).catch(function () {}));
+      var vulnUrl = "/api/v1/vulnerabilities";
+      if (state.vulnFilterStatus) vulnUrl += "?status=" + encodeURIComponent(state.vulnFilterStatus);
+      jobs.push(request(vulnUrl).then(function (d) { state.vulnerabilities = arrayOf(d && d.vulnerabilities || d); }).catch(function () {}));
+      jobs.push(request("/api/v1/vulnerabilities/snapshots/active").then(function (d) { state.activeSnapshot = (d && d.snapshot) || null; }).catch(function () { state.activeSnapshot = null; }));
     }
     if (state.section === "audit") {
       jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
@@ -8694,6 +9122,8 @@
     window.__retireScriptConfirm = retireScriptConfirm;
     window.__cancelScriptScheduleConfirm = cancelScriptScheduleConfirm;
     window.__openEventInspectionSheet = openEventInspectionSheet;
+    window.__openMatchEvidenceSheet = openMatchEvidenceSheet;
+    window.__openSyncFeedModal = openSyncFeedModal;
     window.__openRoute = openRoute;
 
     if ("serviceWorker" in navigator && !state.demo) {

@@ -3929,4 +3929,142 @@ input[type="url"] {
   max-width: 860px;
 }
 
+/* Software Inventory & Vulnerability Correlation (Phase 7) */
+.vuln-match-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.vuln-match-badge[data-status="matched"] {
+  background: rgba(248, 81, 73, 0.18);
+  border: 1px solid var(--crit);
+  color: var(--crit);
+}
+
+.vuln-match-badge[data-status="not_affected"] {
+  background: rgba(46, 160, 67, 0.15);
+  border: 1px solid var(--ok);
+  color: var(--ok);
+}
+
+.vuln-match-badge[data-status="possible"] {
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.vuln-match-badge[data-status="insufficient_data"] {
+  background: rgba(139, 148, 158, 0.15);
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+}
+
+.priority-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--r);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--ground);
+  border: 1px solid var(--line);
+}
+
+.priority-badge.priority-crit {
+  background: rgba(248, 81, 73, 0.15);
+  border-color: var(--crit);
+  color: var(--crit);
+}
+
+.priority-badge.priority-high {
+  background: rgba(210, 153, 34, 0.15);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.cisa-kev-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(248, 81, 73, 0.22);
+  border: 1px solid var(--crit);
+  color: #ff7b72;
+}
+
+.epss-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  background: rgba(163, 113, 247, 0.15);
+  border: 1px solid #a371f7;
+  color: #d2a8ff;
+}
+
+.sw-source-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+
+.sw-scope-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 600;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+  color: var(--brand);
+}
+
+.snapshot-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  font-size: 12px;
+}
+
+.evidence-detail-box {
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 

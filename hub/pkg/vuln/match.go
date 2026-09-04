@@ -42,9 +42,14 @@ func CalculatePriorityScore(cvss float64, isKEV bool, epss float64, severity str
 // CorrelateSoftwareItem evaluates an installed software item against a vulnerability record.
 // Returns a match candidate if relevant, or nil if no product overlap exists.
 func CorrelateSoftwareItem(sw InstalledSoftware, v Vulnerability, snapshotID string) *VulnerabilityMatch {
-	// Try parsing CPEPattern as JSON []CPEMatchCriteria
+	// Try parsing CPEPattern as JSON []CPEMatchCriteria, or raw CPE formatted string
 	var criteriaList []CPEMatchCriteria
-	if err := json.Unmarshal([]byte(v.CPEPattern), &criteriaList); err == nil && len(criteriaList) > 0 {
+	if err := json.Unmarshal([]byte(v.CPEPattern), &criteriaList); err != nil || len(criteriaList) == 0 {
+		if strings.HasPrefix(v.CPEPattern, "cpe:2.3:") || strings.HasPrefix(v.CPEPattern, "cpe:/") {
+			criteriaList = []CPEMatchCriteria{{Criteria: v.CPEPattern}}
+		}
+	}
+	if len(criteriaList) > 0 {
 		var notAffectedCandidate *VulnerabilityMatch
 
 		for _, crit := range criteriaList {
