@@ -5732,6 +5732,52 @@
       }
     });
 
+    var enrollBox = h("div", { cls: "totp-enroll-box stack-s", style: "display: none; margin-top: 8px;" });
+    var enrollBtn = h("button", {
+      cls: "btn mini",
+      type: "button",
+      text: "Setup / Reset Authenticator (TOTP)",
+      on: {
+        click: function () {
+          enrollBtn.disabled = true;
+          enrollBtn.textContent = "Generating Secret…";
+          request("/api/v1/response/auth/totp/enroll", "POST", { operator_id: op })
+            .then(function (res) {
+              enrollBtn.style.display = "none";
+              enrollBox.style.display = "block";
+              enrollBox.innerHTML = "";
+              var keyRow = h("div", { cls: "stack-s pad-s rounded", style: "background: var(--bg-surface-2, rgba(255,255,255,0.05)); border: 1px solid var(--border-dim);" },
+                h("div", { cls: "label-meta", text: "Manual Entry Secret Key (Base32):" }),
+                h("div", { cls: "row-acts", style: "display: flex; gap: 8px; align-items: center;" },
+                  h("code", { cls: "cmd", style: "font-size: 1.05em; font-weight: bold; word-break: break-all;", text: res.secret }),
+                  h("button", {
+                    cls: "btn mini",
+                    type: "button",
+                    text: "Copy Key",
+                    on: {
+                      click: function () { copyText(res.secret, "TOTP Secret Key"); }
+                    }
+                  })
+                ),
+                h("div", { cls: "why", style: "margin-top: 4px;" },
+                  h("span", { text: "Add this key into your authenticator app (Google Authenticator, 1Password, Aegis, Bitwarden, etc.). " }),
+                  res.otpauth_url ? h("a", { href: res.otpauth_url, target: "_blank", rel: "noopener", text: "Open in Authenticator App" }) : null
+                )
+              );
+              enrollBox.appendChild(keyRow);
+              toast("Authenticator enrolled. Enter the generated 6-digit code above.", "ok");
+              codeInput.focus();
+            })
+            .catch(function (err) {
+              enrollBtn.disabled = false;
+              enrollBtn.textContent = "Setup / Reset Authenticator (TOTP)";
+              errBox.textContent = "Enrollment failed: " + (err.message || err);
+              errBox.removeAttribute("hidden");
+            });
+        }
+      }
+    });
+
     var body = h("div", { cls: "card-body stack" },
       h("p", { cls: "pending", text: "Response authority operations require multi-factor proof and an ephemeral in-memory Ed25519 keypair. Your private key remains exclusively in browser memory and is never written to disk." }),
       h("div", { cls: "form-row" },
@@ -5742,6 +5788,8 @@
         h("label", { "for": "unlock-totp-code", text: "Enter 6-Digit Authenticator Code (TOTP):" }),
         codeInput
       ),
+      h("div", { cls: "form-row", style: "margin-top: 4px;" }, enrollBtn),
+      enrollBox,
       errBox
     );
 
