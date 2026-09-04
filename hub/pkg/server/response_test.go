@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	hubauth "ominull/hub/pkg/auth"
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
@@ -50,7 +51,7 @@ func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *respon
 }
 
 func TestServer_ResponseJobFlow(t *testing.T) {
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	tenantID := "default"
@@ -113,8 +114,25 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 	})
 
 	handler := srv.Handler()
+
+	// Verify static API key is rejected with 403
+	reqStatic := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
+	reqStatic.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqStatic.Header.Set("Content-Type", "application/json")
+	wStatic := httptest.NewRecorder()
+	handler.ServeHTTP(wStatic, reqStatic)
+	if wStatic.Code != http.StatusForbidden {
+		t.Fatalf("expected HTTP 403 when creating job with static API key, got %d: %s", wStatic.Code, wStatic.Body.String())
+	}
+
+	// Create job using active console session cookie
+	consoleToken, err := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to generate console token: %v", err)
+	}
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
-	req.Header.Set("X-API-Key", "test-admin-key-12345")
+	req.AddCookie(&http.Cookie{Name: "ominull_console", Value: consoleToken})
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -131,19 +149,39 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 		t.Fatalf("unexpected job record: %+v", createdJob)
 	}
 
+	if srv.evidenceStore != nil {
+		bundle, err := srv.evidenceStore.GetBundle(tenantID, createdJob.ID)
+		if err != nil || bundle == nil {
+			t.Fatalf("expected evidence bundle to be created for forensic job %s, got: %v", createdJob.ID, err)
+		}
+		if bundle.Profile != "diagnostic" {
+			t.Fatalf("expected bundle profile diagnostic, got %s", bundle.Profile)
+		}
+	}
+
 	// 4. Endpoint sends telemetry heartbeat and receives the offered job
+	testKeyHex := strings.Repeat("0123456789abcdef", 4)
 	heartbeatBody, _ := json.Marshal(TelemetryBatchMessage{
-		EndpointID: endpointID,
-		TenantID:   tenantID,
-		Hostname:   "linux-host-1",
-		OS:         "Linux 6.1.0",
-		IP:         "192.168.86.50",
+		EndpointID:         endpointID,
+		TenantID:           tenantID,
+		Hostname:           "linux-host-1",
+		OS:                 "Linux 6.1.0",
+		IP:                 "192.168.86.50",
+		EvidenceSigningKey: testKeyHex,
 	})
 	reqHB := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(heartbeatBody))
 	reqHB.Header.Set("X-API-Key", "test-admin-key-12345")
 	reqHB.Header.Set("Content-Type", "application/json")
 	wHB := httptest.NewRecorder()
 	handler.ServeHTTP(wHB, reqHB)
+
+	ep, err := store.GetEndpoint(endpointID)
+	if err != nil || ep == nil {
+		t.Fatalf("failed to fetch endpoint: %v", err)
+	}
+	if ep.EvidenceSigningKey != testKeyHex {
+		t.Fatalf("expected endpoint evidence signing key to be persisted, got %q", ep.EvidenceSigningKey)
+	}
 
 	if wHB.Code != http.StatusOK {
 		t.Fatalf("heartbeat returned %d: %s", wHB.Code, wHB.Body.String())
@@ -268,8 +306,13 @@ func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 		"proof":         proofValid,
 	})
 
+	consoleToken, err := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to generate console token: %v", err)
+	}
+
 	reqForged := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(forgedBody))
-	reqForged.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqForged.AddCookie(&http.Cookie{Name: "ominull_console", Value: consoleToken})
 	reqForged.Header.Set("Content-Type", "application/json")
 	wForged := httptest.NewRecorder()
 	handler.ServeHTTP(wForged, reqForged)
@@ -301,7 +344,7 @@ func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 	})
 
 	reqStrip := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(validBody))
-	reqStrip.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqStrip.AddCookie(&http.Cookie{Name: "ominull_console", Value: consoleToken})
 	reqStrip.Header.Set("Content-Type", "application/json")
 	reqStrip.Header.Set("X-Operator-ID", "impersonated-victim@example.invalid") // should be stripped!
 	wStrip := httptest.NewRecorder()

@@ -130,7 +130,8 @@ type TelemetryBatchMessage struct {
 	// Readiness is the endpoint's own answer to "can I still be released after
 	// this?". Absent from agents that predate the check, which is a state the
 	// gate distinguishes from a failing answer.
-	Readiness *storage.Readiness `json:"isolation_readiness"`
+	Readiness          *storage.Readiness `json:"isolation_readiness"`
+	EvidenceSigningKey string             `json:"evidence_signing_key,omitempty"`
 }
 
 type DiscoveredAsset struct {

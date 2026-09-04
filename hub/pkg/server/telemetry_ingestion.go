@@ -50,6 +50,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		PackageIdentifier:        batch.PackageIdentifier,
 		RegisteredPackageVersion: batch.RegisteredPackageVersion,
 		ProvenanceStatus:         batch.ProvenanceStatus,
+		EvidenceSigningKey:       batch.EvidenceSigningKey,
 		Status:                   "online",
 		LastSeenAt:               now,
 		CreatedAt:                now,

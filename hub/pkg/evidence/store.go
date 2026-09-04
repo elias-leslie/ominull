@@ -265,16 +265,24 @@ func (s *Store) writeObjectAtomic(digest string, data []byte) error {
 
 // CreateBundle creates a new evidence collection bundle record.
 func (s *Store) CreateBundle(tenantID, endpointID, jobID, profile string, retentionTTL time.Duration) (*EvidenceBundle, error) {
+	return s.CreateBundleWithID(uuid.New().String(), tenantID, endpointID, jobID, profile, retentionTTL)
+}
+
+// CreateBundleWithID creates a new evidence collection bundle record with a specified ID.
+func (s *Store) CreateBundleWithID(id, tenantID, endpointID, jobID, profile string, retentionTTL time.Duration) (*EvidenceBundle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if strings.TrimSpace(id) == "" {
+		id = uuid.New().String()
+	}
 	if retentionTTL == 0 {
 		retentionTTL = 30 * 24 * time.Hour // default 30 days
 	}
 	now := time.Now().UTC()
 
 	bundle := &EvidenceBundle{
-		ID:                 uuid.New().String(),
+		ID:                 id,
 		TenantID:           tenantID,
 		EndpointID:         endpointID,
 		JobID:              jobID,
@@ -292,6 +300,7 @@ func (s *Store) CreateBundle(tenantID, endpointID, jobID, profile string, retent
 			id, tenant_id, endpoint_id, job_id, profile, status,
 			total_bytes, item_count, legal_hold, retention_expires_at, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING
 	`, bundle.ID, bundle.TenantID, bundle.EndpointID, bundle.JobID, bundle.Profile, string(bundle.Status),
 		bundle.TotalBytes, bundle.ItemCount, 0, bundle.RetentionExpiresAt, bundle.CreatedAt)
 	if err != nil {

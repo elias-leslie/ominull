@@ -52,13 +52,18 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot launch response actions; an active console response session is required")
+			return
+		}
+
 		var req struct {
-			EndpointID     string              `json:"endpoint_id"`
-			Kind           response.ActionKind `json:"kind"`
-			PayloadJSON    string              `json:"payload_json"`
-			IdempotencyKey string              `json:"idempotency_key"`
-			SessionID      string              `json:"session_id"`
-			ActionDigest   string              `json:"action_digest"`
+			EndpointID     string                    `json:"endpoint_id"`
+			Kind           response.ActionKind       `json:"kind"`
+			PayloadJSON    string                    `json:"payload_json"`
+			IdempotencyKey string                    `json:"idempotency_key"`
+			SessionID      string                    `json:"session_id"`
+			ActionDigest   string                    `json:"action_digest"`
 			Proof          *responseauth.ActionProof `json:"proof"`
 		}
 
@@ -116,6 +121,24 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// If this is a forensic collection, ensure a corresponding evidence bundle exists
+		if req.Kind == response.ActionKindForensicCollect && s.evidenceStore != nil {
+			var parsedPayload struct {
+				BundleID string `json:"bundle_id"`
+				Profile  string `json:"profile"`
+			}
+			_ = json.Unmarshal([]byte(req.PayloadJSON), &parsedPayload)
+			bundleID := strings.TrimSpace(parsedPayload.BundleID)
+			if bundleID == "" {
+				bundleID = job.ID
+			}
+			profile := strings.TrimSpace(parsedPayload.Profile)
+			if profile == "" {
+				profile = "diagnostic"
+			}
+			_, _ = s.evidenceStore.CreateBundleWithID(bundleID, tenantID, req.EndpointID, job.ID, profile, 0)
+		}
+
 		s.audit(r, "RESPONSE_JOB_CREATED", req.EndpointID, fmt.Sprintf("Created %s response job %s", req.Kind, job.ID))
 
 		w.Header().Set("Content-Type", "application/json")
@@ -168,10 +191,25 @@ func (s *Server) handleResponseAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ack response.JobAck
-	if err := json.NewDecoder(r.Body).Decode(&ack); err != nil || ack.JobID == "" || ack.LeaseID == "" {
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid ack payload")
 		return
+	}
+	jobID, _ := raw["job_id"].(string)
+	leaseID, _ := raw["lease_id"].(string)
+	if jobID == "" || leaseID == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid ack payload")
+		return
+	}
+
+	accepted := true
+	if v, ok := raw["accepted"].(bool); ok {
+		accepted = v
+	}
+	rejectionReason, _ := raw["rejection_reason"].(string)
+	if rejectionReason != "" {
+		accepted = false
 	}
 
 	if s.responseStore == nil {
@@ -185,7 +223,7 @@ func (s *Server) handleResponseAck(w http.ResponseWriter, r *http.Request) {
 		endpointID = r.Header.Get("X-Device-Endpoint-ID")
 	}
 
-	if err := s.responseStore.AcknowledgeJob(tenantID, endpointID, ack.JobID, ack.LeaseID, ack.Accepted, ack.RejectionReason); err != nil {
+	if err := s.responseStore.AcknowledgeJob(tenantID, endpointID, jobID, leaseID, accepted, rejectionReason); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to record ack: "+err.Error())
 		return
 	}

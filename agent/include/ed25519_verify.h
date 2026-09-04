@@ -395,4 +395,82 @@ static inline bool Ed25519_Verify(
     return (verified == 0);
 }
 
+/*
+ * Ed25519_Sign computes a 64-byte detached Ed25519 signature (RFC 8032)
+ * using a 64-byte secret key (32-byte seed + 32-byte public key).
+ */
+static inline bool Ed25519_Sign(
+    ed_u8 signature[64],
+    const ed_u8* message,
+    size_t message_len,
+    const ed_u8 secret_key[64]
+) {
+    if (!signature || (!message && message_len > 0) || !secret_key) return false;
+
+    ed_u8 d[64], h[64], r[64];
+    ed_gf p[4];
+    ed_i64 x[64];
+
+    ed_crypto_hash(d, secret_key, 32);
+    d[0] &= 248;
+    d[31] &= 127;
+    d[31] |= 64;
+
+    size_t sm_len = message_len + 64;
+    ed_u8* sm = (ed_u8*)malloc(sm_len);
+    if (!sm) return false;
+
+    if (message_len > 0 && message) {
+        memcpy(sm + 64, message, message_len);
+    }
+    memcpy(sm + 32, d + 32, 32);
+    ed_crypto_hash(r, sm + 32, message_len + 32);
+    ed_reduce(r);
+    ed_scalarbase(p, r);
+    ed_pack(sm, p);
+
+    memcpy(sm + 32, secret_key + 32, 32);
+    ed_crypto_hash(h, sm, message_len + 64);
+    ed_reduce(h);
+
+    for (int i = 0; i < 64; ++i) x[i] = 0;
+    for (int i = 0; i < 32; ++i) x[i] = (ed_u64)r[i];
+    for (int i = 0; i < 32; ++i) {
+        for (int j = 0; j < 32; ++j) {
+            x[i + j] += (ed_u64)h[i] * (ed_u64)d[j];
+        }
+    }
+    ed_modL(sm + 32, x);
+
+    memcpy(signature, sm, 64);
+    free(sm);
+    return true;
+}
+
+/*
+ * Ed25519_CreateKeypairFromSeed derives a 32-byte public key and 64-byte secret key from a 32-byte seed.
+ */
+static inline bool Ed25519_CreateKeypairFromSeed(
+    ed_u8 public_key[32],
+    ed_u8 secret_key[64],
+    const ed_u8 seed[32]
+) {
+    if (!public_key || !secret_key || !seed) return false;
+
+    ed_u8 d[64];
+    ed_gf p[4];
+
+    ed_crypto_hash(d, seed, 32);
+    d[0] &= 248;
+    d[31] &= 127;
+    d[31] |= 64;
+
+    ed_scalarbase(p, d);
+    ed_pack(public_key, p);
+
+    memcpy(secret_key, seed, 32);
+    memcpy(secret_key + 32, public_key, 32);
+    return true;
+}
+
 #endif /* OMINULL_ED25519_VERIFY_H */

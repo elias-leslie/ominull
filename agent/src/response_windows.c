@@ -69,7 +69,7 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
 
         // 3. Post Acknowledgment to hub
         char ack_body[256];
-        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\"}", offer->job_id, offer->lease_id);
+        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"accepted\":true}", offer->job_id, offer->lease_id);
         if (!Hub_PostPathJSON(config, "/api/v1/response/jobs/ack", ack_body, NULL, 0)) {
             // Lease expired, rejected, or transport down
             continue;

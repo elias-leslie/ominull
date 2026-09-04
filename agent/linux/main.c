@@ -28,6 +28,7 @@
 #include "../include/release_key.h"
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_linux.h"
+#include "../include/forensics_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -94,6 +95,7 @@ typedef struct {
      * Cloudflare endpoints use the operating system trust store instead. */
     bool pin_hub_ca;
     bool allow_plaintext;
+    char evidence_pubkey_hex[65];
 } LINUX_AGENT_CONFIG;
 
 static void EnforcementTeardown(const char* tool);
@@ -2330,7 +2332,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
         char ack_url[sizeof(config->hub_url) + 64];
         snprintf(ack_url, sizeof(ack_url), "%s/api/v1/response/jobs/ack", config->hub_url);
         char ack_body[256];
-        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\"}", offer->job_id, offer->lease_id);
+        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"accepted\":true}", offer->job_id, offer->lease_id);
         char ack_resp[1024] = {0};
         if (!RunHubCurl(config, ack_url, ack_body, ack_resp, sizeof(ack_resp))) {
             continue;
@@ -2338,15 +2340,38 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
 
         // 4. Action Dispatcher: Check if action kind is recognized and supported
         if (strcmp(offer->kind, "forensic_collection") == 0) {
+            ForensicCollectionParams params;
+            Forensics_ParsePayload(offer->payload_json, &params);
+            const char* bundle_id = params.bundle_id[0] ? params.bundle_id : offer->job_id;
+
+            int pipefd[2];
+            if (pipe(pipefd) != 0) {
+                pipefd[0] = -1;
+                pipefd[1] = -1;
+            }
+
+            struct timespec ts_start, ts_end;
+            clock_gettime(CLOCK_MONOTONIC, &ts_start);
+
+            // Temporarily restore default SIGCHLD so waitpid works reliably
+            struct sigaction sa_old, sa_dfl;
+            memset(&sa_dfl, 0, sizeof(sa_dfl));
+            sa_dfl.sa_handler = SIG_DFL;
+            sigaction(SIGCHLD, &sa_dfl, &sa_old);
+
             // Spawn worker in contained child process
             pid_t pid = fork();
             if (pid == 0) {
+                if (pipefd[0] >= 0) close(pipefd[0]);
+
                 // Child: Create new process group
                 setpgid(0, 0);
 
-                // Close inherited file descriptors > 2
+                // Close inherited file descriptors > 2 (except pipefd[1])
                 for (int fd = 3; fd < 1024; fd++) {
-                    close(fd);
+                    if (fd != pipefd[1]) {
+                        close(fd);
+                    }
                 }
 
                 // Clean sanitized environment
@@ -2366,25 +2391,77 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 rl.rlim_max = 60;
                 setrlimit(RLIMIT_CPU, &rl);
 
-                // Worker execution (e.g. collect diagnostics)
-                _exit(0);
+                char manifest_sha[65] = {0};
+                bool success = false;
+                if (strcmp(params.profile, "diagnostic") == 0) {
+                    success = Forensics_RunDiagnosticCollection(
+                        config->hub_url,
+                        config->api_key,
+                        IsDeviceCredentialValue(config->api_key),
+                        config->client_cert_path,
+                        config->client_key_path,
+                        config->ca_path,
+                        config->endpoint_id,
+                        offer->grant.tenant_id,
+                        offer->job_id,
+                        bundle_id,
+                        params.max_bytes,
+                        manifest_sha,
+                        sizeof(manifest_sha)
+                    );
+                }
+
+                if (pipefd[1] >= 0) {
+                    if (manifest_sha[0]) {
+                        ssize_t w = write(pipefd[1], manifest_sha, strlen(manifest_sha));
+                        (void)w;
+                    }
+                    close(pipefd[1]);
+                }
+
+                _exit(success ? 0 : 2);
             } else if (pid > 0) {
+                if (pipefd[1] >= 0) close(pipefd[1]);
+
+                char manifest_sha[65] = {0};
+                if (pipefd[0] >= 0) {
+                    ssize_t r = read(pipefd[0], manifest_sha, sizeof(manifest_sha) - 1);
+                    if (r > 0) {
+                        manifest_sha[r] = '\0';
+                    }
+                    close(pipefd[0]);
+                }
+
                 // Parent: wait for child
                 int status = 0;
                 int exit_code = 1;
                 if (waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
                     exit_code = WEXITSTATUS(status);
                 }
+                sigaction(SIGCHLD, &sa_old, NULL);
+
+                clock_gettime(CLOCK_MONOTONIC, &ts_end);
+                int64_t duration_ms = (ts_end.tv_sec - ts_start.tv_sec) * 1000 +
+                                      (ts_end.tv_nsec - ts_start.tv_nsec) / 1000000;
+                if (duration_ms < 0) duration_ms = 0;
 
                 // Post result to hub
                 char res_url[sizeof(config->hub_url) + 64];
                 snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
-                char res_body[512];
+                char res_body[1024];
                 snprintf(res_body, sizeof(res_body),
-                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":100}",
-                    offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code);
+                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s}",
+                    offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code,
+                    (long long)duration_ms,
+                    (manifest_sha[0] ? ",\"manifest_sha256\":\"" : ""),
+                    (manifest_sha[0] ? manifest_sha : ""),
+                    (manifest_sha[0] ? "\"" : ""));
                 char res_resp[1024] = {0};
                 RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
+            } else {
+                sigaction(SIGCHLD, &sa_old, NULL);
+                if (pipefd[0] >= 0) close(pipefd[0]);
+                if (pipefd[1] >= 0) close(pipefd[1]);
             }
         } else if (strcmp(offer->kind, "terminal_session") == 0) {
             TerminalSessionParams params;
@@ -2434,7 +2511,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     if (!jsonBuf) return;
 
     int offset = snprintf(jsonBuf, bufCap,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
+        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"evidence_signing_key\":\"%s\",\"events\":[",
         config->endpoint_id,
         config->location_id[0] ? config->location_id : "loc-home",
         config->role_tag[0] ? config->role_tag : "workstation",
@@ -2446,7 +2523,8 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         config->install_type,
         config->package_identifier,
         config->registered_package_version,
-        config->provenance_status
+        config->provenance_status,
+        config->evidence_pubkey_hex
     );
 
     for (size_t i = 0; i < flowCount && offset < (int)bufCap - 1024; i++) {
@@ -2681,6 +2759,15 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
     /* Auto-reap terminated worker child processes so no zombies accumulate. */
     signal(SIGCHLD, SIG_IGN);
+
+    mkdir("/var/lib/ominull", 0755);
+    uint8_t ep_pub[32];
+    uint8_t ep_priv[64];
+    if (Forensics_GetOrCreateEndpointKey(FORENSICS_DEFAULT_KEY_PATH, ep_pub, ep_priv, config.evidence_pubkey_hex, sizeof(config.evidence_pubkey_hex))) {
+        if (config.verbose) {
+            printf("[+] Evidence signing key active: %.16s...\n", config.evidence_pubkey_hex);
+        }
+    }
 
     printf("[+] Initializing Linux socket collection and firewall control...\n");
     /* Says what is about to happen, not what has happened. This line used to
