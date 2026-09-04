@@ -58,3 +58,77 @@ func TestClientCertificateModeDefaultsAndValidates(t *testing.T) {
 		t.Fatal("invalid client certificate mode was accepted")
 	}
 }
+
+func TestConsoleHostnameAndACMEValidation(t *testing.T) {
+	// 1. IP address in ConsoleHostname must be strictly rejected
+	badIP := Config{
+		NetworkMode:     "lan",
+		ConsoleURL:      "https://10.0.0.58:8443",
+		AgentURL:        "https://10.0.0.58:9443",
+		ConsoleHostname: "10.0.0.58",
+	}
+	if err := badIP.Validate(); err == nil || !strings.Contains(err.Error(), "not an IP address") {
+		t.Fatalf("expected error rejecting IP address for ConsoleHostname, got: %v", err)
+	}
+
+	// 2. Scheme or port in ConsoleHostname must be rejected
+	badScheme := Config{
+		NetworkMode:     "lan",
+		ConsoleURL:      "https://hub.lan:8443",
+		AgentURL:        "https://hub.lan:9443",
+		ConsoleHostname: "https://hub.lan:8443",
+	}
+	if err := badScheme.Validate(); err == nil || !strings.Contains(err.Error(), "without scheme, port, or path") {
+		t.Fatalf("expected error rejecting scheme/port in ConsoleHostname, got: %v", err)
+	}
+
+	// 3. Valid domain name in ConsoleHostname must be accepted
+	validDomain := Config{
+		NetworkMode:        "direct",
+		ConsoleURL:         "https://omi.example.invalid:8443",
+		AgentURL:           "https://agent.example.invalid:9443",
+		ConsoleHostname:    "omi.example.invalid",
+		ConsoleTLSListen:   ":8443",
+		ConsoleTLSCertFile: "/etc/ominull/console.crt",
+		ConsoleTLSKeyFile:  "/etc/ominull/console.key",
+		TLSMode:            "custom",
+	}
+	if err := validDomain.Validate(); err != nil {
+		t.Fatalf("valid domain config rejected: %v", err)
+	}
+
+	// 4. Normalized defaults ConsoleHostname from ConsoleURL when not an IP
+	norm := (Config{
+		NetworkMode: "lan",
+		ConsoleURL:  "https://hub.lan:8443",
+		AgentURL:    "https://hub.lan:9443",
+	}).Normalized()
+	if norm.ConsoleHostname != "hub.lan" {
+		t.Fatalf("expected ConsoleHostname normalized to 'hub.lan', got %q", norm.ConsoleHostname)
+	}
+
+	// 5. ACME DNS-01 validation
+	acmeCfg := Config{
+		NetworkMode:     "direct",
+		ConsoleURL:      "https://omi.example.invalid:8443",
+		AgentURL:        "https://agent.example.invalid:9443",
+		ConsoleHostname: "omi.example.invalid",
+		TLSMode:         "acme",
+		ACMEEnabled:     true,
+		ACMEEmail:       "ops@example.invalid",
+	}
+	if err := acmeCfg.Validate(); err != nil {
+		t.Fatalf("valid ACME DNS-01 config rejected: %v", err)
+	}
+
+	env := acmeCfg.Environment("/var/lib/ominull/db", "/etc/ominull/admin.key", "/bin", "/token")
+	if !strings.Contains(env, "OMINULL_CONSOLE_HOSTNAME=omi.example.invalid\n") {
+		t.Fatalf("missing OMINULL_CONSOLE_HOSTNAME in env: %s", env)
+	}
+	if !strings.Contains(env, "OMINULL_ACME_ENABLED=true\n") {
+		t.Fatalf("missing OMINULL_ACME_ENABLED in env: %s", env)
+	}
+	if !strings.Contains(env, "OMINULL_ACME_DOMAIN=omi.example.invalid\n") {
+		t.Fatalf("missing OMINULL_ACME_DOMAIN in env: %s", env)
+	}
+}

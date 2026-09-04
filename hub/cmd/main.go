@@ -60,6 +60,11 @@ func main() {
 	consoleTLSCert := flag.String("console-tls-cert", envOr("OMINULL_CONSOLE_TLS_CERT", ""), "PEM certificate for the console HTTPS listener")
 	consoleTLSKey := flag.String("console-tls-key", envOr("OMINULL_CONSOLE_TLS_KEY", ""), "PEM private key for --console-tls-cert")
 	consoleHostname := flag.String("console-hostname", envOr("OMINULL_CONSOLE_HOSTNAME", ""), "Canonical DNS hostname for the operator console (required for WebAuthn RP ID)")
+	acmeEnabled := flag.Bool("acme-enabled", envBool("OMINULL_ACME_ENABLED", false), "Enable automated ACME DNS-01 certificate issuance for console TLS")
+	acmeDomain := flag.String("acme-domain", envOr("OMINULL_ACME_DOMAIN", ""), "Domain name for ACME certificate (defaults to --console-hostname)")
+	acmeEmail := flag.String("acme-email", envOr("OMINULL_ACME_EMAIL", ""), "Contact email for ACME account registration")
+	acmeDirectory := flag.String("acme-directory", envOr("OMINULL_ACME_DIRECTORY", ""), "ACME directory endpoint URL (defaults to Let's Encrypt production)")
+	acmeCloudflareToken := flag.String("acme-cloudflare-token", envOr("OMINULL_ACME_CLOUDFLARE_TOKEN", os.Getenv("CLOUDFLARE_API_TOKEN")), "Cloudflare API token for ACME DNS-01 TXT record management")
 	retentionDays := flag.Int("retention-days", envInt("OMINULL_RETENTION_DAYS", 14), "Days of raw flow telemetry to keep (0 disables pruning)")
 	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 14), "Days of aggregated communication profiles to keep (0 disables pruning)")
 	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 30), "Days of alerts to keep (0 disables pruning)")
@@ -199,11 +204,16 @@ func main() {
 	})
 	if *consoleTLSListen != "" {
 		srv.SetConsoleTLS(server.ConsoleTLSOptions{
-			Listen:   *consoleTLSListen,
-			CertFile: *consoleTLSCert,
-			KeyFile:  *consoleTLSKey,
-			Hostname: *consoleHostname,
-			Hosts:    splitList(*tlsHosts),
+			Listen:              *consoleTLSListen,
+			CertFile:            *consoleTLSCert,
+			KeyFile:             *consoleTLSKey,
+			Hostname:            *consoleHostname,
+			Hosts:               splitList(*tlsHosts),
+			ACMEEnabled:         *acmeEnabled,
+			ACMEDomain:          *acmeDomain,
+			ACMEEmail:           *acmeEmail,
+			ACMEDirectory:       *acmeDirectory,
+			ACMECloudflareToken: *acmeCloudflareToken,
 		})
 	}
 	srv.SetAgentHubURL(*agentHubURL)

@@ -275,6 +275,12 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "network mode could not be saved")
 		return
 	}
+	if req.Configuration.ConsoleHostname != "" {
+		if err := s.store.SetSetting("setup.console_hostname", req.Configuration.ConsoleHostname); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "console hostname could not be saved")
+			return
+		}
+	}
 	if req.Configuration.OIDCIssuer != "" {
 		if err := s.store.SetSetting("oidc.issuer", req.Configuration.OIDCIssuer); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "OIDC configuration could not be saved")
@@ -336,7 +342,10 @@ func (s *Server) setupRuntimeMatches(cfg configuration.Config) bool {
 		strings.TrimRight(strings.TrimSpace(s.agentHubURL), "/") != cfg.AgentURL ||
 		strings.TrimSpace(s.tlsOpts.CertFile) != cfg.TLSCertFile ||
 		strings.TrimSpace(s.tlsOpts.KeyFile) != cfg.TLSKeyFile ||
-		!strings.EqualFold(strings.TrimSpace(string(s.tlsOpts.ClientCerts)), cfg.ClientCerts) {
+		!strings.EqualFold(strings.TrimSpace(string(s.tlsOpts.ClientCerts)), cfg.ClientCerts) ||
+		(cfg.ConsoleHostname != "" && s.consoleTLSOpts.Hostname != "" && !strings.EqualFold(s.consoleTLSOpts.Hostname, cfg.ConsoleHostname)) ||
+		(cfg.ConsoleTLSCertFile != "" && s.consoleTLSOpts.CertFile != cfg.ConsoleTLSCertFile) ||
+		(cfg.ConsoleTLSKeyFile != "" && s.consoleTLSOpts.KeyFile != cfg.ConsoleTLSKeyFile) {
 		return false
 	}
 	activeHosts := append([]string(nil), s.tlsOpts.Hosts...)

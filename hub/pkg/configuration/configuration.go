@@ -20,23 +20,32 @@ import (
 const CurrentVersion = 1
 
 type Config struct {
-	Version         int      `json:"version"`
-	NetworkMode     string   `json:"network_mode"` // lan, direct, cloudflare
-	ConsoleURL      string   `json:"console_url"`
-	AgentURL        string   `json:"agent_url"`
-	TLSMode         string   `json:"tls_mode"` // self-issued, acme, custom
-	TLSCertFile     string   `json:"tls_cert_file,omitempty"`
-	TLSKeyFile      string   `json:"tls_key_file,omitempty"`
-	TLSHosts        []string `json:"tls_hosts,omitempty"`
-	ClientCerts     string   `json:"client_certs"` // off, optional, required
-	OIDCIssuer      string   `json:"oidc_issuer,omitempty"`
-	OIDCClientID    string   `json:"oidc_client_id,omitempty"`
-	OIDCRedirectURL string   `json:"oidc_redirect_url,omitempty"`
-	AccessTeam      string   `json:"access_team,omitempty"`
-	AccessAudience  string   `json:"access_audience,omitempty"`
-	Cloudflare      bool     `json:"cloudflare"`
-	SetupComplete   bool     `json:"setup_complete"`
-	UpdatedAt       string   `json:"updated_at"`
+	Version            int      `json:"version"`
+	NetworkMode        string   `json:"network_mode"` // lan, direct, cloudflare
+	ConsoleHostname    string   `json:"console_hostname"`
+	ConsoleURL         string   `json:"console_url"`
+	AgentURL           string   `json:"agent_url"`
+	ConsoleTLSListen   string   `json:"console_tls_listen,omitempty"`
+	ConsoleTLSCertFile string   `json:"console_tls_cert_file,omitempty"`
+	ConsoleTLSKeyFile  string   `json:"console_tls_key_file,omitempty"`
+	TLSMode            string   `json:"tls_mode"` // self-issued, acme, custom
+	TLSCertFile        string   `json:"tls_cert_file,omitempty"`
+	TLSKeyFile         string   `json:"tls_key_file,omitempty"`
+	TLSHosts           []string `json:"tls_hosts,omitempty"`
+	ClientCerts        string   `json:"client_certs"` // off, optional, required
+	ACMEEnabled        bool     `json:"acme_enabled,omitempty"`
+	ACMEDomain         string   `json:"acme_domain,omitempty"`
+	ACMEEmail          string   `json:"acme_email,omitempty"`
+	ACMEDirectory      string   `json:"acme_directory,omitempty"`
+	ACMEDNSProvider    string   `json:"acme_dns_provider,omitempty"`
+	OIDCIssuer         string   `json:"oidc_issuer,omitempty"`
+	OIDCClientID       string   `json:"oidc_client_id,omitempty"`
+	OIDCRedirectURL    string   `json:"oidc_redirect_url,omitempty"`
+	AccessTeam         string   `json:"access_team,omitempty"`
+	AccessAudience     string   `json:"access_audience,omitempty"`
+	Cloudflare         bool     `json:"cloudflare"`
+	SetupComplete      bool     `json:"setup_complete"`
+	UpdatedAt          string   `json:"updated_at"`
 }
 
 type ValidationError struct{ Problems []string }
@@ -84,6 +93,15 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if strings.TrimSpace(c.ConsoleHostname) != "" {
+		host := strings.TrimSpace(c.ConsoleHostname)
+		if net.ParseIP(host) != nil {
+			problems = append(problems, "console_hostname must be a valid DNS domain name, not an IP address (required for WebAuthn passkey registration)")
+		}
+		if strings.ContainsAny(host, "/:@") {
+			problems = append(problems, "console_hostname must be a domain name without scheme, port, or path")
+		}
+	}
 	if mode == "cloudflare" {
 		if strings.TrimSpace(c.ConsoleURL) == "" || strings.TrimSpace(c.AgentURL) == "" {
 			problems = append(problems, "cloudflare mode needs separate console and agent HTTPS URLs")
@@ -92,8 +110,23 @@ func (c Config) Validate() error {
 			problems = append(problems, "cloudflare mode must enable the optional Cloudflare adapter")
 		}
 	}
-	if (tlsMode == "custom" || tlsMode == "acme") && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
-		problems = append(problems, tlsMode+" TLS needs both certificate and key paths")
+	if (tlsMode == "custom") && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") &&
+		(strings.TrimSpace(c.ConsoleTLSCertFile) == "" || strings.TrimSpace(c.ConsoleTLSKeyFile) == "") {
+		problems = append(problems, "custom TLS needs both certificate and key paths")
+	}
+	if tlsMode == "acme" && !c.ACMEEnabled && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+		problems = append(problems, "acme TLS needs both certificate and key paths")
+	}
+	if c.ACMEEnabled {
+		domain := strings.TrimSpace(c.ACMEDomain)
+		if domain == "" {
+			domain = strings.TrimSpace(c.ConsoleHostname)
+		}
+		if domain == "" {
+			problems = append(problems, "acme DNS-01 requires an acme_domain or console_hostname")
+		} else if net.ParseIP(domain) != nil {
+			problems = append(problems, "acme_domain must be a valid DNS domain name, not an IP address")
+		}
 	}
 	if c.OIDCIssuer != "" {
 		u, err := url.Parse(strings.TrimSpace(c.OIDCIssuer))
@@ -142,7 +175,24 @@ func (c Config) Normalized() Config {
 	c.NetworkMode = strings.ToLower(strings.TrimSpace(c.NetworkMode))
 	c.TLSMode = strings.ToLower(strings.TrimSpace(c.TLSMode))
 	c.ClientCerts = strings.ToLower(strings.TrimSpace(c.ClientCerts))
+	c.ConsoleHostname = strings.ToLower(strings.TrimSpace(c.ConsoleHostname))
 	c.ConsoleURL = strings.TrimRight(strings.TrimSpace(c.ConsoleURL), "/")
+	if c.ConsoleHostname == "" && c.ConsoleURL != "" {
+		if u, err := url.Parse(c.ConsoleURL); err == nil && u.Hostname() != "" && net.ParseIP(u.Hostname()) == nil {
+			c.ConsoleHostname = strings.ToLower(u.Hostname())
+		}
+	}
+	if c.ACMEEnabled {
+		if strings.TrimSpace(c.ACMEDomain) == "" && c.ConsoleHostname != "" {
+			c.ACMEDomain = c.ConsoleHostname
+		}
+		if strings.TrimSpace(c.ACMEDirectory) == "" {
+			c.ACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+		}
+		if strings.TrimSpace(c.ACMEDNSProvider) == "" {
+			c.ACMEDNSProvider = "cloudflare"
+		}
+	}
 	c.AgentURL = strings.TrimRight(strings.TrimSpace(c.AgentURL), "/")
 	c.OIDCIssuer = strings.TrimRight(strings.TrimSpace(c.OIDCIssuer), "/")
 	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -176,6 +226,27 @@ func (c Config) Environment(dbPath, adminKeyFile, binaryDir, setupTokenFile stri
 		"OMINULL_TLS_HOSTS=" + strings.Join(c.TLSHosts, ","),
 		"OMINULL_ACCESS_TEAM=" + c.AccessTeam,
 		"OMINULL_ACCESS_AUD=" + c.AccessAudience,
+	}
+	if c.ConsoleHostname != "" {
+		lines = append(lines, "OMINULL_CONSOLE_HOSTNAME="+c.ConsoleHostname)
+	}
+	if c.ConsoleTLSListen != "" {
+		lines = append(lines, "OMINULL_CONSOLE_TLS_LISTEN="+c.ConsoleTLSListen)
+	}
+	if c.ConsoleTLSCertFile != "" {
+		lines = append(lines, "OMINULL_CONSOLE_TLS_CERT="+c.ConsoleTLSCertFile)
+	}
+	if c.ConsoleTLSKeyFile != "" {
+		lines = append(lines, "OMINULL_CONSOLE_TLS_KEY="+c.ConsoleTLSKeyFile)
+	}
+	if c.ACMEEnabled {
+		lines = append(lines,
+			"OMINULL_ACME_ENABLED=true",
+			"OMINULL_ACME_DOMAIN="+c.ACMEDomain,
+			"OMINULL_ACME_EMAIL="+c.ACMEEmail,
+			"OMINULL_ACME_DIRECTORY="+c.ACMEDirectory,
+			"OMINULL_ACME_DNS_PROVIDER="+c.ACMEDNSProvider,
+		)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

@@ -108,6 +108,8 @@ func main() {
 		err = client.cmdSoftware(rest)
 	case "vulnerabilities":
 		err = client.cmdVulnerabilities(rest)
+	case "console":
+		err = client.cmdConsole(rest)
 	case "help", "--help", "-h":
 		printUsage()
 		return
@@ -914,6 +916,115 @@ func (c *APIClient) cmdVulnerabilities(args []string) error {
 	}
 }
 
+func (c *APIClient) cmdConsole(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ominullctl console export-ca|trust-instructions|status [args...]")
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "export-ca":
+		fs := flag.NewFlagSet("console export-ca", flag.ExitOnError)
+		outFile := fs.String("out", "", "Write CA certificate to output file path instead of stdout")
+		caPath := fs.String("path", envOr("OMINULL_CA_FILE", "/var/lib/ominull/certs/ca.crt"), "Direct path to hub CA certificate on host")
+		_ = fs.Parse(rest)
+
+		var caBytes []byte
+		// 1. Try local disk path if running locally on the hub
+		if data, err := os.ReadFile(*caPath); err == nil && len(data) > 0 {
+			caBytes = data
+		} else {
+			// 2. Fetch from hub API /api/v1/pki/ca.crt
+			endpoint := "/api/v1/pki/ca.crt"
+			fullURL := strings.TrimRight(c.cfg.HubURL, "/") + endpoint
+			resp, err := c.httpClient.Get(fullURL)
+			if err != nil {
+				return fmt.Errorf("failed to fetch CA from API and local file %s: %w", *caPath, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("API /api/v1/pki/ca.crt returned status %d", resp.StatusCode)
+			}
+			caBytes, err = io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read response: %w", err)
+			}
+		}
+
+		if *outFile != "" {
+			if err := os.WriteFile(*outFile, caBytes, 0644); err != nil {
+				return fmt.Errorf("write CA to %s: %w", *outFile, err)
+			}
+			c.printOutput(map[string]string{"status": "exported", "path": *outFile}, func() {
+				fmt.Printf("[+] Exported Ominull Hub Root CA certificate to %s (mode 0644)\n", *outFile)
+			})
+			return nil
+		}
+
+		c.printOutput(map[string]string{"ca_pem": string(caBytes)}, func() {
+			os.Stdout.Write(caBytes)
+		})
+		return nil
+
+	case "trust-instructions":
+		c.printOutput(map[string]interface{}{
+			"instructions": map[string]string{
+				"linux_debian": "sudo cp ca.crt /usr/local/share/ca-certificates/ominull-ca.crt && sudo update-ca-certificates",
+				"linux_rhel":   "sudo cp ca.crt /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust",
+				"macos":        "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt",
+				"windows":      "Import-Certificate -FilePath .\\ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root",
+				"chrome":       "Settings -> Privacy and security -> Security -> Manage certificates -> Authorities -> Import ca.crt -> Trust for identifying websites",
+				"firefox":      "Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import ca.crt -> Trust this CA to identify websites",
+			},
+			"rationale": "Browsers require a secure context with a trusted root certificate to enable WebCrypto (ActionProof signing) and WebAuthn (FIDO2/passkeys).",
+		}, func() {
+			fmt.Println("=== Ominull Hub Root CA Trust Installation Instructions ===")
+			fmt.Println()
+			fmt.Println("1. Linux (Debian / Ubuntu):")
+			fmt.Println("   sudo cp ca.crt /usr/local/share/ca-certificates/ominull-ca.crt")
+			fmt.Println("   sudo update-ca-certificates")
+			fmt.Println()
+			fmt.Println("2. Linux (RHEL / CentOS / Fedora):")
+			fmt.Println("   sudo cp ca.crt /etc/pki/ca-trust/source/anchors/ominull-ca.crt")
+			fmt.Println("   sudo update-ca-trust")
+			fmt.Println()
+			fmt.Println("3. macOS (System Keychain):")
+			fmt.Println("   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt")
+			fmt.Println()
+			fmt.Println("4. Windows (PowerShell as Administrator):")
+			fmt.Println("   Import-Certificate -FilePath .\\ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root")
+			fmt.Println()
+			fmt.Println("5. Web Browsers (Chrome / Edge / Firefox):")
+			fmt.Println("   - Chrome/Edge: Settings -> Privacy and security -> Security -> Manage certificates -> Authorities -> Import ca.crt -> Trust for identifying websites")
+			fmt.Println("   - Firefox: Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import ca.crt -> Trust this CA to identify websites")
+			fmt.Println()
+			fmt.Println("Note: A trusted root certificate is required by browsers to maintain a secure context for WebCrypto and WebAuthn passkeys.")
+		})
+		return nil
+
+	case "status":
+		raw, err := c.doRequest(http.MethodGet, "/api/v1/console/status", nil)
+		if err != nil {
+			return err
+		}
+		var st map[string]interface{}
+		_ = json.Unmarshal(raw, &st)
+		c.printOutput(st, func() {
+			fmt.Println("=== Ominull Console HTTPS Interface Status ===")
+			fmt.Printf("Listener Address:  %v\n", st["listen"])
+			fmt.Printf("Console Hostname:  %v\n", st["hostname"])
+			fmt.Printf("WebAuthn RP ID:    %v\n", st["webauthn_rp_id"])
+			fmt.Printf("Certificate Mode:  %v\n", st["source"])
+			fmt.Printf("HSTS Enforced:     %v\n", st["hsts"])
+			fmt.Printf("Client Cert Mode:  %v (isolated from agent mTLS)\n", st["client_auth"])
+		})
+		return nil
+
+	default:
+		return fmt.Errorf("unknown console subcommand %q; choose export-ca, trust-instructions, or status", sub)
+	}
+}
+
 func currentToken(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -979,6 +1090,11 @@ Forensics & Response Commands:
   shell sessions|show|close <id>          List and close active terminal sessions
   software list                           Inspect authoritative endpoint package inventory
   vulnerabilities list|show|sync          Correlate endpoint packages with NVD/KEV feeds
+
+Console & Trust Commands:
+  console export-ca [--out FILE]          Export the hub Root CA certificate for browser trust
+  console trust-instructions              Show per-platform commands to install Root CA into trust stores
+  console status                          Inspect console HTTPS listener, certificate source, and RP ID
 
 Global Flags:
   --url URL             Hub API URL (default: http://127.0.0.1:9999 or $OMINULL_HUB_URL)

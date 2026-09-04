@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"ominull/hub/pkg/acme"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
@@ -229,6 +230,13 @@ type ConsoleTLSOptions struct {
 	Hostname string
 	// Extra SANs
 	Hosts []string
+	// ACME automated DNS-01 options
+	ACMEEnabled         bool
+	ACMEDomain          string
+	ACMEEmail           string
+	ACMEDirectory       string
+	ACMECloudflareToken string
+	ACMEDNSProvider     acme.DNSProvider
 }
 
 // SetConsoleTLS installs the dedicated console HTTPS configuration. Call it before Start.
@@ -779,6 +787,7 @@ func (s *Server) consoleTLSConfig() (*tls.Config, error) {
 		ClientAuth: tls.NoClientCert,
 	}
 
+	// Source A: Operator-supplied certificate pair
 	if s.consoleTLSOpts.CertFile != "" || s.consoleTLSOpts.KeyFile != "" {
 		if s.consoleTLSOpts.CertFile == "" || s.consoleTLSOpts.KeyFile == "" {
 			return nil, fmt.Errorf("--console-tls-cert and --console-tls-key must be given together")
@@ -792,6 +801,47 @@ func (s *Server) consoleTLSConfig() (*tls.Config, error) {
 		return base, nil
 	}
 
+	// Source B: Automated ACME using DNS-01 challenge
+	if s.consoleTLSOpts.ACMEEnabled {
+		domain := s.consoleTLSOpts.ACMEDomain
+		if domain == "" {
+			domain = s.consoleTLSOpts.Hostname
+		}
+		if domain == "" {
+			return nil, fmt.Errorf("acme console certificate requires --acme-domain or --console-hostname")
+		}
+		var dnsProvider acme.DNSProvider = s.consoleTLSOpts.ACMEDNSProvider
+		if dnsProvider == nil && s.consoleTLSOpts.ACMECloudflareToken != "" {
+			dnsProvider = acme.NewCloudflareDNSProvider(s.consoleTLSOpts.ACMECloudflareToken)
+		}
+		if dnsProvider == nil {
+			return nil, fmt.Errorf("acme console certificate requires a configured DNS provider (e.g. Cloudflare API token)")
+		}
+
+		acmeMgr, err := acme.NewManager(acme.Config{
+			DirectoryURL: s.consoleTLSOpts.ACMEDirectory,
+			Email:        s.consoleTLSOpts.ACMEEmail,
+			Domain:       domain,
+			DNSProvider:  dnsProvider,
+			CertDir:      filepath.Join(s.binaryDir, "certs"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize acme manager: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		cert, err := acmeMgr.Certificate(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to obtain acme certificate: %w", err)
+		}
+		base.Certificates = []tls.Certificate{*cert}
+		log.Printf("[+] Console TLS certificate: automated ACME DNS-01 for %s (expires %s)",
+			domain, cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
+		return base, nil
+	}
+
+	// Source C: Hub-issued CA leaf with guided browser trust
 	if s.pki == nil {
 		return nil, fmt.Errorf("the PKI manager failed to initialize; pass --console-tls-cert/--console-tls-key")
 	}
@@ -1593,6 +1643,45 @@ func (s *Server) handlePKICACert(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"ca.crt\"")
 	w.Write(s.pki.GetCAPEM())
+}
+
+func (s *Server) handleConsoleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	source := "hub-ca"
+	if s.consoleTLSOpts.CertFile != "" && s.consoleTLSOpts.KeyFile != "" {
+		source = "operator-supplied"
+	} else if s.consoleTLSOpts.ACMEEnabled {
+		source = "acme"
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"listen":         s.consoleTLSOpts.Listen,
+		"hostname":       s.consoleTLSOpts.Hostname,
+		"webauthn_rp_id": s.consoleTLSOpts.Hostname,
+		"source":         source,
+		"hsts":           true,
+		"client_auth":    "NoClientCert",
+	})
+}
+
+func (s *Server) handleConsoleTrustInstructions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ca_download_url": "/api/v1/pki/ca.crt",
+		"hostname":        s.consoleTLSOpts.Hostname,
+		"instructions": map[string]string{
+			"linux_debian": "sudo cp ca.crt /usr/local/share/ca-certificates/ominull-ca.crt && sudo update-ca-certificates",
+			"linux_rhel":   "sudo cp ca.crt /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust",
+			"macos":        "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt",
+			"windows":      "Import-Certificate -FilePath .\\ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root",
+			"browser":      "Browser Settings -> Privacy and security -> Security -> Manage certificates -> Authorities -> Import ca.crt and check 'Trust this certificate for identifying websites'.",
+		},
+	})
 }
 
 func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
@@ -3241,6 +3330,8 @@ func (s *Server) routes() *http.ServeMux {
 	// 6. Autonomous PKI & Mutual TLS
 	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
 	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
+	mux.HandleFunc("/api/v1/console/status", s.handleConsoleStatus)
+	mux.HandleFunc("/api/v1/console/trust-instructions", s.handleConsoleTrustInstructions)
 
 	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
 	// Discovery is an operator tool end to end: it sweeps a subnet from the

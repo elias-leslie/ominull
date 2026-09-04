@@ -400,3 +400,62 @@ func TestOminullctl_ForensicsVerify(t *testing.T) {
 		t.Fatal("expected tampered local artifact to fail verification")
 	}
 }
+
+func TestOminullctl_ConsoleCommands(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Setup mock hub server responding to CA download and console status
+	caPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIB...test...CA\n-----END CERTIFICATE-----\n")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/pki/ca.crt":
+			w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+			w.Write(caPEM)
+		case "/api/v1/console/status":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"listen":":8443","hostname":"omi.example.invalid","webauthn_rp_id":"omi.example.invalid","source":"hub-ca","hsts":true,"client_auth":"NoClientCert"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := newAPIClient(CLIConfig{HubURL: ts.URL, JSONOutput: true})
+
+	// 2. Test export-ca with API fallback and --out file
+	outFile := filepath.Join(tempDir, "exported-ca.crt")
+	if err := client.cmdConsole([]string{"export-ca", "--out", outFile, "--path", "/nonexistent/ca.crt"}); err != nil {
+		t.Fatalf("cmdConsole export-ca failed: %v", err)
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil || !strings.Contains(string(content), "BEGIN CERTIFICATE") {
+		t.Fatalf("failed to read exported CA from %s: %v", outFile, err)
+	}
+
+	// 3. Test export-ca reading directly from disk
+	localCA := filepath.Join(tempDir, "local-ca.crt")
+	_ = os.WriteFile(localCA, []byte("-----BEGIN CERTIFICATE-----\nlocal...CA\n-----END CERTIFICATE-----\n"), 0644)
+	outLocal := filepath.Join(tempDir, "out-local.crt")
+	if err := client.cmdConsole([]string{"export-ca", "--out", outLocal, "--path", localCA}); err != nil {
+		t.Fatalf("cmdConsole export-ca with local path failed: %v", err)
+	}
+	readLocal, _ := os.ReadFile(outLocal)
+	if !strings.Contains(string(readLocal), "local...CA") {
+		t.Fatalf("expected local CA content, got: %s", string(readLocal))
+	}
+
+	// 4. Test trust-instructions
+	if err := client.cmdConsole([]string{"trust-instructions"}); err != nil {
+		t.Fatalf("cmdConsole trust-instructions failed: %v", err)
+	}
+
+	// 5. Test status
+	if err := client.cmdConsole([]string{"status"}); err != nil {
+		t.Fatalf("cmdConsole status failed: %v", err)
+	}
+
+	// 6. Unknown subcommand fails
+	if err := client.cmdConsole([]string{"unknown-subcommand"}); err == nil {
+		t.Fatalf("expected unknown console subcommand to fail")
+	}
+}
