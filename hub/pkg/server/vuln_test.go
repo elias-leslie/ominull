@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -349,4 +350,142 @@ func TestServer_VulnSnapshotsAndCatalog(t *testing.T) {
 		t.Fatalf("expected 2 items for historical snapshot, got %d", histResp.Total)
 	}
 }
+
+func TestServer_VulnMatchingAndPrioritization(t *testing.T) {
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	handler := srv.Handler()
+	endpointID := "ep-match-test"
+
+	// 1. Sync CVEs with CPE Match Criteria
+	sshCrit, _ := json.Marshal([]vuln.CPEMatchCriteria{
+		{Criteria: "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*", VersionStartIncluding: "8.5p1", VersionEndExcluding: "9.8p1"},
+	})
+	sudoCrit, _ := json.Marshal([]vuln.CPEMatchCriteria{
+		{Criteria: "cpe:2.3:a:todd_miller:sudo:*:*:*:*:*:*:*:*", VersionStartIncluding: "1.8.2", VersionEndIncluding: "1.8.31p2"},
+	})
+
+	syncReqBody, _ := json.Marshal(map[string]interface{}{
+		"snapshot_id": "snap-match-01",
+		"vulnerabilities": []vuln.Vulnerability{
+			{
+				CVEID:       "CVE-2024-6387",
+				Title:       "OpenSSH regreSSHion",
+				Description: "Signal handler race in OpenSSH server",
+				Severity:    "HIGH",
+				CVSS:        8.1,
+				IsKEV:       true,
+				EPSS:        0.92,
+				CPEPattern:  string(sshCrit),
+				PublishedAt: time.Now(),
+			},
+			{
+				CVEID:       "CVE-2021-3156",
+				Title:       "sudo Baron Samedit",
+				Description: "Heap-based buffer overflow in sudo",
+				Severity:    "CRITICAL",
+				CVSS:        7.8,
+				IsKEV:       true,
+				EPSS:        0.85,
+				CPEPattern:  string(sudoCrit),
+				PublishedAt: time.Now(),
+			},
+		},
+	})
+	reqSync := httptest.NewRequest(http.MethodPost, "/api/v1/vulnerabilities/sync", bytes.NewReader(syncReqBody))
+	reqSync.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqSync.Header.Set("Content-Type", "application/json")
+	wSync := httptest.NewRecorder()
+	handler.ServeHTTP(wSync, reqSync)
+
+	if wSync.Code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", wSync.Code, wSync.Body.String())
+	}
+
+	// 2. Report Endpoint Software (OpenSSH 8.9p1 -> vulnerable, sudo 1.9.5p2 -> patched/not_affected)
+	swBody, _ := json.Marshal(map[string]interface{}{
+		"endpoint_id": endpointID,
+		"packages": []vuln.InstalledSoftware{
+			{
+				Source:       "dpkg",
+				Vendor:       "Ubuntu",
+				Product:      "openssh-server",
+				Version:      "1:8.9p1-3ubuntu0.6",
+				Architecture: "amd64",
+			},
+			{
+				Source:       "dpkg",
+				Vendor:       "Ubuntu",
+				Product:      "sudo",
+				Version:      "1.9.5p2-1ubuntu1",
+				Architecture: "amd64",
+			},
+		},
+	})
+	reqSW := httptest.NewRequest(http.MethodPost, "/api/v1/software", bytes.NewReader(swBody))
+	reqSW.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqSW.Header.Set("Content-Type", "application/json")
+	wSW := httptest.NewRecorder()
+	handler.ServeHTTP(wSW, reqSW)
+
+	if wSW.Code != http.StatusCreated {
+		t.Fatalf("report software returned %d: %s", wSW.Code, wSW.Body.String())
+	}
+
+	// 3. Query all matches
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?endpoint_id="+endpointID, nil)
+	reqAll.Header.Set("X-API-Key", "test-admin-key-12345")
+	wAll := httptest.NewRecorder()
+	handler.ServeHTTP(wAll, reqAll)
+
+	var allResp struct {
+		Vulnerabilities []vuln.VulnerabilityMatch `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wAll.Body).Decode(&allResp)
+	if len(allResp.Vulnerabilities) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(allResp.Vulnerabilities))
+	}
+
+	// First match must be OpenSSH (matched) with high priority score
+	first := allResp.Vulnerabilities[0]
+	if first.CVEID != "CVE-2024-6387" || first.Status != vuln.MatchStatusMatched {
+		t.Fatalf("expected first match to be CVE-2024-6387 matched, got %+v", first)
+	}
+	if first.PriorityScore < 80.0 {
+		t.Fatalf("expected priority score >= 80, got %f", first.PriorityScore)
+	}
+	if first.Evidence == "" || !strings.Contains(first.Evidence, "vulnerable_range") {
+		t.Fatalf("expected structured evidence in match, got: %s", first.Evidence)
+	}
+
+	// 4. Query with status filter (status=matched)
+	reqMatched := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?endpoint_id="+endpointID+"&status=matched", nil)
+	reqMatched.Header.Set("X-API-Key", "test-admin-key-12345")
+	wMatched := httptest.NewRecorder()
+	handler.ServeHTTP(wMatched, reqMatched)
+
+	var matchedResp struct {
+		Vulnerabilities []vuln.VulnerabilityMatch `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wMatched.Body).Decode(&matchedResp)
+	if len(matchedResp.Vulnerabilities) != 1 || matchedResp.Vulnerabilities[0].CVEID != "CVE-2024-6387" {
+		t.Fatalf("expected 1 matched item, got %+v", matchedResp)
+	}
+
+	// 5. Query with status filter (status=not_affected)
+	reqNotAff := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities?endpoint_id="+endpointID+"&status=not_affected", nil)
+	reqNotAff.Header.Set("X-API-Key", "test-admin-key-12345")
+	wNotAff := httptest.NewRecorder()
+	handler.ServeHTTP(wNotAff, reqNotAff)
+
+	var notAffResp struct {
+		Vulnerabilities []vuln.VulnerabilityMatch `json:"vulnerabilities"`
+	}
+	_ = json.NewDecoder(wNotAff.Body).Decode(&notAffResp)
+	if len(notAffResp.Vulnerabilities) != 1 || notAffResp.Vulnerabilities[0].CVEID != "CVE-2021-3156" {
+		t.Fatalf("expected 1 not_affected item (sudo), got %+v", notAffResp)
+	}
+}
+
 

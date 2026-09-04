@@ -73,17 +73,37 @@ type Vulnerability struct {
 
 // VulnerabilityMatch represents an explainable correlation between installed software and a CVE.
 type VulnerabilityMatch struct {
-	ID          string      `json:"id"`
-	TenantID    string      `json:"tenant_id"`
-	EndpointID  string      `json:"endpoint_id"`
-	SoftwareID  string      `json:"software_id"`
-	ProductName string      `json:"product_name"`
-	Version     string      `json:"version"`
-	CVEID       string      `json:"cve_id"`
-	Severity    string      `json:"severity"`
-	IsKEV       bool        `json:"is_kev"`
-	Status      MatchStatus `json:"status"`
-	Confidence  float64     `json:"confidence"`
-	MatchReason string      `json:"match_reason"`
-	DetectedAt  time.Time   `json:"detected_at"`
+	ID             string      `json:"id"`
+	TenantID       string      `json:"tenant_id"`
+	EndpointID     string      `json:"endpoint_id"`
+	SoftwareID     string      `json:"software_id"`
+	ProductName    string      `json:"product_name"`
+	Version        string      `json:"version"`
+	CVEID          string      `json:"cve_id"`
+	Severity       string      `json:"severity"`
+	CVSS           float64     `json:"cvss"`
+	IsKEV          bool        `json:"is_kev"`
+	EPSS           float64     `json:"epss,omitempty"`
+	PriorityScore  float64     `json:"priority_score"`
+	Status         MatchStatus `json:"status"`
+	Confidence     float64     `json:"confidence"`
+	MatchReason    string      `json:"match_reason"`
+	FeedSnapshotID string      `json:"feed_snapshot_id,omitempty"`
+	Evidence       string      `json:"evidence,omitempty"`
+	DetectedAt     time.Time   `json:"detected_at"`
 }
+
+// VulnerabilityMatchEvidence stores structured, reproducible audit details for a match candidate.
+type VulnerabilityMatchEvidence struct {
+	SoftwareID        string `json:"software_id"`
+	Vendor            string `json:"vendor"`
+	Product           string `json:"product"`
+	Version           string `json:"version"`
+	RawVersion        string `json:"raw_version,omitempty"`
+	Source            string `json:"source"`
+	CPE               string `json:"cpe"`
+	VulnerableRange   string `json:"vulnerable_range"`
+	VersionComparison string `json:"version_comparison"`
+	SnapshotID        string `json:"snapshot_id,omitempty"`
+}
+

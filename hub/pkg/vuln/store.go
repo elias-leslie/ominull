@@ -146,6 +146,29 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	matchCols := []struct {
+		col     string
+		colType string
+	}{
+		{"cvss", "REAL DEFAULT 0.0"},
+		{"epss", "REAL DEFAULT 0.0"},
+		{"priority_score", "REAL DEFAULT 0.0"},
+		{"feed_snapshot_id", "TEXT DEFAULT ''"},
+		{"evidence", "TEXT DEFAULT ''"},
+	}
+	for _, c := range matchCols {
+		if err := ensureColumn(s.db, "vulnerability_matches", c.col, c.colType); err != nil {
+			return err
+		}
+	}
+
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_vuln_matches_status ON vulnerability_matches(tenant_id, endpoint_id, status);
+		CREATE INDEX IF NOT EXISTS idx_vuln_matches_priority ON vulnerability_matches(tenant_id, priority_score);
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -418,14 +441,19 @@ func (s *Store) IngestVulnerabilities(vulns []Vulnerability) error {
 	return tx.Commit()
 }
 
-// CorrelateEndpoint matches an endpoint's installed software against the vulnerability catalog.
+// CorrelateEndpoint matches an endpoint's installed software against the active vulnerability catalog.
 func (s *Store) CorrelateEndpoint(tenantID, endpointID string) ([]*VulnerabilityMatch, error) {
+	return s.CorrelateEndpointWithSnapshot(tenantID, endpointID, "")
+}
+
+// CorrelateEndpointWithSnapshot matches an endpoint's installed software against a specific snapshot (or active if empty).
+func (s *Store) CorrelateEndpointWithSnapshot(tenantID, endpointID, snapshotID string) ([]*VulnerabilityMatch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Load installed software
+	// 1. Load installed software
 	rows, err := s.db.Query(`
-		SELECT id, product, version
+		SELECT id, tenant_id, endpoint_id, source, vendor, product, version, architecture, install_scope, confidence, raw_vendor, raw_product, raw_version, observed_at
 		FROM software_inventory
 		WHERE tenant_id = ? AND endpoint_id = ?
 	`, tenantID, endpointID)
@@ -434,81 +462,76 @@ func (s *Store) CorrelateEndpoint(tenantID, endpointID string) ([]*Vulnerability
 	}
 	defer rows.Close()
 
-	type swItem struct {
-		id      string
-		product string
-		version string
-	}
-	var swList []swItem
+	var swList []InstalledSoftware
 	for rows.Next() {
-		var it swItem
-		if err := rows.Scan(&it.id, &it.product, &it.version); err == nil {
-			swList = append(swList, it)
+		var sw InstalledSoftware
+		if err := rows.Scan(
+			&sw.ID, &sw.TenantID, &sw.EndpointID, &sw.Source, &sw.Vendor, &sw.Product,
+			&sw.Version, &sw.Architecture, &sw.InstallScope, &sw.Confidence,
+			&sw.RawVendor, &sw.RawProduct, &sw.RawVersion, &sw.ObservedAt,
+		); err == nil {
+			swList = append(swList, sw)
 		}
 	}
 
-	// Load vulnerabilities
-	vRows, err := s.db.Query(`SELECT cve_id, severity, is_kev, cpe_pattern FROM vulnerabilities`)
+	// 2. Load vulnerabilities
+	var vRows *sql.Rows
+	if snapshotID != "" {
+		vRows, err = s.db.Query(`
+			SELECT cve_id, title, description, severity, cvss, is_kev, epss, cpe_pattern, published_at
+			FROM snapshot_vulnerabilities WHERE snapshot_id = ?
+		`, snapshotID)
+	} else {
+		vRows, err = s.db.Query(`
+			SELECT cve_id, title, description, severity, cvss, is_kev, epss, cpe_pattern, published_at
+			FROM vulnerabilities
+		`)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer vRows.Close()
 
-	type vItem struct {
-		cveID      string
-		severity   string
-		isKEV      bool
-		cpePattern string
-	}
-	var vList []vItem
+	var vList []Vulnerability
 	for vRows.Next() {
-		var v vItem
+		var v Vulnerability
 		var kev int
-		if err := vRows.Scan(&v.cveID, &v.severity, &kev, &v.cpePattern); err == nil {
-			v.isKEV = (kev == 1)
+		if err := vRows.Scan(&v.CVEID, &v.Title, &v.Description, &v.Severity, &v.CVSS, &kev, &v.EPSS, &v.CPEPattern, &v.PublishedAt); err == nil {
+			v.IsKEV = (kev == 1)
 			vList = append(vList, v)
 		}
 	}
 
-	// Correlate
-	var matches []*VulnerabilityMatch
-	now := time.Now().UTC()
-
-	// Clear old matches
+	// 3. Clear old matches for endpoint
 	_, _ = s.db.Exec(`DELETE FROM vulnerability_matches WHERE tenant_id = ? AND endpoint_id = ?`, tenantID, endpointID)
 
 	stmt, err := s.db.Prepare(`
-		INSERT INTO vulnerability_matches (id, tenant_id, endpoint_id, software_id, product_name, version, cve_id, severity, is_kev, status, confidence, match_reason, detected_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO vulnerability_matches (
+			id, tenant_id, endpoint_id, software_id, product_name, version,
+			cve_id, severity, cvss, is_kev, epss, priority_score,
+			status, confidence, match_reason, feed_snapshot_id, evidence, detected_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return nil, err
 	}
 	defer stmt.Close()
 
+	// 4. Correlate
+	var matches []*VulnerabilityMatch
 	for _, sw := range swList {
 		for _, v := range vList {
-			if strings.Contains(strings.ToLower(sw.product), strings.ToLower(v.cpePattern)) {
-				m := &VulnerabilityMatch{
-					ID:          uuid.New().String(),
-					TenantID:    tenantID,
-					EndpointID:  endpointID,
-					SoftwareID:  sw.id,
-					ProductName: sw.product,
-					Version:     sw.version,
-					CVEID:       v.cveID,
-					Severity:    v.severity,
-					IsKEV:       v.isKEV,
-					Status:      MatchStatusMatched,
-					Confidence:  0.95,
-					MatchReason: fmt.Sprintf("Authoritative package match: %s v%s against CPE %s", sw.product, sw.version, v.cpePattern),
-					DetectedAt:  now,
-				}
+			m := CorrelateSoftwareItem(sw, v, snapshotID)
+			if m != nil {
 				kevInt := 0
 				if m.IsKEV {
 					kevInt = 1
 				}
-				_, _ = stmt.Exec(m.ID, m.TenantID, m.EndpointID, m.SoftwareID, m.ProductName, m.Version, m.CVEID, m.Severity, kevInt, string(m.Status), m.Confidence, m.MatchReason, m.DetectedAt)
+				_, _ = stmt.Exec(
+					m.ID, m.TenantID, m.EndpointID, m.SoftwareID, m.ProductName, m.Version,
+					m.CVEID, m.Severity, m.CVSS, kevInt, m.EPSS, m.PriorityScore,
+					string(m.Status), m.Confidence, m.MatchReason, m.FeedSnapshotID, m.Evidence, m.DetectedAt,
+				)
 				matches = append(matches, m)
 			}
 		}
@@ -519,22 +542,64 @@ func (s *Store) CorrelateEndpoint(tenantID, endpointID string) ([]*Vulnerability
 
 // ListMatches returns recorded vulnerability matches for an endpoint.
 func (s *Store) ListMatches(tenantID, endpointID string) ([]*VulnerabilityMatch, error) {
+	return s.ListMatchesFiltered(tenantID, endpointID, "")
+}
+
+// ListMatchesFiltered returns recorded vulnerability matches filtered by optional status.
+func (s *Store) ListMatchesFiltered(tenantID, endpointID string, status MatchStatus) ([]*VulnerabilityMatch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var rows *sql.Rows
-	var err error
+	var query string
+	var args []interface{}
+
 	if endpointID != "" {
-		rows, err = s.db.Query(`
-			SELECT id, tenant_id, endpoint_id, software_id, product_name, version, cve_id, severity, is_kev, status, confidence, match_reason, detected_at
-			FROM vulnerability_matches WHERE tenant_id = ? AND endpoint_id = ? ORDER BY severity DESC
-		`, tenantID, endpointID)
+		if status != "" {
+			query = `
+				SELECT id, tenant_id, endpoint_id, software_id, product_name, version,
+				       cve_id, severity, cvss, is_kev, epss, priority_score,
+				       status, confidence, match_reason, feed_snapshot_id, evidence, detected_at
+				FROM vulnerability_matches
+				WHERE tenant_id = ? AND endpoint_id = ? AND status = ?
+				ORDER BY CASE status WHEN 'matched' THEN 1 WHEN 'possible' THEN 2 WHEN 'insufficient_data' THEN 3 ELSE 4 END ASC, priority_score DESC, cvss DESC, detected_at DESC
+			`
+			args = []interface{}{tenantID, endpointID, string(status)}
+		} else {
+			query = `
+				SELECT id, tenant_id, endpoint_id, software_id, product_name, version,
+				       cve_id, severity, cvss, is_kev, epss, priority_score,
+				       status, confidence, match_reason, feed_snapshot_id, evidence, detected_at
+				FROM vulnerability_matches
+				WHERE tenant_id = ? AND endpoint_id = ?
+				ORDER BY CASE status WHEN 'matched' THEN 1 WHEN 'possible' THEN 2 WHEN 'insufficient_data' THEN 3 ELSE 4 END ASC, priority_score DESC, cvss DESC, detected_at DESC
+			`
+			args = []interface{}{tenantID, endpointID}
+		}
 	} else {
-		rows, err = s.db.Query(`
-			SELECT id, tenant_id, endpoint_id, software_id, product_name, version, cve_id, severity, is_kev, status, confidence, match_reason, detected_at
-			FROM vulnerability_matches WHERE tenant_id = ? ORDER BY severity DESC
-		`, tenantID)
+		if status != "" {
+			query = `
+				SELECT id, tenant_id, endpoint_id, software_id, product_name, version,
+				       cve_id, severity, cvss, is_kev, epss, priority_score,
+				       status, confidence, match_reason, feed_snapshot_id, evidence, detected_at
+				FROM vulnerability_matches
+				WHERE tenant_id = ? AND status = ?
+				ORDER BY CASE status WHEN 'matched' THEN 1 WHEN 'possible' THEN 2 WHEN 'insufficient_data' THEN 3 ELSE 4 END ASC, priority_score DESC, cvss DESC, detected_at DESC
+			`
+			args = []interface{}{tenantID, string(status)}
+		} else {
+			query = `
+				SELECT id, tenant_id, endpoint_id, software_id, product_name, version,
+				       cve_id, severity, cvss, is_kev, epss, priority_score,
+				       status, confidence, match_reason, feed_snapshot_id, evidence, detected_at
+				FROM vulnerability_matches
+				WHERE tenant_id = ?
+				ORDER BY CASE status WHEN 'matched' THEN 1 WHEN 'possible' THEN 2 WHEN 'insufficient_data' THEN 3 ELSE 4 END ASC, priority_score DESC, cvss DESC, detected_at DESC
+			`
+			args = []interface{}{tenantID}
+		}
 	}
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -544,11 +609,16 @@ func (s *Store) ListMatches(tenantID, endpointID string) ([]*VulnerabilityMatch,
 	for rows.Next() {
 		var m VulnerabilityMatch
 		var kev int
-		if err := rows.Scan(&m.ID, &m.TenantID, &m.EndpointID, &m.SoftwareID, &m.ProductName, &m.Version, &m.CVEID, &m.Severity, &kev, &m.Status, &m.Confidence, &m.MatchReason, &m.DetectedAt); err != nil {
+		if err := rows.Scan(
+			&m.ID, &m.TenantID, &m.EndpointID, &m.SoftwareID, &m.ProductName, &m.Version,
+			&m.CVEID, &m.Severity, &m.CVSS, &kev, &m.EPSS, &m.PriorityScore,
+			&m.Status, &m.Confidence, &m.MatchReason, &m.FeedSnapshotID, &m.Evidence, &m.DetectedAt,
+		); err != nil {
 			return nil, err
 		}
 		m.IsKEV = (kev == 1)
 		matches = append(matches, &m)
 	}
+
 	return matches, nil
 }

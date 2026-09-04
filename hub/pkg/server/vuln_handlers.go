@@ -192,7 +192,8 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 		}
 
 		endpointID := r.URL.Query().Get("endpoint_id")
-		matches, err := s.vulnStore.ListMatches(tenantID, endpointID)
+		statusParam := vuln.MatchStatus(r.URL.Query().Get("status"))
+		matches, err := s.vulnStore.ListMatchesFiltered(tenantID, endpointID, statusParam)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to list vulnerabilities: "+err.Error())
 			return
