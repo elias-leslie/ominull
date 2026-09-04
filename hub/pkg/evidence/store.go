@@ -3,7 +3,9 @@ package evidence
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,8 @@ type Store struct {
 	storageDir          string
 	masterKey           *MasterKey
 	maxTenantQuotaBytes int64 // Maximum allowed bytes per tenant (0 = unlimited)
+	receiptKey          ed25519.PrivateKey
+	receiptPubKey       ed25519.PublicKey
 }
 
 // NewStore initializes an evidence store with quota management and atomic object writes.
@@ -52,17 +56,39 @@ func NewStore(db *sql.DB, storageDir string, masterKey *MasterKey) (*Store, erro
 		return nil, fmt.Errorf("failed to create evidence storage dir: %w", err)
 	}
 
+	receiptKeyPath := filepath.Join(storageDir, "receipt.key")
+	receiptKey, receiptPubKey, err := LoadOrCreateReceiptKey(receiptKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load/create receipt key: %w", err)
+	}
+
 	s := &Store{
 		db:                  db,
 		storageDir:          storageDir,
 		masterKey:           masterKey,
 		maxTenantQuotaBytes: 10 * 1024 * 1024 * 1024, // 10 GB default per tenant
+		receiptKey:          receiptKey,
+		receiptPubKey:       receiptPubKey,
 	}
 
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("evidence migration failed: %w", err)
 	}
 	return s, nil
+}
+
+// ReceiptPublicKey returns the hub's Ed25519 public key used for signing receipts.
+func (s *Store) ReceiptPublicKey() ed25519.PublicKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.receiptPubKey
+}
+
+// ReceiptPublicKeyHex returns the hex-encoded hub Ed25519 public key.
+func (s *Store) ReceiptPublicKeyHex() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return hex.EncodeToString(s.receiptPubKey)
 }
 
 // SetTenantQuota overrides the per-tenant maximum storage quota.
@@ -138,7 +164,12 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_evidence_receipts_tenant ON evidence_receipts(tenant_id);
 	`
 	_, err := s.db.Exec(query)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.Exec("ALTER TABLE evidence_bundles ADD COLUMN manifest_raw TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE evidence_receipts ADD COLUMN receipt_signature TEXT DEFAULT ''")
+	return nil
 }
 
 // checkQuotaAndDisk verifies that the tenant has sufficient storage quota and disk free space.
@@ -232,7 +263,7 @@ func (s *Store) CreateBundle(tenantID, endpointID, jobID, profile string, retent
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if retentionTTL <= 0 {
+	if retentionTTL == 0 {
 		retentionTTL = 30 * 24 * time.Hour // default 30 days
 	}
 	now := time.Now().UTC()
@@ -741,8 +772,8 @@ func (s *Store) ReadItemData(tenantID, itemID string) ([]byte, error) {
 	return plaintext, nil
 }
 
-// FinalizeBundle completes a bundle, validates manifest item integrity, and generates a chained receipt.
-func (s *Store) FinalizeBundle(tenantID, bundleID string, manifest *Manifest) (*EvidenceReceipt, error) {
+// FinalizeBundle completes a bundle, validates manifest item integrity, and generates a chained signed receipt.
+func (s *Store) FinalizeBundle(tenantID, bundleID string, manifest *Manifest, endpointEvidencePubKeyHex string) (*EvidenceReceipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -756,6 +787,13 @@ func (s *Store) FinalizeBundle(tenantID, bundleID string, manifest *Manifest) (*
 	}
 	if bTenantID != tenantID {
 		return nil, ErrTenantMismatch
+	}
+
+	// 1. Verify endpoint evidence signature if an endpoint evidence signing key is registered
+	if endpointEvidencePubKeyHex != "" {
+		if err := VerifyManifestSignature(manifest, endpointEvidencePubKeyHex); err != nil {
+			return nil, fmt.Errorf("invalid endpoint manifest signature: %w", err)
+		}
 	}
 
 	manifestBytes := manifest.CanonicalBytes()
@@ -831,6 +869,8 @@ func (s *Store) FinalizeBundle(tenantID, bundleID string, manifest *Manifest) (*
 		IngestedAt:            now,
 	}
 	receipt.ReceiptHash = receipt.ComputeReceiptHash()
+	receiptSig := ed25519.Sign(s.receiptKey, receipt.CanonicalBytes())
+	receipt.ReceiptSignature = hex.EncodeToString(receiptSig)
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -841,19 +881,20 @@ func (s *Store) FinalizeBundle(tenantID, bundleID string, manifest *Manifest) (*
 	_, err = tx.Exec(`
 		INSERT INTO evidence_receipts (
 			receipt_id, bundle_id, tenant_id, endpoint_id, manifest_sha256,
-			storage_objects_sha256, previous_receipt_sha256, ingested_at, receipt_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			storage_objects_sha256, previous_receipt_sha256, ingested_at, receipt_hash, receipt_signature
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, receipt.ReceiptID, receipt.BundleID, receipt.TenantID, receipt.EndpointID, receipt.ManifestSHA256,
-		receipt.StorageObjectsSHA256, receipt.PreviousReceiptSHA256, receipt.IngestedAt, receipt.ReceiptHash)
+		receipt.StorageObjectsSHA256, receipt.PreviousReceiptSHA256, receipt.IngestedAt, receipt.ReceiptHash, receipt.ReceiptSignature)
 	if err != nil {
 		return nil, err
 	}
 
+	manifestRawBytes, _ := json.Marshal(manifest)
 	_, err = tx.Exec(`
 		UPDATE evidence_bundles
-		SET status = ?, manifest_sha256 = ?, receipt_sha256 = ?, completed_at = ?
+		SET status = ?, manifest_sha256 = ?, receipt_sha256 = ?, manifest_raw = ?, completed_at = ?
 		WHERE id = ?
-	`, string(BundleStatusCompleted), manifestSHA, receipt.ReceiptHash, now, bundleID)
+	`, string(BundleStatusCompleted), manifestSHA, receipt.ReceiptHash, string(manifestRawBytes), now, bundleID)
 	if err != nil {
 		return nil, err
 	}
@@ -895,12 +936,17 @@ func (s *Store) SetLegalHold(tenantID, bundleID, actor, reason string, hold bool
 }
 
 // ExportBundleToTarGz reads and decrypts all bundle items and streams them to a tar.gz archive.
+// The archive includes:
+// - bundleID/<sanitized_item_name> (decrypted item contents)
+// - bundleID/manifest.json (canonical endpoint manifest if bundle is finalized)
+// - bundleID/receipt.json (hub-signed integrity receipt if bundle is finalized)
 func (s *Store) ExportBundleToTarGz(tenantID, bundleID string, out io.Writer) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var bTenantID string
-	err := s.db.QueryRow(`SELECT tenant_id FROM evidence_bundles WHERE id = ?`, bundleID).Scan(&bTenantID)
+	var manifestRaw sql.NullString
+	err := s.db.QueryRow(`SELECT tenant_id, manifest_raw FROM evidence_bundles WHERE id = ?`, bundleID).Scan(&bTenantID, &manifestRaw)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return ErrNotFound
@@ -925,10 +971,62 @@ func (s *Store) ExportBundleToTarGz(tenantID, bundleID string, out io.Writer) er
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
+	var totalExported int64
+	const maxExportBytes = 10 * 1024 * 1024 * 1024 // 10 GB limit
+
+	// 1. Include manifest.json if present
+	if manifestRaw.Valid && manifestRaw.String != "" {
+		mBytes := []byte(manifestRaw.String)
+		hdr := &tar.Header{
+			Name:    filepath.Join(bundleID, "manifest.json"),
+			Mode:    0600,
+			Size:    int64(len(mBytes)),
+			ModTime: time.Now().UTC(),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if _, err := tw.Write(mBytes); err != nil {
+			return err
+		}
+		totalExported += int64(len(mBytes))
+	}
+
+	// 2. Include receipt.json if finalized
+	var rec EvidenceReceipt
+	err = s.db.QueryRow(`
+		SELECT receipt_id, bundle_id, tenant_id, endpoint_id, manifest_sha256,
+		       storage_objects_sha256, previous_receipt_sha256, ingested_at, receipt_hash, receipt_signature
+		FROM evidence_receipts WHERE bundle_id = ?
+	`, bundleID).Scan(&rec.ReceiptID, &rec.BundleID, &rec.TenantID, &rec.EndpointID,
+		&rec.ManifestSHA256, &rec.StorageObjectsSHA256, &rec.PreviousReceiptSHA256,
+		&rec.IngestedAt, &rec.ReceiptHash, &rec.ReceiptSignature)
+	if err == nil {
+		recBytes, _ := json.MarshalIndent(rec, "", "  ")
+		hdr := &tar.Header{
+			Name:    filepath.Join(bundleID, "receipt.json"),
+			Mode:    0600,
+			Size:    int64(len(recBytes)),
+			ModTime: rec.IngestedAt,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if _, err := tw.Write(recBytes); err != nil {
+			return err
+		}
+		totalExported += int64(len(recBytes))
+	}
+
+	// 3. Stream each decrypted item
 	for rows.Next() {
 		var it EvidenceItem
 		if err := rows.Scan(&it.ID, &it.Name, &it.ContentType, &it.SizeBytes, &it.SHA256, &it.StorageDigest, &it.EncryptedKey, &it.CreatedAt); err != nil {
 			return err
+		}
+
+		if totalExported+it.SizeBytes > maxExportBytes {
+			return fmt.Errorf("%w: export exceeded maximum archive size limit (%d bytes)", ErrQuotaExceeded, maxExportBytes)
 		}
 
 		dataKey, err := UnwrapDataKey(s.masterKey, it.EncryptedKey)
@@ -948,7 +1046,7 @@ func (s *Store) ExportBundleToTarGz(tenantID, bundleID string, out io.Writer) er
 			return fmt.Errorf("failed to decrypt item %s: %w", it.Name, err)
 		}
 
-		// Safe sanitized filename (basename only, no traversal)
+		// Safe sanitized filename (basename only, no path traversal)
 		safeName := filepath.Base(it.Name)
 		hdr := &tar.Header{
 			Name:    filepath.Join(bundleID, safeName),
@@ -962,6 +1060,84 @@ func (s *Store) ExportBundleToTarGz(tenantID, bundleID string, out io.Writer) er
 		if _, err := tw.Write(plaintext); err != nil {
 			return err
 		}
+		totalExported += int64(len(plaintext))
 	}
 	return nil
+}
+
+// PruneExpiredBundles purges completed bundles that have exceeded their retention period and are not on legal hold.
+// Associated unreferenced encrypted storage objects on disk are securely deleted.
+func (s *Store) PruneExpiredBundles(now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, tenant_id FROM evidence_bundles
+		WHERE retention_expires_at <= ? AND legal_hold = 0
+	`, now)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type expiredBundle struct {
+		id       string
+		tenantID string
+	}
+	var expired []expiredBundle
+	for rows.Next() {
+		var eb expiredBundle
+		if err := rows.Scan(&eb.id, &eb.tenantID); err == nil {
+			expired = append(expired, eb)
+		}
+	}
+	rows.Close()
+
+	if len(expired) == 0 {
+		return 0, nil
+	}
+
+	prunedCount := 0
+	for _, eb := range expired {
+		// Collect storage digests for items in this bundle
+		itemRows, err := s.db.Query(`SELECT storage_digest FROM evidence_items WHERE bundle_id = ?`, eb.id)
+		if err != nil {
+			continue
+		}
+		var digests []string
+		for itemRows.Next() {
+			var d string
+			if err := itemRows.Scan(&d); err == nil && d != "" {
+				digests = append(digests, d)
+			}
+		}
+		itemRows.Close()
+
+		tx, err := s.db.Begin()
+		if err != nil {
+			continue
+		}
+
+		_, _ = tx.Exec(`DELETE FROM evidence_chunks WHERE item_id IN (SELECT id FROM evidence_items WHERE bundle_id = ?)`, eb.id)
+		_, _ = tx.Exec(`DELETE FROM evidence_items WHERE bundle_id = ?`, eb.id)
+		_, _ = tx.Exec(`DELETE FROM evidence_receipts WHERE bundle_id = ?`, eb.id)
+		_, _ = tx.Exec(`DELETE FROM evidence_bundles WHERE id = ?`, eb.id)
+
+		if err := tx.Commit(); err != nil {
+			continue
+		}
+
+		// Delete unreferenced files from disk
+		for _, d := range digests {
+			var refCount int
+			_ = s.db.QueryRow(`SELECT count(*) FROM evidence_items WHERE storage_digest = ?`, d).Scan(&refCount)
+			if refCount == 0 {
+				_ = os.Remove(filepath.Join(s.storageDir, d))
+			}
+		}
+
+		prunedCount++
+	}
+
+	return prunedCount, nil
 }

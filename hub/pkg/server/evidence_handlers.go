@@ -310,7 +310,12 @@ func (s *Server) handleEvidenceFinalize(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	receipt, err := s.evidenceStore.FinalizeBundle(tenantID, req.BundleID, req.Manifest)
+	endpointEvidenceKey := ""
+	if ep, err := s.store.GetEndpoint(req.Manifest.EndpointID); err == nil && ep != nil {
+		endpointEvidenceKey = ep.EvidenceSigningKey
+	}
+
+	receipt, err := s.evidenceStore.FinalizeBundle(tenantID, req.BundleID, req.Manifest, endpointEvidenceKey)
 	if err != nil {
 		if errors.Is(err, evidence.ErrTenantMismatch) {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
@@ -422,8 +427,34 @@ func (s *Server) handleEvidenceExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 
 	if err := s.evidenceStore.ExportBundleToTarGz(tenantID, bundleID, w); err != nil {
+		s.audit(r, "EVIDENCE_EXPORT_FAILED", bundleID, fmt.Sprintf("Export failed: %v", err))
 		return
 	}
 
 	s.audit(r, "EVIDENCE_EXPORTED", bundleID, "Exported evidence archive")
+}
+
+// handleEvidencePrune triggers pruning of retention-expired bundles.
+func (s *Server) handleEvidencePrune(w http.ResponseWriter, r *http.Request) {
+	if s.evidenceStore == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "evidence store not initialized")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	count, err := s.evidenceStore.PruneExpiredBundles(time.Now().UTC())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to prune expired evidence: "+err.Error())
+		return
+	}
+
+	s.audit(r, "EVIDENCE_PRUNED", "", fmt.Sprintf("Pruned %d expired evidence bundles", count))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"pruned_bundles": count,
+		"status":         "ok",
+	})
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"ominull/hub/pkg/evidence"
 	"ominull/hub/pkg/setup"
 )
 
@@ -624,27 +625,138 @@ func (c *APIClient) cmdForensics(args []string) error {
 		return nil
 	case "verify":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ominullctl forensics verify <manifest_file>")
+			return fmt.Errorf("usage: ominullctl forensics verify <manifest_file> [--key <pubkey_or_file>] [--receipt <receipt_file>] [--hub-key <pubkey_or_file>]")
 		}
 		manifestPath := args[1]
 		data, err := os.ReadFile(manifestPath)
 		if err != nil {
 			return fmt.Errorf("failed to read manifest file: %w", err)
 		}
-		var manifest map[string]interface{}
+		var manifest evidence.Manifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return fmt.Errorf("invalid manifest JSON: %w", err)
 		}
-		c.printOutput(map[string]interface{}{
-			"verified": true,
-			"manifest": filepath.Base(manifestPath),
-			"items":    len(manifest),
-		}, func() {
-			fmt.Printf("[+] Forensic manifest %s verified successfully\n", manifestPath)
+
+		keyFlag := ""
+		receiptPath := ""
+		hubKeyFlag := ""
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--key":
+				if i+1 < len(args) {
+					keyFlag = args[i+1]
+					i++
+				}
+			case "--receipt":
+				if i+1 < len(args) {
+					receiptPath = args[i+1]
+					i++
+				}
+			case "--hub-key":
+				if i+1 < len(args) {
+					hubKeyFlag = args[i+1]
+					i++
+				}
+			}
+		}
+
+		manifestSigValid := false
+		if keyFlag != "" {
+			keyData := keyFlag
+			if fileBytes, err := os.ReadFile(keyFlag); err == nil {
+				keyData = strings.TrimSpace(string(fileBytes))
+			}
+			if err := evidence.VerifyManifestSignature(&manifest, keyData); err != nil {
+				return fmt.Errorf("endpoint manifest signature verification FAILED: %w", err)
+			}
+			manifestSigValid = true
+		}
+
+		manifestDir := filepath.Dir(manifestPath)
+		itemsChecked := 0
+		for _, it := range manifest.Items {
+			localFile := filepath.Join(manifestDir, it.Name)
+			if fData, err := os.ReadFile(localFile); err == nil {
+				if int64(len(fData)) != it.SizeBytes {
+					return fmt.Errorf("artifact %s size mismatch: expected %d bytes, got %d bytes", it.Name, it.SizeBytes, len(fData))
+				}
+				actualSHA := evidence.ComputeDigest(fData)
+				if actualSHA != it.SHA256 {
+					return fmt.Errorf("artifact %s SHA-256 mismatch: expected %s, got %s", it.Name, it.SHA256, actualSHA)
+				}
+				itemsChecked++
+			}
+		}
+
+		receiptSigValid := false
+		if receiptPath != "" {
+			rData, err := os.ReadFile(receiptPath)
+			if err != nil {
+				return fmt.Errorf("failed to read receipt file: %w", err)
+			}
+			var receipt evidence.EvidenceReceipt
+			if err := json.Unmarshal(rData, &receipt); err != nil {
+				return fmt.Errorf("invalid receipt JSON: %w", err)
+			}
+			manifestSHA := evidence.ComputeDigest(manifest.CanonicalBytes())
+			if receipt.ManifestSHA256 != manifestSHA {
+				return fmt.Errorf("receipt manifest hash mismatch: receipt=%s actual=%s", receipt.ManifestSHA256, manifestSHA)
+			}
+			if hubKeyFlag != "" {
+				hubKeyData := hubKeyFlag
+				if fBytes, err := os.ReadFile(hubKeyFlag); err == nil {
+					hubKeyData = strings.TrimSpace(string(fBytes))
+				}
+				if err := evidence.VerifyReceiptSignature(&receipt, hubKeyData); err != nil {
+					return fmt.Errorf("hub receipt signature verification FAILED: %w", err)
+				}
+				receiptSigValid = true
+			}
+		}
+
+		res := map[string]interface{}{
+			"verified":           true,
+			"manifest":           filepath.Base(manifestPath),
+			"bundle_id":          manifest.BundleID,
+			"endpoint_id":        manifest.EndpointID,
+			"total_items":        len(manifest.Items),
+			"items_checked":      itemsChecked,
+			"endpoint_sig_valid": manifestSigValid,
+			"receipt_sig_valid":  receiptSigValid,
+		}
+
+		c.printOutput(res, func() {
+			fmt.Printf("[+] Forensic manifest %s verified successfully\n", filepath.Base(manifestPath))
+			fmt.Printf("    Bundle ID:           %s\n", manifest.BundleID)
+			fmt.Printf("    Endpoint ID:         %s\n", manifest.EndpointID)
+			fmt.Printf("    Items in catalog:    %d\n", len(manifest.Items))
+			if itemsChecked > 0 {
+				fmt.Printf("    Local files checked: %d (all digests match)\n", itemsChecked)
+			}
+			if manifestSigValid {
+				fmt.Printf("    Endpoint signature:  VERIFIED (Ed25519)\n")
+			}
+			if receiptSigValid {
+				fmt.Printf("    Hub receipt:         VERIFIED (Ed25519)\n")
+			}
+		})
+		return nil
+	case "prune":
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/evidence/prune", nil)
+		if err != nil {
+			return err
+		}
+		var res struct {
+			PrunedBundles int    `json:"pruned_bundles"`
+			Status        string `json:"status"`
+		}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(res, func() {
+			fmt.Printf("[+] Pruned %d expired evidence bundle(s)\n", res.PrunedBundles)
 		})
 		return nil
 	default:
-		return fmt.Errorf("usage: ominullctl forensics list|show|verify|hold|release")
+		return fmt.Errorf("usage: ominullctl forensics list|show|verify|prune|hold|release")
 	}
 }
 

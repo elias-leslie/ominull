@@ -3191,6 +3191,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/evidence/finalize", s.deviceOrLegacyMiddleware(s.responseGate(s.handleEvidenceFinalize)))
 	mux.HandleFunc("/api/v1/evidence/bundles/hold", s.authMiddleware(s.responseGate(s.handleEvidenceHold)))
 	mux.HandleFunc("/api/v1/evidence/export", s.authMiddleware(s.responseGate(s.handleEvidenceExport)))
+	mux.HandleFunc("/api/v1/evidence/prune", s.authMiddleware(requireAdmin(s.handleEvidencePrune)))
 
 	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.handleTerminalSessions)))

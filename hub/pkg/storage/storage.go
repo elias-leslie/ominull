@@ -66,10 +66,11 @@ type Endpoint struct {
 	// API key. It is what tells an operator whether the fleet is ready for
 	// --client-certs required, which otherwise has to be discovered by turning
 	// it on and seeing who falls off.
-	CertCN     string    `json:"cert_cn"`
-	IsIsolated bool      `json:"is_isolated"`
-	LastSeenAt time.Time `json:"last_seen_at"`
-	CreatedAt  time.Time `json:"created_at"`
+	CertCN             string    `json:"cert_cn"`
+	IsIsolated         bool      `json:"is_isolated"`
+	EvidenceSigningKey string    `json:"evidence_signing_key"`
+	LastSeenAt         time.Time `json:"last_seen_at"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type Event struct {
@@ -622,6 +623,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN package_identifier TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN registered_package_version TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN provenance_status TEXT DEFAULT 'unknown'",
+		"ALTER TABLE endpoints ADD COLUMN evidence_signing_key TEXT DEFAULT ''",
 		// The isolation allow list was formerly transient command state. It is
 		// stored here because the agent now reads its isolation state from its
 		// own heartbeat reply.
@@ -1015,8 +1017,8 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	}
 
 	query := `
-	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, install_type, package_identifier, registered_package_version, provenance_status, status, is_isolated, last_seen_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, install_type, package_identifier, registered_package_version, provenance_status, status, is_isolated, last_seen_at, created_at, evidence_signing_key)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		hostname=excluded.hostname,
 		os=excluded.os,
@@ -1032,6 +1034,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		package_identifier=CASE WHEN excluded.package_identifier != '' THEN excluded.package_identifier ELSE endpoints.package_identifier END,
 		registered_package_version=CASE WHEN excluded.registered_package_version != '' THEN excluded.registered_package_version ELSE endpoints.registered_package_version END,
 		provenance_status=CASE WHEN excluded.provenance_status != '' THEN excluded.provenance_status ELSE endpoints.provenance_status END,
+		evidence_signing_key=CASE WHEN excluded.evidence_signing_key != '' THEN excluded.evidence_signing_key ELSE endpoints.evidence_signing_key END,
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
@@ -1040,7 +1043,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		ep.ID, ep.TenantID, ep.LocationID, ep.LocationName, ep.Hostname, ep.OS, ep.IP, ep.MAC,
 		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion, ep.UpdateCapability,
 		ep.InstallType, ep.PackageIdentifier, ep.RegisteredPackageVersion, ep.ProvenanceStatus,
-		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt,
+		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt, ep.EvidenceSigningKey,
 	); err != nil {
 		return err
 	}
@@ -1389,12 +1392,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1410,7 +1413,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey,
 		); err != nil {
 			return nil, err
 		}
@@ -1427,13 +1430,13 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1443,6 +1446,13 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	}
 	ep.IsIsolated = isoInt != 0
 	return &ep, nil
+}
+
+func (s *Store) SetEndpointEvidenceSigningKey(endpointID, pubKeyHex string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE endpoints SET evidence_signing_key = ? WHERE id = ?", pubKeyHex, endpointID)
+	return err
 }
 
 func (s *Store) GetHierarchy(tenantID string) ([]HierarchyClient, error) {

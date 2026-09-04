@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -121,20 +122,35 @@ func TestServer_EvidenceAPI(t *testing.T) {
 		t.Fatalf("gzip reader failed: %v", err)
 	}
 	tr := tar.NewReader(gr)
-	hdr, err := tr.Next()
-	if err != nil {
-		t.Fatalf("tar next failed: %v", err)
+	foundFiles := make(map[string][]byte)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next failed: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("readall failed: %v", err)
+		}
+		foundFiles[hdr.Name] = data
 	}
+
 	expectedPath := filepath.Join(bundle.ID, "system.txt")
-	if hdr.Name != expectedPath {
-		t.Fatalf("expected file %s, got %s", expectedPath, hdr.Name)
-	}
-	content, err := io.ReadAll(tr)
-	if err != nil {
-		t.Fatalf("readall failed: %v", err)
+	content, ok := foundFiles[expectedPath]
+	if !ok {
+		t.Fatalf("expected file %s in archive", expectedPath)
 	}
 	if !bytes.Equal(content, itemData) {
 		t.Fatalf("exported content mismatch: %q vs %q", string(content), string(itemData))
+	}
+	if len(foundFiles[filepath.Join(bundle.ID, "manifest.json")]) == 0 {
+		t.Fatalf("expected manifest.json in archive")
+	}
+	if len(foundFiles[filepath.Join(bundle.ID, "receipt.json")]) == 0 {
+		t.Fatalf("expected receipt.json in archive")
 	}
 }
 
@@ -390,5 +406,64 @@ func TestServer_EvidenceDeviceCredentialScoping(t *testing.T) {
 	handler.ServeHTTP(wGoodFin, goodFin)
 	if wGoodFin.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for device 1 finalize, got %d: %s", wGoodFin.Code, wGoodFin.Body.String())
+	}
+}
+
+func TestServer_EvidencePruneAPI(t *testing.T) {
+	server, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	handler := server.Handler()
+
+	tenantID := "tenant-prune-test"
+	b1, err := server.evidenceStore.CreateBundle(tenantID, "ep-1", "job-1", "quick", -1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle 1 failed: %v", err)
+	}
+	_, err = server.evidenceStore.StoreItem(tenantID, b1.ID, "prune1.txt", "text/plain", "collected", []byte("prune data"))
+	if err != nil {
+		t.Fatalf("StoreItem failed: %v", err)
+	}
+
+	b2, err := server.evidenceStore.CreateBundle(tenantID, "ep-1", "job-2", "quick", -1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle 2 failed: %v", err)
+	}
+	if err := server.evidenceStore.SetLegalHold(tenantID, b2.ID, "legal-counsel", "court order", true); err != nil {
+		t.Fatalf("SetLegalHold failed: %v", err)
+	}
+
+	// 1. Non-admin request -> 401 or 403
+	reqNoAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/evidence/prune", nil)
+	reqNoAdmin.Header.Set("X-API-Key", "invalid-or-non-admin")
+	wNoAdmin := httptest.NewRecorder()
+	handler.ServeHTTP(wNoAdmin, reqNoAdmin)
+	if wNoAdmin.Code != http.StatusUnauthorized && wNoAdmin.Code != http.StatusForbidden {
+		t.Fatalf("expected 401 or 403 for unauthorized prune, got %d", wNoAdmin.Code)
+	}
+
+	// 2. Admin request -> 200 OK with pruned count 1
+	reqAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/evidence/prune", nil)
+	reqAdmin.Header.Set("X-API-Key", "test-admin-key-12345")
+	wAdmin := httptest.NewRecorder()
+	handler.ServeHTTP(wAdmin, reqAdmin)
+	if wAdmin.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for admin prune, got %d: %s", wAdmin.Code, wAdmin.Body.String())
+	}
+
+	var res map[string]interface{}
+	if err := json.Unmarshal(wAdmin.Body.Bytes(), &res); err != nil {
+		t.Fatalf("invalid json response: %v", err)
+	}
+	if pruned, ok := res["pruned_bundles"].(float64); !ok || int(pruned) != 1 {
+		t.Fatalf("expected 1 pruned bundle, got: %v", res["pruned_bundles"])
+	}
+
+	// Verify b1 is deleted
+	if _, err := server.evidenceStore.GetBundle(tenantID, b1.ID); !errors.Is(err, evidence.ErrNotFound) {
+		t.Fatalf("expected b1 to be deleted, got: %v", err)
+	}
+	// Verify b2 is preserved
+	if b2Got, err := server.evidenceStore.GetBundle(tenantID, b2.ID); err != nil || b2Got == nil {
+		t.Fatalf("expected b2 to be preserved under legal hold, got: %v", err)
 	}
 }

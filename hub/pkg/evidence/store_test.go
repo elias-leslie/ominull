@@ -4,7 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -97,6 +100,7 @@ func TestEvidence_FullLifecycleAndExport(t *testing.T) {
 	}
 
 	// 3. Finalize Bundle with Manifest and Receipt
+	epPub, epPriv, _ := ed25519.GenerateKey(rand.Reader)
 	manifest := &Manifest{
 		BundleID:    bundle.ID,
 		EndpointID:  endpointID,
@@ -109,13 +113,18 @@ func TestEvidence_FullLifecycleAndExport(t *testing.T) {
 			{Name: "system_info.json", SizeBytes: int64(len(item1Data)), SHA256: ComputeDigest(item1Data), CollectorStatus: "collected"},
 		},
 	}
+	manifestSig := ed25519.Sign(epPriv, manifest.CanonicalBytes())
+	manifest.Signature = hex.EncodeToString(manifestSig)
 
-	receipt, err := store.FinalizeBundle(tenantID, bundle.ID, manifest)
+	receipt, err := store.FinalizeBundle(tenantID, bundle.ID, manifest, hex.EncodeToString(epPub))
 	if err != nil {
 		t.Fatalf("FinalizeBundle failed: %v", err)
 	}
-	if receipt.ReceiptHash == "" || receipt.PreviousReceiptSHA256 == "" {
+	if receipt.ReceiptHash == "" || receipt.PreviousReceiptSHA256 == "" || receipt.ReceiptSignature == "" {
 		t.Fatalf("invalid receipt: %+v", receipt)
+	}
+	if err := VerifyReceiptSignature(receipt, store.ReceiptPublicKeyHex()); err != nil {
+		t.Fatalf("receipt signature verification failed: %v", err)
 	}
 
 	// 4. Export to Tar.gz and Verify Safe Path Layout
@@ -150,6 +159,16 @@ func TestEvidence_FullLifecycleAndExport(t *testing.T) {
 	expectedSystemPath := filepath.Join(bundle.ID, "system_info.json")
 	if !bytes.Equal(foundFiles[expectedSystemPath], item1Data) {
 		t.Fatalf("extracted system_info.json content mismatch")
+	}
+
+	expectedManifestPath := filepath.Join(bundle.ID, "manifest.json")
+	if len(foundFiles[expectedManifestPath]) == 0 {
+		t.Fatalf("expected manifest.json in exported archive")
+	}
+
+	expectedReceiptPath := filepath.Join(bundle.ID, "receipt.json")
+	if len(foundFiles[expectedReceiptPath]) == 0 {
+		t.Fatalf("expected receipt.json in exported archive")
 	}
 }
 
@@ -302,5 +321,152 @@ func TestEvidence_TenantIsolation(t *testing.T) {
 	err = store.SetLegalHold("tenant-B", bundleA.ID, "attacker", "fraud", true)
 	if !errors.Is(err, ErrTenantMismatch) {
 		t.Fatalf("expected ErrTenantMismatch for SetLegalHold, got: %v", err)
+	}
+}
+
+func TestEvidence_ManifestAndReceiptSignatures(t *testing.T) {
+	store, _, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	tenantID := "tenant-sig"
+	bundle, err := store.CreateBundle(tenantID, "ep-sig-1", "job-sig", "profile", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle failed: %v", err)
+	}
+
+	payload := []byte("critical volatile memory dump")
+	item, err := store.StoreItem(tenantID, bundle.ID, "dump.raw", "application/octet-stream", "collected", payload)
+	if err != nil {
+		t.Fatalf("StoreItem failed: %v", err)
+	}
+
+	epPub, epPriv, _ := ed25519.GenerateKey(rand.Reader)
+	epPubHex := hex.EncodeToString(epPub)
+
+	manifest := &Manifest{
+		BundleID:    bundle.ID,
+		EndpointID:  "ep-sig-1",
+		TenantID:    tenantID,
+		JobID:       "job-sig",
+		Profile:     "profile",
+		CollectedAt: time.Now().UTC(),
+		Items: []ManifestItem{
+			{Name: item.Name, SizeBytes: item.SizeBytes, SHA256: item.SHA256, CollectorStatus: "collected"},
+		},
+	}
+
+	// 1. Missing signature when key is registered -> fails
+	_, err = store.FinalizeBundle(tenantID, bundle.ID, manifest, epPubHex)
+	if err == nil {
+		t.Fatal("expected error on unsigned manifest")
+	}
+
+	// 2. Corrupt / invalid signature -> fails
+	manifest.Signature = "deadbeef12345678"
+	_, err = store.FinalizeBundle(tenantID, bundle.ID, manifest, epPubHex)
+	if err == nil {
+		t.Fatal("expected error on invalid signature format")
+	}
+
+	// 3. Valid signature from wrong key -> fails
+	_, roguePriv, _ := ed25519.GenerateKey(rand.Reader)
+	manifest.Signature = hex.EncodeToString(ed25519.Sign(roguePriv, manifest.CanonicalBytes()))
+	_, err = store.FinalizeBundle(tenantID, bundle.ID, manifest, epPubHex)
+	if err == nil {
+		t.Fatal("expected error on signature signed with wrong key")
+	}
+
+	// 4. Valid signature -> succeeds
+	manifest.Signature = hex.EncodeToString(ed25519.Sign(epPriv, manifest.CanonicalBytes()))
+	receipt, err := store.FinalizeBundle(tenantID, bundle.ID, manifest, epPubHex)
+	if err != nil {
+		t.Fatalf("valid FinalizeBundle failed: %v", err)
+	}
+
+	// 5. Verify receipt signature against hub receipt key
+	if err := VerifyReceiptSignature(receipt, store.ReceiptPublicKeyHex()); err != nil {
+		t.Fatalf("receipt signature failed verification: %v", err)
+	}
+
+	// 6. Tampered receipt fails verification
+	tamperedReceipt := *receipt
+	tamperedReceipt.ManifestSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	if err := VerifyReceiptSignature(&tamperedReceipt, store.ReceiptPublicKeyHex()); err == nil {
+		t.Fatal("expected tampered receipt to fail verification")
+	}
+}
+
+func TestEvidence_RetentionPruningAndLegalHold(t *testing.T) {
+	store, storageDir, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	tenantID := "tenant-retention"
+
+	// Bundle 1: Expired (retention period was in the past), legal_hold = false
+	b1, err := store.CreateBundle(tenantID, "ep-1", "job-1", "quick", -1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle 1 failed: %v", err)
+	}
+	item1, err := store.StoreItem(tenantID, b1.ID, "file1.txt", "text/plain", "collected", []byte("file1 content"))
+	if err != nil {
+		t.Fatalf("StoreItem 1 failed: %v", err)
+	}
+	obj1Path := filepath.Join(storageDir, item1.StorageDigest)
+	if _, err := os.Stat(obj1Path); err != nil {
+		t.Fatalf("expected object 1 on disk: %v", err)
+	}
+
+	// Bundle 2: Expired, but legal_hold = true
+	b2, err := store.CreateBundle(tenantID, "ep-1", "job-2", "quick", -1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle 2 failed: %v", err)
+	}
+	item2, err := store.StoreItem(tenantID, b2.ID, "file2.txt", "text/plain", "collected", []byte("file2 content"))
+	if err != nil {
+		t.Fatalf("StoreItem 2 failed: %v", err)
+	}
+	if err := store.SetLegalHold(tenantID, b2.ID, "sec-officer", "litigation hold", true); err != nil {
+		t.Fatalf("SetLegalHold failed: %v", err)
+	}
+	obj2Path := filepath.Join(storageDir, item2.StorageDigest)
+
+	// Bundle 3: Future retention expiration
+	b3, err := store.CreateBundle(tenantID, "ep-1", "job-3", "quick", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle 3 failed: %v", err)
+	}
+	_, err = store.StoreItem(tenantID, b3.ID, "file3.txt", "text/plain", "collected", []byte("file3 content"))
+	if err != nil {
+		t.Fatalf("StoreItem 3 failed: %v", err)
+	}
+
+	// Run PruneExpiredBundles
+	pruned, err := store.PruneExpiredBundles(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("PruneExpiredBundles failed: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("expected exactly 1 bundle pruned, got %d", pruned)
+	}
+
+	// Verify Bundle 1 is gone from DB and disk
+	if _, err := store.GetBundle(tenantID, b1.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for b1, got: %v", err)
+	}
+	if _, err := os.Stat(obj1Path); !os.IsNotExist(err) {
+		t.Fatalf("expected object 1 file on disk to be removed")
+	}
+
+	// Verify Bundle 2 (legal hold) is preserved
+	if b2Got, err := store.GetBundle(tenantID, b2.ID); err != nil || b2Got == nil {
+		t.Fatalf("expected b2 to be preserved under legal hold: %v", err)
+	}
+	if _, err := os.Stat(obj2Path); err != nil {
+		t.Fatalf("expected object 2 on disk to be preserved: %v", err)
+	}
+
+	// Verify Bundle 3 (unexpired) is preserved
+	if b3Got, err := store.GetBundle(tenantID, b3.ID); err != nil || b3Got == nil {
+		t.Fatalf("expected b3 to be preserved: %v", err)
 	}
 }

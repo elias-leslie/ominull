@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // MasterKey represents the 256-bit AES master evidence encryption key.
@@ -38,6 +40,35 @@ func LoadOrCreateMasterKey(path string) (*MasterKey, error) {
 		return nil, fmt.Errorf("failed to write master key file: %w", err)
 	}
 	return &k, nil
+}
+
+// LoadOrCreateReceiptKey reads or generates the dedicated Ed25519 receipt signing keypair.
+func LoadOrCreateReceiptKey(keyPath string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	if data, err := os.ReadFile(keyPath); err == nil {
+		rawHex := strings.TrimSpace(string(data))
+		keyBytes, err := hex.DecodeString(rawHex)
+		if err == nil && len(keyBytes) == ed25519.PrivateKeySize {
+			priv := ed25519.PrivateKey(keyBytes)
+			pub := priv.Public().(ed25519.PublicKey)
+			return priv, pub, nil
+		}
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate receipt key: %w", err)
+	}
+
+	privHex := hex.EncodeToString(priv)
+	if err := os.WriteFile(keyPath, []byte(privHex), 0600); err != nil {
+		return nil, nil, fmt.Errorf("failed to write receipt private key: %w", err)
+	}
+
+	pubPath := keyPath + ".pub"
+	pubHex := hex.EncodeToString(pub)
+	_ = os.WriteFile(pubPath, []byte(pubHex), 0644)
+
+	return priv, pub, nil
 }
 
 // GenerateDataKey generates a random 256-bit AES data key.
@@ -152,4 +183,48 @@ func DecryptItemData(dataKey [32]byte, ciphertext []byte, aad []byte) ([]byte, e
 func ComputeDigest(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
+}
+
+// VerifyManifestSignature validates the Ed25519 signature of a canonical endpoint manifest.
+func VerifyManifestSignature(manifest *Manifest, pubKeyHex string) error {
+	if manifest == nil {
+		return errors.New("nil manifest")
+	}
+	pubBytes, err := hex.DecodeString(strings.TrimSpace(pubKeyHex))
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return errors.New("invalid Ed25519 public key")
+	}
+	sigBytes, err := hex.DecodeString(strings.TrimSpace(manifest.Signature))
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return errors.New("invalid Ed25519 signature format")
+	}
+	canonical := manifest.CanonicalBytes()
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), canonical, sigBytes) {
+		return errors.New("manifest signature verification failed")
+	}
+	return nil
+}
+
+// VerifyReceiptSignature validates the Ed25519 signature of a canonical hub receipt.
+func VerifyReceiptSignature(receipt *EvidenceReceipt, pubKeyHex string) error {
+	if receipt == nil {
+		return errors.New("nil receipt")
+	}
+	pubBytes, err := hex.DecodeString(strings.TrimSpace(pubKeyHex))
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return errors.New("invalid hub Ed25519 public key")
+	}
+	sigBytes, err := hex.DecodeString(strings.TrimSpace(receipt.ReceiptSignature))
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return errors.New("invalid receipt signature format")
+	}
+	canonical := receipt.CanonicalBytes()
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), canonical, sigBytes) {
+		return errors.New("receipt signature verification failed")
+	}
+	computedHash := receipt.ComputeReceiptHash()
+	if computedHash != receipt.ReceiptHash {
+		return errors.New("receipt hash does not match canonical receipt content")
+	}
+	return nil
 }

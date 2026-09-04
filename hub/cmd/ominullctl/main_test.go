@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"ominull/hub/pkg/evidence"
 	"ominull/hub/pkg/setup"
 )
 
@@ -314,5 +319,84 @@ func TestOminullctl_DirectAliasesDispatch(t *testing.T) {
 		if !called[k] {
 			t.Fatalf("expected handler for %s to have been called", k)
 		}
+	}
+}
+
+func TestOminullctl_ForensicsVerify(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ctl-forensics-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Generate endpoint keypair
+	epPub, epPriv, _ := ed25519.GenerateKey(rand.Reader)
+	epPubHex := hex.EncodeToString(epPub)
+
+	// Create local artifact file
+	artContent := []byte("process table data: pid 1 init\n")
+	artPath := filepath.Join(tempDir, "proc.txt")
+	_ = os.WriteFile(artPath, artContent, 0600)
+
+	// Create signed manifest
+	manifest := evidence.Manifest{
+		BundleID:    "bundle-verify-1",
+		EndpointID:  "ep-test-1",
+		TenantID:    "default",
+		JobID:       "job-1",
+		Profile:     "diagnostic",
+		CollectedAt: time.Now().UTC(),
+		Items: []evidence.ManifestItem{
+			{Name: "proc.txt", SizeBytes: int64(len(artContent)), SHA256: evidence.ComputeDigest(artContent), CollectorStatus: "collected"},
+		},
+	}
+	manifestSig := ed25519.Sign(epPriv, manifest.CanonicalBytes())
+	manifest.Signature = hex.EncodeToString(manifestSig)
+
+	manifestBytes, _ := json.Marshal(manifest)
+	manifestPath := filepath.Join(tempDir, "manifest.json")
+	_ = os.WriteFile(manifestPath, manifestBytes, 0600)
+
+	// Generate hub receipt keypair
+	hubPub, hubPriv, _ := ed25519.GenerateKey(rand.Reader)
+	hubPubHex := hex.EncodeToString(hubPub)
+
+	// Create signed receipt
+	receipt := evidence.EvidenceReceipt{
+		ReceiptID:             "rec-1",
+		BundleID:              manifest.BundleID,
+		TenantID:              manifest.TenantID,
+		EndpointID:            manifest.EndpointID,
+		ManifestSHA256:        evidence.ComputeDigest(manifest.CanonicalBytes()),
+		StorageObjectsSHA256:  "sha-storage-123",
+		PreviousReceiptSHA256: "0000000000000000000000000000000000000000000000000000000000000000",
+		IngestedAt:            time.Now().UTC(),
+	}
+	receipt.ReceiptHash = receipt.ComputeReceiptHash()
+	receiptSig := ed25519.Sign(hubPriv, receipt.CanonicalBytes())
+	receipt.ReceiptSignature = hex.EncodeToString(receiptSig)
+
+	receiptBytes, _ := json.Marshal(receipt)
+	receiptPath := filepath.Join(tempDir, "receipt.json")
+	_ = os.WriteFile(receiptPath, receiptBytes, 0600)
+
+	client := newAPIClient(CLIConfig{JSONOutput: true})
+
+	// 1. Full verification with key, receipt, and hub-key
+	verifyArgs := []string{"verify", manifestPath, "--key", epPubHex, "--receipt", receiptPath, "--hub-key", hubPubHex}
+	if err := client.cmdForensics(verifyArgs); err != nil {
+		t.Fatalf("full forensics verify failed: %v", err)
+	}
+
+	// 2. Corrupt key fails
+	badKeyArgs := []string{"verify", manifestPath, "--key", "deadbeef12345678"}
+	if err := client.cmdForensics(badKeyArgs); err == nil {
+		t.Fatal("expected invalid key format to fail verification")
+	}
+
+	// 3. Tampered local file fails
+	_ = os.WriteFile(artPath, []byte("tampered data"), 0600)
+	if err := client.cmdForensics(verifyArgs); err == nil {
+		t.Fatal("expected tampered local artifact to fail verification")
 	}
 }
