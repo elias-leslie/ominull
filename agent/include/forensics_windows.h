@@ -1572,6 +1572,388 @@ static inline bool Forensics_CollectLoadedModulesWin(ForensicCollectedItemWin* i
 }
 
 /* ---------------------------------------------------------------------------
+ * Artifact Collectors (Windows IR Standard Profile)
+ * ------------------------------------------------------------------------- */
+
+// 1. Persistence Artifacts (Registry Run/RunOnce, Winlogon, Startup)
+static inline bool Forensics_CollectPersistenceWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "persistence.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"registry_run\": [\n");
+    const char* sep = "";
+    int total_run = 0;
+
+    struct {
+        HKEY root;
+        const char* root_name;
+        const char* subkey;
+    } run_keys[] = {
+        { HKEY_LOCAL_MACHINE, "HKLM", "Software\\Microsoft\\Windows\\CurrentVersion\\Run" },
+        { HKEY_LOCAL_MACHINE, "HKLM", "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" },
+        { HKEY_CURRENT_USER,  "HKCU", "Software\\Microsoft\\Windows\\CurrentVersion\\Run" },
+        { HKEY_CURRENT_USER,  "HKCU", "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" },
+        { NULL, NULL, NULL }
+    };
+
+    for (int k = 0; run_keys[k].subkey != NULL; k++) {
+        HKEY hKey;
+        if (RegOpenKeyExA(run_keys[k].root, run_keys[k].subkey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD idx = 0;
+            char valName[256];
+            DWORD valNameLen = sizeof(valName);
+            DWORD valType = 0;
+            char valData[1024];
+            DWORD valDataLen = sizeof(valData);
+
+            while (RegEnumValueA(hKey, idx, valName, &valNameLen, NULL, &valType, (LPBYTE)valData, &valDataLen) == ERROR_SUCCESS) {
+                if (valType == REG_SZ || valType == REG_EXPAND_SZ) {
+                    valData[sizeof(valData) - 1] = '\0';
+                    char esc_name[512], esc_val[2048];
+                    Forensics_EscapeJsonWin(valName, esc_name, sizeof(esc_name));
+                    Forensics_EscapeJsonWin(valData, esc_val, sizeof(esc_val));
+
+                    char entry[2560];
+                    int elen = snprintf(entry, sizeof(entry),
+                        "%s    {\n"
+                        "      \"hive\": \"%s\",\n"
+                        "      \"key\": \"%s\",\n"
+                        "      \"name\": \"%s\",\n"
+                        "      \"command\": \"%s\"\n"
+                        "    }",
+                        sep, run_keys[k].root_name, run_keys[k].subkey, esc_name, esc_val
+                    );
+
+                    if ((size_t)(off + elen + 256) < cap) {
+                        memcpy(buf + off, entry, elen);
+                        off += elen;
+                        buf[off] = '\0';
+                        sep = ",\n";
+                        total_run++;
+                    }
+                }
+                idx++;
+                valNameLen = sizeof(valName);
+                valDataLen = sizeof(valData);
+            }
+            RegCloseKey(hKey);
+        }
+    }
+
+    // Winlogon keys
+    char userinit[512] = {0}, shell[512] = {0};
+    HKEY hWl;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", 0, KEY_READ, &hWl) == ERROR_SUCCESS) {
+        DWORD len = sizeof(userinit);
+        RegQueryValueExA(hWl, "Userinit", NULL, NULL, (LPBYTE)userinit, &len);
+        len = sizeof(shell);
+        RegQueryValueExA(hWl, "Shell", NULL, NULL, (LPBYTE)shell, &len);
+        RegCloseKey(hWl);
+    }
+    char esc_userinit[1024], esc_shell[1024];
+    Forensics_EscapeJsonWin(userinit, esc_userinit, sizeof(esc_userinit));
+    Forensics_EscapeJsonWin(shell, esc_shell, sizeof(esc_shell));
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"winlogon\": {\n"
+        "    \"userinit\": \"%s\",\n"
+        "    \"shell\": \"%s\"\n"
+        "  },\n"
+        "  \"startup_files\": [\n",
+        esc_userinit, esc_shell
+    );
+
+    // Startup folder files
+    const char* startup_path = "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*";
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(startup_path, &fd);
+    sep = "";
+    int total_startup = 0;
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.cFileName[0] == '.') continue;
+            char esc_file[MAX_PATH * 2];
+            Forensics_EscapeJsonWin(fd.cFileName, esc_file, sizeof(esc_file));
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry), "%s    \"%s\"", sep, esc_file);
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_startup++;
+            }
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+
+    off += snprintf(buf + off, cap - off, "\n  ]\n}\n");
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 2. Scheduled Tasks
+static inline bool Forensics_CollectScheduledTasksWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "scheduled_tasks.json", sizeof(item->name) - 1);
+    strncpy(item->content_type, "application/json", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "{\n  \"tasks\": [\n");
+    const char* sep = "";
+    int total_tasks = 0;
+
+    // Scan C:\Windows\System32\Tasks
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA("C:\\Windows\\System32\\Tasks\\*", &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.cFileName[0] == '.') continue;
+            char esc_name[MAX_PATH * 2];
+            Forensics_EscapeJsonWin(fd.cFileName, esc_name, sizeof(esc_name));
+
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"name\": \"%s\",\n"
+                "      \"is_directory\": %s\n"
+                "    }",
+                sep, esc_name, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "true" : "false"
+            );
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_tasks++;
+            }
+        } while (FindNextFileA(hFind, &fd) && total_tasks < 100);
+        FindClose(hFind);
+    }
+
+    // Also enumerate registry TaskCache\Tree if present
+    HKEY hTree;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tree", 0, KEY_READ, &hTree) == ERROR_SUCCESS) {
+        DWORD idx = 0;
+        char subKeyName[256];
+        DWORD subKeyLen = sizeof(subKeyName);
+        while (RegEnumKeyExA(hTree, idx, subKeyName, &subKeyLen, NULL, NULL, NULL, NULL) == ERROR_SUCCESS && total_tasks < 150) {
+            char esc_name[512];
+            Forensics_EscapeJsonWin(subKeyName, esc_name, sizeof(esc_name));
+            char entry[512];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"name\": \"%s\",\n"
+                "      \"registry_cached\": true\n"
+                "    }",
+                sep, esc_name
+            );
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_tasks++;
+            }
+            idx++;
+            subKeyLen = sizeof(subKeyName);
+        }
+        RegCloseKey(hTree);
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_tasks\": %d\n"
+        "}\n",
+        total_tasks
+    );
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = (total_tasks > 0) ? COLLECTOR_STATUS_COLLECTED : COLLECTOR_STATUS_EMPTY;
+    return true;
+}
+
+// 3. Security Events
+static inline bool Forensics_CollectSecurityEventsWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "security_events.txt", sizeof(item->name) - 1);
+    strncpy(item->content_type, "text/plain", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > 256 * 1024) {
+        max_bytes = 128 * 1024;
+    }
+
+    size_t cap = max_bytes;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+
+    int off = snprintf(buf, cap, "Windows Security & Audit Event Log Tail\n=======================================\n");
+
+    HANDLE hLog = OpenEventLogA(NULL, "Security");
+    const char* log_name = "Security";
+    if (!hLog) {
+        hLog = OpenEventLogA(NULL, "System");
+        log_name = "System (Security log restricted)";
+    }
+
+    DWORD eventsCount = 0;
+    if (hLog) {
+        off += snprintf(buf + off, cap - off, "Source log: %s\n\n", log_name);
+        DWORD dwRead = 0, dwNeeded = 0;
+        DWORD bufSize = 32768;
+        LPBYTE pBuf = (LPBYTE)malloc(bufSize);
+        if (pBuf) {
+            while (ReadEventLogA(hLog,
+                EVENTLOG_BACKWARDS_READ | EVENTLOG_SEQUENTIAL_READ,
+                0, pBuf, bufSize, &dwRead, &dwNeeded) && off < (int)cap - 1024) {
+
+                LPBYTE pRecord = pBuf;
+                while (pRecord < pBuf + dwRead && off < (int)cap - 512) {
+                    PEVENTLOGRECORD pEvt = (PEVENTLOGRECORD)pRecord;
+                    char* srcName = (char*)((LPBYTE)pEvt + sizeof(EVENTLOGRECORD));
+
+                    off += snprintf(buf + off, cap - off,
+                        "Event ID: %lu | Type: 0x%x | Source: %s | Time: %lu\n",
+                        (unsigned long)(pEvt->EventID & 0xFFFF),
+                        (unsigned int)pEvt->EventType,
+                        srcName ? srcName : "unknown",
+                        (unsigned long)pEvt->TimeGenerated
+                    );
+                    eventsCount++;
+                    pRecord += pEvt->Length;
+                }
+            }
+            free(pBuf);
+        }
+        CloseEventLog(hLog);
+    }
+
+    if (eventsCount == 0) {
+        off += snprintf(buf + off, cap - off, "# No audit or security events returned.\n");
+    }
+
+    item->data = (uint8_t*)buf;
+    item->size_bytes = (size_t)off;
+    item->status = (eventsCount > 0) ? COLLECTOR_STATUS_COLLECTED : COLLECTOR_STATUS_EMPTY;
+    return true;
+}
+
+// 4. Shell History (PowerShell PSReadLine console history)
+static inline bool Forensics_CollectShellHistoryWin(ForensicCollectedItemWin* item, size_t max_bytes) {
+    if (!item) return false;
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, "shell_history.txt", sizeof(item->name) - 1);
+    strncpy(item->content_type, "text/plain", sizeof(item->content_type) - 1);
+
+    if (max_bytes == 0 || max_bytes > 256 * 1024) {
+        max_bytes = 256 * 1024;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { item->status = COLLECTOR_STATUS_FAILED; return false; }
+    size_t off = 0;
+
+    int files_collected = 0;
+
+    // Scan C:\Users for PowerShell PSReadLine history
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA("C:\\Users\\*", &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.cFileName[0] == '.') continue;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+
+            char histPath[MAX_PATH * 2];
+            snprintf(histPath, sizeof(histPath),
+                "C:\\Users\\%s\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt",
+                fd.cFileName);
+
+            FILE* hf = fopen(histPath, "rb");
+            if (!hf) continue;
+
+            fseek(hf, 0, SEEK_END);
+            long sz = ftell(hf);
+            size_t to_read = 32768;
+            long start = 0;
+            if (sz > (long)to_read) {
+                start = sz - (long)to_read;
+            } else {
+                to_read = (size_t)sz;
+            }
+            fseek(hf, start, SEEK_SET);
+
+            char header[512];
+            int hlen = snprintf(header, sizeof(header), "=== %s (%ld total bytes, tail %zu bytes) ===\n", histPath, sz, to_read);
+
+            if (off + (size_t)hlen + to_read + 32 >= cap) {
+                size_t new_cap = cap * 2;
+                while (new_cap <= off + (size_t)hlen + to_read + 32 && new_cap <= max_bytes) new_cap *= 2;
+                if (new_cap > max_bytes) new_cap = max_bytes;
+                char* grown = (char*)realloc(buf, new_cap);
+                if (grown) { buf = grown; cap = new_cap; }
+            }
+
+            if (off + (size_t)hlen < cap) {
+                memcpy(buf + off, header, hlen);
+                off += (size_t)hlen;
+            }
+
+            if (off + to_read < cap) {
+                size_t rd = fread(buf + off, 1, to_read, hf);
+                off += rd;
+            }
+            fclose(hf);
+
+            if (off + 2 < cap) {
+                buf[off++] = '\n';
+                buf[off++] = '\n';
+                buf[off] = '\0';
+            }
+            files_collected++;
+        } while (FindNextFileA(hFind, &fd) && files_collected < 4);
+        FindClose(hFind);
+    }
+
+    if (files_collected == 0 && off == 0) {
+        int hlen = snprintf(buf, cap, "# No PowerShell PSReadLine console history files found.\n");
+        off = (size_t)hlen;
+        item->status = COLLECTOR_STATUS_EMPTY;
+    } else {
+        item->status = COLLECTOR_STATUS_COLLECTED;
+    }
+
+    buf[off] = '\0';
+    item->data = (uint8_t*)buf;
+    item->size_bytes = off;
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
  * High-Level Bundle Publishing & Manifest Finalization Routine (Win32)
  * ------------------------------------------------------------------------- */
 
@@ -1821,6 +2203,54 @@ static inline bool Forensics_RunLiveVolatileCollectionWin(
     );
 }
 
+static inline bool Forensics_RunIRStandardCollectionWin(
+    const AGENT_CONFIG* config,
+    const char* payload_json,
+    const char* job_id,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    if (!config || !job_id) return false;
+
+    ForensicCollectionParamsWin params;
+    Forensics_ParsePayloadWin(payload_json, &params);
+    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* tenant_id = "default";
+
+    ForensicCollectedItemWin items[18];
+    memset(items, 0, sizeof(items));
+    int item_count = 18;
+
+    // 1. Diagnostic Suite
+    Forensics_CollectOSVersionWin(&items[0]);
+    Forensics_CollectInterfacesWin(&items[1]);
+    Forensics_CollectRoutesWin(&items[2]);
+    Forensics_CollectDNSWin(&items[3]);
+    Forensics_CollectResourcesWin(&items[4]);
+    Forensics_CollectServicesWin(&items[5]);
+    Forensics_CollectSystemLogsWin(&items[6]);
+    Forensics_CollectAgentDiagWin(config, &items[7]);
+
+    // 2. Live Volatile Suite
+    Forensics_CollectProcessSnapshotWin(&items[8], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectSocketToProcessWin(&items[9], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectLoggedInSessionsWin(&items[10], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectNetworkNeighborsWin(&items[11], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectFirewallStateWin(&items[12], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectLoadedModulesWin(&items[13], FORENSICS_MAX_ITEM_BYTES);
+
+    // 3. IR Standard Suite
+    Forensics_CollectPersistenceWin(&items[14], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectScheduledTasksWin(&items[15], FORENSICS_MAX_ITEM_BYTES);
+    Forensics_CollectSecurityEventsWin(&items[16], 128 * 1024);
+    Forensics_CollectShellHistoryWin(&items[17], 256 * 1024);
+
+    return Forensics_PublishBundleAndFinalizeWin(
+        config, bundle_id, tenant_id, job_id, "ir_standard", params.max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
+
 static inline bool Forensics_RunCollectionWin(
     const AGENT_CONFIG* config,
     const char* payload_json,
@@ -1834,6 +2264,10 @@ static inline bool Forensics_RunCollectionWin(
 
     if (strcmp(params.profile, "live_volatile") == 0) {
         return Forensics_RunLiveVolatileCollectionWin(
+            config, payload_json, job_id, out_manifest_sha256, sha_cap
+        );
+    } else if (strcmp(params.profile, "ir_standard") == 0) {
+        return Forensics_RunIRStandardCollectionWin(
             config, payload_json, job_id, out_manifest_sha256, sha_cap
         );
     } else {

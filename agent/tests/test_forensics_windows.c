@@ -274,6 +274,35 @@ static void test_live_volatile_collectors_win(void) {
     free(item.data);
 }
 
+static void test_ir_standard_collectors_win(void) {
+    printf("[*] Testing Windows IR Standard Profile Collectors...\n");
+    ForensicCollectedItemWin item;
+
+    // 1. Persistence
+    expect("collect win persistence", Forensics_CollectPersistenceWin(&item, 512 * 1024));
+    expect("win persistence status valid", item.status == COLLECTOR_STATUS_COLLECTED);
+    expect("win persistence has json", item.data != NULL && strstr((char*)item.data, "\"registry_run\"") != NULL);
+    free(item.data);
+
+    // 2. Scheduled Tasks
+    expect("collect win scheduled tasks", Forensics_CollectScheduledTasksWin(&item, 512 * 1024));
+    expect("win scheduled tasks status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win scheduled tasks has json", item.data != NULL && strstr((char*)item.data, "\"tasks\"") != NULL);
+    free(item.data);
+
+    // 3. Security Events
+    expect("collect win security events", Forensics_CollectSecurityEventsWin(&item, 128 * 1024));
+    expect("win security events status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win security events has data", item.data != NULL && item.size_bytes > 0);
+    free(item.data);
+
+    // 4. Shell History
+    expect("collect win shell history", Forensics_CollectShellHistoryWin(&item, 256 * 1024));
+    expect("win shell history status valid", item.status == COLLECTOR_STATUS_COLLECTED || item.status == COLLECTOR_STATUS_EMPTY);
+    expect("win shell history has data", item.data != NULL && item.size_bytes > 0);
+    free(item.data);
+}
+
 static void test_run_live_volatile_collection_e2e(void) {
     printf("[*] Testing Windows Forensics_RunCollectionWin (live_volatile) E2E...\n");
 
@@ -296,15 +325,39 @@ static void test_run_live_volatile_collection_e2e(void) {
     expect("manifest sha256 computed (len 64)", strlen(manifest_sha256) == 64);
 }
 
+static void test_run_ir_standard_collection_e2e(void) {
+    printf("[*] Testing Windows Forensics_RunCollectionWin (ir_standard) E2E...\n");
+
+    AGENT_CONFIG config;
+    ZeroMemory(&config, sizeof(config));
+    strcpy(config.endpoint_id, "win11-ir-test");
+    strcpy(config.hub_url, "https://10.0.0.58:9443");
+    strcpy(config.api_key, "omd_test_credential");
+
+    s_mock_upload_count = 0;
+    s_mock_finalize_called = false;
+
+    const char* payload = "{\"profile\":\"ir_standard\",\"max_bytes\":10485760,\"timeout_seconds\":120}";
+    char manifest_sha256[65] = {0};
+
+    bool ok = Forensics_RunCollectionWin(&config, payload, "win-job-ir-01", manifest_sha256, sizeof(manifest_sha256));
+    expect("run ir_standard collection e2e succeeds", ok);
+    expect("uploaded 18 items", s_mock_upload_count == 18);
+    expect("finalize called", s_mock_finalize_called);
+    expect("manifest sha256 computed (len 64)", strlen(manifest_sha256) == 64);
+}
+
 int main(void) {
     printf("=== Starting Windows Forensics C Tests ===\n");
     test_payload_parsing();
     test_key_management();
     test_collectors();
     test_live_volatile_collectors_win();
+    test_ir_standard_collectors_win();
     test_manifest_encoding();
     test_run_diagnostic_collection_e2e();
     test_run_live_volatile_collection_e2e();
+    test_run_ir_standard_collection_e2e();
 
     printf("\n=== Results: %d failures ===\n", failures);
     return (failures == 0) ? 0 : 1;

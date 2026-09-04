@@ -692,6 +692,48 @@ func (s *Store) GetBundle(tenantID, bundleID string) (*EvidenceBundle, error) {
 	return &b, nil
 }
 
+// GetBundleItems returns all items for a bundle, ensuring strict tenant scoping.
+func (s *Store) GetBundleItems(tenantID, bundleID string) ([]EvidenceItem, error) {
+	bundle, err := s.GetBundle(tenantID, bundleID)
+	if err != nil {
+		return nil, err
+	}
+	if bundle == nil {
+		return nil, ErrNotFound
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, bundle_id, name, content_type, size_bytes, received_bytes, sha256, collector_status, status, created_at, completed_at
+		FROM evidence_items
+		WHERE bundle_id = ?
+		ORDER BY name ASC
+	`, bundleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query bundle items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []EvidenceItem
+	for rows.Next() {
+		var it EvidenceItem
+		var compAt sql.NullTime
+		if err := rows.Scan(&it.ID, &it.BundleID, &it.Name, &it.ContentType, &it.SizeBytes, &it.ReceivedBytes, &it.SHA256, &it.CollectorStatus, &it.Status, &it.CreatedAt, &compAt); err != nil {
+			return nil, fmt.Errorf("failed to scan bundle item: %w", err)
+		}
+		if compAt.Valid {
+			it.CompletedAt = &compAt.Time
+		}
+		items = append(items, it)
+	}
+	if items == nil {
+		items = []EvidenceItem{}
+	}
+	return items, nil
+}
+
 // ListBundles lists bundles for a given tenant.
 func (s *Store) ListBundles(tenantID string, limit int) ([]*EvidenceBundle, error) {
 	s.mu.Lock()

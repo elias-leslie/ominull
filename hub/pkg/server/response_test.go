@@ -924,3 +924,346 @@ func TestServer_LiveVolatileForensicFlow(t *testing.T) {
 		t.Fatalf("expected receipt.json in archive")
 	}
 }
+
+func TestServer_IRStandardForensicFlow(t *testing.T) {
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	tenantID := "default"
+	endpointID := "linux-srv-02"
+	opID := "admin"
+
+	// 1. Initialize tenant response key
+	_, _, err := auth.GetOrCreateTenantKey(tenantID)
+	if err != nil {
+		t.Fatalf("GetOrCreateTenantKey failed: %v", err)
+	}
+
+	// 2. Unlock response session
+	secret, err := auth.EnrollTOTP(tenantID, opID)
+	if err != nil {
+		t.Fatalf("EnrollTOTP failed: %v", err)
+	}
+
+	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	code, _ := responseauth.GenerateTOTPCode(secret, now)
+
+	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "ir-test-sess", hex.EncodeToString(browserPub), code)
+	if err != nil {
+		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
+	}
+
+	// 3. Endpoint generates dedicated Ed25519 evidence keypair
+	evidencePub, evidencePriv, _ := ed25519.GenerateKey(rand.Reader)
+	evidencePubHex := hex.EncodeToString(evidencePub)
+
+	handler := srv.Handler()
+
+	// 4. Endpoint registers and heartbeats
+	heartbeatBody, _ := json.Marshal(TelemetryBatchMessage{
+		EndpointID:         endpointID,
+		TenantID:           tenantID,
+		Hostname:           "linux-app-02",
+		OS:                 "Ubuntu 24.04 LTS (x86_64)",
+		IP:                 "10.0.0.102",
+		EvidenceSigningKey: evidencePubHex,
+	})
+	reqHB := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(heartbeatBody))
+	reqHB.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqHB.Header.Set("Content-Type", "application/json")
+	wHB := httptest.NewRecorder()
+	handler.ServeHTTP(wHB, reqHB)
+	if wHB.Code != http.StatusOK {
+		t.Fatalf("Heartbeat returned %d: %s", wHB.Code, wHB.Body.String())
+	}
+
+	ep, err := store.GetEndpoint(endpointID)
+	if err != nil || ep == nil {
+		t.Fatalf("failed to fetch endpoint: %v", err)
+	}
+	if ep.EvidenceSigningKey != evidencePubHex {
+		t.Fatalf("expected evidence signing key %s, got %s", evidencePubHex, ep.EvidenceSigningKey)
+	}
+
+	// 5. Operator dispatches ir_standard forensic collection
+	payload := response.ForensicCollectionPayload{
+		Profile:        "ir_standard",
+		MaxBytes:       10485760,
+		TimeoutSeconds: 120,
+	}
+	actionDigest, err := response.ComputeActionDigest(payload)
+	if err != nil {
+		t.Fatalf("ComputeActionDigest failed: %v", err)
+	}
+
+	proof := &responseauth.ActionProof{
+		SessionID:       session.SessionID,
+		TenantID:        tenantID,
+		ActionKind:      response.ActionKindForensicCollect,
+		ActionDigest:    actionDigest,
+		TargetEndpoints: []string{endpointID},
+		Timestamp:       now.Unix(),
+		Nonce:           "ir-proof-nonce-1",
+	}
+	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
+	proof.Signature = hex.EncodeToString(sig)
+
+	consoleToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"endpoint_id":     endpointID,
+		"kind":            response.ActionKindForensicCollect,
+		"payload_json":    `{"profile":"ir_standard","max_bytes":10485760,"timeout_seconds":120}`,
+		"idempotency_key": "test-idemp-2",
+		"session_id":      session.SessionID,
+		"action_digest":   actionDigest,
+		"proof":           proof,
+	})
+
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
+	reqCreate.AddCookie(&http.Cookie{Name: "ominull_console", Value: consoleToken})
+	reqCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	handler.ServeHTTP(wCreate, reqCreate)
+
+	if wCreate.Code != http.StatusCreated {
+		t.Fatalf("create response job returned %d: %s", wCreate.Code, wCreate.Body.String())
+	}
+
+	var createdJob response.JobRecord
+	_ = json.NewDecoder(wCreate.Body).Decode(&createdJob)
+	if createdJob.ID == "" {
+		t.Fatalf("expected non-empty job ID")
+	}
+
+	// Verify bundle created with profile "ir_standard"
+	initBundle, err := srv.evidenceStore.GetBundle(tenantID, createdJob.ID)
+	if err != nil || initBundle == nil {
+		t.Fatalf("expected evidence bundle to be created, got: %v", err)
+	}
+	if initBundle.Profile != "ir_standard" {
+		t.Fatalf("expected bundle profile ir_standard, got %s", initBundle.Profile)
+	}
+
+	// 6. Endpoint heartbeats and receives offer
+	reqHB2 := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(heartbeatBody))
+	reqHB2.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqHB2.Header.Set("Content-Type", "application/json")
+	wHB2 := httptest.NewRecorder()
+	handler.ServeHTTP(wHB2, reqHB2)
+
+	var hbResp struct {
+		Status         string               `json:"status"`
+		ResponseOffers []*response.JobOffer `json:"response_offers"`
+	}
+	_ = json.NewDecoder(wHB2.Body).Decode(&hbResp)
+	if len(hbResp.ResponseOffers) != 1 {
+		t.Fatalf("expected 1 offer, got %d", len(hbResp.ResponseOffers))
+	}
+	offer := hbResp.ResponseOffers[0]
+
+	// 7. Endpoint ACKs offer
+	ackBody, _ := json.Marshal(map[string]interface{}{
+		"job_id":   offer.JobID,
+		"lease_id": offer.LeaseID,
+		"accepted": true,
+	})
+	reqAck := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs/ack", bytes.NewReader(ackBody))
+	reqAck.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqAck.Header.Set("Content-Type", "application/json")
+	wAck := httptest.NewRecorder()
+	handler.ServeHTTP(wAck, reqAck)
+	if wAck.Code != http.StatusOK {
+		t.Fatalf("ACK failed with %d: %s", wAck.Code, wAck.Body.String())
+	}
+
+	// 8. Endpoint uploads all 18 ir_standard items
+	itemNames := []string{
+		"os_version.json",
+		"network_interfaces.json",
+		"routes.txt",
+		"dns_config.txt",
+		"resource_summary.json",
+		"service_state.json",
+		"system_logs.txt",
+		"agent_diagnostics.json",
+		"process_snapshot.json",
+		"socket_to_process.json",
+		"logged_in_sessions.json",
+		"network_neighbors.json",
+		"firewall_state.json",
+		"loaded_modules.json",
+		"persistence.json",
+		"scheduled_tasks.json",
+		"security_events.txt",
+		"shell_history.txt",
+	}
+
+	bundleID := createdJob.ID
+	itemPayloads := make(map[string][]byte)
+	var manifestItems []evidence.ManifestItem
+	for _, name := range itemNames {
+		content := []byte(fmt.Sprintf(`{"artifact":"%s","data":[{"id":1,"sample":"ir-evidence"}]}`, name))
+		itemPayloads[name] = content
+		sum := sha256.Sum256(content)
+		sumHex := hex.EncodeToString(sum[:])
+		itemURL := "/api/v1/evidence/items?bundle_id=" + bundleID + "&name=" + name + "&status=collected"
+		reqItem := httptest.NewRequest(http.MethodPost, itemURL, bytes.NewReader(content))
+		reqItem.Header.Set("X-API-Key", "test-admin-key-12345")
+		reqItem.Header.Set("Content-Type", "application/octet-stream")
+		wItem := httptest.NewRecorder()
+		handler.ServeHTTP(wItem, reqItem)
+		if wItem.Code != http.StatusOK && wItem.Code != http.StatusCreated {
+			t.Fatalf("upload item %s returned %d: %s", name, wItem.Code, wItem.Body.String())
+		}
+		manifestItems = append(manifestItems, evidence.ManifestItem{
+			Name:            name,
+			SizeBytes:       int64(len(content)),
+			SHA256:          sumHex,
+			CollectorStatus: "collected",
+		})
+	}
+
+	// 9. Endpoint finalizes bundle with signed canonical manifest V2
+	collectedAt := time.Now().UTC().Truncate(time.Second)
+	manifest := &evidence.Manifest{
+		BundleID:    bundleID,
+		EndpointID:  endpointID,
+		TenantID:    tenantID,
+		JobID:       createdJob.ID,
+		Profile:     "ir_standard",
+		CollectedAt: collectedAt,
+		Items:       manifestItems,
+	}
+	canonicalBytes := manifest.CanonicalBytes()
+	manifestSig := ed25519.Sign(evidencePriv, canonicalBytes)
+	manifest.Signature = hex.EncodeToString(manifestSig)
+
+	finBody, _ := json.Marshal(map[string]interface{}{
+		"bundle_id": bundleID,
+		"manifest":  manifest,
+	})
+	reqFin := httptest.NewRequest(http.MethodPost, "/api/v1/evidence/finalize", bytes.NewReader(finBody))
+	reqFin.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqFin.Header.Set("Content-Type", "application/json")
+	wFin := httptest.NewRecorder()
+	handler.ServeHTTP(wFin, reqFin)
+	if wFin.Code != http.StatusOK {
+		t.Fatalf("finalize bundle returned %d: %s", wFin.Code, wFin.Body.String())
+	}
+
+	var receipt evidence.EvidenceReceipt
+	if err := json.NewDecoder(wFin.Body).Decode(&receipt); err != nil {
+		t.Fatalf("failed to decode receipt: %v", err)
+	}
+	if receipt.ReceiptHash == "" {
+		t.Fatalf("expected non-empty receipt hash")
+	}
+
+	// 10. Endpoint reports job result
+	manifestSHA := evidence.ComputeDigest(canonicalBytes)
+	resBody, _ := json.Marshal(map[string]interface{}{
+		"job_id":          offer.JobID,
+		"lease_id":        offer.LeaseID,
+		"state":           "succeeded",
+		"exit_code":       0,
+		"duration_ms":     320,
+		"manifest_sha256": manifestSHA,
+	})
+	reqRes := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs/result", bytes.NewReader(resBody))
+	reqRes.Header.Set("X-API-Key", "test-admin-key-12345")
+	reqRes.Header.Set("Content-Type", "application/json")
+	wRes := httptest.NewRecorder()
+	handler.ServeHTTP(wRes, reqRes)
+	if wRes.Code != http.StatusOK {
+		t.Fatalf("post result returned %d: %s", wRes.Code, wRes.Body.String())
+	}
+
+	// 11. Verify bundle state in evidence store
+	bundle, err := srv.evidenceStore.GetBundle(tenantID, bundleID)
+	if err != nil {
+		t.Fatalf("GetBundle failed: %v", err)
+	}
+	if bundle.Status != "completed" {
+		t.Fatalf("expected bundle status 'completed', got %q", bundle.Status)
+	}
+	if bundle.Profile != "ir_standard" {
+		t.Fatalf("expected bundle profile 'ir_standard', got %q", bundle.Profile)
+	}
+	if bundle.ItemCount != 18 {
+		t.Fatalf("expected 18 items, got %d", bundle.ItemCount)
+	}
+	if bundle.ReceiptSHA256 == "" {
+		t.Fatalf("expected signed receipt_sha256 on finalized bundle")
+	}
+
+	// 12. Query items via GET /api/v1/evidence/items?bundle_id=...
+	reqItems := httptest.NewRequest(http.MethodGet, "/api/v1/evidence/items?bundle_id="+bundleID, nil)
+	reqItems.Header.Set("X-API-Key", "test-admin-key-12345")
+	wItems := httptest.NewRecorder()
+	handler.ServeHTTP(wItems, reqItems)
+	if wItems.Code != http.StatusOK {
+		t.Fatalf("query items returned %d: %s", wItems.Code, wItems.Body.String())
+	}
+	var itemsResp struct {
+		BundleID string                  `json:"bundle_id"`
+		Items    []evidence.EvidenceItem `json:"items"`
+	}
+	if err := json.NewDecoder(wItems.Body).Decode(&itemsResp); err != nil {
+		t.Fatalf("failed to decode items response: %v", err)
+	}
+	if len(itemsResp.Items) != 18 {
+		t.Fatalf("expected 18 items returned from query, got %d", len(itemsResp.Items))
+	}
+
+	// 13. Test export archive verification
+	reqExport := httptest.NewRequest(http.MethodGet, "/api/v1/evidence/export?id="+bundleID, nil)
+	reqExport.Header.Set("X-API-Key", "test-admin-key-12345")
+	wExport := httptest.NewRecorder()
+	handler.ServeHTTP(wExport, reqExport)
+	if wExport.Code != http.StatusOK {
+		t.Fatalf("export returned %d: %s", wExport.Code, wExport.Body.String())
+	}
+
+	gr, err := gzip.NewReader(wExport.Body)
+	if err != nil {
+		t.Fatalf("gzip reader failed: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	archiveFiles := make(map[string][]byte)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next failed: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("readall failed: %v", err)
+		}
+		archiveFiles[hdr.Name] = data
+	}
+
+	// Verify all 18 ir_standard items exist in archive with exact payload
+	for _, name := range itemNames {
+		expectedPath := filepath.Join(bundleID, name)
+		content, ok := archiveFiles[expectedPath]
+		if !ok {
+			t.Fatalf("expected archive to contain %s", expectedPath)
+		}
+		if !bytes.Equal(content, itemPayloads[name]) {
+			t.Fatalf("item content mismatch for %s: %s vs %s", name, string(content), string(itemPayloads[name]))
+		}
+	}
+	if len(archiveFiles[filepath.Join(bundleID, "manifest.json")]) == 0 {
+		t.Fatalf("expected manifest.json in archive")
+	}
+	if len(archiveFiles[filepath.Join(bundleID, "receipt.json")]) == 0 {
+		t.Fatalf("expected receipt.json in archive")
+	}
+}
+

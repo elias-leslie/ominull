@@ -211,12 +211,44 @@ static void test_live_volatile_collectors() {
     free(data); data = NULL; sz = 0;
 }
 
+static void test_ir_standard_collectors() {
+    printf("[*] Testing IR Standard Profile Collectors...\n");
+    char* data = NULL;
+    size_t sz = 0;
+    ForensicCollectorStatus status;
+
+    // 1. Persistence
+    expect("collect persistence", Forensics_CollectPersistence(&data, &sz, &status, 512 * 1024));
+    expect("persistence status valid", status == COLLECTOR_STATUS_COLLECTED);
+    expect("persistence has json", data != NULL && strstr(data, "\"ld_so_preload\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 2. Scheduled Tasks
+    expect("collect scheduled tasks", Forensics_CollectScheduledTasks(&data, &sz, &status, 512 * 1024));
+    expect("scheduled tasks status valid", status == COLLECTOR_STATUS_COLLECTED);
+    expect("scheduled tasks has json", data != NULL && strstr(data, "\"system_crontab\"") != NULL);
+    free(data); data = NULL; sz = 0;
+
+    // 3. Security Events
+    expect("collect security events", Forensics_CollectSecurityEvents(&data, &sz, &status, 128 * 1024));
+    expect("security events status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY);
+    expect("security events has data", data != NULL && sz > 0);
+    free(data); data = NULL; sz = 0;
+
+    // 4. Shell History
+    expect("collect shell history", Forensics_CollectShellHistory(&data, &sz, &status, 256 * 1024));
+    expect("shell history status valid", status == COLLECTOR_STATUS_COLLECTED || status == COLLECTOR_STATUS_EMPTY);
+    expect("shell history has data", data != NULL && sz > 0);
+    free(data); data = NULL; sz = 0;
+}
+
 int main() {
     printf("=== Starting Linux Forensics C Tests ===\n");
     test_payload_parsing();
     test_key_management();
     test_collectors();
     test_live_volatile_collectors();
+    test_ir_standard_collectors();
     test_manifest_encoding();
 
     printf("\n=== Results: %d failures ===\n", failures);

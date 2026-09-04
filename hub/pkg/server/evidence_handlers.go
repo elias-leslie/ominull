@@ -95,13 +95,9 @@ func (s *Server) handleEvidenceBundles(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
-// handleEvidenceItems handles registering and uploading encrypted artifacts (chunked or single-shot).
+// handleEvidenceItems handles registering and uploading encrypted artifacts (chunked or single-shot),
+// as well as querying items for a bundle via GET.
 func (s *Server) handleEvidenceItems(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	if s.evidenceStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "evidence store not initialized")
 		return
@@ -110,6 +106,38 @@ func (s *Server) handleEvidenceItems(w http.ResponseWriter, r *http.Request) {
 	tenantID := s.tenantFromRequest(r)
 	if tenantID == "" {
 		tenantID = "default"
+	}
+
+	if r.Method == http.MethodGet {
+		bundleID := r.URL.Query().Get("bundle_id")
+		if bundleID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing bundle_id query parameter")
+			return
+		}
+		items, err := s.evidenceStore.GetBundleItems(tenantID, bundleID)
+		if err != nil {
+			if errors.Is(err, evidence.ErrTenantMismatch) {
+				writeJSONError(w, http.StatusForbidden, "forbidden")
+				return
+			}
+			if errors.Is(err, evidence.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "bundle not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to query items: "+err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"bundle_id": bundleID,
+			"items":     items,
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
 	}
 
 	// 1. Explicit Item Registration (Action = create)

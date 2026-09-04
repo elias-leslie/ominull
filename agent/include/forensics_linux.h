@@ -1565,6 +1565,414 @@ static inline bool Forensics_CollectLoadedModules(char** out_data, size_t* out_s
 }
 
 /* ---------------------------------------------------------------------------
+ * Artifact Collectors (Linux IR Standard Profile)
+ * ------------------------------------------------------------------------- */
+
+// 1. Persistence Artifacts
+static inline bool Forensics_CollectPersistence(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return false;
+
+    // Check /etc/ld.so.preload
+    char ld_preload[1024] = {0};
+    int ldf = open("/etc/ld.so.preload", O_RDONLY);
+    if (ldf >= 0) {
+        ssize_t r = read(ldf, ld_preload, sizeof(ld_preload) - 1);
+        close(ldf);
+        if (r > 0) ld_preload[r] = '\0';
+    }
+    char esc_ld[2048] = {0};
+    Forensics_EscapeJson(ld_preload, esc_ld, sizeof(esc_ld));
+
+    // Check /etc/rc.local
+    char rc_local[2048] = {0};
+    int rcf = open("/etc/rc.local", O_RDONLY);
+    if (rcf >= 0) {
+        ssize_t r = read(rcf, rc_local, sizeof(rc_local) - 1);
+        close(rcf);
+        if (r > 0) rc_local[r] = '\0';
+    }
+    char esc_rc[4096] = {0};
+    Forensics_EscapeJson(rc_local, esc_rc, sizeof(esc_rc));
+
+    int off = snprintf(buf, cap,
+        "{\n"
+        "  \"ld_so_preload\": \"%s\",\n"
+        "  \"rc_local\": \"%s\",\n"
+        "  \"profile_scripts\": [\n",
+        esc_ld, esc_rc
+    );
+
+    // Enumerate /etc/profile.d
+    DIR* pd = opendir("/etc/profile.d");
+    if (pd) {
+        struct dirent* de;
+        const char* sep = "";
+        int pcount = 0;
+        while ((de = readdir(pd)) != NULL && pcount < 50) {
+            if (de->d_name[0] == '.') continue;
+            char esc_pname[128];
+            Forensics_EscapeJson(de->d_name, esc_pname, sizeof(esc_pname));
+            char entry[256];
+            int elen = snprintf(entry, sizeof(entry), "%s    \"%s\"", sep, esc_pname);
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                pcount++;
+            }
+        }
+        closedir(pd);
+    }
+
+    off += snprintf(buf + off, cap - off, "\n  ],\n  \"systemd_services\": [\n");
+
+    // Enumerate /etc/systemd/system
+    DIR* sd = opendir("/etc/systemd/system");
+    if (sd) {
+        struct dirent* de;
+        const char* sep = "";
+        int scount = 0;
+        while ((de = readdir(sd)) != NULL && scount < 50) {
+            if (de->d_name[0] == '.') continue;
+            char esc_sname[128];
+            Forensics_EscapeJson(de->d_name, esc_sname, sizeof(esc_sname));
+            char entry[256];
+            int elen = snprintf(entry, sizeof(entry), "%s    \"%s\"", sep, esc_sname);
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                scount++;
+            }
+        }
+        closedir(sd);
+    }
+
+    off += snprintf(buf + off, cap - off, "\n  ],\n  \"init_d_scripts\": [\n");
+
+    // Enumerate /etc/init.d
+    DIR* id = opendir("/etc/init.d");
+    if (id) {
+        struct dirent* de;
+        const char* sep = "";
+        int icount = 0;
+        while ((de = readdir(id)) != NULL && icount < 50) {
+            if (de->d_name[0] == '.') continue;
+            char esc_iname[128];
+            Forensics_EscapeJson(de->d_name, esc_iname, sizeof(esc_iname));
+            char entry[256];
+            int elen = snprintf(entry, sizeof(entry), "%s    \"%s\"", sep, esc_iname);
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                icount++;
+            }
+        }
+        closedir(id);
+    }
+
+    off += snprintf(buf + off, cap - off, "\n  ]\n}\n");
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 2. Scheduled Tasks
+static inline bool Forensics_CollectScheduledTasks(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > FORENSICS_MAX_ITEM_BYTES) {
+        max_bytes = FORENSICS_MAX_ITEM_BYTES;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return false;
+
+    // Read /etc/crontab
+    char crontab[4096] = {0};
+    int cf = open("/etc/crontab", O_RDONLY);
+    if (cf >= 0) {
+        ssize_t r = read(cf, crontab, sizeof(crontab) - 1);
+        close(cf);
+        if (r > 0) crontab[r] = '\0';
+    }
+    char* esc_crontab = (char*)malloc(sizeof(crontab) * 2 + 16);
+    if (esc_crontab) Forensics_EscapeJson(crontab, esc_crontab, sizeof(crontab) * 2 + 16);
+
+    int off = snprintf(buf, cap,
+        "{\n"
+        "  \"system_crontab\": \"%s\",\n"
+        "  \"cron_entries\": [\n",
+        esc_crontab ? esc_crontab : ""
+    );
+    if (esc_crontab) free(esc_crontab);
+
+    // Enumerate /etc/cron.d, cron.daily, etc.
+    const char* cron_dirs[] = { "/etc/cron.d", "/etc/cron.daily", "/etc/cron.hourly", "/etc/cron.weekly", "/etc/cron.monthly", NULL };
+    const char* sep = "";
+    int total_cron_files = 0;
+
+    for (int i = 0; cron_dirs[i] != NULL; i++) {
+        DIR* cd = opendir(cron_dirs[i]);
+        if (!cd) continue;
+        struct dirent* de;
+        while ((de = readdir(cd)) != NULL) {
+            if (de->d_name[0] == '.') continue;
+            char esc_name[128];
+            Forensics_EscapeJson(de->d_name, esc_name, sizeof(esc_name));
+            char entry[384];
+            int elen = snprintf(entry, sizeof(entry),
+                "%s    {\n"
+                "      \"directory\": \"%s\",\n"
+                "      \"file\": \"%s\"\n"
+                "    }",
+                sep, cron_dirs[i], esc_name
+            );
+            if ((size_t)(off + elen + 64) < cap) {
+                memcpy(buf + off, entry, elen);
+                off += elen;
+                buf[off] = '\0';
+                sep = ",\n";
+                total_cron_files++;
+            }
+        }
+        closedir(cd);
+    }
+
+    off += snprintf(buf + off, cap - off,
+        "\n  ],\n"
+        "  \"total_cron_files\": %d,\n"
+        "  \"systemd_timers\": [\n",
+        total_cron_files
+    );
+
+    // Try reading systemctl list-timers if available
+    char timer_out[16384] = {0};
+    size_t timer_len = 0;
+    const char* systemctl_bin = (access("/bin/systemctl", X_OK) == 0) ? "/bin/systemctl" :
+                                (access("/usr/bin/systemctl", X_OK) == 0 ? "/usr/bin/systemctl" : NULL);
+    if (systemctl_bin) {
+        const char* const timer_cmd[] = { systemctl_bin, "list-timers", "--all", "--no-pager", NULL };
+        Forensics_RunCommandCapture(timer_cmd, timer_out, sizeof(timer_out), &timer_len, 5);
+    }
+    char* esc_timers = (char*)malloc(timer_len * 2 + 16);
+    if (esc_timers) Forensics_EscapeJson(timer_out, esc_timers, timer_len * 2 + 16);
+
+    off += snprintf(buf + off, cap - off,
+        "    \"%s\"\n"
+        "  ]\n"
+        "}\n",
+        esc_timers ? esc_timers : ""
+    );
+    if (esc_timers) free(esc_timers);
+
+    *out_data = buf;
+    *out_size = (size_t)off;
+    *status = COLLECTOR_STATUS_COLLECTED;
+    return true;
+}
+
+// 3. Security Events
+static inline bool Forensics_CollectSecurityEvents(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > 256 * 1024) {
+        max_bytes = 128 * 1024;
+    }
+
+    const char* log_candidates[] = {
+        "/var/log/auth.log",
+        "/var/log/secure",
+        "/var/log/syslog",
+        NULL
+    };
+
+    const char* chosen = NULL;
+    for (int i = 0; log_candidates[i] != NULL; i++) {
+        if (access(log_candidates[i], R_OK) == 0) {
+            chosen = log_candidates[i];
+            break;
+        }
+    }
+
+    if (chosen) {
+        int fd = open(chosen, O_RDONLY);
+        if (fd >= 0) {
+            off_t sz = lseek(fd, 0, SEEK_END);
+            off_t start = 0;
+            if (sz > (off_t)max_bytes) {
+                start = sz - (off_t)max_bytes;
+            }
+            lseek(fd, start, SEEK_SET);
+
+            char* buf = (char*)malloc(max_bytes + 256);
+            if (!buf) { close(fd); return false; }
+
+            int header_len = snprintf(buf, 256, "# Source: %s (last %zu bytes of %lld total)\n", chosen, max_bytes, (long long)sz);
+            ssize_t bytes_read = read(fd, buf + header_len, max_bytes);
+            close(fd);
+
+            if (bytes_read >= 0) {
+                buf[header_len + bytes_read] = '\0';
+                *out_data = buf;
+                *out_size = (size_t)(header_len + bytes_read);
+                *status = (bytes_read == 0) ? COLLECTOR_STATUS_EMPTY : COLLECTOR_STATUS_COLLECTED;
+                return true;
+            }
+            free(buf);
+        }
+    }
+
+    // Fallback to journalctl
+    const char* journalctl_bin = (access("/bin/journalctl", X_OK) == 0) ? "/bin/journalctl" :
+                                 (access("/usr/bin/journalctl", X_OK) == 0 ? "/usr/bin/journalctl" : NULL);
+    if (journalctl_bin) {
+        char* buf = (char*)malloc(max_bytes + 256);
+        if (!buf) return false;
+        int header_len = snprintf(buf, 256, "# Source: journalctl -n 200 --no-pager\n");
+        size_t cap_out = 0;
+        const char* const cmd[] = { journalctl_bin, "-n", "200", "--no-pager", NULL };
+        Forensics_RunCommandCapture(cmd, buf + header_len, max_bytes, &cap_out, 5);
+        if (cap_out > 0) {
+            buf[header_len + cap_out] = '\0';
+            *out_data = buf;
+            *out_size = (size_t)(header_len + cap_out);
+            *status = COLLECTOR_STATUS_COLLECTED;
+            return true;
+        }
+        free(buf);
+    }
+
+    *status = COLLECTOR_STATUS_EMPTY;
+    char* empty_buf = strdup("# No security logs or journal entries available.\n");
+    if (!empty_buf) return false;
+    *out_data = empty_buf;
+    *out_size = strlen(empty_buf);
+    return true;
+}
+
+// 4. Shell History
+static inline bool Forensics_CollectShellHistory(char** out_data, size_t* out_size, ForensicCollectorStatus* status, size_t max_bytes) {
+    *status = COLLECTOR_STATUS_FAILED;
+    if (max_bytes == 0 || max_bytes > 256 * 1024) {
+        max_bytes = 256 * 1024;
+    }
+
+    size_t cap = 32768;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return false;
+    size_t off = 0;
+
+    const char* history_targets[16];
+    int target_count = 0;
+    history_targets[target_count++] = "/root/.bash_history";
+    history_targets[target_count++] = "/root/.zsh_history";
+
+    // Scan /home for user history files
+    char home_history[8][512];
+    int home_hist_count = 0;
+    DIR* hd = opendir("/home");
+    if (hd) {
+        struct dirent* de;
+        while ((de = readdir(hd)) != NULL && home_hist_count < 4) {
+            if (de->d_name[0] == '.') continue;
+            snprintf(home_history[home_hist_count], sizeof(home_history[0]), "/home/%s/.bash_history", de->d_name);
+            history_targets[target_count++] = home_history[home_hist_count++];
+        }
+        closedir(hd);
+    }
+
+    int files_collected = 0;
+    for (int i = 0; i < target_count; i++) {
+        const char* target_path = history_targets[i];
+        if (access(target_path, F_OK) != 0) continue;
+
+        int fd = open(target_path, O_RDONLY);
+        if (fd < 0) {
+            char header[512];
+            int hlen = snprintf(header, sizeof(header), "=== %s [permission denied] ===\n\n", target_path);
+            if (off + (size_t)hlen < max_bytes) {
+                if (off + (size_t)hlen >= cap) {
+                    char* grown = (char*)realloc(buf, cap * 2);
+                    if (grown) { buf = grown; cap *= 2; }
+                }
+                if (off + (size_t)hlen < cap) {
+                    memcpy(buf + off, header, hlen);
+                    off += (size_t)hlen;
+                    buf[off] = '\0';
+                }
+            }
+            continue;
+        }
+
+        off_t sz = lseek(fd, 0, SEEK_END);
+        size_t to_read = 32768; // last 32 KiB per file
+        off_t start = 0;
+        if (sz > (off_t)to_read) {
+            start = sz - (off_t)to_read;
+        } else {
+            to_read = (size_t)sz;
+        }
+        lseek(fd, start, SEEK_SET);
+
+        char header[512];
+        int hlen = snprintf(header, sizeof(header), "=== %s (%lld total bytes, tail %zu bytes) ===\n", target_path, (long long)sz, to_read);
+        if (off + (size_t)hlen + to_read + 32 >= cap) {
+            size_t new_cap = cap * 2;
+            while (new_cap <= off + (size_t)hlen + to_read + 32 && new_cap <= max_bytes) new_cap *= 2;
+            if (new_cap > max_bytes) new_cap = max_bytes;
+            char* grown = (char*)realloc(buf, new_cap);
+            if (grown) { buf = grown; cap = new_cap; }
+        }
+
+        if (off + (size_t)hlen < cap) {
+            memcpy(buf + off, header, hlen);
+            off += (size_t)hlen;
+        }
+
+        if (off + to_read < cap) {
+            ssize_t rd = read(fd, buf + off, to_read);
+            if (rd > 0) {
+                off += (size_t)rd;
+            }
+        }
+        close(fd);
+
+        if (off + 2 < cap) {
+            buf[off++] = '\n';
+            buf[off++] = '\n';
+            buf[off] = '\0';
+        }
+        files_collected++;
+    }
+
+    if (files_collected == 0 && off == 0) {
+        int hlen = snprintf(buf, cap, "# No shell history files found or accessible on endpoint.\n");
+        off = (size_t)hlen;
+        *status = COLLECTOR_STATUS_EMPTY;
+    } else {
+        *status = COLLECTOR_STATUS_COLLECTED;
+    }
+
+    buf[off] = '\0';
+    *out_data = buf;
+    *out_size = off;
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
  * Forensic Evidence Upload & Finalization Protocol
  * ------------------------------------------------------------------------- */
 
@@ -1999,6 +2407,107 @@ static inline bool Forensics_RunLiveVolatileCollection(
     );
 }
 
+static inline bool Forensics_RunIRStandardCollection(
+    const char* hub_url,
+    const char* api_key_or_cred,
+    bool is_device_credential,
+    const char* client_cert,
+    const char* client_key,
+    const char* ca_path,
+    const char* endpoint_id,
+    const char* tenant_id,
+    const char* job_id,
+    const char* bundle_id,
+    int64_t max_bytes,
+    char* out_manifest_sha256,
+    size_t sha_cap
+) {
+    ForensicCollectedItem items[18];
+    memset(items, 0, sizeof(items));
+    int item_count = 18;
+
+    // 1. Diagnostic suite
+    strncpy(items[0].name, "os_version.json", sizeof(items[0].name) - 1);
+    strncpy(items[0].content_type, "application/json", sizeof(items[0].content_type) - 1);
+    Forensics_CollectOSVersion((char**)&items[0].data, &items[0].size_bytes, &items[0].status);
+
+    strncpy(items[1].name, "network_interfaces.json", sizeof(items[1].name) - 1);
+    strncpy(items[1].content_type, "application/json", sizeof(items[1].content_type) - 1);
+    Forensics_CollectNetworkInterfaces((char**)&items[1].data, &items[1].size_bytes, &items[1].status);
+
+    strncpy(items[2].name, "routes.txt", sizeof(items[2].name) - 1);
+    strncpy(items[2].content_type, "text/plain", sizeof(items[2].content_type) - 1);
+    Forensics_CollectRoutes((char**)&items[2].data, &items[2].size_bytes, &items[2].status);
+
+    strncpy(items[3].name, "dns_config.txt", sizeof(items[3].name) - 1);
+    strncpy(items[3].content_type, "text/plain", sizeof(items[3].content_type) - 1);
+    Forensics_CollectDNSConfig((char**)&items[3].data, &items[3].size_bytes, &items[3].status);
+
+    strncpy(items[4].name, "resource_summary.json", sizeof(items[4].name) - 1);
+    strncpy(items[4].content_type, "application/json", sizeof(items[4].content_type) - 1);
+    Forensics_CollectResourceSummary((char**)&items[4].data, &items[4].size_bytes, &items[4].status);
+
+    strncpy(items[5].name, "service_state.json", sizeof(items[5].name) - 1);
+    strncpy(items[5].content_type, "application/json", sizeof(items[5].content_type) - 1);
+    Forensics_CollectServiceState((char**)&items[5].data, &items[5].size_bytes, &items[5].status);
+
+    strncpy(items[6].name, "system_logs.txt", sizeof(items[6].name) - 1);
+    strncpy(items[6].content_type, "text/plain", sizeof(items[6].content_type) - 1);
+    Forensics_CollectSystemLogs((char**)&items[6].data, &items[6].size_bytes, &items[6].status, 256 * 1024);
+
+    strncpy(items[7].name, "agent_diagnostics.json", sizeof(items[7].name) - 1);
+    strncpy(items[7].content_type, "application/json", sizeof(items[7].content_type) - 1);
+    Forensics_CollectAgentDiagnostics(endpoint_id, hub_url, (char**)&items[7].data, &items[7].size_bytes, &items[7].status);
+
+    // 2. Live volatile suite
+    strncpy(items[8].name, "process_snapshot.json", sizeof(items[8].name) - 1);
+    strncpy(items[8].content_type, "application/json", sizeof(items[8].content_type) - 1);
+    Forensics_CollectProcessSnapshot((char**)&items[8].data, &items[8].size_bytes, &items[8].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[9].name, "socket_to_process.json", sizeof(items[9].name) - 1);
+    strncpy(items[9].content_type, "application/json", sizeof(items[9].content_type) - 1);
+    Forensics_CollectSocketToProcess((char**)&items[9].data, &items[9].size_bytes, &items[9].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[10].name, "logged_in_sessions.json", sizeof(items[10].name) - 1);
+    strncpy(items[10].content_type, "application/json", sizeof(items[10].content_type) - 1);
+    Forensics_CollectLoggedInSessions((char**)&items[10].data, &items[10].size_bytes, &items[10].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[11].name, "network_neighbors.json", sizeof(items[11].name) - 1);
+    strncpy(items[11].content_type, "application/json", sizeof(items[11].content_type) - 1);
+    Forensics_CollectNetworkNeighbors((char**)&items[11].data, &items[11].size_bytes, &items[11].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[12].name, "firewall_state.json", sizeof(items[12].name) - 1);
+    strncpy(items[12].content_type, "application/json", sizeof(items[12].content_type) - 1);
+    Forensics_CollectFirewallState((char**)&items[12].data, &items[12].size_bytes, &items[12].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[13].name, "loaded_modules.json", sizeof(items[13].name) - 1);
+    strncpy(items[13].content_type, "application/json", sizeof(items[13].content_type) - 1);
+    Forensics_CollectLoadedModules((char**)&items[13].data, &items[13].size_bytes, &items[13].status, FORENSICS_MAX_ITEM_BYTES);
+
+    // 3. IR standard suite
+    strncpy(items[14].name, "persistence.json", sizeof(items[14].name) - 1);
+    strncpy(items[14].content_type, "application/json", sizeof(items[14].content_type) - 1);
+    Forensics_CollectPersistence((char**)&items[14].data, &items[14].size_bytes, &items[14].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[15].name, "scheduled_tasks.json", sizeof(items[15].name) - 1);
+    strncpy(items[15].content_type, "application/json", sizeof(items[15].content_type) - 1);
+    Forensics_CollectScheduledTasks((char**)&items[15].data, &items[15].size_bytes, &items[15].status, FORENSICS_MAX_ITEM_BYTES);
+
+    strncpy(items[16].name, "security_events.txt", sizeof(items[16].name) - 1);
+    strncpy(items[16].content_type, "text/plain", sizeof(items[16].content_type) - 1);
+    Forensics_CollectSecurityEvents((char**)&items[16].data, &items[16].size_bytes, &items[16].status, 128 * 1024);
+
+    strncpy(items[17].name, "shell_history.txt", sizeof(items[17].name) - 1);
+    strncpy(items[17].content_type, "text/plain", sizeof(items[17].content_type) - 1);
+    Forensics_CollectShellHistory((char**)&items[17].data, &items[17].size_bytes, &items[17].status, 256 * 1024);
+
+    return Forensics_PublishBundleAndFinalize(
+        hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+        endpoint_id, tenant_id, job_id, bundle_id, "ir_standard", max_bytes,
+        items, item_count, out_manifest_sha256, sha_cap
+    );
+}
+
 static inline bool Forensics_RunCollection(
     const char* profile,
     const char* hub_url,
@@ -2022,6 +2531,11 @@ static inline bool Forensics_RunCollection(
         );
     } else if (strcmp(profile, "live_volatile") == 0) {
         return Forensics_RunLiveVolatileCollection(
+            hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
+            endpoint_id, tenant_id, job_id, bundle_id, max_bytes, out_manifest_sha256, sha_cap
+        );
+    } else if (strcmp(profile, "ir_standard") == 0) {
+        return Forensics_RunIRStandardCollection(
             hub_url, api_key_or_cred, is_device_credential, client_cert, client_key, ca_path,
             endpoint_id, tenant_id, job_id, bundle_id, max_bytes, out_manifest_sha256, sha_cap
         );

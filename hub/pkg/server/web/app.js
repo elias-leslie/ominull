@@ -1618,9 +1618,12 @@
       }
 
       menu.appendChild(h("div", { cls: "sep" }));
-      menu.appendChild(h("div", { cls: "lbl", text: "Response & Shell" }));
+      menu.appendChild(h("div", { cls: "lbl", text: "Response & Forensics" }));
       menu.appendChild(menuItem("Launch Terminal Shell\u2026", "i-unlock", null, function () {
         launchTerminalShell(asset);
+      }));
+      menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
+        launchForensicsSheet(asset);
       }));
     } else {
       // ----------------- Unassigned / Discovered asset menu
@@ -6022,25 +6025,302 @@
     view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard));
   }
 
+  function launchForensicsSheet(asset) {
+    if (!asset || !asset.endpoint) {
+      toast("Cannot collect forensics: host does not have an enrolled agent.", "crit");
+      return;
+    }
+
+    if (!state.responseSession || !ephemeralResponseKey) {
+      openUnlockResponseSheet(function () {
+        launchForensicsSheet(asset);
+      });
+      return;
+    }
+
+    var ep = asset.endpoint;
+
+    var profileSel = h("select", { id: "forensics-profile-select", cls: "select" });
+    profileSel.appendChild(h("option", { value: "diagnostic", text: "Diagnostic (8 artifacts: OS, Net, Routes, DNS, Resources, Services, Logs, Diag)" }));
+    profileSel.appendChild(h("option", { value: "live_volatile", text: "Live Volatile (14 artifacts: Diagnostic + Processes, Sockets, Sessions, Neighbors, Firewall, Modules)" }));
+    profileSel.appendChild(h("option", { value: "ir_standard", text: "IR Standard (18 artifacts: Full Triage + Persistence, Tasks, Security Logs, Shell History)" }));
+    profileSel.value = "ir_standard";
+
+    var profileDesc = h("p", { cls: "pending", text: "IR Standard Profile: Comprehensive endpoint triage collecting all 18 artifacts across diagnostic, volatile memory/network state, autoruns/persistence, cron/scheduled tasks, authentication/security logs, and user shell history. Cryptographically signed with Ed25519." });
+
+    profileSel.addEventListener("change", function () {
+      if (profileSel.value === "diagnostic") {
+        profileDesc.textContent = "Diagnostic Profile: Standard baseline telemetry (8 artifacts) including OS build, network interfaces, routing tables, DNS resolution, system resources, service manager state, syslog tail, and agent diagnostics.";
+      } else if (profileSel.value === "live_volatile") {
+        profileDesc.textContent = "Live Volatile Profile: Real-time volatile system state (14 artifacts) including process tree, active socket-to-PID mappings, logged-in sessions, ARP/NDP neighbors, host firewall rules, and loaded kernel/driver modules.";
+      } else {
+        profileDesc.textContent = "IR Standard Profile: Comprehensive endpoint triage collecting all 18 artifacts across diagnostic, volatile memory/network state, autoruns/persistence, cron/scheduled tasks, authentication/security logs, and user shell history. Cryptographically signed with Ed25519.";
+      }
+    });
+
+    var maxBytesSel = h("select", { id: "forensics-maxbytes-select", cls: "select" });
+    maxBytesSel.appendChild(h("option", { value: "524288", text: "512 KiB per artifact (10 MiB bundle cap - Recommended)" }));
+    maxBytesSel.appendChild(h("option", { value: "262144", text: "256 KiB per artifact" }));
+    maxBytesSel.appendChild(h("option", { value: "1048576", text: "1024 KiB per artifact" }));
+
+    var timeoutSel = h("select", { id: "forensics-timeout-select", cls: "select" });
+    timeoutSel.appendChild(h("option", { value: "120", text: "120 seconds (Recommended for IR Standard / Volatile)" }));
+    timeoutSel.appendChild(h("option", { value: "60", text: "60 seconds (Standard for Diagnostic)" }));
+    timeoutSel.appendChild(h("option", { value: "300", text: "300 seconds (High Latency / Deep Inspection)" }));
+
+    var errBox = h("div", { cls: "msg-err", hidden: true });
+
+    var launchBtn = h("button", {
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Dispatch Forensic Collection",
+      on: {
+        click: function () {
+          var prof = profileSel.value;
+          var maxB = parseInt(maxBytesSel.value, 10) || 524288;
+          var toSec = parseInt(timeoutSel.value, 10) || 120;
+
+          launchBtn.disabled = true;
+          launchBtn.textContent = "Signing Proof & Dispatching\u2026";
+          errBox.setAttribute("hidden", "");
+
+          var payload = {
+            profile: prof,
+            max_bytes: maxB,
+            timeout_seconds: toSec
+          };
+          var payloadStr = JSON.stringify(payload);
+
+          digestSHA256(payloadStr)
+            .then(function (digestHex) {
+              return signActionProof("forensic_collection", digestHex, [ep.id])
+                .then(function (proof) {
+                  return request("/api/v1/response/jobs", "POST", {
+                    endpoint_id: ep.id,
+                    kind: "forensic_collection",
+                    payload_json: payloadStr,
+                    session_id: state.responseSession.session_id,
+                    action_digest: digestHex,
+                    proof: proof
+                  });
+                });
+            })
+            .then(function (job) {
+              closeSheet();
+              toast("Forensic collection job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "\u2026). Target: " + (asset.name || asset.ip), "ok");
+              state.section = "forensics";
+              go("forensics");
+              refresh();
+            })
+            .catch(function (err) {
+              launchBtn.disabled = false;
+              launchBtn.textContent = "Dispatch Forensic Collection";
+              errBox.textContent = err.message || "Failed to dispatch forensic collection.";
+              errBox.removeAttribute("hidden");
+            });
+        }
+      }
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Target Host: " }), h("b", { text: asset.name || asset.ip }),
+        h("span", { cls: "dim-2", text: " \u00b7 Endpoint ID: " }), h("span", { cls: "ip", text: ep.id })
+      ),
+      h("div", { cls: "form-row" },
+        h("span", { cls: "dim-2", text: "Platform: " }), h("b", { text: ep.os || "Linux" }),
+        h("span", { cls: "dim-2", text: " \u00b7 Isolation: " }), h("span", { cls: asset.isolated ? "badge badge-crit" : "badge badge-ok", text: asset.isolated ? "ISOLATED" : "Online" })
+      ),
+      h("p", { cls: "pending", text: "Forensic collections run under the response authority with signed ActionProof V2. The agent collects forensic telemetry in-process, validates size bounds, computes SHA-256 digests, and generates an Ed25519-signed canonical manifest." }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "forensics-profile-select", text: "Select Collection Profile:" }),
+        profileSel
+      ),
+      profileDesc,
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "forensics-maxbytes-select", text: "Artifact Size Bound:" }),
+        maxBytesSel
+      ),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "forensics-timeout-select", text: "Execution Timeout:" }),
+        timeoutSel
+      ),
+      errBox
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      launchBtn
+    ];
+
+    openSheet("Dispatch Forensic Collection", body, foot);
+  }
+
+  function openLaunchForensicsPicker() {
+    var managed = (state.assets || []).filter(function (a) { return a.endpoint; });
+    if (!managed.length) {
+      toast("No agent-managed endpoints online.", "warn");
+      return;
+    }
+
+    var sel = h("select", { cls: "select", id: "forensics-target-picker" });
+    managed.forEach(function (a) {
+      sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ") - " + a.endpoint.id }));
+    });
+
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "Select an enrolled endpoint to dispatch an authenticated forensic collection job:" }),
+      h("div", { cls: "form-row stack-s" },
+        h("label", { "for": "forensics-target-picker", text: "Target Endpoint:" }),
+        sel
+      )
+    );
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      h("button", {
+        cls: "btn btn-primary", type: "button", text: "Next \u2192",
+        on: {
+          click: function () {
+            var asset = state.assetByKey[sel.value];
+            closeSheet();
+            if (asset) launchForensicsSheet(asset);
+          }
+        }
+      })
+    ];
+
+    openSheet("Select Target Endpoint for Forensics", body, foot);
+  }
+
+  function toggleBundleHold(bundleId, currentHold) {
+    var newHold = !currentHold;
+    var reason = newHold ? "Compliance legal hold applied by operator" : "Compliance legal hold released by operator";
+    request("/api/v1/evidence/bundles/hold", "POST", {
+      bundle_id: bundleId,
+      hold: newHold,
+      reason: reason
+    })
+      .then(function () {
+        toast(newHold ? "Legal hold locked on bundle " + (bundleId ? bundleId.slice(0, 8) : "") + "\u2026" : "Legal hold released on bundle " + (bundleId ? bundleId.slice(0, 8) : "") + "\u2026", "ok");
+        refresh();
+      })
+      .catch(function (err) {
+        toast("Failed to update legal hold: " + (err.message || err), "crit");
+      });
+  }
+
+  function inspectBundle(bundleId) {
+    var b = (state.evidenceBundles || []).find(function (x) { return x.id === bundleId; });
+    var loadingEl = h("div", { cls: "card-body", text: "Loading bundle items\u2026" });
+    var body = h("div", { cls: "stack" }, loadingEl);
+
+    var foot = [
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
+      h("a", {
+        cls: "btn btn-primary",
+        href: "/api/v1/evidence/export?id=" + encodeURIComponent(bundleId),
+        text: "Export Archive (.tar.gz)"
+      })
+    ];
+
+    openSheet("Inspect Evidence Bundle \u2014 " + (bundleId ? bundleId.slice(0, 8) + "\u2026" : ""), body, foot);
+
+    request("/api/v1/evidence/items?bundle_id=" + encodeURIComponent(bundleId))
+      .then(function (resp) {
+        clear(body);
+        var metaRows = [
+          [h("span", { cls: "dim-2", text: "Bundle ID:" }), h("span", { cls: "ip", text: bundleId })],
+          [h("span", { cls: "dim-2", text: "Endpoint:" }), h("span", { text: (b && b.endpoint_id) || "Unknown" })],
+          [h("span", { cls: "dim-2", text: "Profile:" }), h("span", { cls: "badge", text: (b && b.profile) || "Unknown" })],
+          [h("span", { cls: "dim-2", text: "Status:" }), h("span", { cls: b && b.status === "completed" ? "badge badge-ok" : "badge badge-warn", text: (b && b.status) || "pending" })],
+          [h("span", { cls: "dim-2", text: "Legal Hold:" }), h("span", { cls: b && b.legal_hold ? "badge badge-crit" : "dim-3", text: b && b.legal_hold ? "LOCKED (HOLD)" : "Normal" })],
+          [h("span", { cls: "dim-2", text: "Collected:" }), stamp(parseTime(b && b.created_at))]
+        ];
+
+        var summaryCard = h("div", { cls: "card-body stack-s" },
+          simpleTable(["Field", "Value"], metaRows)
+        );
+
+        var items = (resp && resp.items) || [];
+        var itemRows = items.map(function (it) {
+          var statusCls = "badge";
+          if (it.collector_status === "collected") statusCls = "badge badge-ok";
+          else if (it.collector_status === "empty" || it.collector_status === "truncated") statusCls = "badge badge-warn";
+          else if (it.collector_status === "permission_denied" || it.collector_status === "failed") statusCls = "badge badge-crit";
+
+          var shortSha = it.sha256 ? it.sha256.slice(0, 12) + "\u2026" : "\u2014";
+          return [
+            h("b", { text: it.name || "" }),
+            h("span", { cls: statusCls, text: it.collector_status || "unknown" }),
+            h("span", { text: bytes(it.size_bytes) }),
+            h("span", { cls: "dim-3", text: it.content_type || "application/octet-stream" }),
+            h("span", { cls: "ip", title: it.sha256 || "", text: shortSha })
+          ];
+        });
+
+        var itemsTable = items.length
+          ? simpleTable(["Artifact Name", "Status", "Size", "Content Type", "SHA-256"], itemRows)
+          : h("div", { cls: "card-body", text: "No individual artifacts registered in this bundle." });
+
+        body.appendChild(summaryCard);
+        body.appendChild(h("h3", { cls: "section-head", text: "Manifest Artifacts (" + items.length + ")" }));
+        body.appendChild(itemsTable);
+      })
+      .catch(function (err) {
+        clear(body);
+        body.appendChild(h("div", { cls: "msg-err", text: "Failed to load bundle artifacts: " + (err.message || err) }));
+      });
+  }
+
   function renderForensics() {
     var view = $("view");
     clear(view);
 
+    var collectBtn = h("button", {
+      cls: "btn btn-primary",
+      type: "button",
+      text: "Collect Forensics\u2026",
+      on: { click: openLaunchForensicsPicker }
+    });
+
     var bundleRows = (state.evidenceBundles || []).map(function (b) {
+      var actCell = h("div", { cls: "form-row" },
+        h("button", {
+          cls: "btn",
+          type: "button",
+          text: "Inspect",
+          on: { click: function () { inspectBundle(b.id); } }
+        }),
+        h("a", {
+          cls: "btn",
+          href: "/api/v1/evidence/export?id=" + encodeURIComponent(b.id),
+          text: "Export"
+        }),
+        h("button", {
+          cls: b.legal_hold ? "btn btn-crit" : "btn",
+          type: "button",
+          text: b.legal_hold ? "Release Hold" : "Lock Hold",
+          on: { click: function () { toggleBundleHold(b.id, b.legal_hold); } }
+        })
+      );
+
       return [
-        h("span", { cls: "ip", text: b.id ? b.id.slice(0, 8) + "..." : "" }),
+        h("span", { cls: "ip", text: b.id ? b.id.slice(0, 8) + "\u2026" : "" }),
         h("span", { text: b.endpoint_id || "" }),
-        h("span", { text: b.profile || "" }),
+        h("span", { cls: "badge", text: b.profile || "" }),
         h("span", { cls: b.status === "completed" ? "badge badge-ok" : "badge badge-warn", text: b.status || "" }),
         h("span", { text: b.item_count ? String(b.item_count) : "0" }),
-        h("span", { text: b.legal_hold ? "LOCKED (HOLD)" : "normal" }),
+        h("span", { cls: b.legal_hold ? "badge badge-crit" : "dim-3", text: b.legal_hold ? "LOCKED (HOLD)" : "Normal" }),
         stamp(parseTime(b.created_at)),
-        h("a", { cls: "btn btn-subtle", href: "/api/v1/evidence/export?id=" + encodeURIComponent(b.id), text: "Export (.tar.gz)" })
+        actCell
       ];
     });
 
     var evidenceCard = card("Forensic Evidence Bundles (AES-256-GCM Encrypted)",
-      bundleRows.length ? simpleTable(["Bundle ID", "Endpoint", "Profile", "Status", "Items", "Hold", "Collected", "Actions"], bundleRows) : h("div", { cls: "card-body", text: "No forensic collections recorded yet." })
+      bundleRows.length ? simpleTable(["Bundle ID", "Endpoint", "Profile", "Status", "Items", "Hold", "Collected", "Actions"], bundleRows) : h("div", { cls: "card-body", text: "No forensic collections recorded yet." }),
+      [collectBtn],
+      true
     );
 
     var vulRows = (state.vulnerabilities || []).map(function (v) {
@@ -7194,6 +7474,10 @@
     window.__launchTerminalShell = launchTerminalShell;
     window.__openLaunchEndpointShellPicker = openLaunchEndpointShellPicker;
     window.__openTerminalEmulator = openTerminalEmulator;
+    window.__launchForensicsSheet = launchForensicsSheet;
+    window.__openLaunchForensicsPicker = openLaunchForensicsPicker;
+    window.__inspectBundle = inspectBundle;
+    window.__toggleBundleHold = toggleBundleHold;
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

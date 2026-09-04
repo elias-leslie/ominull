@@ -467,3 +467,56 @@ func TestServer_EvidencePruneAPI(t *testing.T) {
 		t.Fatalf("expected b2 to be preserved under legal hold, got: %v", err)
 	}
 }
+
+func TestServer_EvidenceItemsQueryAPI(t *testing.T) {
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+
+	handler := srv.Handler()
+	tenantID := "default"
+	endpointID := "ep-items-query"
+
+	// 1. Create Bundle
+	bundle, err := srv.evidenceStore.CreateBundle(tenantID, endpointID, "job-iq-1", "ir_standard", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBundle failed: %v", err)
+	}
+
+	// 2. Upload two items
+	_, err = srv.evidenceStore.StoreItem(tenantID, bundle.ID, "persistence.json", "application/json", "collected", []byte(`{"services":[]}`))
+	if err != nil {
+		t.Fatalf("StoreItem 1 failed: %v", err)
+	}
+	_, err = srv.evidenceStore.StoreItem(tenantID, bundle.ID, "scheduled_tasks.json", "application/json", "collected", []byte(`{"tasks":[]}`))
+	if err != nil {
+		t.Fatalf("StoreItem 2 failed: %v", err)
+	}
+
+	// 3. Query items via GET /api/v1/evidence/items?bundle_id=...
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/evidence/items?bundle_id="+bundle.ID, nil)
+	req.Header.Set("X-API-Key", "test-admin-key-12345")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var res struct {
+		BundleID string                  `json:"bundle_id"`
+		Items    []evidence.EvidenceItem `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode items query response: %v", err)
+	}
+	if res.BundleID != bundle.ID {
+		t.Fatalf("bundle ID mismatch: %s vs %s", res.BundleID, bundle.ID)
+	}
+	if len(res.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(res.Items))
+	}
+	if res.Items[0].Name != "persistence.json" || res.Items[1].Name != "scheduled_tasks.json" {
+		t.Fatalf("unexpected items order/names: %+v", res.Items)
+	}
+}
+
