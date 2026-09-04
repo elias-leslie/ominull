@@ -22,6 +22,84 @@
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_windows.h"
 #include "../include/forensics_windows.h"
+#include "../include/script_exec_windows.h"
+
+typedef struct {
+    AGENT_CONFIG config;
+    char job_id[64];
+    char lease_id[64];
+    char* payload_json;
+} ScriptWorkerThreadArgsWin;
+
+static DWORD WINAPI ScriptWorkerThreadProcWin(LPVOID lpParam) {
+    ScriptWorkerThreadArgsWin* args = (ScriptWorkerThreadArgsWin*)lpParam;
+    if (!args) return 1;
+
+    ScriptExecParamsWin params;
+    if (!ScriptExec_ParsePayloadWin(args->payload_json, &params)) {
+        char res_body[512];
+        snprintf(res_body, sizeof(res_body),
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"failed\",\"exit_code\":1,\"duration_ms\":0,\"error_code\":\"INVALID_PAYLOAD\"}",
+            args->job_id, args->lease_id);
+        Hub_PostPathJSON(&args->config, "/api/v1/response/jobs/result", res_body, NULL, 0);
+        if (args->payload_json) free(args->payload_json);
+        free(args);
+        return 1;
+    }
+
+    size_t out_alloc = params.max_output_bytes + 2048;
+    char* output_buf = (char*)calloc(1, out_alloc);
+    if (!output_buf) {
+        if (args->payload_json) free(args->payload_json);
+        free(args);
+        return 1;
+    }
+
+    bool truncated = false;
+    bool timed_out = false;
+    int64_t duration_ms = 0;
+    char error_code[64] = {0};
+
+    int exit_code = ScriptExec_RunContainedWin(
+        &params,
+        args->job_id,
+        output_buf,
+        out_alloc,
+        &truncated,
+        &timed_out,
+        &duration_ms,
+        error_code,
+        sizeof(error_code)
+    );
+
+    const char* state = (exit_code == 0) ? "succeeded" : "failed";
+    if (timed_out && error_code[0] == '\0') {
+        strncpy(error_code, "TIMED_OUT", sizeof(error_code) - 1);
+    }
+
+    char* escaped_out = ScriptExec_EscapeJSONWin(output_buf);
+    size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
+    char* res_body = (char*)malloc(body_sz);
+    if (res_body) {
+        snprintf(res_body, body_sz,
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
+            args->job_id, args->lease_id, state, exit_code, (long long)duration_ms,
+            (escaped_out ? ",\"stdout\":\"" : ""),
+            (escaped_out ? escaped_out : ""),
+            (escaped_out ? "\"" : ""),
+            (error_code[0] ? ",\"error_code\":\"" : ""),
+            (error_code[0] ? error_code : ""),
+            (error_code[0] ? "\"" : ""));
+        Hub_PostPathJSON(&args->config, "/api/v1/response/jobs/result", res_body, NULL, 0);
+        free(res_body);
+    }
+
+    if (escaped_out) free(escaped_out);
+    free(output_buf);
+    if (args->payload_json) free(args->payload_json);
+    free(args);
+    return 0;
+}
 
 typedef struct {
     AGENT_CONFIG config;
@@ -150,6 +228,29 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
                 HANDLE hThread = CreateThread(NULL, 0, TerminalWorkerThreadProc, args, 0, NULL);
                 if (hThread) {
                     CloseHandle(hThread);
+                } else {
+                    free(args);
+                }
+            }
+        } else if (strcmp(offer->kind, "script_exec") == 0) {
+            ScriptWorkerThreadArgsWin* args = (ScriptWorkerThreadArgsWin*)malloc(sizeof(ScriptWorkerThreadArgsWin));
+            if (args) {
+                memcpy(&args->config, config, sizeof(AGENT_CONFIG));
+                strncpy(args->job_id, offer->job_id, sizeof(args->job_id) - 1);
+                args->job_id[sizeof(args->job_id) - 1] = '\0';
+                strncpy(args->lease_id, offer->lease_id, sizeof(args->lease_id) - 1);
+                args->lease_id[sizeof(args->lease_id) - 1] = '\0';
+                args->payload_json = (char*)malloc(offer->payload_len + 1);
+                if (args->payload_json) {
+                    memcpy(args->payload_json, offer->payload_json, offer->payload_len);
+                    args->payload_json[offer->payload_len] = '\0';
+                    HANDLE hThread = CreateThread(NULL, 0, ScriptWorkerThreadProcWin, args, 0, NULL);
+                    if (hThread) {
+                        CloseHandle(hThread);
+                    } else {
+                        free(args->payload_json);
+                        free(args);
+                    }
                 } else {
                     free(args);
                 }
