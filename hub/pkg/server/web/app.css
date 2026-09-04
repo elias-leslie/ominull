@@ -3208,9 +3208,40 @@ input[type="url"] {
 
 /* ------------------------------------------------------------- Terminal Window & Emulator */
 .sheet-terminal {
-  width: min(1080px, calc(100vw - 24px));
-  height: min(740px, calc(100vh - 24px));
-  background: var(--surface);
+  width: min(1180px, calc(100vw - 24px));
+  height: min(780px, calc(100vh - 24px));
+  background: #0d1117 !important;
+  border: 1px solid #30363d;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.94), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.sheet-terminal .sheet-head {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+}
+
+.sheet-terminal .sheet-body {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: #0d1117 !important;
+}
+
+.sheet-terminal .sheet-foot {
+  background: #161b22;
+  border-top: 1px solid #30363d;
+}
+
+.sheet-terminal-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  background: #0d1117 !important;
 }
 
 .terminal-meta-bar {
@@ -3219,11 +3250,11 @@ input[type="url"] {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--s-2);
-  padding: 6px var(--s-3);
-  background: var(--raised);
-  border-bottom: 1px solid var(--line);
+  padding: 8px var(--s-3);
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
   font-size: var(--t-2);
-  color: var(--ink-2);
+  color: #8b949e;
   flex: none;
 }
 
@@ -3236,18 +3267,25 @@ input[type="url"] {
 .terminal-container {
   flex: 1;
   min-height: 0;
-  background: #0a0c10;
-  padding: 8px 10px;
+  height: 100%;
+  background: #0d1117 !important;
+  padding: 10px 14px;
   position: relative;
   overflow: hidden;
 }
 
-.terminal-container .xterm {
-  height: 100%;
+.terminal-container .xterm,
+.terminal-container .xterm-viewport,
+.terminal-container .xterm-screen,
+.terminal-container canvas {
+  background-color: #0d1117 !important;
+  background: #0d1117 !important;
+  opacity: 1 !important;
 }
 
-.terminal-container .xterm-viewport {
-  background-color: #0a0c10 !important;
+.terminal-container .xterm {
+  height: 100%;
+  width: 100%;
 }
 
 .terminal-overlay-msg {

@@ -349,13 +349,16 @@ static inline int Terminal_RunLinuxWorker(
             close(fd);
         }
 
-        // Minimal sanitized environment
+        // Full color sanitized environment
         clearenv();
         setenv("TERM", "xterm-256color", 1);
-        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+        setenv("COLORTERM", "truecolor", 1);
+        setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
         setenv("HOME", "/root", 1);
         setenv("USER", "root", 1);
+        setenv("LOGNAME", "root", 1);
         setenv("SHELL", program, 1);
+        setenv("LS_COLORS", "rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.zip=01;31:*.gz=01;31:*.deb=01;31:*.rpm=01;31:*.sh=01;32:", 1);
 
         // Explicit safe working directory
         if (chdir("/var/lib/ominull") != 0) {
@@ -364,7 +367,31 @@ static inline int Terminal_RunLinuxWorker(
             }
         }
 
-        execl(program, program, (char*)NULL);
+        // Establish colored shell environment & prompt
+        const char* rc_path = "/var/lib/ominull/.bashrc_terminal";
+        FILE* f_rc = fopen(rc_path, "w");
+        if (f_rc) {
+            fputs("if [ -f /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi\n"
+                  "if [ -f /etc/profile ]; then . /etc/profile; fi\n"
+                  "if [ -f /root/.bashrc ]; then . /root/.bashrc; fi\n"
+                  "alias ls='ls --color=auto'\n"
+                  "alias ll='ls -la --color=auto'\n"
+                  "alias grep='grep --color=auto'\n"
+                  "export PS1='\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '\n", f_rc);
+            fclose(f_rc);
+        }
+
+        if (strcmp(program, "/bin/bash") == 0) {
+            if (access(rc_path, R_OK) == 0) {
+                execl(program, "bash", "--rcfile", rc_path, "-i", (char*)NULL);
+            } else {
+                execl(program, "bash", "-l", "-i", (char*)NULL);
+            }
+        } else if (strcmp(program, "/bin/sh") == 0) {
+            execl(program, "sh", "-i", (char*)NULL);
+        } else {
+            execl(program, program, "-i", (char*)NULL);
+        }
         _exit(127);
     }
 

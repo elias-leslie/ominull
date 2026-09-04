@@ -6116,7 +6116,7 @@
       )
     ];
 
-    var body = h("div", { cls: "stack-s", style: { display: "flex", flexDirection: "column", height: "100%" } },
+    var body = h("div", { cls: "sheet-terminal-wrapper" },
       metaBar,
       termContainer
     );
@@ -6132,18 +6132,38 @@
       return;
     }
 
-    // Initialize xterm
+    // Initialize xterm with full 16-color ANSI palette and opaque background
     term = new window.Terminal({
       cursorBlink: true,
       cursorStyle: "block",
       convertEol: true,
-      fontFamily: "IBM Plex Mono, Menlo, monospace",
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
       fontSize: 13,
+      lineHeight: 1.25,
+      letterSpacing: 0.5,
+      allowTransparency: false,
       theme: {
-        background: "#0a0c10",
-        foreground: "#e2e6eb",
-        cursor: "#3498db",
-        selectionBackground: "rgba(52, 152, 219, 0.3)"
+        background: "#0d1117",
+        foreground: "#c9d1d9",
+        cursor: "#58a6ff",
+        cursorAccent: "#0d1117",
+        selectionBackground: "rgba(56, 139, 253, 0.4)",
+        black: "#484f58",
+        red: "#ff7b72",
+        green: "#3fb950",
+        yellow: "#d29922",
+        blue: "#58a6ff",
+        magenta: "#bc8cff",
+        cyan: "#39c5cf",
+        white: "#b1bac4",
+        brightBlack: "#6e7681",
+        brightRed: "#ffa198",
+        brightGreen: "#56d364",
+        brightYellow: "#e3b341",
+        brightBlue: "#79c0ff",
+        brightMagenta: "#d2a8ff",
+        brightCyan: "#56d4dd",
+        brightWhite: "#f0f6fc"
       },
       allowProposedApi: false,
       scrollback: 5000
