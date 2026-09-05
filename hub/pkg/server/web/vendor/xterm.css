@@ -283,3 +283,23 @@
 .xterm .xterm-scrollable-element > .shadow.top.left {
 	box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;
 }
+
+/* 16-color ANSI Palette for xterm DOM renderer */
+.xterm span[class*="xterm-fg-0"], .xterm .xterm-fg-0 { color: #484f58 !important; }
+.xterm span[class*="xterm-fg-1"], .xterm .xterm-fg-1 { color: #ff7b72 !important; }
+.xterm span[class*="xterm-fg-2"], .xterm .xterm-fg-2 { color: #3fb950 !important; }
+.xterm span[class*="xterm-fg-3"], .xterm .xterm-fg-3 { color: #d29922 !important; }
+.xterm span[class*="xterm-fg-4"], .xterm .xterm-fg-4 { color: #58a6ff !important; }
+.xterm span[class*="xterm-fg-5"], .xterm .xterm-fg-5 { color: #bc8cff !important; }
+.xterm span[class*="xterm-fg-6"], .xterm .xterm-fg-6 { color: #39c5cf !important; }
+.xterm span[class*="xterm-fg-7"], .xterm .xterm-fg-7 { color: #b1bac4 !important; }
+.xterm span[class*="xterm-fg-8"], .xterm .xterm-fg-8 { color: #6e7681 !important; }
+.xterm span[class*="xterm-fg-9"], .xterm .xterm-fg-9 { color: #ffa198 !important; }
+.xterm span[class*="xterm-fg-10"], .xterm .xterm-fg-10 { color: #56d364 !important; }
+.xterm span[class*="xterm-fg-11"], .xterm .xterm-fg-11 { color: #e3b341 !important; }
+.xterm span[class*="xterm-fg-12"], .xterm .xterm-fg-12 { color: #79c0ff !important; }
+.xterm span[class*="xterm-fg-13"], .xterm .xterm-fg-13 { color: #d2a8ff !important; }
+.xterm span[class*="xterm-fg-14"], .xterm .xterm-fg-14 { color: #56d4dd !important; }
+.xterm span[class*="xterm-fg-15"], .xterm .xterm-fg-15 { color: #f0f6fc !important; }
+.xterm span[class*="xterm-bold"], .xterm .xterm-bold { font-weight: bold; }
+.xterm span[class*="xterm-dim"], .xterm .xterm-dim { opacity: 0.6; }

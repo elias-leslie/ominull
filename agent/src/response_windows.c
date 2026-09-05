@@ -152,11 +152,8 @@ static DWORD WINAPI TerminalWorkerThreadProc(LPVOID lpParam) {
     TerminalWorkerThreadArgs* args = (TerminalWorkerThreadArgs*)lpParam;
     if (!args) return 1;
 
-    bool is_https = (strncmp(args->config.hub_url, "https://", 8) == 0);
     Terminal_RunWindowsWorker(
-        args->config.hub_url,
-        is_https,
-        args->config.endpoint_id,
+        &args->config,
         args->params.session_id,
         args->params.connect_token,
         args->params.program

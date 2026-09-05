@@ -154,7 +154,7 @@ func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
 		scriptSrc += " 'nonce-" + scriptNonce + "'"
 	}
 	h.Set("Content-Security-Policy",
-		"default-src 'none'; script-src "+scriptSrc+"; style-src 'self'; font-src 'self'; "+
+		"default-src 'none'; script-src "+scriptSrc+"; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
 			"img-src 'self' data:; connect-src 'self'; form-action 'self'; "+
 			"manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 }

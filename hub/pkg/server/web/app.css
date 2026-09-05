@@ -3288,6 +3288,26 @@ input[type="url"] {
   width: 100%;
 }
 
+/* 16-color ANSI Palette for xterm DOM renderer */
+.terminal-container .xterm span[class*="xterm-fg-0"], .terminal-container .xterm .xterm-fg-0 { color: #484f58 !important; }
+.terminal-container .xterm span[class*="xterm-fg-1"], .terminal-container .xterm .xterm-fg-1 { color: #ff7b72 !important; }
+.terminal-container .xterm span[class*="xterm-fg-2"], .terminal-container .xterm .xterm-fg-2 { color: #3fb950 !important; }
+.terminal-container .xterm span[class*="xterm-fg-3"], .terminal-container .xterm .xterm-fg-3 { color: #d29922 !important; }
+.terminal-container .xterm span[class*="xterm-fg-4"], .terminal-container .xterm .xterm-fg-4 { color: #58a6ff !important; }
+.terminal-container .xterm span[class*="xterm-fg-5"], .terminal-container .xterm .xterm-fg-5 { color: #bc8cff !important; }
+.terminal-container .xterm span[class*="xterm-fg-6"], .terminal-container .xterm .xterm-fg-6 { color: #39c5cf !important; }
+.terminal-container .xterm span[class*="xterm-fg-7"], .terminal-container .xterm .xterm-fg-7 { color: #b1bac4 !important; }
+.terminal-container .xterm span[class*="xterm-fg-8"], .terminal-container .xterm .xterm-fg-8 { color: #6e7681 !important; }
+.terminal-container .xterm span[class*="xterm-fg-9"], .terminal-container .xterm .xterm-fg-9 { color: #ffa198 !important; }
+.terminal-container .xterm span[class*="xterm-fg-10"], .terminal-container .xterm .xterm-fg-10 { color: #56d364 !important; }
+.terminal-container .xterm span[class*="xterm-fg-11"], .terminal-container .xterm .xterm-fg-11 { color: #e3b341 !important; }
+.terminal-container .xterm span[class*="xterm-fg-12"], .terminal-container .xterm .xterm-fg-12 { color: #79c0ff !important; }
+.terminal-container .xterm span[class*="xterm-fg-13"], .terminal-container .xterm .xterm-fg-13 { color: #d2a8ff !important; }
+.terminal-container .xterm span[class*="xterm-fg-14"], .terminal-container .xterm .xterm-fg-14 { color: #56d4dd !important; }
+.terminal-container .xterm span[class*="xterm-fg-15"], .terminal-container .xterm .xterm-fg-15 { color: #f0f6fc !important; }
+.terminal-container .xterm span[class*="xterm-bold"], .terminal-container .xterm .xterm-bold { font-weight: bold; }
+.terminal-container .xterm span[class*="xterm-dim"], .terminal-container .xterm .xterm-dim { opacity: 0.6; }
+
 .terminal-overlay-msg {
   position: absolute;
   top: 50%;

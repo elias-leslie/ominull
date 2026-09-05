@@ -34,6 +34,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "agent.h"
+
 #define WIN_TERMINAL_MAX_FRAME_SIZE 65536
 
 /* ---------------------------------------------------------------------------
@@ -263,13 +265,16 @@ static inline DWORD WINAPI Terminal_StdoutThreadProc(LPVOID lpParam) {
 }
 
 static inline int Terminal_RunWindowsWorker(
-    const char* hub_url,
-    bool is_https,
-    const char* endpoint_id,
+    const AGENT_CONFIG* config,
     const char* session_id,
     const char* token,
     const char* program
 ) {
+    if (!config) return -1;
+    const char* hub_url = config->hub_url;
+    const char* endpoint_id = config->endpoint_id;
+    bool is_https = Hub_UsesTLS(config);
+
     char canonical_cmd[MAX_PATH];
     if (!Terminal_IsAllowedProgramWindows(program, canonical_cmd, sizeof(canonical_cmd))) {
         return -1;
@@ -494,8 +499,27 @@ static inline int Terminal_RunWindowsWorker(
     WCHAR hdrsW[512];
     MultiByteToWideChar(CP_UTF8, 0, hdrsA, -1, hdrsW, sizeof(hdrsW)/sizeof(hdrsW[0]));
 
-    if (!WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0) ||
-        !WinHttpReceiveResponse(hRequest, NULL)) {
+    Hub_AttachClientCert(hRequest, config);
+
+    BOOL bSend = WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0);
+    if (!bSend && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+        bSend = WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0);
+    }
+
+    if (!bSend || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        TerminateJobObject(hJob, 1);
+        ClosePseudoConsole(hPC);
+        CloseHandle(hPipeInWrite);
+        CloseHandle(hPipeOutRead);
+        CloseHandle(pi.hProcess);
+        CloseHandle(hJob);
+        return -1;
+    }
+
+    if (!Hub_VerifyRequestPin(hRequest, config)) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);

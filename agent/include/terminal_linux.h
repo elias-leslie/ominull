@@ -359,6 +359,10 @@ static inline int Terminal_RunLinuxWorker(
         setenv("LOGNAME", "root", 1);
         setenv("SHELL", program, 1);
         setenv("LS_COLORS", "rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.zip=01;31:*.gz=01;31:*.deb=01;31:*.rpm=01;31:*.sh=01;32:", 1);
+        setenv("CLICOLOR", "1", 1);
+        setenv("CLICOLOR_FORCE", "1", 1);
+        setenv("LANG", "en_US.UTF-8", 1);
+        setenv("LC_CTYPE", "C.UTF-8", 1);
 
         // Explicit safe working directory
         if (chdir("/var/lib/ominull") != 0) {
