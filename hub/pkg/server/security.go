@@ -150,11 +150,25 @@ func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
 	h.Set("X-Frame-Options", "DENY")
 
 	scriptSrc := "'self'"
+	// styleSrc carries the same nonce as scriptSrc. It is not there for a
+	// stylesheet of ours - every rule the console owns is in app.css - but for
+	// xterm.js, whose renderer builds its stylesheet at runtime with
+	// document.createElement("style"). xterm has no nonce option in any
+	// released version, so index.html stamps this nonce onto style elements as
+	// they are created and they are admitted individually.
+	//
+	// This replaced 'unsafe-inline', which admitted every inline style on the
+	// page including one arriving in injected markup. A parsed <style> block
+	// carries no nonce and is now refused; per spec a nonce in style-src also
+	// makes a browser ignore 'unsafe-inline' entirely, so leaving both would
+	// have been the same as leaving neither.
+	styleSrc := "'self'"
 	if scriptNonce != "" {
 		scriptSrc += " 'nonce-" + scriptNonce + "'"
+		styleSrc += " 'nonce-" + scriptNonce + "'"
 	}
 	h.Set("Content-Security-Policy",
-		"default-src 'none'; script-src "+scriptSrc+"; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
+		"default-src 'none'; script-src "+scriptSrc+"; style-src "+styleSrc+"; font-src 'self'; "+
 			"img-src 'self' data:; connect-src 'self'; form-action 'self'; "+
 			"manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 }

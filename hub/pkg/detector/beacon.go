@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -57,6 +58,38 @@ func (b BeaconEvidence) Summary() string {
 	return fmt.Sprintf(
 		"score %.2f | every %.1fs (+/- %.1fs, %.0f%% jitter) | %d check-ins over %.0f min | %s",
 		b.Score, b.MeanInterval, b.StdDev, b.CoefVariation*100, b.Samples, b.SpanMinutes, payload)
+}
+
+// JSON is the evidence as machine-readable fields, carried alongside Summary's
+// sentence. Summary is what an operator reads; this is what the console sorts,
+// filters and charts on. threshold is the configured score an alert had to
+// clear, which is the number that makes the score meaningful.
+func (b BeaconEvidence) JSON(threshold float64) string {
+	payload := map[string]any{
+		"kind":           "beacon",
+		"score":          b.Score,
+		"threshold":      threshold,
+		"regularity":     b.Regularity,
+		"consistency":    b.Consistency,
+		"uniformity":     b.Uniformity,
+		"mean_interval":  b.MeanInterval,
+		"std_dev":        b.StdDev,
+		"coef_variation": b.CoefVariation,
+		"median_ratio":   b.MedianRatio,
+		"samples":        b.Samples,
+		"span_minutes":   b.SpanMinutes,
+	}
+	// A negative variation means the agent reported no payload sizes at all.
+	// Reporting that as 0% would say the payload never varied, which is a
+	// different and much more incriminating claim.
+	if b.SizeVariation >= 0 {
+		payload["size_variation"] = b.SizeVariation
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 // record adds one observation and scores the conversation so far.

@@ -58,12 +58,17 @@ func (m *Manager) initStore() error {
 	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN recording_state TEXT DEFAULT 'recording'")
 	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN recording_bytes INTEGER DEFAULT 0")
 	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN frame_count INTEGER DEFAULT 0")
+	_, _ = m.db.Exec("ALTER TABLE terminal_sessions ADD COLUMN operator_token_hash TEXT DEFAULT ''")
 
-	// Startup Recovery: Any sessions left in active/connecting/waiting states are marked failed
+	// Startup Recovery: any session left live is marked failed. A detached
+	// session is live - it survives an operator, not a hub restart: the relay
+	// and the agent's socket both died with the process, so the shell on the
+	// far side is already gone and leaving the row attachable would offer a
+	// reattach that could never succeed.
 	recoveryQuery := `
 	UPDATE terminal_sessions
 	SET state = 'failed', closed_at = CURRENT_TIMESTAMP, close_reason = 'daemon_restarted'
-	WHERE state IN ('waiting', 'connecting', 'active');
+	WHERE state IN ('waiting', 'connecting', 'active', 'detached');
 	`
 	if _, err := m.db.Exec(recoveryQuery); err != nil {
 		return fmt.Errorf("terminal startup recovery failed: %w", err)
@@ -125,9 +130,12 @@ func (m *Manager) updateDurableState(sessionID string, state SessionState, start
 // countActiveSessions queries the database for active sessions.
 func (m *Manager) countActiveSessions(tenantID, endpointID string, now time.Time) (activeTenant int, activeEndpoint int, err error) {
 	// Tenant count
+	// 'detached' counts. A detached session is holding a real shell on a real
+	// endpoint; if it did not hold its slot, a second create would be allowed
+	// through and the operator could never get back to the first one.
 	row := m.db.QueryRow(`
 		SELECT COUNT(*) FROM terminal_sessions
-		WHERE tenant_id = ? AND state IN ('waiting', 'connecting', 'active') AND expires_at > ?;
+		WHERE tenant_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at > ?;
 	`, tenantID, now)
 	if err := row.Scan(&activeTenant); err != nil {
 		return 0, 0, err
@@ -136,7 +144,7 @@ func (m *Manager) countActiveSessions(tenantID, endpointID string, now time.Time
 	// Endpoint count
 	row = m.db.QueryRow(`
 		SELECT COUNT(*) FROM terminal_sessions
-		WHERE endpoint_id = ? AND state IN ('waiting', 'connecting', 'active') AND expires_at > ?;
+		WHERE endpoint_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at > ?;
 	`, endpointID, now)
 	if err := row.Scan(&activeEndpoint); err != nil {
 		return 0, 0, err
@@ -180,7 +188,7 @@ func (m *Manager) sweepExpiredSessions(now time.Time, connectTimeout time.Durati
 	// 2. Active sessions exceeding idle timeout
 	rows, err = m.db.Query(`
 		SELECT session_id FROM terminal_sessions
-		WHERE state = 'active' AND idle_expires_at < ?;
+		WHERE state IN ('active', 'detached') AND idle_expires_at < ?;
 	`, now)
 	if err != nil {
 		return nil, err
@@ -200,7 +208,7 @@ func (m *Manager) sweepExpiredSessions(now time.Time, connectTimeout time.Durati
 	// 3. Any active/connecting/waiting session exceeding max duration (expires_at)
 	rows, err = m.db.Query(`
 		SELECT session_id FROM terminal_sessions
-		WHERE state IN ('waiting', 'connecting', 'active') AND expires_at < ?;
+		WHERE state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at < ?;
 	`, now)
 	if err != nil {
 		return nil, err
@@ -222,7 +230,7 @@ func (m *Manager) sweepExpiredSessions(now time.Time, connectTimeout time.Durati
 		_, _ = m.db.Exec(`
 			UPDATE terminal_sessions
 			SET state = ?, closed_at = ?, close_reason = ?
-			WHERE session_id = ? AND state IN ('waiting', 'connecting', 'active');
+			WHERE session_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached');
 		`, string(item.NewState), now, item.Reason, item.SessionID)
 	}
 
@@ -235,7 +243,8 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 	SELECT session_id, tenant_id, endpoint_id, operator_id, program,
 	       state, token_hash, created_at, expires_at, idle_expires_at,
 	       started_at, closed_at, close_reason, operator_connected, agent_connected,
-	       grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count
+	       grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count,
+	       COALESCE(operator_token_hash, '')
 	FROM terminal_sessions
 	WHERE session_id = ?;
 	`
@@ -247,12 +256,14 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 	var closeReason sql.NullString
 	var bundleID, evidenceItemID, recordingState sql.NullString
 	var recordingBytes, frameCount sql.NullInt64
+	var operatorTokenHash string
 
 	err := row.Scan(
 		&s.SessionID, &s.TenantID, &s.EndpointID, &s.OperatorID, &s.Program,
 		&stateStr, &s.TokenHash, &s.CreatedAt, &s.ExpiresAt, &s.IdleExpiresAt,
 		&startedAt, &closedAt, &closeReason, &s.OperatorConnected, &s.AgentConnected,
 		&grantJSON, &bundleID, &evidenceItemID, &recordingState, &recordingBytes, &frameCount,
+		&operatorTokenHash,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -261,6 +272,7 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 		return nil, err
 	}
 
+	s.OperatorTokenHash = operatorTokenHash
 	s.BundleID = bundleID.String
 	s.EvidenceItemID = evidenceItemID.String
 	s.RecordingState = recordingState.String
@@ -288,4 +300,22 @@ func (m *Manager) loadDurableSession(sessionID string) (*TerminalSession, error)
 	}
 
 	return &s, nil
+}
+
+// updateDurableOperatorToken persists a rotated operator connect token.
+func (m *Manager) updateDurableOperatorToken(sessionID, tokenHash string) error {
+	_, err := m.db.Exec(
+		`UPDATE terminal_sessions SET operator_token_hash = ? WHERE session_id = ?;`,
+		tokenHash, sessionID,
+	)
+	return err
+}
+
+// updateDurableIdle persists a recomputed idle deadline.
+func (m *Manager) updateDurableIdle(sessionID string, idleExpiresAt time.Time) error {
+	_, err := m.db.Exec(
+		`UPDATE terminal_sessions SET idle_expires_at = ? WHERE session_id = ?;`,
+		idleExpiresAt, sessionID,
+	)
+	return err
 }

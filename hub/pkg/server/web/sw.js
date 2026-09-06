@@ -1,12 +1,21 @@
 /* Ominull Service Worker
  * Provides PWA installability, shell caching, and offline support.
  * Live API routes (/api/v1/*) are always fetched live over the network.
+ *
+ * {{HUB_VERSION}} is substituted at serve time, the same way index.html's
+ * asset URLs are. It was a hardcoded "v1.8.1" against a VERSION that had moved
+ * on twice: the cache name therefore never changed, the `activate` purge that
+ * deletes every other cache never had anything to delete, and each release's
+ * assets accumulated in the same bucket for ever. The precache also asked for
+ * "/app.js" while the document asks for "/app.js?v=<version>", so the entry
+ * never matched a request and was pure weight - these carry the query now.
  */
-const CACHE_NAME = "ominull-shell-v1.8.1";
+const HUB_VERSION = "{{HUB_VERSION}}";
+const CACHE_NAME = "ominull-shell-v" + HUB_VERSION;
 const STATIC_ASSETS = [
   "/",
-  "/app.css",
-  "/app.js",
+  "/app.css?v=" + HUB_VERSION,
+  "/app.js?v=" + HUB_VERSION,
   "/manifest.webmanifest",
   "/icon.svg",
   "/icon-192.png",

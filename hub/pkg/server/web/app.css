@@ -73,7 +73,7 @@
   --line: #2C313A;
   --ink: #DADDE3;
   --ink-2: #949BA8;
-  --ink-3: #808793;
+  --ink-3: #878E9B;
   --brand: #8FA9E8;
 
   --ok: #73B87D;
@@ -105,6 +105,78 @@
 
   --rail-w: 52px;
   --overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Overlay stacking. Every overlay reads its z-index from this ladder and
+     nothing hardcodes a number: the terminal shipped at 1000 against toasts at
+     90, so every toast fired from a terminal rendered behind it and was never
+     seen. Order is the contract — rail sits under everything that covers it,
+     and toasts sit above everything because a toast that cannot be read is
+     the same as no toast at all. */
+  --z-rail: 40;
+  --z-drawer: 45;
+  --z-drawer-panel: 50;
+  --z-route: 55;
+  --z-sheet-scrim: 60;
+  --z-sheet: 65;
+  --z-menu: 70;
+  --z-palette: 80;
+  --z-fab: 85;
+  --z-toast: 90;
+
+  /* Aliases for the names the post-core sections were written against. These
+     were 71 dropped declarations: a `var()` naming an undefined property makes
+     the browser discard the whole declaration at parse time, so the newer
+     surfaces had no radius, no background, no transitions and no borders and
+     nothing reported an error. Canonical names are on the right; call sites
+     migrate to them over time and these go away. */
+  --surface: var(--panel);
+  --surface-2: var(--raised);
+  --surface-hover: var(--raised);
+  --ink-1: var(--ink);
+  --ink-4: var(--line);
+  --r: var(--r-b);
+  --r-2: var(--r-c);
+  --s-0: var(--s-1);
+  --t-0: var(--t-1);
+  --t-7: var(--t-6);
+  --dur: 120ms;
+  --brand-alpha: color-mix(in srgb, var(--brand) 16%, transparent);
+
+  /* Terminal surface and the 16 ANSI slots.
+   *
+   * These were a GitHub-dark palette hardcoded in two places that had to be
+   * hand-synced - 25 !important rules here and an xterm `theme` object in
+   * app.js - and neither of them knew about the console's four themes, so a
+   * Phosphor operator got a blue-black rectangle in the middle of a green
+   * console. Both read these now, so there is one definition and a theme
+   * switch can re-derive the live terminal's colours.
+   *
+   * ANSI 0-15 is deliberately not the console's own four-hue state palette:
+   * a shell needs sixteen colours that other people's programs chose, and
+   * --ok/--warn/--crit are reserved for asset state. Where a semantic token
+   * is the right answer it is used; the rest are fixed.
+   */
+  --term-bg: var(--ground);
+  --term-fg: var(--ink);
+  --term-chrome: var(--panel);
+  --term-line: var(--line);
+
+  --term-ansi-0: var(--line);
+  --term-ansi-1: var(--crit);
+  --term-ansi-2: var(--ok);
+  --term-ansi-3: var(--warn);
+  --term-ansi-4: var(--info);
+  --term-ansi-5: #BC8CFF;
+  --term-ansi-6: #39C5CF;
+  --term-ansi-7: var(--ink-2);
+  --term-ansi-8: var(--ink-3);
+  --term-ansi-9: var(--crit-hot);
+  --term-ansi-10: #8FD48F;
+  --term-ansi-11: #F0CE84;
+  --term-ansi-12: var(--brand);
+  --term-ansi-13: #D2A8FF;
+  --term-ansi-14: #6FDDE4;
+  --term-ansi-15: var(--ink);
 }
 
 [data-theme="graphite"] {
@@ -114,7 +186,7 @@
   --line: #332F27;
   --ink: #DDD8D0;
   --ink-2: #9C948A;
-  --ink-3: #8A8278;
+  --ink-3: #928A7F;
   --brand: #C98A5E;
   --ok: #7CB675;
   --warn: #EBBB6E;
@@ -130,7 +202,7 @@
   --line: #26383C;
   --ink: #D3DEDC;
   --ink-2: #8CA0A0;
-  --ink-3: #7A8D8D;
+  --ink-3: #809494;
   --brand: #4FB3A5;
   --ok: #6CB882;
   --warn: #EABC6E;
@@ -146,7 +218,7 @@
   --line: #2C313A;
   --ink: #DADDE3;
   --ink-2: #949BA8;
-  --ink-3: #808793;
+  --ink-3: #878E9B;
   --brand: #8FA9E8;
   --ok: #73B87D;
   --warn: #E6BE6D;
@@ -162,7 +234,7 @@
   --line: #262B24;
   --ink: #C8D3BE;
   --ink-2: #87947F;
-  --ink-3: #7B8775;
+  --ink-3: #7D8A77;
   --brand: #9FCF86;
   --ok: #86B46D;
   --warn: #F0B871;
@@ -375,7 +447,7 @@ a {
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
-  z-index: 40;
+  z-index: var(--z-rail);
   box-shadow: var(--overlay);
 }
 
@@ -477,7 +549,7 @@ a {
   position: fixed;
   left: var(--x, 60px);
   top: var(--y, 60px);
-  z-index: 60;
+  z-index: var(--z-menu);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-b);
@@ -646,6 +718,14 @@ kbd {
 
 .btn-icon {
   padding: var(--s-1) 6px;
+}
+
+/* The setup wizard has asked for this since it was written; nothing defined
+   it, so the "Download Root CA" link rendered at full button size in the
+   middle of a paragraph. */
+.btn-sm {
+  font-size: var(--t-1);
+  padding: 2px 7px;
 }
 
 .btn-icon[aria-expanded="true"] {
@@ -832,6 +912,10 @@ kbd {
 }
 
 .empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
   color: var(--ink-3);
   font-size: var(--t-3);
   padding: var(--s-5) var(--s-3);
@@ -970,17 +1054,28 @@ tr.grp .cnt {
   text-transform: none;
 }
 
+/* .tw is the button now; the row keeps the full-width mouse target. */
 tr.grp .tw {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 tr.grp .tw .ic {
   color: var(--ink-3);
 }
 
-tr.grp[aria-expanded="false"] .ic-twist {
+tr.grp .tw[aria-expanded="false"] .ic-twist {
   transform: rotate(-90deg);
 }
 
@@ -998,6 +1093,12 @@ tr.grp[aria-expanded="false"] .ic-twist {
 }
 
 .dim {
+  color: var(--ink-2);
+}
+
+/* .dim-2 is used at 41 call sites in app.js and had no rule at all, so those
+   spans rendered at full --ink. It is the mid-tier of the same ladder. */
+.dim-2 {
   color: var(--ink-2);
 }
 
@@ -1365,7 +1466,7 @@ p.pending {
   position: fixed;
   left: var(--x, 0px);
   top: var(--y, 0px);
-  z-index: 70;
+  z-index: var(--z-menu);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-b);
@@ -1455,7 +1556,7 @@ p.pending {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.4);
-  z-index: 45;
+  z-index: var(--z-drawer);
 }
 
 .drawer {
@@ -1464,7 +1565,7 @@ p.pending {
   right: 0;
   bottom: 0;
   width: min(420px, 100vw);
-  z-index: 50;
+  z-index: var(--z-drawer-panel);
   background: var(--panel);
   border-left: 1px solid var(--line);
   display: flex;
@@ -1616,7 +1717,7 @@ p.pending {
 .palette-wrap {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-palette);
   background: rgba(0, 0, 0, 0.45);
   display: grid;
   justify-items: center;
@@ -1724,7 +1825,7 @@ p.pending {
 .route {
   position: fixed;
   inset: 0;
-  z-index: 55;
+  z-index: var(--z-route);
   background: var(--ground);
   display: flex;
   flex-direction: column;
@@ -1819,6 +1920,32 @@ p.pending {
 .topo-canvas .node[data-kind="gateway"] { fill: var(--info); }
 .topo-canvas .node[data-kind="threat"] { fill: var(--crit-hot); }
 .topo-canvas .node[data-kind="isolated"] { fill: var(--crit); }
+
+/* --crit and --crit-hot differ by about five percent, and at r=8px that made
+   the graph's two most consequential kinds - a threat and a host you have cut
+   off - the two hardest to tell apart. Shape carries the difference now: a
+   threat gets a hard ring, an isolated host a broken one. */
+.topo-canvas .node[data-kind="threat"] {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.topo-canvas .node[data-kind="isolated"] {
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-dasharray: 3 2;
+}
+
+/* Tab lands on a node; it has to be visible when it does. */
+.topo-canvas .node-item:focus {
+  outline: none;
+}
+
+.topo-canvas .node-item:focus-visible .node {
+  stroke: var(--brand);
+  stroke-width: 3;
+  stroke-dasharray: none;
+}
 
 /* A known asset that said nothing inside the window is drawn hollow rather
    than dropped. Absence is information on a security graph: a workstation
@@ -1940,7 +2067,10 @@ p.pending {
 
 .barrow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 118px 72px;
+  /* label · bar · optional sparkline · value. The sparkline column collapses
+     to nothing when the ranking carries no history, so rows without one line
+     up with rows that have one. */
+  grid-template-columns: minmax(0, 1fr) 118px auto 72px;
   gap: var(--s-2);
   align-items: center;
   font-size: var(--t-2);
@@ -1975,13 +2105,93 @@ p.pending {
   fill: var(--brand);
 }
 
+/* A ranking row that filters the flow table is a control, so it looks and
+   behaves like one rather than like text that happens to react to a click. */
+.barrow .n-pick {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.barrow .n-pick:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.barrow .n-pick:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--r-c);
+}
+
+.barrow .spark {
+  width: 48px;
+  height: 12px;
+}
+
+/* ------------------------------------------------------- traffic heatmap */
+
+.heatgrid {
+  display: grid;
+  grid-template-columns: auto repeat(24, 1fr);
+  gap: 2px;
+  align-items: center;
+  font-size: var(--t-1);
+}
+
+.heat-day,
+.heat-hour {
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  line-height: 1;
+}
+
+.heat-day {
+  padding-right: var(--s-2);
+  text-align: right;
+}
+
+.heat-hour {
+  text-align: center;
+}
+
+.heat-corner {
+  display: block;
+}
+
+.heat-cell {
+  display: block;
+  aspect-ratio: 1;
+  min-height: 10px;
+  border-radius: 2px;
+  background: var(--raised);
+}
+
+/* Four steps, not a continuous ramp: a reader can name the level they are
+   looking at, and each step clears the one below it by more than a hair. */
+.heat-cell[data-level="1"] { background: color-mix(in srgb, var(--brand) 22%, var(--raised)); }
+.heat-cell[data-level="2"] { background: color-mix(in srgb, var(--brand) 45%, var(--raised)); }
+.heat-cell[data-level="3"] { background: color-mix(in srgb, var(--brand) 70%, var(--raised)); }
+.heat-cell[data-level="4"] { background: var(--brand); }
+
+.legend .heat-cell {
+  width: 10px;
+  min-height: 10px;
+}
+
 /* --------------------------------------------------------------- toasts */
 
 .toasts {
   position: fixed;
   right: var(--s-3);
   bottom: var(--s-3);
-  z-index: 90;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
@@ -2409,13 +2619,13 @@ input[type="url"] {
    the host that route is showing. */
 
 .scrim-sheet {
-  z-index: 60;
+  z-index: var(--z-sheet-scrim);
   background: rgba(0, 0, 0, 0.72);
 }
 
 .sheet {
   position: fixed;
-  z-index: 65;
+  z-index: var(--z-sheet);
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -2991,14 +3201,22 @@ input[type="url"] {
   color: var(--ink-1);
 }
 
+/* It is a <button> now, so it needs the button chrome taken back off. */
 .traffic-chip .chip-del {
   cursor: pointer;
   color: var(--ink-3);
   font-weight: 700;
   margin-left: 2px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1;
 }
 
-.traffic-chip .chip-del:hover {
+.traffic-chip .chip-del:hover,
+.traffic-chip .chip-del:focus-visible {
   color: var(--crit);
 }
 
@@ -3057,7 +3275,7 @@ input[type="url"] {
   background: var(--ground);
   border-left: 1px solid var(--line);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
-  z-index: 1000;
+  z-index: var(--z-drawer-panel);
   display: flex;
   flex-direction: column;
   animation: drawerSlide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -3210,14 +3428,14 @@ input[type="url"] {
 .sheet-terminal {
   width: min(1180px, calc(100vw - 24px));
   height: min(780px, calc(100vh - 24px));
-  background: #0d1117 !important;
-  border: 1px solid #30363d;
+  background: var(--term-bg) !important;
+  border: 1px solid var(--term-line);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.94), 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .sheet-terminal .sheet-head {
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--term-chrome);
+  border-bottom: 1px solid var(--term-line);
 }
 
 .sheet-terminal .sheet-body {
@@ -3227,12 +3445,12 @@ input[type="url"] {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  background: #0d1117 !important;
+  background: var(--term-bg) !important;
 }
 
 .sheet-terminal .sheet-foot {
-  background: #161b22;
-  border-top: 1px solid #30363d;
+  background: var(--term-chrome);
+  border-top: 1px solid var(--term-line);
 }
 
 .sheet-terminal-wrapper {
@@ -3241,7 +3459,7 @@ input[type="url"] {
   flex: 1;
   min-height: 0;
   height: 100%;
-  background: #0d1117 !important;
+  background: var(--term-bg) !important;
 }
 
 .terminal-meta-bar {
@@ -3251,10 +3469,10 @@ input[type="url"] {
   flex-wrap: wrap;
   gap: var(--s-2);
   padding: 8px var(--s-3);
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--term-chrome);
+  border-bottom: 1px solid var(--term-line);
   font-size: var(--t-2);
-  color: #8b949e;
+  color: var(--ink-2);
   flex: none;
 }
 
@@ -3268,7 +3486,7 @@ input[type="url"] {
   flex: 1;
   min-height: 0;
   height: 100%;
-  background: #0d1117 !important;
+  background: var(--term-bg) !important;
   padding: 10px 14px;
   position: relative;
   overflow: hidden;
@@ -3278,8 +3496,8 @@ input[type="url"] {
 .terminal-container .xterm-viewport,
 .terminal-container .xterm-screen,
 .terminal-container canvas {
-  background-color: #0d1117 !important;
-  background: #0d1117 !important;
+  background-color: var(--term-bg) !important;
+  background: var(--term-bg) !important;
   opacity: 1 !important;
 }
 
@@ -3289,22 +3507,22 @@ input[type="url"] {
 }
 
 /* 16-color ANSI Palette for xterm DOM renderer */
-.terminal-container .xterm span[class*="xterm-fg-0"], .terminal-container .xterm .xterm-fg-0 { color: #484f58 !important; }
-.terminal-container .xterm span[class*="xterm-fg-1"], .terminal-container .xterm .xterm-fg-1 { color: #ff7b72 !important; }
-.terminal-container .xterm span[class*="xterm-fg-2"], .terminal-container .xterm .xterm-fg-2 { color: #3fb950 !important; }
-.terminal-container .xterm span[class*="xterm-fg-3"], .terminal-container .xterm .xterm-fg-3 { color: #d29922 !important; }
-.terminal-container .xterm span[class*="xterm-fg-4"], .terminal-container .xterm .xterm-fg-4 { color: #58a6ff !important; }
-.terminal-container .xterm span[class*="xterm-fg-5"], .terminal-container .xterm .xterm-fg-5 { color: #bc8cff !important; }
-.terminal-container .xterm span[class*="xterm-fg-6"], .terminal-container .xterm .xterm-fg-6 { color: #39c5cf !important; }
-.terminal-container .xterm span[class*="xterm-fg-7"], .terminal-container .xterm .xterm-fg-7 { color: #b1bac4 !important; }
-.terminal-container .xterm span[class*="xterm-fg-8"], .terminal-container .xterm .xterm-fg-8 { color: #6e7681 !important; }
-.terminal-container .xterm span[class*="xterm-fg-9"], .terminal-container .xterm .xterm-fg-9 { color: #ffa198 !important; }
-.terminal-container .xterm span[class*="xterm-fg-10"], .terminal-container .xterm .xterm-fg-10 { color: #56d364 !important; }
-.terminal-container .xterm span[class*="xterm-fg-11"], .terminal-container .xterm .xterm-fg-11 { color: #e3b341 !important; }
-.terminal-container .xterm span[class*="xterm-fg-12"], .terminal-container .xterm .xterm-fg-12 { color: #79c0ff !important; }
-.terminal-container .xterm span[class*="xterm-fg-13"], .terminal-container .xterm .xterm-fg-13 { color: #d2a8ff !important; }
-.terminal-container .xterm span[class*="xterm-fg-14"], .terminal-container .xterm .xterm-fg-14 { color: #56d4dd !important; }
-.terminal-container .xterm span[class*="xterm-fg-15"], .terminal-container .xterm .xterm-fg-15 { color: #f0f6fc !important; }
+.terminal-container .xterm span[class*="xterm-fg-0"], .terminal-container .xterm .xterm-fg-0 { color: var(--term-ansi-0) !important; }
+.terminal-container .xterm span[class*="xterm-fg-1"], .terminal-container .xterm .xterm-fg-1 { color: var(--term-ansi-1) !important; }
+.terminal-container .xterm span[class*="xterm-fg-2"], .terminal-container .xterm .xterm-fg-2 { color: var(--term-ansi-2) !important; }
+.terminal-container .xterm span[class*="xterm-fg-3"], .terminal-container .xterm .xterm-fg-3 { color: var(--term-ansi-3) !important; }
+.terminal-container .xterm span[class*="xterm-fg-4"], .terminal-container .xterm .xterm-fg-4 { color: var(--term-ansi-4) !important; }
+.terminal-container .xterm span[class*="xterm-fg-5"], .terminal-container .xterm .xterm-fg-5 { color: var(--term-ansi-5) !important; }
+.terminal-container .xterm span[class*="xterm-fg-6"], .terminal-container .xterm .xterm-fg-6 { color: var(--term-ansi-6) !important; }
+.terminal-container .xterm span[class*="xterm-fg-7"], .terminal-container .xterm .xterm-fg-7 { color: var(--term-ansi-7) !important; }
+.terminal-container .xterm span[class*="xterm-fg-8"], .terminal-container .xterm .xterm-fg-8 { color: var(--term-ansi-8) !important; }
+.terminal-container .xterm span[class*="xterm-fg-9"], .terminal-container .xterm .xterm-fg-9 { color: var(--term-ansi-9) !important; }
+.terminal-container .xterm span[class*="xterm-fg-10"], .terminal-container .xterm .xterm-fg-10 { color: var(--term-ansi-10) !important; }
+.terminal-container .xterm span[class*="xterm-fg-11"], .terminal-container .xterm .xterm-fg-11 { color: var(--term-ansi-11) !important; }
+.terminal-container .xterm span[class*="xterm-fg-12"], .terminal-container .xterm .xterm-fg-12 { color: var(--term-ansi-12) !important; }
+.terminal-container .xterm span[class*="xterm-fg-13"], .terminal-container .xterm .xterm-fg-13 { color: var(--term-ansi-13) !important; }
+.terminal-container .xterm span[class*="xterm-fg-14"], .terminal-container .xterm .xterm-fg-14 { color: var(--term-ansi-14) !important; }
+.terminal-container .xterm span[class*="xterm-fg-15"], .terminal-container .xterm .xterm-fg-15 { color: var(--term-ansi-15) !important; }
 .terminal-container .xterm span[class*="xterm-bold"], .terminal-container .xterm .xterm-bold { font-weight: bold; }
 .terminal-container .xterm span[class*="xterm-dim"], .terminal-container .xterm .xterm-dim { opacity: 0.6; }
 
@@ -3313,7 +3531,7 @@ input[type="url"] {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(16, 19, 24, 0.94);
+  background: color-mix(in srgb, var(--ground) 94%, transparent);
   border: 1px solid var(--line);
   padding: 16px 24px;
   border-radius: var(--r);
@@ -3426,7 +3644,7 @@ input[type="url"] {
   border: 1px solid var(--line);
   border-radius: var(--r-2);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-  z-index: 1000;
+  z-index: var(--z-menu);
   overflow: hidden;
   animation: fadeIn 0.15s ease-out;
 }
@@ -3579,7 +3797,7 @@ input[type="url"] {
   display: flex;
   align-items: center;
   gap: 12px;
-  z-index: 100;
+  z-index: var(--z-fab);
   animation: slideUp 0.2s ease-out;
 }
 
@@ -3651,6 +3869,7 @@ input[type="url"] {
 
 .alerts-bar-seg {
   height: 100%;
+  width: var(--seg-w, 0%);
   transition: width var(--dur);
 }
 
@@ -3712,7 +3931,7 @@ input[type="url"] {
   font-family: var(--f-mono);
   font-size: 12px;
   line-height: 1.45;
-  background: #0a0c10;
+  background: var(--term-bg);
   color: var(--ink-1);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -3725,16 +3944,16 @@ input[type="url"] {
 }
 
 .job-output-console.stderr {
-  border-color: rgba(248, 81, 73, 0.4);
-  color: #ff7b72;
-  background: rgba(30, 10, 10, 0.6);
+  border-color: color-mix(in srgb, var(--crit) 40%, transparent);
+  color: var(--crit-hot);
+  background: color-mix(in srgb, var(--crit) 12%, var(--ground));
 }
 
 .script-source-preview {
   font-family: var(--f-mono);
   font-size: 12px;
   line-height: 1.4;
-  background: #0a0c10;
+  background: var(--term-bg);
   color: var(--ink-1);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -3966,8 +4185,8 @@ input[type="url"] {
 }
 
 .cmdline-box {
-  background: #0d1117;
-  color: #c9d1d9;
+  background: var(--term-bg);
+  color: var(--term-fg);
   border: 1px solid var(--line);
   border-radius: var(--r);
   padding: 8px 10px;
@@ -4057,9 +4276,9 @@ input[type="url"] {
   border-radius: 4px;
   font-size: 11px;
   font-weight: 700;
-  background: rgba(248, 81, 73, 0.22);
+  background: color-mix(in srgb, var(--crit) 22%, transparent);
   border: 1px solid var(--crit);
-  color: #ff7b72;
+  color: var(--crit-hot);
 }
 
 .epss-badge {
@@ -4111,8 +4330,8 @@ input[type="url"] {
 }
 
 .evidence-detail-box {
-  background: #0d1117;
-  color: #c9d1d9;
+  background: var(--term-bg);
+  color: var(--term-fg);
   border: 1px solid var(--line);
   border-radius: var(--r);
   padding: 10px 12px;
@@ -4126,3 +4345,373 @@ input[type="url"] {
 }
 
 
+
+/* ------------------------------------------ primitives the slice era assumed
+ *
+ * These four class names were used across Response, Terminal, Scripts and
+ * Forensics and had no rules anywhere, so a banner was body text, a stack had
+ * no gap and the loading spinner was an empty box. They are real primitives -
+ * defining them is the right answer; `.badge` and `.btn-danger` were not, and
+ * those call sites moved onto `.st[data-state]` and `.btn-crit` instead.
+ */
+
+/* A full-width statement above a form or a panel. Carries the same tones as
+   `.st`, and like `.st` it never says it with colour alone: the left rule is
+   the stripe and the word is in the text. */
+.st-banner {
+  display: block;
+  font-family: var(--f-cond);
+  font-size: var(--t-3);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--r-c);
+  background: var(--raised);
+  color: var(--ink);
+}
+
+.st-banner[data-state="ok"] { border-left-color: var(--ok); }
+.st-banner[data-state="warn"] { border-left-color: var(--warn); }
+.st-banner[data-state="crit"] { border-left-color: var(--crit); }
+.st-banner[data-state="info"] { border-left-color: var(--info); }
+
+/* Vertical rhythm inside a form row or a panel. One step of the space scale. */
+.stack-s {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+/* Actions parked on a card's own header, opposite its title. */
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.spin {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid var(--line);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Reduced motion: a spinner that cannot spin still has to read as "working",
+   so it pulses instead of freezing into an indistinguishable ring. */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: spin-pulse 1.4s ease-in-out infinite;
+    border-top-color: var(--brand);
+  }
+  @keyframes spin-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+}
+
+/* TOTP enrolment: the QR, the secret and the confirm field, boxed away from
+   the rest of the unlock form. Named tokens here were `--bg-surface-2` and
+   `--border-dim`, neither of which exists, so it had no border at all. */
+.totp-enroll-box {
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--raised);
+}
+
+.totp-key-row {
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  background: var(--panel);
+}
+
+/* --------------------------------------------------------------- utilities
+ *
+ * `app.js` opens by asserting it writes no inline style attributes, and until
+ * the slice era it did not. 54 `style:` props had accumulated - hardcoded
+ * `font-size: 11px` off the type scale, and colour fallbacks like
+ * `rgba(255,255,255,0.05)` that assume one theme out of four. Two of them named
+ * `--bg-surface-2` and `--border-dim`, which do not exist, so the TOTP panel
+ * had no border. These classes are what those sites say now, and restoring
+ * `style-src 'self'` is what keeps them from coming back: an inline style is
+ * refused silently by the browser, so this is not a preference.
+ */
+
+.uf { display: flex; align-items: center; }
+.uf-wrap { flex-wrap: wrap; }
+.uf-between { justify-content: space-between; }
+.uf-col { display: flex; flex-direction: column; }
+.uf-g1 { gap: var(--s-1); }
+.uf-g2 { gap: 6px; }
+.uf-g3 { gap: var(--s-2); }
+.uf-g4 { gap: var(--s-3); }
+
+.u-t1 { font-size: var(--t-1); }
+.u-t2 { font-size: var(--t-2); }
+.u-t3 { font-size: var(--t-3); }
+.u-italic { font-style: italic; }
+.u-break { word-break: break-all; }
+.u-center { text-align: center; }
+.u-pointer { cursor: pointer; }
+.u-strong { font-weight: 600; }
+
+.u-mt1 { margin-top: var(--s-1); }
+.u-mt2 { margin-top: var(--s-2); }
+.u-mb1 { margin-bottom: var(--s-1); }
+.u-mb2 { margin-bottom: var(--s-2); }
+.u-ml2 { margin-left: 6px; }
+.u-ml3 { margin-left: var(--s-2); }
+.u-m0 { margin: 0; }
+
+/* The evidence-item note in the vuln sheet: a bounded, readable column rather
+   than a paragraph that runs the width of the sheet. */
+.u-narrow { max-width: 260px; padding: var(--s-1) var(--s-2); }
+
+/* Chart tick rail under the dual-lane bandwidth chart. */
+.chart-ticks {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--s-1) 2px var(--s-2) 2px;
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+/* A DNS counter that is not zero says so in its hue as well as its number. */
+.dns-stat-val[data-tone="crit"] { color: var(--crit); }
+.dns-stat-val[data-tone="warn"] { color: var(--warn); }
+
+/* A sortable column heading. The button is the whole heading so the keyboard
+   path is the same as the pointer one; the caret says which way, and the
+   `aria-sort` on the th says it again for a screen reader. */
+.th-sort {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.th-sort:hover { color: var(--ink); }
+
+.th-sort::after {
+  content: "";
+  width: 0;
+  height: 0;
+  opacity: 0;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-bottom: 4px solid currentColor;
+}
+
+.th-sort[data-active="true"] { color: var(--ink); }
+.th-sort[data-active="true"]::after { opacity: 1; }
+.th-sort[data-dir="desc"]::after { transform: rotate(180deg); }
+
+.th-sort:focus-visible {
+  outline: 1px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* A sub-heading inside a card body, naming the block under it. */
+.card-sub {
+  font-family: var(--f-cond);
+  font-size: var(--t-2);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-top: var(--s-2);
+}
+
+/* The health pip when the view is deliberately paused - someone is typing, has
+   text selected, or is dragging a topology node. A frozen view that says
+   nothing reads as a dead hub. */
+.health[data-stale="true"] .pip {
+  outline: 1px dashed var(--ink-3);
+  outline-offset: 2px;
+}
+
+
+/* Terminal presence in Assets
+ *
+ * A shell running as root on a host is a fact about that host, so it is stated
+ * on the asset itself rather than only inside the sheet that opened it. The
+ * banner is full width above the detail grid and is shown to every operator
+ * role: an operator who cannot terminate a session still needs to know one is
+ * open. `data-state="none"` is the quiet case - no session - and gets no tone
+ * colour, because an absent shell is not news.
+ */
+/* The sheet takes focus when it has nothing safe to focus inside it, so that
+   Tab stays in the dialog. It is not a control and must not draw a ring. */
+.sheet:focus,
+.route:focus,
+.drawer:focus {
+  outline: none;
+}
+
+/* The recording cap is a deadline, and an operator who is about to lose the
+   rest of their session recording should see it before it happens. */
+.terminal-meta-right [data-near-cap="true"] {
+  color: var(--warn);
+}
+
+.term-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--r-b);
+  background: var(--raised);
+  font-size: var(--t-2);
+}
+
+.term-banner[data-state="none"] {
+  background: var(--panel);
+  border-left-color: var(--line);
+}
+
+.term-banner[data-state="ok"] { border-left-color: var(--ok); }
+.term-banner[data-state="warn"] { border-left-color: var(--warn); }
+.term-banner[data-state="info"] { border-left-color: var(--info); }
+.term-banner[data-state="crit"] { border-left-color: var(--crit); }
+
+.term-banner .fill {
+  flex: 1 1 auto;
+}
+
+.term-banner-facts {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.term-banner-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex: 0 0 auto;
+}
+
+/* The row-level tell. Small enough to sit inline with a hostname without
+   pushing the column around, loud enough to be findable while scanning. */
+.term-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin-left: var(--s-2);
+  color: var(--ink-3);
+}
+
+.term-glyph svg {
+  width: 13px;
+  height: 13px;
+}
+
+.term-glyph[data-state="ok"] { color: var(--ok); }
+.term-glyph[data-state="warn"] { color: var(--warn); }
+.term-glyph[data-state="info"] { color: var(--info); }
+
+
+/* --------------------------------------------- layout hooks that were named
+ *
+ * These class names were written by app.js and index.html and had no rule at
+ * all - the console was asking for a layout it never defined, so the elements
+ * fell back to block flow and the buttons stacked. They are defined here in
+ * one place rather than sprinkled as one-offs, and scripts/console_lint.py
+ * now fails the build if a new name joins them.
+ */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pad-y {
+  padding-top: var(--s-2);
+  padding-bottom: var(--s-2);
+}
+
+.section-head {
+  font-family: var(--f-cond);
+  font-size: var(--t-3);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: var(--s-4) 0 var(--s-2);
+}
+
+.account-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) 0;
+  border-top: 1px solid var(--line);
+}
+
+.account-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.label-meta {
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* A checkbox or radio and its text on one baseline, with the whole label as
+   the hit target - these carry `for=` and were laid out as blocks, which put
+   the control on the line above its own text. */
+.form-check-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  cursor: pointer;
+}
+
+hr.line {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: var(--s-3) 0;
+}

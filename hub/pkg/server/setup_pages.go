@@ -2,15 +2,38 @@ package server
 
 import "encoding/json"
 
+// diagnosticsRendererJS draws the 24 setup/status checks. It was maintained as
+// two verbatim copies - one in the setup wizard, one in the status page - and
+// a change to either was a change somebody had to remember to make twice.
+// Both pages load the same stylesheet and render the same payload from
+// /api/v1/setup/status, so there is one renderer.
+const diagnosticsRendererJS = `  function renderChecks(box,body){
+    box.textContent="";
+    function node(tag,cls,text){var out=document.createElement(tag);if(cls)out.className=cls;if(text!==undefined)out.textContent=text;return out;}
+    var results=body.results||[],counts={pass:0,fail:0,warn:0,not_configured:0};
+    results.forEach(function(item){counts[item.state]=(counts[item.state]||0)+1;});
+    var summary=node("div","diag-summary");
+    [["pass","Pass"],["fail","Fail"],["warn","Warning"],["not_configured","Not configured"]].forEach(function(pair){summary.appendChild(node("span","st",String(counts[pair[0]])+" "+pair[1]));});
+    var grid=node("div","diag-grid");
+    results.forEach(function(item){
+      var card=node("article","diag");card.dataset.state=item.state||"not_configured";
+      card.appendChild(node("span","diag-mark",item.state==="pass"?"\u2713":item.state==="fail"?"\u00d7":item.state==="warn"?"!":"\u2013"));
+      var copy=node("div");copy.appendChild(node("h3","",item.title||"Check"));copy.appendChild(node("p","",item.summary||"No result"));
+      if(item.remediation)copy.appendChild(node("p","remediation",item.remediation));
+      card.appendChild(copy);grid.appendChild(card);
+    });
+    box.append(summary,grid);
+  }`
+
 // setupWizardDocument keeps first-run setup as an actual staged workflow. The
 // old page placed every setting and diagnostic in one unscrollable document;
 // this page makes network, security, installation, and proof separate tasks.
-func setupWizardDocument(csrf string, complete bool) ([]byte, string) {
+func setupWizardDocument(csrf, version string, complete bool) ([]byte, string) {
 	nonce := newCSPNonce()
 	state, _ := json.Marshal(map[string]interface{}{"csrf": csrf, "complete": complete})
 	document := `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull setup wizard</title><link rel="stylesheet" href="/app.css"></head>
+<head>` + consoleSharedHead("Ominull setup wizard", nonce, version) + `</head>
 <body class="setup-page">
 <main class="setup-shell">
   <header class="setup-head"><div><h1>Ominull setup wizard</h1><p class="sub">Package-owned setup for LAN, direct WAN, or optional free-tier Cloudflare.</p></div><a class="btn" href="/status">Status</a></header>
@@ -101,7 +124,7 @@ func setupWizardDocument(csrf string, complete bool) ([]byte, string) {
   function validStep(step){var bad=qa('[data-step="'+step+'"] input[required],[data-step="'+step+'"] select[required]').filter(function(input){return !input.checkValidity();})[0];if(bad){bad.reportValidity();bad.focus();return false;}return true;}
   qa("[data-nav]").forEach(function(b){b.addEventListener("click",function(){show(Number(b.dataset.nav));});});qa("[data-next]").forEach(function(b){b.addEventListener("click",function(){if(validStep(current))show(Number(b.dataset.next));});});qa("[data-back]").forEach(function(b){b.addEventListener("click",function(){show(Number(b.dataset.back));});});
   async function api(url,options){options=options||{};options.headers=Object.assign({"Content-Type":"application/json","X-CSRF-Token":SETUP.csrf},options.headers||{});var response=await fetch(url,options),body=await response.json().catch(function(){return {};});if(!response.ok)throw new Error(body.error||"request failed");return body;}
-  function renderChecks(box,body){box.textContent="";var results=body.results||[],counts={pass:0,fail:0,warn:0,not_configured:0};results.forEach(function(item){counts[item.state]=(counts[item.state]||0)+1;});var summary=node("div","diag-summary");[["pass","Pass"],["fail","Fail"],["warn","Warning"],["not_configured","Not configured"]].forEach(function(pair){summary.appendChild(node("span","st",String(counts[pair[0]])+" "+pair[1]));});var grid=node("div","diag-grid");results.forEach(function(item){var card=node("article","diag");card.dataset.state=item.state||"not_configured";card.appendChild(node("span","diag-mark",item.state==="pass"?"✓":item.state==="fail"?"×":item.state==="warn"?"!":"–"));var copy=node("div");copy.appendChild(node("h3","",item.title||"Check"));copy.appendChild(node("p","",item.summary||"No result"));if(item.remediation)copy.appendChild(node("p","remediation",item.remediation));card.appendChild(copy);grid.appendChild(card);});box.append(summary,grid);}
+` + diagnosticsRendererJS + `
   function hydrate(c){if(hydrated)return;hydrated=true;[["network","network_mode"],["console_hostname","console_hostname"],["console_url","console_url"],["agent_url","agent_url"],["tls_mode","tls_mode"],["client_certs","client_certs"],["tls_cert_file","tls_cert_file"],["tls_key_file","tls_key_file"],["tls_hosts","tls_hosts"],["acme_email","acme_email"],["acme_dns_provider","acme_dns_provider"],["oidc_issuer","oidc_issuer"],["oidc_client_id","oidc_client_id"],["oidc_redirect_url","oidc_redirect_url"],["access_team","access_team"],["access_audience","access_audience"]].forEach(function(pair){var input=field(pair[0]),value=c[pair[1]];if(input&&value!==undefined&&value!==null)input.value=Array.isArray(value)?value.join(","):value;});syncConditional();}
   function load(){return api("/api/v1/setup/status").then(function(body){renderChecks(q("#checks-preflight"),body);renderChecks(q("#checks-final"),body);q("#complete").disabled=!!body.has_failures;hydrate(body.configuration||{});return body;}).catch(function(error){q("#checks-preflight").textContent=error.message;q("#checks-final").textContent=error.message;});}
   function syncConditional(){q("#cloudflare-fields").hidden=field("network").value!=="cloudflare";q("#certificate-files").hidden=field("tls_mode").value!=="custom";q("#acme-fields").hidden=field("tls_mode").value!=="acme";q("#hub-ca-info").hidden=field("tls_mode").value!=="self-issued";}

@@ -27,7 +27,30 @@ const (
 	StateClosing    SessionState = "closing"
 	StateFailed     SessionState = "failed"
 	StateExpired    SessionState = "expired"
+
+	// StateDetached is a live session with a live agent and no operator
+	// watching it: the shell and its process tree are still running, the
+	// recording is still open, and an operator can attach to it again.
+	//
+	// Before this state existed a detached session was not merely
+	// unsupported, it was impossible - the operator's socket closing tore
+	// the relay down, which sent a close frame to the agent, which killed
+	// the remote process group. "Detach Viewer", the scrim, the header
+	// close and Escape inside vim all did that.
+	//
+	// It counts as active everywhere a live session counts: it holds the
+	// per-endpoint (1) and per-tenant (4) caps, so reattach has a slot to
+	// come back to, and it is swept for idle and max-duration like any
+	// other live session. Only `closed` seals the recording.
+	StateDetached SessionState = "detached"
 )
+
+// LiveStates are the states in which a session holds a slot and its relay may
+// still be running. Kept in one place so a new state cannot be added to the
+// caps and forgotten in the sweeper.
+func LiveStates() []SessionState {
+	return []SessionState{StateWaiting, StateConnecting, StateActive, StateDetached}
+}
 
 // FrameType specifies the type of data frame exchanged over terminal relay.
 type FrameType string
@@ -53,15 +76,25 @@ const DefaultMaxSessionRecordingBytes int64 = 10 * 1024 * 1024
 
 // TerminalSession tracks an interactive remote pseudoterminal session.
 type TerminalSession struct {
-	mu                sync.RWMutex
-	SessionID         string                  `json:"session_id"`
-	TenantID          string                  `json:"tenant_id"`
-	EndpointID        string                  `json:"endpoint_id"`
-	OperatorID        string                  `json:"operator_id"`
-	Program           string                  `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
-	State             SessionState            `json:"state"`
-	ConnectToken      string                  `json:"-"`
-	TokenHash         string                  `json:"-"`
+	mu           sync.RWMutex
+	SessionID    string       `json:"session_id"`
+	TenantID     string       `json:"tenant_id"`
+	EndpointID   string       `json:"endpoint_id"`
+	OperatorID   string       `json:"operator_id"`
+	Program      string       `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
+	State        SessionState `json:"state"`
+	ConnectToken string       `json:"-"`
+	TokenHash    string       `json:"-"`
+	// OperatorTokenHash is the operator's half of the connect credential,
+	// rotated on every attach so a captured token is useless after one use.
+	// The agent keeps validating against TokenHash: rotating a single shared
+	// token would lock out an agent that had not connected yet, and the
+	// window for that is real - an operator can attach and detach before the
+	// endpoint has seen the offer in its heartbeat. Empty means "not yet
+	// rotated", and TokenHash answers for both, which is what makes sessions
+	// created by an older hub still attachable.
+	OperatorTokenHash string                  `json:"-"`
+	OperatorToken     string                  `json:"-"`
 	CreatedAt         time.Time               `json:"created_at"`
 	ExpiresAt         time.Time               `json:"expires_at"`
 	IdleExpiresAt     time.Time               `json:"idle_expires_at"`
@@ -383,7 +416,18 @@ func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
 	sess.Frames = append(sess.Frames, frame)
 	sess.RecordingBytes += frameBytes
 	sess.FrameCount = len(sess.Frames)
-	sess.IdleExpiresAt = now.Add(m.idleTimeout)
+
+	/* Idle means "the operator has done nothing", not "the wire is quiet".
+	   This bumped the deadline on every frame including agent stdout, which
+	   was harmless while a dropped operator socket killed the session and is
+	   not harmless now: a detached `tail -f` or `yes` produces stdout for
+	   ever and would hold a root shell open on a live endpoint until the
+	   60-minute max duration, with nobody watching it. Only frames the
+	   operator originates - keystrokes and window resizes - and attaching
+	   count as activity. */
+	if frame.Type == FrameStdin || frame.Type == FrameResize {
+		sess.IdleExpiresAt = now.Add(m.idleTimeout)
+	}
 
 	// Update idle expiration and recording metadata in database
 	_ = m.updateDurableState(sessionID, sess.State, sess.StartedAt, sess.ClosedAt, sess.CloseReason, sess.OperatorConnected, sess.AgentConnected)
@@ -627,4 +671,77 @@ func (s *TerminalSession) Summary() map[string]interface{} {
 		res["evidence_item_id"] = s.EvidenceItemID
 	}
 	return res
+}
+
+// RotateOperatorToken mints a fresh operator connect token for a live session
+// and returns the plaintext exactly once.
+//
+// Reattach goes through here rather than reusing the creation token for two
+// reasons. The creation cookie has a 300-second MaxAge, so a session detached
+// for six minutes could not be reattached at all; and a token that stays valid
+// for the life of a 60-minute session is a credential to a root shell sitting
+// in whatever captured it. Rotating on every attach makes a captured one
+// useless the moment the real operator comes back.
+//
+// The agent's token is untouched: see OperatorTokenHash.
+func (m *Manager) RotateOperatorToken(sessionID string) (string, error) {
+	sess, err := m.GetSession(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	token := uuid.New().String()
+	hash := HashToken(token)
+
+	sess.mu.Lock()
+	switch sess.State {
+	case StateClosed, StateFailed, StateExpired:
+		st := sess.State
+		sess.mu.Unlock()
+		return "", fmt.Errorf("session is in terminal state: %s", st)
+	}
+	if sess.OperatorConnected {
+		sess.mu.Unlock()
+		return "", errors.New("operator already connected to session")
+	}
+	sess.OperatorToken = token
+	sess.OperatorTokenHash = hash
+	sess.mu.Unlock()
+
+	if err := m.updateDurableOperatorToken(sessionID, hash); err != nil {
+		return "", fmt.Errorf("persist rotated operator token: %w", err)
+	}
+	return token, nil
+}
+
+// DetachSession drops the operator side of a live session without touching the
+// remote process tree. The console reaches this by closing its WebSocket; this
+// is the explicit path, for a caller that has no socket to close.
+func (m *Manager) DetachSession(sessionID, reason string) error {
+	sess, err := m.GetSession(sessionID)
+	if err != nil {
+		return err
+	}
+	sess.mu.RLock()
+	relay := sess.relay
+	sess.mu.RUnlock()
+	if relay == nil {
+		return errors.New("session has no active relay")
+	}
+	if reason == "" {
+		reason = "operator_detached"
+	}
+	relay.DetachOperator(reason)
+	return nil
+}
+
+// IsLive reports whether a session still holds a slot and can be attached to.
+func (s *TerminalSession) IsLive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch s.State {
+	case StateWaiting, StateConnecting, StateActive, StateDetached:
+		return true
+	}
+	return false
 }

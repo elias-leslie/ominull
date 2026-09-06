@@ -1,9 +1,13 @@
 /* Ominull console.
  *
  * Invariants this file exists to hold:
- *   - No inline style attributes. Anything data-driven is SVG geometry or a
- *     data-* attribute the stylesheet selects on. A `style=` here would be a
- *     colour that the theme switcher cannot reach.
+ *   - No inline style attributes. Anything data-driven is SVG geometry, a
+ *     data-* attribute the stylesheet selects on, or a custom property set
+ *     through the CSSOM (`vars`). A `style=` here would be a colour the theme
+ *     switcher cannot reach - and `style-src` is `'self'`, so the browser
+ *     refuses it silently and the value simply never applies. This held until
+ *     the slice era put 54 of them back; they are gone again and the CSP is
+ *     what keeps them out.
  *   - Hue means state. Chrome uses only the neutral ink tokens and --brand;
  *     --ok/--warn/--crit/--info are reserved for asset state.
  *   - Rows sort on stable identity, never last_seen_at, so an isolate click
@@ -159,6 +163,105 @@
       localStorage.setItem(key, value);
     } catch (e) {
       /* Storage is a convenience here; the console must work without it. */
+    }
+  }
+
+  /* ----------------------------------------------------------- addressing
+
+     Everything the console showed lived in a closure variable and nowhere
+     else: Back left the console entirely, reload dropped you on Assets with
+     no filter, and there was no way to send a colleague the view you were
+     looking at. Section, query, filters and the open row are in the URL now,
+     and the same four are remembered across a reload so a refresh does not
+     undo a filter you spent a minute building.
+
+     The URL is a hash. A path would need the hub to serve index.html for
+     arbitrary routes, and it serves exactly the files it embeds. */
+
+  var URL_KEYS = ["q", "f", "row", "route"];
+  var suppressHistory = false;
+
+  function currentURLState() {
+    var f = Object.keys(state.filters || {}).filter(function (k) { return state.filters[k]; });
+    return {
+      section: state.section,
+      q: state.query || "",
+      f: f.sort().join(","),
+      row: state.expandedKey || "",
+      route: state.routeKey || ""
+    };
+  }
+
+  function encodeURLState(u) {
+    var parts = [];
+    URL_KEYS.forEach(function (k) {
+      if (u[k]) parts.push(k + "=" + encodeURIComponent(u[k]));
+    });
+    return "#/" + (u.section || "assets") + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  function decodeURLState(hash) {
+    var m = /^#\/([a-z-]+)(?:\?(.*))?$/.exec(hash || "");
+    if (!m) return null;
+    var out = { section: m[1], q: "", f: "", row: "", route: "" };
+    (m[2] || "").split("&").forEach(function (pair) {
+      if (!pair) return;
+      var i = pair.indexOf("=");
+      var k = i < 0 ? pair : pair.slice(0, i);
+      if (URL_KEYS.indexOf(k) < 0) return;
+      try { out[k] = decodeURIComponent(i < 0 ? "" : pair.slice(i + 1)); } catch (e) { out[k] = ""; }
+    });
+    return out;
+  }
+
+  /* push for a navigation the operator should be able to walk back out of,
+     replace for a keystroke in the filter box - one entry per typed character
+     would make Back useless. */
+  function syncURL(push) {
+    if (suppressHistory) return;
+    var u = currentURLState();
+    var href = encodeURLState(u);
+    try {
+      if (push && location.hash !== href) history.pushState(u, "", href);
+      else history.replaceState(u, "", href);
+    } catch (e) { /* addressing is a convenience; never break the view for it */ }
+    persistView(u);
+  }
+
+  function persistView(u) {
+    writeStore("ominull.view", JSON.stringify({
+      section: u.section, q: u.q, f: u.f, sort: state.assetSort
+    }));
+  }
+
+  function restoreView() {
+    var u = decodeURLState(location.hash);
+    if (!u) {
+      /* No address to honour, so fall back to what this operator was last
+         looking at. A deliberate link always wins over the remembered view. */
+      try {
+        var saved = JSON.parse(readStore("ominull.view", "null"));
+        if (saved && saved.section) u = { section: saved.section, q: saved.q || "", f: saved.f || "", row: "", route: "" };
+        if (saved && saved.sort && typeof saved.sort.col === "number") state.assetSort = saved.sort;
+      } catch (e) { u = null; }
+    }
+    if (u) applyURLState(u);
+  }
+
+  function applyURLState(u) {
+    if (!u) return;
+    var section = u.section === "discovery" ? "assets" : u.section;
+    if (SECTIONS.some(function (sec) { return sec.id === section; })) state.section = section;
+    state.query = u.q || "";
+    state.filters = {};
+    (u.f || "").split(",").forEach(function (k) {
+      if (k && FILTERS[k]) state.filters[k] = true;
+    });
+    state.expandedKey = u.row || "";
+    if (u.route) {
+      state.routeKey = u.route;
+    } else {
+      closeRoute();
     }
   }
 
@@ -322,6 +425,17 @@
     dnsStatus: null,
     dnsEvents: [],
     dnsPolicy: [],
+    terminalAvailable: false,
+    /* The hub runs 24 checks with remediation text and the console never asked
+       for them once. They are not on the 5s poll: each run has an 8 second
+       timeout and touches the network, so it is fetched when the section is
+       first shown and whenever the operator asks again. */
+    diagnostics: null,
+    diagnosticsAt: 0,
+    diagnosticsError: "",
+    diagnosticsRunning: false,
+    viewStale: false,
+    pointerDragging: false,
     topology: null,
     topoWindow: "24h",
     /* The graph is reduced before it is drawn; these decide how. */
@@ -345,6 +459,12 @@
     collapsedGroups: {},
     routeKey: "",
 
+    /* Which Assets column the operator sorted on, {col, dir}, or null for the
+       stable address order. "Who is oldest on agent version" and "who was seen
+       least recently" are two of the questions this table exists to answer and
+       neither was reachable. */
+    assetSort: null,
+
     topoSelected: "",
     topoEdgeSelected: "",
     statHistory: {},
@@ -363,6 +483,14 @@
 
     // Phase 7: Software Inventory & Vulnerability Correlation
     softwareByEndpoint: {},
+    /* The hub has kept a rolling communication profile per endpoint since the
+       first release and the console never read it, so "what does this host
+       normally talk to" could only be answered by scrolling raw flows. */
+    profilesByEndpoint: {},
+    /* One bearer credential per enrolled machine. Admin-only, listed without
+       the secret - the hub returns the credential string exactly once, at
+       issue. */
+    deviceCredentials: [],
     activeSnapshot: null,
     vulnFilterStatus: "",
     softwareSearchQuery: ""
@@ -1066,57 +1194,70 @@
     state.theme = name;
     document.documentElement.setAttribute("data-theme", name);
     if (persist) writeStore("ominull.theme", name);
-    var slots = ["theme-sw-1", "theme-sw-2", "theme-sw-3", "theme-sw-4"];
-    var roles = ["ground", "ink", "ok", "crit"];
-    slots.forEach(function (id, i) {
-      var el = $(id);
-      if (el) el.className = "sw sw-" + roles[i] + "-" + name;
-    });
-    var btn = $("theme-btn");
-    if (btn) btn.setAttribute("title", "Theme: " + THEME_NAMES[name]);
+
+    /* A live terminal recolours with everything else. The data-theme attribute
+       is already on <html> at this point, so the tokens read here are the new
+       theme's. */
+    if (liveTerminal) {
+      try { liveTerminal.options.theme = terminalTheme(); } catch (e) {}
+    }
   }
 
-  var themePop = null;
+  /* xterm cannot read CSS custom properties, so its palette has to be handed
+     to it as literal colours. It was a hardcoded GitHub-dark set maintained in
+     two places that had to be kept in sync by hand - here and 25 !important
+     rules in app.css - and it ignored all four of the console's themes, so a
+     Phosphor operator got a blue-black rectangle in the middle of a green
+     console. These read the real tokens off the document, so there is one
+     source of truth and a theme switch can re-derive them.
 
-  function closeThemePop() {
-    if (themePop && themePop.parentNode) themePop.parentNode.removeChild(themePop);
-    themePop = null;
-    var btn = $("theme-btn");
-    if (btn) btn.setAttribute("aria-expanded", "false");
+     ANSI 0-15 are not tokens and should not be: the console's own palette is
+     four hues reserved for asset state, while a shell needs sixteen
+     distinguishable colours for other people's programs. They are derived
+     from the console's semantic tokens where one exists and are fixed,
+     theme-independent values otherwise. */
+  function cssVar(name, fallback) {
+    var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    v = (v || "").trim();
+    return v || fallback;
   }
 
-  function openThemePop() {
-    closeThemePop();
-    var btn = $("theme-btn");
-    if (!btn) return;
-    var pop = h("div", { cls: "theme-pop", role: "radiogroup", "aria-label": "Theme" },
-      h("div", { cls: "lbl", text: "Palette" }));
-
-    THEMES.forEach(function (t) {
-      var chips = h("span", { cls: "chips" });
-      ["ground", "ink", "brand", "ok", "warn", "crit"].forEach(function (role) {
-        chips.appendChild(h("i", { cls: "sw-" + role + "-" + t }));
-      });
-      pop.appendChild(h("button", {
-        cls: "theme-opt", type: "button", role: "radio",
-        "aria-checked": state.theme === t ? "true" : "false",
-        on: {
-          click: function () {
-            applyTheme(t, true);
-            closeThemePop();
-          }
-        }
-      },
-        h("span", { text: THEME_NAMES[t] }),
-        chips));
-    });
-
-    document.body.appendChild(pop);
-    var r = btn.getBoundingClientRect();
-    placeOverlay(pop, r.left, r.top - pop.offsetHeight - 8);
-    themePop = pop;
-    btn.setAttribute("aria-expanded", "true");
+  /* xterm's palette. Every colour comes from a --term-* token in app.css, so
+   * the emulator, the .terminal-container fallback rules and the four themes
+   * are one definition instead of three that drifted. applyTheme re-derives
+   * this for a live terminal, so switching theme with a shell open recolours
+   * it in place rather than leaving a blue-black rectangle behind. */
+  function terminalTheme() {
+    function ansi(n, fallback) { return cssVar("--term-ansi-" + n, fallback); }
+    var bg = cssVar("--term-bg", "#14161A");
+    var fg = cssVar("--term-fg", "#DADDE3");
+    return {
+      background: bg,
+      foreground: fg,
+      cursor: cssVar("--brand", "#8FA9E8"),
+      cursorAccent: bg,
+      selectionBackground: cssVar("--raised", "#22262E"),
+      black: ansi(0, "#2C313A"),
+      red: ansi(1, "#CD7670"),
+      green: ansi(2, "#73B87D"),
+      yellow: ansi(3, "#E6BE6D"),
+      blue: ansi(4, "#689BDB"),
+      magenta: ansi(5, "#BC8CFF"),
+      cyan: ansi(6, "#39C5CF"),
+      white: ansi(7, "#949BA8"),
+      brightBlack: ansi(8, "#878E9B"),
+      brightRed: ansi(9, "#D35A55"),
+      brightGreen: ansi(10, "#8FD48F"),
+      brightYellow: ansi(11, "#F0CE84"),
+      brightBlue: ansi(12, "#8FA9E8"),
+      brightMagenta: ansi(13, "#D2A8FF"),
+      brightCyan: ansi(14, "#6FDDE4"),
+      brightWhite: ansi(15, "#DADDE3")
+    };
   }
+
+  /* The live terminal, if one is open. applyTheme re-colours it in place. */
+  var liveTerminal = null;
 
   /* ------------------------------------------------------- asset merging */
 
@@ -1130,6 +1271,41 @@
     if (ep.status === "online") return true;
     var t = parseTime(ep.last_seen_at);
     return !!t && (Date.now() - t.getTime()) < 30000;
+  }
+
+  /* The asset row an endpoint id belongs to.
+
+     Asset ids are `asset-<kind>-<safe>` with kind in {mac, ip} - identity keys
+     on the hardware address so a host keeps one row across a DHCP lease change
+     (storage/assets.go). Three call sites indexed `state.assetByKey` by the
+     endpoint id directly, or by a hand-built "asset-ep-<id>" that is not a
+     shape the hub ever emits, so they always missed: the Alerts page's
+     "Isolate Endpoint" - the primary containment action there - could only
+     ever answer "Asset mapping not found". There is no index by endpoint id,
+     so this walks; the map is one row per host and the walk is bounded by the
+     fleet, not by traffic. */
+  function assetForEndpoint(epId) {
+    if (!epId) return null;
+    for (var k in state.assetByKey) {
+      if (!Object.prototype.hasOwnProperty.call(state.assetByKey, k)) continue;
+      var a = state.assetByKey[k];
+      if (a && a.endpoint && a.endpoint.id === epId) return a;
+    }
+    return null;
+  }
+
+  /* Same question asked from an alert, which may carry a hostname and no id. */
+  function assetForAlert(a) {
+    if (!a) return null;
+    var found = assetForEndpoint(a.endpoint_id);
+    if (found) return found;
+    if (!a.hostname) return null;
+    for (var k in state.assetByKey) {
+      if (!Object.prototype.hasOwnProperty.call(state.assetByKey, k)) continue;
+      var asset = state.assetByKey[k];
+      if (asset && asset.name && asset.name === a.hostname) return asset;
+    }
+    return null;
   }
 
   /* One row per host, from the server's asset graph.
@@ -1359,7 +1535,10 @@
       /* A new agent can report with its unique device credential before direct
          native mTLS is enabled. This is the number still missing the extra
          certificate proof before --client-certs required is safe. */
-      keyOnly: count(function (x) { return x.evidence.agent && !(x.endpoint && x.endpoint.cert_cn); })
+      /* Named to match the filter id and the tile id. It was `keyOnly` while
+         both of those are `keyonly`, so `sparkline(state.statHistory[t.id])`
+         looked up a key nothing ever wrote and this one tile had no trend. */
+      keyonly: count(function (x) { return x.evidence.agent && !(x.endpoint && x.endpoint.cert_cn); })
     };
   }
 
@@ -1421,7 +1600,7 @@
       { id: "noagent", label: "No agent", value: stats.noagent, tone: stats.noagent ? "warn" : "" },
       { id: "quarantined", label: "Quarantined", value: stats.quarantined, tone: stats.quarantined ? "crit" : "" },
       { id: "outdated", label: "Agent outdated", value: stats.outdated, tone: stats.outdated ? "warn" : "" },
-      { id: "keyonly", label: "Key only, no cert", value: stats.keyOnly, tone: stats.keyOnly ? "warn" : "" },
+      { id: "keyonly", label: "Key only, no cert", value: stats.keyonly, tone: stats.keyonly ? "warn" : "" },
       { id: "risky", label: "Risky ports", value: stats.risky, tone: stats.risky ? "warn" : "" }
     ];
 
@@ -1436,6 +1615,7 @@
             if (!t.id) state.filters = {};
             else state.filters[t.id] = !state.filters[t.id];
             state.cursorKey = "";
+            syncURL(true);
             render();
           }
         }
@@ -1557,11 +1737,37 @@
   var ctxMenu = null;
 
   function closeCtx() {
+    var opener = ctxMenu && ctxMenu._opener;
+    if (ctxMenu && ctxMenu._keys) document.removeEventListener("keydown", ctxMenu._keys, true);
     if (ctxMenu && ctxMenu.parentNode) ctxMenu.parentNode.removeChild(ctxMenu);
     ctxMenu = null;
     Array.prototype.forEach.call(document.querySelectorAll('.menu-btn[aria-expanded="true"]'), function (b) {
       b.setAttribute("aria-expanded", "false");
     });
+    restoreFocus(opener);
+  }
+
+  /* role="menu" promises arrow-key navigation; this one had none, no initial
+     focus, no trap and no way to open it from the keyboard at all - every
+     per-host action in the console was mouse-only. */
+  function wireMenuKeys(menu) {
+    var items = function () {
+      return Array.prototype.filter.call(menu.querySelectorAll('[role="menuitem"]'), function (b) { return !b.disabled; });
+    };
+    menu._keys = function (e) {
+      var list = items();
+      if (!list.length) return;
+      var at = list.indexOf(document.activeElement);
+      if (e.key === "ArrowDown") { e.preventDefault(); list[(at + 1 + list.length) % list.length].focus(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); list[(at - 1 + list.length) % list.length].focus(); }
+      else if (e.key === "Home") { e.preventDefault(); list[0].focus(); }
+      else if (e.key === "End") { e.preventDefault(); list[list.length - 1].focus(); }
+      else if (e.key === "Tab") { e.preventDefault(); }
+      else if (e.key === "Escape") { e.preventDefault(); closeCtx(); }
+    };
+    document.addEventListener("keydown", menu._keys, true);
+    var first = items()[0];
+    if (first) { try { first.focus(); } catch (e) {} }
   }
 
   function menuItem(label, iconId, shortcut, fn, opts) {
@@ -1594,8 +1800,11 @@
       var isOutdated = asset.endpoint.driver_version !== targetVer;
       menu.appendChild(h("div", { cls: "lbl", text: "Managed Host (" + (asset.name || asset.ip) + ")" }));
       menu.appendChild(menuItem("Open full view", "i-external", "\u21b5", function () { openRoute(asset.key); }));
+      /* Topology nodes are keyed by address; this set the asset id, which
+         matches no node, so a managed host silently opened Topology with
+         nothing selected. The unmanaged branch below always had it right. */
       menu.appendChild(menuItem("Show in topology", "i-topology", "g t", function () {
-        state.topoSelected = asset.key;
+        state.topoSelected = asset.ip;
         go("topology");
       }));
       menu.appendChild(menuItem("Copy IP address", "i-copy", "y", function () { copyAddress(asset); }));
@@ -1626,9 +1835,24 @@
 
       menu.appendChild(h("div", { cls: "sep" }));
       menu.appendChild(h("div", { cls: "lbl", text: "Response & Forensics" }));
-      menu.appendChild(menuItem("Launch Terminal Shell\u2026", "i-unlock", null, function () {
-        launchTerminalShell(asset);
-      }));
+      /* The icon was i-unlock, which this same menu uses for "Release host" -
+         two unrelated actions with one glyph. i-terminal is its own symbol
+         now (index.html). */
+      var liveShell = liveTerminalFor(asset.endpoint);
+      if (liveShell) {
+        var elapsed = parseTime(liveShell.started_at || liveShell.created_at);
+        var elapsedLabel = elapsed ? " \u00b7 " + ago(elapsed) : "";
+        menu.appendChild(menuItem(
+          "Reattach Terminal (" + (liveShell.program || "shell") + elapsedLabel + ")",
+          "i-terminal", null, function () { reattachTerminal(liveShell); }));
+        menu.appendChild(menuItem("Terminate Active Terminal", "i-close", null, function () {
+          terminateTerminalSession(liveShell, asset.name || asset.ip);
+        }, { danger: true }));
+      } else {
+        menu.appendChild(menuItem("Launch Terminal Shell\u2026", "i-terminal", null, function () {
+          launchTerminalShell(asset);
+        }));
+      }
       menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
         launchForensicsSheet(asset);
       }));
@@ -1662,7 +1886,9 @@
     var r = menu.getBoundingClientRect();
     placeOverlay(menu, Math.max(8, Math.min(x, window.innerWidth - r.width - 8)), Math.min(y, window.innerHeight - r.height - 8));
     ctxMenu = menu;
+    menu._opener = anchorBtn || document.activeElement;
     if (anchorBtn) anchorBtn.setAttribute("aria-expanded", "true");
+    wireMenuKeys(menu);
   }
 
   /* --------------------------------------------------------------- actions */
@@ -1721,13 +1947,13 @@
       simpleTable(["Permitted", "Destination", "Wire"], wireRows(info.wire, info.always_permitted)),
       uncovered.length
         ? h("div", {},
-            h("p", { cls: "note note-crit", text: "This host is using services the baseline does not cover. Isolating it cuts them off." }),
+            h("p", { cls: "note note-crit", role: "alert", text: "This host is using services the baseline does not cover. Isolating it cuts them off." }),
             simpleTable(["Not covered", "Destination"], uncovered.map(function (u) {
               return [h("span", { text: u.service }), h("span", { cls: "ip", text: u.destination })];
             })))
         : null,
-      info.blocker && !uncovered.length ? h("p", { cls: "note note-crit", text: info.blocker }) : null,
-      info.warning ? h("p", { cls: "note note-warn", text: info.warning }) : null);
+      info.blocker && !uncovered.length ? h("p", { cls: "note note-crit", role: "alert", text: info.blocker }) : null,
+      info.warning ? h("p", { cls: "note note-warn", role: "alert", text: info.warning }) : null);
 
     var confirm = info.ready
       ? h("button", { cls: "btn btn-primary", type: "button", text: "Isolate", on: { click: function () { doIsolate(asset, false); } } })
@@ -1745,8 +1971,129 @@
     openSheet("Isolate " + asset.name, body, actions);
   }
 
+  /* The one confirmation shape, taken from openIsolateSheet above: what is
+     about to happen, in a sentence a person can act on, and a `btn-crit`
+     confirm that is never the focused control.
+
+     Eighteen destructive actions had six different levels of ceremony and
+     almost no correlation with blast radius. Removing your own admin access
+     was one unconfirmed click while deleting one baseline policy got a full
+     consequence sheet; pushing an agent update to the entire fleet, bulk
+     isolation, mesh quarantine and clearing a tenant's acknowledged alerts had
+     none at all. Everything destructive now comes through here.
+
+     opts:
+       title         heading
+       consequence   what happens, in plain language - required
+       detail        the specific thing being acted on
+       extra         an extra node (a list, a reason field)
+       confirmLabel  the confirm button's text
+       requireText   make the operator type this string first
+       confirmTone   "crit" (default) or "primary" for a reversible action
+       stack         keep the sheet underneath alive (a live terminal)
+       onConfirm     called after the sheet closes */
+  function confirmSheet(opts) {
+    var typed = null;
+    var confirmBtn = h("button", {
+      cls: opts.confirmTone === "primary" ? "btn btn-primary" : "btn btn-crit",
+      type: "button",
+      text: opts.confirmLabel || "Confirm",
+      on: {
+        click: function () {
+          if (opts.requireText && (!typed || typed.value.trim() !== opts.requireText)) return;
+          closeSheet();
+          if (typeof opts.onConfirm === "function") opts.onConfirm();
+        }
+      }
+    });
+
+    if (opts.requireText) {
+      confirmBtn.disabled = true;
+      typed = h("input", {
+        type: "text", autocomplete: "off", spellcheck: "false",
+        "aria-label": "Type " + opts.requireText + " to confirm",
+        placeholder: opts.requireText
+      });
+      typed.addEventListener("input", function () {
+        confirmBtn.disabled = typed.value.trim() !== opts.requireText;
+      });
+    }
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "note note-crit", role: "alert", text: opts.consequence }),
+      opts.detail ? h("p", { cls: "why", text: opts.detail }) : null,
+      opts.extra || null,
+      typed ? h("div", { cls: "form-row stack-s" },
+        h("span", { cls: "dim-2", text: "Type " + opts.requireText + " to confirm:" }),
+        typed) : null);
+
+    openSheet(opts.title || "Confirm", body, [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      confirmBtn
+    ], opts.cls || null, {
+      stack: !!opts.stack,
+      guardDirty: false,
+      /* Never the confirm button. openSheet's old heuristic focused the first
+         `input, select, button.btn-primary` it found, which in the isolate
+         sheet was the Isolate button - one Space from cutting a host off. */
+      initialFocus: typed || false
+    });
+  }
+
+  /* The console's replacement for window.prompt(). The native one cannot be
+     styled, cannot be labelled beyond one line, blocks the whole tab, and on
+     a second monitor opens where the browser feels like rather than where the
+     operator is looking. */
+  function promptSheet(opts) {
+    var field = h("input", {
+      type: "text", autocomplete: "off", spellcheck: "false",
+      "aria-label": opts.label || opts.title || "Value",
+      placeholder: opts.placeholder || "",
+      value: opts.value == null ? "" : String(opts.value)
+    });
+
+    var submit = function () {
+      var v = field.value.trim();
+      if (!v) return;
+      closeSheet();
+      if (typeof opts.onSubmit === "function") opts.onSubmit(v);
+    };
+    field.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+    });
+
+    var body = h("div", { cls: "stack" },
+      opts.detail ? h("p", { cls: "why", text: opts.detail }) : null,
+      h("label", { cls: "field" },
+        h("span", { text: opts.label || "Value" }),
+        field));
+
+    openSheet(opts.title || "Enter a value", body, [
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+      h("button", { cls: "btn btn-primary", type: "button", text: opts.submitLabel || "Save", on: { click: submit } })
+    ], opts.cls || null, { stack: !!opts.stack, guardDirty: false, initialFocus: field });
+  }
+
   function setMesh(asset, on) {
     if (!asset.ip) { toast("No address for " + asset.name, "warn"); return; }
+    /* Mesh quarantine is enforced upstream of the host, so unlike endpoint
+       isolation the host itself cannot undo it and cannot tell you it is
+       happening - it simply stops reaching the network. It fired straight off
+       a menu click with no confirmation at all. */
+    if (on) {
+      confirmSheet({
+        title: "Mesh-quarantine " + (asset.name || asset.ip),
+        consequence: asset.ip + " is cut off at the mesh, not on the host. Everything it serves stops answering, and because the block is upstream the machine itself has no way to report or lift it.",
+        detail: (asset.mac ? asset.mac + " \u00b7 " : "") + (asset.subnet || "no subnet recorded"),
+        confirmLabel: "Quarantine at the mesh",
+        onConfirm: function () { sendMesh(asset, true); }
+      });
+      return;
+    }
+    sendMesh(asset, false);
+  }
+
+  function sendMesh(asset, on) {
     var path = on ? "/api/v1/mesh/quarantine" : "/api/v1/mesh/unquarantine";
     var body = { target_ip: asset.ip };
     if (on) {
@@ -1771,16 +2118,25 @@
   }
 
   function correctFingerprint(asset) {
-    var actual = window.prompt("Actual device for " + asset.ip + ":", asset.scan ? asset.scan.os_guess : "");
-    if (!actual) return;
-    request("/api/v1/scanner/feedback", "POST", {
-      ip: asset.ip, actual_device: actual,
-      vendor: asset.scan ? asset.scan.vendor : "",
-      category: asset.scan ? asset.scan.category : ""
-    }).then(function () {
-      toast("Signature trained for " + asset.ip, "ok");
-      refresh();
-    }).catch(function (e) { toast("Training failed: " + e.message, "crit"); });
+    promptSheet({
+      title: "Correct fingerprint",
+      label: "Actual device",
+      detail: "Teaches the scanner's signature database. " + asset.ip +
+        " is currently identified as " + ((asset.scan && asset.scan.os_guess) || "unknown") + ".",
+      placeholder: "e.g. Ubiquiti UniFi AP",
+      value: asset.scan ? asset.scan.os_guess : "",
+      submitLabel: "Train signature",
+      onSubmit: function (actual) {
+        request("/api/v1/scanner/feedback", "POST", {
+          ip: asset.ip, actual_device: actual,
+          vendor: asset.scan ? asset.scan.vendor : "",
+          category: asset.scan ? asset.scan.category : ""
+        }).then(function () {
+          toast("Signature trained for " + asset.ip, "ok");
+          refresh();
+        }).catch(function (e) { toast("Training failed: " + e.message, "crit"); });
+      }
+    });
   }
 
   function installAgent(asset) {
@@ -1796,10 +2152,31 @@
 
   function bulkIsolate(on) {
     var keys = selectedKeys();
-    var ids = keys.map(function (k) { return state.assetByKey[k]; })
-      .filter(function (a) { return a && a.endpoint; })
-      .map(function (a) { return a.endpoint.id; });
+    var assets = keys.map(function (k) { return state.assetByKey[k]; })
+      .filter(function (a) { return a && a.endpoint; });
+    var ids = assets.map(function (a) { return a.endpoint.id; });
     if (!ids.length) { toast("Select agented hosts first", "warn"); return; }
+
+    /* Isolating one host asks first. Isolating forty from the toolbar did not
+       - the single most consequential control in the console was the one with
+       no confirmation. The names are listed because "40 hosts" is not enough
+       information to notice that the selection is wrong. */
+    if (on) {
+      var names = assets.map(function (a) { return a.name || a.ip || a.endpoint.id; });
+      confirmSheet({
+        title: "Isolate " + ids.length + " host" + (ids.length === 1 ? "" : "s"),
+        consequence: "Each host keeps only its link to this hub. Every other inbound and outbound flow is dropped at the agent - sessions, shares, backups, anything that host serves to anyone else stops immediately.",
+        detail: names.slice(0, 8).join(", ") + (names.length > 8 ? " and " + (names.length - 8) + " more" : ""),
+        confirmLabel: "Isolate " + ids.length + " host" + (ids.length === 1 ? "" : "s"),
+        requireText: ids.length >= 5 ? "ISOLATE" : null,
+        onConfirm: function () { sendBulkIsolate(ids, true); }
+      });
+      return;
+    }
+    sendBulkIsolate(ids, false);
+  }
+
+  function sendBulkIsolate(ids, on) {
     var path = on ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
     var send = function (force) {
       var body = { endpoint_ids: ids };
@@ -1823,7 +2200,7 @@
   function openBulkBlockedSheet(ids, info, send) {
     var uncovered = arrayOf(info.uncovered);
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "note note-crit", text: info.error || "One of the selected hosts is not ready to be isolated." }),
+      h("p", { cls: "note note-crit", role: "alert", text: info.error || "One of the selected hosts is not ready to be isolated." }),
       h("p", { cls: "pending", text: "Blocked on " + (info.endpoint_id || "an endpoint") + ". Nothing has been isolated." }),
       uncovered.length
         ? simpleTable(["Not covered", "Destination"], uncovered.map(function (u) {
@@ -1846,6 +2223,19 @@
   }
 
   function pushAgentUpdates() {
+    /* One click queued a self-update on every agent in the fleet. An agent
+       that restarts into a broken build takes its host's enforcement with it,
+       and there is no console-side undo. */
+    confirmSheet({
+      title: "Push agent updates to the whole fleet",
+      consequence: "Every enrolled agent that supports self-update downloads the bundled build and restarts. Enforcement on each host is briefly down during the restart, and an agent that fails to come back has to be recovered on the host itself.",
+      detail: "Hosts on native packages are skipped and reported instead.",
+      confirmLabel: "Push updates",
+      onConfirm: sendAgentUpdates
+    });
+  }
+
+  function sendAgentUpdates() {
     request("/api/v1/agents/update", "POST", { all: true }).then(function (res) {
       var n = arrayOf(res && res.scheduled).length;
       var u = arrayOf(res && res.unsupported).length;
@@ -1870,6 +2260,37 @@
 
   function stateBadge(st) {
     return h("span", { cls: "st", "data-state": st.tone }, icon(st.glyph, true), h("span", { text: st.word }));
+  }
+
+  /* The sections built after the core were written against a `.badge` /
+     `.badge-ok` vocabulary that has no rules in app.css at all, so every state
+     chip in Response, Terminal, Scripts and Forensics rendered as unstyled grey
+     body text - "collected" and "permission_denied" evidence looked identical.
+     `.st[data-state]` is the console's one state chip: a 3px stripe plus a word,
+     never colour alone. chip() builds one; setChip() is for the few places that
+     reassign className on a node they already hold. Tones map straight across
+     (ok/warn/crit) and the old `badge-neutral`/bare `badge` become `idle`. */
+  function chip(tone, text) {
+    return h("span", { cls: "st", "data-state": tone || "idle" }, h("span", { text: String(text == null ? "" : text) }));
+  }
+
+  /* A terminal session's state as a chip tone. `detached` is a running shell
+     with nobody watching it - warn, not crit: nothing is broken, but it is
+     holding an endpoint's one session slot and burning its 60m budget. */
+  function terminalStateTone(st) {
+    if (st === "active") return "ok";
+    if (st === "detached") return "warn";
+    if (st === "waiting" || st === "connecting") return "info";
+    if (st === "failed" || st === "expired") return "crit";
+    return "idle";
+  }
+
+  function setChip(el, tone, text) {
+    if (!el) return el;
+    el.className = "st";
+    el.setAttribute("data-state", tone || "idle");
+    if (text != null) el.textContent = String(text);
+    return el;
   }
 
   function meter(fraction) {
@@ -1952,6 +2373,16 @@
     addKV("Identity key", asset.assetId);
     addKV("Client", asset.tenantName);
     addKV("Location", asset.locationName);
+    /* The scanner scores every asset and the merge records why it settled on a
+       role and how sure it was. All three were computed on every refresh and
+       rendered nowhere in Assets: risk surfaced only in Topology's side panel,
+       and the confidence behind "Role: Printer" was invisible, so a 44% guess
+       and a 99% certainty read identically. */
+    if (asset.risk) addKV("Risk", asset.risk, asset.risk === "CRITICAL" || asset.risk === "HIGH");
+    if (asset.role) {
+      addKV("Role", asset.role + (asset.roleConf ? " \u00b7 " + Math.round(asset.roleConf * 100) + "% confidence" : ""));
+    }
+    if (asset.rationale) addKV("Why that role", asset.rationale);
     if (ep) {
       addKV("Endpoint id", ep.id);
       addKV("Agent", shortVersion(ep.driver_version) + (engineOf(ep.driver_version) ? " \u00b7 " + engineOf(ep.driver_version) : ""), true);
@@ -2023,8 +2454,86 @@
       whyCol.appendChild(h("p", { cls: "why", text: "Seen, but not yet identified by any source." }));
     }
 
-    var td = h("td", { colspan: String(colspan) }, h("div", { cls: "detail" }, identityCol, exposureCol, whyCol));
+    /* A live root shell on this host outranks all three columns and must not
+       be something you scan sideways for, so it is a full-width banner above
+       the grid rather than a fourth column.
+
+       It renders for every operator role - seeing that a shell is open is
+       situational awareness, not a privilege - while Reattach and Terminate
+       prompt for the response unlock when clicked. */
+    var td = h("td", { colspan: String(colspan) },
+      h("div", { cls: "stack" }, terminalBanner(asset), h("div", { cls: "detail" }, identityCol, exposureCol, whyCol)));
     return h("tr", { cls: "exp" }, td);
+  }
+
+  function terminalBanner(asset) {
+    if (!state.terminalAvailable || !asset.endpoint) return null;
+    var ep = asset.endpoint;
+    var host = asset.name || asset.ip || ep.id;
+    var t = liveTerminalFor(ep);
+
+    if (!t) {
+      /* No session: one quiet line, not a banner. An absent shell is not news. */
+      return h("div", { cls: "term-banner", "data-state": "none" },
+        h("span", { cls: "dim-3", text: "No terminal session on this host." }),
+        h("span", { cls: "fill" }),
+        h("button", {
+          cls: "mini", type: "button", text: "Launch Terminal Shell",
+          on: { click: function (e) { e.stopPropagation(); launchTerminalShell(asset); } }
+        }));
+    }
+
+    var isWindows = String(ep.os || "").indexOf("Windows") !== -1;
+    var identity = isWindows ? "LocalSystem" : "root";
+    var mine = !t.operator_id || t.operator_id === OPERATOR;
+    var started = parseTime(t.started_at || t.created_at);
+
+    var tone, word;
+    if (t.state === "detached") { tone = "warn"; word = "Detached \u2014 running in background"; }
+    else if (t.state === "waiting" || t.state === "connecting") { tone = "info"; word = "Waiting for agent"; }
+    else if (mine) { tone = "ok"; word = "Live \u2014 attached"; }
+    else { tone = "warn"; word = "Live \u2014 held by another operator"; }
+
+    var facts = h("div", { cls: "term-banner-facts" },
+      chip(tone, word),
+      h("span", { cls: "ip", text: t.program || (isWindows ? "powershell.exe" : "/bin/bash") }),
+      chip("idle", identity),
+      h("span", { cls: "dim-2", text: t.operator_id || "unknown operator" }),
+      started ? stamp(started) : null);
+
+    var acts = h("div", { cls: "term-banner-acts" });
+    /* Another operator's live session is theirs to drive; an administrator can
+       still end it, because "somebody left a root shell open and went home" is
+       exactly the situation this has to be able to resolve. */
+    if (mine || t.state === "detached") {
+      acts.appendChild(h("button", {
+        cls: "btn mini", type: "button", text: "Reattach Console",
+        on: { click: function (e) { e.stopPropagation(); reattachTerminal(t); } }
+      }));
+    }
+    if (mine || IS_ADMIN) {
+      acts.appendChild(h("button", {
+        cls: "btn mini", type: "button", "data-danger": "true", text: "Terminate Session",
+        on: { click: function (e) { e.stopPropagation(); terminateTerminalSession(t, host); } }
+      }));
+    }
+
+    return h("div", { cls: "term-banner", "data-state": tone }, facts, h("span", { cls: "fill" }), acts);
+  }
+
+  /* A glyph on the collapsed row, so an open shell is visible while scanning
+     the table rather than only after expanding a host. */
+  function terminalRowGlyph(asset) {
+    if (!state.terminalAvailable || !asset.endpoint) return null;
+    var t = liveTerminalFor(asset.endpoint);
+    if (!t) return null;
+    var tone = t.state === "detached" ? "warn" : (t.state === "active" ? "ok" : "info");
+    var label = t.state === "detached" ? "Terminal session detached and still running" : "Terminal session open";
+    return h("span", {
+      cls: "term-glyph", "data-state": tone,
+      title: label + " \u00b7 " + (t.program || "shell"),
+      "aria-label": label
+    }, icon("i-terminal", true));
   }
 
   function assetRow(asset, colspan, index, allRows) {
@@ -2058,7 +2567,7 @@
       }
     }, icon("i-dots"));
 
-    var nameCell = h("td", {}, h("span", { cls: "host", text: asset.name }));
+    var nameCell = h("td", {}, h("span", { cls: "host", text: asset.name }), terminalRowGlyph(asset));
 
     var agentCell;
     if (asset.endpoint) {
@@ -2137,9 +2646,73 @@
       h("td", {}, stamp(asset.lastSeen)));
   }
 
+  /* One comparable value per sortable Assets column. Numbers where the column
+     is a quantity, so "12 ports" does not sort before "2 ports". */
+  var ASSET_SORT = {
+    2: function (r) { return (r.name || "").toLowerCase(); },
+    3: function (r) { return r.sortKey; },
+    4: function (r) { return (r.identity || "").toLowerCase(); },
+    5: function (r) { return (r.evidence.agent ? 2 : 0) + (r.evidence.scan ? 1 : 0); },
+    6: function (r) { return (r.state || "").toLowerCase(); },
+    7: function (r) { return r.riskyPorts * 10000 + r.ports.length; },
+    8: function (r) {
+      if (!r.endpoint) return -1;
+      var t = versionTriple(r.endpoint.driver_version);
+      return t[0] * 1000000 + t[1] * 1000 + t[2];
+    },
+    9: function (r) { return r.lastSeen ? +r.lastSeen : 0; }
+  };
+
+  /* Sorting is applied inside each tenant/location group, never across them:
+     the grouping is the operator's mental map of the estate and reordering it
+     under a context menu is how a click lands on the wrong host. */
+  function sortAssetRows(rows) {
+    var st = state.assetSort;
+    var pick = st && ASSET_SORT[st.col];
+    if (!pick) return rows;
+    var dir = st.dir === "desc" ? -1 : 1;
+    return rows.slice().sort(function (a, b) {
+      if (a.groupKey !== b.groupKey) return a.groupKey < b.groupKey ? -1 : 1;
+      var va = pick(a), vb = pick(b);
+      if (typeof va === "number" && typeof vb === "number") {
+        if (va !== vb) return (va - vb) * dir;
+      } else {
+        var c = String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: "base" });
+        if (c) return c * dir;
+      }
+      /* Ties keep the stable address order, so a re-render never shuffles
+         equal rows past one another. */
+      return a.sortKey < b.sortKey ? -1 : (a.sortKey > b.sortKey ? 1 : 0);
+    });
+  }
+
+  function assetSortHeader(col, label, attrs) {
+    var st = state.assetSort;
+    var active = st && st.col === col;
+    var th = h("th", attrs || {});
+    th.setAttribute("scope", "col");
+    th.setAttribute("aria-sort", active ? (st.dir === "desc" ? "descending" : "ascending") : "none");
+    th.appendChild(h("button", {
+      cls: "th-sort", type: "button", text: label,
+      "data-active": active ? "true" : null,
+      "data-dir": active ? st.dir : null,
+      title: "Sort by " + label,
+      on: {
+        click: function () {
+          if (active && st.dir === "asc") state.assetSort = { col: col, dir: "desc" };
+          else if (active) state.assetSort = null;
+          else state.assetSort = { col: col, dir: "asc" };
+          persistView(currentURLState());
+          render();
+        }
+      }
+    }));
+    return th;
+  }
+
   function renderAssets() {
     var view = $("view");
-    var rows = visibleAssets();
+    var rows = sortAssetRows(visibleAssets());
     var cols = 10;
 
     var head = h("tr", {},
@@ -2160,15 +2733,15 @@
         box.checked = all;
         return box;
       })()),
-      h("th", { cls: "c-menu", title: "Row actions" }),
-      h("th", { text: "Asset" }),
-      h("th", { text: "Address" }),
-      h("th", { text: "Identity" }),
-      h("th", { title: "agent \u00b7 scan", text: "Known by" }),
-      h("th", { text: "State" }),
-      h("th", { text: "Exposure" }),
-      h("th", { text: "Agent" }),
-      h("th", { text: "Last seen" }));
+      h("th", { cls: "c-menu", scope: "col" }, h("span", { cls: "sr", text: "Row actions" })),
+      assetSortHeader(2, "Asset"),
+      assetSortHeader(3, "Address"),
+      assetSortHeader(4, "Identity"),
+      assetSortHeader(5, "Known by", { title: "agent \u00b7 scan" }),
+      assetSortHeader(6, "State"),
+      assetSortHeader(7, "Exposure"),
+      assetSortHeader(8, "Agent"),
+      assetSortHeader(9, "Last seen"));
 
     var tbody = h("tbody");
     var currentGroup = null;
@@ -2189,17 +2762,25 @@
           (g.noagent ? " \u00b7 " + g.noagent + " without an agent" : "") +
           (g.q ? " \u00b7 " + g.q + " quarantined" : "");
         (function (key) {
+          var toggle = function () {
+            if (state.collapsedGroups[key]) delete state.collapsedGroups[key];
+            else state.collapsedGroups[key] = true;
+            render();
+          };
+          /* aria-expanded was on the <tr>, which is not a control and cannot
+             be focused, and the only way to collapse a group was to click the
+             row. The twisty is the button; the row still forwards clicks so
+             the mouse target stays the whole width. */
           tbody.appendChild(h("tr", {
-            cls: "grp", "aria-expanded": collapsed ? "false" : "true",
-            on: {
-              click: function () {
-                if (state.collapsedGroups[key]) delete state.collapsedGroups[key];
-                else state.collapsedGroups[key] = true;
-                render();
-              }
-            }
+            cls: "grp",
+            on: { click: toggle }
           }, h("td", { colspan: String(cols) },
-            h("span", { cls: "tw" },
+            h("button", {
+              cls: "tw", type: "button",
+              "aria-expanded": collapsed ? "false" : "true",
+              "aria-label": (collapsed ? "Expand " : "Collapse ") + key + ", " + meta,
+              on: { click: function (e) { e.stopPropagation(); toggle(); } }
+            },
               (function () { var i = icon("i-twist", true); i.classList.add("ic-twist"); return i; })(),
               h("span", { text: key }),
               h("span", { cls: "cnt", text: "\u2014 " + meta })))));
@@ -2265,7 +2846,21 @@
       if (unmanagedSelected.length > 0) {
         acts.push(h("button", {
           cls: "btn btn-primary mini", type: "button", text: "Install Agent (" + unmanagedSelected.length + ")",
-          on: { click: function () { openInstallerSheet(); } }
+          on: {
+            click: function () {
+              var oses = {};
+              unmanagedSelected.forEach(function (a) {
+                var os = String((a.os || "")).toLowerCase();
+                if (os.indexOf("windows") !== -1) oses.windows = true;
+                else if (os) oses.linux = true;
+              });
+              var kinds = Object.keys(oses);
+              openInstallerSheet({
+                hosts: unmanagedSelected.map(function (a) { return a.name || a.ip; }),
+                platform: kinds.length === 1 ? kinds[0] : null
+              });
+            }
+          }
         }));
       }
 
@@ -2280,7 +2875,7 @@
       }));
 
       acts.push(h("button", {
-        cls: "btn mini ghost", type: "button", text: "✕ Deselect",
+        cls: "btn mini", type: "button", text: "✕ Deselect",
         on: { click: function () { state.selected = {}; render(); } }
       }));
 
@@ -2297,15 +2892,148 @@
     return h("section", { cls: wide ? "card card-wide" : "card" }, head, body);
   }
 
-  function simpleTable(headers, rows) {
-    var thead = h("tr");
-    headers.forEach(function (t) { thead.appendChild(h("th", { text: t })); });
-    var tbody = h("tbody");
-    if (!rows.length) {
-      tbody.appendChild(h("tr", {}, h("td", { colspan: String(headers.length) },
-        h("div", { cls: "empty", text: "Nothing recorded." }))));
+  /* Text of a rendered cell, for sorting. Cells arrive as strings or as nodes,
+     and a node's own text is what the operator is reading, so that is what a
+     sort has to order on. */
+  function cellText(c) {
+    if (c === null || c === undefined) return "";
+    if (typeof c === "string" || typeof c === "number") return String(c);
+    if (c.dataset && c.dataset.sort !== undefined) return c.dataset.sort;
+    return c.textContent || "";
+  }
+
+  /* Numbers, byte figures and timestamps must not sort as strings: "9 KB"
+     before "10 KB" is worse than no sort at all. A cell that is entirely a
+     number (with the usual separators and a unit) compares numerically. */
+  var NUM_CELL = /^[<>~]?\s*-?[\d,.]+\s*(%|B|KB|MB|GB|TB|ms|s|m|h|d)?$/i;
+  var UNIT_MUL = { b: 1, kb: 1024, mb: 1048576, gb: 1073741824, tb: 1099511627776 };
+
+  function cellSortKey(txt) {
+    var t = String(txt).trim();
+    if (!t || !NUM_CELL.test(t)) return null;
+    var m = t.match(/-?[\d,.]+/);
+    if (!m) return null;
+    var n = parseFloat(m[0].replace(/,/g, ""));
+    if (isNaN(n)) return null;
+    var unit = (t.match(/(kb|mb|gb|tb|b)$/i) || [])[0];
+    if (unit && UNIT_MUL[unit.toLowerCase()]) n *= UNIT_MUL[unit.toLowerCase()];
+    return n;
+  }
+
+  var tableSortState = {};
+
+  /* Backs every table in Response, Forensics, Audit, Access and the DNS policy
+     list. Three things it did not have and needed:
+       - a caller-supplied empty string. "Nothing recorded." was fixed, so a
+         failed operator load and a genuinely empty evidence bundle read
+         identically and neither told you which it was.
+       - `scope="col"`, so a screen reader associates a cell with its heading.
+       - a sort. "Who is oldest on agent version" and "who was seen least
+         recently" are the questions these tables exist to answer.
+     `key` namespaces the sort so two tables on one page do not share it. */
+  /* An empty panel that says which kind of empty it is. Before the first
+     answer from the hub arrives this is a spinner, not a statement that the
+     fleet has nothing - Traffic showed seven "no data" boxes and Policy five
+     "Nothing recorded." tables for the whole of a cold start. */
+  /* A <label> that is actually attached to its control.
+     51 of the console's 61 labels were floating text next to an input: no
+     `for`, not wrapping it, so a screen reader announced an unlabelled edit
+     field and clicking the words did nothing. Where the thing being labelled
+     is not a form control - a container of checkboxes, a row of buttons -
+     there is nothing to point `for` at, and a caption is the honest markup. */
+  var autoIdSeq = 0;
+
+  function labelFor(text, control) {
+    var tag = control && control.tagName ? control.tagName.toLowerCase() : "";
+    if (tag !== "input" && tag !== "select" && tag !== "textarea") {
+      return h("div", { cls: "label-meta", text: text });
     }
-    rows.forEach(function (cells) {
+    if (!control.id) control.id = "f" + (++autoIdSeq);
+    return h("label", { "for": control.id, text: text });
+  }
+
+  /* A removable filter chip. The delete affordance was a bare span with a
+     click handler: not focusable, not announced, and unreachable without a
+     mouse, so a keyboard operator could add a traffic filter and then had no
+     way to take it off again. */
+  function filterChip(label, onRemove) {
+    return h("span", { cls: "traffic-chip" },
+      h("span", { text: label }),
+      h("button", {
+        cls: "chip-del", type: "button", text: "\u00d7",
+        "aria-label": "Remove filter " + label,
+        title: "Remove filter",
+        on: { click: onRemove }
+      }));
+  }
+
+  function emptyBox(text, loadingText) {
+    if (state.loading) {
+      return h("div", { cls: "empty" },
+        h("span", { cls: "spin", "aria-hidden": "true" }),
+        h("span", { text: loadingText || "Loading\u2026" }));
+    }
+    return h("div", { cls: "empty", text: text });
+  }
+
+  function simpleTable(headers, rows, opts) {
+    opts = opts || {};
+    var key = opts.key || ("t:" + headers.join("|"));
+    var sortable = opts.sortable !== false;
+    var st = tableSortState[key];
+
+    var body = rows.slice();
+    if (sortable && st && st.col < headers.length) {
+      var dir = st.dir === "desc" ? -1 : 1;
+      body.sort(function (a, b) {
+        var ta = cellText(a[st.col]), tb = cellText(b[st.col]);
+        var na = cellSortKey(ta), nb = cellSortKey(tb);
+        if (na !== null && nb !== null) return (na - nb) * dir;
+        return ta.localeCompare(tb, undefined, { numeric: true, sensitivity: "base" }) * dir;
+      });
+    }
+
+    var thead = h("tr");
+    headers.forEach(function (t, i) {
+      var active = sortable && st && st.col === i;
+      var th = h("th", { scope: "col" });
+      if (!sortable) { th.textContent = String(t); thead.appendChild(th); return; }
+      th.setAttribute("aria-sort", active ? (st.dir === "desc" ? "descending" : "ascending") : "none");
+      th.appendChild(h("button", {
+        cls: "th-sort", type: "button", text: String(t),
+        "data-active": active ? "true" : null,
+        "data-dir": active ? st.dir : null,
+        title: "Sort by " + t,
+        on: {
+          click: function () {
+            var cur = tableSortState[key];
+            if (cur && cur.col === i) {
+              tableSortState[key] = cur.dir === "asc" ? { col: i, dir: "desc" } : null;
+            } else {
+              tableSortState[key] = { col: i, dir: "asc" };
+            }
+            render();
+          }
+        }
+      }));
+      thead.appendChild(th);
+    });
+
+    var tbody = h("tbody");
+    if (!body.length) {
+      /* "Nothing recorded." was printed for a table that had not been fetched
+         yet, a fetch that failed, and a genuinely empty result. A booting
+         console was indistinguishable from an idle fleet, and five of these in
+         a column read as "the hub knows nothing" when it simply had not
+         answered yet. */
+      tbody.appendChild(h("tr", {}, h("td", { colspan: String(headers.length) },
+        state.loading
+          ? h("div", { cls: "empty" },
+              h("span", { cls: "spin", "aria-hidden": "true" }),
+              h("span", { text: opts.loading || "Loading\u2026" }))
+          : h("div", { cls: "empty", text: opts.empty || "Nothing recorded." }))));
+    }
+    body.forEach(function (cells) {
       var tr = h("tr", { cls: "row" });
       cells.forEach(function (c) {
         tr.appendChild(h("td", {}, typeof c === "string" ? document.createTextNode(c) : c));
@@ -2513,7 +3241,7 @@
           h("span", { cls: "dns-stat-val", text: covered ? pct(cov.coverage_percent) : "—" }),
           h("span", { cls: "dns-stat-label", text: "Fleet Agent Coverage" })),
         h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(cov.critical_risks || 0), style: cov.critical_risks ? "color: var(--crit)" : "" }),
+          h("span", { cls: "dns-stat-val", text: String(cov.critical_risks || 0), "data-tone": cov.critical_risks ? "crit" : null }),
           h("span", { cls: "dns-stat-label", text: "Critical Risk Weakpoints" }))),
       h("div", { cls: "form-row" },
         h("label", { cls: "field" }, h("span", { text: "Target Subnet CIDR" }), subnetInput),
@@ -2538,7 +3266,9 @@
       })
     ];
 
-    openSheet("Subnet Sweep & Asset Discovery", statusSummary, actions, true);
+    /* The fourth argument is a CSS class, not a flag: passing `true` produced
+       class="sheet true". */
+    openSheet("Subnet Sweep & Asset Discovery", statusSummary, actions);
   }
 
   function exportSelectedAssetsCSV() {
@@ -2578,11 +3308,21 @@
     // Group by system / endpoint
     var sysMap = {};
     allAnomalies.forEach(function (a) {
-      var host = a.hostname || a.endpoint_id || "Unknown Host";
-      if (!sysMap[host]) {
-        sysMap[host] = { host: host, total: 0, crit: 0, high: 0, med: 0, low: 0, types: {} };
+      /* Group on the endpoint id and *label* with the hostname. Grouping on
+          the hostname made `s.host` a hostname, which the click handler then
+          assigned to `af.endpoint_id`; the client-side filter matched it
+          instantly, and up to five seconds later refresh() sent it to the hub
+          as `&endpoint_id=<hostname>`, which matches nothing - so the list
+          the operator had just filtered emptied itself with no explanation. */
+      var gkey = a.endpoint_id || a.hostname || "Unknown Host";
+      if (!sysMap[gkey]) {
+        sysMap[gkey] = {
+          host: a.hostname || a.endpoint_id || "Unknown Host",
+          epId: a.endpoint_id || "",
+          total: 0, crit: 0, high: 0, med: 0, low: 0, types: {}
+        };
       }
-      var s = sysMap[host];
+      var s = sysMap[gkey];
       s.total++;
       var sev = (a.severity || "LOW").toUpperCase();
       if (sev === "CRITICAL") s.crit++;
@@ -2604,15 +3344,20 @@
       var wMed = Math.round((s.med / s.total) * 100);
       var wLow = Math.round((s.low / s.total) * 100);
 
-      var isSelected = af.endpoint_id === s.host;
+      var isSelected = !!s.epId && af.endpoint_id === s.epId;
 
       return h("div", {
         cls: "alerts-sys-box" + (isSelected ? " selected" : ""),
         on: {
           click: function () {
-            af.endpoint_id = (af.endpoint_id === s.host) ? "" : s.host;
+            /* An alert group with no endpoint id cannot be filtered on the
+               hub, so it is not offered as a filter at all rather than
+               offered and then silently emptied. */
+            if (!s.epId) { toast("No endpoint id on these alerts \u2014 cannot filter", "warn"); return; }
+            af.endpoint_id = (af.endpoint_id === s.epId) ? "" : s.epId;
             af.page = 1;
-            renderAlerts();
+            renderBody();
+            refresh();
           }
         }
       },
@@ -2620,11 +3365,11 @@
           h("span", { text: s.host }),
           h("b", { text: s.total + " alert" + (s.total === 1 ? "" : "s") })),
         h("div", { cls: "alerts-sys-bars" },
-          s.crit ? h("div", { cls: "alerts-bar-seg alerts-bar-crit", style: "width:" + wCrit + "%" }) : null,
-          s.high ? h("div", { cls: "alerts-bar-seg alerts-bar-high", style: "width:" + wHigh + "%" }) : null,
-          s.med ? h("div", { cls: "alerts-bar-seg alerts-bar-med", style: "width:" + wMed + "%" }) : null,
-          s.low ? h("div", { cls: "alerts-bar-seg alerts-bar-low", style: "width:" + wLow + "%" }) : null),
-        h("div", { cls: "dim-3 pad-y", style: "font-size: 11px" },
+          s.crit ? h("div", { cls: "alerts-bar-seg alerts-bar-crit", vars: { "--seg-w": wCrit + "%" } }) : null,
+          s.high ? h("div", { cls: "alerts-bar-seg alerts-bar-high", vars: { "--seg-w": wHigh + "%" } }) : null,
+          s.med ? h("div", { cls: "alerts-bar-seg alerts-bar-med", vars: { "--seg-w": wMed + "%" } }) : null,
+          s.low ? h("div", { cls: "alerts-bar-seg alerts-bar-low", vars: { "--seg-w": wLow + "%" } }) : null),
+        h("div", { cls: "dim-3 pad-y u-t2" },
           h("span", { text: Object.keys(s.types).slice(0, 2).join(", ").replace(/_/g, " ").toLowerCase() })));
     });
 
@@ -2632,7 +3377,7 @@
       h("div", { cls: "stack" },
         chartBoxes.length
           ? h("div", { cls: "alerts-sys-grid" }, chartBoxes)
-          : h("div", { cls: "empty", text: "No active anomaly alerts recorded across fleet." }),
+          : emptyBox("No active anomaly alerts recorded across fleet."),
         h("div", { cls: "legend pad-x" },
           h("span", { text: "■ Red: Critical" }),
           h("span", { text: "■ Amber: High" }),
@@ -2646,6 +3391,7 @@
       return h("button", {
         cls: "btn mini" + (active ? " btn-primary" : ""),
         type: "button",
+        "aria-pressed": active ? "true" : "false",
         text: sev ? sev : "ALL SEVERITIES",
         on: {
           click: function () {
@@ -2660,6 +3406,7 @@
     var unackBtn = h("button", {
       cls: "btn mini" + (af.unacknowledged_only ? " btn-primary" : ""),
       type: "button",
+      "aria-pressed": af.unacknowledged_only ? "true" : "false",
       text: af.unacknowledged_only ? "UNACKNOWLEDGED ONLY" : "ALL STATUSES",
       on: {
         click: function () {
@@ -2670,17 +3417,27 @@
       }
     });
 
-    var searchInput = h("input", {
-      type: "search",
-      placeholder: "Search alerts (host, process, IP)...",
-      value: af.search || "",
-      on: {
-        input: function (e) {
-          af.search = e.target.value;
-          renderAlerts();
-        }
-      }
-    });
+    /* Reused, never rebuilt. `input` calls renderAlerts(), renderAlerts()
+       calls clear(view), and clearing the view destroys the very input being
+       typed into - so focus and caret were lost on every keystroke and the
+       operator typed one character at a time. The console already had this
+       pattern twice (the Assets filter field, renderAccess's focus guard);
+       it was simply not applied here. */
+    if (!alertsSearchInput) {
+      alertsSearchInput = h("input", {
+        type: "search",
+        placeholder: "Search alerts (host, process, IP)...",
+        "aria-label": "Search alerts"
+      });
+      alertsSearchInput.value = af.search || "";
+      alertsSearchInput.addEventListener("input", function () {
+        (state.alertsFilter || af).search = alertsSearchInput.value;
+        renderBody();
+      });
+    } else if (document.activeElement !== alertsSearchInput) {
+      alertsSearchInput.value = af.search || "";
+    }
+    var searchInput = alertsSearchInput;
 
     // Bulk actions
     var selectedAlertIds = Object.keys(state.selectedAlerts || {}).filter(function (k) { return state.selectedAlerts[k]; });
@@ -2705,32 +3462,52 @@
       text: "Acknowledge All (" + allAnomalies.length + ")",
       on: {
         click: function () {
-          request("/api/v1/anomalies/acknowledge", "POST", { all: true })
-            .then(function () {
-              toast("Acknowledged all anomalies", "ok");
-              refresh();
-            })
-            .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+          /* One click marked every unread detection in the fleet as seen,
+             including ones that had arrived in the seconds since the count in
+             the label was rendered. There is no un-acknowledge. */
+          confirmSheet({
+            title: "Acknowledge every open alert",
+            consequence: "All " + allAnomalies.length + " open alerts are marked as seen by you and leave the unacknowledged view. There is no way to undo this, and anything that arrived since this page last refreshed is acknowledged too.",
+            confirmLabel: "Acknowledge all " + allAnomalies.length,
+            confirmTone: "primary",
+            onConfirm: function () {
+              request("/api/v1/anomalies/acknowledge", "POST", { all: true })
+                .then(function () {
+                  toast("Acknowledged all anomalies", "ok");
+                  refresh();
+                })
+                .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+            }
+          });
         }
       }
     });
 
     var clearResolvedBtn = h("button", {
-      cls: "btn mini ghost", type: "button", text: "Clear Acknowledged",
+      cls: "btn mini", type: "button", text: "Clear Acknowledged",
       on: {
         click: function () {
-          request("/api/v1/anomalies/clear", "POST", {})
-            .then(function () {
-              toast("Cleared resolved alerts from storage", "ok");
-              refresh();
-            })
-            .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+          /* "Clear" reads like clearing a filter. It deletes rows. */
+          confirmSheet({
+            title: "Delete acknowledged alerts",
+            consequence: "Every acknowledged alert is deleted from the hub's storage, not hidden. The detections themselves and anything built on them are gone and cannot be recovered from the console.",
+            detail: "Open, unacknowledged alerts are not affected.",
+            confirmLabel: "Delete them",
+            onConfirm: function () {
+              request("/api/v1/anomalies/clear", "POST", {})
+                .then(function () {
+                  toast("Cleared resolved alerts from storage", "ok");
+                  refresh();
+                })
+                .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
+            }
+          });
         }
       }
     });
 
     var filterBar = h("div", { cls: "traffic-filter-bar" },
-      h("div", { cls: "traffic-filter-group" }, unackBtn, sevBtns),
+      h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
 
     // Filter anomalies by search text
@@ -2766,7 +3543,7 @@
             if (e.target.checked) state.selectedAlerts[a.id] = true;
             else delete state.selectedAlerts[a.id];
           });
-          renderAlerts();
+          renderBody();
         }
       }
     });
@@ -2784,7 +3561,7 @@
             state.selectedAlerts = state.selectedAlerts || {};
             state.selectedAlerts[a.id] = e.target.checked;
             if (!e.target.checked) delete state.selectedAlerts[a.id];
-            renderAlerts();
+            renderBody();
           }
         }
       });
@@ -2808,7 +3585,7 @@
         on: {
           click: function () {
             state.expandedAlertId = isExpanded ? "" : a.id;
-            renderAlerts();
+            renderBody();
           }
         }
       },
@@ -2835,18 +3612,16 @@
             h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Process Path" }), h("div", { cls: "alert-exp-val", text: a.process_path || "—" })),
             h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Target Destination" }), h("div", { cls: "alert-exp-val", text: (a.dst_ip || "—") + ":" + (a.dst_port || 0) })),
             h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Diagnostic Details" }), h("div", { cls: "alert-exp-val", text: a.details || "None" }))),
+          evidencePanel(a),
           h("div", { cls: "actions pad-y" },
             h("button", {
               cls: "btn mini btn-crit", type: "button", text: "Isolate Endpoint (" + (a.hostname || a.endpoint_id) + ")",
               on: {
                 click: function (e) {
                   e.stopPropagation();
-                  var ep = state.endpoints.find(function (x) { return x.id === a.endpoint_id || x.hostname === a.hostname; });
-                  if (ep) {
-                    var ast = state.assetByKey["asset-ep-" + ep.id];
-                    if (ast) setIsolation(ast, true);
-                    else toast("Asset mapping not found", "warn");
-                  } else { toast("Endpoint not found", "warn"); }
+                  var ast = assetForAlert(a);
+                  if (ast) setIsolation(ast, true);
+                  else toast("No asset row for " + (a.hostname || a.endpoint_id || "this alert"), "warn");
                 }
               }
             }),
@@ -2873,7 +3648,7 @@
             h("th", { text: "Process" }),
             h("th", { text: "Title / Finding" }),
             h("th", { text: "Action" }))),
-        h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "9" }, h("div", { cls: "empty", text: "No alerts match active filters." }))))));
+        h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "9" }, emptyBox("No alerts match active filters."))))));
 
     var totalAlerts = (state.alertsData && state.alertsData.total) || allAnomalies.length;
     var alertsCard = card("Active Security Anomaly Stream (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
@@ -3200,6 +3975,7 @@
       [["groups", "Segments"], ["hosts", "Hosts"]].forEach(function (o) {
         bar.appendChild(h("button", {
           cls: state.topoScope === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+          "aria-pressed": state.topoScope === o[0] ? "true" : "false",
           on: { click: function () { state.topoScope = o[0]; reset(); render(); } }
         }));
       });
@@ -3210,6 +3986,7 @@
     [["subnet", "Subnet"], ["category", "Category"], ["kind", "Coverage"]].forEach(function (o) {
       bar.appendChild(h("button", {
         cls: state.topoGroupBy === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+        "aria-pressed": state.topoGroupBy === o[0] ? "true" : "false",
         on: { click: function () { state.topoGroupBy = o[0]; state.topoDrill = ""; reset(); render(); } }
       }));
     });
@@ -3219,6 +3996,7 @@
       [["notable", "Worth looking at"], ["all", "Everything"]].forEach(function (o) {
         bar.appendChild(h("button", {
           cls: state.topoFocus === o[0] ? "mini mini-on" : "mini", type: "button", text: o[1],
+          "aria-pressed": state.topoFocus === o[0] ? "true" : "false",
           on: { click: function () { state.topoFocus = o[0]; reset(); render(); } }
         }));
       });
@@ -3280,7 +4058,7 @@
     view.appendChild(topoControls());
     view.appendChild(h("p", { cls: "topo-note", text: reduced.note }));
     if (!nodes.length) {
-      view.appendChild(h("div", { cls: "empty", text: "Nothing left to draw with this filter." }));
+      view.appendChild(emptyBox("Nothing left to draw with this filter."));
       return;
     }
 
@@ -3289,7 +4067,11 @@
 
     var maxFlow = Math.max.apply(null, edges.map(function (e) { return Number(e.flow_count) || 1; }).concat([1]));
 
-    var svg = s("svg", { viewBox: "0 0 " + layout.width + " " + layout.height, preserveAspectRatio: "xMidYMid meet", role: "img", "aria-label": "Communications topology" });
+    /* role="img" removes every descendant from the accessibility tree, and this
+       one contains dozens of clickable nodes - the graph announced itself as a
+       single picture and the hosts inside it did not exist. It is a group of
+       controls, so it is described as one. */
+    var svg = s("svg", { viewBox: "0 0 " + layout.width + " " + layout.height, preserveAspectRatio: "xMidYMid meet", role: "group", "aria-label": "Communications topology" });
 
     /* Aggregate to asset-pair edges and label only the heaviest port per pair;
        labelling every 5-tuple is what makes these graphs unreadable. */
@@ -3482,9 +4264,23 @@
       var pt = pos[n.id];
       if (!pt) return;
 
+      /* Node kind was fill colour and nothing else, and --crit against
+         --crit-hot at r=8px is about a five percent difference - the two most
+         important states in the graph were the two hardest to tell apart. The
+         label carries the same fact in words. */
+      var kindWord = nodeKind(n);
+      var nodeLabel = n._group
+        ? n._group.label + ", " + n._group.members.length + " hosts, worst risk " + (n._group.risk || "clean")
+        : (n.label || n.id) + (n.ip ? ", " + n.ip : "") + ", " + kindWord +
+          (n.quiet ? ", quiet in this window" : "");
+
       var nodeGroup = s("g", {
         "class": "node-item",
-        "data-node-id": n.id
+        "data-node-id": n.id,
+        role: "button",
+        tabindex: "0",
+        "aria-label": nodeLabel,
+        "aria-pressed": state.topoSelected === n.id ? "true" : "false"
       });
 
       var circle = s("circle", {
@@ -3530,13 +4326,26 @@
         try { nodeGroup.setPointerCapture(ev.pointerId); } catch (e) {}
       });
 
+      var selectNode = function () {
+        state.topoSelected = n.id;
+        state.topoEdgeSelected = "";
+        render();
+      };
+
       nodeGroup.addEventListener("click", function (ev) {
         if (activeDrag && (Math.abs(activeDrag.currX - pt.x) > 4 || Math.abs(activeDrag.currY - pt.y) > 4)) {
           return;
         }
-        state.topoSelected = n.id;
-        state.topoEdgeSelected = "";
-        render();
+        selectNode();
+      });
+
+      /* Tab reaches the node; Enter and Space act on it. The graph had no
+         keyboard path to any host at all. */
+      nodeGroup.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+          ev.preventDefault();
+          selectNode();
+        }
       });
 
       nodeLayer.appendChild(nodeGroup);
@@ -3673,7 +4482,11 @@
     view.appendChild(legend);
   }
 
-  function barList(items, valueFn, labelFn, textFn) {
+  /* opts.onPick makes a row a filter control; opts.spark draws the per-item
+     history the hub already returns on every RankingItem and the console threw
+     away, so "top talker" can be read as "top talker, and rising". */
+  function barList(items, valueFn, labelFn, textFn, opts) {
+    opts = opts || {};
     var max = Math.max.apply(null, items.map(valueFn).concat([1]));
     var list = h("div", { cls: "barlist" });
     items.forEach(function (it) {
@@ -3681,9 +4494,21 @@
       var svg = s("svg", { viewBox: "0 0 118 8", preserveAspectRatio: "none", "aria-hidden": "true" });
       svg.appendChild(s("rect", { "class": "track", x: 0, y: 2, width: 118, height: 4, rx: 2 }));
       svg.appendChild(s("rect", { "class": "fill", x: 0, y: 2, width: (frac * 118).toFixed(1), height: 4, rx: 2 }));
+
+      var spark = opts.spark && it.sparkline && it.sparkline.length > 1
+        ? sparkline(it.sparkline.map(function (v) { return Number(v) || 0; }))
+        : null;
+
+      var label = labelFn(it);
+      var name = opts.onPick
+        ? h("button", {
+            cls: "n n-pick", type: "button", text: label, title: "Filter on " + label,
+            on: { click: function () { opts.onPick(it); } }
+          })
+        : h("span", { cls: "n", text: label, title: label });
+
       list.appendChild(h("div", { cls: "barrow" },
-        h("span", { cls: "n", text: labelFn(it), title: labelFn(it) }),
-        svg,
+        name, svg, spark,
         h("span", { cls: "v", text: textFn(it) })));
     });
     return list;
@@ -3787,7 +4612,7 @@
 
   function commandLineInspector(cmdline) {
     if (!cmdline) {
-      return h("div", { cls: "dim", style: "font-style: italic;", text: "No command line arguments captured for this process." });
+      return h("div", { cls: "dim u-italic", text: "No command line arguments captured for this process." });
     }
     return h("div", { cls: "cmdline-inspector-wrap" },
       h("div", { cls: "cmdline-inspector-head" },
@@ -3808,7 +4633,7 @@
     var headGroup = h("div", { cls: "drawer-kv-group" },
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "Verdict & Direction" }),
-        h("div", { style: "display:flex;gap:6px;align-items:center;" },
+        h("div", { cls: "uf uf-g2" },
           h("span", { cls: "st", "data-state": action === "BLOCK" ? "crit" : "ok", text: action }),
           h("span", { cls: "dim-3", text: direction }))),
       h("div", { cls: "drawer-kv-row" },
@@ -3865,7 +4690,7 @@
 
     var cmdCard = card("Command Line Execution Arguments", commandLineInspector(item.command_line));
 
-    var body = h("div", { cls: "stack", style: "gap: var(--s-3);" },
+    var body = h("div", { cls: "stack uf-g4" },
       headGroup,
       treeCard,
       binCard,
@@ -3947,52 +4772,34 @@
 
     var chips = [];
     if (tf.endpoint_id) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Endpoint: " + tf.endpoint_id }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.endpoint_id; refresh(); } } })));
+      chips.push(filterChip("Endpoint: " + tf.endpoint_id, function () { delete tf.endpoint_id; refresh(); }));
     }
     if (tf.dst_ip) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Dest: " + tf.dst_ip }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.dst_ip; refresh(); } } })));
+      chips.push(filterChip("Dest: " + tf.dst_ip, function () { delete tf.dst_ip; refresh(); }));
     }
     if (tf.process) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Process: " + tf.process }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.process; refresh(); } } })));
+      chips.push(filterChip("Process: " + tf.process, function () { delete tf.process; refresh(); }));
     }
     if (tf.domain) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Domain: " + tf.domain }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.domain; refresh(); } } })));
+      chips.push(filterChip("Domain: " + tf.domain, function () { delete tf.domain; refresh(); }));
     }
     if (tf.protocol) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Proto: " + tf.protocol }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.protocol; refresh(); } } })));
+      chips.push(filterChip("Proto: " + tf.protocol, function () { delete tf.protocol; refresh(); }));
     }
     if (tf.action) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Action: " + tf.action }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.action; refresh(); } } })));
+      chips.push(filterChip("Action: " + tf.action, function () { delete tf.action; refresh(); }));
     }
     if (tf.hash) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Hash: " + tf.hash.slice(0, 10) + "…" }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.hash; refresh(); } } })));
+      chips.push(filterChip("Hash: " + tf.hash.slice(0, 10) + "…", function () { delete tf.hash; refresh(); }));
     }
     if (tf.user) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "User: " + tf.user }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.user; refresh(); } } })));
+      chips.push(filterChip("User: " + tf.user, function () { delete tf.user; refresh(); }));
     }
     if (tf.attribution) {
-      chips.push(h("span", { cls: "traffic-chip" },
-        h("span", { text: "Attribution: " + tf.attribution }),
-        h("span", { cls: "chip-del", text: "×", on: { click: function () { delete tf.attribution; refresh(); } } })));
+      chips.push(filterChip("Attribution: " + tf.attribution, function () { delete tf.attribution; refresh(); }));
     }
 
-    var measuredCheck = h("label", { cls: "traffic-chip", style: "cursor:pointer" },
+    var measuredCheck = h("label", { cls: "traffic-chip u-pointer" },
       h("input", {
         type: "checkbox",
         checked: !!tf.measured_only,
@@ -4024,10 +4831,10 @@
         h("span", { cls: "dns-stat-val", text: String(totals.flow_count || totalFlows) }),
         h("span", { cls: "dns-stat-label", text: "Tracked Flow Events (" + covPct + "% Socket Measured)" })),
       h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(totals.block_count || 0), style: totals.block_count ? "color: var(--crit)" : "" }),
+        h("span", { cls: "dns-stat-val", text: String(totals.block_count || 0), "data-tone": totals.block_count ? "crit" : null }),
         h("span", { cls: "dns-stat-label", text: "Threat & Policy Block Drops" })),
       h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(totals.anomaly_count || 0), style: totals.anomaly_count ? "color: var(--warn)" : "" }),
+        h("span", { cls: "dns-stat-val", text: String(totals.anomaly_count || 0), "data-tone": totals.anomaly_count ? "warn" : null }),
         h("span", { cls: "dns-stat-label", text: "Anomalous Behavioral Detections" })));
 
     // 3. Dual Synchronized Time Lanes
@@ -4056,6 +4863,7 @@
         var bout = Number(p.bytes_out) || 0;
         var flows = Number(p.flows) || 0;
         var blocks = Number(p.blocks) || 0;
+        var anomalies = Number(p.anomalies) || 0;
 
         var hIn = bin ? Math.max(1, Math.round((bin / maxB) * 50)) : 0;
         var hOut = bout ? Math.max(1, Math.round((bout / maxB) * 50)) : 0;
@@ -4066,12 +4874,23 @@
         if (hOut) svg.appendChild(s("rect", { "class": "series-out", x: x0 + barW + 0.2, y: 65 - hOut, width: barW, height: hOut }));
         if (hFlow) svg.appendChild(s("rect", { "class": "series-flow", fill: "var(--dim)", opacity: "0.4", x: x0, y: 140 - hFlow, width: barW * 2 + 0.2, height: hFlow }));
         if (hBlock) svg.appendChild(s("rect", { "class": "series-block", fill: "var(--crit)", x: x0, y: 140 - hBlock, width: barW * 2 + 0.2, height: hBlock }));
+
+        /* Every trend point carries the detector's anomaly count for that
+           bucket and the chart drew neither it nor any hint that it existed.
+           A tick above the flow lane says "the detector fired here", which is
+           the point at which an operator wants the flow table filtered. */
+        if (anomalies) {
+          svg.appendChild(s("rect", {
+            "class": "series-anom", fill: "var(--warn)",
+            x: x0, y: 78, width: barW * 2 + 0.2, height: 4
+          }));
+        }
       });
 
       svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 66, x2: W, y2: 66, stroke: "var(--line)" }));
       svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 141, x2: W, y2: 141, stroke: "var(--line)" }));
 
-      var ticks = h("div", { cls: "chart-ticks", style: "display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: var(--t-1); color: var(--ink-3); padding: 4px 2px 8px 2px; width: 100%;" });
+      var ticks = h("div", { cls: "chart-ticks" });
       var step = Math.max(1, Math.floor((trends.length - 1) / 5));
       for (var idx = 0; idx < trends.length; idx += step) {
         var p = trends[idx];
@@ -4097,17 +4916,18 @@
       dualChartCard = card("Dual Synchronized Flow & Volume Timeline",
         h("div", { cls: "card-body" },
           h("div", { cls: "dual-timeline-container" },
-            h("div", { cls: "dual-lane-label", style: "margin-bottom: 4px; display: flex; justify-content: space-between;", text: "Lane 1: Bandwidth Volume (Top) · Lane 2: Event Counts (Bottom)" }),
+            h("div", { cls: "dual-lane-label u-mb1 uf uf-between", text: "Lane 1: Bandwidth Volume (Top) · Lane 2: Event Counts (Bottom)" }),
             svg,
             ticks,
-            h("div", { cls: "legend pad-x", style: "margin-top: 4px;" },
+            h("div", { cls: "legend pad-x u-mt1" },
               h("span", { text: "■ Blue: Bytes In" }),
               h("span", { text: "■ Indigo: Bytes Out" }),
               h("span", { text: "■ Gray: Total Flows" }),
               h("span", { text: "■ Red: Block Drops" }),
+              h("span", { text: "■ Amber: Detector Anomalies" }),
               h("span", { text: "Window: " + (tf.range || "1h") })))));
     } else {
-      dualChartCard = card("Traffic Timeline", h("div", { cls: "empty", text: "No timeline points captured in this window." }));
+      dualChartCard = card("Traffic Timeline", emptyBox("No timeline points captured in this window."));
     }
 
     // 4. Composition Breakdowns
@@ -4118,7 +4938,7 @@
           ? barList(dist.protocols, function (p) { return p.count; },
               function (p) { return p.label + " (" + Math.round(p.percentage * 100) + "%)"; },
               function (p) { return p.count + " flows · " + bytes(p.total_bytes); })
-          : h("div", { cls: "empty", text: "No protocols active." })));
+          : emptyBox("No protocols active.")));
 
     var actCards = card("Action Breakdown",
       h("div", { cls: "card-body" },
@@ -4126,7 +4946,7 @@
           ? barList(dist.actions, function (a) { return a.count; },
               function (a) { return a.label + " (" + Math.round(a.percentage * 100) + "%)"; },
               function (a) { return a.count + " flows"; })
-          : h("div", { cls: "empty", text: "No action distribution." })));
+          : emptyBox("No action distribution.")));
 
     var dirCards = card("Direction Distribution",
       h("div", { cls: "card-body" },
@@ -4134,25 +4954,49 @@
           ? barList(dist.directions, function (d) { return d.count; },
               function (d) { return d.label + " (" + Math.round(d.percentage * 100) + "%)"; },
               function (d) { return d.count + " flows"; })
-          : h("div", { cls: "empty", text: "No direction distribution." })));
+          : emptyBox("No direction distribution.")));
 
     // 5. Multi-column Rankings
     var rankings = ov.rankings || {};
+
+    /* top_endpoints and top_countries were computed on every overview and
+       dropped: "which host is loudest" and "where is this estate talking to"
+       are the two questions this page is opened with, and neither was on it. */
+    var epCard = card("Top Talking Endpoints",
+      h("div", { cls: "card-body" },
+        arrayOf(rankings.top_endpoints).length
+          ? barList(rankings.top_endpoints, function (e) { return e.total_bytes || e.flow_count; },
+              function (e) { return e.label || e.key; },
+              function (e) { return e.flow_count + " flows" + (e.total_bytes ? " \u00b7 " + bytes(e.total_bytes) : ""); },
+              { spark: true, onPick: function (e) { tf.endpoint_id = e.key || e.label; refresh(); } })
+          : emptyBox("No endpoint has reported a flow in this window.")));
+
+    var ctryCard = card("Top Destination Countries",
+      h("div", { cls: "card-body" },
+        arrayOf(rankings.top_countries).length
+          ? barList(rankings.top_countries, function (c) { return c.total_bytes || c.flow_count; },
+              function (c) { return c.label || c.key; },
+              function (c) { return c.flow_count + " flows" + (c.total_bytes ? " \u00b7 " + bytes(c.total_bytes) : ""); },
+              { spark: true, onPick: function (c) { tf.country = c.key || c.label; refresh(); } })
+          : emptyBox("No destination has been geolocated in this window.")));
+
     var procCard = card("Top Active Processes",
       h("div", { cls: "card-body" },
         arrayOf(rankings.top_processes).length
           ? barList(rankings.top_processes, function (p) { return p.total_bytes || p.flow_count; },
               function (p) { return p.label; },
-              function (p) { return p.flow_count + " flows" + (p.total_bytes ? " · " + bytes(p.total_bytes) : ""); })
-          : h("div", { cls: "empty", text: "No process attribution yet." })));
+              function (p) { return p.flow_count + " flows" + (p.total_bytes ? " · " + bytes(p.total_bytes) : ""); },
+              { spark: true, onPick: function (p) { tf.process = p.label; refresh(); } })
+          : emptyBox("No process attribution yet.")));
 
     var dstCard = card("Top Remote Destinations",
       h("div", { cls: "card-body" },
         arrayOf(rankings.top_destinations).length
           ? barList(rankings.top_destinations, function (d) { return d.total_bytes || d.flow_count; },
               function (d) { return d.label; },
-              function (d) { return d.flow_count + " flows" + (d.total_bytes ? " · " + bytes(d.total_bytes) : ""); })
-          : h("div", { cls: "empty", text: "No destination data." })));
+              function (d) { return d.flow_count + " flows" + (d.total_bytes ? " · " + bytes(d.total_bytes) : ""); },
+              { spark: true })
+          : emptyBox("No destination data.")));
 
     var domCard = card("Top Queried Domains",
       h("div", { cls: "card-body" },
@@ -4160,7 +5004,7 @@
           ? barList(rankings.top_domains, function (d) { return d.flow_count; },
               function (d) { return d.label; },
               function (d) { return d.flow_count + " queries"; })
-          : h("div", { cls: "empty", text: "No domain queries." })));
+          : emptyBox("No domain queries.")));
 
     var portCard = card("Top Destination Ports",
       h("div", { cls: "card-body" },
@@ -4168,7 +5012,7 @@
           ? barList(rankings.top_ports, function (p) { return p.flow_count; },
               function (p) { return "Port " + p.label; },
               function (p) { return p.flow_count + " flows"; })
-          : h("div", { cls: "empty", text: "No port data." })));
+          : emptyBox("No port data.")));
 
     // 6. Live Filtered Flow Stream Table
     var flowsList = arrayOf(flowsData.flows);
@@ -4178,22 +5022,27 @@
         h("span", { cls: "dim", text: f.process_name || f.domain || "—", on: { click: function (e) { e.stopPropagation(); if (f.process_name) tf.process = f.process_name; refresh(); } } })
       ];
       if (f.attribution_status && f.attribution_status !== "unknown") {
-        procCell.push(h("span", { style: "margin-left: 6px;" }, processAttributionBadge(f.attribution_status)));
+        procCell.push(h("span", { cls: "u-ml2" }, processAttributionBadge(f.attribution_status)));
       }
       if (f.executable_sha256) {
-        procCell.push(h("span", { style: "margin-left: 6px;" }, processHashBadge(f.executable_sha256, function (hsh) { tf.hash = hsh; refresh(); })));
+        procCell.push(h("span", { cls: "u-ml2" }, processHashBadge(f.executable_sha256, function (hsh) { tf.hash = hsh; refresh(); })));
       }
+      var verdict = f.is_anomalous
+        ? h("span", { cls: "st", "data-state": "warn", title: "The detector flagged this flow" },
+            icon("i-alert", true), h("span", { text: "anomalous" }))
+        : h("span", { cls: "st", "data-state": f.action === "BLOCK" ? "crit" : "ok" },
+            icon(f.action === "BLOCK" ? "g-quarantine" : "g-online", true),
+            h("span", { text: f.action || "PERMIT" }));
+
       var row = [
         stamp(parseTime(f.timestamp)),
-        h("span", { cls: "st", "data-state": f.action === "BLOCK" ? "crit" : "ok" },
-          icon(f.action === "BLOCK" ? "g-quarantine" : "g-online", true),
-          h("span", { text: f.action || "PERMIT" })),
+        verdict,
         h("span", { cls: "dim-3", text: f.direction || "OUT" }),
         h("span", { cls: "ip", text: f.endpoint_id || "—", on: { click: function (e) { e.stopPropagation(); tf.endpoint_id = f.endpoint_id; refresh(); } } }),
         h("span", { cls: "ip", text: f.src_ip + (f.src_port ? ":" + f.src_port : "") }),
         h("span", { cls: "ip", text: f.dst_ip + (f.dst_port ? ":" + f.dst_port : ""), on: { click: function (e) { e.stopPropagation(); tf.dst_ip = f.dst_ip; refresh(); } } }),
         h("span", { cls: "dim-3", text: f.proto_name || "TCP" }),
-        h("div", { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;" }, procCell),
+        h("div", { cls: "uf uf-wrap uf-g1" }, procCell),
         h("span", { cls: "ago", text: (Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0)
           ? bytes((Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0))
           : "—" })
@@ -4203,7 +5052,7 @@
 
     var flowsTable = flowRows.length
       ? simpleTable(["Time", "Action", "Dir", "Endpoint", "Source", "Destination", "Proto", "Process / Domain", "Volume"], flowRows)
-      : h("div", { cls: "empty", text: "No flow events match active filters." });
+      : emptyBox("No flow events match active filters.");
 
     // Make table rows interactive for drawer selection
     var tableEl = flowsTable.querySelector("tbody");
@@ -4216,7 +5065,7 @@
         }
         tr.addEventListener("click", function () {
           state.selectedFlow = flowsList[idx];
-          renderTraffic();
+          renderBody();
         });
       });
     }
@@ -4245,7 +5094,7 @@
         h("span", { cls: "dns-stat-val", text: String(dnsStatus.queries_total || 0) }),
         h("span", { cls: "dns-stat-label", text: "RFC-53 Queries Handled" })),
       h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(dnsStatus.blocked_total || 0), style: dnsStatus.blocked_total ? "color: var(--crit)" : "" }),
+        h("span", { cls: "dns-stat-val", text: String(dnsStatus.blocked_total || 0), "data-tone": dnsStatus.blocked_total ? "crit" : null }),
         h("span", { cls: "dns-stat-label", text: "Domain Threat Drops (0.0.0.0)" })),
       h("div", { cls: "dns-stat-box" },
         h("span", { cls: "dns-stat-val", text: Math.round((Number(dnsStatus.cache_hit_ratio) || 0) * 100) + "%" }),
@@ -4264,19 +5113,162 @@
       ];
     });
 
+    /* The rules behind the verdicts above. A blocked query with no visible rule
+       is an unexplained block, which is how an operator ends up disabling the
+       whole sinkhole to get a host working again. */
+    var dnsPolicyRules = arrayOf(state.dnsPolicy);
+    var dnsPolicyRows = dnsPolicyRules.map(function (r) {
+      return [
+        chip(r.action === "BLOCK" ? "crit" : "ok", r.action || "BLOCK"),
+        h("span", { cls: "ip", text: r.domain || "—" }),
+        h("span", { cls: "dim-3", text: r.source || "local" }),
+        h("span", { cls: "dim", text: r.comment || "—" }),
+        stamp(parseTime(r.created_at))
+      ];
+    });
+
     var dnsStreamCard = card("RFC-Compliant DNS Gateway & Threat Sinkhole",
       h("div", { cls: "stack" },
         dnsGrid,
         dnsRows.length
           ? simpleTable(["Time", "Verdict", "Client IP", "Queried Domain", "Proto/Type", "Latency & Cache"], dnsRows)
-          : h("div", { cls: "empty", text: "No DNS queries recorded." })));
+          : emptyBox("No DNS queries recorded."),
+        h("div", { cls: "card-sub", text: "Sinkhole policy — " + dnsPolicyRules.length + " rule(s)" }),
+        dnsPolicyRows.length
+          ? simpleTable(["Verdict", "Domain", "Source", "Comment", "Added"], dnsPolicyRows,
+              { empty: "No sinkhole rules configured — every query resolves upstream." })
+          : emptyBox("No sinkhole rules configured — every query resolves upstream.")));
+
+    /* The hub bins every flow by day-of-week and hour-of-day whenever the
+       window is a day or longer, and the console never asked for the grid.
+       "Is this host talking at 3am on a Sunday" is a beaconing question that
+       the trend lane, which is one continuous line, cannot answer. */
+    var heat = arrayOf(ov.heatmap);
+    var heatCard;
+    if (heat.length) {
+      var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      var byCell = {};
+      var heatMax = 0;
+      heat.forEach(function (c) {
+        var v = Number(c.total_bytes) || Number(c.flows) || 0;
+        byCell[c.day_of_week + ":" + c.hour_of_day] = c;
+        if (v > heatMax) heatMax = v;
+      });
+
+      var grid = h("div", { cls: "heatgrid", role: "table", "aria-label": "Flows by day and hour" });
+      grid.appendChild(h("span", { cls: "heat-corner", "aria-hidden": "true" }));
+      for (var hr = 0; hr < 24; hr++) {
+        grid.appendChild(h("span", { cls: "heat-hour", text: hr % 3 === 0 ? pad(hr, 2) : "" }));
+      }
+      DAYS.forEach(function (dayName, day) {
+        grid.appendChild(h("span", { cls: "heat-day", text: dayName }));
+        for (var hour = 0; hour < 24; hour++) {
+          var cell = byCell[day + ":" + hour];
+          var flows = cell ? (Number(cell.flows) || 0) : 0;
+          var vol = cell ? (Number(cell.total_bytes) || 0) : 0;
+          var level = heatMax > 0 && (vol || flows)
+            ? Math.min(4, Math.max(1, Math.ceil(((vol || flows) / heatMax) * 4)))
+            : 0;
+          grid.appendChild(h("span", {
+            cls: "heat-cell", "data-level": String(level),
+            title: dayName + " " + pad(hour, 2) + ":00 \u2014 " + flows + " flow" + (flows === 1 ? "" : "s") +
+              (vol ? " \u00b7 " + bytes(vol) : "")
+          }));
+        }
+      });
+
+      heatCard = card("When This Estate Talks",
+        h("div", { cls: "card-body" },
+          grid,
+          h("div", { cls: "legend u-mt1" },
+            h("span", { text: "quiet" }),
+            h("span", { cls: "heat-cell", "data-level": "1", "aria-hidden": "true" }),
+            h("span", { cls: "heat-cell", "data-level": "2", "aria-hidden": "true" }),
+            h("span", { cls: "heat-cell", "data-level": "3", "aria-hidden": "true" }),
+            h("span", { cls: "heat-cell", "data-level": "4", "aria-hidden": "true" }),
+            h("span", { text: "busiest" }))));
+    } else {
+      heatCard = card("When This Estate Talks",
+        emptyBox("The hub bins the week only over a window of a day or more. Widen the range to see it."));
+    }
+
+    /* The diurnal pair is the whole point of the summary: the baseline is what
+       this hour of the day normally looks like and the live curve is what it
+       looks like now, and reading them apart is how "quiet Sunday 3am" becomes
+       a finding rather than a feeling. */
+    var an = state.analytics || {};
+    var base = an.diurnal_baseline || {};
+    var live = an.diurnal_live || {};
+    var diurnalCard;
+    if (Object.keys(base).length || Object.keys(live).length) {
+      var hours = [];
+      for (var dh = 0; dh < 24; dh++) hours.push(dh);
+      var dMax = 1;
+      hours.forEach(function (hour) {
+        dMax = Math.max(dMax, Number(base[hour]) || 0, Number(live[hour]) || 0);
+      });
+      var dsvg = s("svg", { "class": "chart", viewBox: "0 0 120 60", preserveAspectRatio: "none", role: "img", "aria-label": "Normal hourly volume against the current day" });
+      var baseLine = [], liveLine = [];
+      hours.forEach(function (hour, i) {
+        var x = (i / 23) * 118 + 1;
+        baseLine.push(x.toFixed(1) + "," + (55 - ((Number(base[hour]) || 0) / dMax) * 50).toFixed(1));
+        liveLine.push(x.toFixed(1) + "," + (55 - ((Number(live[hour]) || 0) / dMax) * 50).toFixed(1));
+      });
+      dsvg.appendChild(s("polyline", { points: baseLine.join(" "), fill: "none", stroke: "var(--ink-3)", "stroke-width": "1", "stroke-dasharray": "3 2" }));
+      dsvg.appendChild(s("polyline", { points: liveLine.join(" "), fill: "none", stroke: "var(--brand)", "stroke-width": "1.5" }));
+      dsvg.appendChild(s("line", { x1: 0, y1: 56, x2: 120, y2: 56, stroke: "var(--line)" }));
+
+      var dticks = h("div", { cls: "chart-ticks" });
+      [0, 6, 12, 18, 23].forEach(function (hour) { dticks.appendChild(h("span", { text: pad(hour, 2) + ":00" })); });
+
+      diurnalCard = card("Normal Day Against Today",
+        h("div", { cls: "card-body" }, dsvg, dticks,
+          h("div", { cls: "legend u-mt1" },
+            h("span", { text: "\u2504 Grey: the usual volume for this hour" }),
+            h("span", { text: "\u2500 Blue: today" }))));
+    } else {
+      diurnalCard = card("Normal Day Against Today",
+        emptyBox("The hub needs a day of history before it can say what normal looks like."));
+    }
+
+    var talkers = arrayOf(an.top_talkers);
+    var talkerCard = card("Loudest Processes On The Estate",
+      h("div", { cls: "card-body" },
+        talkers.length
+          ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
+              function (t) { return t.process || "\u2014"; },
+              function (t) { return t.flow_count + " flows \u00b7 " + bytes(t.total_bytes); },
+              { onPick: function (t) { tf.process = t.process; refresh(); } })
+          : emptyBox("Nothing has been attributed to a process yet.")));
+
+    var geo = arrayOf(an.geo_stats);
+    var geoCard = card("Where The Traffic Goes",
+      h("div", { cls: "card-body" },
+        geo.length
+          ? simpleTable(["Country", "Flows", "Volume", "Threat hits"],
+              geo.map(function (g) {
+                return [
+                  h("span", { text: (g.country_name || g.country || "\u2014") }),
+                  h("span", { cls: "ago", text: String(g.flow_count || 0) }),
+                  h("span", { cls: "ago", text: bytes(g.total_bytes || 0) }),
+                  Number(g.threat_count) > 0
+                    ? h("span", { cls: "st", "data-state": "crit", text: String(g.threat_count) })
+                    : h("span", { cls: "dim-3", text: "0" })
+                ];
+              }),
+              { key: "traffic-geo", empty: "No destination has been geolocated." })
+          : emptyBox("No destination has been geolocated.")));
 
     // Assemble View
     view.appendChild(h("div", { cls: "pad stack traffic-workspace" },
       filterBar,
       statsGrid,
       dualChartCard,
+      diurnalCard,
+      heatCard,
+      h("div", { cls: "cols" }, talkerCard, geoCard),
       h("div", { cls: "distrib-grid" }, protoCards, actCards, dirCards),
+      h("div", { cls: "cols" }, epCard, ctryCard),
       h("div", { cls: "cols" }, procCard, dstCard),
       h("div", { cls: "cols" }, domCard, portCard),
       dnsStreamCard,
@@ -4290,14 +5282,14 @@
           h("div", { cls: "stack" },
             h("b", { text: "Flow Investigation #" + (sel.id || sel.ID || "") }),
             h("span", { cls: "dim-3", text: sel.timestamp ? String(sel.timestamp) : "" })),
-          h("div", { style: "display:flex;gap:6px;align-items:center;" },
+          h("div", { cls: "uf uf-g2" },
             h("button", {
               cls: "btn mini btn-primary", type: "button", text: "Forensics Sheet ↗",
               on: { click: function () { openEventInspectionSheet(sel); } }
             }),
             h("button", {
-              cls: "btn mini ghost", type: "button", text: "✕ Close",
-              on: { click: function () { state.selectedFlow = null; renderTraffic(); } }
+              cls: "btn mini", type: "button", text: "✕ Close",
+              on: { click: function () { state.selectedFlow = null; renderBody(); } }
             }))),
         h("div", { cls: "drawer-body" },
           h("div", { cls: "drawer-kv-group" },
@@ -4309,10 +5301,23 @@
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Destination IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.dst_ip + ":" + sel.dst_port })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Remote Country" }), h("span", { cls: "drawer-kv-val", text: sel.country || "—" })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Queried Domain" }), h("span", { cls: "drawer-kv-val", text: sel.domain || "—" })),
+            /* The agent reports which collection layer saw the flow, the TLS
+               server name it was opened for, the host it resolved through, and
+               whether the detector called it anomalous. All four were in the
+               payload and none of them were on the screen, which is most of
+               what "why am I looking at this flow" means. */
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "TLS Server Name" }), h("span", { cls: "drawer-kv-val", text: sel.sni || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Reported Hostname" }), h("span", { cls: "drawer-kv-val", text: sel.hostname || "—" })),
+            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Collection Layer" }), h("span", { cls: "drawer-kv-val", text: sel.layer || "—" })),
+            h("div", { cls: "drawer-kv-row" },
+              h("span", { cls: "drawer-kv-label", text: "Detector Verdict" }),
+              sel.is_anomalous
+                ? h("span", { cls: "st", "data-state": "warn", text: "anomalous" })
+                : h("span", { cls: "st", "data-state": "idle", text: "nothing flagged" })),
             h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes In / Out" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_in) + " / " + bytes(sel.bytes_out) }))),
 
           // Process Lineage Hierarchy Tree
-          h("div", { cls: "stack", style: "gap: 4px;" },
+          h("div", { cls: "stack uf-g1" },
             h("span", { cls: "drawer-kv-label", text: "Process Lineage Tree" }),
             processLineageTree(sel)),
 
@@ -4326,7 +5331,7 @@
               processHashBadge(sel.executable_sha256, function (hsh) { tf.hash = hsh; state.selectedFlow = null; refresh(); })) : null),
 
           // Command Line Inspector
-          h("div", { cls: "stack", style: "gap: 4px;" },
+          h("div", { cls: "stack uf-g1" },
             commandLineInspector(sel.command_line)),
 
           h("div", { cls: "drawer-actions" },
@@ -4364,30 +5369,176 @@
   var sheetEl = null;
   var sheetScrim = null;
 
+  /* Sheets that were open when this one opened. `openSheet` began with
+     `closeSheet()`, so every "sheet opens a sheet" flow - the shell and
+     forensics target pickers, the response unlock gate - was a *replace* with
+     no way back, and opening any sheet from anywhere tore down a live
+     terminal along with the process it was attached to. */
+  var sheetStack = [];
+
+  var FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  /* Overlays trap Tab and give focus back to whatever opened them. All six -
+     sheet, route, drawer, palette, account popover, context menu - used to
+     close by dropping focus on <body>, which puts a keyboard operator at the
+     top of the document every time they dismiss anything. */
+  function trapFocus(container) {
+    return function (e) {
+      if (e.key !== "Tab") return;
+      var items = Array.prototype.filter.call(container.querySelectorAll(FOCUSABLE), function (el) {
+        return el.offsetParent !== null || el === document.activeElement;
+      });
+      if (!items.length) { e.preventDefault(); return; }
+      var first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+  }
+
+  function restoreFocus(el) {
+    if (el && typeof el.focus === "function" && document.contains(el)) {
+      try { el.focus(); } catch (e) {}
+    }
+  }
+
+  /* Detaches the current sheet's DOM without running its cleanup, so it can be
+     put back when the sheet stacked on top of it closes. A live terminal keeps
+     its socket and its xterm instance while a picker sits over it. */
+  function suspendSheet() {
+    if (!sheetEl) return null;
+    var frame = { el: sheetEl, scrim: sheetScrim, opener: sheetEl._opener, trap: sheetEl._trap };
+    if (sheetEl.parentNode) sheetEl.parentNode.removeChild(sheetEl);
+    if (sheetScrim && sheetScrim.parentNode) sheetScrim.parentNode.removeChild(sheetScrim);
+    sheetEl = null;
+    sheetScrim = null;
+    return frame;
+  }
+
+  function resumeSheet(frame) {
+    if (!frame) return;
+    sheetEl = frame.el;
+    sheetScrim = frame.scrim;
+    document.body.appendChild(sheetScrim);
+    document.body.appendChild(sheetEl);
+    if (sheetEl._restoreFocus) { try { sheetEl._restoreFocus(); } catch (e) {} }
+  }
+
   function closeSheet() {
     if (sheetEl && typeof sheetEl._cleanup === "function") {
       try { sheetEl._cleanup(); } catch (e) {}
     }
+    var opener = sheetEl && sheetEl._opener;
+    if (sheetEl && sheetEl._trap) document.removeEventListener("keydown", sheetEl._trap, true);
     if (sheetEl && sheetEl.parentNode) sheetEl.parentNode.removeChild(sheetEl);
     if (sheetScrim && sheetScrim.parentNode) sheetScrim.parentNode.removeChild(sheetScrim);
     sheetEl = null;
     sheetScrim = null;
+
+    if (sheetStack.length) {
+      resumeSheet(sheetStack.pop());
+      return;
+    }
+    restoreFocus(opener);
   }
 
-  function openSheet(title, body, actions, extraCls) {
-    closeSheet();
-    sheetScrim = h("div", { cls: "scrim scrim-sheet", on: { click: closeSheet } });
+  /* Closes the whole stack. `go()` and anything else that changes what the
+     console is showing wants this, not a one-level pop. */
+  function closeAllSheets() {
+    var guard = 0;
+    while (sheetEl && guard++ < 16) closeSheet();
+    sheetStack.length = 0;
+  }
+
+  /* opts:
+       stack        - keep the sheet underneath alive and restore it on close
+       initialFocus - the node to focus, or false for none
+       guardDirty   - false to let Escape and the scrim discard typed input
+                      without asking (confirmations and prompts, where the
+                      typed value only exists to arm the button)
+     openSheet used to guess with `querySelector("input, select, button.btn-primary")`,
+     and it misfired both ways: in openIsolateSheet the first match is the
+     Isolate confirm button, one Space away from cutting a host off the network,
+     while the retire and cancel confirms have no input and no primary button so
+     nothing was focused at all. A confirming button is never auto-focused. */
+  function openSheet(title, body, actions, extraCls, opts) {
+    opts = opts || {};
+    var opener = document.activeElement;
+    if (opts.stack && sheetEl) {
+      var suspended = suspendSheet();
+      if (suspended) sheetStack.push(suspended);
+    } else {
+      closeAllSheets();
+    }
+
+    sheetScrim = h("div", { cls: "scrim scrim-sheet", on: { click: function () { requestCloseSheet(); } } });
     sheetEl = h("div", { cls: "sheet" + (extraCls ? " " + extraCls : ""), role: "dialog", "aria-modal": "true", "aria-label": title },
       h("div", { cls: "sheet-head" },
         h("h2", { text: title }),
         h("span", { cls: "fill" }),
-        h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeSheet } }, icon("i-close"))),
+        h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: function () { requestCloseSheet(); } } }, icon("i-close"))),
       h("div", { cls: "sheet-body" }, body),
       h("div", { cls: "sheet-foot" }, actions || []));
+    sheetEl._opener = opener && opener !== document.body ? opener : null;
     document.body.appendChild(sheetScrim);
     document.body.appendChild(sheetEl);
-    var first = sheetEl.querySelector("input, select, button.btn-primary");
-    if (first) first.focus();
+
+    sheetEl._trap = trapFocus(sheetEl);
+    document.addEventListener("keydown", sheetEl._trap, true);
+
+    /* A dialog whose focus is still on the page behind it is not modal in any
+       useful sense: the trap only cycles Tab between the items it contains, so
+       from outside, Tab walks the document underneath instead. When there is
+       nothing safe to focus - a confirmation, where the only controls are
+       Cancel and a destructive button - the sheet itself takes focus. */
+    sheetEl.setAttribute("tabindex", "-1");
+    var focusTarget = null;
+    if (opts.initialFocus === false) focusTarget = sheetEl;
+    else if (opts.initialFocus) focusTarget = opts.initialFocus;
+    else {
+      focusTarget = sheetEl.querySelector("input:not([type=hidden]), select, textarea");
+      if (!focusTarget) focusTarget = sheetEl.querySelector(".sheet-head button");
+    }
+    sheetEl._restoreFocus = function () { if (focusTarget) { try { focusTarget.focus(); } catch (e) {} } };
+    if (focusTarget) { try { focusTarget.focus(); } catch (e) {} }
+
+    /* Escape and a click on the scrim used to throw away a half-filled
+       installer, script or tuning form with no warning and no way back. A
+       sheet that wants its own dismissal behaviour - the terminal does -
+       overwrites this after openSheet returns. */
+    if (opts.guardDirty !== false) {
+      var el = sheetEl;
+      /* One delegated listener rather than a snapshot of every field: several
+         sheets render their form only after a fetch resolves, and a snapshot
+         taken at open time either misses those fields or, worse, reports them
+         as edited the moment they appear. "The operator typed something" is
+         the question being asked, and this asks exactly that. */
+      el._dirty = false;
+      el.addEventListener("input", function () { el._dirty = true; }, true);
+      el.addEventListener("change", function () { el._dirty = true; }, true);
+      el._confirmClose = function () {
+        if (!el._dirty) return true;
+        confirmSheet({
+          title: "Discard what you have entered?",
+          consequence: "This form has values you typed that have not been submitted. Closing it discards them; there is no draft.",
+          confirmLabel: "Discard",
+          stack: true,
+          onConfirm: function () { closeSheet(); }
+        });
+        return false;
+      };
+    }
+  }
+
+  /* A dismissal the sheet is allowed to intervene in - a live terminal asks
+     first, a filled form warns before discarding. Programmatic closes call
+     closeSheet() directly and are not questioned. */
+  function requestCloseSheet() {
+    if (sheetEl && typeof sheetEl._confirmClose === "function") {
+      var proceed = false;
+      try { proceed = sheetEl._confirmClose(); } catch (e) { proceed = true; }
+      if (!proceed) return;
+    }
+    closeSheet();
   }
 
   /* ------------------------------------------------- adding an endpoint */
@@ -4484,6 +5635,19 @@
     profileHours.value = "8";
     var profileMaxUses = h("input", { type: "text", inputmode: "numeric", placeholder: "No limit" });
 
+    /* Opened from "Install Agent (N)" with the selected hosts. The button
+       counted them and then called this with no arguments at all, so the
+       label promised a bulk operation and the sheet performed a generic
+       single-computer one. N unmanaged hosts is a campaign with an install
+       cap of N - the machinery for that was already here and unreachable. */
+    var preHosts = arrayOf(pre.hosts);
+    if (preHosts.length > 1) {
+      profileKind.value = "campaign";
+      profileMaxUses.value = String(preHosts.length);
+    } else if (pre.kind) {
+      profileKind.value = pre.kind;
+    }
+
     var platformField = h("label", { cls: "field" }, h("span", { text: "Operating system" }), platform);
     var tenantField = h("label", { cls: "field" }, h("span", { text: "Client" }), tenant);
     var locationField = h("label", { cls: "field" }, h("span", { text: "Location" }), location);
@@ -4541,7 +5705,7 @@
           syncProfile();
           setupBlocks.forEach(function (block) { block.hidden = false; });
           out.textContent = "";
-          out.appendChild(h("p", { cls: "note note-warn", text: "Enrollment code revoked. Any downloaded copy of this installer can no longer enroll a computer." }));
+          out.appendChild(h("p", { cls: "note note-warn", role: "alert", text: "Enrollment code revoked. Any downloaded copy of this installer can no longer enroll a computer." }));
           renderButton.textContent = "Generate install options";
           toast("Enrollment code revoked", "ok");
         })
@@ -4586,7 +5750,7 @@
               cls: "btn", type: "button", text: "Copy code",
               on: { click: function () { copyText(res.enrollment_code || "", "the enrollment code"); } }
             })),
-          res.one_liner_warning ? h("p", { cls: "note note-warn", text: res.one_liner_warning }) : null);
+          res.one_liner_warning ? h("p", { cls: "note note-warn", role: "alert", text: res.one_liner_warning }) : null);
       }
       var result = h("section", { cls: "installer-result" },
         h("div", { cls: "installer-result-head" },
@@ -4639,11 +5803,16 @@
         renderButton.disabled = false;
         renderButton.textContent = "Try again";
         out.textContent = "";
-        out.appendChild(h("p", { cls: "note note-crit", text: "Could not generate install options: " + e.message }));
+        out.appendChild(h("p", { cls: "note note-crit", role: "alert", text: "Could not generate install options: " + e.message }));
       });
     };
 
     var intro = h("p", { cls: "why", text: "Prepare a platform-correct installer for one computer, an expiring rollout, or a protected GPO/MDM deployment. Every installed agent receives its own device credential and client certificate." });
+    var selectionNote = preHosts.length > 1
+      ? h("p", { cls: "note note-ok", text: "Prepared for " + preHosts.length + " selected host(s): "
+          + preHosts.slice(0, 6).join(", ") + (preHosts.length > 6 ? ", and " + (preHosts.length - 6) + " more" : "")
+          + ". One code, capped at " + preHosts.length + " installs." })
+      : null;
     var lanPath = h("section", { cls: "installer-paths" },
         h("div", {},
           h("h3", { text: "Installing computers from the same LAN?" }),
@@ -4655,7 +5824,7 @@
     var profileSection = h("section", { cls: "installer-section" },
         h("h3", { text: "2 · Enrollment lifetime" }),
         h("div", { cls: "installer-grid" }, profileField, hoursField, maxUsesField, profileHelp));
-    setupBlocks = [intro, lanPath, targetSection, profileSection];
+    setupBlocks = [intro, selectionNote, lanPath, targetSection, profileSection].filter(Boolean);
     var body = h("div", { cls: "stack" }, setupBlocks, out);
 
     renderButton = h("button", { cls: "btn btn-primary", type: "button", text: "Generate install options", on: { click: render } });
@@ -4682,12 +5851,12 @@
 
     var load = function () {
       out.textContent = "";
-      out.appendChild(h("div", { cls: "empty", text: "Loading enrollment keys…" }));
+      out.appendChild(emptyBox("Loading enrollment keys…"));
       request("/api/v1/enrollment/profiles").then(function (res) {
         out.textContent = "";
         var profiles = arrayOf(res && res.profiles);
         if (!profiles.length) {
-          out.appendChild(h("div", { cls: "empty", text: "No enrollment keys have been created." }));
+          out.appendChild(emptyBox("No enrollment keys have been created."));
           return;
         }
         var rows = profiles.map(function (profile) {
@@ -4712,14 +5881,26 @@
         out.appendChild(simpleTable(["Method", "OS", "Assignment", "Installs", "Expires", "State", ""], rows));
       }).catch(function (e) {
         out.textContent = "";
-        out.appendChild(h("p", { cls: "note note-crit", text: "Could not load enrollment keys: " + e.message }));
+        out.appendChild(h("p", { cls: "note note-crit", role: "alert", text: "Could not load enrollment keys: " + e.message }));
       });
     };
 
     var revoke = function (id) {
-      request("/api/v1/enrollment/profiles?id=" + encodeURIComponent(id), "DELETE")
-        .then(function () { toast("Enrollment key revoked", "ok"); load(); })
-        .catch(function (e) { toast("Could not revoke the key: " + e.message, "crit"); });
+      /* A revoked key is not reissued. Every GPO, MDM profile or scripted
+         rollout still carrying it stops being able to enroll, silently, from
+         the next attempt onwards. */
+      confirmSheet({
+        title: "Revoke enrollment key",
+        consequence: "Any deployment still carrying this key stops enrolling immediately. GPO policies, MDM profiles and rollout scripts that reference it have to be updated with a new key before they will work again.",
+        detail: "Key " + String(id).slice(0, 12) + "\u2026 \u00b7 already-enrolled computers keep their own identities and are unaffected.",
+        confirmLabel: "Revoke key",
+        stack: true,
+        onConfirm: function () {
+          request("/api/v1/enrollment/profiles?id=" + encodeURIComponent(id), "DELETE")
+            .then(function () { toast("Enrollment key revoked", "ok"); load(); })
+            .catch(function (e) { toast("Could not revoke the key: " + e.message, "crit"); });
+        }
+      });
     };
 
     openSheet("Enrollment keys", out, [
@@ -4834,14 +6015,23 @@
     var load = function () {
       request("/api/v1/enrolment/windows").then(renderList).catch(function (e) {
         out.textContent = "";
-        out.appendChild(h("p", { cls: "note note-crit", text: "Could not read LAN install access: " + e.message }));
+        out.appendChild(h("p", { cls: "note note-crit", role: "alert", text: "Could not read LAN install access: " + e.message }));
       });
     };
 
     var revoke = function (id) {
-      request("/api/v1/enrolment/windows?id=" + encodeURIComponent(id), "DELETE")
-        .then(function () { toast("LAN install access closed", "ok"); load(); })
-        .catch(function (e) { toast("Could not close LAN access: " + e.message, "crit"); });
+      confirmSheet({
+        title: "Close LAN install access",
+        consequence: "The install window shuts immediately. Anyone part-way through installing an agent over the LAN fails, and a new window has to be opened before another computer can enroll this way.",
+        detail: "Computers that already finished installing stay enrolled.",
+        confirmLabel: "Close access",
+        stack: true,
+        onConfirm: function () {
+          request("/api/v1/enrolment/windows?id=" + encodeURIComponent(id), "DELETE")
+            .then(function () { toast("LAN install access closed", "ok"); load(); })
+            .catch(function (e) { toast("Could not close LAN access: " + e.message, "crit"); });
+        }
+      });
     };
 
     var open = function () {
@@ -5077,7 +6267,7 @@
   function baselineEndpointCard(asset) {
     var info = state.baselineByEndpoint[asset.endpoint.id];
     if (!info) {
-      return card("If isolated", h("div", { cls: "empty", text: "Reading the baseline…" }), null, true);
+      return card("If isolated", emptyBox("Reading the baseline…"), null, true);
     }
     var res = info.resolution || {};
     var uncovered = arrayOf(res.uncovered);
@@ -5085,8 +6275,8 @@
 
     var body = h("div", { cls: "card-body stack" });
 
-    if (info.blocker) body.appendChild(h("p", { cls: "note note-crit", text: info.blocker }));
-    else if (info.warning) body.appendChild(h("p", { cls: "note note-warn", text: info.warning }));
+    if (info.blocker) body.appendChild(h("p", { cls: "note note-crit", role: "alert", text: info.blocker }));
+    else if (info.warning) body.appendChild(h("p", { cls: "note note-warn", role: "alert", text: info.warning }));
     else body.appendChild(h("p", { cls: "note note-ok", text: "This host reported that it can still be released after an isolation, and the baseline covers everything it is using." }));
 
     body.appendChild(simpleTable(["Permitted", "Destination", "Wire"], wireRows(info.wire, info.always_permitted)));
@@ -5103,7 +6293,7 @@
         ];
       })));
     } else {
-      body.appendChild(h("div", { cls: "empty", text: "This host has not reported which services it uses." }));
+      body.appendChild(emptyBox("This host has not reported which services it uses."));
     }
 
     var policies = arrayOf(res.policies);
@@ -5283,6 +6473,16 @@
     };
 
     var restore = function () {
+      confirmSheet({
+        title: "Restore shipped detection thresholds",
+        consequence: "Every tuning value on this sheet is discarded and replaced with the defaults Ominull ships. Quiet-process and quiet-org lists built up over time are deleted, and the console has no record of what they were.",
+        confirmLabel: "Restore shipped values",
+        stack: true,
+        onConfirm: sendRestoreTuning
+      });
+    };
+
+    var sendRestoreTuning = function () {
       request("/api/v1/detection/tuning", "DELETE").then(function (res) {
         state.tuning = res;
         toast("Restored the shipped thresholds", "ok");
@@ -5325,7 +6525,7 @@
         h("dd", { text: arrayOf(t.quiet_processes).length + " process(es), " + arrayOf(t.quiet_orgs).length + " network(s)" }),
         h("dt", { text: "Hub time" }), h("dd", { cls: "ip", text: wrap.now || "—" })),
       changed.length
-        ? h("p", { cls: "note note-warn", text: changed.length + " setting(s) differ from the shipped values" + (t.updated_by ? ", last changed by " + t.updated_by : "") })
+        ? h("p", { cls: "note note-warn", role: "alert", text: changed.length + " setting(s) differ from the shipped values" + (t.updated_by ? ", last changed by " + t.updated_by : "") })
         : h("p", { cls: "pending", text: "Running the shipped values." }));
 
     return card("Detection tuning", body, [
@@ -5340,7 +6540,11 @@
     var view = $("view");
     clear(view);
 
-    var excl = simpleTable(["Name", "Scope", "Process", "Destination", "Port", "State"],
+    /* An exclusion is a hole in the enforcement policy and the console listed
+       them read-only, beside a Baseline card that can be edited freely - so
+       the one table where "turn this off" is a security action was the one
+       table with no way to do it. The hub has served the toggle all along. */
+    var excl = simpleTable(["Name", "Scope", "Process", "Destination", "Port", "State", ""],
       state.exclusions.map(function (x) {
         return [
           h("span", { text: x.name || x.id }),
@@ -5350,9 +6554,15 @@
           h("span", { cls: "ip", text: (x.port ? String(x.port) : "any") + "/" + (x.protocol || "any") }),
           h("span", { cls: "st", "data-state": x.active ? "ok" : "idle" },
             icon(x.active ? "g-online" : "g-offline", true),
-            h("span", { text: x.active ? "Active" : "Off" }))
+            h("span", { text: x.active ? "Active" : "Off" })),
+          h("div", { cls: "row-actions" }, h("button", {
+            cls: "btn mini" + (x.active ? "" : " btn-primary"), type: "button",
+            text: x.active ? "Disable" : "Enable",
+            on: { click: function () { confirmToggleExclusion(x); } }
+          }))
         ];
-      }));
+      }),
+      { key: "policy-exclusions", empty: "No exclusion has been carved out of the policy." });
 
     var iocs = simpleTable(["Indicator", "Type", "Threat", "Source", "Confidence", "Last seen"],
       state.iocs.map(function (i) {
@@ -5387,7 +6597,11 @@
         ];
       }));
 
+    if (!state.diagnostics && !state.diagnosticsRunning && !state.diagnosticsError) loadDiagnostics();
+
     var stackItems = [
+      diagnosticsCard(),
+      convergenceCard(),
       baselineCard(),
       tuningCard(),
       card("Exclusions", excl),
@@ -5407,6 +6621,145 @@
     ];
 
     view.appendChild(h("div", { cls: "pad stack" }, stackItems.filter(Boolean)));
+  }
+
+  /* "Is the fleet actually on the release I shipped?"
+     The hub answers this on every poll and has done all along: the console
+     fetched /api/v1/agents/update-status every five seconds, read
+     latest_version off it to colour version chips, and dropped outdated[],
+     retired[], provenance_issues[] and native_converged on the floor. The
+     words provenance, install_type and update_capability appeared nowhere in
+     the console at all, so a host running the right version number from the
+     wrong package was indistinguishable from a converged one. */
+  function loadDiagnostics() {
+    state.diagnosticsRunning = true;
+    state.diagnosticsError = "";
+    if (state.section === "policy") renderBody();
+    return request("/api/v1/diagnostics")
+      .then(function (d) {
+        state.diagnostics = arrayOf(d && d.results);
+        state.diagnosticsAt = Date.now();
+      })
+      .catch(function (e) { state.diagnosticsError = e.message || "diagnostics request failed"; })
+      .then(function () {
+        state.diagnosticsRunning = false;
+        if (state.section === "policy") renderBody();
+      });
+  }
+
+  var DIAG_TONE = { pass: "ok", fail: "crit", warn: "warn", not_configured: "idle" };
+
+  /* The hub's own health, with the remediation text it already writes. The
+     word "remediation" did not appear in the console at all: a check could
+     fail and say exactly what to run, and the operator was shown nothing. */
+  function diagnosticsCard() {
+    var results = arrayOf(state.diagnostics);
+    var counts = { pass: 0, fail: 0, warn: 0, not_configured: 0 };
+    results.forEach(function (r) { counts[r.state] = (counts[r.state] || 0) + 1; });
+
+    var head = h("div", { cls: "uf uf-g3 uf-wrap" },
+      chip("ok", counts.pass + " passing"),
+      counts.fail ? chip("crit", counts.fail + " failing") : null,
+      counts.warn ? chip("warn", counts.warn + " warning") : null,
+      counts.not_configured ? chip("idle", counts.not_configured + " not configured") : null,
+      state.diagnosticsAt ? h("span", { cls: "dim-3", text: "checked " + ago(new Date(state.diagnosticsAt)) }) : null);
+
+    var body = h("div", { cls: "card-body stack" });
+
+    if (state.diagnosticsError) {
+      body.appendChild(h("p", { cls: "note note-crit", role: "alert", text: "Could not run diagnostics: " + state.diagnosticsError }));
+    } else if (state.diagnosticsRunning && !results.length) {
+      body.appendChild(h("div", { cls: "empty" },
+        h("span", { cls: "spin", "aria-hidden": "true" }),
+        h("span", { text: "Running checks\u2026" })));
+    } else {
+      body.appendChild(head);
+      /* Failures and warnings first: a wall of 24 green checks with one red
+         one in the middle is a worse answer than the one red one. */
+      var ordered = results.slice().sort(function (a, b) {
+        var rank = { fail: 0, warn: 1, not_configured: 2, pass: 3 };
+        return (rank[a.state] === undefined ? 4 : rank[a.state]) - (rank[b.state] === undefined ? 4 : rank[b.state]);
+      });
+      body.appendChild(simpleTable(["Check", "State", "Result", "What to do"],
+        ordered.map(function (r) {
+          return [
+            h("span", { text: r.title || "Check" }),
+            chip(DIAG_TONE[r.state] || "idle", (r.state || "unknown").replace("_", " ")),
+            h("span", { cls: "dim-2 u-break", text: r.summary || "No result" }),
+            r.remediation
+              ? h("span", { cls: "why u-break", text: r.remediation })
+              : h("span", { cls: "dim-3", text: "\u2014" })
+          ];
+        }), { key: "diagnostics", empty: "No checks reported." }));
+    }
+
+    return card("Hub diagnostics", body, [
+      h("button", {
+        cls: "btn", type: "button",
+        text: state.diagnosticsRunning ? "Running\u2026" : "Run checks",
+        disabled: state.diagnosticsRunning ? true : null,
+        on: { click: loadDiagnostics }
+      })
+    ]);
+  }
+
+  function convergenceCard() {
+    var u = state.updateStatus;
+    if (!u) return null;
+
+    var latest = u.latest_version || "\u2014";
+    var outdated = arrayOf(u.outdated);
+    var issues = arrayOf(u.provenance_issues);
+    var retired = arrayOf(u.retired);
+    var pending = arrayOf(u.pending);
+    var converged = !!u.native_converged;
+
+    var facts = h("div", { cls: "uf uf-g3 uf-wrap" },
+      chip(converged ? "ok" : "warn", converged ? "Converged on " + latest : "Not converged"),
+      chip(outdated.length ? "warn" : "idle", outdated.length + " behind " + latest),
+      chip(issues.length ? "crit" : "idle", issues.length + " provenance issue" + (issues.length === 1 ? "" : "s")),
+      chip(pending.length ? "info" : "idle", pending.length + " update" + (pending.length === 1 ? "" : "s") + " queued"),
+      retired.length ? chip("idle", retired.length + " retired") : null);
+
+    var body = h("div", { cls: "card-body stack" }, facts);
+
+    if (outdated.length) {
+      body.appendChild(h("div", { cls: "card-sub", text: "Behind the shipped release" }));
+      body.appendChild(simpleTable(["Host", "Address", "OS", "Running", "Target"],
+        outdated.map(function (e) {
+          return [
+            h("span", { cls: "host", text: e.hostname || e.endpoint_id }),
+            h("span", { cls: "ip", text: e.ip || "\u2014" }),
+            h("span", { cls: "dim-3", text: e.os || "\u2014" }),
+            h("span", { cls: "ver", text: e.driver_version || "\u2014" }),
+            h("span", { cls: "ver dim-3", text: latest })
+          ];
+        }), { key: "converge-outdated", empty: "Every agent is on " + latest + "." }));
+    }
+
+    if (issues.length) {
+      body.appendChild(h("div", { cls: "card-sub", text: "Right version, wrong provenance" }));
+      body.appendChild(h("p", { cls: "why", text: "These hosts report the shipped version number but the hub cannot tie the running agent back to a package it recognises. A self-updated binary on a host that is supposed to be managed by its native package manager is the usual cause, and it will be overwritten the next time that package manager runs." }));
+      body.appendChild(simpleTable(["Host", "Install", "Package", "Registered", "Provenance", "Why"],
+        issues.map(function (e) {
+          return [
+            h("span", { cls: "host", text: e.hostname || e.endpoint_id }),
+            h("span", { cls: "dim-3", text: e.install_type || "unknown" }),
+            h("span", { cls: "ip", text: e.package_identifier || "\u2014" }),
+            h("span", { cls: "ver", text: e.registered_package_version || "\u2014" }),
+            chip(e.provenance_status === "verified" ? "ok" : "crit", e.provenance_status || "unknown"),
+            h("span", { cls: "dim-2 u-break", text: e.reason || "" })
+          ];
+        }), { key: "converge-provenance" }));
+    }
+
+    if (!outdated.length && !issues.length) {
+      body.appendChild(h("p", { cls: "why", text: "Every non-retired agent reports " + latest + " from a package the hub recognises." }));
+    }
+
+    return card("Fleet convergence", body, IS_ADMIN ? [
+      h("button", { cls: "btn", type: "button", text: "Push agent updates", on: { click: pushAgentUpdates } })
+    ] : null);
   }
 
   function renderAudit() {
@@ -5560,7 +6913,7 @@
       var icon = btn.querySelector("use");
       if (icon) icon.setAttribute("href", "#i-lock");
       toast("Response session expired.", "warn");
-      if (state.section === "response") renderResponse();
+      if (state.section === "response") renderBody();
       return;
     }
 
@@ -5584,6 +6937,88 @@
     }
   }
 
+  /* Locking throws away the browser signing key. Re-unlocking is a fresh TOTP
+     and a fresh key, which is a real interruption mid-incident, so the two
+     deliberate "Lock Response Authority" buttons ask first. Expiry and idle
+     timeout call lockResponseSession() directly and must not prompt. */
+  /* Disabling an exclusion tightens the policy and enabling one loosens it, so
+     only the loosening direction is stopped for a sentence. */
+  function confirmToggleExclusion(x) {
+    var name = x.name || x.id;
+    var apply = function () {
+      request("/api/v1/exclusions/toggle", "POST", { id: x.id, active: !x.active })
+        .then(function () {
+          toast((x.active ? "Disabled" : "Enabled") + " exclusion " + name, "ok");
+          refresh();
+        })
+        .catch(function (e) { toast("Could not change the exclusion: " + e.message, "crit"); });
+    };
+    if (x.active) { apply(); return; }
+    confirmSheet({
+      title: "Enable exclusion " + name,
+      consequence: "Traffic matching this exclusion stops being inspected and stops being enforced against, on every endpoint in scope, until somebody turns it off again.",
+      detail: (x.process_path || "any process") + " \u2192 " + (x.dst_ip_range || "any destination") +
+        " on " + (x.port ? String(x.port) : "any port") + "/" + (x.protocol || "any"),
+      confirmLabel: "Enable exclusion",
+      onConfirm: apply
+    });
+  }
+
+  /* The job lifecycle, named exactly as the hub names it (response.JobState:
+     queued, offered, acknowledged, running, succeeded, failed, cancel_requested,
+     cancelled). Listing the *finished* states rather than the open ones is the
+     safe direction: a state added later shows a Cancel button the hub then
+     refuses, instead of silently hiding the button on a job that is very much
+     still running. cancel_requested is already on its way out, so it is
+     finished for this purpose too. */
+  var RESPONSE_JOB_CLOSED = {
+    succeeded: true, failed: true, cancelled: true, cancel_requested: true
+  };
+
+  function responseJobIsOpen(j) {
+    return !RESPONSE_JOB_CLOSED[String((j && j.state) || "queued")];
+  }
+
+  function confirmCancelResponseJob(j) {
+    /* A job the agent has not taken yet is cancelled outright. Once it has been
+       offered or acknowledged the hub can only *ask*: the agent has to notice
+       the cancellation and stop. Saying "cancelled" in that case would tell an
+       operator the action is over when it may still be running on the host. */
+    var takenUp = String(j.state || "queued") !== "queued";
+    confirmSheet({
+      title: "Cancel response job",
+      consequence: takenUp
+        ? "The agent on " + (j.endpoint_id || "the endpoint") + " has already taken this job. Cancelling asks it to stop; anything it has already done is not undone, and there is no guarantee it stops before it finishes."
+        : "The job stops being offered to " + (j.endpoint_id || "the endpoint") + " and is closed without ever running.",
+      detail: (j.action_kind || j.kind || "response job") + " \u00b7 " + (j.id || "") +
+        " \u00b7 " + (j.state || "queued") +
+        (j.requested_by ? " \u00b7 requested by " + j.requested_by : ""),
+      confirmLabel: takenUp ? "Ask the agent to stop" : "Cancel job",
+      onConfirm: function () {
+        request("/api/v1/response/jobs/cancel", "POST", { job_id: j.id })
+          .then(function (res) {
+            var requested = !res || res.status !== "cancelled";
+            toast(requested && takenUp
+              ? "Cancellation sent to " + (j.endpoint_id || "the endpoint") + ". The job closes when the agent acknowledges it."
+              : "Response job cancelled.", "ok");
+            refresh();
+          })
+          .catch(function (e) { toast("Could not cancel the job: " + e.message, "crit"); });
+      }
+    });
+  }
+
+  function confirmLockResponseSession() {
+    confirmSheet({
+      title: "Lock response authority",
+      consequence: "The browser signing key is destroyed and active response authority is dropped. Any response action you start after this needs a fresh unlock with your authenticator before it will run.",
+      detail: "Response jobs already dispatched to an agent keep running.",
+      confirmLabel: "Lock authority",
+      stack: true,
+      onConfirm: lockResponseSession
+    });
+  }
+
   function lockResponseSession() {
     if (state.responseSession && state.responseSession.session_id) {
       request("/api/v1/response/auth/lock", "POST", { session_id: state.responseSession.session_id })
@@ -5593,7 +7028,7 @@
     ephemeralResponseKey = null;
     updateResponseButton();
     toast("Response authority locked.", "info");
-    if (state.section === "response") renderResponse();
+    if (state.section === "response") renderBody();
   }
 
   function openResponseControllerSheet() {
@@ -5603,7 +7038,7 @@
 
     var body = h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
-        h("div", { cls: "badge badge-ok", text: "Session Active" }),
+        chip("ok", "Session Active"),
         h("span", { cls: "dim-2", text: "Session ID: " + (sess.session_id ? sess.session_id.slice(0, 16) + "\u2026" : "") })
       ),
       h("dl", { cls: "kv" },
@@ -5618,13 +7053,14 @@
     );
 
     var lockBtn = h("button", {
-      cls: "btn btn-danger",
+      cls: "btn btn-crit",
       type: "button",
       text: "Lock Response Authority",
+      /* confirmLockResponseSession, not lockResponseSession - see there. */
       on: {
         click: function () {
           closeSheet();
-          lockResponseSession();
+          confirmLockResponseSession();
         }
       }
     });
@@ -5656,7 +7092,7 @@
       tenant = state.hierarchy[0].tenant.id || "default";
     }
 
-    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
     var codeInput = h("input", {
       type: "text",
       id: "unlock-totp-code",
@@ -5709,7 +7145,7 @@
                     closeSheet();
                     updateResponseButton();
                     toast("Response authority unlocked for 8 hours (30m idle).", "ok");
-                    if (state.section === "response") renderResponse();
+                    if (state.section === "response") renderBody();
                     if (typeof onSuccess === "function") onSuccess(session);
                   });
                 });
@@ -5732,7 +7168,7 @@
       }
     });
 
-    var enrollBox = h("div", { cls: "totp-enroll-box stack-s", style: "display: none; margin-top: 8px;" });
+    var enrollBox = h("div", { cls: "totp-enroll-box stack-s u-mt2", hidden: true });
     var enrollBtn = h("button", {
       cls: "btn mini",
       type: "button",
@@ -5746,10 +7182,10 @@
               enrollBtn.style.display = "none";
               enrollBox.style.display = "block";
               enrollBox.innerHTML = "";
-              var keyRow = h("div", { cls: "stack-s pad-s rounded", style: "background: var(--bg-surface-2, rgba(255,255,255,0.05)); border: 1px solid var(--border-dim);" },
+              var keyRow = h("div", { cls: "stack-s totp-key-row" },
                 h("div", { cls: "label-meta", text: "Manual Entry Secret Key (Base32):" }),
-                h("div", { cls: "row-acts", style: "display: flex; gap: 8px; align-items: center;" },
-                  h("code", { cls: "cmd", style: "font-size: 1.05em; font-weight: bold; word-break: break-all;", text: res.secret }),
+                h("div", { cls: "row-acts uf uf-g3" },
+                  h("code", { cls: "cmd u-strong u-break", text: res.secret }),
                   h("button", {
                     cls: "btn mini",
                     type: "button",
@@ -5759,7 +7195,7 @@
                     }
                   })
                 ),
-                h("div", { cls: "why", style: "margin-top: 4px;" },
+                h("div", { cls: "why u-mt1" },
                   h("span", { text: "Add this key into your authenticator app (Google Authenticator, 1Password, Aegis, Bitwarden, etc.). " }),
                   res.otpauth_url ? h("a", { href: res.otpauth_url, target: "_blank", rel: "noopener", text: "Open in Authenticator App" }) : null
                 )
@@ -5788,7 +7224,7 @@
         h("label", { "for": "unlock-totp-code", text: "Enter 6-Digit Authenticator Code (TOTP):" }),
         codeInput
       ),
-      h("div", { cls: "form-row", style: "margin-top: 4px;" }, enrollBtn),
+      h("div", { cls: "form-row u-mt1" }, enrollBtn),
       enrollBox,
       errBox
     );
@@ -5818,7 +7254,7 @@
     var ep = asset.endpoint;
     var isWindows = (ep.os || "").toLowerCase().indexOf("windows") >= 0;
 
-    var progSel = h("select", { id: "shell-prog-select", cls: "select" });
+    var progSel = h("select", { id: "shell-prog-select" });
     if (isWindows) {
       progSel.appendChild(h("option", { value: "powershell.exe", text: "powershell.exe (Windows PowerShell)" }));
       progSel.appendChild(h("option", { value: "cmd.exe", text: "cmd.exe (Windows Command Prompt)" }));
@@ -5828,7 +7264,7 @@
       progSel.appendChild(h("option", { value: "/bin/sh", text: "/bin/sh (POSIX Shell)" }));
     }
 
-    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
 
     var launchBtn = h("button", {
       cls: "btn btn-primary",
@@ -5860,8 +7296,11 @@
             .then(function (sessionSummary) {
               closeSheet();
               toast("Terminal shell session created (" + sessionSummary.session_id.slice(0, 8) + "\u2026). Connecting emulator.", "ok");
-              state.section = "response";
-              go("response");
+              /* Stay where the operator is. This forced `go("response")`,
+                 and go() closes the sheet, the route panel and the drawer -
+                 so launching a shell from an asset's route panel silently
+                 destroyed the panel they were working in. The emulator is a
+                 sheet; it does not need a section behind it. */
               openTerminalEmulator(sessionSummary);
             })
             .catch(function (err) {
@@ -5906,7 +7345,7 @@
       return;
     }
 
-    var sel = h("select", { cls: "select", id: "shell-target-picker" });
+    var sel = h("select", { id: "shell-target-picker" });
     managed.forEach(function (a) {
       sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ") - " + a.endpoint.id }));
     });
@@ -5936,6 +7375,67 @@
     openSheet("Select Target Endpoint for Shell", body, foot);
   }
 
+  /* The one live-session lookup, and the one reattach path. The Response page
+     row, the Assets banner and the Assets context menu all route through
+     reattachTerminal so there is a single implementation of "come back to a
+     shell" rather than three that drift. */
+  function liveTerminalFor(ep) {
+    if (!ep || !ep.id) return null;
+    var sessions = arrayOf(state.terminalSessions);
+    for (var i = 0; i < sessions.length; i++) {
+      var t = sessions[i];
+      if (!t || t.endpoint_id !== ep.id) continue;
+      if (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting") return t;
+    }
+    return null;
+  }
+
+  function terminalSessionIsLive(t) {
+    return !!t && (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting");
+  }
+
+  /* Reattaching needs a live response session but no fresh TOTP proof: the
+     ActionProof V2 on creation authorised *spawning* a root shell, and coming
+     back to one this operator already spawned is not a second privileged
+     action. A lapsed response session falls through to the unlock sheet with
+     a resume callback, the pattern launchTerminalShell already uses. */
+  function reattachTerminal(sessionSummary) {
+    if (!sessionSummary || !sessionSummary.session_id) return;
+    if (!terminalSessionIsLive(sessionSummary)) {
+      toast("That session is no longer live \u2014 nothing to reattach to.", "warn");
+      return;
+    }
+    if (!state.responseSession || !ephemeralResponseKey) {
+      openUnlockResponseSheet(function () { reattachTerminal(sessionSummary); });
+      return;
+    }
+    request("/api/v1/terminal/sessions/attach", "POST", { session_id: sessionSummary.session_id })
+      .then(function (sum) {
+        openTerminalEmulator(sum || sessionSummary, true);
+      })
+      .catch(function (e) {
+        toast("Reattach refused: " + e.message, "crit");
+        refresh();
+      });
+  }
+
+  function terminateTerminalSession(sessionSummary, hostLabel) {
+    if (!sessionSummary || !sessionSummary.session_id) return;
+    var host = hostLabel || sessionSummary.endpoint_id || "this host";
+    var act = function () { closeTerminalSession(sessionSummary.session_id); };
+    if (!state.responseSession || !ephemeralResponseKey) {
+      openUnlockResponseSheet(function () { terminateTerminalSession(sessionSummary, hostLabel); });
+      return;
+    }
+    confirmSheet({
+      title: "Terminate terminal session",
+      consequence: "Every process started by that shell on " + host + " is killed with SIGTERM and then SIGKILL. Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
+      detail: (sessionSummary.program || "shell") + " \u00b7 session " + String(sessionSummary.session_id).slice(0, 8) + "\u2026",
+      confirmLabel: "Terminate session",
+      onConfirm: act
+    });
+  }
+
   function closeTerminalSession(sessionId) {
     request("/api/v1/terminal/sessions?id=" + encodeURIComponent(sessionId), "DELETE")
       .then(function () {
@@ -5947,17 +7447,20 @@
       });
   }
 
-  function openTerminalEmulator(session) {
+  /* xterm's own scrollback, and the cap on how much recording is replayed
+     into it: writing more than the buffer holds costs time and shows the same
+     last N lines. */
+  var TERM_SCROLLBACK = 5000;
+  /* Six attempts over ~12s of backoff. Enough for a Wi-Fi blip or a proxy
+     recycling; short enough that a session that is genuinely gone stops being
+     retried and says so. */
+  var TERM_MAX_RECONNECT = 6;
+
+  function openTerminalEmulator(session, reattaching) {
     if (!session || !session.session_id) return;
 
     var epId = session.endpoint_id || "unknown";
-    var asset = null;
-    for (var k in state.assetByKey) {
-      if (state.assetByKey[k].endpoint && state.assetByKey[k].endpoint.id === epId) {
-        asset = state.assetByKey[k];
-        break;
-      }
-    }
+    var asset = assetForEndpoint(epId);
     var hostName = asset ? (asset.name || asset.ip || epId) : epId;
     var epOs = (asset && asset.endpoint && asset.endpoint.os) || "Linux";
     var isWindows = epOs.indexOf("Windows") !== -1;
@@ -5978,12 +7481,52 @@
     var termContainer = h("div", { cls: "terminal-container", id: "active-terminal-container" });
 
     // Status elements
-    var statusBadge = h("div", {
-      cls: "badge " + (session.state === "active" ? "badge-ok" : "badge-warn"),
-      text: session.state === "active" ? "Agent Connected" : "Connecting to Relay\u2026"
-    });
-    var frameCountEl = h("span", { cls: "dim-2", text: "Frames: " + frameCount + " (" + encLabel + ")" });
-    var limitsEl = h("span", { cls: "dim-3", text: "Duration: 60m \u00b7 Idle: 15m \u00b7 Tenant slots: " + activeSessionsCount + "/4" });
+    /* setChip rewrites this in place as the relay connects, drops, retries and
+       reattaches. Without a live region none of that is announced, and the
+       terminal is the one place where "it stopped working" has to be heard. */
+    var statusBadge = chip(session.state === "active" ? "ok" : "warn",
+      session.state === "active" ? "Agent Connected" : "Connecting to Relay\u2026");
+    statusBadge.setAttribute("role", "status");
+    statusBadge.setAttribute("aria-live", "polite");
+    var frameCountEl = h("span", { cls: "dim-2" });
+    /* recording_bytes and max_recording_bytes ride on every poll and were both
+       unused, so the cap announced itself only by appearing mid-scrollback as
+       "[Recording limit reached]". Saying how much of it is spent, while it is
+       being spent, is the difference between a surprise and a deadline. */
+    var recordedBytes = Number(session && session.recording_bytes) || 0;
+    var updateFrames = function (sum) {
+      if (sum && Number(sum.recording_bytes) > recordedBytes) recordedBytes = Number(sum.recording_bytes);
+      var used = recordedBytes;
+      var cap = Number((sum && sum.max_recording_bytes) || (session && session.max_recording_bytes)) || 0;
+      var text = "Frames: " + frameCount + " (" + encLabel + ")";
+      if (cap > 0) text += " \u00b7 " + bytes(used) + " of " + bytes(cap) + " recorded";
+      else if (used > 0) text += " \u00b7 " + bytes(used) + " recorded";
+      frameCountEl.textContent = text;
+      frameCountEl.setAttribute("data-near-cap", cap > 0 && used / cap >= 0.9 ? "true" : "false");
+      frameCountEl.setAttribute("title", cap > 0
+        ? "The session recording is sealed into evidence. Output past " + bytes(cap) + " is not recorded."
+        : "No recording cap reported by the hub.");
+    };
+    updateFrames(session);
+    /* The hub sends expires_at and idle_expires_at on every poll. This was a
+       hardcoded "Duration: 60m · Idle: 15m", which is a promise the console
+       cannot keep - it is whatever --terminal-max-duration and
+       --terminal-idle-timeout say on the hub, and the string would have lied
+       the moment either changed. */
+    var limitsEl = h("span", { cls: "dim-3" });
+    var updateLimits = function (sum) {
+      var expires = parseTime(sum && sum.expires_at);
+      var idle = parseTime(sum && sum.idle_expires_at);
+      var parts = [];
+      parts.push(expires ? "Ends " + stampText(expires) : "Ends \u2014");
+      parts.push(idle ? "Idle out " + stampText(idle) : "Idle out \u2014");
+      parts.push("Tenant slots: " + activeSessionsCount + "/4");
+      limitsEl.textContent = parts.join(" \u00b7 ");
+      limitsEl.setAttribute("title",
+        (expires ? "Maximum duration reached at " + expires.toString() : "No maximum duration reported") + "\n" +
+        (idle ? "Idle timeout at " + idle.toString() + " unless you type" : "No idle deadline reported"));
+    };
+    updateLimits(session);
 
     var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
       h("div", { cls: "spin" }),
@@ -5999,7 +7542,7 @@
         statusBadge,
         h("span", { cls: "dim", text: "Endpoint: " }), h("b", { text: hostName }),
         h("span", { cls: "dim-2", text: "(" + epId + ")" }),
-        h("span", { cls: "badge badge-neutral", text: identity }),
+        chip("idle", identity),
         h("span", { cls: "ip", text: prog })
       ),
       h("div", { cls: "terminal-meta-right" },
@@ -6008,7 +7551,17 @@
       )
     );
 
+    /* Set while the operator is deliberately leaving, so ws.onclose knows the
+       difference between "I detached" and "the network dropped" - the first
+       is done, the second gets a reconnect. */
+    var leaving = false;
+    var terminated = false;
+    var reconnectAttempt = 0;
+    var reconnectTimer = null;
+
     function cleanup() {
+      leaving = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (resizeObserver) {
         try { resizeObserver.disconnect(); } catch (e) {}
         resizeObserver = null;
@@ -6018,6 +7571,10 @@
           ws.onclose = null;
           ws.onerror = null;
           ws.onmessage = null;
+          /* No close frame. Closing the socket is now a detach on the hub
+             side: the process tree keeps running and the session moves to
+             `detached`. Sending {type:"close"} is the explicit terminate and
+             belongs only to the Terminate button. */
           ws.close();
         } catch (e) {}
         ws = null;
@@ -6026,11 +7583,12 @@
         try { term.dispose(); } catch (e) {}
         term = null;
       }
+      if (liveTerminal) liveTerminal = null;
     }
 
     // Foot controls
     var sendCtrlCBtn = h("button", {
-      cls: "btn btn-subtle",
+      cls: "btn mini",
       type: "button",
       text: "Ctrl+C",
       title: "Send Interrupt (SIGINT)",
@@ -6045,7 +7603,7 @@
     });
 
     var sendCtrlDBtn = h("button", {
-      cls: "btn btn-subtle",
+      cls: "btn mini",
       type: "button",
       text: "Ctrl+D",
       title: "Send EOF",
@@ -6060,7 +7618,7 @@
     });
 
     var clearBtn = h("button", {
-      cls: "btn btn-subtle",
+      cls: "btn mini",
       type: "button",
       text: "Clear",
       title: "Clear Terminal Screen",
@@ -6071,32 +7629,57 @@
       }
     });
 
+    var terminateNow = function () {
+      terminated = true;
+      leaving = true;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "close" }));
+      }
+      closeTerminalSession(session.session_id);
+      closeSheet();
+    };
+
     var closeSessBtn = h("button", {
-      cls: "btn btn-danger",
+      cls: "btn btn-crit",
       type: "button",
-      text: "Close Session",
-      title: "Terminate remote process tree and close terminal session",
+      /* Renamed from "Close Session". "Close" is what the ✕ does to a window;
+         this kills a process tree on a live host. */
+      text: "Terminate Session",
+      title: "Kill the remote shell session and seal the recording",
       on: {
         click: function () {
-          if (confirm("Terminate remote pseudoterminal session on " + hostName + "? This will kill all processes in the session group.")) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "close" }));
-            }
-            closeTerminalSession(session.session_id);
-            closeSheet();
-          }
+          /* This was the file's only window.confirm(), in a console with a
+             purpose-built sheet system - and it named no host and stated no
+             consequence beyond one line of browser chrome. */
+          confirmSheet({
+            title: "Terminate terminal session",
+            consequence: "Every process started by that shell on " + hostName + " (" + epId + ") is killed with SIGTERM and then SIGKILL. Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
+            detail: prog + " running as " + identity + " \u00b7 session " + session.session_id.slice(0, 8) + "\u2026",
+            confirmLabel: "Terminate session",
+            stack: true,
+            onConfirm: terminateNow
+          });
         }
       }
     });
 
     var detachBtn = h("button", {
-      cls: "btn",
+      cls: "btn btn-primary",
       type: "button",
       text: "Detach Viewer",
-      title: "Close this window without terminating the remote session",
+      title: "Close this viewer and leave the remote session running",
       on: {
         click: function () {
+          /* This used to be `closeSheet(); refresh();` - and closeSheet ran
+             the cleanup that closed the WebSocket, which the hub answered by
+             closing the whole relay, which sent the agent a close frame,
+             which made the agent SIGTERM/SIGKILL the remote shell session.
+             The button labelled "Detach Viewer", whose tooltip said it would
+             not terminate the session, terminated the session. It works now
+             because the hub treats an operator socket closing as a detach. */
+          leaving = true;
           closeSheet();
+          toast("Session detached \u2014 still running on " + hostName + ". Reattach from the asset row.", "ok");
           refresh();
         }
       }
@@ -6121,8 +7704,21 @@
       termContainer
     );
 
-    openSheet("Pseudoterminal \u2014 " + hostName + " (" + session.session_id.slice(0, 8) + "\u2026)", body, foot, "sheet-terminal");
-    if (sheetEl) sheetEl._cleanup = cleanup;
+    openSheet("Pseudoterminal \u2014 " + hostName + " (" + session.session_id.slice(0, 8) + "\u2026)", body, foot, "sheet-terminal",
+      { initialFocus: false });
+    if (sheetEl) {
+      sheetEl._cleanup = cleanup;
+      sheetEl._isTerminal = true;
+      /* A stray click on the scrim used to kill a root shell. It detaches
+         now, so the question is only whether they meant to leave - and the
+         answer is stated rather than implied. */
+      sheetEl._confirmClose = function () {
+        if (terminated || !ws || ws.readyState !== WebSocket.OPEN) return true;
+        leaving = true;
+        toast("Session detached \u2014 still running on " + hostName + ". Reattach from the asset row.", "ok");
+        return true;
+      };
+    }
 
     // Check if xterm is available
     if (!window.Terminal) {
@@ -6137,37 +7733,20 @@
       cursorBlink: true,
       cursorStyle: "block",
       convertEol: true,
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
+      /* JetBrains Mono, Fira Code and Cascadia were requested and none of them
+         ship with the hub - an airgapped fleet has no CDN to fetch them from,
+         so this fell all the way through to Menlo/Consolas. IBM Plex Mono is
+         the face the console actually bundles, and --f-mono names it. */
+      fontFamily: cssVar("--f-mono", "ui-monospace, Menlo, Consolas, monospace"),
       fontSize: 13,
       lineHeight: 1.25,
       letterSpacing: 0.5,
       allowTransparency: false,
-      theme: {
-        background: "#0d1117",
-        foreground: "#c9d1d9",
-        cursor: "#58a6ff",
-        cursorAccent: "#0d1117",
-        selectionBackground: "rgba(56, 139, 253, 0.4)",
-        black: "#484f58",
-        red: "#ff7b72",
-        green: "#3fb950",
-        yellow: "#d29922",
-        blue: "#58a6ff",
-        magenta: "#bc8cff",
-        cyan: "#39c5cf",
-        white: "#b1bac4",
-        brightBlack: "#6e7681",
-        brightRed: "#ffa198",
-        brightGreen: "#56d364",
-        brightYellow: "#e3b341",
-        brightBlue: "#79c0ff",
-        brightMagenta: "#d2a8ff",
-        brightCyan: "#56d4dd",
-        brightWhite: "#f0f6fc"
-      },
+      theme: terminalTheme(),
       allowProposedApi: false,
-      scrollback: 5000
+      scrollback: TERM_SCROLLBACK
     });
+    liveTerminal = term;
 
     if (window.FitAddon && window.FitAddon.FitAddon) {
       fitAddon = new window.FitAddon.FitAddon();
@@ -6180,75 +7759,146 @@
     }
     term.focus();
 
-    // Connect WebSocket
+    // ------------------------------------------------- scrollback replay
+    //
+    // Reattaching to a session that has been running without a viewer means
+    // the output produced meanwhile is in the recording and not on this
+    // screen. GET /api/v1/terminal/frames answers with the *live* in-memory
+    // frames for an unsealed session, so no new backend was needed for this.
+    //
+    // Live frames that arrive while the replay is still being fetched are
+    // buffered, not written: interleaving them would put the last second of
+    // output in the middle of the last ten minutes of it.
+    var replaying = false;
+    var liveBuffer = [];
+
+    function writeFrameData(b64) {
+      if (!b64 || !term) return;
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      term.write(bytes);
+    }
+
+    function flushLiveBuffer() {
+      replaying = false;
+      while (liveBuffer.length) writeFrameData(liveBuffer.shift());
+    }
+
+    function replayScrollback() {
+      replaying = true;
+      return request("/api/v1/terminal/frames?session_id=" + encodeURIComponent(session.session_id))
+        .then(function (d) {
+          var frames = arrayOf(d && d.frames).filter(function (f) { return f && f.type === "stdout"; });
+          if (!frames.length) return;
+          /* Bounded by xterm's own scrollback: replaying 10 MiB of recording
+             into a 5000-line buffer costs the time and shows the last 5000
+             lines either way. */
+          var tail = frames.length > TERM_SCROLLBACK ? frames.slice(frames.length - TERM_SCROLLBACK) : frames;
+          if (tail.length < frames.length) {
+            term.write("\r\n\x1b[2m\u2500\u2500 earlier output trimmed (" + (frames.length - tail.length) + " frames) \u2500\u2500\x1b[0m\r\n");
+          }
+          tail.forEach(function (f) { writeFrameData(f.data); });
+          term.write("\r\n\x1b[2m\u2500\u2500 replayed " + tail.length + " frame(s) \u00b7 live from here \u2500\u2500\x1b[0m\r\n");
+        })
+        .catch(function () { /* replay is a convenience; live I/O still works */ })
+        .then(flushLiveBuffer);
+    }
+
+    // ------------------------------------------------------- the socket
     var wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
     var wsUrl = wsProto + "//" + window.location.host + "/api/v1/terminal/ws/operator?session_id=" + encodeURIComponent(session.session_id);
 
-    try {
-      ws = new WebSocket(wsUrl);
-    } catch (e) {
-      statusBadge.className = "badge badge-crit";
-      statusBadge.textContent = "Connection Failed";
-      term.write("\r\n[Failed to open WebSocket: " + e.message + "]\r\n");
-      return;
+    function connect(isReconnect) {
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch (e) {
+        setChip(statusBadge, "crit", "Connection failed");
+        term.write("\r\n[Failed to open WebSocket: " + e.message + "]\r\n");
+        return;
+      }
+
+      ws.onopen = function () {
+        reconnectAttempt = 0;
+        setChip(statusBadge, "info", "Attached \u00b7 awaiting agent");
+        ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+        if (isReconnect || session.state === "detached" || (session.frame_count || 0) > 0) {
+          replayScrollback();
+        }
+      };
+
+      ws.onmessage = function (event) {
+        try {
+          var frame = JSON.parse(event.data);
+          frameCount++;
+          /* The polled summary lags the stream by up to five seconds, so the
+             bytes actually seen on this socket are added as they arrive and
+             the next poll only ever corrects upwards. */
+          if (typeof event.data === "string") recordedBytes += event.data.length;
+          updateFrames(null);
+
+          if (frame.type === "stdout") {
+            if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
+            setChip(statusBadge, "ok", "Attached (Live)");
+            if (replaying) liveBuffer.push(frame.data);
+            else writeFrameData(frame.data);
+          } else if (frame.type === "bounded") {
+            setChip(statusBadge, "warn", "Recording bounded");
+            frameCountEl.textContent = "Frames: " + frameCount + " (Bounded / " + encLabel + ")";
+            term.write("\r\n\x1b[33m[Session recording bounded: 10MB limit reached]\x1b[0m\r\n");
+          } else if (frame.type === "close") {
+            terminated = true;
+            leaving = true;
+            setChip(statusBadge, "idle", "Terminated");
+            term.write("\r\n\r\n[Remote session terminated by agent]\r\n");
+          }
+        } catch (e) {
+          console.error("Failed to parse incoming terminal frame:", e);
+        }
+      };
+
+      ws.onerror = function () {
+        if (!leaving) setChip(statusBadge, "crit", "Relay error");
+      };
+
+      ws.onclose = function (e) {
+        if (leaving || terminated) {
+          setChip(statusBadge, "idle", terminated ? "Terminated" : "Detached (running in background)");
+          return;
+        }
+        /* Not a deliberate detach: a Wi-Fi blip, a proxy timeout, a laptop
+           lid. The hub has moved the session to `detached` and the shell is
+           still there, so come back rather than stranding the operator on a
+           dead rectangle. Bounded, because a session that is genuinely gone
+           must stop being retried. */
+        if (reconnectAttempt >= TERM_MAX_RECONNECT) {
+          setChip(statusBadge, "crit", "Disconnected (code " + e.code + ")");
+          term.write("\r\n[Terminal relay disconnected and could not be reattached. Reattach from the asset row.]\r\n");
+          return;
+        }
+        reconnectAttempt++;
+        var delay = Math.min(8000, 400 * Math.pow(2, reconnectAttempt - 1));
+        setChip(statusBadge, "warn", "Reconnecting\u2026 (" + reconnectAttempt + "/" + TERM_MAX_RECONNECT + ")");
+        reconnectTimer = setTimeout(function () {
+          reconnectTimer = null;
+          if (leaving || terminated) return;
+          /* The connect token is single-attach, so a reconnect has to mint a
+             fresh one. That POST also re-sets the HttpOnly cookie the
+             WebSocket upgrade carries. */
+          request("/api/v1/terminal/sessions/attach", "POST", { session_id: session.session_id })
+            .then(function (sum) {
+              if (sum) { session = sum; updateLimits(sum); updateFrames(sum); }
+              if (!leaving && !terminated) connect(true);
+            })
+            .catch(function (err) {
+              setChip(statusBadge, "crit", "Reattach refused");
+              term.write("\r\n[Reattach refused: " + (err && err.message ? err.message : "unknown") + "]\r\n");
+            });
+        }, delay);
+      };
     }
 
-    ws.onopen = function () {
-      statusBadge.className = "badge badge-warn";
-      statusBadge.textContent = "Awaiting Agent Connection";
-
-      // Send initial resize
-      ws.send(JSON.stringify({
-        type: "resize",
-        rows: term.rows,
-        cols: term.cols
-      }));
-    };
-
-    ws.onmessage = function (event) {
-      try {
-        var frame = JSON.parse(event.data);
-        frameCount++;
-        frameCountEl.textContent = "Frames: " + frameCount + " (" + encLabel + ")";
-
-        if (frame.type === "stdout") {
-          if (overlayMsg.parentNode) {
-            overlayMsg.parentNode.removeChild(overlayMsg);
-          }
-          statusBadge.className = "badge badge-ok";
-          statusBadge.textContent = "Live Pseudoterminal Active";
-
-          if (frame.data) {
-            var bin = atob(frame.data);
-            var bytes = new Uint8Array(bin.length);
-            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            term.write(bytes);
-          }
-        } else if (frame.type === "bounded") {
-          statusBadge.className = "badge badge-warn";
-          statusBadge.textContent = "Recording Bounded";
-          frameCountEl.textContent = "Frames: " + frameCount + " (Bounded / " + encLabel + ")";
-          term.write("\r\n\x1b[33m[Session recording bounded: 10MB limit reached]\x1b[0m\r\n");
-        } else if (frame.type === "close") {
-          statusBadge.className = "badge badge-neutral";
-          statusBadge.textContent = "Session Terminated";
-          term.write("\r\n\r\n[Remote session terminated by agent]\r\n");
-        }
-      } catch (e) {
-        console.error("Failed to parse incoming terminal frame:", e);
-      }
-    };
-
-    ws.onerror = function (e) {
-      statusBadge.className = "badge badge-crit";
-      statusBadge.textContent = "Relay Error";
-    };
-
-    ws.onclose = function (e) {
-      statusBadge.className = "badge badge-neutral";
-      statusBadge.textContent = "Disconnected (Code: " + e.code + ")";
-      term.write("\r\n[Terminal relay disconnected]\r\n");
-    };
+    connect(!!reattaching);
 
     // Terminal keyboard input
     term.onData(function (data) {
@@ -6285,7 +7935,7 @@
 
     var authActions = isUnlocked
       ? [
-          h("button", { cls: "btn btn-danger", type: "button", text: "Lock Response Authority", on: { click: lockResponseSession } }),
+          h("button", { cls: "btn btn-crit", type: "button", text: "Lock Response Authority", on: { click: confirmLockResponseSession } }),
           h("button", { cls: "btn", type: "button", text: "Session Details", on: { click: openResponseControllerSheet } })
         ]
       : [
@@ -6294,7 +7944,7 @@
 
     var authCard = card("Response Authority (Ring-0/Proof)", h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
-        h("div", { cls: isUnlocked ? "badge badge-ok" : "badge badge-warn", text: isUnlocked ? "Response Unlocked" : "Response Locked" }),
+        chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Response Unlocked" : "Response Locked"),
         h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
       ),
       isUnlocked
@@ -6306,29 +7956,40 @@
     // Remote Terminal Sessions Card
     var termSessions = state.terminalSessions || [];
     var termRows = termSessions.map(function (ts) {
+      var live = terminalSessionIsLive(ts);
+      /* The session-id link used to call openTerminalEmulator unconditionally
+         for every row - only the row's *button* was gated on state - so
+         clicking a closed session opened an emulator against a dead session
+         that could never connect. A closed session's id is a label. */
+      var idCell = live
+        ? h("a", {
+            cls: "ip", href: "#",
+            title: "Reattach to this session",
+            text: ts.session_id ? ts.session_id.slice(0, 8) + "\u2026" : "",
+            on: { click: function (e) { e.preventDefault(); reattachTerminal(ts); } }
+          })
+        : h("span", {
+            cls: "ip dim-2",
+            title: "Session " + (ts.close_reason || "closed") + " \u2014 inspect its recording in Forensics",
+            text: ts.session_id ? ts.session_id.slice(0, 8) + "\u2026" : ""
+          });
+
       return [
-        h("a", {
-          cls: "ip",
-          href: "#",
-          text: ts.session_id ? ts.session_id.slice(0, 8) + "..." : "",
-          on: {
-            click: function (e) {
-              e.preventDefault();
-              openTerminalEmulator(ts);
-            }
-          }
-        }),
+        idCell,
         h("span", { text: ts.endpoint_id || "" }),
         h("span", { text: ts.program || "" }),
-        h("span", { cls: ts.state === "active" ? "badge badge-ok" : (ts.state === "waiting" || ts.state === "connecting" ? "badge badge-warn" : "badge badge-crit"), text: ts.state || "unknown" }),
+        chip(terminalStateTone(ts.state), ts.state || "unknown"),
         h("span", { cls: "dim-2", text: (ts.recording_state || (ts.closed_at ? "sealed" : "recording")) + (ts.frame_count !== undefined ? " (" + ts.frame_count + " frames)" : "") }),
         h("span", { cls: "dim", text: ts.operator_id || "" }),
         stamp(parseTime(ts.created_at)),
         h("div", { cls: "row-actions" },
-          ts.state === "active" || ts.state === "waiting" || ts.state === "connecting"
+          live
             ? [
-                h("button", { cls: "btn btn-subtle", type: "button", text: "Open Console", on: { click: function () { openTerminalEmulator(ts); } } }),
-                h("button", { cls: "btn btn-subtle btn-danger", type: "button", text: "Close", on: { click: function () { closeTerminalSession(ts.session_id); } } })
+                /* One reattach implementation, shared with the Assets banner
+                   and the context menu, so the token rotation and the replay
+                   cannot drift between three copies. */
+                h("button", { cls: "btn mini", type: "button", text: ts.state === "detached" ? "Reattach" : "Open Console", on: { click: function () { reattachTerminal(ts); } } }),
+                h("button", { cls: "btn mini", "data-danger": "true", type: "button", text: "Terminate", on: { click: function () { terminateTerminalSession(ts, ts.endpoint_id); } } })
               ]
             : h("span", { cls: "dim-3", text: ts.close_reason || "closed" })
         )
@@ -6337,7 +7998,7 @@
 
     var termCardHead = h("div", { cls: "card-header-actions" },
       h("button", {
-        cls: "btn btn-primary btn-s",
+        cls: "btn btn-primary",
         type: "button",
         text: "Launch Endpoint Shell",
         on: {
@@ -6368,15 +8029,23 @@
         }),
         h("span", { text: j.endpoint_id || "" }),
         h("span", { text: j.action_kind || j.kind || "" }),
-        h("span", {
-          cls: j.state === "succeeded" ? "badge badge-ok" : (j.state === "failed" || j.state === "timed_out" ? "badge badge-crit" : "badge badge-warn"),
-          text: j.state || "queued"
-        }),
-        h("span", { cls: "dim", text: j.operator_id || "" }),
-        stamp(parseTime(j.created_at)),
+        /* A failed job's error_code is the difference between "it failed" and
+           "the grant had expired", and it was fetched and dropped. */
+        h("div", { cls: "uf-col" },
+          chip(j.state === "succeeded" ? "ok" : (j.state === "failed" || j.state === "timed_out" ? "crit" : "warn"), j.state || "queued"),
+          j.error_code ? h("span", { cls: "dim-3 u-t1", text: j.error_code }) : null,
+          (j.attempt || 0) > 1 ? h("span", { cls: "dim-3 u-t1", text: "attempt " + j.attempt }) : null),
+        /* The job carries requested_by. The console read operator_id, which no
+           response job has ever had, so the Operator column was blank for every
+           row on the page - and "who ran this" is the first question asked of
+           any response job. */
+        h("span", { cls: "dim", text: j.requested_by || j.operator_id || "\u2014" }),
+        stamp(parseTime(j.requested_at || j.created_at)),
+        /* lease_expires_at says when the agent's claim on this job lapses,
+           which is the difference between "still running" and "stuck". */
         h("div", { cls: "row-actions" },
           h("button", {
-            cls: "btn btn-subtle",
+            cls: "btn mini",
             type: "button",
             text: "Inspect",
             on: {
@@ -6384,7 +8053,19 @@
                 openJobOutputModal(j.id);
               }
             }
-          })
+          }),
+          /* The hub has always served a cancel route and the console never
+             called it, so a job dispatched by mistake could only be waited
+             out. Only a job that has not finished can be cancelled. */
+          responseJobIsOpen(j)
+            ? h("button", {
+                cls: "btn mini", type: "button", "data-danger": "true", text: "Cancel",
+                title: j.lease_expires_at
+                  ? "Agent lease runs to " + stampTitle(parseTime(j.lease_expires_at))
+                  : "This job has not been leased by an agent yet",
+                on: { click: function () { confirmCancelResponseJob(j); } }
+              })
+            : null
         )
       ];
     });
@@ -6399,11 +8080,11 @@
         h("span", { cls: "mono", text: sc.interpreter || "" }),
         h("span", { text: "v" + (sc.latest_version || 1) }),
         h("span", { cls: "dim-2", text: sc.description || "" }),
-        h("span", { cls: sc.retired ? "badge badge-crit" : "badge badge-ok", text: sc.retired ? "Retired" : "Active" }),
+        chip(sc.retired ? "crit" : "ok", sc.retired ? "Retired" : "Active"),
         stamp(parseTime(sc.updated_at)),
         h("div", { cls: "row-actions" },
           !sc.retired ? h("button", {
-            cls: "btn btn-subtle btn-primary",
+            cls: "btn mini",
             type: "button",
             text: "Run",
             on: {
@@ -6413,7 +8094,7 @@
             }
           }) : null,
           h("button", {
-            cls: "btn btn-subtle",
+            cls: "btn mini",
             type: "button",
             text: "Versions",
             on: {
@@ -6423,7 +8104,7 @@
             }
           }),
           !sc.retired ? h("button", {
-            cls: "btn btn-subtle btn-danger",
+            cls: "btn mini", "data-danger": "true",
             type: "button",
             text: "Retire",
             on: {
@@ -6438,7 +8119,7 @@
 
     var scriptCardHead = h("div", { cls: "card-header-actions" },
       h("button", {
-        cls: "btn btn-primary btn-s",
+        cls: "btn btn-primary",
         type: "button",
         text: "New Script",
         on: {
@@ -6462,14 +8143,14 @@
         h("span", { cls: "ip mono", text: sched.id ? sched.id.slice(0, 12) + "..." : "" }),
         h("span", { text: (sched.script_id || "").slice(0, 8) + "... v" + sched.version }),
         h("span", { cls: "mono dim-2", text: (sched.script_digest || "").slice(0, 12) + "..." }),
-        h("span", { cls: "badge badge-neutral", text: sched.recurrence || "daily" }),
+        chip("idle", sched.recurrence || "daily"),
         h("span", { title: (sched.target_endpoints || []).join(", "), text: targetPreview }),
         h("span", { cls: "dim-2", text: (sched.runs_count || 0) + " / " + (sched.max_runs > 0 ? sched.max_runs : "indefinite") }),
-        h("span", { cls: isCancelled ? "badge badge-crit" : "badge badge-ok", text: sched.status || "active" }),
+        chip(isCancelled ? "crit" : "ok", sched.status || "active"),
         stamp(parseTime(sched.created_at)),
         h("div", { cls: "row-actions" },
           !isCancelled ? h("button", {
-            cls: "btn btn-subtle btn-danger",
+            cls: "btn mini", "data-danger": "true",
             type: "button",
             text: "Cancel",
             on: {
@@ -6493,15 +8174,16 @@
     if (!jobId) return;
 
     var headTitle = "Response Job: " + (jobId.length > 16 ? jobId.slice(0, 16) + "..." : jobId);
-    var statusBadge = h("div", { cls: "badge badge-warn", text: "Loading..." });
+    var statusBadge = chip("warn", "Loading...");
+    statusBadge.setAttribute("aria-live", "polite");
     var metaGrid = h("div", { cls: "alert-exp-grid" });
-    var stdoutBox = h("pre", { cls: "job-output-console stdout", text: "Fetching output..." });
+    var stdoutBox = h("pre", { cls: "job-output-console", text: "Fetching output..." });
     var stderrBox = h("pre", { cls: "job-output-console stderr", hidden: true });
     var truncNotice = h("div", { cls: "st-banner", "data-state": "warn", hidden: true, text: "Output exceeded maximum buffer size and was truncated by endpoint worker." });
-    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
 
     var copyStdoutBtn = h("button", {
-      cls: "btn btn-subtle btn-s",
+      cls: "btn mini",
       type: "button",
       text: "Copy stdout",
       on: {
@@ -6512,7 +8194,7 @@
     });
 
     var copyStderrBtn = h("button", {
-      cls: "btn btn-subtle btn-s",
+      cls: "btn mini",
       type: "button",
       text: "Copy stderr",
       hidden: true,
@@ -6523,13 +8205,13 @@
       }
     });
 
-    var stdoutHeader = h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
-      h("label", { cls: "bold", text: "Standard Output (stdout):" }),
+    var stdoutHeader = h("div", { cls: "form-row uf uf-between" },
+      h("label", { cls: "u-strong", text: "Standard Output (stdout):" }),
       copyStdoutBtn
     );
 
-    var stderrHeader = h("div", { cls: "form-row", hidden: true, style: "justify-content:space-between; align-items:center;" },
-      h("label", { cls: "bold", text: "Standard Error (stderr):" }),
+    var stderrHeader = h("div", { cls: "form-row uf uf-between", hidden: true },
+      h("label", { cls: "u-strong", text: "Standard Error (stderr):" }),
       copyStderrBtn
     );
 
@@ -6537,7 +8219,7 @@
       if (!job) return;
       var isSucceeded = job.state === "succeeded";
       var isFailed = job.state === "failed" || job.state === "timed_out";
-      statusBadge.className = isSucceeded ? "badge badge-ok" : (isFailed ? "badge badge-crit" : "badge badge-warn");
+      setChip(statusBadge, isSucceeded ? "ok" : (isFailed ? "crit" : "warn"));
       statusBadge.textContent = (job.state || "queued").toUpperCase();
 
       clear(metaGrid);
@@ -6550,7 +8232,11 @@
 
       addMeta("Endpoint", job.endpoint_id);
       addMeta("Action Kind", job.action_kind || job.kind);
-      addMeta("Operator", job.operator_id);
+      addMeta("Operator", job.requested_by || job.operator_id);
+      addMeta("Grant", job.authorization_grant_id);
+      if (job.error_code) addMeta("Error code", job.error_code);
+      if (job.attempt) addMeta("Attempt", String(job.attempt));
+      if (job.lease_expires_at) addMeta("Lease expires", job.lease_expires_at);
       addMeta("Dispatched", job.created_at ? new Date(job.created_at).toLocaleString() : "—");
 
       var res = null;
@@ -6610,12 +8296,12 @@
     pollTimer = setInterval(poll, 2000);
 
     var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+      h("div", { cls: "form-row uf uf-between" },
         h("div", { cls: "form-row" },
           statusBadge,
           h("span", { cls: "ip mono dim-2", text: jobId })
         ),
-        h("button", { cls: "btn btn-subtle", type: "button", text: "Refresh", on: { click: poll } })
+        h("button", { cls: "btn mini", type: "button", text: "Refresh", on: { click: poll } })
       ),
       metaGrid,
       truncNotice,
@@ -6642,10 +8328,10 @@
   }
 
   function openCreateScriptSheet() {
-    var nameInput = h("input", { id: "create-script-name", type: "text", cls: "input", placeholder: "e.g. check_disk_usage.sh" });
-    var descInput = h("input", { id: "create-script-desc", type: "text", cls: "input", placeholder: "e.g. Check disk usage thresholds and mount points" });
+    var nameInput = h("input", { id: "create-script-name", type: "text", placeholder: "e.g. check_disk_usage.sh" });
+    var descInput = h("input", { id: "create-script-desc", type: "text", placeholder: "e.g. Check disk usage thresholds and mount points" });
 
-    var interpSel = h("select", { id: "create-script-interp", cls: "select" });
+    var interpSel = h("select", { id: "create-script-interp" });
     [
       { val: "/bin/bash", label: "/bin/bash (GNU Bourne-Again Shell - Linux)" },
       { val: "/bin/sh", label: "/bin/sh (POSIX Shell - Linux)" },
@@ -6671,7 +8357,7 @@
     });
 
     var insertTemplateBtn = h("button", {
-      cls: "btn btn-subtle btn-s",
+      cls: "btn mini",
       type: "button",
       text: "Insert Schema Template",
       on: {
@@ -6687,7 +8373,7 @@
       }
     });
 
-    var errBox = h("div", { id: "create-script-err", cls: "msg-err", hidden: true });
+    var errBox = h("div", { id: "create-script-err", cls: "note note-crit", role: "alert", hidden: true });
 
     var submitBtn = h("button", {
       id: "create-script-submit",
@@ -6741,7 +8427,7 @@
               toast("Script '" + name + "' registered as v1.", "ok");
               return request("/api/v1/scripts").then(function (d) {
                 state.scripts = arrayOf(d && d.scripts || d);
-                if (state.section === "response") renderResponse();
+                if (state.section === "response") renderBody();
               });
             })
             .catch(function (err) {
@@ -6757,24 +8443,24 @@
     var body = h("div", { cls: "card-body stack" },
       h("p", { cls: "pending", text: "Register an immutable script in the Ominull script library. Scripts are hashed with SHA-256 upon registration. Modifying a script creates a new immutable version." }),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Script Name:" }),
+        labelFor("Script Name:", nameInput),
         nameInput
       ),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Description:" }),
+        labelFor("Description:", descInput),
         descInput
       ),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Interpreter:" }),
+        labelFor("Interpreter:", interpSel),
         interpSel
       ),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Source Code (verbatim execution):" }),
+        labelFor("Source Code (verbatim execution):", sourceEditor),
         sourceEditor
       ),
       h("div", { cls: "form-row stack-s" },
-        h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
-          h("label", { text: "Parameter Schema JSON (optional):" }),
+        h("div", { cls: "form-row uf uf-between" },
+          labelFor("Parameter Schema JSON (optional):", schemaEditor),
           insertTemplateBtn
         ),
         schemaEditor
@@ -6794,7 +8480,7 @@
     if (!script) return;
 
     var headTitle = "Script Versions: " + (script.name || script.id);
-    var versionSelect = h("select", { cls: "select" });
+    var versionSelect = h("select", {});
     for (var v = script.latest_version || 1; v >= 1; v--) {
       versionSelect.appendChild(h("option", { value: String(v), text: "Version " + v + (v === script.latest_version ? " (Latest)" : "") }));
     }
@@ -6803,8 +8489,8 @@
     var createdSpan = h("span", { cls: "dim-2", text: "—" });
     var sourceBox = h("pre", { cls: "script-source-preview", text: "Loading version..." });
     var schemaBox = h("pre", { cls: "script-source-preview", text: "—", hidden: true });
-    var schemaLabel = h("label", { cls: "bold", text: "Parameter Schema:", hidden: true });
-    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var schemaLabel = h("label", { cls: "u-strong", text: "Parameter Schema:", hidden: true });
+    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
 
     function loadVersion(verNum) {
       request("/api/v1/scripts?id=" + encodeURIComponent(script.id) + "&version=" + verNum)
@@ -6839,12 +8525,12 @@
     loadVersion(script.latest_version || 1);
 
     var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+      h("div", { cls: "form-row uf uf-between" },
         h("div", { cls: "form-row" },
-          h("label", { text: "Select Version:" }),
+          labelFor("Select Version:", versionSelect),
           versionSelect
         ),
-        h("span", { cls: script.retired ? "badge badge-crit" : "badge badge-ok", text: script.retired ? "Retired" : "Active" })
+        chip(script.retired ? "crit" : "ok", script.retired ? "Retired" : "Active")
       ),
       h("div", { cls: "form-row" },
         h("span", { cls: "dim-2", text: "SHA-256 Digest: " }),
@@ -6855,7 +8541,7 @@
         createdSpan
       ),
       errBox,
-      h("label", { cls: "bold", text: "Script Source Code:" }),
+      h("label", { cls: "u-strong", text: "Script Source Code:" }),
       sourceBox,
       schemaLabel,
       schemaBox
@@ -6878,7 +8564,7 @@
     var ver = initialVersion || script.latest_version || 1;
     var headTitle = "Run Script: " + (script.name || script.id);
 
-    var verSelect = h("select", { cls: "select" });
+    var verSelect = h("select", {});
     for (var v = script.latest_version || 1; v >= 1; v--) {
       verSelect.appendChild(h("option", { value: String(v), text: "v" + v + (v === script.latest_version ? " (Latest)" : "") }));
     }
@@ -6886,19 +8572,19 @@
 
     var digestBadge = h("span", { cls: "mono dim", text: "Loading digest..." });
     var paramFormContainer = h("div", { cls: "script-param-group stack-s" });
-    var errBox = h("div", { id: "run-script-err", cls: "msg-err", hidden: true });
+    var errBox = h("div", { id: "run-script-err", cls: "note note-crit", role: "alert", hidden: true });
 
     // Mode Toggle: One-off vs Scheduled
     var modeRunNow = h("input", { type: "radio", name: "script-mode", id: "mode-run-now", checked: true });
     var modeSchedule = h("input", { type: "radio", name: "script-mode", id: "mode-schedule" });
 
-    var modeToggleRow = h("div", { cls: "form-row", style: "gap: var(--s-3); margin-bottom: var(--s-2);" },
+    var modeToggleRow = h("div", { cls: "form-row uf-g4 u-mb2" },
       h("label", { cls: "form-check-label", "for": "mode-run-now" }, modeRunNow, h("span", { text: " Run Now (One-Off)" })),
       h("label", { cls: "form-check-label", "for": "mode-schedule" }, modeSchedule, h("span", { text: " Schedule Execution (Frozen Snapshot)" }))
     );
 
     // Endpoints for Run Now (single select)
-    var singleEndpointSel = h("select", { cls: "select", id: "script-single-endpoint" });
+    var singleEndpointSel = h("select", { id: "script-single-endpoint" });
     // Endpoints for Schedule (checkbox list)
     var scheduleTargetsContainer = h("div", { cls: "target-endpoints-list stack-s", hidden: true });
 
@@ -6915,15 +8601,15 @@
 
       var cb = h("input", { type: "checkbox", value: ep.id, id: "sched-target-" + ep.id });
       targetCheckboxes.push(cb);
-      scheduleTargetsContainer.appendChild(h("div", { cls: "form-row", style: "align-items:center;" },
+      scheduleTargetsContainer.appendChild(h("div", { cls: "form-row uf" },
         cb,
         h("label", { "for": "sched-target-" + ep.id, text: " " + label })
       ));
     });
 
     // Execution Bounds
-    var timeoutInput = h("input", { id: "run-script-timeout", type: "number", cls: "input", min: "1", max: "300", value: "60" });
-    var maxOutputSel = h("select", { id: "run-script-max-output", cls: "select" });
+    var timeoutInput = h("input", { id: "run-script-timeout", type: "number", min: "1", max: "300", value: "60" });
+    var maxOutputSel = h("select", { id: "run-script-max-output" });
     [
       { val: "1048576", label: "1 MiB (Default)" },
       { val: "524288", label: "512 KiB" },
@@ -6935,36 +8621,36 @@
 
     // Schedule-specific fields
     var schedSection = h("div", { cls: "stack-s", hidden: true });
-    var recurrenceSel = h("select", { cls: "select" });
+    var recurrenceSel = h("select", {});
     ["hourly", "daily", "weekly"].forEach(function (r) {
       recurrenceSel.appendChild(h("option", { value: r, text: r.charAt(0).toUpperCase() + r.slice(1) }));
     });
     recurrenceSel.value = "daily";
 
-    var maxRunsInput = h("input", { type: "number", cls: "input", min: "0", value: "0", placeholder: "0 = indefinite" });
+    var maxRunsInput = h("input", { type: "number", min: "0", value: "0", placeholder: "0 = indefinite" });
     var nowIso = new Date(Date.now() + 60000).toISOString().slice(0, 16);
-    var startTimeInput = h("input", { type: "datetime-local", cls: "input", value: nowIso });
+    var startTimeInput = h("input", { type: "datetime-local", value: nowIso });
 
     schedSection.appendChild(h("div", { cls: "form-row stack-s" },
-      h("label", { text: "Recurrence Schedule:" }),
+      labelFor("Recurrence Schedule:", recurrenceSel),
       recurrenceSel
     ));
     schedSection.appendChild(h("div", { cls: "form-row stack-s" },
-      h("label", { text: "Start Time (Local):" }),
+      labelFor("Start Time (Local):", startTimeInput),
       startTimeInput
     ));
     schedSection.appendChild(h("div", { cls: "form-row stack-s" },
-      h("label", { text: "Max Runs (0 for unlimited):" }),
+      labelFor("Max Runs (0 for unlimited):", maxRunsInput),
       maxRunsInput
     ));
 
     var singleTargetRow = h("div", { cls: "form-row stack-s" },
-      h("label", { text: "Target Endpoint:" }),
+      labelFor("Target Endpoint:", singleEndpointSel),
       singleEndpointSel
     );
 
     var scheduleTargetRow = h("div", { cls: "form-row stack-s", hidden: true },
-      h("label", { text: "Target Endpoints Snapshot (Explicit endpoints to freeze):" }),
+      labelFor("Target Endpoints Snapshot (Explicit endpoints to freeze):", scheduleTargetsContainer),
       scheduleTargetsContainer
     );
 
@@ -7007,28 +8693,28 @@
               schema.parameters.forEach(function (p) {
                 var fieldEl = null;
                 if (p.type === "enum" && Array.isArray(p.enum)) {
-                  fieldEl = h("select", { cls: "select" });
+                  fieldEl = h("select", {});
                   p.enum.forEach(function (optVal) {
                     fieldEl.appendChild(h("option", { value: optVal, text: optVal }));
                   });
                   if (p.default !== undefined) fieldEl.value = String(p.default);
                 } else if (p.type === "boolean") {
-                  fieldEl = h("select", { cls: "select" });
+                  fieldEl = h("select", {});
                   fieldEl.appendChild(h("option", { value: "true", text: "true" }));
                   fieldEl.appendChild(h("option", { value: "false", text: "false" }));
                   if (p.default !== undefined) fieldEl.value = String(p.default);
                 } else if (p.type === "number") {
-                  fieldEl = h("input", { type: "number", step: "any", cls: "input", value: p.default !== undefined ? String(p.default) : "" });
+                  fieldEl = h("input", { type: "number", step: "any", value: p.default !== undefined ? String(p.default) : "" });
                 } else {
-                  fieldEl = h("input", { type: "text", cls: "input", value: p.default !== undefined ? String(p.default) : "", placeholder: p.type === "ipv4" ? "10.0.0.1" : (p.type === "cidr" ? "10.0.0.0/24" : "") });
+                  fieldEl = h("input", { type: "text", value: p.default !== undefined ? String(p.default) : "", placeholder: p.type === "ipv4" ? "10.0.0.1" : (p.type === "cidr" ? "10.0.0.0/24" : "") });
                 }
 
                 paramInputMap[p.name] = { param: p, input: fieldEl };
 
                 paramFormContainer.appendChild(h("div", { cls: "form-row stack-s" },
-                  h("div", { cls: "form-row", style: "gap:var(--s-1); align-items:center;" },
-                    h("label", { cls: "bold", text: p.name }),
-                    p.required ? h("span", { cls: "badge badge-crit", style: "font-size:10px; padding:1px 4px;", text: "required" }) : h("span", { cls: "dim-3", text: "(optional)" }),
+                  h("div", { cls: "form-row uf uf-g1" },
+                    h("label", { cls: "u-strong", text: p.name }),
+                    p.required ? chip("crit", "required") : h("span", { cls: "dim-3", text: "(optional)" }),
                     h("span", { cls: "mono dim-2", text: "[" + p.type + "]" })
                   ),
                   p.description ? h("span", { cls: "dim-2", text: p.description }) : null,
@@ -7127,7 +8813,7 @@
             toast("Script execution job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "...) Target: " + epId, "ok");
             request("/api/v1/response/jobs?limit=50").then(function (d) {
               state.responseJobs = arrayOf(d && d.jobs || d);
-              if (state.section === "response") renderResponse();
+              if (state.section === "response") renderBody();
             });
             openJobOutputModal(job.id);
           })
@@ -7173,7 +8859,7 @@
             toast("Frozen schedule created for " + selectedTargets.length + " endpoint(s).", "ok");
             return request("/api/v1/scripts/schedules").then(function (d) {
               state.scriptSchedules = arrayOf(d && d.schedules || d);
-              if (state.section === "response") renderResponse();
+              if (state.section === "response") renderBody();
             });
           })
           .catch(function (err) {
@@ -7186,34 +8872,34 @@
     });
 
     var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row", style: "justify-content:space-between; align-items:center;" },
+      h("div", { cls: "form-row uf uf-between" },
         h("div", { cls: "form-row" },
-          h("label", { text: "Script Version:" }),
+          labelFor("Script Version:", verSelect),
           verSelect
         ),
-        h("div", { cls: "form-row", style: "gap:var(--s-1);" },
+        h("div", { cls: "form-row uf-g1" },
           h("span", { cls: "dim-2", text: "Digest: " }),
           digestBadge
         )
       ),
       h("div", { cls: "form-row" },
         h("span", { cls: "dim-2", text: "Interpreter: " }),
-        h("span", { cls: "mono bold", text: script.interpreter || "/bin/bash" })
+        h("span", { cls: "mono u-strong", text: script.interpreter || "/bin/bash" })
       ),
       h("hr", { cls: "line" }),
       modeToggleRow,
       singleTargetRow,
       scheduleTargetRow,
       schedSection,
-      h("label", { cls: "bold", text: "Script Parameters:" }),
+      h("label", { cls: "u-strong", text: "Script Parameters:" }),
       paramFormContainer,
       h("hr", { cls: "line" }),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Execution Timeout (seconds, 1-300):" }),
+        labelFor("Execution Timeout (seconds, 1-300):", timeoutInput),
         timeoutInput
       ),
       h("div", { cls: "form-row stack-s" },
-        h("label", { text: "Output Buffer Bound:" }),
+        labelFor("Output Buffer Bound:", maxOutputSel),
         maxOutputSel
       ),
       errBox
@@ -7238,7 +8924,7 @@
       [
         h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
         h("button", {
-          cls: "btn btn-danger",
+          cls: "btn btn-crit",
           type: "button",
           text: "Retire Script",
           on: {
@@ -7249,7 +8935,7 @@
                   toast("Script '" + script.name + "' retired.", "ok");
                   return request("/api/v1/scripts").then(function (d) {
                     state.scripts = arrayOf(d && d.scripts || d);
-                    if (state.section === "response") renderResponse();
+                    if (state.section === "response") renderBody();
                   });
                 })
                 .catch(function (err) {
@@ -7271,7 +8957,7 @@
       [
         h("button", { cls: "btn", type: "button", text: "Keep Schedule", on: { click: closeSheet } }),
         h("button", {
-          cls: "btn btn-danger",
+          cls: "btn btn-crit",
           type: "button",
           text: "Cancel Schedule",
           on: {
@@ -7282,7 +8968,7 @@
                   toast("Schedule " + schedId + " cancelled.", "ok");
                   return request("/api/v1/scripts/schedules").then(function (d) {
                     state.scriptSchedules = arrayOf(d && d.schedules || d);
-                    if (state.section === "response") renderResponse();
+                    if (state.section === "response") renderBody();
                   });
                 })
                 .catch(function (err) {
@@ -7310,7 +8996,7 @@
 
     var ep = asset.endpoint;
 
-    var profileSel = h("select", { id: "forensics-profile-select", cls: "select" });
+    var profileSel = h("select", { id: "forensics-profile-select" });
     profileSel.appendChild(h("option", { value: "diagnostic", text: "Diagnostic (8 artifacts: OS, Net, Routes, DNS, Resources, Services, Logs, Diag)" }));
     profileSel.appendChild(h("option", { value: "live_volatile", text: "Live Volatile (14 artifacts: Diagnostic + Processes, Sockets, Sessions, Neighbors, Firewall, Modules)" }));
     profileSel.appendChild(h("option", { value: "ir_standard", text: "IR Standard (18 artifacts: Full Triage + Persistence, Tasks, Security Logs, Shell History)" }));
@@ -7328,17 +9014,17 @@
       }
     });
 
-    var maxBytesSel = h("select", { id: "forensics-maxbytes-select", cls: "select" });
+    var maxBytesSel = h("select", { id: "forensics-maxbytes-select" });
     maxBytesSel.appendChild(h("option", { value: "524288", text: "512 KiB per artifact (10 MiB bundle cap - Recommended)" }));
     maxBytesSel.appendChild(h("option", { value: "262144", text: "256 KiB per artifact" }));
     maxBytesSel.appendChild(h("option", { value: "1048576", text: "1024 KiB per artifact" }));
 
-    var timeoutSel = h("select", { id: "forensics-timeout-select", cls: "select" });
+    var timeoutSel = h("select", { id: "forensics-timeout-select" });
     timeoutSel.appendChild(h("option", { value: "120", text: "120 seconds (Recommended for IR Standard / Volatile)" }));
     timeoutSel.appendChild(h("option", { value: "60", text: "60 seconds (Standard for Diagnostic)" }));
     timeoutSel.appendChild(h("option", { value: "300", text: "300 seconds (High Latency / Deep Inspection)" }));
 
-    var errBox = h("div", { cls: "msg-err", hidden: true });
+    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
 
     var launchBtn = h("button", {
       cls: "btn btn-primary",
@@ -7377,9 +9063,10 @@
             })
             .then(function (job) {
               closeSheet();
-              toast("Forensic collection job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "\u2026). Target: " + (asset.name || asset.ip), "ok");
-              state.section = "forensics";
-              go("forensics");
+              /* Same hijack as the shell launch: go() would close the route
+                 panel the operator dispatched this from. The toast carries
+                 the job id and Forensics is one click away. */
+              toast("Forensic collection dispatched (" + (job.id ? job.id.slice(0, 8) + "\u2026" : "") + ") on " + (asset.name || asset.ip) + " \u2014 see Forensics", "ok");
               refresh();
             })
             .catch(function (err) {
@@ -7399,7 +9086,7 @@
       ),
       h("div", { cls: "form-row" },
         h("span", { cls: "dim-2", text: "Platform: " }), h("b", { text: ep.os || "Linux" }),
-        h("span", { cls: "dim-2", text: " \u00b7 Isolation: " }), h("span", { cls: asset.isolated ? "badge badge-crit" : "badge badge-ok", text: asset.isolated ? "ISOLATED" : "Online" })
+        h("span", { cls: "dim-2", text: " \u00b7 Isolation: " }), chip(asset.isolated ? "crit" : "ok", asset.isolated ? "ISOLATED" : "Online")
       ),
       h("p", { cls: "pending", text: "Forensic collections run under the response authority with signed ActionProof V2. The agent collects forensic telemetry in-process, validates size bounds, computes SHA-256 digests, and generates an Ed25519-signed canonical manifest." }),
       h("div", { cls: "form-row stack-s" },
@@ -7433,7 +9120,7 @@
       return;
     }
 
-    var sel = h("select", { cls: "select", id: "forensics-target-picker" });
+    var sel = h("select", { id: "forensics-target-picker" });
     managed.forEach(function (a) {
       sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ") - " + a.endpoint.id }));
     });
@@ -7464,7 +9151,23 @@
   }
 
   function toggleBundleHold(bundleId, currentHold) {
-    var newHold = !currentHold;
+    /* Releasing a legal hold makes the bundle eligible for retention deletion
+       again, and the retention sweeper does not ask a second time. Applying
+       one is safe and stays a single click. */
+    if (currentHold) {
+      confirmSheet({
+        title: "Release legal hold",
+        consequence: "Bundle " + (bundleId ? bundleId.slice(0, 8) + "\u2026" : "") + " becomes subject to the normal retention policy again and can be deleted by the next retention sweep. Released evidence cannot be recovered.",
+        detail: "The release is recorded in the audit log against your operator id.",
+        confirmLabel: "Release hold",
+        onConfirm: function () { sendBundleHold(bundleId, false); }
+      });
+      return;
+    }
+    sendBundleHold(bundleId, true);
+  }
+
+  function sendBundleHold(bundleId, newHold) {
     var reason = newHold ? "Compliance legal hold applied by operator" : "Compliance legal hold released by operator";
     request("/api/v1/evidence/bundles/hold", "POST", {
       bundle_id: bundleId,
@@ -7502,10 +9205,27 @@
         var metaRows = [
           [h("span", { cls: "dim-2", text: "Bundle ID:" }), h("span", { cls: "ip", text: bundleId })],
           [h("span", { cls: "dim-2", text: "Endpoint:" }), h("span", { text: (b && b.endpoint_id) || "Unknown" })],
-          [h("span", { cls: "dim-2", text: "Profile:" }), h("span", { cls: "badge", text: (b && b.profile) || "Unknown" })],
-          [h("span", { cls: "dim-2", text: "Status:" }), h("span", { cls: b && b.status === "completed" ? "badge badge-ok" : "badge badge-warn", text: (b && b.status) || "pending" })],
-          [h("span", { cls: "dim-2", text: "Legal Hold:" }), h("span", { cls: b && b.legal_hold ? "badge badge-crit" : "dim-3", text: b && b.legal_hold ? "LOCKED (HOLD)" : "Normal" })],
-          [h("span", { cls: "dim-2", text: "Collected:" }), stamp(parseTime(b && b.created_at))]
+          [h("span", { cls: "dim-2", text: "Profile:" }), chip("idle", (b && b.profile) || "Unknown")],
+          [h("span", { cls: "dim-2", text: "Status:" }), chip(b && b.status === "completed" ? "ok" : "warn", (b && b.status) || "pending")],
+          [h("span", { cls: "dim-2", text: "Legal Hold:" }), b && b.legal_hold
+            ? h("span", { cls: "uf uf-g2" },
+                chip("crit", "LOCKED (HOLD)"),
+                h("span", { cls: "dim-3", text: (b.legal_hold_actor || "unknown actor") + (b.legal_hold_reason ? " \u00b7 " + b.legal_hold_reason : "") }))
+            : h("span", { cls: "dim-3", text: "Normal" })],
+          [h("span", { cls: "dim-2", text: "Collected:" }), stamp(parseTime(b && b.created_at))],
+          /* Chain of custody. The hub hashes the manifest and signs a receipt
+             over it on every finalised bundle, and the word "receipt" did not
+             appear in the console once - so the one artefact that makes an
+             exported bundle defensible was invisible to the person exporting
+             it. */
+          [h("span", { cls: "dim-2", text: "Size:" }), h("span", { text: (b && b.total_bytes ? bytes(b.total_bytes) : "\u2014") + (b && b.item_count ? " \u00b7 " + b.item_count + " item" + (b.item_count === 1 ? "" : "s") : "") })],
+          [h("span", { cls: "dim-2", text: "Manifest SHA-256:" }), h("span", { cls: "ip u-break", text: (b && b.manifest_sha256) || "not sealed" })],
+          [h("span", { cls: "dim-2", text: "Signed receipt:" }), (b && b.receipt_sha256)
+            ? h("span", { cls: "ip u-break", text: b.receipt_sha256 })
+            : h("span", { cls: "dim-3", text: "no receipt \u2014 this bundle is not yet sealed" })],
+          [h("span", { cls: "dim-2", text: "Retention expires:" }), b && b.legal_hold
+            ? h("span", { cls: "dim-3", text: "held indefinitely" })
+            : stamp(parseTime(b && b.retention_expires_at))]
         ];
 
         var summaryCard = h("div", { cls: "card-body stack-s" },
@@ -7514,15 +9234,15 @@
 
         var items = (resp && resp.items) || [];
         var itemRows = items.map(function (it) {
-          var statusCls = "badge";
-          if (it.collector_status === "collected") statusCls = "badge badge-ok";
-          else if (it.collector_status === "empty" || it.collector_status === "truncated") statusCls = "badge badge-warn";
-          else if (it.collector_status === "permission_denied" || it.collector_status === "failed") statusCls = "badge badge-crit";
+          var statusTone = "idle";
+          if (it.collector_status === "collected") statusTone = "ok";
+          else if (it.collector_status === "empty" || it.collector_status === "truncated") statusTone = "warn";
+          else if (it.collector_status === "permission_denied" || it.collector_status === "failed") statusTone = "crit";
 
           var shortSha = it.sha256 ? it.sha256.slice(0, 12) + "\u2026" : "\u2014";
           return [
             h("b", { text: it.name || "" }),
-            h("span", { cls: statusCls, text: it.collector_status || "unknown" }),
+            chip(statusTone, it.collector_status || "unknown"),
             h("span", { text: bytes(it.size_bytes) }),
             h("span", { cls: "dim-3", text: it.content_type || "application/octet-stream" }),
             h("span", { cls: "ip", title: it.sha256 || "", text: shortSha })
@@ -7539,7 +9259,7 @@
       })
       .catch(function (err) {
         clear(body);
-        body.appendChild(h("div", { cls: "msg-err", text: "Failed to load bundle artifacts: " + (err.message || err) }));
+        body.appendChild(h("div", { cls: "note note-crit", role: "alert", text: "Failed to load bundle artifacts: " + (err.message || err) }));
       });
   }
 
@@ -7596,7 +9316,7 @@
       } catch (e) {}
     }
 
-    var sevCls = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "badge badge-crit" : (v.severity === "MEDIUM" ? "badge badge-warn" : "badge");
+    var sevTone = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "crit" : (v.severity === "MEDIUM" ? "warn" : "idle");
 
     var flags = [];
     if (v.is_kev) flags.push(cisaKevBadge());
@@ -7609,16 +9329,16 @@
       ),
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "CVE & Severity" }),
-        h("div", { style: "display: flex; gap: 8px; align-items: center;" },
+        h("div", { cls: "uf uf-g3" },
           h("b", { text: v.cve_id || "—" }),
-          h("span", { cls: sevCls, text: (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : "") })
+          chip(sevTone, (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : ""))
         )
       ),
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "Priority Score" }),
-        h("div", { style: "display: flex; gap: 8px; align-items: center;" },
+        h("div", { cls: "uf uf-g3" },
           priorityScoreBadge(v.priority_score),
-          h("span", { cls: "dim-3", style: "font-size: 11px;", text: "(CVSS × 6.0 + KEV × 25.0 + EPSS × 15.0) × confidence" })
+          h("span", { cls: "dim-3 u-t2", text: "(CVSS × 6.0 + KEV × 25.0 + EPSS × 15.0) × confidence" })
         )
       )
     ];
@@ -7626,7 +9346,7 @@
     if (flags.length) {
       kvRows.push(h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "Threat Intelligence" }),
-        h("div", { style: "display: flex; gap: 6px; align-items: center;" }, flags)
+        h("div", { cls: "uf uf-g2" }, flags)
       ));
     }
 
@@ -7670,17 +9390,16 @@
     var criteriaCard = card("Matching Criteria & Version Boundaries", h("div", { cls: "card-body stack" },
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "CPE Criteria Pattern" }),
-        h("code", { cls: "mono", style: "font-size: 11px; word-break: break-all;", text: (ev && ev.cpe) || "—" })
+        h("code", { cls: "mono u-t2 u-break", text: (ev && ev.cpe) || "—" })
       ),
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "Vulnerable Version Range" }),
-        h("code", { cls: "mono", style: "font-size: 11px;", text: (ev && ev.vulnerable_range) || "—" })
+        h("code", { cls: "mono u-t2", text: (ev && ev.vulnerable_range) || "—" })
       ),
       h("div", { cls: "drawer-kv-row" },
         h("span", { cls: "drawer-kv-label", text: "Comparison Verdict" }),
         h("div", {
-          cls: "note " + (v.status === "matched" ? "note-crit" : (v.status === "not_affected" ? "note-ok" : "note-warn")),
-          style: "font-size: 12px; margin: 0;",
+          cls: "note u-t3 u-m0 " + (v.status === "matched" ? "note-crit" : (v.status === "not_affected" ? "note-ok" : "note-warn")),
           text: (ev && ev.version_comparison) || v.match_reason || "—"
         })
       )
@@ -7713,15 +9432,15 @@
 
   function openSyncFeedModal() {
     var onlineCheck = h("input", { type: "checkbox", checked: true, id: "sync-online-check" });
-    var nvdUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official NVD 2.0 API)", value: "" });
-    var kevUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official CISA KEV JSON)", value: "" });
-    var epssUrlInput = h("input", { type: "text", cls: "inp", placeholder: "Default (official FIRST EPSS JSON)", value: "" });
-    var maxResultsInput = h("input", { type: "number", cls: "inp", value: "2000", min: "100", max: "50000" });
+    var nvdUrlInput = h("input", { type: "text", placeholder: "Default (official NVD 2.0 API)", value: "" });
+    var kevUrlInput = h("input", { type: "text", placeholder: "Default (official CISA KEV JSON)", value: "" });
+    var epssUrlInput = h("input", { type: "text", placeholder: "Default (official FIRST EPSS JSON)", value: "" });
+    var maxResultsInput = h("input", { type: "number", value: "2000", min: "100", max: "50000" });
     var statusText = h("div", { cls: "note dim-3", text: "Sync will fetch feeds in the background, validate schema boundaries, and atomically promote into the active snapshot." });
 
     var body = h("div", { cls: "stack" },
       h("p", { text: "Synchronize local vulnerability correlation database with authoritative upstream intelligence feeds." }),
-      h("label", { cls: "form-row", style: "align-items: center; gap: 8px; cursor: pointer;" },
+      h("label", { cls: "form-row uf uf-g3 u-pointer" },
         onlineCheck,
         h("span", {}, h("b", { text: "Online Feed Fetch" }), h("span", { cls: "dim-3", text: " (Query NVD, CISA KEV, and EPSS directly)" }))
       ),
@@ -7751,10 +9470,11 @@
           if (kevUrlInput.value.trim()) payload.cisa_kev_url = kevUrlInput.value.trim();
           if (epssUrlInput.value.trim()) payload.epss_url = epssUrlInput.value.trim();
 
-          request("/api/v1/vulnerabilities/sync", {
-            method: "POST",
-            body: JSON.stringify(payload)
-          }).then(function (res) {
+          /* request() is (path, method, body). This passed a fetch-shaped
+             options object as `method`, so `opts.method` stringified to
+             "[object Object]" and the payload was never sent: both "Sync
+             Feeds…" buttons issued a request the hub could not act on. */
+          request("/api/v1/vulnerabilities/sync", "POST", payload).then(function (res) {
             statusText.className = "note note-ok";
             var msg = "Feed synchronization complete: Snapshot " + (res.snapshot_id || "") + " activated with " +
               (res.nvd_count || 0) + " CVEs, " + (res.cisa_kev_count || 0) + " KEV items, " + (res.epss_count || 0) + " EPSS scores.";
@@ -7785,10 +9505,10 @@
     var epID = asset.endpoint.id;
     var pkgs = state.softwareByEndpoint[epID];
     if (!pkgs) {
-      return card("Installed Software Inventory", h("div", { cls: "empty", text: "Reading installed software inventory…" }), null, true);
+      return card("Installed Software Inventory", emptyBox("Reading installed software inventory…"), null, true);
     }
     if (!pkgs.length) {
-      return card("Installed Software Inventory", h("div", { cls: "empty", text: "No installed software packages recorded for this host." }), null, true);
+      return card("Installed Software Inventory", emptyBox("No installed software packages recorded for this host."), null, true);
     }
 
     var q = (state.softwareSearchQuery || "").toLowerCase().trim();
@@ -7804,29 +9524,31 @@
              ver.indexOf(q) !== -1 || src.indexOf(q) !== -1;
     }) : pkgs;
 
-    var searchInput = h("input", {
-      type: "search",
-      cls: "inp",
-      style: "max-width: 260px; font-size: 12px; padding: 4px 8px;",
-      placeholder: "Filter software…",
-      value: state.softwareSearchQuery || "",
-      on: {
-        input: function (ev) {
-          state.softwareSearchQuery = ev.target.value;
-          renderRoute();
-        }
-      }
-    });
+    /* Same defect as the Alerts search: the handler called renderRoute(),
+       which rebuilds the panel and with it this field. Cache the node. */
+    if (!softwareSearchInput) {
+      softwareSearchInput = h("input", {
+        type: "search",
+        cls: "u-narrow u-t3",
+        placeholder: "Filter software…",
+        "aria-label": "Filter software inventory"
+      });
+      softwareSearchInput.value = state.softwareSearchQuery || "";
+      softwareSearchInput.addEventListener("input", function () {
+        state.softwareSearchQuery = softwareSearchInput.value;
+        renderRoute();
+      });
+    } else if (document.activeElement !== softwareSearchInput) {
+      softwareSearchInput.value = state.softwareSearchQuery || "";
+    }
+    var searchInput = softwareSearchInput;
 
-    var countBadge = h("span", {
-      cls: "badge",
-      text: (q ? filtered.length + " of " : "") + pkgs.length + " packages"
-    });
+    var countBadge = chip("idle", (q ? filtered.length + " of " : "") + pkgs.length + " packages");
 
     var headControls = h("div", {
-      style: "display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;"
+      cls: "uf uf-between uf-g3 uf-wrap u-mb2"
     },
-      h("div", { style: "display: flex; align-items: center; gap: 8px;" },
+      h("div", { cls: "uf uf-g3" },
         countBadge,
         q ? h("button", {
           cls: "btn mini",
@@ -7844,20 +9566,16 @@
     var rows = displayed.map(function (p) {
       var prodNode = h("div", {},
         h("b", { text: p.product || p.raw_product || "—" }),
-        (p.raw_product && p.raw_product !== p.product) ? h("div", { cls: "dim-3", style: "font-size: 11px;", text: p.raw_product }) : null,
-        (p.vendor || p.raw_vendor) ? h("div", { cls: "dim-3", style: "font-size: 11px;", text: p.vendor || p.raw_vendor }) : null
+        (p.raw_product && p.raw_product !== p.product) ? h("div", { cls: "dim-3 u-t2", text: p.raw_product }) : null,
+        (p.vendor || p.raw_vendor) ? h("div", { cls: "dim-3 u-t2", text: p.vendor || p.raw_vendor }) : null
       );
 
       var verNode = h("div", {},
         h("span", { cls: "mono", text: p.version || "—" }),
-        (p.raw_version && p.raw_version !== p.version) ? h("div", { cls: "dim-3 mono", style: "font-size: 10px;", text: p.raw_version }) : null
+        (p.raw_version && p.raw_version !== p.version) ? h("div", { cls: "dim-3 mono u-t1", text: p.raw_version }) : null
       );
 
-      var confBadge = h("span", {
-        cls: p.confidence === "authoritative" ? "badge badge-ok" : "badge badge-warn",
-        style: "font-size: 10px;",
-        text: p.confidence || "inferred"
-      });
+      var confBadge = chip(p.confidence === "authoritative" ? "ok" : "warn", p.confidence || "inferred");
 
       return [
         prodNode,
@@ -7873,7 +9591,7 @@
     var body = h("div", { cls: "card-body stack" },
       headControls,
       simpleTable(["Package / Product", "Version", "Source", "Arch", "Scope", "Confidence", "Observed"], rows),
-      (filtered.length > displayLimit) ? h("div", { cls: "dim-3", style: "text-align: center; font-size: 12px; margin-top: 4px;", text: "Showing first " + displayLimit + " of " + filtered.length + " matching packages. Use the filter to narrow results." }) : null
+      (filtered.length > displayLimit) ? h("div", { cls: "dim-3 u-center u-t3 u-mt1", text: "Showing first " + displayLimit + " of " + filtered.length + " matching packages. Use the filter to narrow results." }) : null
     );
 
     return card("Installed Software Inventory", body, null, true);
@@ -7914,10 +9632,10 @@
       return [
         h("span", { cls: "ip", text: b.id ? b.id.slice(0, 8) + "\u2026" : "" }),
         h("span", { text: b.endpoint_id || "" }),
-        h("span", { cls: "badge", text: b.profile || "" }),
-        h("span", { cls: b.status === "completed" ? "badge badge-ok" : "badge badge-warn", text: b.status || "" }),
+        chip("idle", b.profile || ""),
+        chip(b.status === "completed" ? "ok" : "warn", b.status || ""),
         h("span", { text: b.item_count ? String(b.item_count) : "0" }),
-        h("span", { cls: b.legal_hold ? "badge badge-crit" : "dim-3", text: b.legal_hold ? "LOCKED (HOLD)" : "Normal" }),
+        b.legal_hold ? chip("crit", "LOCKED (HOLD)") : h("span", { cls: "dim-3", text: "Normal" }),
         stamp(parseTime(b.created_at)),
         actCell
       ];
@@ -7933,7 +9651,7 @@
     var snap = state.activeSnapshot;
     var snapStrip = h("div", { cls: "snapshot-meta-strip" },
       snap ? [
-        h("span", { cls: "badge badge-ok", text: "Feed: " + (snap.id || "Active") }),
+        chip("ok", "Feed: " + (snap.id || "Active")),
         h("span", {}, h("b", { text: String(snap.nvd_count || 0) }), " CVEs (NVD 2.0)"),
         h("span", {}, h("b", { text: String(snap.cisa_kev_count || 0) }), " KEV Exploits"),
         h("span", {}, h("b", { text: String(snap.epss_count || 0) }), " EPSS Scores"),
@@ -7941,7 +9659,7 @@
         h("span", { cls: "fill" }),
         h("button", { cls: "btn mini", type: "button", text: "Sync Feeds…", on: { click: openSyncFeedModal } })
       ] : [
-        h("span", { cls: "badge badge-warn", text: "No Active Feed Snapshot" }),
+        chip("warn", "No Active Feed Snapshot"),
         h("span", { cls: "dim-3", text: "Vulnerability correlation requires active NVD 2.0 / CISA KEV feeds." }),
         h("span", { cls: "fill" }),
         h("button", { cls: "btn mini btn-primary", type: "button", text: "Sync Feeds…", on: { click: openSyncFeedModal } })
@@ -7949,32 +9667,36 @@
     );
 
     // Filter Buttons
-    var filterBtns = h("div", { style: "display: flex; gap: 8px; align-items: center; margin-top: 8px; margin-bottom: 8px; flex-wrap: wrap;" },
+    var filterBtns = h("div", { cls: "uf uf-g3 uf-wrap u-mt2 u-mb2" },
       h("button", {
         cls: !state.vulnFilterStatus ? "btn btn-primary mini" : "btn mini",
         type: "button",
+        "aria-pressed": !state.vulnFilterStatus ? "true" : "false",
         text: "All Verdicts",
         on: { click: function () { state.vulnFilterStatus = ""; refresh(); } }
       }),
       h("button", {
         cls: state.vulnFilterStatus === "matched" ? "btn btn-primary mini" : "btn mini",
         type: "button",
+        "aria-pressed": state.vulnFilterStatus === "matched" ? "true" : "false",
         text: "Affected Only",
         on: { click: function () { state.vulnFilterStatus = "matched"; refresh(); } }
       }),
       h("button", {
         cls: state.vulnFilterStatus === "possible" ? "btn btn-primary mini" : "btn mini",
         type: "button",
+        "aria-pressed": state.vulnFilterStatus === "possible" ? "true" : "false",
         text: "Possible",
         on: { click: function () { state.vulnFilterStatus = "possible"; refresh(); } }
       }),
       h("button", {
         cls: state.vulnFilterStatus === "not_affected" ? "btn btn-primary mini" : "btn mini",
         type: "button",
+        "aria-pressed": state.vulnFilterStatus === "not_affected" ? "true" : "false",
         text: "Not Affected",
         on: { click: function () { state.vulnFilterStatus = "not_affected"; refresh(); } }
       }),
-      h("span", { cls: "dim-3", style: "font-size: 11px; margin-left: 8px;", text: (state.vulnerabilities || []).length + " correlated records" })
+      h("span", { cls: "dim-3 u-t2 u-ml3", text: (state.vulnerabilities || []).length + " correlated records" })
     );
 
     var vulRows = (state.vulnerabilities || []).map(function (v) {
@@ -7983,10 +9705,10 @@
       if (v.epss && v.epss > 0) flags.push(epssBadge(v.epss));
 
       var flagsNode = flags.length
-        ? h("div", { style: "display: flex; gap: 4px; align-items: center; flex-wrap: wrap;" }, flags)
+        ? h("div", { cls: "uf uf-g1 uf-wrap" }, flags)
         : h("span", { cls: "dim-3", text: "—" });
 
-      var sevCls = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "badge badge-crit" : (v.severity === "MEDIUM" ? "badge badge-warn" : "badge");
+      var sevTone = (v.severity === "CRITICAL" || v.severity === "HIGH") ? "crit" : (v.severity === "MEDIUM" ? "warn" : "idle");
 
       var explainBtn = h("button", {
         cls: "btn mini",
@@ -8002,7 +9724,7 @@
 
       return [
         h("b", { text: v.cve_id || "" }),
-        h("span", { cls: sevCls, text: (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : "") }),
+        chip(sevTone, (v.severity || "MEDIUM") + (v.cvss ? " " + v.cvss.toFixed(1) : "")),
         priorityScoreBadge(v.priority_score),
         flagsNode,
         vulnStatusBadge(v.status),
@@ -8100,8 +9822,11 @@
     /* A five-second poll must not yank an open dropdown out from under a click.
        Nothing in this section changes on its own - operators change when an
        administrator changes them - so skipping the rebuild while the focus is
-       inside it costs nothing and keeps the section usable. */
-    if (view.firstChild && view.contains(document.activeElement)) return;
+       inside it costs nothing and keeps the section usable.
+       It must not skip the *first* build, though: arriving from a section whose
+       filter box still held focus left the previous section's table on screen
+       under an Access breadcrumb, with no error and nothing to click. */
+    if (view.dataset.section === "access" && view.firstChild && view.contains(document.activeElement)) return;
 
     clear(view);
 
@@ -8147,15 +9872,30 @@
         h("span", { cls: "dim-3", text: op.created_by || "\u2014" }),
         stamp(parseTime(op.created_at)),
         h("button", {
-          cls: "mini", type: "button", text: "Remove",
+          cls: "mini", "data-danger": "true", type: "button", text: "Remove",
+          title: isYou ? "Remove your own access to this hub" : "Remove " + op.email,
           on: {
             click: function () {
-              request("/api/v1/operators/remove", "POST", { email: op.email })
-                .then(function () {
-                  toast("Removed " + op.email + (isYou ? " \u2014 that was your own access" : ""), isYou ? "warn" : "ok");
-                  refresh();
-                })
-                .catch(function (e) { toast("Could not remove: " + e.message, "crit"); });
+              /* A single unconfirmed click, one row away from a role dropdown,
+                 and on your own row it removed your own access. If you are the
+                 last administrator nobody can put it back from the console. */
+              confirmSheet({
+                title: isYou ? "Remove your own access" : "Remove " + op.email,
+                consequence: isYou
+                  ? "You lose access to this hub immediately. If you are the last administrator, nobody can restore it from the console - it has to be done on the hub host."
+                  : op.email + " loses access to this hub immediately. Any console session they have open stops working on its next request.",
+                detail: roleName(op.role) + " \u00b7 granted by " + (op.created_by || "unknown"),
+                confirmLabel: isYou ? "Remove my access" : "Remove operator",
+                requireText: isYou ? "REMOVE MY ACCESS" : null,
+                onConfirm: function () {
+                  request("/api/v1/operators/remove", "POST", { email: op.email })
+                    .then(function () {
+                      toast("Removed " + op.email + (isYou ? " \u2014 that was your own access" : ""), isYou ? "warn" : "ok");
+                      refresh();
+                    })
+                    .catch(function (e) { toast("Could not remove: " + e.message, "crit"); });
+                }
+              });
             }
           }
         })
@@ -8165,22 +9905,95 @@
     var listCard = card("Operators",
       simpleTable(["Email", "Role", "Granted by", "Added", ""], rows));
 
-    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard));
+    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard, deviceCredentialCard()));
+  }
+
+  function confirmRevokeDeviceCredential(cr) {
+    var who = cr.endpoint_id || "this endpoint";
+    confirmSheet({
+      title: "Revoke device credential",
+      consequence: "The agent on " + who + " stops being able to authenticate to this hub. It will not report flows, will not receive policy, and cannot be given a terminal session until somebody re-enrols it on the host itself.",
+      detail: "Credential " + (cr.id || "") + " \u00b7 issued " + stampTitle(parseTime(cr.created_at)),
+      confirmLabel: "Revoke credential",
+      onConfirm: function () {
+        request("/api/v1/device-auth/credentials?endpoint_id=" + encodeURIComponent(cr.endpoint_id), "DELETE")
+          .then(function () { toast("Device credential revoked for " + who, "warn"); refresh(); })
+          .catch(function (e) { toast("Could not revoke the credential: " + e.message, "crit"); });
+      }
+    });
+  }
+
+  /* The machine half of "who may talk to this hub". Operators were listed and
+     agents were not, so a revoked-in-theory endpoint had no screen anywhere in
+     the console. The credential string itself is never shown: the hub returns
+     it exactly once, at enrolment. */
+  function deviceCredentialCard() {
+    var creds = state.deviceCredentials;
+    if (!creds.length) {
+      return card("Enrolled device credentials",
+        h("div", { cls: "card-body" },
+          emptyBox("No device credential has been issued. Agents are still authenticating with the shared tenant key.")));
+    }
+
+    var rows = creds.map(function (cr) {
+      var revoked = !!cr.revoked_at;
+      var actions = h("div", { cls: "row-actions" });
+      if (!revoked) {
+        actions.appendChild(h("button", {
+          cls: "btn mini", type: "button", text: "Revoke", "data-danger": "true",
+          title: "Stop this machine authenticating to the hub",
+          on: { click: function () { confirmRevokeDeviceCredential(cr); } }
+        }));
+      }
+      return [
+        h("b", { text: cr.endpoint_id || "\u2014" }),
+        h("span", { cls: "dim", text: cr.id || "\u2014" }),
+        revoked
+          ? h("span", { cls: "st", "data-state": "crit" }, h("span", { text: "revoked" }))
+          : h("span", { cls: "st", "data-state": "ok" }, h("span", { text: "active" })),
+        stamp(parseTime(cr.created_at)),
+        cr.last_used_at ? stamp(parseTime(cr.last_used_at)) : h("span", { cls: "dim", text: "never used" }),
+        cr.revoked_at ? stamp(parseTime(cr.revoked_at)) : h("span", { cls: "dim", text: "\u2014" }),
+        actions
+      ];
+    });
+
+    return card("Enrolled device credentials",
+      simpleTable(["Endpoint", "Credential", "State", "Issued", "Last used", "Revoked", ""], rows));
   }
 
   /* --------------------------------------------------------- full route */
 
   var routeEl = null;
+  var routeOpener = null;
+  var drawerOpener = null;
 
   function closeRoute() {
-    if (routeEl && routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    var wasOpen = !!routeEl;
+    var opener = routeOpener;
+    if (routeEl) {
+      if (routeEl._trap) document.removeEventListener("keydown", routeEl._trap, true);
+      if (routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
+    }
     routeEl = null;
+    routeOpener = null;
+    if (wasOpen) restoreFocus(opener);
     state.routeKey = "";
+    /* Only when a route was actually on screen: go() closes the route before
+       it pushes its own entry, and two entries for one navigation makes Back
+       feel broken. */
+    if (wasOpen) syncURL(true);
   }
 
   function openRoute(key) {
+    /* Whatever the operator was on when the full view opened, so Escape puts
+       them back there instead of at the top of the document. Recorded before
+       closeRoute clears it, and only when the route was not already open. */
+    var opener = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
     if (state.routeKey !== key) closeRoute();
+    if (!routeOpener) routeOpener = opener;
     state.routeKey = key;
+    syncURL(true);
     renderRoute();
     /* The full view shows this asset's recent flows, which only the Traffic and
        Audit sections load; fetch them on demand so the panel is never empty. */
@@ -8200,6 +10013,10 @@
         state.softwareByEndpoint[epID] = (d && d.packages) || [];
         if (state.routeKey) renderRoute();
       }).catch(function () {});
+      request("/api/v1/network-profiles?level=endpoint&id=" + encodeURIComponent(epID)).then(function (d) {
+        state.profilesByEndpoint[epID] = arrayOf(d);
+        if (state.routeKey) renderRoute();
+      }).catch(function () { /* the card degrades to "nothing recorded yet" */ });
       request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
         state.baselineByEndpoint[epID] = d || {};
         if (state.routeKey) renderRoute();
@@ -8254,6 +10071,47 @@
     return card("How this was identified", body);
   }
 
+  /* The rolling profile the hub builds from every flow it has seen for this
+     host: one row per process/destination/port conversation, with how often
+     and how much. Raw flow rows answer "what happened at 14:03"; this answers
+     "is this normal for this machine", which is the question an operator
+     actually has in front of an alert. */
+  function commProfileCard(asset) {
+    var epID = asset.endpoint.id;
+    var profiles = state.profilesByEndpoint[epID];
+    if (!profiles) return card("What this host talks to", emptyBox("Reading this host's communication profile\u2026"), null, true);
+    if (!profiles.length) {
+      return card("What this host talks to",
+        emptyBox("No conversation has been profiled for this host yet. The profile is built from the flows the agent reports, so a freshly enrolled host is empty until it talks."), null, true);
+    }
+
+    var shown = profiles.slice(0, 30);
+    var rows = shown.map(function (pr) {
+      var moved = (Number(pr.total_bytes_in) || 0) + (Number(pr.total_bytes_out) || 0);
+      return [
+        h("span", { cls: "dim", text: pr.process_name || pr.process_path || "\u2014" }),
+        h("span", { cls: "ip", text: (pr.dst_ip || "\u2014") + ":" + (pr.dst_port || 0) }),
+        (pr.protocol || "\u2014") + (pr.direction ? " " + pr.direction : ""),
+        pr.country || "\u2014",
+        String(Number(pr.event_count) || 0),
+        bytes(moved),
+        /* Baseline here means the hub accepted this conversation as normal for
+           the host. Anything unmarked is traffic nobody has vouched for. */
+        pr.is_baseline
+          ? h("span", { cls: "st", "data-state": "ok" }, h("span", { text: "baseline" }))
+          : h("span", { cls: "st", "data-state": "idle" }, h("span", { text: "unvouched" })),
+        stamp(parseTime(pr.last_seen))
+      ];
+    });
+
+    var body = h("div", { cls: "stack" },
+      simpleTable(["Process", "Destination", "Protocol", "Country", "Conversations", "Moved", "Baseline", "Last seen"], rows));
+    if (profiles.length > shown.length) {
+      body.appendChild(h("p", { cls: "pending", text: "Showing the " + shown.length + " busiest of " + profiles.length + " profiled conversations." }));
+    }
+    return card("What this host talks to", body, null, true);
+  }
+
   function renderRoute() {
     var previousScrollTop = 0;
     if (routeEl) {
@@ -8293,7 +10151,7 @@
             h("dt", { text: "Role" }), h("dd", { text: ep.role_tag || "\u2014" }),
             h("dt", { text: "Software" }), h("dd", { text: ep.installed_software || "\u2014" }),
             h("dt", { text: "Registered" }), h("dd", {}, stamp(parseTime(ep.created_at))))
-        : h("div", { cls: "empty", text: "No agent on this asset. It is on the deployment worklist." })));
+        : emptyBox("No agent on this asset. It is on the deployment worklist.")));
 
     var portsBody = h("div", { cls: "card-body" });
     if (asset.ports.length) {
@@ -8323,7 +10181,7 @@
       flows.map(function (e) {
         var procNode = [h("span", { cls: "dim", text: e.process_path || e.domain || "—" })];
         if (e.attribution_status && e.attribution_status !== "unknown") {
-          procNode.push(h("span", { style: "margin-left: 6px;" }, processAttributionBadge(e.attribution_status)));
+          procNode.push(h("span", { cls: "u-ml2" }, processAttributionBadge(e.attribution_status)));
         }
         var forensicsBtn = h("button", {
           cls: "btn mini", type: "button", text: "Inspect",
@@ -8336,7 +10194,7 @@
             h("span", { text: e.action || "" })),
           h("span", { cls: "ip", text: (e.src_ip || "") + ":" + (e.src_port || 0) }),
           h("span", { cls: "ip", text: (e.dst_ip || "") + ":" + (e.dst_port || 0) }),
-          h("div", { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;" }, procNode),
+          h("div", { cls: "uf uf-wrap uf-g1" }, procNode),
           forensicsBtn
         ];
       })), null, true);
@@ -8344,14 +10202,18 @@
     var alerts = state.anomalies.filter(function (a) { return (ep && a.endpoint_id === ep.id) || (asset.ip && a.dst_ip === asset.ip); });
     var alertCard = card("Open alerts", alerts.length
       ? h("div", {}, alerts.map(function (a) { return alertCardNode(a, true); }))
-      : h("div", { cls: "empty", text: "No open alert on this asset." }), null, true);
+      : emptyBox("No open alert on this asset."), null, true);
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
       ep ? baselineEndpointCard(asset) : null,
+      ep ? commProfileCard(asset) : null,
       ep ? softwareInventoryCard(asset) : null,
       card("Evidence", evBody), flowCard, alertCard);
 
-    routeEl = h("div", { cls: "route", role: "dialog", "aria-label": "Asset " + asset.name },
+    routeEl = h("div", {
+      cls: "route", role: "dialog", "aria-modal": "true", tabindex: "-1",
+      "aria-label": "Asset " + asset.name
+    },
       h("div", { cls: "route-head" },
         h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Back", on: { click: closeRoute } }, icon("i-close")),
         h("h2", { text: asset.name }),
@@ -8374,6 +10236,15 @@
     if (previousScrollTop > 0) {
       routeBody.scrollTop = previousScrollTop;
     }
+    /* A dialog nobody focused is a dialog a keyboard operator cannot reach:
+       Tab carried on through the table behind it. Focus moves in on the first
+       build only, so a five-second repaint does not yank the caret back to the
+       top of the panel while somebody is reading it. */
+    routeEl._trap = trapFocus(routeEl);
+    document.addEventListener("keydown", routeEl._trap, true);
+    if (!routeEl.contains(document.activeElement)) {
+      try { routeEl.focus(); } catch (e) { /* not focusable in every engine */ }
+    }
   }
 
   /* -------------------------------------------------------------- drawers */
@@ -8383,27 +10254,81 @@
   var openDrawer = "";
 
   function closeDrawer() {
-    if (drawerEl && drawerEl.parentNode) drawerEl.parentNode.removeChild(drawerEl);
+    var opener = drawerOpener;
+    var wasOpen = !!drawerEl;
+    if (drawerEl) {
+      if (drawerEl._trap) document.removeEventListener("keydown", drawerEl._trap, true);
+      if (drawerEl.parentNode) drawerEl.parentNode.removeChild(drawerEl);
+    }
     if (scrimEl && scrimEl.parentNode) scrimEl.parentNode.removeChild(scrimEl);
     drawerEl = null;
     scrimEl = null;
+    drawerOpener = null;
     openDrawer = "";
-    var btn = $("btn-alerts");
-    if (btn) btn.setAttribute("aria-expanded", "false");
+    if (wasOpen) restoreFocus(opener);
   }
 
   function showDrawer(kind) {
     if (kind !== "alerts") return;
     if (openDrawer === kind) { closeDrawer(); return; }
+    var opener = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
     closeDrawer();
+    drawerOpener = opener;
     openDrawer = kind;
     scrimEl = h("div", { cls: "scrim", on: { click: closeDrawer } });
     document.body.appendChild(scrimEl);
-    drawerEl = h("aside", { cls: "drawer", role: "dialog", "aria-label": "Alerts" });
+    drawerEl = h("aside", {
+      cls: "drawer", role: "dialog", "aria-modal": "true", tabindex: "-1",
+      "aria-label": "Alerts"
+    });
     document.body.appendChild(drawerEl);
-    var btn = $("btn-alerts");
-    if (btn) btn.setAttribute("aria-expanded", "true");
     renderDrawer();
+    drawerEl._trap = trapFocus(drawerEl);
+    document.addEventListener("keydown", drawerEl._trap, true);
+    if (!drawerEl.contains(document.activeElement)) {
+      try { drawerEl.focus(); } catch (e) { /* not focusable in every engine */ }
+    }
+  }
+
+  /* The detector's own numbers, when it recorded any.
+     A beacon verdict used to arrive as one sentence of prose, so "score 0.82"
+     and "threshold 0.70" were something an operator had to read out of a
+     paragraph and compare in their head. The hub has always computed both. */
+  function evidencePanel(a) {
+    if (!a.evidence) return null;
+    var ev;
+    try { ev = JSON.parse(a.evidence); } catch (e) { return null; }
+    if (!ev || ev.kind !== "beacon") return null;
+
+    var score = Number(ev.score) || 0;
+    var threshold = Number(ev.threshold) || 0;
+    var over = threshold > 0 ? score / threshold : 0;
+
+    function pct(v) { return v === undefined || v === null ? "\u2014" : (Number(v) * 100).toFixed(0) + "%"; }
+    function secs(v) { return v === undefined || v === null ? "\u2014" : Number(v).toFixed(1) + "s"; }
+
+    var facts = [
+      ["Beacon score", score.toFixed(2) + " of " + threshold.toFixed(2) + " needed"],
+      ["Regularity", pct(ev.regularity)],
+      ["Consistency", pct(ev.consistency)],
+      ["Uniformity", pct(ev.uniformity)],
+      ["Mean interval", secs(ev.mean_interval)],
+      ["Jitter", secs(ev.std_dev) + " (" + pct(ev.coef_variation) + ")"],
+      ["Check-ins", String(ev.samples || 0) + " over " + Math.round(Number(ev.span_minutes) || 0) + " min"],
+      ["Payload variation", ev.size_variation === undefined ? "not reported by the agent" : pct(ev.size_variation)]
+    ];
+
+    return h("div", { cls: "stack-s" },
+      h("div", { cls: "card-sub" },
+        document.createTextNode("Detector evidence "),
+        chip(over >= 1.2 ? "crit" : over >= 1 ? "warn" : "idle",
+          over >= 1 ? (over).toFixed(2) + "\u00d7 threshold" : "below threshold")),
+      h("div", { cls: "alert-exp-grid" },
+        facts.map(function (f) {
+          return h("div", { cls: "alert-exp-box" },
+            h("div", { cls: "alert-exp-label", text: f[0] }),
+            h("div", { cls: "alert-exp-val", text: f[1] }));
+        })));
   }
 
   function alertCardNode(a, compact) {
@@ -8417,14 +10342,15 @@
           stamp(parseTime(a.timestamp))),
         h("div", { cls: "desc", text: a.description || "" }),
         a.details ? h("div", { cls: "meta", text: a.details }) : null,
+        compact ? null : evidencePanel(a),
         compact ? null : h("div", { cls: "acts" },
           h("button", {
             cls: "mini", type: "button", text: "Open asset",
             on: {
               click: function () {
-                var asset = state.assetByKey[a.endpoint_id];
+                var asset = assetForAlert(a);
                 if (asset) { closeDrawer(); openRoute(asset.key); }
-                else toast("No asset row for " + a.endpoint_id, "warn");
+                else toast("No asset row for " + (a.hostname || a.endpoint_id), "warn");
               }
             }
           }),
@@ -8432,9 +10358,9 @@
             cls: "mini", type: "button", "data-danger": "true", text: "Isolate host",
             on: {
               click: function () {
-                var asset = state.assetByKey[a.endpoint_id];
+                var asset = assetForAlert(a);
                 if (asset) setIsolation(asset, true);
-                else toast("No agented asset for " + a.endpoint_id, "warn");
+                else toast("No agented asset for " + (a.hostname || a.endpoint_id), "warn");
               }
             }
           }),
@@ -8468,7 +10394,7 @@
         h("button", { cls: "btn btn-icon", type: "button", "aria-label": "Close", on: { click: closeDrawer } }, icon("i-close"))));
       var body = h("div", { cls: "drawer-body" });
       if (!state.anomalies.length) {
-        body.appendChild(h("div", { cls: "empty", text: "No open anomalies." }));
+        body.appendChild(emptyBox("No open anomalies."));
       } else {
         state.anomalies.forEach(function (a) { body.appendChild(alertCardNode(a, false)); });
       }
@@ -8485,10 +10411,22 @@
   var paletteEl = null;
   var paletteItems = [];
   var paletteCursor = 0;
+  var paletteOpener = null;
 
   function closePalette() {
-    if (paletteEl && paletteEl.parentNode) paletteEl.parentNode.removeChild(paletteEl);
+    if (paletteEl) {
+      if (paletteEl._trap) document.removeEventListener("keydown", paletteEl._trap, true);
+      if (paletteEl.parentNode) paletteEl.parentNode.removeChild(paletteEl);
+    }
     paletteEl = null;
+    /* The palette is opened from the keyboard more often than anything else in
+       the console, and it dropped focus on <body> when it closed - so Escape
+       sent a keyboard operator back to the top of the document instead of to
+       whatever they were on. Running an item is different: that item moves
+       focus itself. */
+    var opener = paletteOpener;
+    paletteOpener = null;
+    return opener;
   }
 
   function paletteSource() {
@@ -8606,14 +10544,18 @@
         list.appendChild(h("div", { cls: "lbl", text: it.group }));
       }
       list.appendChild(h("button", {
-        cls: "pi", type: "button", "data-cursor": i === paletteCursor ? "true" : "false",
+        cls: "pi", type: "button", id: "pi-" + i, role: "option",
+        "aria-selected": i === paletteCursor ? "true" : "false",
+        "data-cursor": i === paletteCursor ? "true" : "false",
         on: {
-          click: function () { closePalette(); it.run(); },
+          click: function () { restoreFocus(closePalette()); it.run(); },
           mouseenter: function () {
             paletteCursor = i;
             Array.prototype.forEach.call(list.querySelectorAll(".pi"), function (b, bi) {
               b.setAttribute("data-cursor", bi === i ? "true" : "false");
+              b.setAttribute("aria-selected", bi === i ? "true" : "false");
             });
+            syncPaletteActiveDescendant();
           }
         }
       },
@@ -8623,28 +10565,48 @@
     });
 
     if (!paletteItems.length) {
-      list.appendChild(h("div", { cls: "empty", text: "Nothing matches." }));
+      list.appendChild(emptyBox("Nothing matches."));
     }
+    syncPaletteActiveDescendant();
+  }
+
+  /* The palette had no ARIA at all - a combobox with a filtered list of
+     options, announced as a text field beside a pile of buttons. It ranks
+     "Isolate selected hosts" with the same scorer as "Go to Assets", so which
+     row is armed has to be something a screen reader can report. */
+  function syncPaletteActiveDescendant() {
+    if (!paletteEl) return;
+    var input = paletteEl.querySelector("input");
+    if (!input) return;
+    if (paletteItems.length) input.setAttribute("aria-activedescendant", "pi-" + paletteCursor);
+    else input.removeAttribute("aria-activedescendant");
   }
 
   function openPalette() {
     if (paletteEl) return;
     paletteCursor = 0;
-    var input = h("input", { type: "text", placeholder: "Jump to a host, an address, a section, or an action\u2026", "aria-label": "Command palette" });
+    paletteOpener = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+    var input = h("input", {
+      type: "text", placeholder: "Jump to a host, an address, a section, or an action\u2026",
+      "aria-label": "Command palette", role: "combobox", "aria-expanded": "true",
+      "aria-controls": "palette-list", "aria-autocomplete": "list", autocomplete: "off"
+    });
     paletteEl = h("div", {
       cls: "palette-wrap",
       on: {
-        click: function (e) { if (e.target === paletteEl) closePalette(); }
+        click: function (e) { if (e.target === paletteEl) restoreFocus(closePalette()); }
       }
     },
-      h("div", { cls: "palette" },
+      h("div", { cls: "palette", role: "dialog", "aria-modal": "true", "aria-label": "Command palette" },
         input,
-        h("div", { cls: "palette-list" }),
+        h("div", { cls: "palette-list", id: "palette-list", role: "listbox", "aria-label": "Results" }),
         h("div", { cls: "palette-foot" },
           h("span", { text: "enter run" }),
           h("span", { text: "up/down move" }),
           h("span", { text: "esc close" }))));
     document.body.appendChild(paletteEl);
+    paletteEl._trap = trapFocus(paletteEl);
+    document.addEventListener("keydown", paletteEl._trap, true);
     renderPaletteList("");
 
     input.addEventListener("input", function () {
@@ -8667,10 +10629,13 @@
       } else if (e.key === "Enter") {
         e.preventDefault();
         var it = paletteItems[paletteCursor];
-        if (it) { closePalette(); it.run(); }
+        /* Focus goes back to whatever opened the palette before the item runs,
+           so an action that opens an overlay of its own records a live opener
+           rather than the palette input it is about to remove. */
+        if (it) { restoreFocus(closePalette()); it.run(); }
       } else if (e.key === "Escape") {
         e.preventDefault();
-        closePalette();
+        restoreFocus(closePalette());
       }
     });
     input.focus();
@@ -8711,19 +10676,36 @@
     return tag === "input" || tag === "textarea" || tag === "select" || t.isContentEditable;
   }
 
+  /* Is the terminal sheet open and holding focus? Both branches below run
+     *before* the typingInField guard, which is why they used to fire while a
+     shell had focus: Escape closed the sheet - and closing the sheet used to
+     kill the process, so pressing Escape inside vim killed vim and everything
+     under it - and Ctrl+K opened the command palette instead of reaching
+     readline's kill-line. Single-letter shortcuts were already safe: xterm
+     focuses a hidden <textarea> and typingInField catches it. */
+  function terminalHasFocus() {
+    return !!(sheetEl && sheetEl._isTerminal && sheetEl.contains(document.activeElement));
+  }
+
   document.addEventListener("keydown", function (e) {
+    var inTerminal = terminalHasFocus();
+
     var mod = IS_MAC ? e.metaKey : e.ctrlKey;
     if (mod && (e.key === "k" || e.key === "K")) {
+      if (inTerminal) return; // kill-line belongs to the shell
       e.preventDefault();
       openPalette();
       return;
     }
 
     if (e.key === "Escape") {
-      if (sheetEl) { closeSheet(); return; }
-      if (paletteEl) { closePalette(); return; }
+      /* Escape belongs to whatever is running in the shell. Dismiss the
+         terminal with the header ✕ or Detach Viewer. */
+      if (inTerminal) return;
+      if (sheetEl) { requestCloseSheet(); return; }
+      if (paletteEl) { restoreFocus(closePalette()); return; }
       if (ctxMenu) { closeCtx(); return; }
-      if (themePop) { closeThemePop(); return; }
+      if (accountPop) { closeAccountPop(); return; }
       if (routeEl) { closeRoute(); return; }
       if (openDrawer) { closeDrawer(); return; }
       if (state.query) { state.query = ""; render(); return; }
@@ -8798,6 +10780,11 @@
   /* ------------------------------------------------------------- topbar */
 
   var filterInput = null;
+  /* Long-lived input nodes. See renderAlerts / softwareInventoryCard: a render
+     that clears its own view destroys any field inside it, so the field has to
+     outlive the render. */
+  var alertsSearchInput = null;
+  var softwareSearchInput = null;
 
   function updateCrumb() {
     var sec = SECTIONS.filter(function (x) { return x.id === state.section; })[0];
@@ -8834,10 +10821,22 @@
     var health = $("health");
     var hstate = state.lastError ? "down" : (assetStats().offline > 0 ? "degraded" : "ok");
     health.setAttribute("data-state", hstate);
-    health.setAttribute("title", state.lastError
+    health.setAttribute("data-stale", state.viewStale ? "true" : "false");
+    var title = state.lastError
       ? "Hub unreachable: " + state.lastError
-      : (hstate === "degraded" ? "Hub healthy \u00b7 some endpoints offline" : "Hub healthy"));
-    $("health-word").textContent = health.getAttribute("title");
+      : (hstate === "degraded" ? "Hub healthy \u00b7 some endpoints offline" : "Hub healthy");
+    if (state.viewStale) title += " \u00b7 view paused while you are typing";
+    health.setAttribute("title", title);
+    $("health-word").textContent = title;
+  }
+
+  /* Says out loud that the view is not being repainted, so a paused console is
+     distinguishable from a hub that has stopped answering. */
+  function setStale(on) {
+    if (state.viewStale === !!on) return;
+    state.viewStale = !!on;
+    var health = $("health");
+    if (health) health.setAttribute("data-stale", state.viewStale ? "true" : "false");
   }
 
   function renderTopbar() {
@@ -8866,6 +10865,7 @@
         filterInput.addEventListener("input", function () {
           state.query = filterInput.value;
           state.cursorKey = "";
+          syncURL(false);
           renderBody();
           renderStrip();
           updateCrumb();
@@ -8883,6 +10883,7 @@
         ["1h", "6h", "24h", "7d"].forEach(function (w) {
           actions.appendChild(h("button", {
             cls: state.topoWindow === w ? "btn btn-primary" : "btn", type: "button", text: w,
+            "aria-pressed": state.topoWindow === w ? "true" : "false",
             on: {
               click: function () {
                 state.topoWindow = w;
@@ -8904,6 +10905,19 @@
     var tblWrap = view.querySelector(".tblwrap");
     var tblScrollLeft = tblWrap ? tblWrap.scrollLeft : 0;
 
+    /* Several sections reuse their filter input across rebuilds precisely so
+       typing survives, but clear(view) detaches it and re-appends it, and
+       detaching a focused element blurs it - the caret was kept and the focus
+       was not, so the next keystroke went to the document instead of the box
+       the operator was typing in. Reinstating focus on the same node
+       afterwards is the whole fix. */
+    var focused = document.activeElement;
+    var refocus = focused && focused !== document.body && view.contains(focused) ? focused : null;
+    var selStart = null, selEnd = null;
+    if (refocus && typeof refocus.selectionStart === "number") {
+      try { selStart = refocus.selectionStart; selEnd = refocus.selectionEnd; } catch (e) { selStart = null; }
+    }
+
     if (state.section === "assets") renderAssets();
     else if (state.section === "topology") renderTopology();
     else if (state.section === "traffic") renderTraffic();
@@ -8915,11 +10929,22 @@
     else if (state.section === "access") renderAccess();
     else renderAssets();
 
+    /* What the view now holds, so a guard that skips a redundant rebuild can
+       tell "the poll came round again" from "the operator navigated here". */
+    view.dataset.section = state.section;
+
     view.scrollTop = scrollTop;
     view.scrollLeft = scrollLeft;
     if (tblScrollLeft > 0) {
       var newTbl = view.querySelector(".tblwrap");
       if (newTbl) newTbl.scrollLeft = tblScrollLeft;
+    }
+
+    if (refocus && view.contains(refocus) && document.activeElement !== refocus) {
+      try {
+        refocus.focus();
+        if (selStart !== null) refocus.setSelectionRange(selStart, selEnd);
+      } catch (e) { /* not every focusable element has a selection */ }
     }
 
     Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
@@ -8938,9 +10963,10 @@
   function go(section) {
     if (section === "discovery") section = "assets";
     state.section = section;
-    closeSheet();
+    closeAllSheets();
     closeRoute();
     closeDrawer();
+    syncURL(true);
     render();
     refresh();
   }
@@ -9000,16 +11026,44 @@
       jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
-    if (state.section === "operators") {
+    /* The section id is "access" (SECTIONS, above). This read "operators"
+       and `state.section` is never that, so the fetch never fired: the table
+       always rendered simpleTable's generic empty string and `state.you`
+       stayed "" so the "you" marker never appeared. */
+    if (state.section === "access") {
       jobs.push(request("/api/v1/operators").then(function (d) {
         state.operators = arrayOf(d && d.operators);
         if (d && Array.isArray(d.roles) && d.roles.length) state.operatorRoles = d.roles;
         state.you = (d && d.you) || "";
       }));
+      /* Device credentials are the other half of "who may talk to this hub",
+         and the console never asked for them: an operator could see every
+         human sign-in and nothing at all about the machines. Admin-only at
+         the hub, and Access is already admin-only. */
+      jobs.push(request("/api/v1/device-auth/credentials").then(function (d) {
+        state.deviceCredentials = arrayOf(d && d.credentials);
+      }).catch(function () { /* the card says the list could not be read */ }));
     }
+    /* Terminal sessions are fleet state, not Response-page state. This fetch
+       sat inside the `section === "response"` block, so an operator on Assets
+       could not be told that a root shell was open on a host in front of them
+       - the data existed and was simply not asked for unless they happened to
+       be on the right page. It is cheap (one row per live session, capped at
+       four per tenant) and it is what the Assets banner reads. */
+    jobs.push(request("/api/v1/terminal/sessions")
+      .then(function (d) {
+        state.terminalSessions = arrayOf(d && d.sessions || d);
+        state.terminalAvailable = true;
+      })
+      .catch(function () {
+        /* responseGate answers 404 when the response feature is off, and the
+           auditor role is refused outright. Either way there is nothing to
+           show and nothing to report: the banner simply does not render. */
+        state.terminalSessions = [];
+        state.terminalAvailable = false;
+      }));
     if (state.section === "response") {
       jobs.push(request("/api/v1/response/auth/status").then(function (d) { state.responseAuthStatus = d || null; }).catch(function () {}));
-      jobs.push(request("/api/v1/terminal/sessions").then(function (d) { state.terminalSessions = arrayOf(d && d.sessions || d); }).catch(function () {}));
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts/schedules").then(function (d) { state.scriptSchedules = arrayOf(d && d.schedules || d); }).catch(function () {}));
@@ -9048,11 +11102,16 @@
       jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { state.trafficFlows = d || null; }));
       jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
       jobs.push(request("/api/v1/dns/events?limit=40").then(function (d) { state.dnsEvents = arrayOf(d && d.events); }));
-    }
-    if (state.section === "dns") {
-      jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
-      jobs.push(request("/api/v1/dns/events?limit=40").then(function (d) { state.dnsEvents = arrayOf(d && d.events); }));
-      jobs.push(request("/api/v1/dns/policy").then(function (d) { state.dnsPolicy = arrayOf(d && d.rules); }));
+      /* The sinkhole's own rules, beside the queries they decided. This was
+         guarded on `state.section === "dns"`, and there is no dns section, so
+         the hub's rule list was fetched by nobody and rendered by nobody. */
+      jobs.push(request("/api/v1/dns/policy").then(function (d) { state.dnsPolicy = arrayOf(d && d.rules); }).catch(function () {}));
+      /* The whole analytics summary existed in this file only as a demo
+         fixture: the hub computes a diurnal baseline, a live diurnal curve,
+         the top talkers by volume and a per-country breakdown with threat
+         counts, and the console read one field of it - total_blocks - from a
+         state slot nothing ever filled. */
+      jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }).catch(function () {}));
     }
     if (state.section === "topology") jobs.push(loadTopology());
 
@@ -9065,12 +11124,18 @@
       }
     }
 
+    /* One failure among fourteen concurrent requests used to pin the health
+       pip to "Hub unreachable" for the life of the page: `lastError` was set
+       here and cleared nowhere. A cycle in which nothing failed is the
+       evidence that the hub is reachable, so that is what clears it. */
+    var cycleError = "";
     return Promise.all(jobs.map(function (p) {
       return p.catch(function (e) {
-        state.lastError = e.message;
+        cycleError = (e && e.message) || String(e);
         return null;
       });
     })).then(function () {
+      state.lastError = cycleError;
       state.loading = false;
       buildAssets();
       pushHistory(Object.assign({ total: state.assets.length }, assetStats()));
@@ -9081,22 +11146,32 @@
       if (state.cursorKey && !state.assetByKey[state.cursorKey]) state.cursorKey = "";
       if (state.routeKey && !state.assetByKey[state.routeKey]) closeRoute();
 
-      // Check if user is actively selecting text or typing in an input
+      /* Do not rebuild the view out from under someone who is typing or has
+         text selected - but do keep saying that the data behind it is moving.
+         The old guard returned here with no indication at all, so a console
+         with an open terminal (xterm focuses a hidden <textarea>, which this
+         sees as an input) froze silently for as long as the shell was open
+         and looked like a hub that had stopped answering. */
       var sel = window.getSelection ? window.getSelection() : null;
       var hasActiveTextSelection = sel && !sel.isCollapsed && sel.toString().length > 0;
-      var isInputFocused = document.activeElement && (
-        document.activeElement.tagName === "INPUT" ||
-        document.activeElement.tagName === "TEXTAREA" ||
-        document.activeElement.isContentEditable
+      var ae = document.activeElement;
+      var isInputFocused = ae && (
+        ae.tagName === "INPUT" ||
+        ae.tagName === "TEXTAREA" ||
+        ae.isContentEditable ||
+        ae.tagName === "SELECT" // an open <select> is destroyed by a rebuild too
       );
-      if (hasActiveTextSelection || isInputFocused) {
+      var dragging = !!state.pointerDragging;
+      if (hasActiveTextSelection || isInputFocused || dragging) {
         updateCrumb();
         renderStrip();
         var alertBadge = $("rail-alert-badge");
         if (alertBadge) alertBadge.textContent = state.unackAlertsTotal || 0;
+        setStale(true);
         return;
       }
 
+      setStale(false);
       render();
     }).finally(function () {
       state.refreshing = false;
@@ -9163,36 +11238,11 @@
     }
     setInterval(updateResponseTimer, 1000);
 
-    window.__state = state;
-    window.__refresh = refresh;
-    window.__request = request;
-    window.__render = render;
-    window.__responseCrypto = {
-      hasWebCrypto: hasWebCrypto,
-      encodeActionProofV2: encodeActionProofV2,
-      digestSHA256: digestSHA256,
-      signActionProof: signActionProof
-    };
-    window.__openUnlockResponseSheet = openUnlockResponseSheet;
-    window.__openResponseControllerSheet = openResponseControllerSheet;
-    window.__lockResponseSession = lockResponseSession;
-    window.__launchTerminalShell = launchTerminalShell;
-    window.__openLaunchEndpointShellPicker = openLaunchEndpointShellPicker;
-    window.__openTerminalEmulator = openTerminalEmulator;
-    window.__launchForensicsSheet = launchForensicsSheet;
-    window.__openLaunchForensicsPicker = openLaunchForensicsPicker;
-    window.__inspectBundle = inspectBundle;
-    window.__toggleBundleHold = toggleBundleHold;
-    window.__openCreateScriptSheet = openCreateScriptSheet;
-    window.__openScriptRunSheet = openScriptRunSheet;
-    window.__openScriptVersionsSheet = openScriptVersionsSheet;
-    window.__openJobOutputModal = openJobOutputModal;
-    window.__retireScriptConfirm = retireScriptConfirm;
-    window.__cancelScriptScheduleConfirm = cancelScriptScheduleConfirm;
-    window.__openEventInspectionSheet = openEventInspectionSheet;
-    window.__openMatchEvidenceSheet = openMatchEvidenceSheet;
-    window.__openSyncFeedModal = openSyncFeedModal;
-    window.__openRoute = openRoute;
+    /* Twenty-five window.__* handles used to ship to production, among them
+       __responseCrypto.signActionProof - the primitive that mints response
+       authorisations. Anything that got script execution in this page was
+       handed a signing oracle and a direct call into every destructive sheet.
+       Nothing in the console reads them; they were a debugging convenience. */
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {
@@ -9200,9 +11250,45 @@
       });
     }
 
+    /* A hidden tab is nine unconditional requests every five seconds against
+       a hub that nobody is looking at. Pause while hidden and refresh once on
+       return, so coming back shows current data rather than whatever was on
+       screen when the tab was backgrounded. */
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") refresh();
+    });
+
+    /* A topology node drag lasting longer than the poll interval was destroyed
+       mid-gesture by the rebuild. The guard in refresh() knows about this. */
+    document.addEventListener("pointerdown", function () { state.pointerDragging = true; }, true);
+    document.addEventListener("pointerup", function () { state.pointerDragging = false; }, true);
+    document.addEventListener("pointercancel", function () { state.pointerDragging = false; }, true);
+
+    /* Address first, then paint: restoreView decides which section render()
+       is about to draw, so doing it afterwards would flash Assets. */
+    suppressHistory = true;
+    restoreView();
+    suppressHistory = false;
+    syncURL(false);
+
+    window.addEventListener("popstate", function (e) {
+      /* Back and Forward move the console, not the browser off it. */
+      suppressHistory = true;
+      closeAllSheets();
+      closeDrawer();
+      applyURLState(e.state || decodeURLState(location.hash) || { section: "assets" });
+      suppressHistory = false;
+      render();
+      if (state.routeKey) renderRoute();
+      refresh();
+    });
+
     render();
     refresh();
-    setInterval(refresh, 5000);
+    setInterval(function () {
+      if (document.visibilityState === "hidden") return;
+      refresh();
+    }, 5000);
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

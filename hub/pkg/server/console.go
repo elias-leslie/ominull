@@ -1,14 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
+	"html"
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -181,21 +184,57 @@ func jsStringEscape(v string) string {
 // next request, which is the one place a credential is guaranteed to be written
 // down: browser history, bookmarks, and the access log of every proxy and CDN
 // between the operator and the hub. None of those are reachable by a cache purge.
-func consoleGate() []byte {
-	return consoleGateDocument(false)
+// consoleSharedHead is the <head> every server-rendered surface uses: the
+// console gate, the setup gate, the setup wizard and the status page.
+//
+// Those four were three styling regimes for one product. They all linked
+// /app.css, but without the ?v= that index.html uses, so a released stylesheet
+// change reached the console immediately and the setup wizard whenever the
+// browser felt like it. None of them carried a theme: the console gate
+// hardcoded data-theme="ash" and the other three set nothing at all, so an
+// operator who runs Phosphor unlocked a grey-blue lock screen, got their own
+// palette for one page, and went back to grey-blue at /status.
+//
+// The theme script is the same pre-paint selection index.html makes, and needs
+// the same nonce - a caller that has no nonce still gets a correct default,
+// because the attribute falls back to the :root palette.
+func consoleSharedHead(title, nonce, version string) string {
+	href := "/app.css"
+	if version != "" {
+		href += "?v=" + url.QueryEscape(version)
+	}
+	head := `<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>` + html.EscapeString(title) + `</title>
+<link rel="stylesheet" href="` + href + `">`
+	if nonce != "" {
+		head += `
+<script nonce="` + nonce + `">
+(function () {
+  var t = "ash";
+  try {
+    var v = localStorage.getItem("ominull.theme");
+    if (v === "graphite" || v === "bunker" || v === "ash" || v === "phosphor") t = v;
+  } catch (e) { /* keep the default */ }
+  document.documentElement.setAttribute("data-theme", t);
+})();
+</script>`
+	}
+	return head
 }
 
-func consoleGateDocument(oidcConfigured bool) []byte {
+func consoleGate() []byte {
+	return consoleGateDocument(false, "", "")
+}
+
+func consoleGateDocument(oidcConfigured bool, nonce, version string) []byte {
 	oidcLink := ""
 	if oidcConfigured {
 		oidcLink = `<p><a href="/oidc/start">Sign in with OIDC</a></p>`
 	}
 	return []byte(`<!DOCTYPE html>
-<html lang="en" data-theme="ash">
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ominull Console</title>
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -204,7 +243,7 @@ func consoleGateDocument(oidcConfigured bool) []byte {
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Ominull">
-<link rel="stylesheet" href="/app.css">
+` + consoleSharedHead("Ominull Console", nonce, version) + `
 </head>
 <body>
 <div class="gate">
@@ -229,7 +268,7 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 	consoleOnce.Do(loadConsole)
 
 	name := strings.TrimPrefix(r.URL.Path, "/")
-	asset, ok := consoleAssets[name]
+	asset, ok := s.consoleAssetFor(name)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -258,6 +297,37 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(asset.body)
+}
+
+// consoleAssetFor resolves one embedded asset, applying the serve-time
+// substitutions the asset declares.
+//
+// Only index.html was ever substituted, and sw.js needs it too: its cache name
+// was a hardcoded version string that had fallen two releases behind VERSION,
+// so `activate`'s "delete every cache that is not mine" purge never matched
+// anything and every release's shell accumulated in one bucket that nothing
+// would ever evict. The substituted body gets its own ETag - two hub versions
+// serve different bytes for the same path, and an ETag computed over the
+// pre-substitution body would tell a browser they were the same file.
+func (s *Server) consoleAssetFor(name string) (consoleAsset, bool) {
+	// Every other reader of consoleAssets goes through a path that has already
+	// loaded it; this one did not, so a caller that asked for an asset before
+	// the first request was served got "no such asset" instead of the file.
+	consoleOnce.Do(loadConsole)
+	asset, ok := consoleAssets[name]
+	if !ok {
+		return consoleAsset{}, false
+	}
+	if !bytes.Contains(asset.body, []byte(hubVersionPlaceholder)) {
+		return asset, true
+	}
+	body := bytes.ReplaceAll(asset.body, []byte(hubVersionPlaceholder), []byte(jsStringEscape(s.agentVersion)))
+	sum := sha256.Sum256(body)
+	return consoleAsset{
+		body:        body,
+		contentType: asset.contentType,
+		etag:        `"` + hex.EncodeToString(sum[:8]) + `"`,
+	}, true
 }
 
 // consoleAssetPaths lists the URL paths the console loads, so Start can route

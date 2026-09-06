@@ -476,6 +476,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Description: alert.Description,
 					Details: fmt.Sprintf("%s | threshold %.2f | GeoIP: %s (%s)",
 						bev.Summary(), cfg.BeaconScore, geo.Country, geo.Org),
+					// The same numbers the sentence above is built from, kept
+					// as numbers. The console can then show how far past the
+					// threshold this verdict actually was, and sort a page of
+					// beacon alerts by strength, instead of re-reading prose.
+					Evidence:    bev.JSON(cfg.BeaconScore),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,

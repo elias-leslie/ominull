@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <time.h>
+#include <dirent.h>
 #include <curl/curl.h>
 
 #define TERMINAL_MAX_FRAME_SIZE 65536
@@ -298,15 +299,53 @@ static inline int Terminal_RecvWsFrame(CURL* curl, curl_socket_t sock, int* out_
  * Child Process Tree Termination
  * ------------------------------------------------------------------------- */
 
+/* Signal every process in the pseudoterminal's session, not only the shell's
+ * own process group. forkpty(3) makes the shell a session leader, and an
+ * interactive shell puts each job it starts into a *separate* process group
+ * inside that session - so "sleep 900 &" survived a terminate that killed the
+ * shell, while the console promised the operator that everything started in
+ * that shell was gone. /proc is the only way to enumerate a session. */
+static inline void Terminal_SignalSession(pid_t sid, int sig) {
+    DIR* proc = opendir("/proc");
+    if (!proc) return;
+    struct dirent* ent;
+    while ((ent = readdir(proc)) != NULL) {
+        pid_t pid = (pid_t)atoi(ent->d_name);
+        if (pid <= 1 || pid == sid) continue;
+
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
+        char line[512];
+        size_t n = fread(line, 1, sizeof(line) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        line[n] = '\0';
+
+        /* Field 2 is the executable name in parentheses and may itself contain
+         * spaces and parentheses, so the fields are read after the last ')'. */
+        char* after = strrchr(line, ')');
+        if (!after) continue;
+        int state = 0;
+        int ppid = 0, pgrp = 0, session = 0;
+        if (sscanf(after + 1, " %c %d %d %d", (char*)&state, &ppid, &pgrp, &session) != 4) continue;
+        if (session == (int)sid) kill(pid, sig);
+    }
+    closedir(proc);
+}
+
 static inline void Terminal_KillChildTree(pid_t child_pid) {
     if (child_pid <= 1) return;
 
     // Send SIGTERM to child process group
     kill(-child_pid, SIGTERM);
+    Terminal_SignalSession(child_pid, SIGTERM);
     usleep(50000); // 50ms grace period
 
     // Enforce unconditional SIGKILL to full child process group
     kill(-child_pid, SIGKILL);
+    Terminal_SignalSession(child_pid, SIGKILL);
 
     // Reap child to avoid zombies
     int status = 0;

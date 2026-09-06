@@ -414,3 +414,148 @@ func (s *Server) handleTerminalFrames(w http.ResponseWriter, r *http.Request) {
 
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
+
+// handleTerminalSessionAttach re-mints the operator connect cookie for a live
+// session and hands back its refreshed summary, so the console can open a new
+// WebSocket against a session it has detached from.
+//
+// It deliberately does not ask for a fresh ActionProof. The V2 proof on session
+// creation authorises *spawning* a root shell on an endpoint; coming back to a
+// shell this operator already spawned, inside the same response session, is not
+// a second privileged action, and demanding a TOTP code to look at output you
+// have already been shown teaches people to keep a shell attached rather than
+// detach it. The response session is still required - the route is behind
+// responseGate and authMiddleware, and a lapsed unlock fails here exactly as it
+// does everywhere else.
+func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.terminalMgr == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
+		return
+	}
+	if r.Header.Get("X-Auth-Method") == "api-key" {
+		writeJSONError(w, http.StatusForbidden, "static API keys cannot attach to terminal sessions")
+		return
+	}
+	role := r.Header.Get("X-Role")
+	if role != "admin" && role != "operator" {
+		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to attach to a terminal session")
+		return
+	}
+
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session_id")
+		return
+	}
+
+	sess, err := s.terminalMgr.GetSession(req.SessionID)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.TenantID != tenantID {
+		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
+		return
+	}
+	if !sess.IsLive() {
+		writeJSONError(w, http.StatusConflict, "session is no longer live and cannot be attached")
+		return
+	}
+
+	token, err := s.terminalMgr.RotateOperatorToken(req.SessionID)
+	if err != nil {
+		writeJSONError(w, http.StatusConflict, "attach refused: "+err.Error())
+		return
+	}
+
+	// The token never travels in a URL or a response body: it is an HttpOnly,
+	// Secure, SameSite=Strict cookie scoped to the WebSocket path, which the
+	// browser then attaches to the upgrade request by itself. MaxAge is short
+	// because it is consumed immediately - the previous 300s window was the
+	// only thing making it look like a long-lived credential.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "ominull_terminal_token",
+		Value:    token,
+		Path:     "/api/v1/terminal/ws/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   120,
+	})
+
+	s.audit(r, "TERMINAL_SESSION_REATTACHED", req.SessionID,
+		fmt.Sprintf("Operator reattached to terminal session %s on %s", req.SessionID, sess.EndpointID))
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sess.Summary())
+}
+
+// handleTerminalSessionDetach drops the operator side of a live session and
+// leaves the remote process tree running. The console normally detaches by
+// closing its WebSocket; this exists for a caller that has none - a page that
+// was closed, or an operator releasing a session from the Assets row.
+func (s *Server) handleTerminalSessionDetach(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.terminalMgr == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
+		return
+	}
+	if r.Header.Get("X-Auth-Method") == "api-key" {
+		writeJSONError(w, http.StatusForbidden, "static API keys cannot detach terminal sessions")
+		return
+	}
+	role := r.Header.Get("X-Role")
+	if role != "admin" && role != "operator" {
+		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to detach a terminal session")
+		return
+	}
+
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing session_id")
+		return
+	}
+
+	sess, err := s.terminalMgr.GetSession(req.SessionID)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.TenantID != tenantID {
+		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
+		return
+	}
+
+	if err := s.terminalMgr.DetachSession(req.SessionID, req.Reason); err != nil {
+		writeJSONError(w, http.StatusConflict, "detach refused: "+err.Error())
+		return
+	}
+
+	s.audit(r, "TERMINAL_SESSION_DETACHED", req.SessionID,
+		fmt.Sprintf("Operator detached from terminal session %s on %s; remote process tree left running", req.SessionID, sess.EndpointID))
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sess.Summary())
+}

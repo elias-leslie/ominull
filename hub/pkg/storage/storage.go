@@ -74,24 +74,24 @@ type Endpoint struct {
 }
 
 type Event struct {
-	ID          int64     `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	EndpointID  string    `json:"endpoint_id"`
-	Timestamp   time.Time `json:"timestamp"`
-	Layer       string    `json:"layer"`
-	Action      string    `json:"action"`    // PERMIT, BLOCK
-	Direction   string    `json:"direction"` // INBOUND, OUTBOUND
-	Protocol    uint8     `json:"protocol"`
-	SrcIP       string    `json:"src_ip"`
-	DstIP       string    `json:"dst_ip"`
-	SrcPort     uint16    `json:"src_port"`
-	DstPort     uint16    `json:"dst_port"`
-	BytesIn     int64     `json:"bytes_in"`
-	BytesOut    int64     `json:"bytes_out"`
-	Country     string    `json:"country"`
-	ProcessPath       string    `json:"process_path"`
-	ProcessID         uint32    `json:"process_id"`
-	Domain            string    `json:"domain,omitempty"`
+	ID                      int64      `json:"id"`
+	TenantID                string     `json:"tenant_id"`
+	EndpointID              string     `json:"endpoint_id"`
+	Timestamp               time.Time  `json:"timestamp"`
+	Layer                   string     `json:"layer"`
+	Action                  string     `json:"action"`    // PERMIT, BLOCK
+	Direction               string     `json:"direction"` // INBOUND, OUTBOUND
+	Protocol                uint8      `json:"protocol"`
+	SrcIP                   string     `json:"src_ip"`
+	DstIP                   string     `json:"dst_ip"`
+	SrcPort                 uint16     `json:"src_port"`
+	DstPort                 uint16     `json:"dst_port"`
+	BytesIn                 int64      `json:"bytes_in"`
+	BytesOut                int64      `json:"bytes_out"`
+	Country                 string     `json:"country"`
+	ProcessPath             string     `json:"process_path"`
+	ProcessID               uint32     `json:"process_id"`
+	Domain                  string     `json:"domain,omitempty"`
 	SNI                     string     `json:"sni,omitempty"`
 	ProcessInstanceID       string     `json:"process_instance_id,omitempty"`
 	ParentPID               uint32     `json:"parent_pid,omitempty"`
@@ -140,16 +140,25 @@ type Exclusion struct {
 }
 
 type AnomalyAlert struct {
-	ID           string    `json:"id"`
-	TenantID     string    `json:"tenant_id"`
-	LocationID   string    `json:"location_id"`
-	EndpointID   string    `json:"endpoint_id"`
-	Hostname     string    `json:"hostname"`
-	AnomalyType  string    `json:"anomaly_type"` // "NOVEL_PROCESS_EGRESS", "UNUSUAL_PORT", "BANDWIDTH_SPIKE", "NOVEL_COUNTRY"
-	Severity     string    `json:"severity"`     // "LOW", "MEDIUM", "HIGH", "CRITICAL"
-	Title        string    `json:"title"`
-	Description  string    `json:"description"`
-	Details      string    `json:"details"`
+	ID          string `json:"id"`
+	TenantID    string `json:"tenant_id"`
+	LocationID  string `json:"location_id"`
+	EndpointID  string `json:"endpoint_id"`
+	Hostname    string `json:"hostname"`
+	AnomalyType string `json:"anomaly_type"` // "NOVEL_PROCESS_EGRESS", "UNUSUAL_PORT", "BANDWIDTH_SPIKE", "NOVEL_COUNTRY"
+	Severity    string `json:"severity"`     // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Details     string `json:"details"`
+	// Evidence is the detector's own numbers as JSON, not prose. The beacon
+	// detector computes ten of them - score, regularity, consistency,
+	// coefficient of variation, mean interval, sample count - and every one
+	// was flattened into the Details sentence above, so the console could
+	// print the finding but could not sort by it, filter on it, or show an
+	// operator how close to the threshold a verdict actually was. Empty for
+	// detectors that have no structured evidence, and for every alert raised
+	// before this column existed.
+	Evidence     string    `json:"evidence,omitempty"`
 	ProcessPath  string    `json:"process_path"`
 	DstIP        string    `json:"dst_ip"`
 	DstPort      uint16    `json:"dst_port"`
@@ -657,6 +666,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN executable_sha256 TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN attribution_status TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
+		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
 	}
 	for _, m := range migrations {
@@ -1657,17 +1667,17 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 	const queryCols = "id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, ''), COALESCE(process_instance_id, ''), COALESCE(parent_pid, 0), COALESCE(parent_process_instance_id, ''), COALESCE(command_line, ''), COALESCE(user_identity, ''), COALESCE(executable_sha256, ''), COALESCE(attribution_status, ''), observed_at"
 	if tenantID != "" && endpointID != "" {
 		rows, err = s.db.Query(
-			"SELECT " + queryCols + " FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT "+queryCols+" FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, endpointID, limit,
 		)
 	} else if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT " + queryCols + " FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT "+queryCols+" FROM events WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT " + queryCols + " FROM events ORDER BY timestamp DESC LIMIT ?",
+			"SELECT "+queryCols+" FROM events ORDER BY timestamp DESC LIMIT ?",
 			limit,
 		)
 	}
@@ -1983,8 +1993,8 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	}
 
 	query := `
-	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, evidence, process_path, dst_ip, dst_port, timestamp, acknowledged)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		severity=excluded.severity,
 		description=excluded.description,
@@ -1993,7 +2003,7 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	_, err := s.db.Exec(
 		query,
 		a.ID, a.TenantID, a.LocationID, a.EndpointID, a.Hostname,
-		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details,
+		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details, a.Evidence,
 		a.ProcessPath, a.DstIP, a.DstPort, a.Timestamp, ackInt,
 	)
 	return err
@@ -2060,7 +2070,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		return nil, 0, err
 	}
 
-	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
 	queryArgs := append(args, limit, offset)
 
 	rows, err := s.db.Query(query, queryArgs...)
@@ -2075,7 +2085,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		var ackInt int
 		if err := rows.Scan(
 			&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
-			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details,
+			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details, &a.Evidence,
 			&a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
 		); err != nil {
 			return nil, 0, err

@@ -130,11 +130,12 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	setConsoleSecurityHeaders(w, "")
+	gateNonce := newCSPNonce()
+	setConsoleSecurityHeaders(w, gateNonce)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if session, ok := s.setupSessionFromRequest(r); ok {
-		doc, nonce := setupWizardDocument(session.CSRF, s.setupIsComplete())
+		doc, nonce := setupWizardDocument(session.CSRF, s.agentVersion, s.setupIsComplete())
 		setConsoleSecurityHeaders(w, nonce)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -142,7 +143,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(setupGateDocument()))
+	_, _ = w.Write(setupGateDocument(gateNonce, s.agentVersion))
 }
 
 func (s *Server) handleSetupSession(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +423,7 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page := `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull status</title><link rel="stylesheet" href="/app.css"></head>
+<head>` + consoleSharedHead("Ominull status", nonce, s.agentVersion) + `</head>
 <body class="setup-page">
 <main class="setup-shell">
   <header class="setup-head"><div><h1>Ominull status</h1><p class="sub">Live checks for host, packages, network, certificates, agent transport, identity, and fleet proof.</p></div><a class="btn" href="/">Open console</a></header>
@@ -432,23 +433,8 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 (function(){
   "use strict";
   var checks=document.querySelector("#checks"), rerun=document.querySelector("#rerun");
-  function el(tag,cls,text){var node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;}
-  function render(body){
-    checks.textContent="";
-    var results=body.results||[], counts={pass:0,fail:0,warn:0,not_configured:0};
-    results.forEach(function(item){counts[item.state]=(counts[item.state]||0)+1;});
-    var summary=el("div","diag-summary");
-    [["pass","Pass"],["fail","Fail"],["warn","Warning"],["not_configured","Not configured"]].forEach(function(pair){summary.appendChild(el("span","st",""+counts[pair[0]]+" "+pair[1]));});
-    var grid=el("div","diag-grid");
-    results.forEach(function(item){
-      var card=el("article","diag");card.dataset.state=item.state||"not_configured";
-      card.appendChild(el("span","diag-mark",item.state==="pass"?"✓":item.state==="fail"?"×":item.state==="warn"?"!":"–"));
-      var copy=el("div");copy.appendChild(el("h3","",item.title||"Check"));copy.appendChild(el("p","",item.summary||"No result"));
-      if(item.remediation)copy.appendChild(el("p","remediation",item.remediation));card.appendChild(copy);grid.appendChild(card);
-    });
-    checks.append(summary,grid);
-  }
-  function load(){rerun.disabled=true;rerun.textContent="Running…";return fetch("/api/v1/setup/status",{credentials:"same-origin"}).then(function(response){if(!response.ok)throw new Error("diagnostics request failed");return response.json();}).then(render).catch(function(error){checks.textContent=error.message;}).finally(function(){rerun.disabled=false;rerun.textContent="Run checks again";});}
+` + diagnosticsRendererJS + `
+  function load(){rerun.disabled=true;rerun.textContent="Running…";return fetch("/api/v1/setup/status",{credentials:"same-origin"}).then(function(response){if(!response.ok)throw new Error("diagnostics request failed");return response.json();}).then(function(body){renderChecks(checks,body);}).catch(function(error){checks.textContent=error.message;}).finally(function(){rerun.disabled=false;rerun.textContent="Run checks again";});}
   rerun.addEventListener("click",load);load();
 })();
 </script>
@@ -479,10 +465,12 @@ func secureStringEqual(a, b string) bool {
 	return diff == 0
 }
 
-var setupGateTemplate = template.Must(template.New("setup-gate").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ominull setup</title><link rel="stylesheet" href="/app.css"></head><body><main class="gate"><form method="post" action="/api/v1/setup/session"><h1>Ominull first-run setup</h1><p>Run <code>ominullctl setup-token</code> on the hub host. Token is one-use and never appears in a URL.</p><input type="password" name="token" autocomplete="off" required autofocus placeholder="Local setup token"><button class="btn btn-primary" type="submit">Open setup</button></form></main></body></html>`))
+var setupGateTemplate = template.Must(template.New("setup-gate").Parse(`<!doctype html><html lang="en"><head>{{.Head}}</head><body><main class="gate"><form method="post" action="/api/v1/setup/session"><h1>Ominull first-run setup</h1><p>Run <code>ominullctl setup-token</code> on the hub host. Token is one-use and never appears in a URL.</p><input type="password" name="token" autocomplete="off" required autofocus placeholder="Local setup token"><button class="btn btn-primary" type="submit">Open setup</button></form></main></body></html>`))
 
-func setupGateDocument() []byte {
+func setupGateDocument(nonce, version string) []byte {
 	var b strings.Builder
-	_ = setupGateTemplate.Execute(&b, nil)
+	_ = setupGateTemplate.Execute(&b, map[string]any{
+		"Head": template.HTML(consoleSharedHead("Ominull setup", nonce, version)),
+	})
 	return []byte(b.String())
 }

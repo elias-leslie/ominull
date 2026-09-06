@@ -451,9 +451,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	addr := clientIP(r)
 	if s.throttle.blocked(addr) {
 		w.Header().Set("Retry-After", "60")
+		doc := s.consoleGateFor(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write(s.consoleGate())
+		w.Write(doc)
 		return
 	}
 
@@ -519,9 +520,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		if provided != "" && s.throttle.fail(addr) {
 			log.Printf("[!] %s has failed the console gate %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
 		}
+		doc := s.consoleGateFor(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write(s.consoleGate())
+		w.Write(doc)
 		return
 	}
 	s.throttle.succeed(addr)
@@ -570,7 +572,16 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) consoleGate() []byte {
 	issuer, _ := s.store.GetSetting("oidc.issuer")
-	return consoleGateDocument(strings.TrimSpace(issuer) != "")
+	return consoleGateDocument(strings.TrimSpace(issuer) != "", "", s.agentVersion)
+}
+
+// consoleGateFor writes the gate with a nonce, so the pre-paint theme script in
+// its head is allowed to run and the lock screen matches the console behind it.
+func (s *Server) consoleGateFor(w http.ResponseWriter) []byte {
+	nonce := newCSPNonce()
+	setConsoleSecurityHeaders(w, nonce)
+	issuer, _ := s.store.GetSetting("oidc.issuer")
+	return consoleGateDocument(strings.TrimSpace(issuer) != "", nonce, s.agentVersion)
 }
 
 // consoleSessionCookie carries a short-lived signed assertion that this browser
@@ -3410,6 +3421,8 @@ func (s *Server) routes() *http.ServeMux {
 	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.handleTerminalSessions)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
+	mux.HandleFunc("/api/v1/terminal/sessions/attach", s.authMiddleware(s.responseGate(s.handleTerminalSessionAttach)))
+	mux.HandleFunc("/api/v1/terminal/sessions/detach", s.authMiddleware(s.responseGate(s.handleTerminalSessionDetach)))
 	mux.HandleFunc("/api/v1/terminal/frames", s.authMiddleware(s.responseGate(s.handleTerminalFrames)))
 	mux.HandleFunc("/api/v1/terminal/ws/operator", s.handleTerminalWSOperator)
 	mux.HandleFunc("/api/v1/terminal/ws/agent", s.handleTerminalWSAgent)

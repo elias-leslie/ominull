@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +177,48 @@ func TestTheThresholdIsTheOperators(t *testing.T) {
 	if _, hit := feed(t, strict, 30, 60*time.Second,
 		func(i int) time.Duration { return time.Duration((i%5)-2) * time.Second }, nil); hit {
 		t.Error("a deliberately strict tuning fired anyway")
+	}
+}
+
+// The detector computed ten numbers and threw all of them into one prose
+// sentence, so the console could print a beacon verdict but not sort by its
+// strength or show how close to the threshold it landed. JSON keeps them.
+func TestBeaconEvidenceJSONCarriesTheNumbers(t *testing.T) {
+	cfg := storage.DefaultDetectionTuning()
+	ev, hit := feed(t, cfg, 30, 60*time.Second,
+		func(i int) time.Duration { return time.Duration((i%3)-1) * 900 * time.Millisecond },
+		func(i int) int64 { return int64(480 + i%5) })
+	if !hit {
+		t.Fatalf("expected the window to convict: %s", ev.Summary())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal([]byte(ev.JSON(cfg.BeaconScore)), &got); err != nil {
+		t.Fatalf("evidence is not valid JSON: %v", err)
+	}
+	for _, key := range []string{"kind", "score", "threshold", "regularity", "consistency", "mean_interval", "samples", "span_minutes"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("evidence is missing %q", key)
+		}
+	}
+	if got["kind"] != "beacon" {
+		t.Errorf("kind = %v, want beacon", got["kind"])
+	}
+	if got["threshold"] != cfg.BeaconScore {
+		t.Errorf("threshold = %v, want %v", got["threshold"], cfg.BeaconScore)
+	}
+	if score, _ := got["score"].(float64); score != ev.Score {
+		t.Errorf("score = %v, want %v", got["score"], ev.Score)
+	}
+
+	// A payload size the agent never reported must not come back as "0% variation",
+	// which reads as a far stronger finding than "we do not know".
+	ev.SizeVariation = -1
+	var unreported map[string]any
+	if err := json.Unmarshal([]byte(ev.JSON(cfg.BeaconScore)), &unreported); err != nil {
+		t.Fatalf("evidence is not valid JSON: %v", err)
+	}
+	if _, present := unreported["size_variation"]; present {
+		t.Error("unreported payload sizes must be absent, not zero")
 	}
 }
