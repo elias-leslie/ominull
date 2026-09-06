@@ -979,10 +979,15 @@ input[type="checkbox"] {
   overflow-x: auto;
 }
 
+/* 860px was the floor for every table on the page, so a four-column table in a
+   half-width card was forced wider than its card and scrolled sideways with a
+   column hidden off the edge. The floor scales with the column count instead,
+   and still lands on 860px for the wide tables it was written for. --tbl-cols
+   is set by simpleTable; the fallback keeps a hand-built table as it was. */
 table {
   border-collapse: collapse;
   width: 100%;
-  min-width: 860px;
+  min-width: min(860px, calc(var(--tbl-cols, 7) * 124px));
 }
 
 thead th {
@@ -1458,6 +1463,21 @@ p.pending {
 .mini[data-danger="true"] {
   color: var(--crit);
   border-color: var(--crit-hot);
+}
+
+/* .btn-primary is declared above .mini at the same specificity, so .mini won
+   and every primary mini button rendered exactly like a plain one - including
+   the selected entry in the traffic range group, which left no way to tell
+   which of 15M/1H/6H/24H/7D/ALL was in force. */
+.mini.btn-primary {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+}
+
+.mini.btn-primary:hover {
+  color: var(--brand);
+  border-color: var(--brand);
 }
 
 /* --------------------------------------------------------- context menu */

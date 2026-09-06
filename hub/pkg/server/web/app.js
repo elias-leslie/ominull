@@ -3052,7 +3052,8 @@
       });
       tbody.appendChild(tr);
     });
-    return h("div", { cls: "tblwrap" }, h("table", {}, h("thead", {}, thead), tbody));
+    return h("div", { cls: "tblwrap" },
+      h("table", { vars: { "--tbl-cols": String(headers.length) } }, h("thead", {}, thead), tbody));
   }
 
   /* ------------------------------------------------------- scan progress */
@@ -4771,6 +4772,10 @@
       return h("button", {
         cls: "btn mini" + (active ? " btn-primary" : ""),
         type: "button",
+        /* The class alone was the whole answer to "which window am I looking
+           at", and it was drawing nothing; this states it to a reader who
+           cannot see the colour either way. */
+        "aria-pressed": active ? "true" : "false",
         text: r.toUpperCase(),
         on: {
           click: function () {
