@@ -147,7 +147,8 @@ sandbox /usr/bin/ominullctl setup-token >/dev/null
 [ -s "${SANDBOX_ROOT}/var/lib/ominull/setup.token" ]
 [ "$(stat -c '%a' "${SANDBOX_ROOT}/var/lib/ominull/setup.token")" = 600 ]
 printf '%s\n' 'hub_url=https://example.invalid' 'endpoint_id=lifecycle' > "${SANDBOX_ROOT}/etc/ominull/agent.conf"
-printf '%s\n' 'OMINULL_ADMIN_KEY=test-admin-value' 'OMINULL_DB=/var/lib/ominull/ominull.db' > "${SANDBOX_ROOT}/etc/ominull/hub.env"
+printf '%s\n' 'OMINULL_ADMIN_KEY=test-admin-value' 'OMINULL_DB=/var/lib/ominull/ominull.db' \
+    "OMINULL_AGENT_VERSION=${VERSION}" > "${SANDBOX_ROOT}/etc/ominull/hub.env"
 printf '%s\n' 'production-data' > "${SANDBOX_ROOT}/var/lib/ominull/ominull.db"
 printf '%s\n' 'pki-data' > "${SANDBOX_ROOT}/var/lib/ominull/pki-marker"
 
@@ -159,6 +160,13 @@ grep -q 'endpoint_id=lifecycle' "${SANDBOX_ROOT}/etc/ominull/agent.conf"
 ! grep -q '^OMINULL_ADMIN_KEY=' "${SANDBOX_ROOT}/etc/ominull/hub.env"
 grep -q '^OMINULL_ADMIN_KEY_FILE=/etc/ominull/admin.key$' "${SANDBOX_ROOT}/etc/ominull/hub.env"
 [ "$(tr -d '\n' < "${SANDBOX_ROOT}/etc/ominull/admin.key")" = 'test-admin-value' ]
+# The bundled agent version has to follow the package across an upgrade. It only
+# ever got written on a first install, so a hub upgraded in place went on
+# offering the fleet the agent it shipped with years of releases ago and went on
+# serving its console assets under the old ?v= and the old cache name.
+grep -q "^OMINULL_AGENT_VERSION=${NEXT_VERSION}$" "${SANDBOX_ROOT}/etc/ominull/hub.env"
+# ...without disturbing a line an operator owns.
+grep -q '^OMINULL_DB=/var/lib/ominull/ominull.db$' "${SANDBOX_ROOT}/etc/ominull/hub.env"
 
 if sandbox /usr/bin/dpkg --force-depends -i /release/base-agent.deb >/dev/null 2>&1; then
     echo "[-] Agent preinst allowed a downgrade." >&2

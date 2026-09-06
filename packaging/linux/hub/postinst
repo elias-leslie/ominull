@@ -137,6 +137,20 @@ if ! grep -q '^OMINULL_ADMIN_KEY_FILE=' /etc/ominull/hub.env; then
     printf '%s\n' 'OMINULL_ADMIN_KEY_FILE=/etc/ominull/admin.key' >> /etc/ominull/hub.env
 fi
 
+# OMINULL_AGENT_VERSION is not a setting - it is the agent release bundled with
+# *this* package, and it decides three things: which agent the hub offers to an
+# outdated endpoint, the ?v= query the console requests its assets with, and the
+# service worker's cache name. The block above writes it only when hub.env does
+# not exist, so on every upgrade since the first install it kept the version
+# that first installed the hub: a 1.8.4 hub served app.js?v=1.8.3 out of a cache
+# keyed on 1.8.3, and offered the fleet an agent it no longer bundled. Rewrite it
+# to track the package on every install, and leave every other line alone.
+if grep -q '^OMINULL_AGENT_VERSION=' /etc/ominull/hub.env; then
+    sed -i 's/^OMINULL_AGENT_VERSION=.*/OMINULL_AGENT_VERSION=@VERSION@/' /etc/ominull/hub.env
+else
+    printf '%s\n' 'OMINULL_AGENT_VERSION=@VERSION@' >> /etc/ominull/hub.env
+fi
+
 # 5. Distribute downloaded package artifacts
 if [ -d /usr/share/ominull/packages ]; then
     install -d -o root -g root -m 0755 /opt/ominull/bin
