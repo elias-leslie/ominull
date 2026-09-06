@@ -37,7 +37,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.15"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.16"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -959,13 +959,18 @@ typedef struct {
  * conversation or a corpse.
  *
  * This filter is the difference between telemetry and noise. /proc/net/tcp
- * lists every socket the kernel still remembers, and on a busy workstation
- * most of them are finished: TIME_WAIT lingers for two minutes after a normal
- * close, and a leaked descriptor sits in CLOSE_WAIT indefinitely. Neither can
- * move another byte, so both report a zero-byte delta on every pass - and a
- * zero-byte record on a fixed timer is exactly the shape of a beacon. A host
- * with 170 sockets in TIME_WAIT was manufacturing dozens of perfectly
- * metronomic conversations out of connections that had already ended.
+ * lists every socket the kernel still remembers, including ones that have
+ * finished. A leaked descriptor sits in CLOSE_WAIT indefinitely and can never
+ * move another byte, so it reported a zero-byte delta on every pass, and the
+ * idle rollup released it again every thirty seconds - a zero-byte record on
+ * a fixed timer, which is exactly the shape of a beacon. Ten sockets a worker
+ * had leaked to three market-data APIs produced hours of metronomic
+ * command-and-control findings against traffic that did not exist.
+ *
+ * TIME_WAIT never reached here: the kernel prints those rows with no inode,
+ * and the inode check above has always dropped them. Nothing is lost by
+ * naming the state anyway - what a finished connection did was already
+ * reported while it was established.
  *
  * SYN_SENT is deliberately kept: a connection attempt that never completes is
  * a real signal, and it is one of the few places a dead command-and-control

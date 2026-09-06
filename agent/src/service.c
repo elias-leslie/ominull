@@ -226,7 +226,14 @@ typedef struct {
 #define FLOW_DEDUP_CAP_WIN 2048
 static FLOW_DEDUP_SLOT_WIN g_FlowDedupWin[FLOW_DEDUP_CAP_WIN];
 
-static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid, ULONG64 bytesIn, ULONG64 bytesOut) {
+/* How often a socket that is merely present, rather than moving data, may be
+ * re-released. A live connection repeats on the ordinary rollup; a finished
+ * one is a record that contact happened, and repeating that on a short timer
+ * is what made closed sockets look like check-ins. */
+#define FLOW_ROLLUP_MS_WIN 30000
+#define FLOW_CONTACT_ROLLUP_MS_WIN 600000
+
+static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid, ULONG64 bytesIn, ULONG64 bytesOut, DWORD rollupMs) {
     if (rip == 0x7f000001 || rip == 0) return false; // 127.0.0.1 or 0.0.0.0
     if (bytesIn > 0 || bytesOut > 0) return true;
 
@@ -246,9 +253,9 @@ static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid
             return true; // Novel flow
         }
         if (slot->remoteIp == rip && slot->remotePort == rport && slot->protocol == proto && slot->processId == pid) {
-            if (now - slot->lastReported >= 30000) {
+            if (now - slot->lastReported >= rollupMs) {
                 slot->lastReported = now;
-                return true; // 30s rollup
+                return true; // rollup
             }
             return false; // Suppress duplicate idle keepalive
         }
@@ -264,6 +271,7 @@ typedef struct {
     MIB_TCPROW_OWNER_PID row;
     ULONG64 bytesIn;
     ULONG64 bytesOut;
+    bool live;
 } FLOW_CANDIDATE_WIN;
 
 #define MAX_FLOW_CANDIDATES_WIN 256
@@ -282,9 +290,28 @@ typedef struct {
  * SYN_SENT is kept on purpose: a connection attempt that never completes is
  * a real signal, and one of the few ways a dead command-and-control address
  * announces itself. */
-static bool IsReportableTcpStateWin(DWORD state) {
+static bool IsLiveTcpStateWin(DWORD state) {
     return state == MIB_TCP_STATE_ESTAB || state == MIB_TCP_STATE_SYN_SENT ||
            state == MIB_TCP_STATE_FIN_WAIT1 || state == MIB_TCP_STATE_FIN_WAIT2;
+}
+
+/* TIME_WAIT is the one finished state still worth reporting, and it is
+ * reported as a record of contact rather than as a flow.
+ *
+ * Windows holds a closed connection here for about two minutes, and most of
+ * what this host does is shorter than the polling interval - a name lookup, a
+ * telemetry post, an update check - so TIME_WAIT is the only state in which
+ * those connections are ever visible. Dropping it outright cost four fifths of
+ * the destinations this endpoint reported. It carries no byte counts and no
+ * owning process, so it says one true thing - that this host contacted that
+ * address - and it is released at the contact cadence, not the flow one.
+ *
+ * The other finished states are not kept. CLOSE_WAIT, LAST_ACK and CLOSING all
+ * describe a connection that was established, and an established connection
+ * has already been reported with its real process and its real bytes; the only
+ * thing re-reporting it adds is a timer. */
+static bool IsContactTcpStateWin(DWORD state) {
+    return state == MIB_TCP_STATE_TIME_WAIT;
 }
 
 /* SelectFlowCandidatesWin chooses which sockets get this batch's wire slots.
@@ -310,7 +337,9 @@ static size_t SelectFlowCandidatesWin(const FLOW_CANDIDATE_WIN* candidates, size
             if (!ShouldReportFlowWin(ntohl(candidates[i].row.dwRemoteAddr),
                                      ntohs((u_short)candidates[i].row.dwRemotePort),
                                      IPPROTO_TCP, candidates[i].row.dwOwningPid,
-                                     candidates[i].bytesIn, candidates[i].bytesOut)) {
+                                     candidates[i].bytesIn, candidates[i].bytesOut,
+                                     candidates[i].live ? FLOW_ROLLUP_MS_WIN
+                                                        : FLOW_CONTACT_ROLLUP_MS_WIN)) {
                 continue;
             }
             order[selected++] = i;
@@ -337,20 +366,23 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
                     MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
                     if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
                     if (row.dwRemoteAddr == 0x0100007f || row.dwLocalAddr == 0x0100007f) continue; // Loopback
-                    if (!IsReportableTcpStateWin(row.dwState)) continue;
+                    bool live = IsLiveTcpStateWin(row.dwState);
+                    if (!live && !IsContactTcpStateWin(row.dwState)) continue;
 
                     /* Measured for every live socket, not only for the ones
                      * that end up on the wire. These are cumulative counters
                      * read as interval deltas, so a socket skipped this poll
                      * and reported the next would otherwise arrive carrying
-                     * everything it had ever sent. */
+                     * everything it had ever sent. A finished connection has
+                     * no estats to read. */
                     OMINULL_EVENT measured;
                     memset(&measured, 0, sizeof(measured));
-                    EstatsMeasure(&row, &measured);
+                    if (live) EstatsMeasure(&row, &measured);
 
                     candidates[count].row = row;
                     candidates[count].bytesIn = measured.BytesIn;
                     candidates[count].bytesOut = measured.BytesOut;
+                    candidates[count].live = live;
                     count++;
                 }
             }
