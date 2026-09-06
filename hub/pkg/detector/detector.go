@@ -633,7 +633,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			bWin = &beaconWindow{}
 			e.beaconTracker[beaconKey] = bWin
 		}
-		bev, isBeacon := bWin.record(now, ev.BytesOut, cfg)
+		bev, isBeacon := bWin.record(now, ev.BytesOut, ev.BytesIn+ev.BytesOut, cfg)
 		e.mu.Unlock()
 
 		if isBeacon && !warming {

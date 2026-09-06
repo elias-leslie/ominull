@@ -25,7 +25,10 @@ func feed(t *testing.T, cfg storage.DetectionTuning, n int, interval time.Durati
 		if size != nil {
 			b = size(i)
 		}
-		ev, hit = bw.record(at, b, cfg)
+		// Every synthetic check-in carries a small reply, so these cases
+		// exercise interval and payload scoring rather than the rule that
+		// throws away observations which moved nothing at all.
+		ev, hit = bw.record(at, b, b+64, cfg)
 	}
 	return ev, hit
 }
@@ -91,7 +94,7 @@ func TestIrregularHumanTrafficIsNotABeacon(t *testing.T) {
 	var hit bool
 	for i := 0; i < 40; i++ {
 		at = at.Add(gaps[i%len(gaps)] * time.Second)
-		ev, hit = bw.record(at, int64(2000+i*137), cfg)
+		ev, hit = bw.record(at, int64(2000+i*137), int64(2064+i*137), cfg)
 		if hit {
 			t.Fatalf("human browsing called a beacon at sample %d: %s", i, ev.Summary())
 		}
@@ -112,7 +115,7 @@ func TestSimultaneousConnectionsDoNotManufactureRegularity(t *testing.T) {
 		at = at.Add(gaps[i%len(gaps)] * time.Second)
 		// Four sockets opened at once, then an irregular wait.
 		for k := 0; k < 4; k++ {
-			ev, hit = bw.record(at.Add(time.Duration(k)*15*time.Millisecond), 0, cfg)
+			ev, hit = bw.record(at.Add(time.Duration(k)*15*time.Millisecond), 0, 64, cfg)
 			if hit {
 				t.Fatalf("simultaneous sockets manufactured a beacon at %d: %s", i, ev.Summary())
 			}
@@ -220,5 +223,49 @@ func TestBeaconEvidenceJSONCarriesTheNumbers(t *testing.T) {
 	}
 	if _, present := unreported["size_variation"]; present {
 		t.Error("unreported payload sizes must be absent, not zero")
+	}
+}
+
+// The finding that started this rule. A worker leaked ten HTTPS sockets in
+// CLOSE_WAIT; the agent re-reported each of them on its thirty-second idle
+// rollup, so the hub saw a conversation with three market-data APIs that was
+// metronomic to within half a second for hours, with a payload that never
+// varied - because there was no payload. Nothing was sent to those addresses
+// at all. Regularity this perfect is a property of our own timer, and it must
+// not be readable as evidence about the network.
+func TestAZeroPayloadConversationIsNeverABeacon(t *testing.T) {
+	cfg := storage.DefaultDetectionTuning()
+	bw := &beaconWindow{}
+	at := time.Now().UTC().Add(-3 * time.Hour)
+	for i := 0; i < 360; i++ {
+		at = at.Add(30 * time.Second)
+		ev, hit := bw.record(at, 0, 0, cfg)
+		if hit {
+			t.Fatalf("a zero-byte socket rollup was called a beacon at sample %d: %s", i, ev.Summary())
+		}
+		if ev.Samples != 0 {
+			t.Fatalf("an observation carrying no bytes entered the window: %d samples", ev.Samples)
+		}
+	}
+}
+
+// The other half of the same rule: a conversation that only downloads still
+// counts. The bytes are inbound, so nothing is scored on payload size, but the
+// check-ins are real and the timing evidence stands.
+func TestAnInboundOnlyConversationStillScores(t *testing.T) {
+	cfg := storage.DefaultDetectionTuning()
+	bw := &beaconWindow{}
+	at := time.Now().UTC().Add(-2 * time.Hour)
+	var ev BeaconEvidence
+	var hit bool
+	for i := 0; i < 30; i++ {
+		at = at.Add(60*time.Second + time.Duration((i%3)-1)*900*time.Millisecond)
+		ev, hit = bw.record(at, 0, 900, cfg)
+	}
+	if !hit {
+		t.Fatalf("an inbound-only metronomic conversation was missed: %s", ev.Summary())
+	}
+	if ev.SizeVariation >= 0 {
+		t.Fatalf("outbound payload sizes were invented from inbound bytes: %.2f", ev.SizeVariation)
 	}
 }

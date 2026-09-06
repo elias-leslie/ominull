@@ -64,6 +64,44 @@ static int remove_tree_entry(const char* path, const struct stat* st, int type, 
     return remove(path);
 }
 
+
+static void test_socket_state_filter(void) {
+    check(IsReportableSocketState(0x01), "ESTABLISHED was not reportable");
+    check(IsReportableSocketState(0x02), "SYN_SENT was not reportable");
+    check(IsReportableSocketState(0x04), "FIN_WAIT1 was not reportable");
+    check(IsReportableSocketState(0x05), "FIN_WAIT2 was not reportable");
+    check(!IsReportableSocketState(0x06), "TIME_WAIT was reported as a live flow");
+    check(!IsReportableSocketState(0x07), "CLOSE was reported as a live flow");
+    check(!IsReportableSocketState(0x08), "CLOSE_WAIT was reported as a live flow");
+    check(!IsReportableSocketState(0x09), "LAST_ACK was reported as a live flow");
+    check(!IsReportableSocketState(0x0A), "LISTEN was reported as a live flow");
+    check(!IsReportableSocketState(0x0B), "CLOSING was reported as a live flow");
+}
+
+/* A batch has fewer slots than a busy host has sockets. The socket that moved
+ * bytes has to win one, whatever order /proc happened to list it in. */
+static void test_active_flows_win_the_batch(void) {
+    enum { CANDIDATES = 4 };
+    FLOW_CANDIDATE candidates[CANDIDATES];
+    PROC_SOCKET_OWNER owners[CANDIDATES];
+    size_t order[CANDIDATES];
+    memset(candidates, 0, sizeof(candidates));
+    memset(owners, 0, sizeof(owners));
+
+    for (size_t i = 0; i < CANDIDATES; i++) {
+        snprintf(candidates[i].src_ip, sizeof(candidates[i].src_ip), "10.0.0.9");
+        snprintf(candidates[i].dst_ip, sizeof(candidates[i].dst_ip), "10.0.0.%u", (unsigned)(20 + i));
+        candidates[i].dst_port = (uint16_t)(9000 + i);
+        candidates[i].inode = 70000UL + i;
+        owners[i].pid = (uint32_t)(70000 + i);
+    }
+    candidates[CANDIDATES - 1].bytes_out = 4096;
+
+    size_t selected = SelectFlowCandidates(candidates, owners, CANDIDATES, 2, order);
+    check(selected == 2, "selection did not fill the available slots");
+    check(order[0] == CANDIDATES - 1, "the socket that moved bytes did not win a slot");
+}
+
 static void make_fixture(void) {
     char template_path[] = "/tmp/ominull-linux-collector.XXXXXX";
     g_fixture_root = mkdtemp(template_path);
@@ -82,6 +120,15 @@ static void make_fixture(void) {
         exit(1);
     }
     fputs("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n", tcp);
+    /* Finished sockets, listed first so that a collector which ignores the
+     * state field would spend its first slots on them. TIME_WAIT, CLOSE_WAIT,
+     * LAST_ACK and CLOSING cannot carry another byte; a leaked descriptor can
+     * sit in CLOSE_WAIT for days, reporting a zero-byte delta on every pass. */
+    static const char* dead_states[] = {"06", "08", "09", "0B", "07", "0A"};
+    for (int i = 0; i < (int)(sizeof(dead_states) / sizeof(dead_states[0])); i++) {
+        fprintf(tcp, "%d: 0100000A:%04X 0400000A:0050 %s 00000000:00000000 00:00000000 0 1000 0 %lu\n",
+                900 + i, 5000 + i, dead_states[i], 60000UL + (unsigned long)i);
+    }
     for (int i = 0; i < FIXTURE_SOCKETS / 2; i++) {
         fprintf(tcp, "%d: 0100000A:%04X 0300000A:0050 01 00000000:%08X 00:00000000 0 1000 0 %lu\n",
                 i, 4000 + i, i, 50000UL + (unsigned long)i);
@@ -176,15 +223,24 @@ static void test_package_query(void) {
 int main(void) {
     test_legacy_config();
     test_package_query();
+    test_socket_state_filter();
+    test_active_flows_win_the_batch();
     make_fixture();
 
-    LINUX_FLOW_EVENT events[FIXTURE_SOCKETS];
+    /* Room for more than the live sockets, so a collector that reported the
+     * finished ones would show up as a larger count rather than being hidden
+     * by the cap. */
+    LINUX_FLOW_EVENT events[FIXTURE_SOCKETS + 16];
     g_ProcDescriptorWalks = 0;
-    size_t got = CollectActiveFlows(events, FIXTURE_SOCKETS);
+    size_t got = CollectActiveFlows(events, FIXTURE_SOCKETS + 16);
 
     char message[256];
     snprintf(message, sizeof(message), "fixture produced %d active flows, expected %d", (int)got, FIXTURE_SOCKETS);
     check(got == FIXTURE_SOCKETS, message);
+    for (size_t i = 0; i < got; i++) {
+        check(strcmp(events[i].dst_ip, "10.0.0.4") != 0,
+              "a finished socket was reported as an active flow");
+    }
     check(strcmp(events[FIXTURE_SOCKETS / 2].src_ip, "::2") == 0,
           "IPv6 local address was not decoded from tcp6");
     check(strcmp(events[FIXTURE_SOCKETS / 2].dst_ip, "2001:db8::1") == 0,

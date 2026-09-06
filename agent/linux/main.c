@@ -37,7 +37,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.13"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.15"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -931,12 +931,65 @@ static bool IsLoopbackAddress(const char* address) {
     return strcmp(address, "127.0.0.1") == 0 || strcmp(address, "::1") == 0;
 }
 
-// Read one TCP address-family table from /proc/net. The table is read first,
-// then process descriptors are walked once and joined by inode. That keeps
-// descriptor reads proportional to the proc tree, not to socket count.
+/* TCP states as /proc/net/tcp prints them, from include/net/tcp_states.h.
+ * Only the states in which a connection can still carry data are worth
+ * reporting as a flow. */
+#define TCP_STATE_ESTABLISHED 0x01
+#define TCP_STATE_SYN_SENT    0x02
+#define TCP_STATE_FIN_WAIT1   0x04
+#define TCP_STATE_FIN_WAIT2   0x05
+
+/* One socket the collector may report, before any process enrichment. The
+ * expensive half of a flow - the command line, the user identity and the
+ * executable hash behind it - is spent only on the sockets that win a wire
+ * slot, so candidates stay cheap enough to hold several times the wire cap. */
+typedef struct {
+    char src_ip[64];
+    char dst_ip[64];
+    uint16_t src_port;
+    uint16_t dst_port;
+    unsigned long inode;
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+} FLOW_CANDIDATE;
+
+#define MAX_FLOW_CANDIDATES 256
+
+/* IsReportableSocketState answers whether a socket in this state is a
+ * conversation or a corpse.
+ *
+ * This filter is the difference between telemetry and noise. /proc/net/tcp
+ * lists every socket the kernel still remembers, and on a busy workstation
+ * most of them are finished: TIME_WAIT lingers for two minutes after a normal
+ * close, and a leaked descriptor sits in CLOSE_WAIT indefinitely. Neither can
+ * move another byte, so both report a zero-byte delta on every pass - and a
+ * zero-byte record on a fixed timer is exactly the shape of a beacon. A host
+ * with 170 sockets in TIME_WAIT was manufacturing dozens of perfectly
+ * metronomic conversations out of connections that had already ended.
+ *
+ * SYN_SENT is deliberately kept: a connection attempt that never completes is
+ * a real signal, and it is one of the few places a dead command-and-control
+ * address shows itself. LISTEN never had a peer to talk to; the remote-port
+ * check already drops it, and naming it here says so on purpose. */
+static bool IsReportableSocketState(int state) {
+    switch (state) {
+        case TCP_STATE_ESTABLISHED:
+        case TCP_STATE_SYN_SENT:
+        case TCP_STATE_FIN_WAIT1:
+        case TCP_STATE_FIN_WAIT2:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Read one TCP address-family table from /proc/net into the candidate set.
+// The table is read first, then process descriptors are walked once and joined
+// by inode. That keeps descriptor reads proportional to the proc tree, not to
+// socket count.
 static void CollectSocketTable(const char* tableName, bool ipv6,
-                               LINUX_FLOW_EVENT* outEvents, size_t maxEvents,
-                               unsigned long* targetInodes, size_t* count) {
+                               FLOW_CANDIDATE* candidates, size_t maxCandidates,
+                               size_t* count) {
     char tablePath[256];
     ProcPath(tablePath, sizeof(tablePath), tableName);
     FILE* fp = fopen(tablePath, "r");
@@ -948,7 +1001,7 @@ static void CollectSocketTable(const char* tableName, bool ipv6,
         return;
     }
 
-    while (*count < maxEvents && fgets(line, sizeof(line), fp)) {
+    while (*count < maxCandidates && fgets(line, sizeof(line), fp)) {
         // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
         int sl = 0, state = 0;
         char localAddrHex[64] = {0}, remAddrHex[64] = {0};
@@ -957,26 +1010,25 @@ static void CollectSocketTable(const char* tableName, bool ipv6,
         int matched = sscanf(line, "%d: %64[0-9A-Fa-f]:%X %64[0-9A-Fa-f]:%X %X %*X:%*X %*X:%*X %*X %*d %*d %lu",
                              &sl, localAddrHex, &localPort, remAddrHex, &remPort, &state, &inode);
         if (matched < 7 || inode == 0 || remPort == 0 || IsZeroAddress(remAddrHex)) continue;
+        if (!IsReportableSocketState(state)) continue;
 
-        LINUX_FLOW_EVENT* ev = &outEvents[*count];
-        memset(ev, 0, sizeof(*ev));
+        FLOW_CANDIDATE* candidate = &candidates[*count];
+        memset(candidate, 0, sizeof(*candidate));
         if (ipv6) {
-            if (!ParseHexIPv6(localAddrHex, ev->src_ip, sizeof(ev->src_ip)) ||
-                !ParseHexIPv6(remAddrHex, ev->dst_ip, sizeof(ev->dst_ip))) {
+            if (!ParseHexIPv6(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip)) ||
+                !ParseHexIPv6(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip))) {
                 continue;
             }
         } else {
-            ParseHexIPv4(localAddrHex, ev->src_ip, sizeof(ev->src_ip));
-            ParseHexIPv4(remAddrHex, ev->dst_ip, sizeof(ev->dst_ip));
+            ParseHexIPv4(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip));
+            ParseHexIPv4(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip));
         }
-        ev->src_port = (uint16_t)localPort;
-        ev->dst_port = (uint16_t)remPort;
-        if (IsLoopbackAddress(ev->dst_ip) || IsLoopbackAddress(ev->src_ip)) continue;
-        if (ev->dst_port == 9999 && strcmp(ev->dst_ip, ev->src_ip) == 0) continue;
+        candidate->src_port = (uint16_t)localPort;
+        candidate->dst_port = (uint16_t)remPort;
+        if (IsLoopbackAddress(candidate->dst_ip) || IsLoopbackAddress(candidate->src_ip)) continue;
+        if (candidate->dst_port == 9999 && strcmp(candidate->dst_ip, candidate->src_ip) == 0) continue;
 
-        ev->protocol = IPPROTO_TCP;
-        strncpy(ev->direction, "OUTBOUND", sizeof(ev->direction) - 1);
-        targetInodes[*count] = inode;
+        candidate->inode = inode;
         (*count)++;
     }
     fclose(fp);
@@ -1032,20 +1084,61 @@ static const char* LookupDnsDomain(const char* ip) {
     return NULL;
 }
 
+/* SelectFlowCandidates chooses which sockets get the batch's wire slots.
+ *
+ * There are more sockets on a busy host than a batch can carry, and the
+ * previous selection was "whatever /proc listed first". /proc lists sockets in
+ * hash order, which has nothing to do with importance, so a host holding
+ * hundreds of idle connections could spend its whole batch on them and never
+ * report the transfer that mattered. Sockets that moved bytes this interval go
+ * first; the rest fill what is left, still subject to the idle rollup.
+ *
+ * The rollup is consulted only while a slot is actually free, because
+ * ShouldReportFlow records that it released a flow. Asking it about a socket
+ * that could not be sent anyway would silence that socket for the next thirty
+ * seconds without anything having been reported. */
+static size_t SelectFlowCandidates(const FLOW_CANDIDATE* candidates,
+                                   const PROC_SOCKET_OWNER* owners, size_t count,
+                                   size_t maxEvents, size_t* order) {
+    size_t selected = 0;
+    for (int pass = 0; pass < 2 && selected < maxEvents; pass++) {
+        for (size_t i = 0; i < count && selected < maxEvents; i++) {
+            bool active = candidates[i].bytes_in > 0 || candidates[i].bytes_out > 0;
+            if ((pass == 0) != active) continue;
+            if (!ShouldReportFlow(candidates[i].dst_ip, candidates[i].dst_port, IPPROTO_TCP,
+                                  owners[i].pid, candidates[i].bytes_in, candidates[i].bytes_out)) {
+                continue;
+            }
+            order[selected++] = i;
+        }
+    }
+    return selected;
+}
+
 // Capture active TCP socket flows from both Linux address families.
 static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) {
+    /* Held across calls rather than on the stack: the candidate set is several
+     * times the wire cap, and this daemon runs with a modest thread stack. */
+    static FLOW_CANDIDATE candidates[MAX_FLOW_CANDIDATES];
+    static unsigned long targetInodes[MAX_FLOW_CANDIDATES];
+    static PROC_SOCKET_OWNER owners[MAX_FLOW_CANDIDATES];
+    static SOCKET_DIAG_RESULT socketStats[MAX_FLOW_CANDIDATES];
+    static size_t order[MAX_FLOW_CANDIDATES];
+
     size_t count = 0;
-    unsigned long targetInodes[MAX_FLOWS_PER_BATCH];
-    PROC_SOCKET_OWNER owners[MAX_FLOWS_PER_BATCH];
+    memset(candidates, 0, sizeof(candidates));
     memset(targetInodes, 0, sizeof(targetInodes));
     memset(owners, 0, sizeof(owners));
-    memset(outEvents, 0, sizeof(LINUX_FLOW_EVENT) * maxEvents);
-
-    CollectSocketTable("net/tcp", false, outEvents, maxEvents, targetInodes, &count);
-    CollectSocketTable("net/tcp6", true, outEvents, maxEvents, targetInodes, &count);
-
-    SOCKET_DIAG_RESULT socketStats[MAX_FLOWS_PER_BATCH];
     memset(socketStats, 0, sizeof(socketStats));
+    memset(outEvents, 0, sizeof(LINUX_FLOW_EVENT) * maxEvents);
+    if (maxEvents == 0) return 0;
+
+    CollectSocketTable("net/tcp", false, candidates, MAX_FLOW_CANDIDATES, &count);
+    CollectSocketTable("net/tcp6", true, candidates, MAX_FLOW_CANDIDATES, &count);
+    for (size_t i = 0; i < count; i++) {
+        targetInodes[i] = candidates[i].inode;
+    }
+
     (void)QuerySocketDiag(targetInodes, count, socketStats);
     for (size_t i = 0; i < count; i++) {
         if (!socketStats[i].found) continue;
@@ -1053,47 +1146,49 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
         if (SocketCounterDelta(socketStats[i].inode, socketStats[i].cookie0,
                                 socketStats[i].cookie1, socketStats[i].bytes_in,
                                 socketStats[i].bytes_out, &bytesIn, &bytesOut)) {
-            outEvents[i].bytes_in = bytesIn;
-            outEvents[i].bytes_out = bytesOut;
+            candidates[i].bytes_in = bytesIn;
+            candidates[i].bytes_out = bytesOut;
         }
     }
 
     IndexSocketOwners(targetInodes, count, owners);
-    for (size_t i = 0; i < count; i++) {
-        if (owners[i].pid != 0) {
-            outEvents[i].process_id = owners[i].pid;
-            snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "%s", owners[i].path);
 
-            bool foundInBatch = false;
-            for (size_t j = 0; j < i; j++) {
-                if (outEvents[j].process_id == owners[i].pid) {
-                    outEvents[i].enrichment = outEvents[j].enrichment;
-                    foundInBatch = true;
-                    break;
-                }
-            }
-            if (!foundInBatch) {
-                ProcessLineage_InspectProcess(owners[i].pid, &outEvents[i].enrichment);
-            }
+    size_t selected = SelectFlowCandidates(candidates, owners, count, maxEvents, order);
+    for (size_t s = 0; s < selected; s++) {
+        const FLOW_CANDIDATE* candidate = &candidates[order[s]];
+        const PROC_SOCKET_OWNER* owner = &owners[order[s]];
+        LINUX_FLOW_EVENT* ev = &outEvents[s];
+
+        snprintf(ev->src_ip, sizeof(ev->src_ip), "%s", candidate->src_ip);
+        snprintf(ev->dst_ip, sizeof(ev->dst_ip), "%s", candidate->dst_ip);
+        ev->src_port = candidate->src_port;
+        ev->dst_port = candidate->dst_port;
+        ev->protocol = IPPROTO_TCP;
+        strncpy(ev->direction, "OUTBOUND", sizeof(ev->direction) - 1);
+        ev->bytes_in = candidate->bytes_in;
+        ev->bytes_out = candidate->bytes_out;
+
+        if (owner->pid != 0) {
+            ev->process_id = owner->pid;
+            snprintf(ev->process_path, sizeof(ev->process_path), "%s", owner->path);
         } else {
-            outEvents[i].process_id = 0;
-            snprintf(outEvents[i].process_path, sizeof(outEvents[i].process_path), "/usr/bin/system");
-            ProcessLineage_InspectProcess(0, &outEvents[i].enrichment);
+            ev->process_id = 0;
+            snprintf(ev->process_path, sizeof(ev->process_path), "/usr/bin/system");
         }
-    }
 
-    // Apply edge deduplication: novel flows emit immediately; routine idle flows rollup every 30s.
-    size_t filteredCount = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (ShouldReportFlow(outEvents[i].dst_ip, outEvents[i].dst_port, outEvents[i].protocol,
-                             outEvents[i].process_id, outEvents[i].bytes_in, outEvents[i].bytes_out)) {
-            if (filteredCount != i) {
-                outEvents[filteredCount] = outEvents[i];
+        bool foundInBatch = false;
+        for (size_t j = 0; j < s; j++) {
+            if (outEvents[j].process_id == ev->process_id) {
+                ev->enrichment = outEvents[j].enrichment;
+                foundInBatch = true;
+                break;
             }
-            filteredCount++;
+        }
+        if (!foundInBatch) {
+            ProcessLineage_InspectProcess(ev->process_id, &ev->enrichment);
         }
     }
-    return filteredCount;
+    return selected;
 }
 
 /* IsIPLiteral accepts only a bare IPv4 or IPv6 address.

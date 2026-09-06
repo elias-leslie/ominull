@@ -256,10 +256,76 @@ static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid
     return true;
 }
 
+/* One socket this poll may report, before any process enrichment. Windows
+ * lists every socket the stack still remembers, and enriching one costs a
+ * process open, a path read and a lineage walk, so candidates stay cheap
+ * enough to hold several times the wire cap. */
+typedef struct {
+    MIB_TCPROW_OWNER_PID row;
+    ULONG64 bytesIn;
+    ULONG64 bytesOut;
+} FLOW_CANDIDATE_WIN;
+
+#define MAX_FLOW_CANDIDATES_WIN 256
+
+/* IsReportableTcpStateWin answers whether a socket in this state is a
+ * conversation or a corpse.
+ *
+ * GetExtendedTcpTable with TCP_TABLE_OWNER_PID_ALL returns finished sockets
+ * alongside live ones: TIME_WAIT lingers after every normal close, and a
+ * leaked handle sits in CLOSE_WAIT indefinitely. Neither can move another
+ * byte, so both measure a zero-byte delta on every poll - and a zero-byte
+ * record on a fixed timer is the shape of a beacon, which is what the hub
+ * then reported. Windows also gives TIME_WAIT rows an owning process of 0,
+ * so they cannot even be attributed to what opened them.
+ *
+ * SYN_SENT is kept on purpose: a connection attempt that never completes is
+ * a real signal, and one of the few ways a dead command-and-control address
+ * announces itself. */
+static bool IsReportableTcpStateWin(DWORD state) {
+    return state == MIB_TCP_STATE_ESTAB || state == MIB_TCP_STATE_SYN_SENT ||
+           state == MIB_TCP_STATE_FIN_WAIT1 || state == MIB_TCP_STATE_FIN_WAIT2;
+}
+
+/* SelectFlowCandidatesWin chooses which sockets get this batch's wire slots.
+ *
+ * There are more sockets on a busy host than a batch can carry, and the
+ * previous selection was "whatever the table listed first", which has nothing
+ * to do with importance: a host holding hundreds of idle connections could
+ * spend its whole batch on them and never report the transfer that mattered.
+ * Sockets that moved bytes this interval go first; the rest fill what is
+ * left, still subject to the idle rollup.
+ *
+ * The rollup is consulted only while a slot is actually free, because
+ * ShouldReportFlowWin records that it released a flow. Asking it about a
+ * socket that could not be sent anyway would silence that socket for the next
+ * thirty seconds without anything having been reported. */
+static size_t SelectFlowCandidatesWin(const FLOW_CANDIDATE_WIN* candidates, size_t count,
+                                      size_t maxEvents, size_t* order) {
+    size_t selected = 0;
+    for (int pass = 0; pass < 2 && selected < maxEvents; pass++) {
+        for (size_t i = 0; i < count && selected < maxEvents; i++) {
+            bool active = candidates[i].bytesIn > 0 || candidates[i].bytesOut > 0;
+            if ((pass == 0) != active) continue;
+            if (!ShouldReportFlowWin(ntohl(candidates[i].row.dwRemoteAddr),
+                                     ntohs((u_short)candidates[i].row.dwRemotePort),
+                                     IPPROTO_TCP, candidates[i].row.dwOwningPid,
+                                     candidates[i].bytesIn, candidates[i].bytesOut)) {
+                continue;
+            }
+            order[selected++] = i;
+        }
+    }
+    return selected;
+}
+
 static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) {
+    static FLOW_CANDIDATE_WIN candidates[MAX_FLOW_CANDIDATES_WIN];
+    static size_t order[MAX_FLOW_CANDIDATES_WIN];
     size_t count = 0;
     DWORD dwSize = 0;
 
+    if (maxEvents == 0) return 0;
     g_estatsGeneration++;
 
     DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
@@ -267,39 +333,24 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
         PMIB_TCPTABLE_OWNER_PID pTcpTable = (PMIB_TCPTABLE_OWNER_PID)malloc(dwSize);
         if (pTcpTable) {
             if (GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
-                for (DWORD i = 0; i < pTcpTable->dwNumEntries && count < maxEvents; i++) {
+                for (DWORD i = 0; i < pTcpTable->dwNumEntries && count < MAX_FLOW_CANDIDATES_WIN; i++) {
                     MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
                     if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
                     if (row.dwRemoteAddr == 0x0100007f || row.dwLocalAddr == 0x0100007f) continue; // Loopback
+                    if (!IsReportableTcpStateWin(row.dwState)) continue;
 
-                    OMINULL_EVENT* ev = &outEvents[count];
-                    memset(ev, 0, sizeof(OMINULL_EVENT));
-                    ev->EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V4;
-                    ev->Action = 0; // Permit
-                    ev->Direction = 1; // Outbound
-                    ev->Protocol = IPPROTO_TCP;
-                    ev->IpVersion = 4;
-                    ev->ProcessId = row.dwOwningPid;
-                    ev->LocalPort = ntohs((u_short)row.dwLocalPort);
-                    ev->RemotePort = ntohs((u_short)row.dwRemotePort);
-                    ev->Addr.Ipv4.LocalIp = ntohl(row.dwLocalAddr);
-                    ev->Addr.Ipv4.RemoteIp = ntohl(row.dwRemoteAddr);
+                    /* Measured for every live socket, not only for the ones
+                     * that end up on the wire. These are cumulative counters
+                     * read as interval deltas, so a socket skipped this poll
+                     * and reported the next would otherwise arrive carrying
+                     * everything it had ever sent. */
+                    OMINULL_EVENT measured;
+                    memset(&measured, 0, sizeof(measured));
+                    EstatsMeasure(&row, &measured);
 
-                    ProcessPathFor(row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
-                    EstatsMeasure(&row, ev);
-
-                    bool foundInBatch = false;
-                    for (size_t j = 0; j < count; j++) {
-                        if (outEvents[j].ProcessId == row.dwOwningPid) {
-                            ev->Enrichment = outEvents[j].Enrichment;
-                            foundInBatch = true;
-                            break;
-                        }
-                    }
-                    if (!foundInBatch) {
-                        ProcessLineageWin_InspectProcess(row.dwOwningPid, &ev->Enrichment);
-                    }
-
+                    candidates[count].row = row;
+                    candidates[count].bytesIn = measured.BytesIn;
+                    candidates[count].bytesOut = measured.BytesOut;
                     count++;
                 }
             }
@@ -308,17 +359,39 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
     }
     EstatsEvictUnseen();
 
-    size_t filteredCount = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (ShouldReportFlowWin(outEvents[i].Addr.Ipv4.RemoteIp, outEvents[i].RemotePort, outEvents[i].Protocol,
-                                (DWORD)outEvents[i].ProcessId, outEvents[i].BytesIn, outEvents[i].BytesOut)) {
-            if (filteredCount != i) {
-                outEvents[filteredCount] = outEvents[i];
+    size_t selected = SelectFlowCandidatesWin(candidates, count, maxEvents, order);
+    for (size_t s = 0; s < selected; s++) {
+        const FLOW_CANDIDATE_WIN* candidate = &candidates[order[s]];
+        OMINULL_EVENT* ev = &outEvents[s];
+        memset(ev, 0, sizeof(OMINULL_EVENT));
+        ev->EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V4;
+        ev->Action = 0; // Permit
+        ev->Direction = 1; // Outbound
+        ev->Protocol = IPPROTO_TCP;
+        ev->IpVersion = 4;
+        ev->ProcessId = candidate->row.dwOwningPid;
+        ev->LocalPort = ntohs((u_short)candidate->row.dwLocalPort);
+        ev->RemotePort = ntohs((u_short)candidate->row.dwRemotePort);
+        ev->Addr.Ipv4.LocalIp = ntohl(candidate->row.dwLocalAddr);
+        ev->Addr.Ipv4.RemoteIp = ntohl(candidate->row.dwRemoteAddr);
+        ev->BytesIn = candidate->bytesIn;
+        ev->BytesOut = candidate->bytesOut;
+
+        ProcessPathFor(candidate->row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
+
+        bool foundInBatch = false;
+        for (size_t j = 0; j < s; j++) {
+            if (outEvents[j].ProcessId == candidate->row.dwOwningPid) {
+                ev->Enrichment = outEvents[j].Enrichment;
+                foundInBatch = true;
+                break;
             }
-            filteredCount++;
+        }
+        if (!foundInBatch) {
+            ProcessLineageWin_InspectProcess(candidate->row.dwOwningPid, &ev->Enrichment);
         }
     }
-    return filteredCount;
+    return selected;
 }
 
 

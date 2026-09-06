@@ -104,7 +104,26 @@ func (b BeaconEvidence) JSON(threshold float64) string {
 // to its own period*, that it stays regular for a long time, and that every
 // check-in carries about the same amount of data. Each of those is scored
 // separately and they are combined, so no single one of them can convict.
-func (bw *beaconWindow) record(t time.Time, bytesOut int64, cfg storage.DetectionTuning) (BeaconEvidence, bool) {
+func (bw *beaconWindow) record(t time.Time, bytesOut, payload int64, cfg storage.DetectionTuning) (BeaconEvidence, bool) {
+	// An observation that moved no bytes in either direction is not a
+	// check-in, and must never enter the window.
+	//
+	// Agents report cumulative socket counters as interval deltas, and they
+	// re-report a socket that is still in the table on a fixed rollup timer.
+	// A socket that has finished - or one that is simply idle - therefore
+	// produces a zero-byte record at a perfectly constant period, which is
+	// the exact shape this detector looks for. Production spent a day
+	// reporting metronomic command-and-control traffic to three market-data
+	// APIs that turned out to be sockets a worker had leaked in CLOSE_WAIT:
+	// nothing was being sent to them at all. The agents no longer report
+	// finished sockets, but an older agent, or a genuinely idle connection,
+	// still can, so the verdict itself has to require that something was
+	// actually exchanged. A beacon that carries no data is not a beacon; it
+	// is a socket.
+	if payload <= 0 {
+		return BeaconEvidence{Samples: len(bw.samples)}, false
+	}
+
 	bw.samples = append(bw.samples, beaconSample{at: t, bytes: bytesOut})
 	if len(bw.samples) > beaconWindowCap {
 		bw.samples = bw.samples[len(bw.samples)-beaconWindowCap:]
