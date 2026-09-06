@@ -752,3 +752,62 @@ func TestAVouchedInterpreterPairIsNotReported(t *testing.T) {
 		t.Fatalf("a vouched pair raised %d findings: %q", len(got), got[0].Title)
 	}
 }
+
+// One CDN-fronted service answers from a dozen addresses. Production showed the
+// same worker holding one conversation open and raising four identical beacon
+// findings, one per Akamai and Cloudflare address.
+func TestOneBeaconingConversationIsOneFindingPerCounterparty(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC().Add(-2 * time.Hour)
+
+	// Four Cloudflare addresses, each beaconing on the same 60-second cadence.
+	for _, last := range []int{1, 2, 3, 4} {
+		beaconEvents(engine, "linux-50", fmt.Sprintf("104.16.0.%d", last), "/usr/bin/python3.13", now)
+	}
+
+	got := anomaliesOfType(t, store, "C2_BEACONING")
+	if len(got) != 1 {
+		t.Fatalf("four addresses of one counterparty raised %d beacon findings", len(got))
+	}
+	if !strings.Contains(got[0].Title, "python3.13") {
+		t.Fatalf("the finding does not name the process: %q", got[0].Title)
+	}
+}
+
+// A browser keeps sessions open to whatever the user is looking at, including
+// sites hosted on rented compute. Five Google Cloud addresses in a minute were
+// five beacon findings and five ordinary web sessions.
+func TestABrowserIsNotABeaconOnANetworkThatResolves(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC().Add(-2 * time.Hour)
+
+	// 159.65.0.0/16 is DigitalOcean in the built-in table: resolved, and rented.
+	beaconEvents(engine, "linux-51", "159.65.0.20", "/opt/google/chrome/chrome", now)
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 0 {
+		t.Fatalf("an ordinary browser session raised %d beacon findings: %q", len(got), got[0].Title)
+	}
+}
+
+// The exemption is the browser, not the network: an interpreter on the same
+// rented range is still the finding this detector exists for.
+func TestAnInterpreterOnTheSameNetworkIsStillABeacon(t *testing.T) {
+	engine, store := noiseEngine(t)
+	beaconEvents(engine, "linux-52", "159.65.0.21", "/usr/bin/python3.13", time.Now().UTC().Add(-2*time.Hour))
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) == 0 {
+		t.Fatal("an interpreter beaconing to rented compute raised nothing")
+	}
+}
+
+// A browser reaching a network nobody can name is not covered by the exemption:
+// an unnamed counterparty is the one case where the process is not the whole
+// story.
+func TestABrowserBeaconingToAnUnnamedNetworkIsStillReported(t *testing.T) {
+	engine, store := noiseEngine(t)
+	beaconEvents(engine, "linux-53", "198.51.100.77", "/opt/google/chrome/chrome", time.Now().UTC().Add(-2*time.Hour))
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) == 0 {
+		t.Fatal("a browser beaconing to an unattributable network raised nothing")
+	}
+}

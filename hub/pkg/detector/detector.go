@@ -615,8 +615,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// network that fronts much of the web, and an implant beaconing through a
 	// CDN is the case this detector exists for. Chrome to Cloudflare stays
 	// quiet; python or curl to the same network is a finding again.
+	//
+	// One exception, learned from production: a browser is not a candidate for
+	// this detector on a network that resolves. Browsers hold keepalives open
+	// to whatever the user is looking at - Chrome scored five separate beacon
+	// findings against five Google Cloud addresses in one minute, all of them
+	// ordinary web sessions, because a site being hosted on rented compute says
+	// nothing about the browser talking to it. Browser-borne exfiltration shows
+	// up in the volume and storage rules above, which still apply in full.
+	browserToKnownNetwork := cfg.IsQuietClient(procName) && geo.Resolved()
 	if cfg.BeaconOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isVouched {
+		!isTrustedSys && !isVouched && !browserToKnownNetwork {
 		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
 		e.mu.Lock()
 		bWin, exists := e.beaconTracker[beaconKey]
@@ -628,7 +637,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		e.mu.Unlock()
 
 		if isBeacon && !warming {
-			alertKey := fmt.Sprintf("beacon:%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
+			// Keyed on the counterparty, not the address, for the same reason
+			// the first-seen detector is: one CDN-fronted service answers from
+			// a dozen addresses, and python3.13 holding one conversation open
+			// produced four identical findings naming four Cloudflare and
+			// Akamai addresses. The address is still in the finding; it is just
+			// not what decides whether this is news.
+			beaconOwner := strings.ToLower(strings.TrimSpace(geo.Org))
+			if beaconOwner == "" {
+				beaconOwner = ev.DstIP
+			}
+			alertKey := fmt.Sprintf("beacon:%s:%s:%s", ev.EndpointID, procName, beaconOwner)
 			if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BeaconCooldownMin)*time.Minute) {
 				// The severity follows the evidence. A conversation that only
 				// just cleared the bar is worth looking at; one that is
@@ -643,7 +662,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					TenantID:   ev.TenantID,
 					EndpointID: ev.EndpointID,
 					Timestamp:  now,
-					Title:      fmt.Sprintf("Periodic beaconing to %s (every ~%.0fs)", ev.DstIP, bev.MeanInterval),
+					Title:      fmt.Sprintf("Periodic beaconing by %s to %s (every ~%.0fs)", procName, describeCounterparty(geo, ev), bev.MeanInterval),
 					Description: fmt.Sprintf(
 						"%s has connected to %s:%d %d times over %.0f minutes at a near-constant interval of %.1fs (%.0f%% jitter), with payloads varying by %.0f%%.",
 						procName, ev.DstIP, ev.DstPort, bev.Samples, bev.SpanMinutes, bev.MeanInterval, bev.CoefVariation*100, bev.SizeVariation*100),
