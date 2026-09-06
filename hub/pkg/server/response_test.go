@@ -174,7 +174,7 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 		TenantID:           tenantID,
 		Hostname:           "linux-host-1",
 		OS:                 "Linux 6.1.0",
-		IP:                 "192.168.86.50",
+		IP:                 "10.0.0.50",
 		EvidenceSigningKey: testKeyHex,
 	})
 	reqHB := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(heartbeatBody))
