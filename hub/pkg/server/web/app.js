@@ -7379,6 +7379,11 @@
      row, the Assets banner and the Assets context menu all route through
      reattachTerminal so there is a single implementation of "come back to a
      shell" rather than three that drift. */
+  /* Set by an open terminal sheet so the fleet poll can hand it the hub's own
+     view of its session. Cleared when the sheet closes. */
+  var terminalMetaSubscriber = null;
+  var terminalMetaSessionID = "";
+
   function liveTerminalFor(ep) {
     if (!ep || !ep.id) return null;
     var sessions = arrayOf(state.terminalSessions);
@@ -7494,20 +7499,47 @@
        "[Recording limit reached]". Saying how much of it is spent, while it is
        being spent, is the difference between a surprise and a deadline. */
     var recordedBytes = Number(session && session.recording_bytes) || 0;
+    var recordedCap = Number(session && session.max_recording_bytes) || 0;
+    var recordingBounded = !!(session && session.recording_state === "bounded");
+    /* Only the hub knows how many bytes it recorded. Counting them on this end
+       instead - adding each frame's length as it arrived off the socket - read
+       "13.9 MB of 10.0 MB recorded" on a live session, because a viewer sees
+       three things the recording does not: the scrollback replayed to it on
+       every reattach, the frames the hub declined to record once the cap was
+       reached, and the JSON envelope around each one. A number about evidence
+       retention that drifts past its own limit is worse than one that only
+       moves when the five-second poll lands. */
     var updateFrames = function (sum) {
-      if (sum && Number(sum.recording_bytes) > recordedBytes) recordedBytes = Number(sum.recording_bytes);
-      var used = recordedBytes;
-      var cap = Number((sum && sum.max_recording_bytes) || (session && session.max_recording_bytes)) || 0;
+      if (sum) {
+        if (sum.recording_bytes !== undefined) recordedBytes = Number(sum.recording_bytes) || 0;
+        if (sum.max_recording_bytes) recordedCap = Number(sum.max_recording_bytes) || 0;
+        if (sum.recording_state === "bounded") recordingBounded = true;
+      }
       var text = "Frames: " + frameCount + " (" + encLabel + ")";
-      if (cap > 0) text += " \u00b7 " + bytes(used) + " of " + bytes(cap) + " recorded";
-      else if (used > 0) text += " \u00b7 " + bytes(used) + " recorded";
+      if (recordingBounded) {
+        /* The session is still live and still audited; it is the *recording*
+           that stopped. An operator who is about to do something they will
+           later need to prove has to be told which of those two it is. */
+        text += " \u00b7 recording stopped at " + bytes(recordedCap || recordedBytes);
+      } else if (recordedCap > 0) {
+        text += " \u00b7 " + bytes(Math.min(recordedBytes, recordedCap)) + " of " + bytes(recordedCap) + " recorded";
+      } else if (recordedBytes > 0) {
+        text += " \u00b7 " + bytes(recordedBytes) + " recorded";
+      }
       frameCountEl.textContent = text;
-      frameCountEl.setAttribute("data-near-cap", cap > 0 && used / cap >= 0.9 ? "true" : "false");
-      frameCountEl.setAttribute("title", cap > 0
-        ? "The session recording is sealed into evidence. Output past " + bytes(cap) + " is not recorded."
-        : "No recording cap reported by the hub.");
+      frameCountEl.setAttribute("data-near-cap",
+        recordingBounded || (recordedCap > 0 && recordedBytes / recordedCap >= 0.9) ? "true" : "false");
+      frameCountEl.setAttribute("title", recordingBounded
+        ? "The recording reached its " + bytes(recordedCap || recordedBytes) + " cap and stopped. The session is still live and still audited, but nothing from here on is sealed into evidence."
+        : recordedCap > 0
+          ? "The session recording is sealed into evidence. Output past " + bytes(recordedCap) + " is not recorded."
+          : "No recording cap reported by the hub.");
     };
     updateFrames(session);
+    /* The summary rides the five-second fleet poll that Assets already runs,
+       so the figure moves on its own while the operator watches it. */
+    terminalMetaSubscriber = function (sum) { updateFrames(sum); };
+    terminalMetaSessionID = (session && session.session_id) || "";
     /* The hub sends expires_at and idle_expires_at on every poll. This was a
        hardcoded "Duration: 60m · Idle: 15m", which is a promise the console
        cannot keep - it is whatever --terminal-max-duration and
@@ -7561,6 +7593,10 @@
 
     function cleanup() {
       leaving = true;
+      /* The poll outlives this sheet; leaving the closure subscribed would
+         keep writing into a detached element for the life of the page. */
+      terminalMetaSubscriber = null;
+      terminalMetaSessionID = "";
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (resizeObserver) {
         try { resizeObserver.disconnect(); } catch (e) {}
@@ -7831,10 +7867,6 @@
         try {
           var frame = JSON.parse(event.data);
           frameCount++;
-          /* The polled summary lags the stream by up to five seconds, so the
-             bytes actually seen on this socket are added as they arrive and
-             the next poll only ever corrects upwards. */
-          if (typeof event.data === "string") recordedBytes += event.data.length;
           updateFrames(null);
 
           if (frame.type === "stdout") {
@@ -7844,7 +7876,10 @@
             else writeFrameData(frame.data);
           } else if (frame.type === "bounded") {
             setChip(statusBadge, "warn", "Recording bounded");
-            frameCountEl.textContent = "Frames: " + frameCount + " (Bounded / " + encLabel + ")";
+            /* Through updateFrames, not by writing the element directly: the
+               next frame off the socket rebuilt this line and erased it. */
+            recordingBounded = true;
+            updateFrames(null);
             term.write("\r\n\x1b[33m[Session recording bounded: 10MB limit reached]\x1b[0m\r\n");
           } else if (frame.type === "close") {
             terminated = true;
@@ -11054,6 +11089,12 @@
       .then(function (d) {
         state.terminalSessions = arrayOf(d && d.sessions || d);
         state.terminalAvailable = true;
+        if (terminalMetaSubscriber && terminalMetaSessionID) {
+          for (var ti = 0; ti < state.terminalSessions.length; ti++) {
+            var ts = state.terminalSessions[ti];
+            if (ts && ts.session_id === terminalMetaSessionID) { terminalMetaSubscriber(ts); break; }
+          }
+        }
       })
       .catch(function () {
         /* responseGate answers 404 when the response feature is off, and the
