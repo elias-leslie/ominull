@@ -2,6 +2,7 @@ package detector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -18,10 +19,15 @@ import (
 
 type IsolateFunc func(endpointID string, reason string) error
 
+// bandwidthRingSize bounds what a process's baseline is built from. Sixty-four
+// transfers is enough to describe an ordinary working volume and recent enough
+// that a machine whose job changed last week is judged on what it does now.
+const bandwidthRingSize = 64
+
 type bandwidthStats struct {
-	count int64
-	mean  float64
-	m2    float64
+	samples []float64 // most recent first bandwidthRingSize transfers, unordered
+	next    int
+	count   int64
 }
 
 // observe scores a transfer against the baseline built from the transfers
@@ -29,35 +35,63 @@ type bandwidthStats struct {
 //
 // The order matters and used to be the other way round. Scoring a value against
 // a distribution that already contains it suppresses exactly the outliers this
-// detector exists to find: the new point pulls the mean toward itself and
-// inflates the standard deviation it is then divided by, which bounds the
-// z-score at roughly (n-1)/sqrt(n) however extreme the value really is. A
-// 500 MB transfer from a process whose every previous transfer was a kilobyte
-// scored 5.4 against a baseline of thirty, and the same transfer against a
-// baseline of four could not have reached 3.5 at all - so the fixed threshold
-// was mostly measuring how many samples had been collected, and the alerts that
-// did fire came almost entirely from the absolute-size branch beside it.
+// detector exists to find: the new point pulls the centre toward itself and
+// inflates the spread it is then divided by.
 //
-// The returned counts and moments describe the baseline as it stood before this
-// value, which is what the alert then quotes.
-func (b *bandwidthStats) observe(val float64) (mean float64, stddev float64, z float64, baseline int64) {
+// The statistic is the modified z-score, 0.6745·(x−median)/MAD, not the mean
+// and standard deviation this used to compute. Network transfer sizes are
+// heavy-tailed - a browser sends a few kilobytes a hundred times and eight
+// megabytes once - and a mean with a standard deviation is not robust to that:
+// one large ordinary upload lifts both, so the next ordinary upload scores
+// modestly while the first scored fifty. The median and the median absolute
+// deviation are unmoved by a handful of extreme values, which is the whole
+// reason the robust statistics literature reaches for them on data shaped like
+// this.
+//
+// The returned centre, spread and count describe the baseline as it stood
+// before this value, which is what the alert then quotes.
+func (b *bandwidthStats) observe(val float64) (median float64, mad float64, z float64, baseline int64) {
 	baseline = b.count
-	mean = b.mean
-	if baseline >= 2 {
-		variance := b.m2 / float64(baseline-1)
-		stddev = math.Sqrt(variance)
-		if stddev > 0 {
-			z = (val - mean) / stddev
-		}
+	median, mad = b.summary()
+
+	switch {
+	case baseline < 2:
+		// Nothing to compare against yet.
+	case mad > 0:
+		z = 0.6745 * (val - median) / mad
+	case median > 0 && val > median:
+		// A process whose transfers are all the same size has a MAD of zero,
+		// and dividing by it would be an infinity dressed up as a score. What
+		// the operator wants to know is how many times its usual volume this
+		// transfer was, expressed on the same scale as the threshold beside it.
+		z = 3.5 * (val / median)
 	}
 
+	if len(b.samples) < bandwidthRingSize {
+		b.samples = append(b.samples, val)
+	} else {
+		b.samples[b.next] = val
+		b.next = (b.next + 1) % bandwidthRingSize
+	}
 	b.count++
-	delta := val - b.mean
-	b.mean += delta / float64(b.count)
-	delta2 := val - b.mean
-	b.m2 += delta * delta2
 
-	return mean, stddev, z, baseline
+	return median, mad, z, baseline
+}
+
+// summary returns the median and the median absolute deviation of the retained
+// samples. medianOf copies before sorting, so the ring keeps its insertion
+// order and the oldest entry stays the one overwritten next.
+func (b *bandwidthStats) summary() (median float64, mad float64) {
+	if len(b.samples) == 0 {
+		return 0, 0
+	}
+	median = medianOf(b.samples)
+
+	deviations := make([]float64, len(b.samples))
+	for i, v := range b.samples {
+		deviations[i] = math.Abs(v - median)
+	}
+	return median, medianOf(deviations)
 }
 
 type Engine struct {
@@ -71,6 +105,7 @@ type Engine struct {
 	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
 	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
 	unattributed   map[string]*unattributedRun     // endpointID -> destinations we could not name
+	silence        *silenceWatch                   // endpoints already reported as gone quiet
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
@@ -139,12 +174,18 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 		lateralTargets: make(map[string]map[string]time.Time),
 		alertCooldown:  make(map[string]time.Time),
 		unattributed:   make(map[string]*unattributedRun),
+		silence:        newSilenceWatch(),
 	}
 }
 
 func (e *Engine) Start(ctx context.Context) {
 	subCtx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
+
+	// Alerting on absence does not depend on events arriving - that is the
+	// point of it - so it starts before the events channel is checked.
+	e.StartSilenceWatch(subCtx)
+
 	if e.eventsChan == nil {
 		return
 	}
@@ -189,10 +230,66 @@ func (e *Engine) recordAlert(alert storage.Alert) {
 	}
 }
 
-func (e *Engine) recordAnomaly(anomaly storage.AnomalyAlert) {
+func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, anomaly storage.AnomalyAlert) {
+	anomaly.Evidence = withFlowContext(anomaly.Evidence, ev, geo)
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
 		log.Printf("[-] anomaly write failed for %s/%s: %v", anomaly.EndpointID, anomaly.Title, err)
 	}
+}
+
+// withFlowContext folds what the agent already reported about the process into
+// the finding's structured evidence.
+//
+// Every flow arrives carrying the command line, the user it ran as, the
+// executable's hash and the parent process id, and no detector read any of
+// them: an analyst deciding whether a finding mattered had to leave the alert
+// and go looking. The detector's own numbers stay exactly as they were; this
+// only adds the context around them.
+func withFlowContext(evidence string, ev storage.Event, geo threatintel.GeoRecord) string {
+	fields := map[string]any{}
+	if strings.TrimSpace(evidence) != "" {
+		if err := json.Unmarshal([]byte(evidence), &fields); err != nil {
+			// A detector that wrote something other than a JSON object keeps
+			// what it wrote; losing its numbers to add context would be a poor
+			// trade.
+			return evidence
+		}
+	}
+
+	set := func(key, value string) {
+		if strings.TrimSpace(value) != "" {
+			fields[key] = value
+		}
+	}
+	set("command_line", ev.CommandLine)
+	set("user_identity", ev.UserIdentity)
+	set("executable_sha256", ev.ExecutableSHA256)
+	set("process_instance_id", ev.ProcessInstanceID)
+	set("attribution_status", ev.AttributionStatus)
+	set("destination_owner", geo.Org)
+	set("destination_asn", geo.ASN)
+	set("destination_tenancy", geo.Tenancy)
+	set("attribution_source", geo.Source)
+	if ev.ProcessID != 0 {
+		fields["process_id"] = ev.ProcessID
+	}
+	if ev.ParentPID != 0 {
+		// An interpreter spawned by a shell is the shape every beaconing
+		// write-up describes, and the parent is how an analyst sees it.
+		fields["parent_pid"] = ev.ParentPID
+	}
+	if strings.TrimSpace(ev.ParentProcessInstanceID) != "" {
+		fields["parent_process_instance_id"] = ev.ParentProcessInstanceID
+	}
+
+	if len(fields) == 0 {
+		return evidence
+	}
+	blob, err := json.Marshal(fields)
+	if err != nil {
+		return evidence
+	}
+	return string(blob)
 }
 
 func (e *Engine) autoIsolate(endpointID, reason string) {
@@ -245,7 +342,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	if procName == "." || procName == "/" || procName == "" {
 		procName = "system"
 	}
-	procLower := strings.ToLower(cleanPath)
 
 	// GeoIP and ASN resolution. The batch path resolves each unique
 	// destination once and passes the result here.
@@ -298,7 +394,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Mitigated:   true,
 			}
 			e.recordAlert(alert)
-			e.recordAnomaly(storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -335,29 +431,18 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	isOffHours := cfg.IsOffHours(now)
 	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
-	isInteractiveShell := strings.HasSuffix(procLower, "powershell.exe") ||
-		strings.HasSuffix(procLower, "pwsh.exe") ||
-		strings.HasSuffix(procLower, "cmd.exe") ||
-		strings.HasSuffix(procLower, "wscript.exe") ||
-		strings.HasSuffix(procLower, "cscript.exe") ||
-		strings.HasSuffix(procLower, "curl") ||
-		strings.HasSuffix(procLower, "curl.exe") ||
-		strings.HasSuffix(procLower, "wget") ||
-		strings.HasSuffix(procLower, "nc") ||
-		strings.HasSuffix(procLower, "ncat") ||
-		strings.HasSuffix(procLower, "netcat") ||
-		strings.HasSuffix(procLower, "/sh") ||
-		strings.HasSuffix(procLower, "/bash") ||
-		strings.HasSuffix(procLower, "/zsh") ||
-		strings.HasSuffix(procLower, "/dash") ||
-		strings.HasSuffix(procLower, "python") ||
-		strings.HasSuffix(procLower, "python3") ||
-		strings.HasSuffix(procLower, "python.exe")
+	isInteractiveShell := isInterpreterOrShell(procName)
 
 	// Both lists are the operator's, held in the database and shown in the
 	// console, not a table compiled into this file.
 	isTrustedSys := cfg.IsQuietProcess(strings.ToLower(procName))
 	isTrustedDst := cfg.IsQuietOrg(geo.Org)
+
+	// isVouched is the narrower question: this process, to this owner. A quiet
+	// org alone silenced every process on every port to networks that front a
+	// large part of the web - which is where beaconing hides, not where it is
+	// absent. The beacon and volume detectors below ask this instead.
+	isVouched := cfg.IsVouchedPair(procName, geo.Org, geo.Tenancy)
 
 	// Off-hours activity triggers ONLY for interactive shells / script
 	// interpreters, NEVER for standard OS system daemons.
@@ -376,7 +461,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Mitigated:   false,
 			}
 			e.recordAlert(alert)
-			e.recordAnomaly(storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -418,7 +503,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			stats = &bandwidthStats{}
 			e.bwTracker[bwKey] = stats
 		}
-		mean, stddev, zScore, samples := stats.observe(float64(ev.BytesOut))
+		median, mad, zScore, samples := stats.observe(float64(ev.BytesOut))
 		e.mu.Unlock()
 
 		baselined := samples >= int64(cfg.BandwidthMinSamples)
@@ -429,7 +514,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// and nothing about that is exfiltration. An operator who has vouched
 		// for a network has already answered this question, and a megabyte is
 		// the smallest transfer worth waking someone for.
-		outlier := baselined && zScore > 3.5 && ev.BytesOut > 1024*1024 && !isTrustedDst
+		outlier := baselined && zScore > 3.5 && ev.BytesOut > 1024*1024 && !isVouched
 		// A burst large enough to matter on its own account, reported even
 		// without a baseline - but as the weaker finding it is, because with no
 		// baseline there is nothing to say it is unusual for this process.
@@ -451,12 +536,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					EndpointID:  ev.EndpointID,
 					Timestamp:   now,
 					Title:       bandwidthTitle(baselined, zScore, ev.BytesOut),
-					Description: bandwidthDescription(baselined, procName, ev.BytesOut, ev.DstIP, ev.DstPort, mean, stddev, zScore, samples),
+					Description: bandwidthDescription(baselined, procName, ev.BytesOut, ev.DstIP, ev.DstPort, median, mad, zScore, samples),
 					Severity:    bwSeverity,
 					Mitigated:   false,
 				}
 				e.recordAlert(alert)
-				e.recordAnomaly(storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -465,7 +550,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    bwSeverity,
 					Title:       alert.Title,
 					Description: alert.Description,
-					Details:     fmt.Sprintf("Measured: %d bytes | Samples: %d | Baseline Mean: %.0f bytes | StdDev: %.0f | Z-Score: %.2f | %s", ev.BytesOut, samples, mean, stddev, zScore, describeOwner(geo)),
+					Details:     fmt.Sprintf("Measured: %d bytes | Samples: %d | Usual transfer: %.0f bytes | Median absolute deviation: %.0f | Modified Z: %.2f | %s", ev.BytesOut, samples, median, mad, zScore, describeOwner(geo)),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
@@ -473,6 +558,41 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				})
 				log.Printf("[!] ANOMALY ALERT [%s]: %s on %s -> %d bytes (Z=%.2f over %d samples)", bwSeverity, alert.Title, ev.EndpointID, ev.BytesOut, zScore, samples)
 			}
+		}
+	}
+
+	// 3b. Bulk egress to a cloud storage service (MITRE DET0570)
+	//
+	// This is the one case where being vouched for is not an answer. Staging
+	// data in the same file-sharing service the estate uses every day is the
+	// technique - the traffic is meant to look ordinary, and any tuning that
+	// silences "chrome to a storage provider" silences the exfiltration with
+	// it. So a large single transfer to a storage service is reported whatever
+	// the quiet lists say, at a volume high enough that ordinary document work
+	// does not reach it.
+	if cfg.BandwidthOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
+		ev.BytesOut >= cloudStorageEgressBytes && isCloudStorageDestination(geo, ev) {
+		alertKey := fmt.Sprintf("storageegress:%s:%s:%s", ev.EndpointID, procName, strings.ToLower(geo.Org))
+		if !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
+			title := fmt.Sprintf("Bulk upload to cloud storage (%s)", describeStorageService(geo, ev))
+			description := fmt.Sprintf("Process %s uploaded %s to %s at %s:%d. Volume to a storage service is reported even when the process and network are expected here, because using a service the estate already trusts is what this technique looks like.",
+				procName, humanBytes(ev.BytesOut), describeStorageService(geo, ev), ev.DstIP, ev.DstPort)
+			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+				ID:          uuid.New().String(),
+				TenantID:    ev.TenantID,
+				EndpointID:  ev.EndpointID,
+				Hostname:    endpoint.Hostname,
+				AnomalyType: "CLOUD_STORAGE_EGRESS",
+				Severity:    "HIGH",
+				Title:       title,
+				Description: description,
+				Details:     fmt.Sprintf("Measured: %d bytes | Threshold: %d bytes | Process: %s | %s", ev.BytesOut, int64(cloudStorageEgressBytes), ev.ProcessPath, describeOwner(geo)),
+				ProcessPath: ev.ProcessPath,
+				DstIP:       ev.DstIP,
+				DstPort:     ev.DstPort,
+				Timestamp:   now,
+			})
+			log.Printf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %d bytes", title, ev.EndpointID, ev.BytesOut)
 		}
 	}
 
@@ -489,8 +609,14 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// scored 1.00 with 0% payload variation, which is what a keepalive is. An
 	// owner the operator trusts is trusted at whatever port they answer on; the
 	// way to stop trusting them is to take them off the list.
+	//
+	// That exemption is now the process talking to the owner rather than the
+	// owner alone. "Cloudflare is normal here" silenced every process reaching a
+	// network that fronts much of the web, and an implant beaconing through a
+	// CDN is the case this detector exists for. Chrome to Cloudflare stays
+	// quiet; python or curl to the same network is a finding again.
 	if cfg.BeaconOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isTrustedDst {
+		!isTrustedSys && !isVouched {
 		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
 		e.mu.Lock()
 		bWin, exists := e.beaconTracker[beaconKey]
@@ -525,7 +651,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Mitigated: false,
 				}
 				e.recordAlert(alert)
-				e.recordAnomaly(storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -596,7 +722,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				description = unattributedDescription(ev.EndpointID, ev.DstIP, ev.DstPort, run)
 				details = fmt.Sprintf("Process: %s | %s | %s", ev.ProcessPath, describeOwner(geo), unattributedDetails(run, cfg.FirstSeenCooldown))
 			}
-			e.recordAnomaly(storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -656,7 +782,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Mitigated:   false,
 				}
 				e.recordAlert(alert)
-				e.recordAnomaly(storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -727,7 +853,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Mitigated:   false,
 				}
 				e.recordAlert(alert)
-				e.recordAnomaly(storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -762,7 +888,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Mitigated:   false,
 			}
 			e.recordAlert(alert)
-			e.recordAnomaly(storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -800,7 +926,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			}
-			e.recordAnomaly(anomaly)
+			e.recordAnomaly(ev, geo, anomaly)
 			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}
@@ -835,6 +961,126 @@ func isBridgeOrContainerSubnet(ipStr string) bool {
 }
 
 // isKnownInfrastructureProcess checks if a process is a container runtime, local DNS resolver, or test runner
+// isInterpreterOrShell matches the base name of the process, not the tail of
+// its path.
+//
+// The suffix test this replaces was wrong in both directions, and both showed
+// up in production. "python3.13" does not end in "python3", so the interpreter
+// behind most of this fleet's beacon-shaped traffic was never recognised; and
+// any path ending in the two letters "nc" - /usr/bin/sync, a vnc client,
+// zsync - was treated as netcat.
+func isInterpreterOrShell(procName string) bool {
+	base := strings.ToLower(strings.TrimSpace(procName))
+	base = strings.TrimSuffix(base, ".exe")
+	if base == "" {
+		return false
+	}
+
+	switch base {
+	case "powershell", "pwsh", "cmd", "wscript", "cscript", "mshta", "rundll32",
+		"curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ssh",
+		"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
+		"python", "python2", "python3", "pythonw",
+		"perl", "ruby", "php", "node", "nodejs", "deno", "bun",
+		"osascript", "java", "lua", "tclsh":
+		return true
+	}
+
+	// Versioned interpreters: python3.13, perl5.38, php8.3, ruby3.2. The
+	// version is what the suffix match kept missing.
+	for _, family := range []string{"python", "perl", "php", "ruby", "node", "lua"} {
+		if !strings.HasPrefix(base, family) {
+			continue
+		}
+		rest := strings.TrimPrefix(base, family)
+		if rest == "" {
+			return true
+		}
+		if isVersionSuffix(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// isVersionSuffix accepts what follows an interpreter's name in a versioned
+// binary - "3", "3.13", "5.38" - and nothing else, so "pythonic-agent" and
+// "nodeguard" are not interpreters.
+func isVersionSuffix(rest string) bool {
+	if rest == "" {
+		return false
+	}
+	for _, r := range rest {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return rest[0] >= '0' && rest[0] <= '9'
+}
+
+// cloudStorageEgressBytes is the volume at which a single upload to a storage
+// service is worth reporting on its own. Ten megabytes is the figure MITRE's
+// detection strategy for exfiltration to cloud storage uses, and it is well
+// above the document-sized traffic that fills an ordinary working day.
+const cloudStorageEgressBytes = 10 * 1024 * 1024
+
+// storageServices are the counterparties whose whole purpose is holding files.
+// Matched against the resolved network owner and, when the agent reports one,
+// the destination name.
+var storageServices = []string{
+	"dropbox", "box.com", "box, inc", "mega.nz", "mega limited", "backblaze",
+	"wasabi", "pcloud", "sync.com", "mediafire", "wetransfer", "sendspace",
+	"file.io", "anonfiles", "gofile", "storj", "icedrive", "koofr",
+	"amazon s3", "google drive", "onedrive", "sharepoint", "azure blob",
+	"digitalocean spaces", "linode object storage", "cloudflare r2",
+}
+
+// isCloudStorageDestination decides whether this destination is a place files
+// are put. It reads the owner, and the destination name when the agent has one
+// - which today it rarely does, so the owner carries most of this until the
+// router work brings names.
+func isCloudStorageDestination(geo threatintel.GeoRecord, ev storage.Event) bool {
+	haystacks := []string{
+		strings.ToLower(geo.Org),
+		strings.ToLower(ev.Domain),
+		strings.ToLower(ev.SNI),
+	}
+	for _, haystack := range haystacks {
+		if strings.TrimSpace(haystack) == "" {
+			continue
+		}
+		for _, service := range storageServices {
+			if strings.Contains(haystack, service) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func describeStorageService(geo threatintel.GeoRecord, ev storage.Event) string {
+	for _, candidate := range []string{ev.SNI, ev.Domain, geo.Org} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return "an unnamed storage service"
+}
+
+// humanBytes renders a transfer the way the finding reads out loud.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/float64(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d bytes", n)
+	}
+}
+
 func isKnownInfrastructureProcess(procPath string) bool {
 	p := strings.ToLower(procPath)
 	base := filepath.Base(p)
@@ -952,30 +1198,30 @@ func firstSeenTitle(geo threatintel.GeoRecord) string {
 // whatever handful of samples happened to exist.
 func bandwidthTitle(baselined bool, zScore float64, bytesOut int64) string {
 	if baselined {
-		return "Outbound volume " + deviations(zScore) + " above this process's baseline"
+		return "Outbound volume " + deviations(zScore) + " above this process's usual volume"
 	}
 	return fmt.Sprintf("Large outbound transfer (%d bytes, no baseline yet)", bytesOut)
 }
 
-// deviations renders a z-score at a precision that means something. A process
-// whose every previous transfer was the same size has almost no variance, so a
-// genuine outlier against it scores in the millions; printing that to one
-// decimal place reads as a broken number rather than as a large one.
+// deviations renders the modified z-score at a precision that means something.
+// A process whose every previous transfer was the same size has almost no
+// spread, so a genuine outlier against it scores enormously; printing that to
+// one decimal place reads as a broken number rather than as a large one.
 func deviations(z float64) string {
 	switch {
 	case z >= 1000:
-		return "more than 1,000 standard deviations"
+		return "more than 1,000 deviations"
 	case z >= 100:
-		return fmt.Sprintf("%.0f standard deviations", z)
+		return fmt.Sprintf("%.0f deviations", z)
 	default:
-		return fmt.Sprintf("%.1f standard deviations", z)
+		return fmt.Sprintf("%.1f deviations", z)
 	}
 }
 
-func bandwidthDescription(baselined bool, procName string, bytesOut int64, dstIP string, dstPort uint16, mean, stddev, zScore float64, samples int64) string {
+func bandwidthDescription(baselined bool, procName string, bytesOut int64, dstIP string, dstPort uint16, median, mad, zScore float64, samples int64) string {
 	if baselined {
-		return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Its baseline over the %d transfers before this one is %.0f bytes (standard deviation %.0f), which puts this one %s out.",
-			procName, bytesOut, dstIP, dstPort, samples, mean, stddev, deviations(zScore))
+		return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Its usual transfer over the %d before this one is %.0f bytes (median absolute deviation %.0f), which puts this one %s out.",
+			procName, bytesOut, dstIP, dstPort, samples, median, mad, deviations(zScore))
 	}
 	return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Only %d transfers have been observed for it, which is too few to say whether that is unusual for this process.",
 		procName, bytesOut, dstIP, dstPort, samples)

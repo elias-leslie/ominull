@@ -27,6 +27,7 @@ import (
 	"ominull/hub/pkg/configuration"
 	"ominull/hub/pkg/diagnostics"
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
 
 // diagnosticChecks is shared by the first-run wizard and /status. Checks are
@@ -52,6 +53,7 @@ func (s *Server) diagnosticChecks() []diagnostics.Check {
 		s.checkBootstrap,
 		s.checkHeartbeats,
 		s.checkBackups,
+		s.checkNetworkAttribution,
 	}
 }
 
@@ -675,4 +677,41 @@ func (s *Server) checkBackups(context.Context) diagnostics.Result {
 		return diag("backups", "Backup path", diagnostics.Warn, "configured backup path is not readable", filepath.Base(path), "restore the package-owned backup directory or correct its permissions")
 	}
 	return diag("backups", "Backup path", diagnostics.Pass, "package backup directory is present", filepath.Base(path), "")
+}
+
+// checkNetworkAttribution reports the table that names destinations.
+//
+// A stale table is not an outage: the hub keeps resolving from whatever it last
+// had, and from the ranges compiled into the binary underneath that. It is
+// still worth saying out loud, because the visible symptom of a table that
+// stopped refreshing is findings that read "unattributed network" rather than
+// naming a counterparty, which looks like a change in the estate's behaviour.
+func (s *Server) checkNetworkAttribution(context.Context) diagnostics.Result {
+	status := threatintel.AttributionInfo()
+	evidence := fmt.Sprintf("%d prefixes, %s", status.Count, status.Source)
+
+	refreshedAt, storedSource, storedCount, err := s.store.NetworkAttributionState()
+	if err != nil {
+		return diag("network-attribution", "Destination attribution", diagnostics.Warn,
+			"the stored attribution snapshot could not be read", evidence,
+			"restore the SQLite database and restart the service")
+	}
+
+	if storedCount == 0 {
+		return diag("network-attribution", "Destination attribution", diagnostics.Warn,
+			"no published ranges have been fetched yet; destinations are named from the built-in table only", evidence,
+			"allow outbound HTTPS to the published vendor range feeds, or accept built-in attribution only")
+	}
+
+	age := time.Since(refreshedAt)
+	evidence = fmt.Sprintf("%d prefixes in force, %d stored from %s, refreshed %s ago",
+		status.Count, storedCount, storedSource, age.Truncate(time.Minute))
+
+	if age > 7*24*time.Hour {
+		return diag("network-attribution", "Destination attribution", diagnostics.Warn,
+			"published ranges have not refreshed in over a week", evidence,
+			"check outbound HTTPS from the hub; the previous snapshot stays in force meanwhile")
+	}
+	return diag("network-attribution", "Destination attribution", diagnostics.Pass,
+		fmt.Sprintf("%d prefixes in force", status.Count), evidence, "")
 }

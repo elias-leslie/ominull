@@ -671,6 +671,9 @@ func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request, opera
 func (s *Server) Start(addr string) error {
 	// Start Threat Intelligence feed scheduler, behavioral detector, and autonomous scanner.
 	s.ti.Start(context.Background(), 1*time.Hour)
+	// Published vendor ranges change slowly; daily is the cadence the feeds
+	// themselves are updated on.
+	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
 	s.scanner.StartBackground()
 

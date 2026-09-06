@@ -6498,9 +6498,14 @@
     var bwCool = numberField(t.bandwidth_cooldown_minutes, 1, 1440, 1);
     var bwSamples = numberField(t.bandwidth_min_samples, 4, 1000, 1);
 
+    var silenceOn = toggleField(t.silence_enabled, "Report agents that stop reporting");
+    var silenceAfter = numberField(t.silence_after_minutes, 5, 1440, 1);
+
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
     var procs = listField(t.quiet_processes, "svchost.exe, apsd, systemd-timesyncd");
     var orgs = listField(t.quiet_orgs, "apple, microsoft, cloudflare");
+    var clients = listField(t.quiet_clients, "chrome, firefox, msedge.exe");
+    var pairs = listField(t.quiet_pairs, "backup-agent@backblaze, curl@github");
 
     var body = h("div", { cls: "stack" },
       h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored." }),
@@ -6526,7 +6531,9 @@
         tuningRow("Repeat at most every", "Minutes, per destination.", fsCool),
         tuningRow("", "", bwOn.node),
         tuningRow("Transfers required", "A spike is measured against what this process normally sends. Below this many observed transfers the baseline is guesswork, and every large-ish upload looks like an outlier. Shipped default " + (d.bandwidth_min_samples || 20) + ".", bwSamples),
-        tuningRow("Repeat at most every", "Minutes, per process.", bwCool)),
+        tuningRow("Repeat at most every", "Minutes, per process.", bwCool),
+        tuningRow("", "", silenceOn.node),
+        tuningRow("Silent after", "Minutes without a heartbeat before a host is reported as dark. Every other detector here needs telemetry, so stopping the agent is the cheapest way to blind all of them - and a crashed, rebuilt or disconnected host looks the same. One finding per host, and a recovery note when it returns.", silenceAfter)),
 
       h("h4", { cls: "tune-head", text: "New endpoints" }),
       h("div", { cls: "tune-list" },
@@ -6535,7 +6542,9 @@
       h("h4", { cls: "tune-head", text: "Known-quiet" }),
       h("div", { cls: "tune-list" },
         tuningRow("Processes", "Matched on the program name. These are the operating system's own components, whose job is to talk to their vendor on a timer.", procs),
-        tuningRow("Networks", "Matched against the owner of the destination address.", orgs)));
+        tuningRow("Networks", "Matched against the owner of the destination address. On its own this names a network as ordinary; it no longer silences everything that reaches it.", orgs),
+        tuningRow("Expected clients", "Programs whose regular traffic to those networks is expected - browsers, updaters, this agent. Beaconing and volume findings are silenced only for a listed program talking to a listed network, because a CDN is exactly where an implant would rather hide.", clients),
+        tuningRow("Expected pairs", "One-off exceptions written program@network, the shape the Expected button on an alert produces. Rented cloud ranges are never silenced by either list.", pairs)));
 
     var save = function () {
       var payload = {
@@ -6555,9 +6564,13 @@
         bandwidth_enabled: bwOn.input.checked,
         bandwidth_cooldown_minutes: parseInt(bwCool.value, 10) || 0,
         bandwidth_min_samples: parseInt(bwSamples.value, 10) || 0,
+        silence_enabled: silenceOn.input.checked,
+        silence_after_minutes: parseInt(silenceAfter.value, 10) || 0,
         warmup_hours: parseInt(warmup.value, 10) || 0,
         quiet_processes: parseList(procs.value),
-        quiet_orgs: parseList(orgs.value)
+        quiet_orgs: parseList(orgs.value),
+        quiet_clients: parseList(clients.value),
+        quiet_pairs: parseList(pairs.value)
       };
       request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
         state.tuning = res;
@@ -6617,7 +6630,7 @@
         h("dt", { text: "Learning period" }),
         h("dd", { text: t.warmup_hours ? t.warmup_hours + "h after an endpoint first reports" : "None — hosts are judged from their first packet" }),
         h("dt", { text: "Known-quiet" }),
-        h("dd", { text: arrayOf(t.quiet_processes).length + " process(es), " + arrayOf(t.quiet_orgs).length + " network(s)" }),
+        h("dd", { text: arrayOf(t.quiet_processes).length + " process(es), " + arrayOf(t.quiet_orgs).length + " network(s), " + (arrayOf(t.quiet_clients).length + arrayOf(t.quiet_pairs).length) + " expected client(s)/pair(s)" }),
         h("dt", { text: "Hub time" }), h("dd", { cls: "ip", text: wrap.now || "—" })),
       changed.length
         ? h("p", { cls: "note note-warn", role: "alert", text: changed.length + " setting(s) differ from the shipped values" + (t.updated_by ? ", last changed by " + t.updated_by : "") })

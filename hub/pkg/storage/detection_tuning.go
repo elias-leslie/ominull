@@ -44,6 +44,17 @@ type DetectionTuning struct {
 	// z-score against the noise of the previous three.
 	BandwidthMinSamples int `json:"bandwidth_min_samples"`
 
+	// SilenceOn and SilenceAfterMinutes are the alert-on-absence rule: an agent
+	// that stops reporting is a finding, not a gap.
+	//
+	// Every detector in this product needs telemetry to say anything at all, so
+	// the cheapest way to defeat all of them at once is to stop the agent -
+	// MITRE tracks it as T1562.001, and it is what a host being rebuilt,
+	// crashing, or losing its route looks like too. Wazuh alerts on the same
+	// condition after its keepalive window; fifteen minutes is that order.
+	SilenceOn           bool `json:"silence_enabled"`
+	SilenceAfterMinutes int  `json:"silence_after_minutes"`
+
 	// WarmupHours is how long after an endpoint first reports that behavioural
 	// detections are held rather than raised. A host installed an hour ago has
 	// no baseline to be anomalous against, and every one of its ordinary
@@ -55,6 +66,22 @@ type DetectionTuning struct {
 	// resolved network owner.
 	QuietProcesses []string `json:"quiet_processes"`
 	QuietOrgs      []string `json:"quiet_orgs"`
+
+	// QuietClients are the processes whose regular traffic to a vouched network
+	// is expected: browsers, updaters, this agent.
+	//
+	// A quiet org on its own is far wider than it reads. "Cloudflare is normal
+	// here" silences every process on every port to a network that fronts a
+	// large part of the web, which is exactly where beaconing is easiest to
+	// hide - the published allowlist is the point of the technique. Silence is
+	// therefore granted to a process talking to a vouched network, never to the
+	// network alone: chrome to Cloudflare is ordinary, python to Cloudflare is
+	// the finding.
+	QuietClients []string `json:"quiet_clients"`
+
+	// QuietPairs are one-off exceptions, written "process@owner" - the shape
+	// the console's Expected button and the learning proposals produce.
+	QuietPairs []string `json:"quiet_pairs"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
@@ -97,10 +124,14 @@ func defaultDetectionTuning() DetectionTuning {
 		BandwidthCooldown:   5,
 		BandwidthMinSamples: 20,
 
+		SilenceOn:           true,
+		SilenceAfterMinutes: 15,
+
 		WarmupHours: 24,
 
 		QuietProcesses: defaultQuietProcesses(),
 		QuietOrgs:      defaultQuietOrgs(),
+		QuietClients:   defaultQuietClients(),
 	}
 }
 
@@ -126,6 +157,25 @@ func defaultQuietProcesses() []string {
 		"ominull-agent", "ominulld", "ominulld.exe", "ominull_agent.exe",
 		// Trusted communication clients with known regular keepalive intervals
 		"telegram", "telegram-desktop", "Telegram.exe",
+	}
+}
+
+// defaultQuietClients are the processes that talk to vendor networks all day by
+// design. Being on this list silences nothing on its own: it only means that
+// this process talking to an already-vouched owner is unremarkable.
+func defaultQuietClients() []string {
+	return []string{
+		// Browsers, which account for most traffic to CDN and vendor networks.
+		"chrome", "chrome.exe", "chromium", "firefox", "firefox.exe",
+		"msedge.exe", "safari", "brave", "brave.exe", "opera.exe",
+		// Platform updaters and stores.
+		"svchost.exe", "usocoreworker.exe", "msmpeng.exe", "snapd",
+		"packagekitd", "unattended-upgr", "softwareupdated", "nsurlsessiond",
+		// This fleet's own agent, which is the most regular talker on any host
+		// it is installed on.
+		"ominull-agent", "ominulld", "ominulld.exe",
+		// Chat clients with fixed keepalives.
+		"telegram", "telegram-desktop", "telegram.exe",
 	}
 }
 
@@ -226,6 +276,9 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.FirstSeenCooldown = clampInt(t.FirstSeenCooldown, 1, 1440, 30)
 	t.BandwidthCooldown = clampInt(t.BandwidthCooldown, 1, 1440, 5)
 	t.BandwidthMinSamples = clampInt(t.BandwidthMinSamples, 4, 1000, 20)
+	// Below five minutes this reports every reboot and every flaky link; above
+	// a day it is not alerting on absence, it is noticing it eventually.
+	t.SilenceAfterMinutes = clampInt(t.SilenceAfterMinutes, 5, 1440, 15)
 	if t.WarmupHours < 0 {
 		t.WarmupHours = 0
 	}
@@ -234,6 +287,8 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	}
 	t.QuietProcesses = tidyList(t.QuietProcesses)
 	t.QuietOrgs = tidyList(t.QuietOrgs)
+	t.QuietClients = tidyList(t.QuietClients)
+	t.QuietPairs = tidyPairs(t.QuietPairs)
 	return t
 }
 
@@ -250,6 +305,41 @@ func tidyList(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// tidyPairs keeps only entries shaped "process@owner". A pair missing either
+// half would otherwise widen into "this process anywhere" or "this owner for
+// anything", which is the failure the pair exists to avoid.
+func tidyPairs(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		proc, org, ok := splitPair(v)
+		if !ok {
+			continue
+		}
+		v = proc + "@" + org
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func splitPair(v string) (proc, org string, ok bool) {
+	at := strings.LastIndex(v, "@")
+	if at <= 0 || at == len(v)-1 {
+		return "", "", false
+	}
+	proc = strings.ToLower(strings.TrimSpace(v[:at]))
+	org = strings.ToLower(strings.TrimSpace(v[at+1:]))
+	if proc == "" || org == "" {
+		return "", "", false
+	}
+	return proc, org, true
 }
 
 // Location resolves the configured zone. "Local" means the hub's own zone,
@@ -308,6 +398,51 @@ func (t DetectionTuning) IsQuietOrg(org string) bool {
 		}
 	}
 	return false
+}
+
+// IsQuietClient matches the process base name against the expected-client list.
+func (t DetectionTuning) IsQuietClient(base string) bool {
+	base = strings.ToLower(strings.TrimSpace(base))
+	if base == "" {
+		return false
+	}
+	for _, q := range t.QuietClients {
+		if q == base {
+			return true
+		}
+	}
+	return false
+}
+
+// IsVouchedPair answers the only question that should silence a conversation:
+// is this process, talking to this owner, expected here?
+//
+// Two things can refuse. Rented compute is never vouched for whatever its
+// owner's name is - an EC2 instance is Amazon's address and somebody else's
+// machine - and a process nobody has vouched for is a finding even on the most
+// ordinary network in the estate.
+func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
+	procBase = strings.ToLower(strings.TrimSpace(procBase))
+	org = strings.ToLower(strings.TrimSpace(org))
+	if procBase == "" || org == "" {
+		return false
+	}
+	if strings.TrimSpace(tenancy) == TenancyHosting {
+		return false
+	}
+
+	// An explicit pair is the operator naming this exact conversation.
+	for _, entry := range t.QuietPairs {
+		proc, owner, ok := splitPair(entry)
+		if !ok || proc != procBase {
+			continue
+		}
+		if strings.Contains(org, owner) {
+			return true
+		}
+	}
+
+	return t.IsQuietOrg(org) && t.IsQuietClient(procBase)
 }
 
 // OffHoursLabel renders the window the way it is shown next to an alert.

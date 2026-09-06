@@ -102,6 +102,10 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("learning period", before.WarmupHours, after.WarmupHours)
 	add("quiet processes", len(before.QuietProcesses), len(after.QuietProcesses))
 	add("quiet networks", len(before.QuietOrgs), len(after.QuietOrgs))
+	add("expected clients", len(before.QuietClients), len(after.QuietClients))
+	add("expected pairs", len(before.QuietPairs), len(after.QuietPairs))
+	add("silence threshold (minutes)", before.SilenceAfterMinutes, after.SilenceAfterMinutes)
+	add("silence detection", before.SilenceOn, after.SilenceOn)
 	if len(parts) == 0 {
 		return "saved with no change"
 	}

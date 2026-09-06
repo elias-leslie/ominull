@@ -2,7 +2,6 @@ package threatintel
 
 import (
 	"net/netip"
-	"sort"
 	"strings"
 	"sync"
 )
@@ -51,16 +50,22 @@ type GeoRecord struct {
 	City        string `json:"city"`
 	ASN         string `json:"asn"`
 	Org         string `json:"org"`
+	// Tenancy says whether this range runs the owner's own services, fronts
+	// other people's, or is rented compute. See attribution.go: an owner name
+	// alone is not enough to decide that traffic is ordinary.
+	Tenancy string `json:"tenancy,omitempty"`
+	// Source names where the attribution came from - the table compiled into
+	// this binary, or the feed that last updated it.
+	Source string `json:"source,omitempty"`
 }
 
 // Resolved reports whether this record names a real network owner, as opposed
 // to the unresolved answer returned for an address the table does not cover.
 func (g GeoRecord) Resolved() bool { return strings.TrimSpace(g.Org) != "" }
 
-type prefixRule struct {
-	prefix netip.Prefix
-	record GeoRecord
-}
+// geoCacheLimit bounds the resolved-address cache. An estate talks to a few
+// thousand destinations; anything approaching this is enumeration, not traffic.
+const geoCacheLimit = 65536
 
 var (
 	geoCache   = make(map[string]GeoRecord)
@@ -88,12 +93,8 @@ var (
 		CountryName: "Internal Network",
 		ASN:         "AS-PRIVATE",
 		Org:         "Enterprise Intranet",
+		Tenancy:     TenancyVendor,
 	}
-
-	// knownBlocks is built once, sorted longest-prefix-first, so the first
-	// match is also the most specific one.
-	knownBlocks []prefixRule
-	blocksOnce  sync.Once
 )
 
 // ownerBlocks lists the networks the table knows, as CIDR strings against one
@@ -104,8 +105,12 @@ var ownerBlocks = []struct {
 	owner GeoRecord
 	cidrs []string
 }{
+	// Tenancy is deliberately pessimistic here. The built-in Amazon block mixes
+	// CloudFront edge with rented EC2 and cannot tell them apart, so the whole
+	// of it is treated as rented until the AWS feed arrives with its per-prefix
+	// service tag and refines it.
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS15169", Org: "Google LLC"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS15169", Org: "Google LLC", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{
 			"8.8.4.0/24", "8.8.8.0/24", "8.34.208.0/20", "8.35.192.0/20",
 			"23.236.48.0/20", "23.251.128.0/19",
@@ -121,7 +126,7 @@ var ownerBlocks = []struct {
 		},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS20940", Org: "Akamai Technologies"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS20940", Org: "Akamai Technologies", Tenancy: TenancySharedCDN, Source: "built-in"},
 		[]string{
 			"2.16.0.0/13", "23.32.0.0/11", "23.64.0.0/14", "23.192.0.0/11",
 			"88.221.0.0/16", "92.122.0.0/15", "95.100.0.0/15", "96.16.0.0/15",
@@ -129,7 +134,7 @@ var ownerBlocks = []struct {
 		},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13335", Org: "Cloudflare, Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13335", Org: "Cloudflare, Inc.", Tenancy: TenancySharedCDN, Source: "built-in"},
 		[]string{
 			"1.0.0.0/24", "1.1.1.0/24",
 			"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
@@ -141,7 +146,7 @@ var ownerBlocks = []struct {
 		},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS8075", Org: "Microsoft Corporation"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS8075", Org: "Microsoft Corporation", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{
 			"13.64.0.0/11", "20.0.0.0/8", "40.64.0.0/10", "51.104.0.0/15",
 			"52.96.0.0/12", "52.112.0.0/14", "65.52.0.0/14", "104.40.0.0/13",
@@ -150,7 +155,7 @@ var ownerBlocks = []struct {
 		},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS16509", Org: "Amazon.com, Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS16509", Org: "Amazon.com, Inc.", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{
 			"3.0.0.0/8", "13.32.0.0/15", "13.224.0.0/14", "15.177.0.0/16",
 			"18.0.0.0/8", "44.192.0.0/10", "52.0.0.0/11", "52.32.0.0/11",
@@ -159,61 +164,63 @@ var ownerBlocks = []struct {
 		},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS714", Org: "Apple Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS714", Org: "Apple Inc.", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{"17.0.0.0/8"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS54113", Org: "Fastly, Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS54113", Org: "Fastly, Inc.", Tenancy: TenancySharedCDN, Source: "built-in"},
 		[]string{"146.75.0.0/16", "151.101.0.0/16", "199.232.0.0/16"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS36459", Org: "GitHub, Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS36459", Org: "GitHub, Inc.", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{"140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS14061", Org: "DigitalOcean, LLC"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS14061", Org: "DigitalOcean, LLC", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{"104.248.0.0/16", "138.68.0.0/16", "159.65.0.0/16", "165.227.0.0/16", "167.71.0.0/16"},
 	},
 	{
-		GeoRecord{Country: "DE", CountryName: "Germany", ASN: "AS24940", Org: "Hetzner Online GmbH"},
+		GeoRecord{Country: "DE", CountryName: "Germany", ASN: "AS24940", Org: "Hetzner Online GmbH", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{"88.198.0.0/16", "136.243.0.0/16", "148.251.0.0/16", "159.69.0.0/16", "65.108.0.0/16", "116.202.0.0/16"},
 	},
 	{
-		GeoRecord{Country: "FR", CountryName: "France", ASN: "AS16276", Org: "OVH SAS"},
+		GeoRecord{Country: "FR", CountryName: "France", ASN: "AS16276", Org: "OVH SAS", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{"51.15.0.0/16", "145.239.0.0/16", "178.32.0.0/15", "51.68.0.0/14", "54.36.0.0/14"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS63949", Org: "Akamai Connected Cloud (Linode)"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS63949", Org: "Akamai Connected Cloud (Linode)", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{"45.33.32.0/19", "173.255.192.0/18", "172.104.0.0/15", "139.162.0.0/16"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS19281", Org: "Quad9"},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS19281", Org: "Quad9", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{"9.9.9.0/24", "149.112.112.0/24"},
 	},
 	{
-		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13414", Org: "Twitter, Inc."},
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13414", Org: "Twitter, Inc.", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{"104.244.40.0/21", "192.133.76.0/22"},
 	},
 }
 
-func buildBlocks() {
+// BuiltinAttribution is the table compiled into this binary: a coarse,
+// hand-maintained list of the large networks an estate actually talks to. It is
+// what a hub with no internet access resolves from, and what the synced feeds
+// replace when they arrive.
+func BuiltinAttribution() []NetworkPrefix {
+	var out []NetworkPrefix
 	for _, owner := range ownerBlocks {
 		for _, cidr := range owner.cidrs {
-			prefix, err := netip.ParsePrefix(cidr)
-			if err != nil {
-				// A malformed entry is dropped rather than approximated. The
-				// address it covered then resolves as unknown, which is the
-				// honest outcome and is caught by the table's own test.
-				continue
-			}
-			knownBlocks = append(knownBlocks, prefixRule{prefix: prefix.Masked(), record: owner.owner})
+			out = append(out, NetworkPrefix{
+				Prefix:      cidr,
+				Country:     owner.owner.Country,
+				CountryName: owner.owner.CountryName,
+				ASN:         owner.owner.ASN,
+				Org:         owner.owner.Org,
+				Tenancy:     owner.owner.Tenancy,
+				Source:      "built-in",
+			})
 		}
 	}
-	// Longest prefix first: 52.96.0.0/12 (Microsoft 365) has to be consulted
-	// before 52.0.0.0/11 (AWS), and a list in authoring order would not.
-	sort.SliceStable(knownBlocks, func(i, j int) bool {
-		return knownBlocks[i].prefix.Bits() > knownBlocks[j].prefix.Bits()
-	})
+	return out
 }
 
 // ResolveGeoIP attributes an address to a country and a network owner, offline.
@@ -244,17 +251,18 @@ func ResolveGeoIP(ipStr string) GeoRecord {
 		return rec
 	}
 
-	blocksOnce.Do(buildBlocks)
-
 	result := unresolvedRecord
-	for _, b := range knownBlocks {
-		if b.prefix.Contains(addr) {
-			result = b.record
-			break
-		}
+	if rec, ok := table().lookup(addr); ok {
+		result = rec
 	}
 
 	geoCacheMu.Lock()
+	// The cache is keyed by whatever addresses the fleet reports, so it is
+	// bounded rather than left to grow with the number of distinct destinations
+	// an endpoint can be made to talk to.
+	if len(geoCache) >= geoCacheLimit {
+		geoCache = make(map[string]GeoRecord, geoCacheLimit/2)
+	}
 	geoCache[ipStr] = result
 	geoCacheMu.Unlock()
 	return result

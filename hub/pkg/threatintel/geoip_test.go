@@ -77,7 +77,7 @@ func TestTheSameNetworkAnswersConsistently(t *testing.T) {
 }
 
 func TestLocalAddressesAreNotAttributedToAnOwner(t *testing.T) {
-	for _, ip := range []string{"192.168.86.58", "10.0.0.1", "172.18.0.4", "169.254.1.1"} {
+	for _, ip := range []string{"10.0.0.58", "10.0.0.1", "172.18.0.4", "169.254.1.1"} {
 		if got := ResolveGeoIP(ip); got.Country != "LOCAL" {
 			t.Errorf("%s resolved to %q; a private address is local", ip, got.Country)
 		}
@@ -92,18 +92,30 @@ func TestLocalAddressesAreNotAttributedToAnOwner(t *testing.T) {
 // A malformed entry in the table would silently widen or narrow somebody's
 // network, so the table has to parse in full.
 func TestEveryTableEntryIsAValidPrefix(t *testing.T) {
-	blocksOnce.Do(buildBlocks)
+	built := table()
 	declared := 0
 	for _, owner := range ownerBlocks {
 		declared += len(owner.cidrs)
 	}
-	if len(knownBlocks) != declared {
-		t.Fatalf("%d of %d table entries parsed; the rest were dropped", len(knownBlocks), declared)
+	if built.count != declared {
+		t.Fatalf("%d of %d table entries parsed; the rest were dropped", built.count, declared)
 	}
-	for i := 1; i < len(knownBlocks); i++ {
-		if knownBlocks[i-1].prefix.Bits() < knownBlocks[i].prefix.Bits() {
+	for i := 1; i < len(built.rules); i++ {
+		if built.rules[i-1].prefix.Bits() < built.rules[i].prefix.Bits() {
 			t.Fatalf("table is not sorted longest-prefix-first at %d: /%d before /%d",
-				i, knownBlocks[i-1].prefix.Bits(), knownBlocks[i].prefix.Bits())
+				i, built.rules[i-1].prefix.Bits(), built.rules[i].prefix.Bits())
+		}
+	}
+}
+
+// Every built-in owner has to declare how its range is tenanted, because that
+// is what decides whether anything may ever be vouched for on it.
+func TestEveryBuiltinOwnerDeclaresItsTenancy(t *testing.T) {
+	for _, owner := range ownerBlocks {
+		switch owner.owner.Tenancy {
+		case TenancyVendor, TenancySharedCDN, TenancyHosting:
+		default:
+			t.Errorf("%s declares tenancy %q", owner.owner.Org, owner.owner.Tenancy)
 		}
 	}
 }

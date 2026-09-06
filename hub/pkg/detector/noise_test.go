@@ -1,12 +1,15 @@
 package detector
 
 import (
+	"encoding/json"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
 
 // The production fleet carried 2,549 open alerts, and the great majority of
@@ -381,4 +384,300 @@ func itoa(n int) string {
 		return string(rune('0' + n))
 	}
 	return string(rune('0'+n/10)) + string(rune('0'+n%10))
+}
+
+// A quiet organisation on its own is a very wide statement: it silences every
+// process on every port to a network that fronts a large part of the web. That
+// is where beaconing hides, so what is vouched for is the pair - this process,
+// to this owner.
+
+func beaconEvents(engine *Engine, endpointID, dstIP, procPath string, now time.Time) {
+	for i := 0; i < 40; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: endpointID,
+			Timestamp: now.Add(time.Duration(i) * 60 * time.Second),
+			Action:    "PERMIT", Direction: "OUTBOUND",
+			DstIP: dstIP, DstPort: 443, BytesOut: 1024,
+			ProcessPath: procPath,
+		})
+	}
+}
+
+func TestAnInterpreterBeaconingThroughAVouchedNetworkIsStillAFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	// 104.16.0.1 is Cloudflare, which the shipped tuning vouches for.
+	beaconEvents(engine, "linux-20", "104.16.0.1", "/usr/bin/python3.13", time.Now().UTC().Add(-2*time.Hour))
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) == 0 {
+		t.Fatal("python3.13 beaconing through a CDN raised nothing; a vouched owner is not a vouched conversation")
+	}
+}
+
+func TestABrowserTalkingToTheSameVouchedNetworkIsNotAFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	beaconEvents(engine, "linux-21", "104.16.0.1", "/usr/bin/chrome", time.Now().UTC().Add(-2*time.Hour))
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 0 {
+		t.Fatalf("an ordinary browser keepalive to a vouched network raised %d alerts: %q", len(got), got[0].Title)
+	}
+}
+
+// Rented compute is never vouched for, whoever owns the range. An EC2 address
+// is Amazon's allocation and somebody else's machine, and "amazon" is in the
+// shipped quiet-org list.
+func TestABrowserTalkingToRentedComputeIsNotVouchedFor(t *testing.T) {
+	tuning := storage.DefaultDetectionTuning()
+	for _, tc := range []struct {
+		name    string
+		tenancy string
+		want    bool
+	}{
+		{"vendor range", storage.TenancyVendor, true},
+		{"shared edge", storage.TenancySharedCDN, true},
+		{"rented compute", storage.TenancyHosting, false},
+	} {
+		got := tuning.IsVouchedPair("chrome", "Amazon Web Services", tc.tenancy)
+		if got != tc.want {
+			t.Fatalf("%s: IsVouchedPair returned %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAnExplicitPairVouchesForThatConversationAndNoOther(t *testing.T) {
+	tuning := storage.DefaultDetectionTuning()
+	tuning.QuietPairs = []string{"backup-agent@backblaze"}
+	tuning = mustSaveTuning(t, tuning)
+
+	if !tuning.IsVouchedPair("backup-agent", "Backblaze, Inc.", storage.TenancyVendor) {
+		t.Fatal("the pair the operator named was not honoured")
+	}
+	if tuning.IsVouchedPair("python3", "Backblaze, Inc.", storage.TenancyVendor) {
+		t.Fatal("a pair vouched for every process reaching that owner")
+	}
+	if tuning.IsVouchedPair("backup-agent", "Cloudflare, Inc.", storage.TenancyVendor) {
+		t.Fatal("a pair vouched for its process reaching any owner")
+	}
+}
+
+func TestAMalformedPairIsDiscardedRatherThanWidened(t *testing.T) {
+	tuning := storage.DefaultDetectionTuning()
+	tuning.QuietPairs = []string{"chrome", "@google", "curl@", "  ", "curl@github"}
+	tuning = mustSaveTuning(t, tuning)
+
+	if len(tuning.QuietPairs) != 1 || tuning.QuietPairs[0] != "curl@github" {
+		t.Fatalf("expected only the complete pair to survive, got %q", tuning.QuietPairs)
+	}
+}
+
+func mustSaveTuning(t *testing.T, tuning storage.DetectionTuning) storage.DetectionTuning {
+	t.Helper()
+	store, err := storage.New(filepath.Join(t.TempDir(), "tuning.db"))
+	if err != nil {
+		t.Fatalf("storage.New() failed: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	saved, err := store.SaveDetectionTuning(tuning, "test")
+	if err != nil {
+		t.Fatalf("saving tuning: %v", err)
+	}
+	return saved
+}
+
+// The suffix match this replaces missed the interpreter behind most of the
+// fleet's beacon-shaped traffic, and treated /usr/bin/sync as netcat.
+func TestInterpretersAreMatchedOnTheirNameNotTheTailOfThePath(t *testing.T) {
+	for _, name := range []string{
+		"python3.13", "python3", "python.exe", "pythonw.exe", "perl5.38",
+		"node", "ruby3.2", "php8.3", "osascript", "powershell.exe", "pwsh",
+		"bash", "zsh", "nc", "ncat", "curl", "wget",
+	} {
+		if !isInterpreterOrShell(name) {
+			t.Fatalf("%s should be recognised as an interpreter or shell", name)
+		}
+	}
+	for _, name := range []string{
+		"sync", "vnc", "zsync", "vncviewer", "nodeguard", "pythonic-agent",
+		"chrome", "ominulld", "svchost.exe", "rubygems-helper",
+	} {
+		if isInterpreterOrShell(name) {
+			t.Fatalf("%s was mistaken for an interpreter or shell", name)
+		}
+	}
+}
+
+// Every flow already carries the command line, the user, the executable hash
+// and the parent pid. Before this, an analyst had to leave the finding and go
+// looking for all four.
+func TestAFindingCarriesWhatRanAndAsWhom(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	beaconEvents(engine, "linux-22", "104.16.0.2", "/usr/bin/python3.13", now.Add(-2*time.Hour))
+
+	// One more flow of the same conversation, carrying the process context the
+	// agent reports.
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-22", Timestamp: now,
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "104.16.0.2", DstPort: 443, BytesOut: 12 * 1024 * 1024,
+		ProcessPath:  "/usr/bin/python3.13",
+		ProcessID:    4242,
+		ParentPID:    991,
+		CommandLine:  "python3.13 /tmp/.cache/agent.py --quiet",
+		UserIdentity: "kiosk",
+
+		ExecutableSHA256: "9f2b1c0d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
+	})
+
+	found := append(anomaliesOfType(t, store, "C2_BEACONING"), anomaliesOfType(t, store, "BANDWIDTH_SPIKE")...)
+	if len(found) == 0 {
+		t.Fatal("expected a finding for this conversation")
+	}
+
+	var evidence map[string]any
+	for _, a := range found {
+		if a.Evidence == "" {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(a.Evidence), &fields); err != nil {
+			t.Fatalf("evidence on %s is not a JSON object: %v", a.AnomalyType, err)
+		}
+		if _, ok := fields["command_line"]; ok {
+			evidence = fields
+			break
+		}
+	}
+	if evidence == nil {
+		t.Fatalf("no finding carried the process context; evidence was %q", found[0].Evidence)
+	}
+
+	for _, key := range []string{"command_line", "user_identity", "executable_sha256", "parent_pid", "process_id"} {
+		if _, ok := evidence[key]; !ok {
+			t.Fatalf("evidence is missing %s: %v", key, evidence)
+		}
+	}
+	if evidence["user_identity"] != "kiosk" {
+		t.Fatalf("evidence names the wrong user: %v", evidence["user_identity"])
+	}
+}
+
+// The beacon detector's own numbers are the reason its findings are arguable.
+// Adding context around them must not cost any of them.
+func TestAddingContextKeepsTheDetectorsOwnNumbers(t *testing.T) {
+	before := `{"score":0.97,"jitter_pct":2.5,"samples":31}`
+	after := withFlowContext(before, storage.Event{
+		CommandLine: "curl https://example.test", UserIdentity: "root", ProcessID: 12,
+	}, threatintel.GeoRecord{Org: "Example", Tenancy: storage.TenancyVendor})
+
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(after), &fields); err != nil {
+		t.Fatalf("merged evidence is not JSON: %v", err)
+	}
+	for _, key := range []string{"score", "jitter_pct", "samples", "command_line", "user_identity", "destination_owner"} {
+		if _, ok := fields[key]; !ok {
+			t.Fatalf("%s was lost in the merge: %v", key, fields)
+		}
+	}
+}
+
+// A detector that wrote something other than a JSON object keeps what it wrote.
+func TestNonObjectEvidenceIsLeftAlone(t *testing.T) {
+	const raw = "not json at all"
+	if got := withFlowContext(raw, storage.Event{CommandLine: "sh"}, threatintel.GeoRecord{}); got != raw {
+		t.Fatalf("evidence was rewritten: %q", got)
+	}
+}
+
+// Network transfer sizes are heavy-tailed: a browser sends a few kilobytes a
+// hundred times and eight megabytes once. A mean and a standard deviation are
+// not robust to that, which is how a 255 KB upload came to score 51 sigma.
+
+func TestOneLargeOrdinaryUploadDoesNotDeafenTheBaseline(t *testing.T) {
+	var stats bandwidthStats
+	for i := 0; i < 40; i++ {
+		stats.observe(float64(5000 + i*17))
+	}
+	// One genuinely large but ordinary upload.
+	stats.observe(8 * 1024 * 1024)
+	// A second transfer of the same size is now unremarkable for this process
+	// under a mean-based score, because the first one moved the mean and blew
+	// up the standard deviation. Under median/MAD it still stands out.
+	_, _, z, _ := stats.observe(8 * 1024 * 1024)
+	if z <= 3.5 {
+		t.Fatalf("a second 8 MB upload scored %.2f; one large sample deafened the baseline", z)
+	}
+}
+
+func TestPerfectlyRegularTrafficDoesNotDivideByZero(t *testing.T) {
+	var stats bandwidthStats
+	for i := 0; i < 30; i++ {
+		stats.observe(4096)
+	}
+	median, mad, z, samples := stats.observe(4096)
+	if math.IsNaN(z) || math.IsInf(z, 0) {
+		t.Fatalf("a constant series produced z=%v (median %v, mad %v)", z, median, mad)
+	}
+	if z > 3.5 {
+		t.Fatalf("a transfer identical to every previous one scored %.2f over %d samples", z, samples)
+	}
+
+	// The same series, then a transfer a hundred times larger, must still be a
+	// finding rather than an infinity.
+	_, _, big, _ := stats.observe(4096 * 100)
+	if math.IsInf(big, 0) || math.IsNaN(big) {
+		t.Fatalf("an outlier against constant traffic produced %v", big)
+	}
+	if big <= 3.5 {
+		t.Fatalf("a hundredfold transfer against constant traffic scored only %.2f", big)
+	}
+}
+
+func TestTheBaselineIsBoundedAndRecent(t *testing.T) {
+	var stats bandwidthStats
+	for i := 0; i < 500; i++ {
+		stats.observe(1000)
+	}
+	if len(stats.samples) != bandwidthRingSize {
+		t.Fatalf("the baseline retained %d samples, want %d", len(stats.samples), bandwidthRingSize)
+	}
+	if stats.count != 500 {
+		t.Fatalf("the observed count is %d, want 500", stats.count)
+	}
+}
+
+// Staging data in the file-sharing service the estate uses every day is the
+// technique, so being vouched for is not an answer here.
+func TestBulkUploadToStorageIsReportedEvenForAVouchedPair(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-30", Timestamp: now,
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "104.16.0.3", DstPort: 443, BytesOut: 64 * 1024 * 1024,
+		ProcessPath: "/usr/bin/chrome",
+		SNI:         "upload.dropbox.com",
+	})
+
+	got := anomaliesOfType(t, store, "CLOUD_STORAGE_EGRESS")
+	if len(got) != 1 {
+		t.Fatalf("expected one storage egress finding, got %d", len(got))
+	}
+	if !strings.Contains(got[0].Title, "dropbox") {
+		t.Fatalf("the finding does not name the service: %q", got[0].Title)
+	}
+}
+
+func TestOrdinaryDocumentSizedTrafficToStorageIsNotAFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-31", Timestamp: time.Now().UTC(),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "104.16.0.3", DstPort: 443, BytesOut: 2 * 1024 * 1024,
+		ProcessPath: "/usr/bin/chrome",
+		SNI:         "upload.dropbox.com",
+	})
+	if got := anomaliesOfType(t, store, "CLOUD_STORAGE_EGRESS"); len(got) != 0 {
+		t.Fatalf("a 2 MB upload raised %d storage findings", len(got))
+	}
 }

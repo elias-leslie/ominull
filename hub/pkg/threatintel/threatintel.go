@@ -22,6 +22,9 @@ type Manager struct {
 	mu         sync.RWMutex
 	cache      map[string]*storage.IOC
 	cancelFunc context.CancelFunc
+	// attributionCancel stops the network attribution refresh, which runs on
+	// its own much slower schedule than the indicator feeds.
+	attributionCancel context.CancelFunc
 }
 
 func New(store *storage.Store) *Manager {
@@ -67,6 +70,9 @@ func (m *Manager) Start(ctx context.Context, interval time.Duration) {
 func (m *Manager) Stop() {
 	if m.cancelFunc != nil {
 		m.cancelFunc()
+	}
+	if m.attributionCancel != nil {
+		m.attributionCancel()
 	}
 }
 
