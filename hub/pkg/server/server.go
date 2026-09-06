@@ -2789,19 +2789,35 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	anomalyType := r.URL.Query().Get("type")
 	severity := r.URL.Query().Get("severity")
 
-	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity)
+	// "held=true" is the Held tab: findings a learning window is sitting on.
+	// The default view never shows them, which is the whole point of holding
+	// one, and "held=all" is there for an operator reconciling the two.
+	held := storage.HeldExclude
+	switch r.URL.Query().Get("held") {
+	case "true", storage.HeldOnly:
+		held = storage.HeldOnly
+	case storage.HeldAny:
+		held = storage.HeldAny
+	}
+
+	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity, held)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	unackTotal, _ := s.store.CountAnomalyAlerts(tenantID, true)
+	// How many findings the learning windows are sitting on, so the console can
+	// offer the Held tab only when there is something in it - and so that a
+	// quiet console is never quiet because something is hiding findings without
+	// saying so.
+	_, heldTotal, _ := s.store.QueryAnomalyAlerts(tenantID, 1, 0, true, "", "", "", storage.HeldOnly)
 
 	// The per-host breakdown is computed over the whole matching set. The
 	// console used to derive it from the page it had just been handed, so the
 	// summary tiles added up to the page size (fifty) while the header above
 	// them reported the real total.
-	breakdown, err := s.store.SummarizeAnomalyAlerts(tenantID, unackOnly, anomalyType, severity)
+	breakdown, err := s.store.SummarizeAnomalyAlerts(tenantID, unackOnly, anomalyType, severity, held)
 	if err != nil {
 		log.Printf("[!] The alert summary could not be built: %v", err)
 		breakdown = nil
@@ -2817,6 +2833,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		"alerts":               anomalies,
 		"total":                total,
 		"unacknowledged_total": unackTotal,
+		"held_total":           heldTotal,
 		"breakdown":            breakdown,
 		"limit":                limit,
 		"offset":               offset,
@@ -3315,6 +3332,10 @@ func (s *Server) routes() *http.ServeMux {
 	// the handler itself refuses a write from anyone but an administrator.
 	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
 	mux.HandleFunc("/api/v1/detection/tuning/suppress", s.authMiddleware(s.handleSuppressPair))
+	mux.HandleFunc("/api/v1/learning/windows", s.authMiddleware(s.handleLearningWindows))
+	mux.HandleFunc("/api/v1/learning/windows/close", s.authMiddleware(s.handleCloseLearningWindow))
+	mux.HandleFunc("/api/v1/learning/proposals", s.authMiddleware(s.handleLearningProposals))
+	mux.HandleFunc("/api/v1/learning/proposals/apply", s.authMiddleware(s.handleApplyLearningProposals))
 
 	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
 	// A local one-use setup session has administrator weight for enrollment:

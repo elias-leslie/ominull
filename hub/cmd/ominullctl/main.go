@@ -110,6 +110,8 @@ func main() {
 		err = client.cmdVulnerabilities(rest)
 	case "console":
 		err = client.cmdConsole(rest)
+	case "learning":
+		err = client.cmdLearning(rest)
 	case "help", "--help", "-h":
 		printUsage()
 		return
@@ -1271,6 +1273,165 @@ func (c *APIClient) cmdConsole(args []string) error {
 	}
 }
 
+// cmdLearning is the console's Learning section, for an operator working
+// without a browser - and for an agent asked to read the proposals, form a
+// view, and apply the ones a human agreed to. Every subcommand maps to one API
+// call, and "apply" takes explicit ids: there is no "apply all", because the
+// point of a proposal is that somebody read it.
+func (c *APIClient) cmdLearning(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ominullctl learning windows|open|close|proposals|apply [args]")
+	}
+
+	switch args[0] {
+	case "windows":
+		query := "/api/v1/learning/windows"
+		if len(args) > 1 && args[1] == "open" {
+			query += "?open=true"
+		}
+		raw, err := c.doRequest(http.MethodGet, query, nil)
+		if err != nil {
+			return err
+		}
+		var res struct {
+			Windows []struct {
+				Window struct {
+					ID         string    `json:"id"`
+					ScopeType  string    `json:"scope_type"`
+					ScopeLabel string    `json:"scope_label"`
+					EndsAt     time.Time `json:"ends_at"`
+					Status     string    `json:"status"`
+					Note       string    `json:"note"`
+				} `json:"window"`
+				Open      bool `json:"open"`
+				Remaining int  `json:"remaining_minutes"`
+			} `json:"windows"`
+		}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(json.RawMessage(raw), func() {
+			if len(res.Windows) == 0 {
+				fmt.Println("No learning windows.")
+				return
+			}
+			fmt.Println("=== Learning windows ===")
+			for _, row := range res.Windows {
+				state := row.Window.Status
+				if row.Open {
+					state = fmt.Sprintf("open, %d minute(s) left", row.Remaining)
+				}
+				fmt.Printf("%s  %s %s  [%s]\n", row.Window.ID, row.Window.ScopeType, row.Window.ScopeLabel, state)
+				if row.Window.Note != "" {
+					fmt.Printf("    %s\n", row.Window.Note)
+				}
+			}
+		})
+		return nil
+
+	case "open":
+		fs := flag.NewFlagSet("learning open", flag.ContinueOnError)
+		scope := fs.String("scope", "endpoint", "tenant, location or endpoint")
+		id := fs.String("id", "", "the tenant, location or endpoint to watch")
+		days := fs.Int("days", 0, "window length in days (default 7)")
+		hours := fs.Int("hours", 0, "window length in hours, if shorter than a day")
+		note := fs.String("note", "", "why this window is open")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		body := map[string]interface{}{"scope_type": *scope, "scope_id": *id, "note": *note}
+		if *hours > 0 {
+			body["hours"] = *hours
+		}
+		if *days > 0 {
+			body["days"] = *days
+		}
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/windows", body)
+		if err != nil {
+			return err
+		}
+		c.printOutput(json.RawMessage(raw), func() { fmt.Println(string(raw)) })
+		return nil
+
+	case "close":
+		fs := flag.NewFlagSet("learning close", flag.ContinueOnError)
+		id := fs.String("id", "", "the window to close")
+		cancel := fs.Bool("cancel", false, "close it as a mistake rather than as finished")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/windows/close",
+			map[string]interface{}{"id": *id, "cancel": *cancel})
+		if err != nil {
+			return err
+		}
+		c.printOutput(json.RawMessage(raw), func() { fmt.Println(string(raw)) })
+		return nil
+
+	case "proposals":
+		fs := flag.NewFlagSet("learning proposals", flag.ContinueOnError)
+		window := fs.String("window", "", "the window to read")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		raw, err := c.doRequest(http.MethodGet, "/api/v1/learning/proposals?window="+*window, nil)
+		if err != nil {
+			return err
+		}
+		var res struct {
+			Proposals []struct {
+				ID            string  `json:"id"`
+				Kind          string  `json:"kind"`
+				Subject       string  `json:"subject"`
+				Silences      string  `json:"silences"`
+				Technique     string  `json:"technique"`
+				Evidence      int64   `json:"evidence"`
+				Endpoints     int     `json:"endpoints"`
+				Corroboration float64 `json:"corroboration"`
+			} `json:"proposals"`
+		}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(json.RawMessage(raw), func() {
+			if len(res.Proposals) == 0 {
+				fmt.Println("This window proposes nothing.")
+				return
+			}
+			fmt.Println("=== Learning proposals ===")
+			for _, p := range res.Proposals {
+				fmt.Printf("%s\n", p.ID)
+				fmt.Printf("    %s: %s\n", p.Kind, p.Subject)
+				fmt.Printf("    silences %s (%s)\n", p.Silences, p.Technique)
+				fmt.Printf("    %d observation(s) on %d endpoint(s), corroboration %.2f\n",
+					p.Evidence, p.Endpoints, p.Corroboration)
+			}
+		})
+		return nil
+
+	case "apply":
+		fs := flag.NewFlagSet("learning apply", flag.ContinueOnError)
+		window := fs.String("window", "", "the window the proposals came from")
+		ids := fs.String("ids", "", "comma-separated proposal ids to apply")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		list := []string{}
+		for _, id := range strings.Split(*ids, ",") {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				list = append(list, trimmed)
+			}
+		}
+		if len(list) == 0 {
+			return fmt.Errorf("name the proposals to apply with --ids; there is no apply-all")
+		}
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/proposals/apply",
+			map[string]interface{}{"window": *window, "ids": list})
+		if err != nil {
+			return err
+		}
+		c.printOutput(json.RawMessage(raw), func() { fmt.Println(string(raw)) })
+		return nil
+	}
+	return fmt.Errorf("unknown learning subcommand %q", args[0])
+}
+
 func currentToken(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -1324,6 +1485,8 @@ Fleet & CyberOps Commands:
   endpoints list|show <id>                Inspect enrolled endpoint agents
   scanner scan|status|assets|train        Subnet discovery, sweeps, and OS fingerprinting
   alerts list                             List active behavioral anomalies and threat alerts
+  learning windows|open|close             Inspect, open and close learning windows
+  learning proposals|apply                Read what a window learned and apply named proposals
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
   agents versions|update <id|all>         Inspect fleet version currency and publish releases
   install reports [list|show]             Inspect bootstrap error reports

@@ -187,6 +187,12 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds |
+| `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
+| `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint |
+| `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
+| `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
+| `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 

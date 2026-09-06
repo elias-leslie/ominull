@@ -99,6 +99,8 @@ type Engine struct {
 	onAutoIsolate  IsolateFunc
 	eventsChan     <-chan storage.Event
 	mu             sync.Mutex
+	learnMu        sync.Mutex
+	learnBuf       map[learnKey]*learnCount        // learning observations not yet written
 	portHistory    map[string][]portAccess         // endpointID -> accesses
 	bwTracker      map[string]*bandwidthStats      // endpoint:process -> bandwidth stats
 	beaconTracker  map[string]*beaconWindow        // endpoint:dstIP:process -> beacon window
@@ -185,6 +187,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// Alerting on absence does not depend on events arriving - that is the
 	// point of it - so it starts before the events channel is checked.
 	e.StartSilenceWatch(subCtx)
+	e.startLearningFlush(subCtx.Done())
 
 	if e.eventsChan == nil {
 		return
@@ -224,8 +227,20 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	return false
 }
 
-func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, anomaly storage.AnomalyAlert) {
+// recordAnomaly writes a finding, or holds it.
+//
+// Holding happens here rather than at each detector so that no branch can
+// forget to do it. A held finding is written in full - the evidence, the
+// severity, the technique - and only its visibility changes, because the host
+// that was already compromised when its learning window opened is the one host
+// whose findings must survive that window.
+func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep storage.Endpoint, anomaly storage.AnomalyAlert) {
 	anomaly.Evidence = withFlowContext(anomaly.Evidence, ev, geo)
+	if anomaly.HeldReason == "" {
+		if _, learning := e.store.LearningWindowFor(ep); learning {
+			anomaly.HeldReason = storage.HeldLearning
+		}
+	}
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
 		log.Printf("[-] anomaly write failed for %s/%s: %v", anomaly.EndpointID, anomaly.Title, err)
 	}
@@ -387,7 +402,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "CRITICAL",
 				Mitigated:   true,
 			}
-			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -432,6 +447,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	isTrustedSys := cfg.IsQuietProcess(strings.ToLower(procName))
 	isTrustedDst := cfg.IsQuietOrg(geo.Org)
 
+	// While a window is open the estate is being described. The findings below
+	// still run and are still written - recordAnomaly holds them - and this is
+	// the second, much cheaper record that the proposals are argued from.
+	e.observeForLearning(ev, endpoint, geo.Org, geo.Tenancy, hr, now)
+
 	// isVouched is the narrower question: this process, to this owner. A quiet
 	// org alone silenced every process on every port to networks that front a
 	// large part of the web - which is where beaconing hides, not where it is
@@ -454,7 +474,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "HIGH",
 				Mitigated:   false,
 			}
-			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -534,7 +554,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    bwSeverity,
 					Mitigated:   false,
 				}
-				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -571,7 +591,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			title := fmt.Sprintf("Bulk upload to cloud storage (%s)", describeStorageService(geo, ev))
 			description := fmt.Sprintf("Process %s uploaded %s to %s at %s:%d. Volume to a storage service is reported even when the process and network are expected here, because using a service the estate already trusts is what this technique looks like.",
 				procName, humanBytes(ev.BytesOut), describeStorageService(geo, ev), ev.DstIP, ev.DstPort)
-			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -664,7 +684,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:  severity,
 					Mitigated: false,
 				}
-				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -736,7 +756,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				description = unattributedDescription(ev.EndpointID, ev.DstIP, ev.DstPort, run)
 				details = fmt.Sprintf("Process: %s | %s | %s", ev.ProcessPath, describeOwner(geo), unattributedDetails(run, cfg.FirstSeenCooldown))
 			}
-			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -796,7 +816,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    "HIGH",
 					Mitigated:   false,
 				}
-				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -867,7 +887,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    "CRITICAL",
 					Mitigated:   false,
 				}
-				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
@@ -936,7 +956,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    severity,
 				Mitigated:   false,
 			}
-			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
+			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
@@ -976,7 +996,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			}
-			e.recordAnomaly(ev, geo, anomaly)
+			e.recordAnomaly(ev, geo, endpoint, anomaly)
 			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}

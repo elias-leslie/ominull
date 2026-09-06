@@ -486,7 +486,7 @@
     scanStatus: null,
     scanPoll: null,
 
-    alertsFilter: { page: 1, limit: 50, severity: "", type: "", endpoint_id: "", unacknowledged_only: true, search: "" },
+    alertsFilter: { page: 1, limit: 50, severity: "", type: "", endpoint_id: "", unacknowledged_only: true, search: "", held: false },
     alertsData: null,
     selectedAlerts: {},
     expandedAlertId: "",
@@ -930,6 +930,11 @@
           return;
         }
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
+        /* Learning mode reads answer empty in the demo console: the section
+           renders and explains itself rather than throwing on a hub that is
+           not there. */
+        if (base === "/api/v1/learning/windows") { resolve({ windows: [] }); return; }
+        if (base === "/api/v1/learning/proposals") { resolve({ window: "demo-window", proposals: [] }); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
@@ -1119,6 +1124,14 @@
         : "process";
       return { pair: demoProc + "@example", added: true, acknowledged: body && body.id };
     }
+    /* Learning mode in the demo console. The windows list answers empty and
+       the write paths answer plausibly, so the section renders and explains
+       itself rather than throwing on a hub that is not there. */
+    if (base === "/api/v1/learning/windows") {
+      return { window: { id: "demo-window", scope_type: (body && body.scope_type) || "endpoint", scope_label: "demo", status: "active", ends_at: new Date(Date.now() + 7 * 86400000).toISOString(), note: (body && body.note) || "" }, open: true };
+    }
+    if (base === "/api/v1/learning/windows/close") { return { id: body && body.id, status: "completed" }; }
+    if (base === "/api/v1/learning/proposals/apply") { return { applied: arrayOf(body && body.ids), skipped: {} }; }
     if (base === "/api/v1/anomalies/acknowledge") {
       DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
       return { status: "acknowledged" };
@@ -3469,6 +3482,27 @@
       }
     });
 
+    /* Held findings are the ones a learning window is sitting on. The button
+       appears only when there are some, so a console with no window open is
+       not carrying a control for a state it is not in - but when findings are
+       being held, it says so and how many, because a quiet alert list that is
+       quiet for an invisible reason is worse than a noisy one. */
+    var heldTotal = Number(state.heldAlertsTotal) || 0;
+    var heldBtn = (heldTotal > 0 || af.held) ? h("button", {
+      cls: "btn mini" + (af.held ? " btn-primary" : ""),
+      type: "button",
+      "aria-pressed": af.held ? "true" : "false",
+      title: "Findings recorded during a learning window. They are kept in full and are not counted as open work.",
+      text: af.held ? "HELD (LEARNING)" : "HELD: " + heldTotal,
+      on: {
+        click: function () {
+          af.held = !af.held;
+          af.page = 1;
+          refresh();
+        }
+      }
+    }) : null;
+
     /* Reused, never rebuilt. `input` calls renderAlerts(), renderAlerts()
        calls clear(view), and clearing the view destroys the very input being
        typed into - so focus and caret were lost on every keystroke and the
@@ -3559,7 +3593,7 @@
     });
 
     var filterBar = h("div", { cls: "traffic-filter-bar" },
-      h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, sevBtns),
+      h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
 
     // Filter anomalies by search text
@@ -3671,7 +3705,8 @@
         h("td", {}, stamp(parseTime(a.timestamp))),
         h("td", {}, h("span", { cls: "st", "data-state": (a.severity || "LOW").toLowerCase() === "critical" ? "crit" : (a.severity === "HIGH" ? "warn" : "idle"), text: a.severity || "LOW" })),
         h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") }),
-          a.technique ? h("span", { cls: "dim-3", text: " " + a.technique }) : null),
+          a.technique ? h("span", { cls: "dim-3", text: " " + a.technique }) : null,
+          a.held_reason ? h("span", { cls: "dim-3", title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null),
         h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
@@ -6679,6 +6714,166 @@
     ]);
   }
 
+
+  /* Learning mode.
+
+     A window is the answer to "this estate has never been tuned and I am not
+     going to read four hundred findings to do it". While one is open the
+     detectors still run and their findings are recorded as held; when it
+     closes, what was observed becomes proposals with the evidence attached.
+
+     Nothing here applies itself. Each proposal names what it would silence,
+     the technique that silence would blunt, and how many machines corroborate
+     it - because a pair seen on five workstations is platform traffic and the
+     same pair seen on exactly one host is the thing you were looking for. */
+  function learningCard() {
+    var rows = arrayOf(state.learningWindows).map(function (row) {
+      var w = row.window || {};
+      var label = row.open ? "Open" : (w.status || "closed");
+      return [
+        h("span", { cls: "dim", text: (w.scope_type || "") + " \u00b7 " + (w.scope_label || w.scope_id || "") }),
+        h("span", { cls: "st", "data-state": row.open ? "ok" : "idle" },
+          h("span", { text: label })),
+        h("span", { cls: "dim-3", text: row.open ? (row.remaining_minutes + " min left") : stamp(parseTime(w.ends_at)) }),
+        h("span", { cls: "dim-3", text: w.note || "" }),
+        h("div", { cls: "row-actions" },
+          h("button", {
+            cls: "btn mini", type: "button", text: "Proposals",
+            on: { click: function () { openProposalsSheet(w); } }
+          }),
+          (IS_ADMIN && row.open) ? h("button", {
+            cls: "btn mini", type: "button", text: "Close",
+            on: {
+              click: function () {
+                request("/api/v1/learning/windows/close", "POST", { id: w.id })
+                  .then(function () { toast("Learning window closed", "ok"); refresh(); })
+                  .catch(function (e) { toast("Close failed: " + e.message, "crit"); });
+              }
+            }
+          }) : null)
+      ];
+    });
+
+    var body = simpleTable(["Scope", "State", "Ends", "Note", ""], rows, {
+      key: "learning-windows",
+      empty: "No learning window has been opened. Detections are being judged, not described."
+    });
+
+    var actions = IS_ADMIN ? [
+      h("button", {
+        cls: "btn", type: "button", text: "Open a window",
+        on: { click: openLearningSheet }
+      })
+    ] : [];
+    return card("Learning mode", body, actions);
+  }
+
+  function openLearningSheet() {
+    var scope = h("select", {}, 
+      h("option", { value: "endpoint", text: "One endpoint" }),
+      h("option", { value: "location", text: "A location" }),
+      h("option", { value: "tenant", text: "The whole estate" }));
+    var target = h("select", {});
+    var note = h("input", { type: "text", placeholder: "Why this window is open" });
+    var days = h("input", { type: "number", value: "7", min: "1", max: "90" });
+
+    function fillTargets() {
+      clear(target);
+      if (scope.value === "endpoint") {
+        arrayOf(state.endpoints).forEach(function (ep) {
+          if (ep.status === "retired") return;
+          target.appendChild(h("option", { value: ep.id, text: ep.hostname || ep.id }));
+        });
+      } else if (scope.value === "location") {
+        arrayOf(state.locations).forEach(function (l) {
+          target.appendChild(h("option", { value: l.id, text: l.name || l.id }));
+        });
+      } else {
+        target.appendChild(h("option", { value: "", text: "every endpoint" }));
+      }
+    }
+    scope.addEventListener("change", fillTargets);
+    fillTargets();
+
+    var body = h("div", { cls: "stack" },
+      h("p", { cls: "note", text: "While this window is open, findings for the endpoints it covers are recorded and held rather than raised. They stay readable under HELD on the alerts page, and the silence detector is deliberately not exempt: a host going dark during its baseline period is exactly when you want to know." }),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Scope" }), scope),
+        h("label", { cls: "field" }, h("span", { text: "Which" }), target)),
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Days" }), days),
+        h("label", { cls: "field" }, h("span", { text: "Note" }), note)));
+
+    openSheet("Open a learning window", body, [
+      h("button", {
+        cls: "btn btn-primary", type: "button", text: "Open",
+        on: {
+          click: function () {
+            request("/api/v1/learning/windows", "POST", {
+              scope_type: scope.value,
+              scope_id: target.value,
+              days: Number(days.value) || 7,
+              note: note.value
+            }).then(function () {
+              toast("Learning window open \u2014 findings for that scope are being held", "ok");
+              closeSheet();
+              refresh();
+            }).catch(function (e) { toast("Could not open the window: " + e.message, "crit"); });
+          }
+        }
+      })
+    ]);
+  }
+
+  function openProposalsSheet(w) {
+    request("/api/v1/learning/proposals?window=" + encodeURIComponent(w.id))
+      .then(function (d) {
+        var proposals = arrayOf(d && d.proposals);
+        var chosen = {};
+        var rows = proposals.map(function (p) {
+          var box = h("input", { type: "checkbox" });
+          box.addEventListener("change", function () { chosen[p.id] = box.checked; });
+          return [
+            IS_ADMIN ? box : h("span", { cls: "dim-3", text: "\u2014" }),
+            h("span", { cls: "dim", text: p.kind.replace(/_/g, " ") }),
+            h("span", { text: p.subject }),
+            h("span", { cls: "dim-3", text: p.silences + (p.technique ? " (" + p.technique + ")" : "") }),
+            h("span", { cls: "ip", text: p.evidence + " on " + p.endpoints + " host(s)" }),
+            h("span", { cls: "st", "data-state": p.corroboration >= 0.6 ? "ok" : "idle" },
+              h("span", { text: p.corroboration.toFixed(2) }))
+          ];
+        });
+
+        var body = h("div", {},
+          h("p", { cls: "note", text: "Corroboration is how many of the machines this window watched agree. A proposal backed by one host scores low on purpose: that is the shape of a finding, not of ordinary traffic." }),
+          simpleTable(["", "Kind", "Subject", "Silences", "Evidence", "Corroboration"], rows, {
+            key: "learning-proposals",
+            empty: "This window has nothing to propose yet."
+          }));
+
+        openSheet("Proposals \u00b7 " + (w.scope_label || w.scope_id || ""), body, IS_ADMIN ? [
+          h("button", {
+            cls: "btn btn-primary", type: "button", text: "Apply selected",
+            on: {
+              click: function () {
+                var ids = Object.keys(chosen).filter(function (k) { return chosen[k]; });
+                if (!ids.length) { toast("Nothing selected", "warn"); return; }
+                request("/api/v1/learning/proposals/apply", "POST", { window: w.id, ids: ids })
+                  .then(function (res) {
+                    var n = arrayOf(res && res.applied).length;
+                    toast("Applied " + n + " proposal(s) \u2014 see Detection tuning", "ok");
+                    closeSheet();
+                    refresh();
+                  })
+                  .catch(function (e) { toast("Apply failed: " + e.message, "crit"); });
+              }
+            }
+          })
+        ] : []);
+      })
+      .catch(function (e) { toast("Could not read the proposals: " + e.message, "crit"); });
+  }
+
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -6747,6 +6942,7 @@
       convergenceCard(),
       baselineCard(),
       tuningCard(),
+      learningCard(),
       card("Exclusions", excl),
       card("Threat indicators", iocs, [
         h("button", {
@@ -11192,6 +11388,10 @@
     if (af.severity) aParams += "&severity=" + encodeURIComponent(af.severity);
     if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
     if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
+    /* The Held tab. A learning window records findings without raising them,
+       and a console that never showed them would be quiet for a reason the
+       operator could not see. */
+    if (af.held) aParams += "&held=true";
 
     var jobs = [
       request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
@@ -11200,11 +11400,13 @@
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
+      request("/api/v1/learning/windows").then(function (d) { state.learningWindows = arrayOf(d && d.windows); }).catch(function () { state.learningWindows = []; }),
       request("/api/v1/anomalies" + aParams).then(function (d) {
         if (d && Array.isArray(d.alerts)) {
           state.alertsData = d;
           state.anomalies = d.alerts;
           state.unackAlertsTotal = Number(d.unacknowledged_total) || 0;
+          state.heldAlertsTotal = Number(d.held_total) || 0;
         } else {
           var page = arrayOf(d);
           state.anomalies = page;

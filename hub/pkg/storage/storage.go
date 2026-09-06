@@ -168,7 +168,16 @@ type AnomalyAlert struct {
 	// to argue about when the finding names the technique it would blunt.
 	// Empty for detectors that map to nothing in particular, and for every
 	// finding raised before this column existed.
-	Technique    string    `json:"technique,omitempty"`
+	Technique string `json:"technique,omitempty"`
+	// HeldReason is why this finding is recorded but is not being shown as
+	// open. Today the only value is "learning": the endpoint was inside a
+	// learning window when the detector spoke.
+	//
+	// A held finding is kept rather than dropped, because a host that was
+	// already compromised when its baseline period opened is exactly the host
+	// whose findings must not quietly vanish. It stays out of the open count
+	// and off the default list, and it is one filter away.
+	HeldReason   string    `json:"held_reason,omitempty"`
 	ProcessPath  string    `json:"process_path"`
 	DstIP        string    `json:"dst_ip"`
 	DstPort      uint16    `json:"dst_port"`
@@ -361,6 +370,7 @@ type Store struct {
 	mu        sync.RWMutex
 	analytics analyticsCache
 	traffic   trafficCache
+	learning  learningCache
 }
 
 func New(dbPath string) (*Store, error) {
@@ -540,6 +550,7 @@ func (s *Store) initSchema() error {
 		description TEXT NOT NULL,
 		details TEXT NOT NULL DEFAULT "",
 		technique TEXT NOT NULL DEFAULT "",
+		held_reason TEXT NOT NULL DEFAULT "",
 		process_path TEXT NOT NULL DEFAULT "",
 		dst_ip TEXT NOT NULL DEFAULT "",
 		dst_port INTEGER NOT NULL DEFAULT 0,
@@ -679,6 +690,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
+		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
 	}
 	for _, m := range migrations {
@@ -720,6 +732,9 @@ func (s *Store) initSchema() error {
 	}
 
 	if err := s.initDetectionTuningSchema(); err != nil {
+		return err
+	}
+	if err := s.initLearningSchema(); err != nil {
 		return err
 	}
 	if err := s.initRollupCubesSchema(); err != nil {
@@ -2019,8 +2034,8 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	}
 
 	query := `
-	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, evidence, technique, process_path, dst_ip, dst_port, timestamp, acknowledged)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, evidence, technique, held_reason, process_path, dst_ip, dst_port, timestamp, acknowledged)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		severity=excluded.severity,
 		description=excluded.description,
@@ -2029,7 +2044,7 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	_, err := s.db.Exec(
 		query,
 		a.ID, a.TenantID, a.LocationID, a.EndpointID, a.Hostname,
-		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details, a.Evidence, a.Technique,
+		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details, a.Evidence, a.Technique, a.HeldReason,
 		a.ProcessPath, a.DstIP, a.DstPort, a.Timestamp, ackInt,
 	)
 	return err
@@ -2043,7 +2058,9 @@ func (s *Store) CountAnomalyAlerts(tenantID string, unacknowledgedOnly bool) (in
 		count int64
 		err   error
 	)
-	query := "SELECT COUNT(*) FROM anomaly_alerts WHERE 1=1"
+	// Held findings are deliberately absent from every count that describes
+	// outstanding work. They are recorded, not raised.
+	query := "SELECT COUNT(*) FROM anomaly_alerts WHERE held_reason = ''"
 	var args []interface{}
 	if tenantID != "" {
 		query += " AND tenant_id = ?"
@@ -2056,7 +2073,17 @@ func (s *Store) CountAnomalyAlerts(tenantID string, unacknowledgedOnly bool) (in
 	return count, err
 }
 
-func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity string) ([]AnomalyAlert, int64, error) {
+// Held filters for QueryAnomalyAlerts.
+const (
+	// HeldExclude is the default view: what is actually being raised.
+	HeldExclude = ""
+	// HeldOnly is the Held tab - findings a learning window is sitting on.
+	HeldOnly = "held"
+	// HeldAny is every finding the detectors wrote, held or not.
+	HeldAny = "all"
+)
+
+func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity, held string) ([]AnomalyAlert, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -2070,6 +2097,13 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 	whereClause := " WHERE 1=1"
 	var args []interface{}
 
+	switch held {
+	case HeldOnly:
+		whereClause += " AND held_reason != ''"
+	case HeldAny:
+	default:
+		whereClause += " AND held_reason = ''"
+	}
 	if tenantID != "" {
 		whereClause += " AND tenant_id = ?"
 		args = append(args, tenantID)
@@ -2096,7 +2130,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		return nil, 0, err
 	}
 
-	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), COALESCE(held_reason, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
 	queryArgs := append(args, limit, offset)
 
 	rows, err := s.db.Query(query, queryArgs...)
@@ -2112,7 +2146,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		if err := rows.Scan(
 			&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
 			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details, &a.Evidence,
-			&a.Technique, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
+			&a.Technique, &a.HeldReason, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2151,11 +2185,21 @@ type AnomalyAlertGroup struct {
 // Every matching host is returned - the set is bounded by the size of the
 // fleet, and truncating it here would make the summary disagree with the total
 // again, this time silently.
-func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyType, severity string) ([]AnomalyAlertGroup, error) {
+func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyType, severity, held string) ([]AnomalyAlertGroup, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// The strip has to describe the same rows as the list beneath it. When the
+	// operator is reading the Held tab, a summary of everything except the held
+	// findings would disagree with every row on the page.
 	where := " WHERE 1=1"
+	switch held {
+	case HeldOnly:
+		where += " AND held_reason != ''"
+	case HeldAny:
+	default:
+		where += " AND held_reason = ''"
+	}
 	var args []interface{}
 	if tenantID != "" {
 		where += " AND tenant_id = ?"
@@ -2257,7 +2301,7 @@ func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyT
 }
 
 func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
-	list, _, err := s.QueryAnomalyAlerts(tenantID, limit, 0, false, "", "", "")
+	list, _, err := s.QueryAnomalyAlerts(tenantID, limit, 0, false, "", "", "", HeldAny)
 	return list, err
 }
 
@@ -2272,12 +2316,12 @@ func (s *Store) GetAnomalyAlert(id string) (AnomalyAlert, error) {
 	var a AnomalyAlert
 	var ackInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts WHERE id = ?",
+		"SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), COALESCE(held_reason, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts WHERE id = ?",
 		id,
 	).Scan(
 		&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
 		&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details, &a.Evidence,
-		&a.Technique, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
+		&a.Technique, &a.HeldReason, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
 	)
 	if err != nil {
 		return AnomalyAlert{}, err
@@ -2535,9 +2579,9 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	// lesson, not a dashboard.
 	var querySev string
 	if tenantID != "" {
-		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 AND tenant_id = ? GROUP BY severity"
+		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 AND held_reason = '' AND tenant_id = ? GROUP BY severity"
 	} else {
-		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 GROUP BY severity"
+		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 AND held_reason = '' GROUP BY severity"
 	}
 	sRows, err := s.db.Query(querySev, args...)
 	if err != nil {

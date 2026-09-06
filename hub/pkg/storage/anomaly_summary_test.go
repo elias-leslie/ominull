@@ -41,7 +41,7 @@ func TestTheAlertSummaryCountsEveryAlertNotOnePage(t *testing.T) {
 	seedAlerts(t, store, "ep-noisy", "workstation-a", "BANDWIDTH_SPIKE", "CRITICAL", 30, false)
 	seedAlerts(t, store, "ep-quiet", "workstation-b", "C2_BEACONING", "MEDIUM", 7, false)
 
-	page, total, err := store.QueryAnomalyAlerts("", 50, 0, true, "", "", "")
+	page, total, err := store.QueryAnomalyAlerts("", 50, 0, true, "", "", "", HeldAny)
 	if err != nil {
 		t.Fatalf("querying a page: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestTheAlertSummaryCountsEveryAlertNotOnePage(t *testing.T) {
 		t.Fatalf("page of %d with total %d; expected 50 of 157", len(page), total)
 	}
 
-	groups, err := store.SummarizeAnomalyAlerts("", true, "", "")
+	groups, err := store.SummarizeAnomalyAlerts("", true, "", "", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestTheAlertSummaryHonoursTheFiltersOnTheList(t *testing.T) {
 	seedAlerts(t, store, "ep-a", "workstation-a", "BANDWIDTH_SPIKE", "LOW", 5, false)
 	seedAlerts(t, store, "ep-b", "workstation-b", "C2_BEACONING", "HIGH", 4, true)
 
-	all, err := store.SummarizeAnomalyAlerts("", false, "", "")
+	all, err := store.SummarizeAnomalyAlerts("", false, "", "", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing everything: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestTheAlertSummaryHonoursTheFiltersOnTheList(t *testing.T) {
 		t.Fatalf("unfiltered summary covered %d hosts; expected 2", len(all))
 	}
 
-	open, err := store.SummarizeAnomalyAlerts("", true, "", "")
+	open, err := store.SummarizeAnomalyAlerts("", true, "", "", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing open alerts: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestTheAlertSummaryHonoursTheFiltersOnTheList(t *testing.T) {
 		t.Fatalf("open-only summary was %+v; expected workstation-a alone with 14", open)
 	}
 
-	high, err := store.SummarizeAnomalyAlerts("", true, "", "HIGH")
+	high, err := store.SummarizeAnomalyAlerts("", true, "", "HIGH", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing by severity: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestTheAlertSummaryHonoursTheFiltersOnTheList(t *testing.T) {
 		t.Fatalf("severity-filtered summary was %+v; expected nine HIGH on one host", high)
 	}
 
-	byType, err := store.SummarizeAnomalyAlerts("", true, "BANDWIDTH_SPIKE", "")
+	byType, err := store.SummarizeAnomalyAlerts("", true, "BANDWIDTH_SPIKE", "", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing by type: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAnAlertWithNoEndpointIdStillAppears(t *testing.T) {
 	store := newTestStore(t)
 	seedAlerts(t, store, "", "orphan-host", "UNUSUAL_PORT", "LOW", 3, false)
 
-	groups, err := store.SummarizeAnomalyAlerts("", true, "", "")
+	groups, err := store.SummarizeAnomalyAlerts("", true, "", "", HeldAny)
 	if err != nil {
 		t.Fatalf("summarizing: %v", err)
 	}
