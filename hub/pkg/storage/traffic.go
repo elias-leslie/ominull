@@ -34,10 +34,18 @@ type TrafficFilter struct {
 }
 
 type TrafficOverview struct {
-	AsOf                 time.Time              `json:"as_of"`
-	WindowStart          time.Time              `json:"window_start"`
-	WindowEnd            time.Time              `json:"window_end"`
-	BucketSize           string                 `json:"bucket_size"`
+	AsOf        time.Time `json:"as_of"`
+	WindowStart time.Time `json:"window_start"`
+	WindowEnd   time.Time `json:"window_end"`
+	BucketSize  string    `json:"bucket_size"`
+	// RetainedFrom is the oldest telemetry the hub still holds for this tenant,
+	// deliberately ignoring every other filter on this query. A window can reach
+	// back further than the data does - retention prunes, and a hub only started
+	// this morning has nothing from last night - and without this the console
+	// draws that lead-in as a quiet estate, which is a different and much more
+	// reassuring claim than "we do not have those minutes". Nil when the hub
+	// holds no telemetry at all.
+	RetainedFrom         *time.Time             `json:"retained_from,omitempty"`
 	TotalFlows           int64                  `json:"total_flows"`
 	MeasuredFlows        int64                  `json:"measured_flows"`
 	MeasuredFlowCoverage float64                `json:"measured_flow_coverage"`
@@ -451,6 +459,7 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 
 	// 2. Trendline Buckets
 	overview.Trends = s.buildTrendBuckets(whereClause, args, start, end, bucketDur, isUnfiltered, filter.TenantID)
+	overview.RetainedFrom = s.earliestRetainedEvent(filter.TenantID)
 
 	// 3. Distributions (Protocols, Actions, Directions)
 	overview.Distributions = s.queryDistributions(whereClause, args, overview.TotalFlows, overview.Totals.TotalBytes, isUnfiltered, start, end, filter.TenantID)
@@ -467,11 +476,20 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 	return overview, nil
 }
 
+// buildTrendBuckets lays out one slot per bucket across the whole window and
+// files each row of aggregate into the slot its timestamp belongs to.
+//
+// The index map is load-bearing. This used to hold a map of pointers taken as
+// &buckets[len(buckets)-1] while still appending to buckets, and append
+// reallocates: every pointer handed out before the last growth addressed an
+// abandoned array, so the rows filed through them were written to memory nothing
+// read. On a one-hour window at one-minute buckets that is 61 slots grown to a
+// capacity of 75, with only slots 35 onward still live - the console drew an
+// empty lead-in and packed every bar into the right-hand third of the chart, and
+// the totals beside it (counted by a separate query) disagreed with the sum of
+// the bars by more than half. Index into the slice; never keep a pointer into
+// one you are still growing.
 func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start, end time.Time, bucketDur time.Duration, isUnfiltered bool, tenantID string) []TrafficTrendBucket {
-	// Initialize empty slots across the window
-	var buckets []TrafficTrendBucket
-	bucketMap := make(map[int64]*TrafficTrendBucket)
-
 	stepSec := int64(bucketDur.Seconds())
 	if stepSec <= 0 {
 		stepSec = 60
@@ -479,11 +497,20 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 	startUnix := start.Unix()
 	endUnix := end.Unix()
 
+	slots := int((endUnix-startUnix)/stepSec) + 1
+	if slots < 1 {
+		slots = 1
+	}
+	buckets := make([]TrafficTrendBucket, 0, slots)
+	bucketIndex := make(map[int64]int, slots)
+
 	for t := startUnix; t <= endUnix; t += stepSec {
-		bTime := time.Unix(t, 0).UTC()
-		b := TrafficTrendBucket{Timestamp: bTime}
-		buckets = append(buckets, b)
-		bucketMap[t/stepSec] = &buckets[len(buckets)-1]
+		key := t / stepSec
+		bucketIndex[key] = len(buckets)
+		// Stamped with the bucket's own boundary rather than with the window
+		// offset, because that boundary is what the grouped query counts into and
+		// what the axis label under the bar then claims the bar covers.
+		buckets = append(buckets, TrafficTrendBucket{Timestamp: time.Unix(key*stepSec, 0).UTC()})
 	}
 
 	// FAST PATH: If unfiltered and window >= 6h, read from bandwidth_buckets
@@ -513,11 +540,11 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 				if err := rows.Scan(&hStr, &bin, &bout, &flows, &blocks); err == nil {
 					if t, err := time.Parse(time.RFC3339, hStr); err == nil {
 						key := t.Unix() / stepSec
-						if slot, ok := bucketMap[key]; ok {
-							slot.BytesIn += bin
-							slot.BytesOut += bout
-							slot.Flows += flows
-							slot.Blocks += blocks
+						if idx, ok := bucketIndex[key]; ok {
+							buckets[idx].BytesIn += bin
+							buckets[idx].BytesOut += bout
+							buckets[idx].Flows += flows
+							buckets[idx].Blocks += blocks
 						}
 					}
 				}
@@ -552,17 +579,40 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 			)
 			if err := rows.Scan(&bucketSec, &bin, &bout, &flows, &blocks); err == nil {
 				key := bucketSec / stepSec
-				if slot, ok := bucketMap[key]; ok {
-					slot.BytesIn = bin
-					slot.BytesOut = bout
-					slot.Flows = flows
-					slot.Blocks = blocks
+				if idx, ok := bucketIndex[key]; ok {
+					buckets[idx].BytesIn = bin
+					buckets[idx].BytesOut = bout
+					buckets[idx].Flows = flows
+					buckets[idx].Blocks = blocks
 				}
 			}
 		}
 	}
 
 	return buckets
+}
+
+// earliestRetainedEvent reports the oldest event the hub still holds, so a
+// caller can tell a window with no traffic in it from a window that reaches back
+// past the data. It answers MIN over an indexed column and is not filtered by
+// the query's other criteria on purpose: the question is what the hub retains,
+// not what matched. The caller already holds the read lock.
+func (s *Store) earliestRetainedEvent(tenantID string) *time.Time {
+	query := "SELECT MIN(timestamp) FROM events"
+	var args []interface{}
+	if tenantID != "" {
+		query += " WHERE tenant_id = ?"
+		args = append(args, tenantID)
+	}
+	var raw interface{}
+	if err := s.db.QueryRow(query, args...).Scan(&raw); err != nil || raw == nil {
+		return nil
+	}
+	at := scanTime(raw)
+	if at.IsZero() {
+		return nil
+	}
+	return &at
 }
 
 func (s *Store) queryDistributions(whereClause string, args []interface{}, totalFlows, totalBytes int64, isUnfiltered bool, start, end time.Time, tenantID string) TrafficDistributions {

@@ -262,6 +262,16 @@ func (s *Server) SetAccess(opts AccessOptions) error {
 		if err := s.store.EnsureBootstrapAdmin(opts.BootstrapAdmin); err != nil {
 			return fmt.Errorf("seeding the bootstrap administrator: %w", err)
 		}
+		// The verifier records nothing on its own. This is what turns a verified
+		// assertion into something the diagnostic can read back after a restart,
+		// the way OIDC records its own first completed callback. A failed write
+		// is logged rather than returned: it costs a diagnostic marker, and
+		// refusing the sign-in over it would be worse than the gap.
+		v.record = func(at time.Time) {
+			if err := s.store.SetSetting(accessLastSuccessSetting, at.UTC().Format(time.RFC3339)); err != nil {
+				log.Printf("[!] A Cloudflare Access sign-in verified but the marker could not be saved: %v", err)
+			}
+		}
 	}
 	s.access = v
 	return nil

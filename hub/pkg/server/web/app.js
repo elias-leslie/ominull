@@ -287,6 +287,18 @@
     return isNaN(d.getTime()) ? null : d;
   }
 
+  /* A span of time in the largest unit that keeps it readable. "24 of 60
+     minutes" and "6 of 7 days" both have to come out of the same call, so the
+     chart's coverage line reads correctly on a 15m window and a 30d one. */
+  function spanText(ms) {
+    var mins = Math.max(0, Math.round(ms / 60000));
+    if (mins < 180) return mins + (mins === 1 ? " minute" : " minutes");
+    var hrs = Math.round(mins / 60);
+    if (hrs < 72) return hrs + (hrs === 1 ? " hour" : " hours");
+    var days = Math.round(hrs / 24);
+    return days + (days === 1 ? " day" : " days");
+  }
+
   function ago(date) {
     if (!date) return "\u2014";
     var secs = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
@@ -4855,6 +4867,25 @@
 
       var svg = s("svg", { "class": "chart dual-chart-svg", viewBox: "0 0 " + W + " 150", preserveAspectRatio: "none", role: "img", "aria-label": "Dual synchronized traffic lanes" });
 
+      /* An empty stretch of chart has two readings that look identical and mean
+         opposite things: nothing was talking, or the hub has nothing from those
+         minutes. retained_from is the oldest telemetry the hub still holds, so
+         the part of the window that predates it is drawn as uncovered rather
+         than as quiet, and said in words underneath. */
+      var winStart = parseTime(ov.window_start);
+      var winEnd = parseTime(ov.window_end);
+      var retainedFrom = parseTime(ov.retained_from);
+      var uncoveredTo = 0;
+      if (winStart && winEnd && retainedFrom && retainedFrom.getTime() > winStart.getTime() && winEnd.getTime() > winStart.getTime()) {
+        var span = winEnd.getTime() - winStart.getTime();
+        var gap = Math.min(retainedFrom.getTime(), winEnd.getTime()) - winStart.getTime();
+        uncoveredTo = Math.max(0, Math.min(W, (gap / span) * W));
+      }
+      if (uncoveredTo > 0) {
+        svg.appendChild(s("rect", { "class": "chart-uncovered", x: 0, y: 10, width: uncoveredTo, height: 55 }));
+        svg.appendChild(s("rect", { "class": "chart-uncovered", x: 0, y: 85, width: uncoveredTo, height: 55 }));
+      }
+
       // Lane 1 (Top: Bandwidth In/Out) - y: 10 to 65
       // Lane 2 (Bottom: Flows / Blocks) - y: 85 to 140
       trends.forEach(function (p, i) {
@@ -4913,12 +4944,37 @@
         }
       }
 
+      /* Said in words as well as drawn, because the shading answers "how much of
+         this window does the hub have" and nothing else on the card does. A
+         window the hub covers in full and still has no bars in it is a quiet
+         estate, and says so rather than leaving the reader to guess which of the
+         two they are looking at. */
+      var busy = trends.some(function (p) {
+        return (Number(p.flows) || 0) || (Number(p.bytes_in) || 0) || (Number(p.bytes_out) || 0) || (Number(p.blocks) || 0);
+      });
+      var coverageNote = null;
+      if (uncoveredTo > 0 && retainedFrom) {
+        var floorLabel = (tf.range === "7d" || tf.range === "all")
+          ? (retainedFrom.getMonth() + 1) + "/" + retainedFrom.getDate() + " " + pad(retainedFrom.getHours(), 2) + ":" + pad(retainedFrom.getMinutes(), 2)
+          : pad(retainedFrom.getHours(), 2) + ":" + pad(retainedFrom.getMinutes(), 2);
+        coverageNote = h("p", {
+          cls: "chart-note", "data-tone": "warn",
+          text: "Shaded: the hub retains no telemetry before " + floorLabel + ". This " + (tf.range || "1h")
+            + " window is covered for " + spanText(winEnd.getTime() - retainedFrom.getTime())
+            + " of " + spanText(winEnd.getTime() - winStart.getTime())
+            + " \u2014 an empty lane on the left is missing data, not a quiet network."
+        });
+      } else if (!busy) {
+        coverageNote = h("p", { cls: "chart-note", text: "The hub covers this whole window and recorded no flows in it." });
+      }
+
       dualChartCard = card("Dual Synchronized Flow & Volume Timeline",
         h("div", { cls: "card-body" },
           h("div", { cls: "dual-timeline-container" },
             h("div", { cls: "dual-lane-label u-mb1 uf uf-between", text: "Lane 1: Bandwidth Volume (Top) · Lane 2: Event Counts (Bottom)" }),
             svg,
             ticks,
+            coverageNote,
             h("div", { cls: "legend pad-x u-mt1" },
               h("span", { text: "■ Blue: Bytes In" }),
               h("span", { text: "■ Indigo: Bytes Out" }),

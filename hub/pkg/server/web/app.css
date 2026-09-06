@@ -1712,6 +1712,24 @@ p.pending {
   text-align: center;
 }
 
+/* The part of a window the hub holds no telemetry for. Drawn as a wash over
+   both lanes rather than left blank, because blank already means "nothing was
+   talking" and the two readings must not look the same. */
+.chart-uncovered {
+  fill: var(--ink-3);
+  opacity: 0.12;
+}
+
+.chart-note {
+  margin-top: var(--s-1);
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+.chart-note[data-tone="warn"] {
+  color: var(--warn);
+}
+
 /* ------------------------------------------------------- command palette */
 
 .palette-wrap {
@@ -2479,6 +2497,13 @@ input[type="url"] {
   color: var(--ink-2);
   font-size: var(--t-2);
   margin-top: 2px;
+}
+
+.diag .evidence {
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  overflow-wrap: anywhere;
 }
 
 .diag .remediation {

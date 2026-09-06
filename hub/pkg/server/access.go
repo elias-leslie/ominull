@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -59,6 +61,20 @@ const accessRefusalLogEvery = time.Minute
 // operator with the page open would write a line every five seconds.
 const accessAcceptLogEvery = 5 * time.Minute
 
+// accessLastSuccessSetting is the durable marker saying that a signed assertion
+// from this Access application has verified at least once. Without it the
+// diagnostic can only report that Access is configured, which is exactly the
+// claim an operator already doubts when they come to look: the interesting
+// question is whether Cloudflare is really forwarding an identity this hub can
+// check, and only a verification that actually happened answers it.
+const accessLastSuccessSetting = "access.last_success"
+
+// accessSuccessRecordEvery rate-limits writing that marker. Every console
+// request carries an assertion, so recording each one would be a database write
+// per request; the diagnostic only needs to know that one verified and roughly
+// when.
+const accessSuccessRecordEvery = time.Minute
+
 // AccessOptions configures Cloudflare Access verification. Team and AUD are the
 // deployment's own identifiers, so they are given at run time and never live in
 // the repository. Who holds which role is managed in the console and stored in
@@ -85,12 +101,18 @@ type accessVerifier struct {
 	// effect on their next request instead of at the next restart.
 	lookup func(email string) (string, bool)
 
+	// record persists the moment an assertion verified. It is a callback rather
+	// than a store handle so the verifier keeps knowing nothing about storage,
+	// and a verifier built without one simply records nothing.
+	record func(time.Time)
+
 	mu           sync.RWMutex
 	keys         map[string]*rsa.PublicKey
 	fetchedAt    time.Time
 	lastAttempt  time.Time
 	lastRefusal  time.Time
 	lastAccepted time.Time
+	lastRecorded time.Time
 
 	client *http.Client
 }
@@ -156,6 +178,12 @@ func (a *accessVerifier) Verify(r *http.Request) (accessOperator, bool) {
 	if email == "" {
 		return accessOperator{}, false
 	}
+	// Recorded here rather than after the operator lookup, because the two
+	// answer different questions. This marker says the Cloudflare side works -
+	// the assertion was signed by this team's keys and minted for this
+	// application. Whether the person it names may then use the console is the
+	// operator list's business, and it already logs its own refusal below.
+	a.noteVerified(time.Now().UTC())
 	role, listed := a.lookup(email)
 	if !listed {
 		// Worth a line: the person authenticated successfully and was still
@@ -346,21 +374,47 @@ func (a *accessVerifier) refresh() error {
 	a.lastAttempt = time.Now()
 	a.mu.Unlock()
 
-	url := "https://" + a.team + ".cloudflareaccess.com/cdn-cgi/access/certs"
-	resp, err := a.client.Get(url)
+	keys, err := a.fetchKeys(context.Background())
 	if err != nil {
-		return fmt.Errorf("fetching %s: %w", url, err)
+		return err
+	}
+
+	a.mu.Lock()
+	a.keys = keys
+	a.fetchedAt = time.Now()
+	a.mu.Unlock()
+	return nil
+}
+
+// jwksURL is where Cloudflare publishes this team's signing keys.
+func (a *accessVerifier) jwksURL() string {
+	return "https://" + a.team + ".cloudflareaccess.com/cdn-cgi/access/certs"
+}
+
+// fetchKeys reads and parses the published key set without touching any cached
+// state, so a diagnostic can ask whether Cloudflare is reachable without
+// disturbing the keys live sign-ins are verifying against - or being turned away
+// by the refetch rate limit that protects them.
+func (a *accessVerifier) fetchKeys(ctx context.Context) (map[string]*rsa.PublicKey, error) {
+	url := a.jwksURL()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", url, err)
+	}
+	resp, err := a.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s answered %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("%s answered %d", url, resp.StatusCode)
 	}
 
 	var doc struct {
 		Keys []jwk `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return fmt.Errorf("parsing %s: %w", url, err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", url, err)
 	}
 
 	keys := map[string]*rsa.PublicKey{}
@@ -375,14 +429,69 @@ func (a *accessVerifier) refresh() error {
 		keys[k.Kid] = pub
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("%s returned no usable RSA keys", url)
+		return nil, fmt.Errorf("%s returned no usable RSA keys", url)
 	}
+	return keys, nil
+}
 
+// accessStatus is a point-in-time reading of the verifier for the diagnostic.
+type accessStatus struct {
+	Team      string
+	AUD       string
+	Issuer    string
+	JWKSURL   string
+	KeysHeld  int
+	FetchedAt time.Time
+}
+
+// status reports what the live verifier is configured with and what it is
+// currently holding. It is the runtime answer rather than the saved one: a hub
+// that has not been restarted since the configuration changed is exactly the
+// case the diagnostic exists to catch.
+func (a *accessVerifier) status() accessStatus {
+	if a == nil {
+		return accessStatus{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return accessStatus{
+		Team:      a.team,
+		AUD:       a.aud,
+		Issuer:    a.issuer,
+		JWKSURL:   a.jwksURL(),
+		KeysHeld:  len(a.keys),
+		FetchedAt: a.fetchedAt,
+	}
+}
+
+// probeSigningKeys reports how many usable signing keys Cloudflare publishes for
+// this team right now.
+func (a *accessVerifier) probeSigningKeys(ctx context.Context) (int, error) {
+	if a == nil {
+		return 0, errors.New("Cloudflare Access verification is not configured")
+	}
+	keys, err := a.fetchKeys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(keys), nil
+}
+
+// noteVerified records that an assertion verified, at most once per interval.
+func (a *accessVerifier) noteVerified(now time.Time) {
+	if a == nil || a.record == nil {
+		return
+	}
 	a.mu.Lock()
-	a.keys = keys
-	a.fetchedAt = time.Now()
+	quiet := !a.lastRecorded.IsZero() && now.Sub(a.lastRecorded) < accessSuccessRecordEvery
+	if !quiet {
+		a.lastRecorded = now
+	}
 	a.mu.Unlock()
-	return nil
+	if quiet {
+		return
+	}
+	a.record(now)
 }
 
 func rsaKeyFromJWK(k jwk) (*rsa.PublicKey, error) {

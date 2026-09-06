@@ -2,7 +2,7 @@ package server
 
 import "encoding/json"
 
-// diagnosticsRendererJS draws the 24 setup/status checks. It was maintained as
+// diagnosticsRendererJS draws the setup/status checks. It was maintained as
 // two verbatim copies - one in the setup wizard, one in the status page - and
 // a change to either was a change somebody had to remember to make twice.
 // Both pages load the same stylesheet and render the same payload from
@@ -19,6 +19,10 @@ const diagnosticsRendererJS = `  function renderChecks(box,body){
       var card=node("article","diag");card.dataset.state=item.state||"not_configured";
       card.appendChild(node("span","diag-mark",item.state==="pass"?"\u2713":item.state==="fail"?"\u00d7":item.state==="warn"?"!":"\u2013"));
       var copy=node("div");copy.appendChild(node("h3","",item.title||"Check"));copy.appendChild(node("p","",item.summary||"No result"));
+      /* Evidence was carried in the payload and drawn nowhere, so the figures
+         a check gathered - which key set answered, when an assertion last
+         verified - reached the API and stopped there. */
+      if(item.evidence)copy.appendChild(node("p","evidence",item.evidence));
       if(item.remediation)copy.appendChild(node("p","remediation",item.remediation));
       card.appendChild(copy);grid.appendChild(card);
     });

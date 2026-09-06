@@ -47,6 +47,7 @@ func (s *Server) diagnosticChecks() []diagnostics.Check {
 		s.checkTLS,
 		s.checkNativeTransport,
 		s.checkOIDC,
+		s.checkAccess,
 		s.checkCloudflare,
 		s.checkBootstrap,
 		s.checkHeartbeats,
@@ -446,29 +447,99 @@ func (s *Server) checkOIDC(ctx context.Context) diagnostics.Result {
 	return diag("oidc", "OIDC", diagnostics.Pass, "OIDC discovery and a verified operator callback succeeded", safeURL(provider.Issuer)+"; last success "+strings.TrimSpace(lastSuccess), "")
 }
 
+// checkAccess reports on Cloudflare Access as the console's identity, which is a
+// different question from whether the Tunnel adapter below carries the fleet. A
+// hub can run in LAN mode, with every agent reaching it directly over mTLS, and
+// still have Access authenticating every console sign-in - which is the shape
+// this deployment actually has. Before this check existed nothing in the list
+// covered it, so the only Cloudflare row on the page was the adapter one, and it
+// reported not_configured on a hub where Access was verifying every operator.
+func (s *Server) checkAccess(ctx context.Context) diagnostics.Result {
+	cfg := s.effectiveConfiguration()
+	savedTeam := strings.TrimSpace(cfg.AccessTeam)
+	savedAUD := strings.TrimSpace(cfg.AccessAudience)
+	if s.access == nil {
+		if savedTeam == "" && savedAUD == "" {
+			return diag("access", "Cloudflare Access", diagnostics.NotConfigured,
+				"console sign-in is not verified through Cloudflare Access; the admin key and any configured local identity are what reach the console", "",
+				"set an Access team and application audience when an Access application fronts this console")
+		}
+		// Saved but not live is a restart away from working, and it is invisible
+		// from the operator's side: Access says they signed in and the hub shows
+		// them the key prompt.
+		return diag("access", "Cloudflare Access", diagnostics.Fail,
+			"an Access team and application audience are saved but no verifier is live on this hub",
+			"saved team "+savedTeam, "restart the hub so it loads the Access team and application audience, and check that both are set")
+	}
+
+	status := s.access.status()
+	evidence := "team " + status.Team + "; application audience " + status.AUD
+	keys, err := s.access.probeSigningKeys(ctx)
+	if err != nil {
+		if status.KeysHeld > 0 {
+			// A cached key set outlives a failed refetch on purpose, so this is a
+			// warning about the next rotation rather than about sign-ins now.
+			return diag("access", "Cloudflare Access", diagnostics.Warn,
+				"the Access signing keys could not be fetched; sign-ins continue on the "+strconv.Itoa(status.KeysHeld)+" key(s) already cached",
+				evidence+"; "+err.Error(),
+				"restore outbound HTTPS from the hub to "+status.JWKSURL+" before Cloudflare rotates its signing keys")
+		}
+		return diag("access", "Cloudflare Access", diagnostics.Fail,
+			"the Access signing keys are unreachable and none are cached, so no assertion can be verified",
+			evidence+"; "+err.Error(),
+			"check outbound HTTPS from the hub to "+status.JWKSURL+" and that the Access team name is correct")
+	}
+	evidence += "; " + strconv.Itoa(keys) + " signing key(s) published at " + status.JWKSURL
+
+	lastSuccess, _ := s.store.GetSetting(accessLastSuccessSetting)
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(lastSuccess)); err != nil {
+		return diag("access", "Cloudflare Access", diagnostics.Warn,
+			"the Access verifier is live and Cloudflare is reachable; no signed assertion has verified yet",
+			evidence,
+			"sign in to the console once through the Access hostname; if that keeps landing on the key prompt, check that the application audience matches this application's AUD tag (journalctl -u ominull-hub | grep \"assertion was refused\")")
+	}
+	return diag("access", "Cloudflare Access", diagnostics.Pass,
+		"Cloudflare Access verifies console sign-in: the verifier is live, its signing keys are reachable, and a signed assertion has verified",
+		evidence+"; last verified assertion "+strings.TrimSpace(lastSuccess), "")
+}
+
+// checkCloudflare covers the Tunnel adapter - console and agents reaching this
+// hub through Cloudflare - and nothing else. Console identity is checkAccess
+// above; the two are independent and this deployment runs one without the other.
 func (s *Server) checkCloudflare(ctx context.Context) diagnostics.Result {
 	cfg := s.effectiveConfiguration()
 	adapter, _ := s.store.GetSetting("cloudflare.adapter")
 	if !cfg.Cloudflare && strings.TrimSpace(adapter) == "" {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.NotConfigured, "direct native access is active; Cloudflare remains optional", "", "select Cloudflare mode only when a free-tier Tunnel and separate agent route are prepared")
+		// This branch used to read "direct native access is active; Cloudflare
+		// remains optional", which is false on a hub whose every console sign-in
+		// is authenticated by Cloudflare Access. Only the Tunnel adapter is
+		// unused here, and the row now says which of the two it is talking about.
+		summary := "the Cloudflare Tunnel adapter is not in use; agents and operators reach this hub directly"
+		evidence := "network mode " + cfg.NetworkMode
+		if s.access != nil {
+			summary += ". Cloudflare Access still verifies console sign-in - see the Cloudflare Access check"
+			evidence += "; Cloudflare Access console verification is live"
+		}
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.NotConfigured, summary, evidence,
+			"select Cloudflare mode only when a free-tier Tunnel and separate agent route are prepared")
 	}
 	if strings.TrimSpace(cfg.AccessTeam) == "" || strings.TrimSpace(cfg.AccessAudience) == "" || s.access == nil {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.Fail, "Cloudflare mode lacks a configured signed Access console verifier", "team, audience, or live verifier missing", "configure the Access team and application audience, restart the hub, and keep the agent hostname separate")
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Fail, "Cloudflare mode lacks a configured signed Access console verifier", "team, audience, or live verifier missing", "configure the Access team and application audience, restart the hub, and keep the agent hostname separate")
 	}
 	if cfg.AgentURL == "" {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.Fail, "Cloudflare mode has no separate agent URL", "", "configure an agent hostname without an interactive Access redirect")
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Fail, "Cloudflare mode has no separate agent URL", "", "configure an agent hostname without an interactive Access redirect")
 	}
 	probe := publicJSONProbe(ctx, cfg.AgentURL+"/api/v1/events")
 	if probe.err != nil {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.Warn, "Cloudflare Access verifier is configured; agent route probe was inconclusive", probe.err.Error(), "verify the separate Tunnel agent route from outside the hub network")
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Warn, "Cloudflare Access verifier is configured; agent route probe was inconclusive", probe.err.Error(), "verify the separate Tunnel agent route from outside the hub network")
 	}
 	if probe.redirect {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.Fail, "agent hostname redirects an unauthenticated machine to interactive Access", probe.status, "exclude the agent hostname from browser Access redirects; it must return bounded Ominull JSON")
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Fail, "agent hostname redirects an unauthenticated machine to interactive Access", probe.status, "exclude the agent hostname from browser Access redirects; it must return bounded Ominull JSON")
 	}
 	if probe.jsonRefusal {
-		return diag("cloudflare", "Cloudflare adapter", diagnostics.Pass, "Cloudflare console verifier is active and the unauthenticated agent route returns bounded JSON", probe.status, "")
+		return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Pass, "Cloudflare console verifier is active and the unauthenticated agent route returns bounded JSON", probe.status, "")
 	}
-	return diag("cloudflare", "Cloudflare adapter", diagnostics.Warn, "Cloudflare route answered but not with the expected unauthenticated JSON refusal", probe.status, "check Tunnel origin routing and keep interactive Access redirects off the agent hostname")
+	return diag("cloudflare", "Cloudflare Tunnel adapter", diagnostics.Warn, "Cloudflare route answered but not with the expected unauthenticated JSON refusal", probe.status, "check Tunnel origin routing and keep interactive Access redirects off the agent hostname")
 }
 
 type publicProbe struct {
