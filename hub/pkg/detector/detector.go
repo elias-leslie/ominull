@@ -873,18 +873,52 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 	}
 
-	// 8. Suspicious Shell / Script Engine External Connection
-	if isInteractiveShell && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
-		alertKey := fmt.Sprintf("shell:%s:%s", ev.EndpointID, ev.DstIP)
-		if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
+	// 8. Interpreter or shell reaching the internet
+	//
+	// This fired on every external connection any interpreter made, at HIGH,
+	// keyed per destination address with a fifteen-second cooldown and no quiet
+	// list of any kind. That was survivable only while the interpreter match was
+	// broken: correcting it so python3.13 is recognised turned one ordinary
+	// application worker on one workstation into seventy-one HIGH findings in a
+	// morning, each naming a different CDN address for the same conversation.
+	//
+	// "An interpreter talked to the internet" is not a finding on its own - it
+	// describes every developer machine and most servers. What is worth saying
+	// is that an interpreter has started talking to a counterparty nobody has
+	// vouched for, so the finding is keyed on the owner, holds for the tuned
+	// first-seen period, and takes its severity from what is actually known
+	// about the destination.
+	if isInteractiveShell && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
+		!isTrustedSys && !isVouched && !warming {
+		owner := strings.ToLower(strings.TrimSpace(geo.Org))
+		if owner == "" {
+			owner = "unattributed"
+		}
+		alertKey := fmt.Sprintf("shell:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), owner)
+		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
+			// Rented compute and unnamed networks are where an interpreter
+			// reaching out is worth waking someone for. A named vendor or edge
+			// network is worth recording and looking at in the morning.
+			severity := "MEDIUM"
+			switch {
+			case !geo.Resolved() || geo.Tenancy == storage.TenancyHosting:
+				severity = "HIGH"
+			case ev.DstPort != 443 && ev.DstPort != 80:
+				severity = "HIGH"
+			}
+
+			title := fmt.Sprintf("Script interpreter %s reaching %s", procName, describeCounterparty(geo, ev))
+			description := fmt.Sprintf("%s connected out to %s:%d (%s). Nothing has vouched for this program talking to this counterparty; if it is expected here, mark it so and this conversation stops being reported.",
+				procName, ev.DstIP, ev.DstPort, describeCounterparty(geo, ev))
+
 			alert := storage.Alert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
-				Title:       "Suspicious Interactive Shell External Egress",
-				Description: fmt.Sprintf("Script interpreter %s established outbound connection to external IP %s:%d (%s).", ev.ProcessPath, ev.DstIP, ev.DstPort, geo.CountryName),
-				Severity:    "HIGH",
+				Title:       title,
+				Description: description,
+				Severity:    severity,
 				Mitigated:   false,
 			}
 			e.recordAlert(alert)
@@ -894,16 +928,16 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "NOVEL_PROCESS_EGRESS",
-				Severity:    "HIGH",
-				Title:       alert.Title,
-				Description: alert.Description,
-				Details:     fmt.Sprintf("Interpreter: %s | Target: %s:%d (%s, %s)", ev.ProcessPath, ev.DstIP, ev.DstPort, geo.Country, geo.Org),
+				Severity:    severity,
+				Title:       title,
+				Description: description,
+				Details:     fmt.Sprintf("Interpreter: %s | Target: %s:%d | %s | Command: %s", ev.ProcessPath, ev.DstIP, ev.DstPort, describeOwner(geo), firstLine(ev.CommandLine)),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s:%d)", alert.Title, alert.EndpointID, ev.DstIP, ev.DstPort)
+			log.Printf("[!] ANOMALY ALERT [%s]: %s on endpoint %s (%s:%d)", severity, title, alert.EndpointID, ev.DstIP, ev.DstPort)
 		}
 	}
 
@@ -1079,6 +1113,34 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d bytes", n)
 	}
+}
+
+// describeCounterparty names the far end the way the finding reads: the owner
+// when one is known, the address when it is not.
+func describeCounterparty(geo threatintel.GeoRecord, ev storage.Event) string {
+	for _, candidate := range []string{ev.SNI, ev.Domain, geo.Org} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return "an unnamed network (" + ev.DstIP + ")"
+}
+
+// firstLine keeps a command line to something an alert row can hold. A worker
+// invoked with a page of arguments is common, and the first part is the part
+// that says what it is.
+func firstLine(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return "not reported"
+	}
+	if idx := strings.IndexAny(cmd, "\r\n"); idx >= 0 {
+		cmd = cmd[:idx]
+	}
+	if len(cmd) > 160 {
+		return cmd[:157] + "..."
+	}
+	return cmd
 }
 
 func isKnownInfrastructureProcess(procPath string) bool {

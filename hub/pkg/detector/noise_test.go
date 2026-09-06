@@ -2,6 +2,7 @@ package detector
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"path/filepath"
 	"strings"
@@ -679,5 +680,75 @@ func TestOrdinaryDocumentSizedTrafficToStorageIsNotAFinding(t *testing.T) {
 	})
 	if got := anomaliesOfType(t, store, "CLOUD_STORAGE_EGRESS"); len(got) != 0 {
 		t.Fatalf("a 2 MB upload raised %d storage findings", len(got))
+	}
+}
+
+// "An interpreter talked to the internet" describes every developer machine and
+// most servers. Correcting the interpreter match turned one ordinary Python
+// worker into seventy-one HIGH findings in a morning, one per CDN address for
+// the same conversation.
+func TestAnInterpreterReachingOneCounterpartyIsOneFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+
+	// The same owner behind a dozen edge addresses, which is how a CDN answers.
+	for i := 0; i < 12; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-40", Timestamp: now.Add(time.Duration(i) * time.Second),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: fmt.Sprintf("23.32.3.%d", 10+i), DstPort: 443, BytesOut: 800,
+			ProcessPath: "/usr/bin/python3.13",
+			CommandLine: "python -m app.worker",
+		})
+	}
+
+	got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS")
+	if len(got) != 1 {
+		t.Fatalf("twelve edge addresses of one counterparty raised %d findings", len(got))
+	}
+	if got[0].Severity != "MEDIUM" {
+		t.Fatalf("a named edge network is a MEDIUM finding, got %q", got[0].Severity)
+	}
+}
+
+func TestAnInterpreterReachingRentedComputeIsTheLouderFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-41", Timestamp: time.Now().UTC(),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "159.65.0.9", DstPort: 8443, BytesOut: 800,
+		ProcessPath: "/usr/bin/python3.13",
+	})
+
+	got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS")
+	if len(got) != 1 {
+		t.Fatalf("expected one finding, got %d", len(got))
+	}
+	if got[0].Severity != "HIGH" {
+		t.Fatalf("an interpreter reaching rented compute on an odd port is HIGH, got %q", got[0].Severity)
+	}
+}
+
+// The operator's own answer still applies here: a pair they have vouched for is
+// not reported, and a quiet process is not reported at all.
+func TestAVouchedInterpreterPairIsNotReported(t *testing.T) {
+	engine, store := noiseEngine(t)
+
+	tuning := storage.DefaultDetectionTuning()
+	tuning.QuietPairs = []string{"python3.13@akamai"}
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatalf("saving tuning: %v", err)
+	}
+	engine.InvalidateTuning()
+
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-42", Timestamp: time.Now().UTC(),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "23.32.3.11", DstPort: 443, BytesOut: 800,
+		ProcessPath: "/usr/bin/python3.13",
+	})
+
+	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 0 {
+		t.Fatalf("a vouched pair raised %d findings: %q", len(got), got[0].Title)
 	}
 }
