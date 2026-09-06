@@ -70,6 +70,7 @@ type Engine struct {
 	beaconTracker  map[string]*beaconWindow        // endpoint:dstIP:process -> beacon window
 	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
 	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
+	unattributed   map[string]*unattributedRun     // endpointID -> destinations we could not name
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
@@ -137,6 +138,7 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 		beaconTracker:  make(map[string]*beaconWindow),
 		lateralTargets: make(map[string]map[string]time.Time),
 		alertCooldown:  make(map[string]time.Time),
+		unattributed:   make(map[string]*unattributedRun),
 	}
 }
 
@@ -562,28 +564,47 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// counterparty bringing forty edge addresses is one of those, not
 		// forty. An address whose owner is unknown falls back to the address,
 		// because then the address is all there is.
-		novelKey := strings.ToLower(strings.TrimSpace(geo.Org))
-		if novelKey == "" {
-			novelKey = ev.DstIP
+		// An address with no owner has no key that can repeat either, so the
+		// per-address fallback brought the same defect back in a smaller form:
+		// an ordinary workstation browsing the web reaches a dozen unnamed
+		// addresses an hour and raised one alert for each. Those are folded
+		// into a single rolling finding per endpoint, which is the question an
+		// analyst actually has - "is this host reaching places we cannot
+		// name?" - and it carries the count of everything folded into it.
+		attributed := geo.Resolved() && strings.TrimSpace(geo.Org) != ""
+		severity := "MEDIUM"
+		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, strings.ToLower(strings.TrimSpace(geo.Org)))
+		if !attributed {
+			severity = "LOW"
+			alertKey = fmt.Sprintf("firstseen:%s:unattributed:%s", ev.TenantID, ev.EndpointID)
+			e.noteUnattributed(ev.EndpointID, ev.DstIP, now)
 		}
-		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, novelKey)
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
+			title := firstSeenTitle(geo)
+			description := fmt.Sprintf("Endpoint %s established a first connection to %s:%d (%s).", ev.EndpointID, ev.DstIP, ev.DstPort, describeOwner(geo))
+			details := fmt.Sprintf("Process: %s | %s", ev.ProcessPath, describeOwner(geo))
+			if !attributed {
+				run := e.takeUnattributed(ev.EndpointID)
+				title = unattributedTitle(run)
+				description = unattributedDescription(ev.EndpointID, ev.DstIP, ev.DstPort, run)
+				details = fmt.Sprintf("Process: %s | %s | %s", ev.ProcessPath, describeOwner(geo), unattributedDetails(run, cfg.FirstSeenCooldown))
+			}
 			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          uuid.New().String(),
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "NOVEL_DESTINATION",
-				Severity:    "MEDIUM",
-				Title:       firstSeenTitle(geo),
-				Description: fmt.Sprintf("Endpoint %s established a first connection to %s:%d (%s).", ev.EndpointID, ev.DstIP, ev.DstPort, describeOwner(geo)),
-				Details:     fmt.Sprintf("Process: %s | %s", ev.ProcessPath, describeOwner(geo)),
+				Severity:    severity,
+				Title:       title,
+				Description: description,
+				Details:     details,
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[*] ANOMALY ALERT [MEDIUM]: First-seen destination %s (%s) contacted by %s", ev.DstIP, describeOwner(geo), ev.EndpointID)
+			log.Printf("[*] ANOMALY ALERT [%s]: First-seen destination %s (%s) contacted by %s", severity, ev.DstIP, describeOwner(geo), ev.EndpointID)
 		}
 	}
 
@@ -848,6 +869,69 @@ func describeOwner(geo threatintel.GeoRecord) string {
 // firstSeenTitle names the counterparty when there is one to name. "First-Seen
 // Destination IP Contacted (CA)" was a country the resolver had invented; a
 // title has to carry something the reader can act on or admit it does not.
+// unattributedRun is the set of first-seen destinations on one endpoint that
+// the offline attribution table could not name, held between alerts so the one
+// alert that does go out can say how many there were rather than sending one
+// alert per address.
+type unattributedRun struct {
+	count int
+	first string
+	since time.Time
+	last  time.Time
+}
+
+func (e *Engine) noteUnattributed(endpointID, dstIP string, at time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	run := e.unattributed[endpointID]
+	if run == nil {
+		run = &unattributedRun{first: dstIP, since: at}
+		e.unattributed[endpointID] = run
+	}
+	run.count++
+	run.last = at
+}
+
+// takeUnattributed reads the run and clears it, so the next alert counts only
+// what happened after this one.
+func (e *Engine) takeUnattributed(endpointID string) unattributedRun {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	run := e.unattributed[endpointID]
+	if run == nil {
+		return unattributedRun{count: 1}
+	}
+	out := *run
+	delete(e.unattributed, endpointID)
+	return out
+}
+
+func unattributedTitle(run unattributedRun) string {
+	if run.count > 1 {
+		return fmt.Sprintf("%d first connections to unattributed networks", run.count)
+	}
+	return "First connection to an unattributed network"
+}
+
+func unattributedDescription(endpointID, dstIP string, dstPort uint16, run unattributedRun) string {
+	if run.count > 1 {
+		window := run.last.Sub(run.since).Round(time.Minute)
+		if window < time.Minute {
+			window = time.Minute
+		}
+		return fmt.Sprintf("Endpoint %s reached %d addresses for the first time in %s, none of which the offline attribution table can name. The most recent was %s:%d; the first was %s.",
+			endpointID, run.count, window, dstIP, dstPort, run.first)
+	}
+	return fmt.Sprintf("Endpoint %s established a first connection to %s:%d, an address the offline attribution table cannot name.", endpointID, dstIP, dstPort)
+}
+
+func unattributedDetails(run unattributedRun, cooldownMinutes int) string {
+	if run.count > 1 {
+		return fmt.Sprintf("%d unnamed destinations folded into this finding; further ones are folded for the next %d minutes", run.count, cooldownMinutes)
+	}
+	return fmt.Sprintf("further unnamed destinations on this endpoint are folded into this finding for the next %d minutes", cooldownMinutes)
+}
+
 func firstSeenTitle(geo threatintel.GeoRecord) string {
 	if geo.Resolved() {
 		return fmt.Sprintf("First connection to %s", geo.Org)

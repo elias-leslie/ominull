@@ -207,6 +207,124 @@ func TestAnUnattributableDestinationSaysSoRatherThanNamingNothing(t *testing.T) 
 	}
 }
 
+// Production, ten minutes after the geo fabrication was fixed: seven MEDIUM
+// "First connection to an unattributed network" alerts from one workstation,
+// all inside four minutes. An address with no owner cannot repeat as a cooldown
+// key any more than the address itself could, so every unnamed destination a
+// browser reached became its own alert. They belong to one finding per host.
+func TestUnnamedDestinationsAreOneRollingFindingPerHost(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	// Twenty addresses in documentation ranges, which the attribution table
+	// deliberately does not name, spread over four minutes.
+	for i := 0; i < 20; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-07", Timestamp: now.Add(time.Duration(i*12) * time.Second),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: "198.51.100." + itoa(i+1), DstPort: 443, BytesOut: 200,
+			ProcessPath: "/usr/bin/firefox",
+		})
+	}
+	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
+	if len(got) != 1 {
+		t.Fatalf("twenty unnamed destinations raised %d alerts; the whole point of the rollup is that they are one", len(got))
+	}
+	if got[0].Severity != "LOW" {
+		t.Errorf("severity was %q; an address nothing can attribute is the weakest evidence this detector has", got[0].Severity)
+	}
+	// The alert has to carry what it swallowed, or the rollup is just silence.
+	if !strings.Contains(got[0].Details, "folded") {
+		t.Errorf("the alert does not say that later destinations were folded into it: %q", got[0].Details)
+	}
+}
+
+// The rollup must not swallow the next window: after the cooldown, a further
+// unnamed destination is reported again, and it counts the ones it folded.
+func TestTheUnnamedRollupReopensAfterItsCooldown(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-08", Timestamp: now,
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "198.51.100.10", DstPort: 443, BytesOut: 200,
+		ProcessPath: "/usr/bin/firefox",
+	})
+	for i := 0; i < 5; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-08", Timestamp: now.Add(time.Duration(i+1) * time.Minute),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: "198.51.100.2" + itoa(i), DstPort: 443, BytesOut: 200,
+			ProcessPath: "/usr/bin/firefox",
+		})
+	}
+	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
+		t.Fatalf("inside one cooldown window the endpoint raised %d alerts; expected 1", len(got))
+	}
+
+	// Expire the cooldown the way time would, then reach somewhere new again.
+	engine.mu.Lock()
+	for k := range engine.alertCooldown {
+		engine.alertCooldown[k] = time.Now().Add(-2 * time.Hour)
+	}
+	engine.mu.Unlock()
+
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-08", Timestamp: now.Add(90 * time.Minute),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "198.51.100.90", DstPort: 443, BytesOut: 200,
+		ProcessPath: "/usr/bin/firefox",
+	})
+	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
+	if len(got) != 2 {
+		t.Fatalf("after the cooldown expired the endpoint raised %d alerts; expected a second", len(got))
+	}
+	var second storage.AnomalyAlert
+	for _, a := range got {
+		if a.Timestamp.After(second.Timestamp) {
+			second = a
+		}
+	}
+	if !strings.Contains(second.Title, "6 first connections") {
+		t.Errorf("the second alert must count what it folded, got %q", second.Title)
+	}
+}
+
+// A destination the table can name is still its own finding: folding those
+// together would hide the one thing this detector is for.
+func TestANamedCounterpartyIsStillItsOwnFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-09", Timestamp: now,
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "159.65.0.5", DstPort: 443, BytesOut: 200,
+		ProcessPath: "/usr/bin/firefox",
+	})
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-09", Timestamp: now.Add(time.Second),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "198.51.100.5", DstPort: 443, BytesOut: 200,
+		ProcessPath: "/usr/bin/firefox",
+	})
+	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
+	if len(got) != 2 {
+		t.Fatalf("a named counterparty and an unnamed address raised %d alerts; expected one each", len(got))
+	}
+	var named, unnamed bool
+	for _, a := range got {
+		if strings.Contains(a.Title, "DigitalOcean") && a.Severity == "MEDIUM" {
+			named = true
+		}
+		if strings.Contains(a.Title, "unattributed") && a.Severity == "LOW" {
+			unnamed = true
+		}
+	}
+	if !named || !unnamed {
+		t.Errorf("expected one MEDIUM naming the owner and one LOW for the unnamed address, got %+v", got)
+	}
+}
+
 func itoa(n int) string {
 	if n < 10 {
 		return string(rune('0' + n))
