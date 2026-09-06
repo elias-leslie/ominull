@@ -37,7 +37,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.16"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.17"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -57,6 +57,10 @@
 #define OMINULL_UPDATE_DIR "/var/lib/ominull/updates"
 #define MAX_FLOWS_PER_BATCH 64
 #define MAX_PATH_LEN 512
+
+/* What both agents send when no process can be attributed to a socket. It is
+ * deliberately not a path: a path is a claim, and this is the absence of one. */
+#define OMINULL_UNATTRIBUTED_PROCESS "unknown"
 
 static volatile bool g_Running = true;
 static unsigned long g_ProcDescriptorWalks = 0;
@@ -1089,6 +1093,50 @@ static const char* LookupDnsDomain(const char* ip) {
     return NULL;
 }
 
+/* The agent's own connection to the hub, so it is not reported back to the
+ * hub as telemetry.
+ *
+ * A flow record exists to tell the hub something it does not already know.
+ * The hub receiving a heartbeat is complete evidence that the heartbeat
+ * happened, so re-describing that same socket as a flow says nothing and, on
+ * an idle host, made this agent the single largest talker in its own
+ * telemetry. Only the exact configured hub endpoint is dropped, and only for
+ * this process: if this binary ever connects anywhere else, that is precisely
+ * the thing worth seeing. */
+static char g_HubPeerAddr[64] = {0};
+static uint16_t g_HubPeerPort = 0;
+static uint32_t g_SelfPid = 0;
+
+static bool HubAddressLiteral(const LINUX_AGENT_CONFIG* config, char* out, size_t cap);
+
+static void SetSelfHubPeer(const LINUX_AGENT_CONFIG* config) {
+    g_SelfPid = (uint32_t)getpid();
+    g_HubPeerPort = 0;
+    g_HubPeerAddr[0] = '\0';
+    if (!HubAddressLiteral(config, g_HubPeerAddr, sizeof(g_HubPeerAddr))) return;
+
+    bool tls = strncmp(config->hub_url, "https://", 8) == 0;
+    const char* p = strstr(config->hub_url, "://");
+    p = p ? p + 3 : config->hub_url;
+    const char* port = NULL;
+    if (*p == '[') {
+        const char* close = strchr(p, ']');
+        if (close && close[1] == ':') port = close + 2;
+    } else {
+        const char* colon = strchr(p, ':');
+        const char* slash = strchr(p, '/');
+        if (colon && (!slash || colon < slash)) port = colon + 1;
+    }
+    unsigned long parsed = port ? strtoul(port, NULL, 10) : (tls ? 443UL : 80UL);
+    g_HubPeerPort = parsed > 0 && parsed <= UINT16_MAX ? (uint16_t)parsed : 0;
+}
+
+static bool IsOwnHubFlow(const FLOW_CANDIDATE* candidate, uint32_t pid) {
+    return g_HubPeerPort != 0 && pid != 0 && pid == g_SelfPid &&
+           candidate->dst_port == g_HubPeerPort &&
+           strcmp(candidate->dst_ip, g_HubPeerAddr) == 0;
+}
+
 /* SelectFlowCandidates chooses which sockets get the batch's wire slots.
  *
  * There are more sockets on a busy host than a batch can carry, and the
@@ -1110,6 +1158,7 @@ static size_t SelectFlowCandidates(const FLOW_CANDIDATE* candidates,
         for (size_t i = 0; i < count && selected < maxEvents; i++) {
             bool active = candidates[i].bytes_in > 0 || candidates[i].bytes_out > 0;
             if ((pass == 0) != active) continue;
+            if (IsOwnHubFlow(&candidates[i], owners[i].pid)) continue;
             if (!ShouldReportFlow(candidates[i].dst_ip, candidates[i].dst_port, IPPROTO_TCP,
                                   owners[i].pid, candidates[i].bytes_in, candidates[i].bytes_out)) {
                 continue;
@@ -1177,8 +1226,12 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
             ev->process_id = owner->pid;
             snprintf(ev->process_path, sizeof(ev->process_path), "%s", owner->path);
         } else {
+            /* Nothing owns this socket that this agent can see. Saying so is
+             * the honest answer; naming a system binary that is not running
+             * invents an attribution and, worse, one that sits on the quiet
+             * list, so the destination was silently excused as well. */
             ev->process_id = 0;
-            snprintf(ev->process_path, sizeof(ev->process_path), "/usr/bin/system");
+            snprintf(ev->process_path, sizeof(ev->process_path), "%s", OMINULL_UNATTRIBUTED_PROCESS);
         }
 
         bool foundInBatch = false;
@@ -2755,7 +2808,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             f->dst_port,
             (unsigned long)f->bytes_in,
             (unsigned long)f->bytes_out,
-            escapedPath[0] ? escapedPath : "/usr/bin/system",
+            escapedPath[0] ? escapedPath : OMINULL_UNATTRIBUTED_PROCESS,
             f->process_id,
             domainJson,
             enrichmentJson,
@@ -3002,6 +3055,8 @@ int main(int argc, char* argv[]) {
             printf("[+] Evidence signing key active: %.16s...\n", config.evidence_pubkey_hex);
         }
     }
+
+    SetSelfHubPeer(&config);
 
     printf("[+] Initializing Linux socket collection and firewall control...\n");
     /* Says what is about to happen, not what has happened. This line used to

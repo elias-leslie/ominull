@@ -174,8 +174,12 @@ func defaultQuietClients() []string {
 		// This fleet's own agent, which is the most regular talker on any host
 		// it is installed on.
 		"ominull-agent", "ominulld", "ominulld.exe",
-		// Chat clients with fixed keepalives.
+		// Chat and assistant clients with fixed keepalives. These hold a
+		// websocket open and ping it on a timer, which is regular, uniform and
+		// entirely ordinary - the shape the beacon detector exists to find,
+		// produced by an application the operator installed on purpose.
 		"telegram", "telegram-desktop", "telegram.exe",
+		"chatgpt", "chatgpt.exe", "claude-desktop", "claude", "claude.exe",
 	}
 }
 

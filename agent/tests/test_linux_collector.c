@@ -102,6 +102,39 @@ static void test_active_flows_win_the_batch(void) {
     check(order[0] == CANDIDATES - 1, "the socket that moved bytes did not win a slot");
 }
 
+/* The hub already knows it received the heartbeat; describing that same socket
+ * back to it is not telemetry. Anywhere else this binary connects still is. */
+static void test_own_hub_flow_is_not_reported(void) {
+    LINUX_AGENT_CONFIG config;
+    memset(&config, 0, sizeof(config));
+    snprintf(config.hub_url, sizeof(config.hub_url), "https://10.0.0.58:9443");
+    SetSelfHubPeer(&config);
+    check(g_HubPeerPort == 9443, "the hub port was not taken from the configured URL");
+    check(strcmp(g_HubPeerAddr, "10.0.0.58") == 0, "the hub address was not taken from the configured URL");
+
+    FLOW_CANDIDATE candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    snprintf(candidate.dst_ip, sizeof(candidate.dst_ip), "10.0.0.58");
+    candidate.dst_port = 9443;
+    check(IsOwnHubFlow(&candidate, g_SelfPid), "this agent's own hub connection was reported");
+    check(!IsOwnHubFlow(&candidate, g_SelfPid + 1),
+          "another process talking to the hub was suppressed");
+
+    candidate.dst_port = 443;
+    check(!IsOwnHubFlow(&candidate, g_SelfPid),
+          "this agent reaching the hub's address on another port was suppressed");
+    snprintf(candidate.dst_ip, sizeof(candidate.dst_ip), "10.0.0.59");
+    candidate.dst_port = 9443;
+    check(!IsOwnHubFlow(&candidate, g_SelfPid),
+          "this agent reaching a different address was suppressed");
+
+    /* An unconfigured hub must not suppress anything at all. */
+    memset(&config, 0, sizeof(config));
+    SetSelfHubPeer(&config);
+    snprintf(candidate.dst_ip, sizeof(candidate.dst_ip), "10.0.0.58");
+    check(!IsOwnHubFlow(&candidate, g_SelfPid), "an unconfigured hub suppressed a real flow");
+}
+
 static void make_fixture(void) {
     char template_path[] = "/tmp/ominull-linux-collector.XXXXXX";
     g_fixture_root = mkdtemp(template_path);
@@ -129,6 +162,10 @@ static void make_fixture(void) {
         fprintf(tcp, "%d: 0100000A:%04X 0400000A:0050 %s 00000000:00000000 00:00000000 0 1000 0 %lu\n",
                 900 + i, 5000 + i, dead_states[i], 60000UL + (unsigned long)i);
     }
+    /* A live socket no process in the fixture owns. The collector must say so
+     * rather than name a system binary that is not running. */
+    fprintf(tcp, "%d: 0100000A:%04X 0500000A:0050 01 00000000:00000000 00:00000000 0 1000 0 %lu\n",
+            800, 5100, 60100UL);
     for (int i = 0; i < FIXTURE_SOCKETS / 2; i++) {
         fprintf(tcp, "%d: 0100000A:%04X 0300000A:0050 01 00000000:%08X 00:00000000 0 1000 0 %lu\n",
                 i, 4000 + i, i, 50000UL + (unsigned long)i);
@@ -225,6 +262,7 @@ int main(void) {
     test_package_query();
     test_socket_state_filter();
     test_active_flows_win_the_batch();
+    test_own_hub_flow_is_not_reported();
     make_fixture();
 
     /* Room for more than the live sockets, so a collector that reported the
@@ -235,15 +273,25 @@ int main(void) {
     size_t got = CollectActiveFlows(events, FIXTURE_SOCKETS + 16);
 
     char message[256];
-    snprintf(message, sizeof(message), "fixture produced %d active flows, expected %d", (int)got, FIXTURE_SOCKETS);
-    check(got == FIXTURE_SOCKETS, message);
+    snprintf(message, sizeof(message), "fixture produced %d active flows, expected %d", (int)got, FIXTURE_SOCKETS + 1);
+    check(got == FIXTURE_SOCKETS + 1, message);
+    int unattributed = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (strcmp(events[i].dst_ip, "10.0.0.5") == 0) {
+            unattributed++;
+            check(strcmp(events[i].process_path, "unknown") == 0,
+                  "an unowned socket was attributed to a process");
+            check(events[i].process_id == 0, "an unowned socket carried a process id");
+        }
+    }
+    check(unattributed == 1, "the unowned live socket was not reported");
     for (size_t i = 0; i < got; i++) {
         check(strcmp(events[i].dst_ip, "10.0.0.4") != 0,
               "a finished socket was reported as an active flow");
     }
-    check(strcmp(events[FIXTURE_SOCKETS / 2].src_ip, "::2") == 0,
+    check(strcmp(events[1 + FIXTURE_SOCKETS / 2].src_ip, "::2") == 0,
           "IPv6 local address was not decoded from tcp6");
-    check(strcmp(events[FIXTURE_SOCKETS / 2].dst_ip, "2001:db8::1") == 0,
+    check(strcmp(events[1 + FIXTURE_SOCKETS / 2].dst_ip, "2001:db8::1") == 0,
           "IPv6 remote address was not decoded from tcp6");
 
     unsigned long one_index_walk = (unsigned long)FIXTURE_PROCESSES * FIXTURE_FDS;

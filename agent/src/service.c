@@ -92,10 +92,24 @@ static size_t ProcessPathSlot(DWORD pid) {
  * service pay the same handle/open/path cost once per row. Cache by PID and
  * process creation time: PID reuse cannot inherit the old process's identity,
  * and the fixed table keeps stale process churn bounded. */
+/* What is sent when no process can be attributed to a socket.
+ *
+ * This used to answer with the path of the Windows kernel image, which is not
+ * a process that owns sockets and is not what was on the other end. It was a
+ * fabricated attribution, and because that name sits on the hub's quiet list,
+ * every destination behind it was quietly excused as well - a closed socket to
+ * an address this host had never contacted before raised nothing at all. An
+ * unowned socket now says so. Process id 4 is left alone: that one really is
+ * the System process, and it really does own sockets. */
 static void ProcessPathFor(DWORD pid, WCHAR* out, DWORD outCap) {
 	if (outCap == 0) return;
-    _snwprintf(out, outCap, L"C:\\Windows\\System32\\ntoskrnl.exe");
+    _snwprintf(out, outCap, L"unknown");
     out[outCap - 1] = L'\0';
+    if (pid == 4) {
+        _snwprintf(out, outCap, L"System");
+        out[outCap - 1] = L'\0';
+        return;
+    }
     if (pid <= 4) return;
 
     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -314,6 +328,52 @@ static bool IsContactTcpStateWin(DWORD state) {
     return state == MIB_TCP_STATE_TIME_WAIT;
 }
 
+/* The agent's own connection to the hub, so it is not reported back to the
+ * hub as telemetry.
+ *
+ * A flow record exists to tell the hub something it does not already know.
+ * The hub receiving a heartbeat is complete evidence that the heartbeat
+ * happened, so re-describing that socket as a flow says nothing, and on an
+ * idle host it made this agent the largest talker in its own telemetry. Only
+ * the exact configured hub endpoint is dropped, and only for this process: if
+ * this binary ever connects anywhere else, that is the thing worth seeing.
+ *
+ * Resolved once. HubAddressLiteral may consult DNS, which has no place on a
+ * three-second polling path. */
+bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
+
+static UINT32 g_HubPeerIp = 0;
+static UINT16 g_HubPeerPort = 0;
+static DWORD g_SelfPid = 0;
+static bool g_HubPeerResolved = false;
+
+static void ResolveSelfHubPeer(void) {
+    if (g_HubPeerResolved) return;
+    g_HubPeerResolved = true;
+    g_SelfPid = GetCurrentProcessId();
+
+    char literal[64] = {0};
+    if (!HubAddressLiteral(&g_Config, literal, sizeof(literal))) return;
+    struct in_addr parsed;
+    if (inet_pton(AF_INET, literal, &parsed) != 1) return;
+    g_HubPeerIp = ntohl(parsed.s_addr);
+
+    bool tls = strncmp(g_Config.hub_url, "https://", 8) == 0;
+    const char* p = strstr(g_Config.hub_url, "://");
+    p = p ? p + 3 : g_Config.hub_url;
+    const char* colon = strchr(p, ':');
+    const char* slash = strchr(p, '/');
+    unsigned long port = (colon && (!slash || colon < slash)) ? strtoul(colon + 1, NULL, 10)
+                                                              : (tls ? 443UL : 80UL);
+    g_HubPeerPort = (port > 0 && port <= 0xFFFF) ? (UINT16)port : 0;
+}
+
+static bool IsOwnHubFlowWin(const FLOW_CANDIDATE_WIN* candidate) {
+    return g_HubPeerPort != 0 && candidate->row.dwOwningPid == g_SelfPid &&
+           ntohl(candidate->row.dwRemoteAddr) == g_HubPeerIp &&
+           ntohs((u_short)candidate->row.dwRemotePort) == g_HubPeerPort;
+}
+
 /* SelectFlowCandidatesWin chooses which sockets get this batch's wire slots.
  *
  * There are more sockets on a busy host than a batch can carry, and the
@@ -334,6 +394,7 @@ static size_t SelectFlowCandidatesWin(const FLOW_CANDIDATE_WIN* candidates, size
         for (size_t i = 0; i < count && selected < maxEvents; i++) {
             bool active = candidates[i].bytesIn > 0 || candidates[i].bytesOut > 0;
             if ((pass == 0) != active) continue;
+            if (IsOwnHubFlowWin(&candidates[i])) continue;
             if (!ShouldReportFlowWin(ntohl(candidates[i].row.dwRemoteAddr),
                                      ntohs((u_short)candidates[i].row.dwRemotePort),
                                      IPPROTO_TCP, candidates[i].row.dwOwningPid,
@@ -355,6 +416,7 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
     DWORD dwSize = 0;
 
     if (maxEvents == 0) return 0;
+    ResolveSelfHubPeer();
     g_estatsGeneration++;
 
     DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
