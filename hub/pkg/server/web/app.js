@@ -7424,6 +7424,22 @@
       });
   }
 
+  /* How the agent actually ends the session, per platform. Both sentences said
+     "SIGTERM and then SIGKILL", which is the Linux path only: the Windows agent
+     holds the shell and everything it started in a job object and ends the lot
+     with TerminateJobObject. Naming the wrong mechanism in a confirmation is
+     the same defect as naming the wrong blast radius - an operator reads it to
+     decide whether to press the button. */
+  function terminateMechanism(program) {
+    /* The program is what the session was launched with and it is on every
+       summary the hub serves; the session summary carries no OS field, so
+       reaching for one would have read undefined and quietly picked the Linux
+       sentence for every host. */
+    return /\.exe$|^pwsh$|^powershell$|^cmd$/i.test(String(program || ""))
+      ? "ended together through the job object the agent holds them in"
+      : "killed with SIGTERM and then SIGKILL";
+  }
+
   function terminateTerminalSession(sessionSummary, hostLabel) {
     if (!sessionSummary || !sessionSummary.session_id) return;
     var host = hostLabel || sessionSummary.endpoint_id || "this host";
@@ -7434,7 +7450,9 @@
     }
     confirmSheet({
       title: "Terminate terminal session",
-      consequence: "Every process started by that shell on " + host + " is killed with SIGTERM and then SIGKILL. Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
+      consequence: "Every process started by that shell on " + host + " is " +
+        terminateMechanism(sessionSummary && sessionSummary.program) +
+        ". Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
       detail: (sessionSummary.program || "shell") + " \u00b7 session " + String(sessionSummary.session_id).slice(0, 8) + "\u2026",
       confirmLabel: "Terminate session",
       onConfirm: act
@@ -7689,7 +7707,9 @@
              consequence beyond one line of browser chrome. */
           confirmSheet({
             title: "Terminate terminal session",
-            consequence: "Every process started by that shell on " + hostName + " (" + epId + ") is killed with SIGTERM and then SIGKILL. Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
+            consequence: "Every process started by that shell on " + hostName + " (" + epId + ") is " +
+              terminateMechanism(prog || session.program) +
+              ". Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
             detail: prog + " running as " + identity + " \u00b7 session " + session.session_id.slice(0, 8) + "\u2026",
             confirmLabel: "Terminate session",
             stack: true,
