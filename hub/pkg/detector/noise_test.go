@@ -122,6 +122,57 @@ func TestARealSpikeAgainstARealBaselineStillFires(t *testing.T) {
 	}
 }
 
+// The first CRITICAL production raised after the scoring fix was chrome sending
+// 255KB to Google: 51 standard deviations out, because a browser's transfer
+// sizes are heavy-tailed and the 50KB floor was below a single page load. The
+// destination is in the shipped quiet-organisation list, so the operator has
+// already answered this.
+func TestAnOrdinaryBrowserUploadToAVouchedNetworkIsNotASpike(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	for i := 0; i < 30; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-10", Timestamp: now.Add(time.Duration(i) * time.Second),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: "142.250.176.69", DstPort: 443, BytesOut: 6000 + int64(i*10),
+			ProcessPath: "/usr/bin/chrome",
+		})
+	}
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-10", Timestamp: now.Add(time.Minute),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "142.250.176.69", DstPort: 443, BytesOut: 255536,
+		ProcessPath: "/usr/bin/chrome",
+	})
+	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
+		t.Fatalf("a quarter-megabyte upload to a vouched network raised %d alerts: %q", len(got), got[0].Title)
+	}
+}
+
+// The same transfer to a network nobody has vouched for is still below the
+// floor: a megabyte is the smallest transfer worth waking someone for.
+func TestATransferBelowTheFloorIsNotASpikeAnywhere(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	for i := 0; i < 30; i++ {
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-11", Timestamp: now.Add(time.Duration(i) * time.Second),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: "198.51.100.40", DstPort: 443, BytesOut: 6000 + int64(i*10),
+			ProcessPath: "/usr/bin/chrome",
+		})
+	}
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-11", Timestamp: now.Add(time.Minute),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "198.51.100.40", DstPort: 443, BytesOut: 255536,
+		ProcessPath: "/usr/bin/chrome",
+	})
+	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
+		t.Fatalf("a quarter-megabyte upload raised %d bandwidth alerts", len(got))
+	}
+}
+
 // Chrome and the ChatGPT client holding Google's push channel open scored 1.00
 // with zero payload variation. Google is in the shipped quiet-organisation
 // list; the exemption applied only on port 443, and the push channel is 5228.

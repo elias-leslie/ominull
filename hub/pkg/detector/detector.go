@@ -422,7 +422,14 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		e.mu.Unlock()
 
 		baselined := samples >= int64(cfg.BandwidthMinSamples)
-		outlier := baselined && zScore > 3.5 && ev.BytesOut > 50000
+		// The floor was 50KB, which a browser clears on a single page load, and
+		// the destination was not consulted at all: production's first CRITICAL
+		// after the scoring fix was chrome sending 255KB to Google, 51 standard
+		// deviations out because a browser's transfer sizes are heavy-tailed
+		// and nothing about that is exfiltration. An operator who has vouched
+		// for a network has already answered this question, and a megabyte is
+		// the smallest transfer worth waking someone for.
+		outlier := baselined && zScore > 3.5 && ev.BytesOut > 1024*1024 && !isTrustedDst
 		// A burst large enough to matter on its own account, reported even
 		// without a baseline - but as the weaker finding it is, because with no
 		// baseline there is nothing to say it is unusual for this process.
