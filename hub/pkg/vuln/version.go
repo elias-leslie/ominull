@@ -9,12 +9,12 @@ import (
 
 // ParsedVersion breaks a version string down into epoch, upstream, and revision components.
 type ParsedVersion struct {
-	Raw        string
-	Epoch      int
-	Upstream   string
-	Revision   string
-	HasEpoch   bool
-	Tokens     []versionToken
+	Raw      string
+	Epoch    int
+	Upstream string
+	Revision string
+	HasEpoch bool
+	Tokens   []versionToken
 }
 
 type tokenType int

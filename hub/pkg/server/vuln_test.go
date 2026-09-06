@@ -487,5 +487,3 @@ func TestServer_VulnMatchingAndPrioritization(t *testing.T) {
 		t.Fatalf("expected 1 not_affected item (sudo), got %+v", notAffResp)
 	}
 }
-
-

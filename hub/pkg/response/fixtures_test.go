@@ -182,52 +182,52 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 
 	// 7. Unknown fields (forward-compatible test cases)
 	grantUnknown := map[string]interface{}{
-		"version":              grantValid.Version,
-		"grant_id":             grantValid.GrantID,
-		"tenant_id":            grantValid.TenantID,
-		"endpoint_id":          grantValid.EndpointID,
-		"action_kind":          string(grantValid.ActionKind),
-		"action_digest":        grantValid.ActionDigest,
-		"operator_id":          grantValid.OperatorID,
-		"response_session_id":  grantValid.ResponseSessionID,
-		"issued_at":            grantValid.IssuedAt,
-		"expires_at":           grantValid.ExpiresAt,
-		"nonce":                grantValid.Nonce,
-		"signer_key_id":        grantValid.SignerKeyID,
-		"signature":            grantValid.Signature,
-		"future_field_xyz":     "should_be_ignored",
-		"future_flags":         1024,
+		"version":             grantValid.Version,
+		"grant_id":            grantValid.GrantID,
+		"tenant_id":           grantValid.TenantID,
+		"endpoint_id":         grantValid.EndpointID,
+		"action_kind":         string(grantValid.ActionKind),
+		"action_digest":       grantValid.ActionDigest,
+		"operator_id":         grantValid.OperatorID,
+		"response_session_id": grantValid.ResponseSessionID,
+		"issued_at":           grantValid.IssuedAt,
+		"expires_at":          grantValid.ExpiresAt,
+		"nonce":               grantValid.Nonce,
+		"signer_key_id":       grantValid.SignerKeyID,
+		"signature":           grantValid.Signature,
+		"future_field_xyz":    "should_be_ignored",
+		"future_flags":        1024,
 	}
 	writeJSON("grant_unknown_fields.json", grantUnknown)
 
 	offerUnknown := map[string]interface{}{
-		"job_id":               offerValid.JobID,
-		"kind":                 string(offerValid.Kind),
-		"lease_id":             offerValid.LeaseID,
-		"lease_expires_at":     offerValid.LeaseExpiresAt,
-		"grant":                grantValid,
-		"payload_json":         offerValid.PayloadJSON,
-		"priority":             10,
-		"retry_strategy":       "exponential_backoff",
+		"job_id":           offerValid.JobID,
+		"kind":             string(offerValid.Kind),
+		"lease_id":         offerValid.LeaseID,
+		"lease_expires_at": offerValid.LeaseExpiresAt,
+		"grant":            grantValid,
+		"payload_json":     offerValid.PayloadJSON,
+		"priority":         10,
+		"retry_strategy":   "exponential_backoff",
 	}
 	writeJSON("offer_unknown_fields.json", offerUnknown)
 
 	ackUnknown := map[string]interface{}{
-		"job_id":               ackValid.JobID,
-		"lease_id":             ackValid.LeaseID,
-		"accepted":             ackValid.Accepted,
-		"future_client_id":     "agent-v2-preview",
+		"job_id":           ackValid.JobID,
+		"lease_id":         ackValid.LeaseID,
+		"accepted":         ackValid.Accepted,
+		"future_client_id": "agent-v2-preview",
 	}
 	writeJSON("ack_unknown_fields.json", ackUnknown)
 
 	resultUnknown := map[string]interface{}{
-		"job_id":               resultValid.JobID,
-		"lease_id":             resultValid.LeaseID,
-		"state":                string(resultValid.State),
-		"exit_code":            resultValid.ExitCode,
-		"duration_ms":          resultValid.DurationMs,
-		"manifest_sha256":      resultValid.ManifestSHA256,
-		"diagnostic_metadata":  map[string]string{"collector": "v1.8.3"},
+		"job_id":              resultValid.JobID,
+		"lease_id":            resultValid.LeaseID,
+		"state":               string(resultValid.State),
+		"exit_code":           resultValid.ExitCode,
+		"duration_ms":         resultValid.DurationMs,
+		"manifest_sha256":     resultValid.ManifestSHA256,
+		"diagnostic_metadata": map[string]string{"collector": "v1.8.3"},
 	}
 	writeJSON("result_unknown_fields.json", resultUnknown)
 
@@ -284,7 +284,7 @@ func TestGenerateAndValidateCrossLanguageFixtures(t *testing.T) {
 	// Simulates what a legacy agent receives in a telemetry control response:
 	// it includes quarantined_peers and agent_update (which it parses), plus response_offers (which it ignores).
 	heartbeatOldAgent := map[string]interface{}{
-		"status": "ok",
+		"status":            "ok",
 		"quarantined_peers": []string{"10.0.0.99", "10.0.0.100"},
 		"agent_update": map[string]interface{}{
 			"version": "1.8.3",

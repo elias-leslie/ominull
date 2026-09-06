@@ -186,15 +186,33 @@ func (s *Store) CreateJob(tenantID, endpointID string, kind ActionKind, requeste
 			&existing.CreatedAt, &existing.UpdatedAt,
 		)
 		if err == nil {
-			if leaseID.Valid { existing.LeaseID = leaseID.String }
-			if leaseExp.Valid { existing.LeaseExpiresAt = &leaseExp.Time }
-			if started.Valid { existing.StartedAt = &started.Time }
-			if completed.Valid { existing.CompletedAt = &completed.Time }
-			if cancelReq.Valid { existing.CancelRequestedAt = &cancelReq.Time }
-			if idemp.Valid { existing.IdempotencyKey = idemp.String }
-			if grantID.Valid { existing.AuthorizationGrantID = grantID.String }
-			if resJSON.Valid { existing.ResultJSON = resJSON.String }
-			if errCode.Valid { existing.ErrorCode = errCode.String }
+			if leaseID.Valid {
+				existing.LeaseID = leaseID.String
+			}
+			if leaseExp.Valid {
+				existing.LeaseExpiresAt = &leaseExp.Time
+			}
+			if started.Valid {
+				existing.StartedAt = &started.Time
+			}
+			if completed.Valid {
+				existing.CompletedAt = &completed.Time
+			}
+			if cancelReq.Valid {
+				existing.CancelRequestedAt = &cancelReq.Time
+			}
+			if idemp.Valid {
+				existing.IdempotencyKey = idemp.String
+			}
+			if grantID.Valid {
+				existing.AuthorizationGrantID = grantID.String
+			}
+			if resJSON.Valid {
+				existing.ResultJSON = resJSON.String
+			}
+			if errCode.Valid {
+				existing.ErrorCode = errCode.String
+			}
 			return &existing, nil
 		}
 	}
@@ -632,15 +650,33 @@ func (s *Store) ListJobs(tenantID, endpointID string, limit int) ([]*JobRecord, 
 			return nil, err
 		}
 
-		if leaseID.Valid { j.LeaseID = leaseID.String }
-		if leaseExp.Valid { j.LeaseExpiresAt = &leaseExp.Time }
-		if started.Valid { j.StartedAt = &started.Time }
-		if completed.Valid { j.CompletedAt = &completed.Time }
-		if cancelReq.Valid { j.CancelRequestedAt = &cancelReq.Time }
-		if idemp.Valid { j.IdempotencyKey = idemp.String }
-		if grantID.Valid { j.AuthorizationGrantID = grantID.String }
-		if resJSON.Valid { j.ResultJSON = resJSON.String }
-		if errCode.Valid { j.ErrorCode = errCode.String }
+		if leaseID.Valid {
+			j.LeaseID = leaseID.String
+		}
+		if leaseExp.Valid {
+			j.LeaseExpiresAt = &leaseExp.Time
+		}
+		if started.Valid {
+			j.StartedAt = &started.Time
+		}
+		if completed.Valid {
+			j.CompletedAt = &completed.Time
+		}
+		if cancelReq.Valid {
+			j.CancelRequestedAt = &cancelReq.Time
+		}
+		if idemp.Valid {
+			j.IdempotencyKey = idemp.String
+		}
+		if grantID.Valid {
+			j.AuthorizationGrantID = grantID.String
+		}
+		if resJSON.Valid {
+			j.ResultJSON = resJSON.String
+		}
+		if errCode.Valid {
+			j.ErrorCode = errCode.String
+		}
 
 		jobs = append(jobs, &j)
 	}
@@ -680,15 +716,33 @@ func (s *Store) GetJob(tenantID, jobID string) (*JobRecord, error) {
 		return nil, ErrTenantMismatch
 	}
 
-	if leaseID.Valid { j.LeaseID = leaseID.String }
-	if leaseExp.Valid { j.LeaseExpiresAt = &leaseExp.Time }
-	if started.Valid { j.StartedAt = &started.Time }
-	if completed.Valid { j.CompletedAt = &completed.Time }
-	if cancelReq.Valid { j.CancelRequestedAt = &cancelReq.Time }
-	if idemp.Valid { j.IdempotencyKey = idemp.String }
-	if grantID.Valid { j.AuthorizationGrantID = grantID.String }
-	if resJSON.Valid { j.ResultJSON = resJSON.String }
-	if errCode.Valid { j.ErrorCode = errCode.String }
+	if leaseID.Valid {
+		j.LeaseID = leaseID.String
+	}
+	if leaseExp.Valid {
+		j.LeaseExpiresAt = &leaseExp.Time
+	}
+	if started.Valid {
+		j.StartedAt = &started.Time
+	}
+	if completed.Valid {
+		j.CompletedAt = &completed.Time
+	}
+	if cancelReq.Valid {
+		j.CancelRequestedAt = &cancelReq.Time
+	}
+	if idemp.Valid {
+		j.IdempotencyKey = idemp.String
+	}
+	if grantID.Valid {
+		j.AuthorizationGrantID = grantID.String
+	}
+	if resJSON.Valid {
+		j.ResultJSON = resJSON.String
+	}
+	if errCode.Valid {
+		j.ErrorCode = errCode.String
+	}
 
 	return &j, nil
 }
@@ -721,8 +775,12 @@ func (s *Store) GetJobAuditLog(tenantID, jobID string, limit int) ([]*JobAuditEn
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.TenantID, &e.EndpointID, &e.JobID, &grantID, &e.FromState, &e.ToState, &e.Actor, &details); err != nil {
 			return nil, err
 		}
-		if grantID.Valid { e.GrantID = grantID.String }
-		if details.Valid { e.Details = details.String }
+		if grantID.Valid {
+			e.GrantID = grantID.String
+		}
+		if details.Valid {
+			e.Details = details.String
+		}
 		entries = append(entries, &e)
 	}
 	return entries, nil

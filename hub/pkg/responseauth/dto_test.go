@@ -131,5 +131,3 @@ func TestCanonicalBytes_VerifyWebCryptoSignature(t *testing.T) {
 		t.Fatalf("expected real WebCrypto Ed25519 signature to verify in Go, got: %v", err)
 	}
 }
-
-

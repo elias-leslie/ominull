@@ -627,4 +627,3 @@ func TestOminullctl_ScriptsCommands(t *testing.T) {
 		t.Fatalf("cmdScripts retire without id expected error")
 	}
 }
-

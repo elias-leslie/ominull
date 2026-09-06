@@ -97,7 +97,7 @@ func TestWebAuthn_FullLifecycle_Ed25519(t *testing.T) {
 	rpHdr := sha256.Sum256([]byte("localhost"))
 	authData := make([]byte, 37)
 	copy(authData[0:32], rpHdr[:])
-	authData[32] = 0x01 // User Present
+	authData[32] = 0x01                            // User Present
 	binary.BigEndian.PutUint32(authData[33:37], 1) // Sign counter 1
 	authDataBase64 := base64.RawURLEncoding.EncodeToString(authData)
 

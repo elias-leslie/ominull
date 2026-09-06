@@ -145,13 +145,13 @@ type SignGrantResponse struct {
 
 // ResponseAuthorityStatus reports the status of the response authority and tenant signing keys.
 type ResponseAuthorityStatus struct {
-	Healthy           bool      `json:"healthy"`
-	SignerPartition   string    `json:"signer_partition"`
-	TenantKeyID       string    `json:"tenant_key_id"`
-	TenantPublicKey   string    `json:"tenant_public_key"` // hex ed25519 public key
-	AuthenticatorsCount int     `json:"authenticators_count"`
-	ActiveSessions    int       `json:"active_sessions"`
-	StartedAt         time.Time `json:"started_at"`
+	Healthy             bool      `json:"healthy"`
+	SignerPartition     string    `json:"signer_partition"`
+	TenantKeyID         string    `json:"tenant_key_id"`
+	TenantPublicKey     string    `json:"tenant_public_key"` // hex ed25519 public key
+	AuthenticatorsCount int       `json:"authenticators_count"`
+	ActiveSessions      int       `json:"active_sessions"`
+	StartedAt           time.Time `json:"started_at"`
 }
 
 // RecoveryToken represents a single-use root-issued token for emergency authenticator enrollment.

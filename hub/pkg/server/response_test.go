@@ -1266,4 +1266,3 @@ func TestServer_IRStandardForensicFlow(t *testing.T) {
 		t.Fatalf("expected receipt.json in archive")
 	}
 }
-

@@ -49,11 +49,11 @@ type EndpointGrant struct {
 	ActionDigest      string     `json:"action_digest"` // hex sha256 of canonical action payload
 	OperatorID        string     `json:"operator_id"`
 	ResponseSessionID string     `json:"response_session_id"`
-	IssuedAt          int64      `json:"issued_at"`  // unix seconds
-	ExpiresAt         int64      `json:"expires_at"` // unix seconds
-	Nonce             string     `json:"nonce"`      // hex random nonce
+	IssuedAt          int64      `json:"issued_at"`     // unix seconds
+	ExpiresAt         int64      `json:"expires_at"`    // unix seconds
+	Nonce             string     `json:"nonce"`         // hex random nonce
 	SignerKeyID       string     `json:"signer_key_id"` // hex sha256 fingerprint of public key
-	Signature         string     `json:"signature"`  // hex ed25519 signature
+	Signature         string     `json:"signature"`     // hex ed25519 signature
 }
 
 // CanonicalBytes returns the deterministic length-prefixed bytes for signature verification.

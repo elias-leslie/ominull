@@ -202,7 +202,7 @@ func ParseEPSSJSON(r io.Reader) (map[string]EPSSScore, error) {
 const (
 	DefaultCISAKEVURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 	DefaultNVD20URL   = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-	DefaultEPSSURL     = "https://api.first.org/data/v1/epss"
+	DefaultEPSSURL    = "https://api.first.org/data/v1/epss"
 )
 
 // FeedSyncOptions configures the vulnerability feed ingestion pipeline.
@@ -472,4 +472,3 @@ func SyncFeeds(ctx context.Context, store *Store, opts FeedSyncOptions, snapshot
 
 	return store.GetActiveSnapshot()
 }
-

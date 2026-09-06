@@ -503,4 +503,3 @@ func TestVuln_SyncFeedsRateLimitHandling(t *testing.T) {
 		t.Fatalf("failed snapshot record not found in snapshot history")
 	}
 }
-

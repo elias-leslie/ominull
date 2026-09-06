@@ -678,10 +678,10 @@ func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
 	// 2b. Valid digest calculation
 	validParams := map[string]string{"env": "prod", "dry_run": "true"}
 	digestReqBody, _ := json.Marshal(map[string]interface{}{
-		"script_id":       scriptID,
-		"version":         1,
-		"parameters":      validParams,
-		"timeout_seconds": 45,
+		"script_id":        scriptID,
+		"version":          1,
+		"parameters":       validParams,
+		"timeout_seconds":  45,
 		"max_output_bytes": 2048,
 	})
 	reqDigest := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/digest", bytes.NewReader(digestReqBody))
@@ -902,13 +902,13 @@ func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
 	proof.Signature = hex.EncodeToString(sig)
 
 	runBody, _ := json.Marshal(map[string]interface{}{
-		"script_id":       createResp.Script.ID,
-		"version":         1,
-		"endpoint_id":     endpointID,
-		"session_id":      session.SessionID,
-		"action_digest":   actionDigest,
-		"proof":           proof,
-		"timeout_seconds": 60,
+		"script_id":        createResp.Script.ID,
+		"version":          1,
+		"endpoint_id":      endpointID,
+		"session_id":       session.SessionID,
+		"action_digest":    actionDigest,
+		"proof":            proof,
+		"timeout_seconds":  60,
 		"max_output_bytes": 1048576,
 	})
 	reqRun := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/run", bytes.NewReader(runBody))
@@ -952,4 +952,3 @@ func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
 		t.Fatalf("expected 404 for non-existent job, got %d", wNonExistent.Code)
 	}
 }
-

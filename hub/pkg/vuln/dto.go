@@ -27,16 +27,16 @@ type InstalledSoftware struct {
 	ID           string             `json:"id"`
 	TenantID     string             `json:"tenant_id"`
 	EndpointID   string             `json:"endpoint_id"`
-	Source       string             `json:"source"`                 // dpkg, rpm, win_registry, win_package, macos_app
-	Vendor       string             `json:"vendor"`                 // Normalized vendor (e.g. "debian", "microsoft", "canonical")
-	Product      string             `json:"product"`                // Normalized package/product name
-	Version      string             `json:"version"`                // Normalized version string
-	Architecture string             `json:"architecture,omitempty"` // e.g. "amd64", "x86_64", "all"
+	Source       string             `json:"source"`                  // dpkg, rpm, win_registry, win_package, macos_app
+	Vendor       string             `json:"vendor"`                  // Normalized vendor (e.g. "debian", "microsoft", "canonical")
+	Product      string             `json:"product"`                 // Normalized package/product name
+	Version      string             `json:"version"`                 // Normalized version string
+	Architecture string             `json:"architecture,omitempty"`  // e.g. "amd64", "x86_64", "all"
 	InstallScope string             `json:"install_scope,omitempty"` // "system", "user"
-	Confidence   SoftwareConfidence `json:"confidence"`             // authoritative, inferred
-	RawVendor    string             `json:"raw_vendor,omitempty"`   // Raw maintainer / publisher string from system
-	RawProduct   string             `json:"raw_product,omitempty"`  // Raw package name or display name
-	RawVersion   string             `json:"raw_version,omitempty"`  // Raw version string before normalization
+	Confidence   SoftwareConfidence `json:"confidence"`              // authoritative, inferred
+	RawVendor    string             `json:"raw_vendor,omitempty"`    // Raw maintainer / publisher string from system
+	RawProduct   string             `json:"raw_product,omitempty"`   // Raw package name or display name
+	RawVersion   string             `json:"raw_version,omitempty"`   // Raw version string before normalization
 	ObservedAt   time.Time          `json:"observed_at"`
 }
 
@@ -106,4 +106,3 @@ type VulnerabilityMatchEvidence struct {
 	VersionComparison string `json:"version_comparison"`
 	SnapshotID        string `json:"snapshot_id,omitempty"`
 }
-

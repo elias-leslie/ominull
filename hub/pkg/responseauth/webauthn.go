@@ -34,15 +34,15 @@ var (
 
 // WebAuthnRPConfig defines Relying Party settings.
 type WebAuthnRPConfig struct {
-	RPID           string   `json:"rp_id"`          // e.g. "ominull.example.invalid" or "localhost"
-	RPName         string   `json:"rp_name"`        // e.g. "Ominull Response Authority"
+	RPID           string   `json:"rp_id"`           // e.g. "ominull.example.invalid" or "localhost"
+	RPName         string   `json:"rp_name"`         // e.g. "Ominull Response Authority"
 	AllowedOrigins []string `json:"allowed_origins"` // e.g. ["https://ominull.example.invalid:8443", "http://localhost:9999"]
 }
 
 // StoredWebAuthnCredential holds the public key and sign counter of a registered WebAuthn credential.
 type StoredWebAuthnCredential struct {
-	CredentialID string `json:"credential_id"` // base64url
-	KeyType      string `json:"key_type"`      // "ES256", "Ed25519", "RS256"
+	CredentialID string `json:"credential_id"`  // base64url
+	KeyType      string `json:"key_type"`       // "ES256", "Ed25519", "RS256"
 	PublicKeyPEM string `json:"public_key_pem"` // PKIX PEM or hex
 	SignCount    uint32 `json:"sign_count"`
 	AAGUID       string `json:"aaguid,omitempty"`
@@ -97,11 +97,11 @@ type AuthenticationOptions struct {
 type WebAuthnRegistrationRequest struct {
 	TenantID        string `json:"tenant_id"`
 	OperatorID      string `json:"operator_id"`
-	CredentialID    string `json:"credential_id"`     // base64url
-	ClientDataJSON  string `json:"client_data_json"`   // base64url
-	AttestationData string `json:"attestation_data"`  // base64url
-	PublicKeyPEM    string `json:"public_key_pem"`    // Optional direct PKIX PEM (or extracted from attestation)
-	KeyType         string `json:"key_type"`          // "ES256", "Ed25519", "RS256"
+	CredentialID    string `json:"credential_id"`    // base64url
+	ClientDataJSON  string `json:"client_data_json"` // base64url
+	AttestationData string `json:"attestation_data"` // base64url
+	PublicKeyPEM    string `json:"public_key_pem"`   // Optional direct PKIX PEM (or extracted from attestation)
+	KeyType         string `json:"key_type"`         // "ES256", "Ed25519", "RS256"
 }
 
 // WebAuthnAuthenticationRequest is submitted by the client after navigator.credentials.get()
@@ -111,7 +111,7 @@ type WebAuthnAuthenticationRequest struct {
 	BrowserSessionID  string `json:"browser_session_id"`
 	BrowserPublicKey  string `json:"browser_public_key"` // hex
 	CredentialID      string `json:"credential_id"`      // base64url
-	ClientDataJSON    string `json:"client_data_json"`    // base64url
+	ClientDataJSON    string `json:"client_data_json"`   // base64url
 	AuthenticatorData string `json:"authenticator_data"` // base64url
 	Signature         string `json:"signature"`          // base64url
 }
@@ -210,8 +210,8 @@ func (m *WebAuthnManager) CreateRegistrationOptions(tenantID, operatorID string)
 	}
 
 	opts := &RegistrationOptions{
-		Challenge: ch,
-		Timeout:   60000,
+		Challenge:   ch,
+		Timeout:     60000,
 		Attestation: "none",
 	}
 	opts.RP.ID = m.cfg.RPID

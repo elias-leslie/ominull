@@ -1059,4 +1059,3 @@ func (m *MemoryStore) CountAuthenticators(ctx context.Context, tenantID string) 
 	}
 	return count, nil
 }
-

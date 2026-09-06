@@ -49,7 +49,7 @@ type EvidenceItem struct {
 	SHA256          string     `json:"sha256"`
 	CollectorStatus string     `json:"collector_status"` // collected, truncated, empty, failed
 	StorageDigest   string     `json:"storage_digest,omitempty"`
-	EncryptedKey    string     `json:"-"` // Never expose wrapped data key in normal API responses
+	EncryptedKey    string     `json:"-"`      // Never expose wrapped data key in normal API responses
 	Status          string     `json:"status"` // uploading, completed, failed
 	CreatedAt       time.Time  `json:"created_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`

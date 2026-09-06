@@ -519,4 +519,3 @@ func TestServer_EvidenceItemsQueryAPI(t *testing.T) {
 		t.Fatalf("unexpected items order/names: %+v", res.Items)
 	}
 }
-

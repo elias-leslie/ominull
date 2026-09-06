@@ -11,22 +11,22 @@ import (
 )
 
 type TrafficFilter struct {
-	TenantID     string
-	Range        string
-	From         time.Time
-	To           time.Time
-	EndpointID   string
-	SrcIP        string
-	DstIP        string
-	Process      string
-	Domain       string
-	Country      string
-	Protocol     int
-	Port         int
-	Direction    string
-	Action       string
-	MeasuredOnly bool
-	Cursor       string
+	TenantID          string
+	Range             string
+	From              time.Time
+	To                time.Time
+	EndpointID        string
+	SrcIP             string
+	DstIP             string
+	Process           string
+	Domain            string
+	Country           string
+	Protocol          int
+	Port              int
+	Direction         string
+	Action            string
+	MeasuredOnly      bool
+	Cursor            string
 	Limit             int
 	ExecutableSHA256  string
 	UserIdentity      string
@@ -109,24 +109,24 @@ type TrafficHeatmapCell struct {
 }
 
 type TrafficFlowItem struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	Timestamp   time.Time `json:"timestamp"`
-	EndpointID  string    `json:"endpoint_id"`
-	Hostname    string    `json:"hostname"`
-	Layer       string    `json:"layer"`
-	Action      string    `json:"action"`
-	Direction   string    `json:"direction"`
-	Protocol    int       `json:"protocol"`
-	ProtoName   string    `json:"proto_name"`
-	SrcIP       string    `json:"src_ip"`
-	DstIP       string    `json:"dst_ip"`
-	SrcPort     int       `json:"src_port"`
-	DstPort     int       `json:"dst_port"`
-	ProcessPath string    `json:"process_path"`
-	ProcessName string    `json:"process_name"`
-	Domain      string    `json:"domain"`
-	Country     string    `json:"country"`
+	ID                      string     `json:"id"`
+	TenantID                string     `json:"tenant_id"`
+	Timestamp               time.Time  `json:"timestamp"`
+	EndpointID              string     `json:"endpoint_id"`
+	Hostname                string     `json:"hostname"`
+	Layer                   string     `json:"layer"`
+	Action                  string     `json:"action"`
+	Direction               string     `json:"direction"`
+	Protocol                int        `json:"protocol"`
+	ProtoName               string     `json:"proto_name"`
+	SrcIP                   string     `json:"src_ip"`
+	DstIP                   string     `json:"dst_ip"`
+	SrcPort                 int        `json:"src_port"`
+	DstPort                 int        `json:"dst_port"`
+	ProcessPath             string     `json:"process_path"`
+	ProcessName             string     `json:"process_name"`
+	Domain                  string     `json:"domain"`
+	Country                 string     `json:"country"`
 	BytesIn                 int64      `json:"bytes_in"`
 	BytesOut                int64      `json:"bytes_out"`
 	IsAnomalous             bool       `json:"is_anomalous"`

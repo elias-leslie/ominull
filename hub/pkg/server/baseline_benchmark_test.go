@@ -138,15 +138,15 @@ func setupTestServerBench(b *testing.B) (*Server, *storage.Store) {
 	_ = store.SetSetting("legacy_agent_auth", "migration")
 
 	_ = store.UpsertEndpoint(storage.Endpoint{
-		ID:         "bench-ep-01",
-		TenantID:   "t-01",
-		Hostname:   "bench-node",
-		IP:         "10.0.0.101",
-		MAC:        "52:54:00:12:34:56",
+		ID:                       "bench-ep-01",
+		TenantID:                 "t-01",
+		Hostname:                 "bench-node",
+		IP:                       "10.0.0.101",
+		MAC:                      "52:54:00:12:34:56",
 		OS:                       "linux",
 		RegisteredPackageVersion: "1.8.3",
 		Status:                   "online",
-		LastSeenAt: time.Now().UTC(),
+		LastSeenAt:               time.Now().UTC(),
 	})
 
 	srv := New(store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.8.3")
