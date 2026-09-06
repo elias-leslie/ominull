@@ -2096,6 +2096,140 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 	return list, total, nil
 }
 
+// AnomalyTypeCount is one anomaly type and how many alerts of it a host holds.
+type AnomalyTypeCount struct {
+	Type  string `json:"type"`
+	Count int64  `json:"count"`
+}
+
+// AnomalyAlertGroup is the per-host alert breakdown over the *whole* matching
+// set, not over one page of it. The console used to build this by grouping the
+// fifty rows it had just fetched, so a fleet with 2,320 open alerts drew tiles
+// that summed to fifty and disagreed with the total printed directly above
+// them.
+type AnomalyAlertGroup struct {
+	EndpointID string             `json:"endpoint_id"`
+	Hostname   string             `json:"hostname"`
+	Total      int64              `json:"total"`
+	Critical   int64              `json:"critical"`
+	High       int64              `json:"high"`
+	Medium     int64              `json:"medium"`
+	Low        int64              `json:"low"`
+	Types      []AnomalyTypeCount `json:"types"`
+}
+
+// SummarizeAnomalyAlerts groups every alert matching the filters by host. The
+// endpoint filter is deliberately not applied: the summary is what the operator
+// clicks to *choose* a host, so narrowing it to the host already chosen would
+// remove every other host from the strip and leave no way back.
+// Every matching host is returned - the set is bounded by the size of the
+// fleet, and truncating it here would make the summary disagree with the total
+// again, this time silently.
+func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyType, severity string) ([]AnomalyAlertGroup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	where := " WHERE 1=1"
+	var args []interface{}
+	if tenantID != "" {
+		where += " AND tenant_id = ?"
+		args = append(args, tenantID)
+	}
+	if unackOnly {
+		where += " AND acknowledged = 0"
+	}
+	if anomalyType != "" {
+		where += " AND anomaly_type = ?"
+		args = append(args, anomalyType)
+	}
+	if severity != "" {
+		where += " AND severity = ?"
+		args = append(args, severity)
+	}
+
+	// One pass at host x type x severity granularity. That is a handful of
+	// rows per host, so the whole fleet summary costs a single scan rather
+	// than one query per host or per severity.
+	query := `SELECT COALESCE(NULLIF(endpoint_id, ''), hostname, '') AS gkey,
+		MAX(hostname), MAX(endpoint_id), UPPER(COALESCE(severity, '')), COALESCE(anomaly_type, ''), COUNT(*)
+		FROM anomaly_alerts` + where + `
+		GROUP BY gkey, UPPER(COALESCE(severity, '')), COALESCE(anomaly_type, '')`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	order := make([]string, 0)
+	byKey := make(map[string]*AnomalyAlertGroup)
+	typeCounts := make(map[string]map[string]int64)
+
+	for rows.Next() {
+		var gkey, hostname, endpointID, sev, atype string
+		var count int64
+		if err := rows.Scan(&gkey, &hostname, &endpointID, &sev, &atype, &count); err != nil {
+			return nil, err
+		}
+		g := byKey[gkey]
+		if g == nil {
+			label := hostname
+			if label == "" {
+				label = endpointID
+			}
+			if label == "" {
+				label = "Unknown Host"
+			}
+			g = &AnomalyAlertGroup{EndpointID: endpointID, Hostname: label}
+			byKey[gkey] = g
+			order = append(order, gkey)
+			typeCounts[gkey] = make(map[string]int64)
+		}
+		g.Total += count
+		switch sev {
+		case "CRITICAL":
+			g.Critical += count
+		case "HIGH":
+			g.High += count
+		case "MEDIUM":
+			g.Medium += count
+		default:
+			g.Low += count
+		}
+		if atype != "" {
+			typeCounts[gkey][atype] += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	groups := make([]AnomalyAlertGroup, 0, len(order))
+	for _, key := range order {
+		g := byKey[key]
+		counts := typeCounts[key]
+		types := make([]AnomalyTypeCount, 0, len(counts))
+		for t, c := range counts {
+			types = append(types, AnomalyTypeCount{Type: t, Count: c})
+		}
+		sort.Slice(types, func(i, j int) bool {
+			if types[i].Count != types[j].Count {
+				return types[i].Count > types[j].Count
+			}
+			return types[i].Type < types[j].Type
+		})
+		g.Types = types
+		groups = append(groups, *g)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Total != groups[j].Total {
+			return groups[i].Total > groups[j].Total
+		}
+		return groups[i].Hostname < groups[j].Hostname
+	})
+	return groups, nil
+}
+
 func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
 	list, _, err := s.QueryAnomalyAlerts(tenantID, limit, 0, false, "", "", "")
 	return list, err

@@ -1,11 +1,49 @@
 package threatintel
 
 import (
-	"hash/fnv"
-	"net"
+	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 )
+
+// Offline network attribution: which country and which network owner an address
+// belongs to.
+//
+// This used to answer every address. Addresses outside its small table were run
+// through fnv32a(ip) %% len(fallbackProfiles) and assigned whichever of fourteen
+// plausible profiles the hash landed on - a country, a city, an ASN and an
+// organisation, returned in the same shape and with the same apparent
+// confidence as a real answer. It was labelled a fallback "for test/unallocated
+// public IPs"; on a real network it caught the overwhelming majority of
+// destinations. Measured on the production fleet, it reported Google's
+// 74.125.26.188 as Amazon, two addresses inside Akamai's 23.192.0.0/11 as OVH
+// in France and Telstra in Australia, and Cloudflare's 104.26.12.157 as
+// WorldStream in the Netherlands.
+//
+// That was not a cosmetic defect. The detector's quiet-organisation list - the
+// operator's own statement that Google, Akamai, Cloudflare, Amazon, Microsoft
+// and Apple are normal here - is matched against this answer, so inventing a
+// different owner meant the list never matched and every CDN keepalive was
+// reported as C2 beaconing. It also fed the console's country rankings, which
+// showed a home LAN talking to Sweden and Japan more than to anywhere real.
+//
+// Two rules now:
+//
+//   - Anything not in the table is *unresolved*. Not a guess, not a plausible
+//     profile: Country "UNKNOWN" and an empty Org, which the quiet lists treat
+//     as no match and the console prints as unknown. A wrong owner is worse
+//     than no owner, because everything downstream trusts it.
+//   - Matching is by CIDR, longest prefix wins. The old table matched decimal
+//     string prefixes in list order, so "17." (Apple) captured 172.217.0.0/16
+//     (Google), 173.255.0.0/16 (Linode) and 178.32.0.0/16 (OVH), and "18."
+//     (Amazon) captured 185.199.108.0/22 (GitHub Pages) - the later, more
+//     specific entries were unreachable.
+//
+// The table is a coarse, hand-maintained list of the large networks an estate
+// actually talks to, kept deliberately to allocations that are published and
+// stable. It is not a substitute for a real GeoIP database, and it does not
+// pretend to be: everything it does not know, it says it does not know.
 
 type GeoRecord struct {
 	Country     string `json:"country"`
@@ -15,8 +53,12 @@ type GeoRecord struct {
 	Org         string `json:"org"`
 }
 
+// Resolved reports whether this record names a real network owner, as opposed
+// to the unresolved answer returned for an address the table does not cover.
+func (g GeoRecord) Resolved() bool { return strings.TrimSpace(g.Org) != "" }
+
 type prefixRule struct {
-	prefix string
+	prefix netip.Prefix
 	record GeoRecord
 }
 
@@ -24,142 +66,177 @@ var (
 	geoCache   = make(map[string]GeoRecord)
 	geoCacheMu sync.RWMutex
 
-	// Comprehensive embedded prefix table mapping major global blocks, cloud ASNs, and C2/hosting networks
-	knownBlocks = []prefixRule{
-		// Google Public DNS & Cloud (AS15169)
-		{"8.8.8.", GeoRecord{"US", "United States", "Mountain View", "AS15169", "Google LLC"}},
-		{"8.8.4.", GeoRecord{"US", "United States", "Mountain View", "AS15169", "Google LLC"}},
-		{"34.", GeoRecord{"US", "United States", "Council Bluffs", "AS15169", "Google Cloud Platform"}},
-		{"35.", GeoRecord{"US", "United States", "North Charleston", "AS15169", "Google Cloud Platform"}},
-
-		// Cloudflare (AS13335)
-		{"1.1.1.", GeoRecord{"AU", "Australia", "Sydney", "AS13335", "Cloudflare, Inc."}},
-		{"1.0.0.", GeoRecord{"AU", "Australia", "Melbourne", "AS13335", "Cloudflare, Inc."}},
-		{"104.16.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"104.17.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"104.18.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"104.19.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"104.20.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"104.21.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-		{"172.67.", GeoRecord{"US", "United States", "San Francisco", "AS13335", "Cloudflare, Inc."}},
-
-		// Quad9 (AS19281)
-		{"9.9.9.", GeoRecord{"US", "United States", "Berkeley", "AS19281", "Quad9 DNS"}},
-		{"149.112.112.", GeoRecord{"US", "United States", "Zurich", "AS19281", "Quad9 DNS"}},
-
-		// Microsoft Azure & Cloud (AS8075)
-		{"20.", GeoRecord{"US", "United States", "Redmond", "AS8075", "Microsoft Corporation"}},
-		{"40.", GeoRecord{"US", "United States", "Boydton", "AS8075", "Microsoft Azure"}},
-		{"52.", GeoRecord{"US", "United States", "Des Moines", "AS8075", "Microsoft Azure"}},
-
-		// Amazon AWS (AS16509)
-		{"3.", GeoRecord{"US", "United States", "Ashburn", "AS16509", "Amazon Technologies Inc."}},
-		{"18.", GeoRecord{"US", "United States", "Seattle", "AS16509", "Amazon.com, Inc."}},
-		{"54.", GeoRecord{"US", "United States", "Ashburn", "AS16509", "Amazon Web Services"}},
-		{"44.", GeoRecord{"US", "United States", "Boardman", "AS16509", "Amazon Web Services"}},
-
-		// Apple (AS714)
-		{"17.", GeoRecord{"US", "United States", "Cupertino", "AS714", "Apple Inc."}},
-
-		// GitHub / Microsoft (AS36459)
-		{"140.82.112.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub, Inc."}},
-		{"140.82.121.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub, Inc."}},
-		{"185.199.108.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub Pages"}},
-		{"185.199.109.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub Pages"}},
-		{"185.199.110.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub Pages"}},
-		{"185.199.111.", GeoRecord{"US", "United States", "San Francisco", "AS36459", "GitHub Pages"}},
-
-		// Fastly CDN (AS54113)
-		{"151.101.", GeoRecord{"US", "United States", "San Francisco", "AS54113", "Fastly Inc."}},
-		{"199.232.", GeoRecord{"US", "United States", "New York", "AS54113", "Fastly Inc."}},
-
-		// DigitalOcean (AS14061)
-		{"104.248.", GeoRecord{"US", "United States", "New York", "AS14061", "DigitalOcean, LLC"}},
-		{"138.68.", GeoRecord{"US", "United States", "San Francisco", "AS14061", "DigitalOcean, LLC"}},
-		{"159.65.", GeoRecord{"US", "United States", "North Bergen", "AS14061", "DigitalOcean, LLC"}},
-		{"165.227.", GeoRecord{"US", "United States", "Santa Clara", "AS14061", "DigitalOcean, LLC"}},
-
-		// Hetzner (AS24940)
-		{"88.198.", GeoRecord{"DE", "Germany", "Nuremberg", "AS24940", "Hetzner Online GmbH"}},
-		{"136.243.", GeoRecord{"DE", "Germany", "Falkenstein", "AS24940", "Hetzner Online GmbH"}},
-		{"148.251.", GeoRecord{"DE", "Germany", "Falkenstein", "AS24940", "Hetzner Online GmbH"}},
-		{"65.108.", GeoRecord{"FI", "Finland", "Helsinki", "AS24940", "Hetzner Online GmbH"}},
-
-		// OVH (AS16276)
-		{"51.15.", GeoRecord{"FR", "France", "Paris", "AS16276", "OVH SAS"}},
-		{"145.239.", GeoRecord{"FR", "France", "Roubaix", "AS16276", "OVH SAS"}},
-		{"178.32.", GeoRecord{"FR", "France", "Gravelines", "AS16276", "OVH SAS"}},
-
-		// Linode / Akamai (AS63949)
-		{"45.33.32.", GeoRecord{"US", "United States", "Fremont", "AS63949", "Linode / Akamai"}},
-		{"173.255.", GeoRecord{"US", "United States", "Dallas", "AS63949", "Linode / Akamai"}},
-
-		// Known Threat / C2 Feed IP Blocks (Feodo / Emerging Threats)
-		{"185.220.101.", GeoRecord{"DE", "Germany", "Frankfurt", "AS206804", "EstNOC OY (C2/Relay)"}},
-		{"194.26.29.", GeoRecord{"RU", "Russia", "Moscow", "AS44050", "Petersburg Internet Network"}},
-		{"45.148.10.", GeoRecord{"NL", "Netherlands", "Amsterdam", "AS49981", "WorldStream B.V."}},
-		{"89.208.103.", GeoRecord{"RU", "Russia", "St. Petersburg", "AS47583", "Selectel LLC"}},
-		{"195.123.245.", GeoRecord{"LV", "Latvia", "Riga", "AS200019", "Alexhost SRL"}},
-		{"91.215.85.", GeoRecord{"RO", "Romania", "Bucharest", "AS20860", "IOMART CLOUD SERVICES"}},
-		{"103.151.125.", GeoRecord{"SG", "Singapore", "Singapore", "AS138997", "Host Universal Pty Ltd"}},
-		{"179.43.141.", GeoRecord{"CH", "Switzerland", "Zurich", "AS51852", "Private Layer INC"}},
-		{"198.51.100.", GeoRecord{"US", "United States", "Chicago", "AS64512", "TEST-NET-2"}},
-		{"203.0.113.", GeoRecord{"JP", "Japan", "Tokyo", "AS64513", "TEST-NET-3"}},
-		{"104.244.42.", GeoRecord{"US", "United States", "San Francisco", "AS13414", "Twitter, Inc."}},
+	// unresolvedRecord is what an address outside the table gets. The country
+	// code is the same "UNKNOWN" an unparseable address has always produced, so
+	// nothing downstream meets a value it has not already had to handle.
+	unresolvedRecord = GeoRecord{
+		Country:     "UNKNOWN",
+		CountryName: "Unknown Network",
+		ASN:         "",
+		Org:         "",
 	}
 
-	fallbackProfiles = []GeoRecord{
-		{"US", "United States", "Ashburn", "AS16509", "Amazon.com, Inc."},
-		{"DE", "Germany", "Frankfurt", "AS24940", "Hetzner Online GmbH"},
-		{"GB", "United Kingdom", "London", "AS13335", "Cloudflare, Inc."},
-		{"NL", "Netherlands", "Amsterdam", "AS49981", "WorldStream B.V."},
-		{"FR", "France", "Paris", "AS16276", "OVH SAS"},
-		{"JP", "Japan", "Tokyo", "AS2516", "KDDI Corporation"},
-		{"SG", "Singapore", "Singapore", "AS4657", "StarHub Ltd"},
-		{"AU", "Australia", "Sydney", "AS1221", "Telstra Corporation"},
-		{"CA", "Canada", "Montreal", "AS852", "TELUS Communications"},
-		{"CH", "Switzerland", "Zurich", "AS51852", "Private Layer INC"},
-		{"SE", "Sweden", "Stockholm", "AS3301", "Telia Company AB"},
-		{"BR", "Brazil", "Sao Paulo", "AS28573", "Claro NXT Telecomunicacoes"},
-		{"IN", "India", "Mumbai", "AS55836", "Reliance Jio Infocomm"},
+	loopbackRecord = GeoRecord{
+		Country:     "LOCAL",
+		CountryName: "Loopback Interface",
+		ASN:         "AS-LOCAL",
+		Org:         "Local Loopback",
 	}
+
+	privateRecord = GeoRecord{
+		Country:     "LOCAL",
+		CountryName: "Internal Network",
+		ASN:         "AS-PRIVATE",
+		Org:         "Enterprise Intranet",
+	}
+
+	// knownBlocks is built once, sorted longest-prefix-first, so the first
+	// match is also the most specific one.
+	knownBlocks []prefixRule
+	blocksOnce  sync.Once
 )
 
-// ResolveGeoIP provides fast, offline, in-memory IP resolution for Country, City, ASN, and Org.
+// ownerBlocks lists the networks the table knows, as CIDR strings against one
+// owner each. City is deliberately absent: an owner's allocation spans
+// continents, and naming a city for it would be the same invention this file
+// exists to remove.
+var ownerBlocks = []struct {
+	owner GeoRecord
+	cidrs []string
+}{
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS15169", Org: "Google LLC"},
+		[]string{
+			"8.8.4.0/24", "8.8.8.0/24", "8.34.208.0/20", "8.35.192.0/20",
+			"23.236.48.0/20", "23.251.128.0/19",
+			"34.64.0.0/10", "34.128.0.0/10",
+			"35.184.0.0/13", "35.192.0.0/14", "35.196.0.0/15", "35.198.0.0/16",
+			"35.199.0.0/17", "35.200.0.0/13", "35.208.0.0/12", "35.224.0.0/12",
+			"35.240.0.0/13",
+			"64.233.160.0/19", "66.102.0.0/20", "66.249.64.0/19", "72.14.192.0/18",
+			"74.125.0.0/16", "108.177.0.0/17", "130.211.0.0/16",
+			"142.250.0.0/15", "142.251.0.0/16",
+			"172.217.0.0/16", "172.253.0.0/16", "173.194.0.0/16",
+			"209.85.128.0/17", "216.58.192.0/19", "216.239.32.0/19",
+		},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS20940", Org: "Akamai Technologies"},
+		[]string{
+			"2.16.0.0/13", "23.32.0.0/11", "23.64.0.0/14", "23.192.0.0/11",
+			"88.221.0.0/16", "92.122.0.0/15", "95.100.0.0/15", "96.16.0.0/15",
+			"104.64.0.0/10", "184.24.0.0/13", "184.50.0.0/15",
+		},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13335", Org: "Cloudflare, Inc."},
+		[]string{
+			"1.0.0.0/24", "1.1.1.0/24",
+			"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+			"104.16.0.0/13", "104.24.0.0/14",
+			"108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+			"162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20",
+			"188.114.96.0/20", "190.93.240.0/20", "197.234.240.0/22",
+			"198.41.128.0/17",
+		},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS8075", Org: "Microsoft Corporation"},
+		[]string{
+			"13.64.0.0/11", "20.0.0.0/8", "40.64.0.0/10", "51.104.0.0/15",
+			"52.96.0.0/12", "52.112.0.0/14", "65.52.0.0/14", "104.40.0.0/13",
+			"131.253.0.0/16", "157.55.0.0/16", "168.61.0.0/16",
+			"191.232.0.0/13", "204.79.195.0/24",
+		},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS16509", Org: "Amazon.com, Inc."},
+		[]string{
+			"3.0.0.0/8", "13.32.0.0/15", "13.224.0.0/14", "15.177.0.0/16",
+			"18.0.0.0/8", "44.192.0.0/10", "52.0.0.0/11", "52.32.0.0/11",
+			"52.64.0.0/12", "52.84.0.0/15", "52.88.0.0/13", "54.0.0.0/8",
+			"99.77.0.0/16", "143.204.0.0/16", "205.251.192.0/18",
+		},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS714", Org: "Apple Inc."},
+		[]string{"17.0.0.0/8"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS54113", Org: "Fastly, Inc."},
+		[]string{"146.75.0.0/16", "151.101.0.0/16", "199.232.0.0/16"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS36459", Org: "GitHub, Inc."},
+		[]string{"140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS14061", Org: "DigitalOcean, LLC"},
+		[]string{"104.248.0.0/16", "138.68.0.0/16", "159.65.0.0/16", "165.227.0.0/16", "167.71.0.0/16"},
+	},
+	{
+		GeoRecord{Country: "DE", CountryName: "Germany", ASN: "AS24940", Org: "Hetzner Online GmbH"},
+		[]string{"88.198.0.0/16", "136.243.0.0/16", "148.251.0.0/16", "159.69.0.0/16", "65.108.0.0/16", "116.202.0.0/16"},
+	},
+	{
+		GeoRecord{Country: "FR", CountryName: "France", ASN: "AS16276", Org: "OVH SAS"},
+		[]string{"51.15.0.0/16", "145.239.0.0/16", "178.32.0.0/15", "51.68.0.0/14", "54.36.0.0/14"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS63949", Org: "Akamai Connected Cloud (Linode)"},
+		[]string{"45.33.32.0/19", "173.255.192.0/18", "172.104.0.0/15", "139.162.0.0/16"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS19281", Org: "Quad9"},
+		[]string{"9.9.9.0/24", "149.112.112.0/24"},
+	},
+	{
+		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13414", Org: "Twitter, Inc."},
+		[]string{"104.244.40.0/21", "192.133.76.0/22"},
+	},
+}
+
+func buildBlocks() {
+	for _, owner := range ownerBlocks {
+		for _, cidr := range owner.cidrs {
+			prefix, err := netip.ParsePrefix(cidr)
+			if err != nil {
+				// A malformed entry is dropped rather than approximated. The
+				// address it covered then resolves as unknown, which is the
+				// honest outcome and is caught by the table's own test.
+				continue
+			}
+			knownBlocks = append(knownBlocks, prefixRule{prefix: prefix.Masked(), record: owner.owner})
+		}
+	}
+	// Longest prefix first: 52.96.0.0/12 (Microsoft 365) has to be consulted
+	// before 52.0.0.0/11 (AWS), and a list in authoring order would not.
+	sort.SliceStable(knownBlocks, func(i, j int) bool {
+		return knownBlocks[i].prefix.Bits() > knownBlocks[j].prefix.Bits()
+	})
+}
+
+// ResolveGeoIP attributes an address to a country and a network owner, offline.
+// An address the table does not cover comes back unresolved rather than
+// guessed; callers must treat an empty Org as "not known", never as a name.
 func ResolveGeoIP(ipStr string) GeoRecord {
 	ipStr = strings.TrimSpace(ipStr)
-	if ipStr == "" || ipStr == "127.0.0.1" || ipStr == "::1" || ipStr == "0.0.0.0" {
-		return GeoRecord{
-			Country:     "LOCAL",
-			CountryName: "Loopback Interface",
-			City:        "Localhost",
-			ASN:         "AS-LOCAL",
-			Org:         "Local Loopback",
-		}
+	if ipStr == "" {
+		return unresolvedRecord
 	}
 
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return GeoRecord{
-			Country:     "UNKNOWN",
-			CountryName: "Unknown Network",
-			City:        "Unknown",
-			ASN:         "AS-UNKNOWN",
-			Org:         "Unallocated / Reserved",
-		}
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return unresolvedRecord
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsUnspecified() {
+		return loopbackRecord
+	}
+	if addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
+		return privateRecord
 	}
 
-	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-		return GeoRecord{
-			Country:     "LOCAL",
-			CountryName: "Internal Network",
-			City:        "Corporate LAN",
-			ASN:         "AS-PRIVATE",
-			Org:         "Enterprise Intranet",
-		}
-	}
-
-	// 1. Check in-memory fast cache
 	geoCacheMu.RLock()
 	rec, found := geoCache[ipStr]
 	geoCacheMu.RUnlock()
@@ -167,24 +244,15 @@ func ResolveGeoIP(ipStr string) GeoRecord {
 		return rec
 	}
 
-	// 2. Exact/Prefix Table Lookup
+	blocksOnce.Do(buildBlocks)
+
+	result := unresolvedRecord
 	for _, b := range knownBlocks {
-		if strings.HasPrefix(ipStr, b.prefix) {
-			geoCacheMu.Lock()
-			geoCache[ipStr] = b.record
-			geoCacheMu.Unlock()
-			return b.record
+		if b.prefix.Contains(addr) {
+			result = b.record
+			break
 		}
 	}
-
-	// 3. Deterministic fallback for test/unallocated public IPs
-	h := fnv.New32a()
-	h.Write([]byte(ipStr))
-	idx := int(h.Sum32()) % len(fallbackProfiles)
-	if idx < 0 {
-		idx = -idx
-	}
-	result := fallbackProfiles[idx]
 
 	geoCacheMu.Lock()
 	geoCache[ipStr] = result
@@ -192,12 +260,13 @@ func ResolveGeoIP(ipStr string) GeoRecord {
 	return result
 }
 
-// ResolveCountry returns a 2-letter ISO country code for an IP address.
+// ResolveCountry returns a 2-letter ISO country code, or "UNKNOWN".
 func ResolveCountry(ipStr string) string {
 	return ResolveGeoIP(ipStr).Country
 }
 
-// ResolveASN returns ASN number and Organization name for an IP address.
+// ResolveASN returns the ASN and organisation for an address. Both are empty
+// when the address is not attributable.
 func ResolveASN(ipStr string) (string, string) {
 	rec := ResolveGeoIP(ipStr)
 	return rec.ASN, rec.Org

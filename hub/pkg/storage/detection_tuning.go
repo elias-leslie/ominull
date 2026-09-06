@@ -37,6 +37,13 @@ type DetectionTuning struct {
 	BandwidthOn       bool `json:"bandwidth_enabled"`
 	BandwidthCooldown int  `json:"bandwidth_cooldown_minutes"`
 
+	// BandwidthMinSamples is how many transfers a process must have made before
+	// its mean and standard deviation are treated as a baseline. This was four,
+	// compiled in: four observations do not describe a process's normal volume,
+	// and the first genuinely large upload after them scores an enormous
+	// z-score against the noise of the previous three.
+	BandwidthMinSamples int `json:"bandwidth_min_samples"`
+
 	// WarmupHours is how long after an endpoint first reports that behavioural
 	// detections are held rather than raised. A host installed an hour ago has
 	// no baseline to be anomalous against, and every one of its ordinary
@@ -84,10 +91,11 @@ func defaultDetectionTuning() DetectionTuning {
 		BeaconScore:       0.80,
 		BeaconCooldownMin: 30,
 
-		FirstSeenOn:       true,
-		FirstSeenCooldown: 30,
-		BandwidthOn:       true,
-		BandwidthCooldown: 5,
+		FirstSeenOn:         true,
+		FirstSeenCooldown:   30,
+		BandwidthOn:         true,
+		BandwidthCooldown:   5,
+		BandwidthMinSamples: 20,
 
 		WarmupHours: 24,
 
@@ -111,7 +119,11 @@ func defaultQuietProcesses() []string {
 		"snapd", "packagekitd", "unattended-upgr", "dbus-daemon",
 		// This fleet's own agent, which heartbeats on a fixed interval and is
 		// therefore the most perfect beacon on any host it is installed on.
-		"ominull-agent", "ominulld", "ominull_agent.exe",
+		// "ominull_agent.exe" was the Windows entry and is not a file that
+		// exists; the service binary is ominulld.exe, so the Windows agent was
+		// never actually quiet and reported its own hub traffic as an
+		// exfiltration spike.
+		"ominull-agent", "ominulld", "ominulld.exe", "ominull_agent.exe",
 		// Trusted communication clients with known regular keepalive intervals
 		"telegram", "telegram-desktop", "Telegram.exe",
 	}
@@ -213,6 +225,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.BeaconCooldownMin = clampInt(t.BeaconCooldownMin, 1, 1440, 30)
 	t.FirstSeenCooldown = clampInt(t.FirstSeenCooldown, 1, 1440, 30)
 	t.BandwidthCooldown = clampInt(t.BandwidthCooldown, 1, 1440, 5)
+	t.BandwidthMinSamples = clampInt(t.BandwidthMinSamples, 4, 1000, 20)
 	if t.WarmupHours < 0 {
 		t.WarmupHours = 0
 	}

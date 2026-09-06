@@ -98,6 +98,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("beacon cooldown", before.BeaconCooldownMin, after.BeaconCooldownMin)
 	add("first-seen enabled", before.FirstSeenOn, after.FirstSeenOn)
 	add("bandwidth enabled", before.BandwidthOn, after.BandwidthOn)
+	add("bandwidth baseline size", before.BandwidthMinSamples, after.BandwidthMinSamples)
 	add("learning period", before.WarmupHours, after.WarmupHours)
 	add("quiet processes", len(before.QuietProcesses), len(after.QuietProcesses))
 	add("quiet networks", len(before.QuietOrgs), len(after.QuietOrgs))

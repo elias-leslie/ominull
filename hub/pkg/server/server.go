@@ -2794,6 +2794,16 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 
 	unackTotal, _ := s.store.CountAnomalyAlerts(tenantID, true)
 
+	// The per-host breakdown is computed over the whole matching set. The
+	// console used to derive it from the page it had just been handed, so the
+	// summary tiles added up to the page size (fifty) while the header above
+	// them reported the real total.
+	breakdown, err := s.store.SummarizeAnomalyAlerts(tenantID, unackOnly, anomalyType, severity)
+	if err != nil {
+		log.Printf("[!] The alert summary could not be built: %v", err)
+		breakdown = nil
+	}
+
 	// Return envelope or array based on accept / query param
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Query().Get("envelope") == "false" {
@@ -2804,6 +2814,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		"alerts":               anomalies,
 		"total":                total,
 		"unacknowledged_total": unackTotal,
+		"breakdown":            breakdown,
 		"limit":                limit,
 		"offset":               offset,
 	})

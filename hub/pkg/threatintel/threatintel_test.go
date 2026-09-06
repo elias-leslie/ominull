@@ -57,8 +57,12 @@ func TestThreatIntelManager(t *testing.T) {
 		t.Errorf("unexpected GeoIP for 8.8.8.8: %+v", geoGoogle)
 	}
 
+	// 1.1.1.1 is anycast, announced from every Cloudflare edge at once. The
+	// table used to answer AU/Sydney for it because APNIC registers the block
+	// in that region; which continent a packet to it actually lands on is not
+	// knowable offline, so the assertion is on the owner, which is.
 	geoCF := ResolveGeoIP("1.1.1.1")
-	if geoCF.Country != "AU" || geoCF.ASN != "AS13335" {
+	if geoCF.ASN != "AS13335" || geoCF.Org != "Cloudflare, Inc." {
 		t.Errorf("unexpected GeoIP for 1.1.1.1: %+v", geoCF)
 	}
 

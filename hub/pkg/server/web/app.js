@@ -3318,9 +3318,30 @@
     var allAnomalies = state.anomalies || [];
     var af = state.alertsFilter || { page: 1, limit: 50, unacknowledged_only: true, severity: "", endpoint_id: "", search: "" };
 
-    // Group by system / endpoint
+    /* The per-host breakdown comes from the hub and covers every alert that
+       matches the current filters. Grouping the fifty rows of the current page
+       instead - which is what this did - drew a strip that summed to fifty
+       under a header reporting thousands. Older hubs do not send it, so the
+       page grouping stays as the fallback and says so. */
+    var breakdown = (state.alertsData && Array.isArray(state.alertsData.breakdown)) ? state.alertsData.breakdown : null;
     var sysMap = {};
-    allAnomalies.forEach(function (a) {
+    if (breakdown) {
+      breakdown.forEach(function (g) {
+        var types = {};
+        arrayOf(g.types).forEach(function (t) { if (t && t.type) types[t.type] = Number(t.count) || 0; });
+        sysMap[g.endpoint_id || g.hostname || "Unknown Host"] = {
+          host: g.hostname || g.endpoint_id || "Unknown Host",
+          epId: g.endpoint_id || "",
+          total: Number(g.total) || 0,
+          crit: Number(g.critical) || 0,
+          high: Number(g.high) || 0,
+          med: Number(g.medium) || 0,
+          low: Number(g.low) || 0,
+          types: types
+        };
+      });
+    }
+    if (!breakdown) allAnomalies.forEach(function (a) {
       /* Group on the endpoint id and *label* with the hostname. Grouping on
           the hostname made `s.host` a hostname, which the click handler then
           assigned to `af.endpoint_id`; the client-side filter matched it
@@ -3386,8 +3407,18 @@
           h("span", { text: Object.keys(s.types).slice(0, 2).join(", ").replace(/_/g, " ").toLowerCase() })));
     });
 
+    var stripHosts = Object.keys(sysMap).length;
+    var stripTotal = Object.keys(sysMap).reduce(function (n, k) { return n + sysMap[k].total; }, 0);
+    var stripScope = breakdown
+      ? (af.unacknowledged_only ? "Every open alert matching the current filters" : "Every alert matching the current filters")
+      : "Only the " + allAnomalies.length + " alerts on this page - this hub reports no fleet summary";
+    stripScope += ": " + stripTotal.toLocaleString() + " alert" + (stripTotal === 1 ? "" : "s") +
+      " across " + stripHosts + " host" + (stripHosts === 1 ? "" : "s") +
+      (stripHosts > topSystems.length ? " (busiest " + topSystems.length + " shown)" : "") + ".";
+
     var chartCard = card("Systems with the Most Alerts by Alert Type",
       h("div", { cls: "stack" },
+        h("p", { cls: "dim-3 u-t2", text: stripScope }),
         chartBoxes.length
           ? h("div", { cls: "alerts-sys-grid" }, chartBoxes)
           : emptyBox("No active anomaly alerts recorded across fleet."),
@@ -6465,6 +6496,7 @@
     var fsCool = numberField(t.first_seen_cooldown_minutes, 1, 1440, 1);
     var bwOn = toggleField(t.bandwidth_enabled, "Report bandwidth spikes");
     var bwCool = numberField(t.bandwidth_cooldown_minutes, 1, 1440, 1);
+    var bwSamples = numberField(t.bandwidth_min_samples, 4, 1000, 1);
 
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
     var procs = listField(t.quiet_processes, "svchost.exe, apsd, systemd-timesyncd");
@@ -6493,6 +6525,7 @@
         tuningRow("", "", fsOn.node),
         tuningRow("Repeat at most every", "Minutes, per destination.", fsCool),
         tuningRow("", "", bwOn.node),
+        tuningRow("Transfers required", "A spike is measured against what this process normally sends. Below this many observed transfers the baseline is guesswork, and every large-ish upload looks like an outlier. Shipped default " + (d.bandwidth_min_samples || 20) + ".", bwSamples),
         tuningRow("Repeat at most every", "Minutes, per process.", bwCool)),
 
       h("h4", { cls: "tune-head", text: "New endpoints" }),
@@ -6521,6 +6554,7 @@
         first_seen_cooldown_minutes: parseInt(fsCool.value, 10) || 0,
         bandwidth_enabled: bwOn.input.checked,
         bandwidth_cooldown_minutes: parseInt(bwCool.value, 10) || 0,
+        bandwidth_min_samples: parseInt(bwSamples.value, 10) || 0,
         warmup_hours: parseInt(warmup.value, 10) || 0,
         quiet_processes: parseList(procs.value),
         quiet_orgs: parseList(orgs.value)

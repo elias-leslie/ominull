@@ -24,23 +24,40 @@ type bandwidthStats struct {
 	m2    float64
 }
 
-func (b *bandwidthStats) update(val float64) (mean float64, stddev float64, z float64) {
+// observe scores a transfer against the baseline built from the transfers
+// before it, and only then folds it into that baseline.
+//
+// The order matters and used to be the other way round. Scoring a value against
+// a distribution that already contains it suppresses exactly the outliers this
+// detector exists to find: the new point pulls the mean toward itself and
+// inflates the standard deviation it is then divided by, which bounds the
+// z-score at roughly (n-1)/sqrt(n) however extreme the value really is. A
+// 500 MB transfer from a process whose every previous transfer was a kilobyte
+// scored 5.4 against a baseline of thirty, and the same transfer against a
+// baseline of four could not have reached 3.5 at all - so the fixed threshold
+// was mostly measuring how many samples had been collected, and the alerts that
+// did fire came almost entirely from the absolute-size branch beside it.
+//
+// The returned counts and moments describe the baseline as it stood before this
+// value, which is what the alert then quotes.
+func (b *bandwidthStats) observe(val float64) (mean float64, stddev float64, z float64, baseline int64) {
+	baseline = b.count
+	mean = b.mean
+	if baseline >= 2 {
+		variance := b.m2 / float64(baseline-1)
+		stddev = math.Sqrt(variance)
+		if stddev > 0 {
+			z = (val - mean) / stddev
+		}
+	}
+
 	b.count++
 	delta := val - b.mean
 	b.mean += delta / float64(b.count)
 	delta2 := val - b.mean
 	b.m2 += delta * delta2
 
-	if b.count < 2 {
-		return b.mean, 0, 0
-	}
-
-	variance := b.m2 / float64(b.count-1)
-	stddev = math.Sqrt(variance)
-	if stddev > 0 {
-		z = (val - b.mean) / stddev
-	}
-	return b.mean, stddev, z
+	return mean, stddev, z, baseline
 }
 
 type Engine struct {
@@ -288,7 +305,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "CRITICAL",
 				Title:       alert.Title,
 				Description: alert.Description,
-				Details:     fmt.Sprintf("GeoIP: %s (%s) | ASN: %s | Org: %s", geo.Country, geo.CountryName, geo.ASN, geo.Org),
+				Details:     fmt.Sprintf("%s", describeOwner(geo)),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
@@ -376,8 +393,22 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 	}
 
-	// 3. Statistical Outlier: Bandwidth Exfiltration Spikes (Z-Score > 3.5)
-	if ev.Direction == "OUTBOUND" && ev.BytesOut > 0 {
+	// 3. Statistical Outlier: Bandwidth Exfiltration Spikes
+	//
+	// Three gates were missing here that every other detector below has, and
+	// each one produced alerts on the live fleet:
+	//
+	//   - the quiet-process list was never consulted, so svchost.exe - the
+	//     first name in the shipped list - reported exfiltration spikes;
+	//   - the destination was never checked, so the fleet's own agent
+	//     heartbeating to the hub on the LAN, and a container talking to its
+	//     own database on a bridge network, were both "exfiltration";
+	//   - the baseline was four samples, which is not a baseline, and every
+	//     finding was CRITICAL whatever the evidence behind it.
+	//
+	// Bytes leaving for a host inside the estate are a different question from
+	// bytes leaving the estate, and this detector is about the second one.
+	if ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys {
 		bwKey := fmt.Sprintf("%s:%s", ev.EndpointID, procName)
 		e.mu.Lock()
 		stats, exists := e.bwTracker[bwKey]
@@ -385,21 +416,34 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			stats = &bandwidthStats{}
 			e.bwTracker[bwKey] = stats
 		}
-		mean, stddev, zScore := stats.update(float64(ev.BytesOut))
+		mean, stddev, zScore, samples := stats.observe(float64(ev.BytesOut))
 		e.mu.Unlock()
 
-		// Trigger anomaly if Z-score > 3.5 and outbound bytes > 50,000, or huge burst (>10MB)
-		if (zScore > 3.5 && ev.BytesOut > 50000 && stats.count >= 4) || (ev.BytesOut > 10*1024*1024) {
+		baselined := samples >= int64(cfg.BandwidthMinSamples)
+		outlier := baselined && zScore > 3.5 && ev.BytesOut > 50000
+		// A burst large enough to matter on its own account, reported even
+		// without a baseline - but as the weaker finding it is, because with no
+		// baseline there is nothing to say it is unusual for this process.
+		burst := ev.BytesOut > 10*1024*1024
+		if outlier || burst {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
+			// The severity follows the evidence rather than the detector's
+			// name. A transfer four standard deviations out is worth a look; one
+			// far past that, against a real baseline, is the finding this
+			// detector was written for.
+			bwSeverity := "HIGH"
+			if outlier && zScore > 8 {
+				bwSeverity = "CRITICAL"
+			}
 			if cfg.BandwidthOn && !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Timestamp:   now,
-					Title:       fmt.Sprintf("Bandwidth Exfiltration Spike (Z-Score: %.2f)", zScore),
-					Description: fmt.Sprintf("Process %s transmitted %d bytes to %s:%d (Baseline Mean: %.0f bytes, StdDev: %.0f, Z: %.2f).", procName, ev.BytesOut, ev.DstIP, ev.DstPort, mean, stddev, zScore),
-					Severity:    "CRITICAL",
+					Title:       bandwidthTitle(baselined, zScore, ev.BytesOut),
+					Description: bandwidthDescription(baselined, procName, ev.BytesOut, ev.DstIP, ev.DstPort, mean, stddev, zScore, samples),
+					Severity:    bwSeverity,
 					Mitigated:   false,
 				}
 				e.recordAlert(alert)
@@ -409,16 +453,16 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "BANDWIDTH_SPIKE",
-					Severity:    "CRITICAL",
+					Severity:    bwSeverity,
 					Title:       alert.Title,
 					Description: alert.Description,
-					Details:     fmt.Sprintf("Measured: %d bytes | Baseline Mean: %.0f bytes | StdDev: %.0f | Z-Score: %.2f | GeoIP: %s (%s)", ev.BytesOut, mean, stddev, zScore, geo.Country, geo.Org),
+					Details:     fmt.Sprintf("Measured: %d bytes | Samples: %d | Baseline Mean: %.0f bytes | StdDev: %.0f | Z-Score: %.2f | %s", ev.BytesOut, samples, mean, stddev, zScore, describeOwner(geo)),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on %s -> %d bytes (Z=%.2f)", alert.Title, ev.EndpointID, ev.BytesOut, zScore)
+				log.Printf("[!] ANOMALY ALERT [%s]: %s on %s -> %d bytes (Z=%.2f over %d samples)", bwSeverity, alert.Title, ev.EndpointID, ev.BytesOut, zScore, samples)
 			}
 		}
 	}
@@ -429,8 +473,15 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// a conversation with a long, uniform history rather than four packets in a
 	// row, and that whatever the detector decided travels into the alert so the
 	// operator can disagree with it.
+	// The quiet-organisation exemption used to apply only on port 443, so a
+	// keepalive to a network owner the operator had already declared normal was
+	// still reported as C2 the moment it used that owner's own service port:
+	// Chrome and the ChatGPT client holding Google's push channel open on 5228
+	// scored 1.00 with 0% payload variation, which is what a keepalive is. An
+	// owner the operator trusts is trusted at whatever port they answer on; the
+	// way to stop trusting them is to take them off the list.
 	if cfg.BeaconOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !(isTrustedDst && ev.DstPort == 443) {
+		!isTrustedSys && !isTrustedDst {
 		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
 		e.mu.Lock()
 		bWin, exists := e.beaconTracker[beaconKey]
@@ -474,8 +525,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    severity,
 					Title:       alert.Title,
 					Description: alert.Description,
-					Details: fmt.Sprintf("%s | threshold %.2f | GeoIP: %s (%s)",
-						bev.Summary(), cfg.BeaconScore, geo.Country, geo.Org),
+					Details: fmt.Sprintf("%s | threshold %.2f | %s",
+						bev.Summary(), cfg.BeaconScore, describeOwner(geo)),
 					// The same numbers the sentence above is built from, kept
 					// as numbers. The console can then show how far past the
 					// threshold this verdict actually was, and sort a page of
@@ -503,7 +554,19 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	}
 	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
 		!isTrustedDst && !isTrustedSys && firstSeen {
-		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, ev.DstIP)
+		// Keyed on the network owner, not the address. A destination is
+		// first-seen exactly once, so a per-address key could never repeat and
+		// the cooldown never suppressed anything - which is how this detector
+		// came to be 62%% of every alert on the fleet. What an analyst wants to
+		// know is that the estate has started talking to somebody new, and one
+		// counterparty bringing forty edge addresses is one of those, not
+		// forty. An address whose owner is unknown falls back to the address,
+		// because then the address is all there is.
+		novelKey := strings.ToLower(strings.TrimSpace(geo.Org))
+		if novelKey == "" {
+			novelKey = ev.DstIP
+		}
+		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, novelKey)
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			e.recordAnomaly(storage.AnomalyAlert{
 				ID:          uuid.New().String(),
@@ -512,15 +575,15 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "NOVEL_DESTINATION",
 				Severity:    "MEDIUM",
-				Title:       fmt.Sprintf("First-Seen Destination IP Contacted (%s)", geo.Country),
-				Description: fmt.Sprintf("Endpoint %s established first organizational connection to novel destination %s:%d (%s, %s).", ev.EndpointID, ev.DstIP, ev.DstPort, geo.CountryName, geo.Org),
-				Details:     fmt.Sprintf("Process: %s | GeoIP: %s (%s) | ASN: %s | Org: %s", ev.ProcessPath, geo.Country, geo.CountryName, geo.ASN, geo.Org),
+				Title:       firstSeenTitle(geo),
+				Description: fmt.Sprintf("Endpoint %s established a first connection to %s:%d (%s).", ev.EndpointID, ev.DstIP, ev.DstPort, describeOwner(geo)),
+				Details:     fmt.Sprintf("Process: %s | %s", ev.ProcessPath, describeOwner(geo)),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[*] ANOMALY ALERT [MEDIUM]: First-seen destination %s (%s, %s) contacted by %s", ev.DstIP, geo.Country, geo.Org, ev.EndpointID)
+			log.Printf("[*] ANOMALY ALERT [MEDIUM]: First-seen destination %s (%s) contacted by %s", ev.DstIP, describeOwner(geo), ev.EndpointID)
 		}
 	}
 
@@ -757,4 +820,72 @@ func isKnownInfrastructureProcess(procPath string) bool {
 		return true
 	}
 	return false
+}
+
+// describeOwner renders what is known about a destination's network, and says
+// so plainly when that is nothing.
+//
+// Alert text used to be built as "GeoIP: %s (%s)" straight from the resolver,
+// which answered every address because it hashed the ones it did not know into
+// a list of plausible countries and owners. With that removed, an unattributable
+// address has an empty organisation, and printing it through the old format
+// produced "GeoIP: UNKNOWN ()" - an operator reading that cannot tell a lookup
+// that failed from a network with no name.
+func describeOwner(geo threatintel.GeoRecord) string {
+	if !geo.Resolved() {
+		return "network owner not resolved (no offline attribution for this address)"
+	}
+	country := strings.TrimSpace(geo.CountryName)
+	if country == "" {
+		country = strings.TrimSpace(geo.Country)
+	}
+	if asn := strings.TrimSpace(geo.ASN); asn != "" {
+		return fmt.Sprintf("%s (%s, %s)", geo.Org, asn, country)
+	}
+	return fmt.Sprintf("%s (%s)", geo.Org, country)
+}
+
+// firstSeenTitle names the counterparty when there is one to name. "First-Seen
+// Destination IP Contacted (CA)" was a country the resolver had invented; a
+// title has to carry something the reader can act on or admit it does not.
+func firstSeenTitle(geo threatintel.GeoRecord) string {
+	if geo.Resolved() {
+		return fmt.Sprintf("First connection to %s", geo.Org)
+	}
+	return "First connection to an unattributed network"
+}
+
+// bandwidthTitle distinguishes a transfer measured against a real baseline from
+// one large enough to report on its own. Both used to be reported with a
+// z-score, including the burst case where the score was computed against
+// whatever handful of samples happened to exist.
+func bandwidthTitle(baselined bool, zScore float64, bytesOut int64) string {
+	if baselined {
+		return "Outbound volume " + deviations(zScore) + " above this process's baseline"
+	}
+	return fmt.Sprintf("Large outbound transfer (%d bytes, no baseline yet)", bytesOut)
+}
+
+// deviations renders a z-score at a precision that means something. A process
+// whose every previous transfer was the same size has almost no variance, so a
+// genuine outlier against it scores in the millions; printing that to one
+// decimal place reads as a broken number rather than as a large one.
+func deviations(z float64) string {
+	switch {
+	case z >= 1000:
+		return "more than 1,000 standard deviations"
+	case z >= 100:
+		return fmt.Sprintf("%.0f standard deviations", z)
+	default:
+		return fmt.Sprintf("%.1f standard deviations", z)
+	}
+}
+
+func bandwidthDescription(baselined bool, procName string, bytesOut int64, dstIP string, dstPort uint16, mean, stddev, zScore float64, samples int64) string {
+	if baselined {
+		return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Its baseline over the %d transfers before this one is %.0f bytes (standard deviation %.0f), which puts this one %s out.",
+			procName, bytesOut, dstIP, dstPort, samples, mean, stddev, deviations(zScore))
+	}
+	return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Only %d transfers have been observed for it, which is too few to say whether that is unusual for this process.",
+		procName, bytesOut, dstIP, dstPort, samples)
 }
