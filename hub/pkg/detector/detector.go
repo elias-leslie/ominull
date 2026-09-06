@@ -224,12 +224,6 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	return false
 }
 
-func (e *Engine) recordAlert(alert storage.Alert) {
-	if err := e.store.CreateAlert(alert); err != nil {
-		log.Printf("[-] alert write failed for %s/%s: %v", alert.EndpointID, alert.Title, err)
-	}
-}
-
 func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, anomaly storage.AnomalyAlert) {
 	anomaly.Evidence = withFlowContext(anomaly.Evidence, ev, geo)
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
@@ -393,13 +387,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "CRITICAL",
 				Mitigated:   true,
 			}
-			e.recordAlert(alert)
 			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "THREAT_INTEL_MATCH",
+				Technique:   "T1071",
 				Severity:    "CRITICAL",
 				Title:       alert.Title,
 				Description: alert.Description,
@@ -460,13 +454,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "HIGH",
 				Mitigated:   false,
 			}
-			e.recordAlert(alert)
 			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "OFF_HOURS_ACTIVITY",
+				Technique:   "T1029",
 				Severity:    "HIGH",
 				Title:       alert.Title,
 				Description: alert.Description,
@@ -540,13 +534,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    bwSeverity,
 					Mitigated:   false,
 				}
-				e.recordAlert(alert)
 				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "BANDWIDTH_SPIKE",
+					Technique:   "T1030",
 					Severity:    bwSeverity,
 					Title:       alert.Title,
 					Description: alert.Description,
@@ -583,6 +577,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "CLOUD_STORAGE_EGRESS",
+				Technique:   "T1567.002",
 				Severity:    "HIGH",
 				Title:       title,
 				Description: description,
@@ -669,13 +664,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:  severity,
 					Mitigated: false,
 				}
-				e.recordAlert(alert)
 				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "C2_BEACONING",
+					Technique:   "T1071.001",
 					Severity:    severity,
 					Title:       alert.Title,
 					Description: alert.Description,
@@ -747,6 +742,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "NOVEL_DESTINATION",
+				Technique:   "T1071",
 				Severity:    severity,
 				Title:       title,
 				Description: description,
@@ -800,13 +796,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    "HIGH",
 					Mitigated:   false,
 				}
-				e.recordAlert(alert)
 				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "PORT_SCAN_RECON",
+					Technique:   "T1046",
 					Severity:    "HIGH",
 					Title:       alert.Title,
 					Description: alert.Description,
@@ -871,13 +867,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    "CRITICAL",
 					Mitigated:   false,
 				}
-				e.recordAlert(alert)
 				e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
 					AnomalyType: "LATERAL_PORT_SWEEP",
+					Technique:   "T1021",
 					Severity:    "CRITICAL",
 					Title:       alert.Title,
 					Description: alert.Description,
@@ -940,13 +936,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    severity,
 				Mitigated:   false,
 			}
-			e.recordAlert(alert)
 			e.recordAnomaly(ev, geo, storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "NOVEL_PROCESS_EGRESS",
+				Technique:   "T1059",
 				Severity:    severity,
 				Title:       title,
 				Description: description,
@@ -970,6 +966,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
 				AnomalyType: "SENSITIVE_PORT_EGRESS",
+				Technique:   "T1021",
 				Severity:    "CRITICAL",
 				Title:       fmt.Sprintf("Sensitive Port %d Egress to External IP", ev.DstPort),
 				Description: fmt.Sprintf("Process %s attempted outbound connection on sensitive management/file-sharing port %d to %s (%s).", ev.ProcessPath, ev.DstPort, ev.DstIP, geo.CountryName),

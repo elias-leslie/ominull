@@ -3314,6 +3314,7 @@ func (s *Server) routes() *http.ServeMux {
 	// looking at an alert has to be able to see the rule that produced it - and
 	// the handler itself refuses a write from anyone but an administrator.
 	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
+	mux.HandleFunc("/api/v1/detection/tuning/suppress", s.authMiddleware(s.handleSuppressPair))
 
 	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
 	// A local one-use setup session has administrator weight for enrollment:

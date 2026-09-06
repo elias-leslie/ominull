@@ -158,7 +158,17 @@ type AnomalyAlert struct {
 	// operator how close to the threshold a verdict actually was. Empty for
 	// detectors that have no structured evidence, and for every alert raised
 	// before this column existed.
-	Evidence     string    `json:"evidence,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	// Technique is the ATT&CK identifier this detector is arguing for, when it
+	// is arguing for one. It is the shortest honest answer to "so what?": an
+	// analyst reading "periodic beaconing" and an analyst reading "T1071.001"
+	// are reading the same sentence, but only the second can be looked up,
+	// compared against what the estate already covers, or handed to somebody
+	// else. It also makes a suppression legible - silencing a pair is easier
+	// to argue about when the finding names the technique it would blunt.
+	// Empty for detectors that map to nothing in particular, and for every
+	// finding raised before this column existed.
+	Technique    string    `json:"technique,omitempty"`
 	ProcessPath  string    `json:"process_path"`
 	DstIP        string    `json:"dst_ip"`
 	DstPort      uint16    `json:"dst_port"`
@@ -529,6 +539,7 @@ func (s *Store) initSchema() error {
 		title TEXT NOT NULL,
 		description TEXT NOT NULL,
 		details TEXT NOT NULL DEFAULT "",
+		technique TEXT NOT NULL DEFAULT "",
 		process_path TEXT NOT NULL DEFAULT "",
 		dst_ip TEXT NOT NULL DEFAULT "",
 		dst_port INTEGER NOT NULL DEFAULT 0,
@@ -667,6 +678,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN attribution_status TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
+		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
 	}
 	for _, m := range migrations {
@@ -816,6 +828,17 @@ func (s *Store) initRollupCubesSchema() error {
 				FROM events GROUP BY tenant_id, strftime('%Y-%m-%dT%H:00:00Z', substr(timestamp, 1, 19) || 'Z'), country, direction
 			`)
 		}
+	}
+
+	// The legacy alert copy is emptied once. Every detector wrote a row here
+	// and an identical finding into anomaly_alerts, and only the second was
+	// ever read, acknowledged or cleared - so this table accumulated every
+	// finding the fleet had ever raised, 48,046 of them, none of which any
+	// operator could see or dismiss. The findings themselves are untouched in
+	// anomaly_alerts; what goes is the copy. The table is left in place for one
+	// release so a hub that is rolled back still starts.
+	if _, err := s.db.Exec("DELETE FROM alerts"); err != nil {
+		return fmt.Errorf("clearing the superseded alert copy: %w", err)
 	}
 
 	var topoCount int64
@@ -1996,8 +2019,8 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	}
 
 	query := `
-	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, evidence, process_path, dst_ip, dst_port, timestamp, acknowledged)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO anomaly_alerts (id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, evidence, technique, process_path, dst_ip, dst_port, timestamp, acknowledged)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		severity=excluded.severity,
 		description=excluded.description,
@@ -2006,7 +2029,7 @@ func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
 	_, err := s.db.Exec(
 		query,
 		a.ID, a.TenantID, a.LocationID, a.EndpointID, a.Hostname,
-		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details, a.Evidence,
+		a.AnomalyType, a.Severity, a.Title, a.Description, a.Details, a.Evidence, a.Technique,
 		a.ProcessPath, a.DstIP, a.DstPort, a.Timestamp, ackInt,
 	)
 	return err
@@ -2073,7 +2096,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		return nil, 0, err
 	}
 
-	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts" + whereClause + " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
 	queryArgs := append(args, limit, offset)
 
 	rows, err := s.db.Query(query, queryArgs...)
@@ -2089,7 +2112,7 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		if err := rows.Scan(
 			&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
 			&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details, &a.Evidence,
-			&a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
+			&a.Technique, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2236,6 +2259,31 @@ func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyT
 func (s *Store) ListAnomalyAlerts(tenantID string, limit int) ([]AnomalyAlert, error) {
 	list, _, err := s.QueryAnomalyAlerts(tenantID, limit, 0, false, "", "", "")
 	return list, err
+}
+
+// GetAnomalyAlert returns one finding by id. Triage needs the whole row - the
+// process, the destination and the evidence behind it - before it can offer to
+// silence anything, and offering to silence a finding nobody can read back is
+// how allowlists grow entries no one can justify later.
+func (s *Store) GetAnomalyAlert(id string) (AnomalyAlert, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var a AnomalyAlert
+	var ackInt int
+	err := s.db.QueryRow(
+		"SELECT id, tenant_id, location_id, endpoint_id, hostname, anomaly_type, severity, title, description, details, COALESCE(evidence, ''), COALESCE(technique, ''), process_path, dst_ip, dst_port, timestamp, acknowledged FROM anomaly_alerts WHERE id = ?",
+		id,
+	).Scan(
+		&a.ID, &a.TenantID, &a.LocationID, &a.EndpointID, &a.Hostname,
+		&a.AnomalyType, &a.Severity, &a.Title, &a.Description, &a.Details, &a.Evidence,
+		&a.Technique, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp, &ackInt,
+	)
+	if err != nil {
+		return AnomalyAlert{}, err
+	}
+	a.Acknowledged = ackInt != 0
+	return a, nil
 }
 
 func (s *Store) AcknowledgeAnomaly(id string) error {
@@ -2476,12 +2524,20 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 		return nil, fmt.Errorf("closing analytics process counts: %w", err)
 	}
 
-	// 4. Severity counts
+	// 4. Severity counts, over the findings an operator can actually see.
+	//
+	// These were read from the legacy `alerts` table while the console's alert
+	// page reads `anomaly_alerts`, and nothing kept the two in step:
+	// acknowledging a finding cleared it from one and not the other, so the
+	// dashboard reported 3,593 CRITICAL and 44,181 HIGH over a page showing
+	// two. Both now come from the same rows, and only the open ones count -
+	// a severity chart of findings somebody already dealt with is a history
+	// lesson, not a dashboard.
 	var querySev string
 	if tenantID != "" {
-		querySev = "SELECT severity, COUNT(*) FROM alerts WHERE tenant_id = ? GROUP BY severity"
+		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 AND tenant_id = ? GROUP BY severity"
 	} else {
-		querySev = "SELECT severity, COUNT(*) FROM alerts GROUP BY severity"
+		querySev = "SELECT severity, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0 GROUP BY severity"
 	}
 	sRows, err := s.db.Query(querySev, args...)
 	if err != nil {
@@ -2887,21 +2943,6 @@ func (s *Store) ListIOCs(limit int) ([]IOC, error) {
 	return list, nil
 }
 
-func (s *Store) CreateAlert(a Alert) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	val := 0
-	if a.Mitigated {
-		val = 1
-	}
-	_, err := s.db.Exec(
-		"INSERT INTO alerts (id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		a.ID, a.TenantID, a.EndpointID, a.Timestamp, a.Title, a.Description, a.Severity, val,
-	)
-	return err
-}
-
 func (s *Store) ListAlerts(tenantID string, limit int) ([]Alert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2914,14 +2955,19 @@ func (s *Store) ListAlerts(tenantID string, limit int) ([]Alert, error) {
 		rows *sql.Rows
 		err  error
 	)
+	// Served from the anomaly rows, which are the findings. The `alerts` table
+	// was written alongside them with the same identifiers and then never read
+	// by the console, acknowledged, or cleared - a second copy that could only
+	// ever drift. This endpoint keeps its original shape for callers outside
+	// the console; `mitigated` carries what acknowledgement means here.
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated FROM alerts WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
+			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, acknowledged FROM anomaly_alerts WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
 			tenantID, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated FROM alerts ORDER BY timestamp DESC LIMIT ?",
+			"SELECT id, tenant_id, endpoint_id, timestamp, title, description, severity, acknowledged FROM anomaly_alerts ORDER BY timestamp DESC LIMIT ?",
 			limit,
 		)
 	}

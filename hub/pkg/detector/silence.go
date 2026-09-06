@@ -153,6 +153,10 @@ func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.
 		EndpointID:  endpoint.ID,
 		Hostname:    endpoint.Hostname,
 		AnomalyType: silenceAnomalyType,
+		// Impair Defenses: Disable or Modify Tools. A host going quiet is not
+		// proof of that, but it is the only reading in which it matters, and
+		// the innocent explanations are all cheap to check.
+		Technique:   "T1562.001",
 		Severity:    "HIGH",
 		Title:       title,
 		Description: description,

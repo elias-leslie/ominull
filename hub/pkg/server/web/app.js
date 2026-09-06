@@ -1111,6 +1111,14 @@
     if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
     if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
     if (base === "/api/v1/endpoints/unisolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, false); }); return { status: "released" }; }
+    if (base === "/api/v1/detection/tuning/suppress") {
+      var silenced = (DEMO_CACHE["/api/v1/anomalies"] || []).filter(function (a) { return a.id === (body && body.id); })[0];
+      DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
+      var demoProc = silenced && silenced.process_path
+        ? silenced.process_path.split("\\").pop().split("/").pop().toLowerCase()
+        : "process";
+      return { pair: demoProc + "@example", added: true, acknowledged: body && body.id };
+    }
     if (base === "/api/v1/anomalies/acknowledge") {
       DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
       return { status: "acknowledged" };
@@ -3610,19 +3618,45 @@
         }
       });
 
+      /* Two different answers, and the difference matters. "Acknowledge" says
+         I have read this one. "Expected" says this conversation is ordinary
+         here and should stop being reported - it writes the process and the
+         counterparty into the tuning as a pair, which is the loop that turns
+         triage into fewer alerts instead of the same alert tomorrow. The hub
+         refuses the pair if the process is unattributed or the destination is
+         rented compute, and says why. */
       var ackAction = a.acknowledged
         ? h("span", { cls: "dim-3", text: "Acknowledged" })
-        : h("button", {
-          cls: "btn mini", type: "button", text: "Acknowledge",
-          on: {
-            click: function (e) {
-              e.stopPropagation();
-              request("/api/v1/anomalies/acknowledge", "POST", { id: a.id })
-                .then(function () { toast("Alert acknowledged", "ok"); refresh(); })
-                .catch(function (err) { toast("Error: " + err.message, "crit"); });
+        : h("span", { cls: "row-actions" },
+          h("button", {
+            cls: "btn mini", type: "button", text: "Acknowledge",
+            on: {
+              click: function (e) {
+                e.stopPropagation();
+                request("/api/v1/anomalies/acknowledge", "POST", { id: a.id })
+                  .then(function () { toast("Alert acknowledged", "ok"); refresh(); })
+                  .catch(function (err) { toast("Error: " + err.message, "crit"); });
+              }
             }
-          }
-        });
+          }),
+          h("button", {
+            cls: "btn mini", type: "button", text: "Expected",
+            title: "Mark this program talking to this counterparty as normal here",
+            on: {
+              click: function (e) {
+                e.stopPropagation();
+                request("/api/v1/detection/tuning/suppress", "POST", { id: a.id })
+                  .then(function (res) {
+                    var pair = (res && res.pair) || "this conversation";
+                    toast(res && res.added
+                      ? "Silenced " + pair + " - see Detection tuning"
+                      : pair + " was already expected", "ok");
+                    refresh();
+                  })
+                  .catch(function (err) { toast(err.message, "crit"); });
+              }
+            }
+          }));
 
       var tr = h("tr", {
         cls: "alert-row-interactive" + (isSelected ? " selected" : ""),
@@ -3636,7 +3670,8 @@
         h("td", {}, rowCheckbox),
         h("td", {}, stamp(parseTime(a.timestamp))),
         h("td", {}, h("span", { cls: "st", "data-state": (a.severity || "LOW").toLowerCase() === "critical" ? "crit" : (a.severity === "HIGH" ? "warn" : "idle"), text: a.severity || "LOW" })),
-        h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") })),
+        h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") }),
+          a.technique ? h("span", { cls: "dim-3", text: " " + a.technique }) : null),
         h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
