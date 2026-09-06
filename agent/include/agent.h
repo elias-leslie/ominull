@@ -17,7 +17,7 @@
 
 #include "process_lineage_windows.h"
 
-#define OMINULL_AGENT_VERSION "1.8.3"
+#define OMINULL_AGENT_VERSION "1.8.4"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
