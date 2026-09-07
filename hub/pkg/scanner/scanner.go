@@ -147,7 +147,7 @@ func (s *Scanner) RecordPassiveDHCP(ip, mac, hostname, vendorClass string, param
 		return
 	}
 
-	vendor := LookupVendor(mac)
+	vendor, vendorKnown := LookupVendorDetail(mac)
 	dhcpStr := fmt.Sprintf("dhcp:vendor=%s,host=%s", vendorClass, hostname)
 	ident := identityFromDHCP(dhcpStr)
 
@@ -163,14 +163,17 @@ func (s *Scanner) RecordPassiveDHCP(ip, mac, hostname, vendorClass string, param
 		confidence = ident.Confidence
 		method = ident.Method
 		evidence = ident.Evidence
-	} else if vendor != "Generic / Unassigned Hardware" {
+	} else if vendorKnown {
+		// Only a real manufacturer belongs in an OS guess. A randomised or
+		// withheld address would otherwise read as "Randomised MAC
+		// (locally administered) Device".
 		osGuess = vendor + " Device"
 	}
 
 	asset := DiscoveredAsset{
 		IP:             ip,
 		MAC:            mac,
-		Vendor:         vendor,
+		Vendor:         VendorClaim(mac),
 		Hostname:       hostname,
 		OSGuess:        osGuess,
 		Category:       category,
@@ -699,7 +702,7 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 	return DiscoveredAsset{
 		IP:              ip,
 		MAC:             mac,
-		Vendor:          LookupVendor(mac),
+		Vendor:          VendorClaim(mac),
 		Hostname:        hostname,
 		OSGuess:         osGuess,
 		Category:        category,

@@ -440,6 +440,18 @@ func LookupVendor(mac string) string {
 	return name
 }
 
+// VendorClaim is LookupVendor reduced to what is worth recording about a
+// device. An address matching no assignment tells you nothing, and storing
+// "Generic / Unassigned Hardware" as a manufacturer is worse than storing
+// nothing at all. A randomised or withheld address is kept, because it
+// explains why there is no manufacturer to show.
+func VendorClaim(mac string) string {
+	if v := LookupVendor(mac); v != VendorUnknown {
+		return v
+	}
+	return ""
+}
+
 // LookupVendorDetail returns the vendor string and whether it actually names
 // a manufacturer. Callers that build device identity from the vendor need the
 // second value: a randomised or withheld address yields a true and useful

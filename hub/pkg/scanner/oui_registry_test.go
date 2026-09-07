@@ -1,8 +1,11 @@
 package scanner
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"ominull/hub/pkg/storage"
 )
 
 // The hand-written table knew 94 prefixes. Anything outside them was reported
@@ -181,5 +184,54 @@ func TestRegistryLoadedAtExpectedScale(t *testing.T) {
 	ouiOnce.Do(loadOUIRegistry)
 	if len(ouiBlock) < 50000 {
 		t.Errorf("registry holds %d assignments; expected the full IEEE listing (~53k)", len(ouiBlock))
+	}
+}
+
+func TestVendorClaimDropsOnlyTheUselessAnswer(t *testing.T) {
+	for _, tc := range []struct{ mac, want string }{
+		{"F4:03:2A:11:22:33", "Amazon Technologies Inc."},
+		// Randomised and withheld addresses explain why there is no
+		// manufacturer, so they are worth recording.
+		{"DA:BB:CC:DD:EE:FF", VendorRandomised},
+		{"00:01:01:11:22:33", VendorPrivate},
+		// "Generic / Unassigned Hardware" is not a vendor and storing it as
+		// one is worse than storing nothing.
+		{"99:99:99:11:22:33", ""},
+		{"garbage", ""},
+	} {
+		if got := VendorClaim(tc.mac); got != tc.want {
+			t.Errorf("VendorClaim(%q) = %q; want %q", tc.mac, got, tc.want)
+		}
+	}
+}
+
+// The OS guess is built by appending " Device" to the vendor. Widening what a
+// vendor lookup can return meant an unguarded branch would emit "Randomised
+// MAC (locally administered) Device" as a device's operating system.
+func TestPassiveDHCPDoesNotTurnANonVendorIntoAnOSGuess(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "scan.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer store.Close()
+	s := New(store)
+
+	s.RecordPassiveDHCP("10.0.0.77", "DA:BB:CC:DD:EE:FF", "phone", "", nil)
+	s.RecordPassiveDHCP("10.0.0.78", "F4:03:2A:11:22:33", "echo", "", nil)
+
+	s.mu.RLock()
+	randomised := s.cachedAssets["10.0.0.77"]
+	known := s.cachedAssets["10.0.0.78"]
+	s.mu.RUnlock()
+
+	if strings.Contains(randomised.OSGuess, "Randomised") || strings.Contains(randomised.OSGuess, "locally administered") {
+		t.Errorf("a randomised address became an OS guess: %q", randomised.OSGuess)
+	}
+	if randomised.Vendor != VendorRandomised {
+		t.Errorf("randomised vendor = %q; want %q", randomised.Vendor, VendorRandomised)
+	}
+	// A real manufacturer still drives the guess.
+	if known.OSGuess != "Amazon Technologies Inc. Device" {
+		t.Errorf("known vendor OS guess = %q; want %q", known.OSGuess, "Amazon Technologies Inc. Device")
 	}
 }
