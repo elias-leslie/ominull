@@ -143,6 +143,7 @@ func (s *Server) telemetrySnapshot(tenantID string, endpoint storage.Endpoint, e
 
 	geo := make(map[string]threatintel.GeoRecord)
 	firstSeen := make(map[string]bool)
+	dstIPs := make([]string, 0, len(events))
 	for i := range events {
 		ev := &events[i]
 		if _, ok := geo[ev.DstIP]; !ok {
@@ -153,6 +154,28 @@ func (s *Server) telemetrySnapshot(tenantID string, endpoint storage.Endpoint, e
 		}
 		if _, ok := firstSeen[ev.DstIP]; !ok && ev.DstIP != "" {
 			firstSeen[ev.DstIP] = s.store.IsFirstSeenDestination(tenantID, ev.DstIP)
+		}
+		if ev.DstIP != "" {
+			dstIPs = append(dstIPs, ev.DstIP)
+		}
+	}
+
+	// The agent sends no SNI, so without this every finding quotes an edge
+	// address. The gateway's resolver already answered what name that address
+	// was looked up under; borrowing it here means the detector's existing
+	// naming (SNI, then domain, then owner) starts producing readable titles
+	// with no change to the detector at all. Only an empty field is filled -
+	// anything the agent itself observed is better evidence than our inference.
+	// Looked up once for the batch, because this is the ingest hot path.
+	if names, err := s.store.NamesForIPs(dstIPs); err == nil && len(names) > 0 {
+		for i := range events {
+			ev := &events[i]
+			if strings.TrimSpace(ev.Domain) != "" {
+				continue
+			}
+			if n := names[ev.DstIP]; n != "" {
+				ev.Domain = n
+			}
 		}
 	}
 	return detector.BatchSnapshot{
