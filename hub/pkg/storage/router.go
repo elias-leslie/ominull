@@ -203,7 +203,10 @@ func normaliseProtocol(raw string) (string, bool) {
 // authoritative because the gateway issued it. It lands as a claim from the
 // "router" source so it can be weighed against, and corrected by, a scan or an
 // agent rather than silently overwriting them.
-func (s *Store) RecordRouterLeases(routerID string, leases []RouterLease, now time.Time) (int, int, error) {
+// vendorFor resolves a hardware address to a manufacturer. It is passed in
+// rather than called directly because the OUI registry lives in pkg/scanner,
+// which imports this package. A nil func records leases without a vendor.
+func (s *Store) RecordRouterLeases(routerID string, leases []RouterLease, vendorFor func(mac string) string, now time.Time) (int, int, error) {
 	accepted, rejected := 0, 0
 	if len(leases) > MaxRouterLeasesPerPoll {
 		rejected += len(leases) - MaxRouterLeasesPerPoll
@@ -222,7 +225,15 @@ func (s *Store) RecordRouterLeases(routerID string, leases []RouterLease, now ti
 		if host == "*" || host == "-" {
 			host = ""
 		}
-		if err := s.UpsertAssetFromScan(ip, mac, "", host, "", "", "", 0.9, nil, now); err != nil {
+		// The lease carries the hardware address, so the manufacturer is
+		// already knowable here. Without this an unagented device - which is
+		// every device a lease is the only evidence of - shows a blank vendor
+		// in the inventory while its OUI sits in the same record.
+		vendor := ""
+		if vendorFor != nil {
+			vendor = vendorFor(mac)
+		}
+		if err := s.UpsertAssetFromScan(ip, mac, vendor, host, "", "", "", 0.9, nil, now); err != nil {
 			rejected++
 			continue
 		}

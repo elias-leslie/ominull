@@ -17,7 +17,7 @@ func TestRouterLeasesBecomeAssets(t *testing.T) {
 	accepted, rejected, err := store.RecordRouterLeases("gw", []RouterLease{
 		{MAC: "64:16:66:3b:b5:81", IP: "10.0.0.36", Hostname: "thermostat"},
 		{MAC: "b8:d6:1a:2d:e6:0c", IP: "10.0.0.118", Hostname: "Emporia"},
-	}, now)
+	}, nil, now)
 	if err != nil {
 		t.Fatalf("recording leases: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestRouterGarbageIsRejectedNotStored(t *testing.T) {
 		{MAC: "not-a-mac", IP: "10.0.0.5", Hostname: "liar"},
 		{MAC: "64:16:66:3b:b5:81", IP: "999.999.999.999", Hostname: "also-liar"},
 		{MAC: "aa:bb:cc:dd:ee:ff", IP: "10.0.0.7", Hostname: "honest"},
-	}, now)
+	}, nil, now)
 	if err != nil {
 		t.Fatalf("recording: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRouterUnnamedLeaseGetsNoHostname(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "router.db"))
 	if _, _, err := store.RecordRouterLeases("gw", []RouterLease{
 		{MAC: "aa:bb:cc:dd:ee:01", IP: "10.0.0.9", Hostname: "*"},
-	}, time.Now().UTC()); err != nil {
+	}, nil, time.Now().UTC()); err != nil {
 		t.Fatalf("recording: %v", err)
 	}
 	assets, _ := store.ListAssets("")
@@ -94,7 +94,7 @@ func TestRouterHostnameIsBounded(t *testing.T) {
 	evil := "bad\x00\x1bname" + strings.Repeat("A", 4000)
 	if _, _, err := store.RecordRouterLeases("gw", []RouterLease{
 		{MAC: "aa:bb:cc:dd:ee:02", IP: "10.0.0.10", Hostname: evil},
-	}, time.Now().UTC()); err != nil {
+	}, nil, time.Now().UTC()); err != nil {
 		t.Fatalf("recording: %v", err)
 	}
 	assets, _ := store.ListAssets("")

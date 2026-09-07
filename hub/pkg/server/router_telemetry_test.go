@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 )
 
@@ -184,7 +185,7 @@ func TestRouterTalkersAreRankedAndNamed(t *testing.T) {
 	now := time.Now().UTC()
 	if _, _, err := store.RecordRouterLeases("gw", []storage.RouterLease{
 		{MAC: "64:16:66:3b:b5:81", IP: "10.0.0.36", Hostname: "thermostat"},
-	}, now); err != nil {
+	}, nil, now); err != nil {
 		t.Fatalf("seeding lease: %v", err)
 	}
 	if _, _, err := store.RecordRouterFlows("gw", []storage.RouterFlow{
@@ -307,5 +308,46 @@ func TestRouterTelemetryIngestsResolutions(t *testing.T) {
 	}
 	if store.NameForIP("10.9.9.9") != "firmware.nest.com" {
 		t.Fatalf("the resolution did not reach the store")
+	}
+}
+
+// A lease is often the only evidence an unagented device ever produces, and it
+// carries the hardware address. Recording one without resolving the vendor
+// left the inventory blank for exactly the devices it exists to cover.
+func TestRouterLeaseNamesTheManufacturer(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	body := `{"router_id":"gw","leases":[
+		{"mac":"F4:03:2A:3F:FC:71","ip":"10.0.0.41","hostname":"echo"},
+		{"mac":"64:16:66:3B:B5:81","ip":"10.0.0.36","hostname":"thermostat"},
+		{"mac":"F6:55:AD:29:6C:93","ip":"10.0.0.44","hostname":"phone"}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/router/telemetry", strings.NewReader(body))
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleRouterTelemetry).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest returned %d: %s", w.Code, w.Body.String())
+	}
+
+	assets, err := store.ListAssets("")
+	if err != nil {
+		t.Fatalf("listing assets: %v", err)
+	}
+	got := map[string]string{}
+	for _, a := range assets {
+		got[a.IP] = a.Vendor
+	}
+	for ip, want := range map[string]string{
+		"10.0.0.41": "Amazon Technologies Inc.",
+		"10.0.0.36": "Nest Labs Inc.",
+		// Randomised, so there is no manufacturer - but saying so is the
+		// useful answer, and blank is not.
+		"10.0.0.44": scanner.VendorRandomised,
+	} {
+		if got[ip] != want {
+			t.Errorf("lease %s recorded vendor %q; want %q", ip, got[ip], want)
+		}
 	}
 }

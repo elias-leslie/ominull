@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 )
 
@@ -66,7 +67,7 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 	// the others: a gateway whose conntrack parser has broken should still be
 	// able to tell us who holds which lease.
 	if len(req.Leases) > 0 {
-		a, rj, err := s.store.RecordRouterLeases(routerID, req.Leases, now)
+		a, rj, err := s.store.RecordRouterLeases(routerID, req.Leases, leaseVendor, now)
 		if err != nil {
 			log.Printf("[!] router %s: lease ingest failed: %v", routerID, err)
 		}
@@ -265,4 +266,15 @@ func (s *Server) handleRouterTalkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"talkers": talkers, "hours": hours})
+}
+
+// leaseVendor names the manufacturer behind a lease's hardware address.
+// A randomised or withheld address is reported as such rather than left
+// blank - it tells an operator why there is no manufacturer to show - but an
+// address matching no assignment at all says nothing worth recording.
+func leaseVendor(mac string) string {
+	if v := scanner.LookupVendor(mac); v != scanner.VendorUnknown {
+		return v
+	}
+	return ""
 }
