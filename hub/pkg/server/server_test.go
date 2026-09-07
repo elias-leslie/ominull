@@ -546,7 +546,11 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 		t.Errorf("Expected 400 without endpoint_id, got %d", w.Code)
 	}
 
-	// 3. An endpoint below the bundled version is offered the .deb package.
+	// 3. An explicitly queued endpoint is offered the .deb package.
+	// Bundle availability alone no longer authorizes installation.
+	if err := store.RequestAgentUpdate("linux-web-01", "1.1.0"); err != nil {
+		t.Fatal(err)
+	}
 	req = httptest.NewRequest("GET", "/api/v1/agent/config?endpoint_id=linux-web-01", nil)
 	req.Header.Set("X-API-Key", "mock_admin_token")
 	w = httptest.NewRecorder()

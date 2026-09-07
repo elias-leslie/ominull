@@ -1,6 +1,8 @@
 """Verify release requests pass credentials through a fresh descriptor per call."""
 from pathlib import Path
 import re
+import json
+import shlex
 import subprocess
 import unittest
 
@@ -26,6 +28,25 @@ curl() {
         result = subprocess.run(['bash', '-c', script], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['ok', 'ok', 'ok'])
+
+    def test_convergence_requires_observed_requested_endpoints(self):
+        source = Path(__file__).with_name('release.sh').read_text()
+        wait_match = re.search(r'^wait_for\(\) \{.*?^\}', source, re.M | re.S)
+        assert wait_match is not None
+        wait = wait_match.group()
+        target_match = re.search(r'^target_json\(\) \{.*?^\}', source, re.M | re.S)
+        assert target_match is not None
+        target = target_match.group()
+        for response in [
+            {"latest_version": "1.2.0", "outdated": [], "endpoints": []},
+            {"latest_version": "1.2.0", "outdated": [], "endpoints": [{"endpoint_id": "other"}]},
+            {"latest_version": "1.1.0", "outdated": [], "endpoints": [{"endpoint_id": "canary"}]},
+        ]:
+            script = "VERSION=1.2.0\napi() { printf '%s' " + shlex.quote(json.dumps(response)) + "; }\nsleep() { :; }\n"
+            script += target + "\n" + wait + "\nwait_for canary\n"
+            result = subprocess.run(['bash', '-c', script], text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn('converged on', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

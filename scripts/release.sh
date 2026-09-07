@@ -170,6 +170,14 @@ wait_for() {
             sleep 5
             continue
         fi
+        if ! printf '%s' "${status}" | jq -e --arg version "${VERSION}" --argjson ids "${ids_json}" '
+            .latest_version == $version and
+            (.endpoints | type == "array" and length > 0) and
+            ([.endpoints[].endpoint_id] as $observed | all($ids[]; . as $id | $observed | index($id) != null))
+        ' >/dev/null; then
+            echo "[-] Update status lacks the requested version or endpoint observations; convergence is unverified." >&2
+            return 1
+        fi
         if [ -n "${ids}" ]; then
             remaining="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
                 '[.outdated[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"

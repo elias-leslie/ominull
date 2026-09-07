@@ -1159,9 +1159,9 @@ func compareVersions(a, b string) int {
 }
 
 // desiredAgentVersion resolves the fleet-wide target agent version: the operator-set
-// value if present, otherwise the version bundled with this hub build.
+// value if newer, otherwise the version bundled with this hub build.
 func (s *Server) desiredAgentVersion() string {
-	if v, _ := s.store.GetSetting("desired_agent_version"); strings.TrimSpace(v) != "" {
+	if v, _ := s.store.GetSetting("desired_agent_version"); compareVersions(strings.TrimSpace(v), s.agentVersion) > 0 {
 		return strings.TrimSpace(v)
 	}
 	return s.agentVersion
@@ -1421,17 +1421,17 @@ func updatePackageFor(capability string) (string, bool) {
 // just reported. It also retires any queued job the endpoint has already satisfied, so
 // the agent reporting its new version is what closes the loop on an update.
 func (s *Server) pendingAgentUpdate(endpointID, reportedVersion string) (string, bool) {
-	target := s.desiredAgentVersion()
-	job, _ := s.store.GetAgentUpdateJob(endpointID)
-	if job != nil && job.CompletedAt == nil {
-		if compareVersions(job.DesiredVersion, target) > 0 {
-			target = job.DesiredVersion
-		}
-		if compareVersions(reportedVersion, job.DesiredVersion) >= 0 {
-			s.store.CompleteAgentUpdate(endpointID)
-		}
+	// Availability is not authorization. Only an explicitly queued job may
+	// trigger an installation; publishing a hub bundle must not bypass canaries.
+	job, err := s.store.GetAgentUpdateJob(endpointID)
+	if err != nil || job == nil || job.CompletedAt != nil {
+		return s.desiredAgentVersion(), false
 	}
-	return target, compareVersions(reportedVersion, target) < 0
+	if compareVersions(reportedVersion, job.DesiredVersion) >= 0 {
+		s.store.CompleteAgentUpdate(endpointID)
+		return job.DesiredVersion, false
+	}
+	return job.DesiredVersion, true
 }
 
 // handleAgentConfig is the agent-facing configuration poll. Agents call it with their
@@ -1523,9 +1523,11 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"refusing to downgrade: hub bundle ships agent `+s.agentVersion+`"}`, http.StatusBadRequest)
 		return
 	}
-	if err := s.store.SetSetting("desired_agent_version", version); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if req.All {
+		if err := s.store.SetSetting("desired_agent_version", version); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	endpoints, err := s.store.ListEndpoints("")
@@ -1590,6 +1592,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var outdated, retired []map[string]string
+	observed := make([]map[string]string, 0, len(endpoints))
 	var provenanceIssues []map[string]string
 	for _, ep := range endpoints {
 		if ep.Status == "retired" {
@@ -1601,6 +1604,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 			})
 			continue
 		}
+		observed = append(observed, map[string]string{"endpoint_id": ep.ID, "driver_version": ep.DriverVersion, "status": ep.Status})
 		if compareVersions(ep.DriverVersion, latest) < 0 {
 			outdated = append(outdated, map[string]string{
 				"endpoint_id":    ep.ID,
@@ -1629,6 +1633,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"latest_version":    latest,
+		"endpoints":         observed,
 		"outdated":          outdated,
 		"retired":           retired,
 		"provenance_issues": provenanceIssues,
