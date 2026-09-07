@@ -175,10 +175,27 @@ json_escape() {
 # than guessed at.
 : > "$WORK/dns.json"
 if [ "$DNS_LOG" = "1" ]; then
+	# The ring buffer holds far more than one poll interval, so re-reading it
+	# every five minutes would report the same query over and over: two polls
+	# two seconds apart both claimed forty-five queries. The last line already
+	# sent is remembered, and only what follows it is new. If that line is no
+	# longer in the buffer the buffer rolled, and everything present is new.
+	DNS_STATE=/tmp/ominull-router-dns.last
+	all=$(logread -e dnsmasq 2>/dev/null | grep -F 'query[')
+	if [ -n "$all" ] && [ -r "$DNS_STATE" ]; then
+		last=$(cat "$DNS_STATE" 2>/dev/null)
+		if printf '%s\n' "$all" | grep -qxF "$last"; then
+			all=$(printf '%s\n' "$all" | awk -v l="$last" 'seen{print} $0==l{seen=1}')
+		fi
+	fi
+	[ -n "$all" ] && printf '%s\n' "$all" | tail -1 > "$DNS_STATE"
+	all=$(printf '%s\n' "$all" | tail -5000)
+
 	{
 		printf '['
 		first=1
-		logread -e dnsmasq 2>/dev/null | grep -F 'query[' | tail -5000 | while read -r line; do
+		printf '%s\n' "$all" | while read -r line; do
+			[ -n "$line" ] || continue
 			qtype=$(expr "$line" : '.*query\[\([A-Z0-9]*\)\]')
 			name=$(expr "$line" : '.*query\[[A-Z0-9]*\] \([^ ]*\) from')
 			client=$(expr "$line" : '.*from \([0-9.]*\)')
