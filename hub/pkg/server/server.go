@@ -95,14 +95,15 @@ type Server struct {
 }
 
 type TelemetryBatchMessage struct {
-	Type       string `json:"type"` // "telemetry"
-	EndpointID string `json:"endpoint_id"`
-	TenantID   string `json:"tenant_id"`
-	LocationID string `json:"location_id"`
-	Role       string `json:"role"`
-	Hostname   string `json:"hostname"`
-	OS         string `json:"os"`
-	IP         string `json:"ip"`
+	CollectorHealth storage.CollectorHealthList `json:"collector_health"`
+	Type            string                      `json:"type"` // "telemetry"
+	EndpointID      string                      `json:"endpoint_id"`
+	TenantID        string                      `json:"tenant_id"`
+	LocationID      string                      `json:"location_id"`
+	Role            string                      `json:"role"`
+	Hostname        string                      `json:"hostname"`
+	OS              string                      `json:"os"`
+	IP              string                      `json:"ip"`
 	// MAC is the endpoint's primary hardware address. Asset identity keys on
 	// it, so an agented host that changes DHCP lease stays one record instead
 	// of forking a second one. The retained Linux and Windows agents send
@@ -1604,7 +1605,11 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 			})
 			continue
 		}
-		observed = append(observed, map[string]string{"endpoint_id": ep.ID, "driver_version": ep.DriverVersion, "status": ep.Status})
+		status := "offline"
+		if time.Since(ep.LastSeenAt) < 30*time.Second {
+			status = "online"
+		}
+		observed = append(observed, map[string]string{"endpoint_id": ep.ID, "driver_version": ep.DriverVersion, "status": status})
 		if compareVersions(ep.DriverVersion, latest) < 0 {
 			outdated = append(outdated, map[string]string{
 				"endpoint_id":    ep.ID,
@@ -2358,7 +2363,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("[-] telemetry ingestion failed for %s: %v", batch.EndpointID, err)
 				status := http.StatusInternalServerError
-				if errors.Is(err, errInvalidTelemetryAddress) {
+				if errors.Is(err, errInvalidTelemetryAddress) || errors.Is(err, errInvalidTelemetryObservation) {
 					status = http.StatusBadRequest
 				}
 				if errors.Is(err, errRetiredEndpoint) {
@@ -2378,7 +2383,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err := s.ingestLegacyEvents(tenantID, rawEvents); err != nil {
 				log.Printf("[-] legacy telemetry ingestion failed: %v", err)
 				status := http.StatusInternalServerError
-				if errors.Is(err, errInvalidTelemetryAddress) {
+				if errors.Is(err, errInvalidTelemetryAddress) || errors.Is(err, errInvalidTelemetryObservation) {
 					status = http.StatusBadRequest
 				}
 				writeJSONError(w, status, "telemetry was not accepted: "+err.Error())
@@ -3343,6 +3348,15 @@ func (s *Server) routes() *http.ServeMux {
 	// looking at an alert has to be able to see the rule that produced it - and
 	// the handler itself refuses a write from anyone but an administrator.
 	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
+	mux.HandleFunc("/api/v1/detection/coverage", s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.detector.ObservationCoverage())
+	}))
 	mux.HandleFunc("/api/v1/detection/tuning/suppress", s.authMiddleware(s.handleSuppressPair))
 	mux.HandleFunc("/api/v1/learning/windows", s.authMiddleware(s.handleLearningWindows))
 	mux.HandleFunc("/api/v1/learning/windows/close", s.authMiddleware(s.handleCloseLearningWindow))

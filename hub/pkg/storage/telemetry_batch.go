@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -60,15 +61,10 @@ func communicationValues(ev Event, hostname, locationID string) []interface{} {
 	cleanPath := strings.ReplaceAll(ev.ProcessPath, "\\", "/")
 	procName := filepath.Base(cleanPath)
 	if procName == "." || procName == "/" || procName == "\\" || procName == "" {
-		procName = "kernel/system"
+		procName = "unknown"
 	}
 
-	proto := "TCP"
-	if ev.Protocol == 17 {
-		proto = "UDP"
-	} else if ev.Protocol == 1 {
-		proto = "ICMP"
-	}
+	proto := ProtocolName(int(ev.Protocol))
 	direction := ev.Direction
 	if direction == "" {
 		direction = "OUTBOUND"
@@ -80,7 +76,8 @@ func communicationValues(ev Event, hostname, locationID string) []interface{} {
 	if locationID == "" {
 		locationID = "loc-home"
 	}
-	profileID := fmt.Sprintf("%s:%s:%s:%d:%s", ev.EndpointID, procName, ev.DstIP, ev.DstPort, direction)
+	profileKey := fmt.Sprintf("%q|%q|%q|%d|%q|%d", ev.EndpointID, cleanPath, ev.DstIP, ev.DstPort, direction, ev.Protocol)
+	profileID := fmt.Sprintf("v2:%x", sha256.Sum256([]byte(profileKey)))
 	return []interface{}{
 		profileID, ev.TenantID, locationID, ev.EndpointID, hostname,
 		procName, ev.ProcessPath, ev.DstIP, ev.DstPort, proto, direction, country,
@@ -181,8 +178,8 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 	defer tx.Rollback()
 
 	eventStmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare telemetry events: %w", err)
@@ -220,7 +217,7 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, country,
 			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
+			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
 		); err != nil {
 			return fmt.Errorf("insert telemetry event: %w", err)
 		}

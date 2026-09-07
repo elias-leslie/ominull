@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
@@ -73,5 +74,33 @@ func TestUpdateStatusUsesPublishedBundleAfterPreviousRollout(t *testing.T) {
 	}
 	if body.Latest != "1.2.0" || len(body.Outdated) != 1 {
 		t.Fatalf("previous fleet setting hid an outdated canary: %s", w.Body.String())
+	}
+}
+
+func TestUpdateStatusDoesNotCallStaleEndpointOnline(t *testing.T) {
+	s, db := setupTestServer(t)
+	defer db.Close()
+	seedEndpointWithCapability(t, db, "stale-agent", "Linux", "1.1.0", "deb")
+	ep, err := db.GetEndpoint("stale-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep.LastSeenAt = time.Now().Add(-time.Hour)
+	ep.Status = "online"
+	if err := db.UpsertEndpoint(*ep); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/api/v1/agents/update-status", nil)
+	r.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	var body struct {
+		Endpoints []map[string]string `json:"endpoints"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Endpoints) != 1 || body.Endpoints[0]["status"] != "offline" {
+		t.Fatalf("stale endpoint called online: %s", w.Body.String())
 	}
 }

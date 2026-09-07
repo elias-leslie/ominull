@@ -102,8 +102,8 @@ type Engine struct {
 	learnMu        sync.Mutex
 	learnBuf       map[learnKey]*learnCount        // learning observations not yet written
 	portHistory    map[string][]portAccess         // endpointID -> accesses
-	bwTracker      map[string]*bandwidthStats      // endpoint:process -> bandwidth stats
-	beaconTracker  map[string]*beaconWindow        // endpoint:dstIP:process -> beacon window
+	bwTracker      *windowCache[*bandwidthStats]   // bounded endpoint/process histories
+	beaconTracker  *windowCache[*beaconWindow]     // bounded endpoint/peer/process histories
 	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
 	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
 	unattributed   map[string]*unattributedRun     // endpointID -> destinations we could not name
@@ -171,8 +171,8 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 		eventsChan:     eventsChan,
 		onAutoIsolate:  onAutoIsolate,
 		portHistory:    make(map[string][]portAccess),
-		bwTracker:      make(map[string]*bandwidthStats),
-		beaconTracker:  make(map[string]*beaconWindow),
+		bwTracker:      newWindowCache[*bandwidthStats](8192),
+		beaconTracker:  newWindowCache[*beaconWindow](8192),
 		lateralTargets: make(map[string]map[string]time.Time),
 		alertCooldown:  make(map[string]time.Time),
 		unattributed:   make(map[string]*unattributedRun),
@@ -269,6 +269,11 @@ func withFlowContext(evidence string, ev storage.Event, geo threatintel.GeoRecor
 		if strings.TrimSpace(value) != "" {
 			fields[key] = value
 		}
+	}
+	fields["protocol"] = ev.Protocol
+	fields["protocol_name"] = storage.ProtocolName(int(ev.Protocol))
+	if ev.Observation.Source != "" {
+		fields["observation"] = ev.Observation
 	}
 	set("command_line", ev.CommandLine)
 	set("user_identity", ev.UserIdentity)
@@ -509,15 +514,25 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	//
 	// Bytes leaving for a host inside the estate are a different question from
 	// bytes leaving the estate, and this detector is about the second one.
-	if ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys {
-		bwKey := fmt.Sprintf("%s:%s", ev.EndpointID, procName)
-		e.mu.Lock()
-		stats, exists := e.bwTracker[bwKey]
-		if !exists {
-			stats = &bandwidthStats{}
-			e.bwTracker[bwKey] = stats
+	bwValue := float64(ev.BytesOut)
+	measuredRate := ev.Observation.Source != ""
+	rateEligible := true
+	if measuredRate {
+		rateEligible = ev.Observation.FirstAt != nil && ev.Observation.LastAt != nil && ev.Observation.Lost == 0 && !ev.Observation.Incomplete &&
+			(ev.Observation.ByteBasis == "udp_payload" || ev.Observation.ByteBasis == "tcp_socket_counter")
+		if rateEligible {
+			// Compare bytes per second, never differently sized batches.
+			// A one-second floor avoids extrapolating a microsecond packet
+			// burst into a sustained transfer rate the collector did not see.
+			seconds := math.Max(1, ev.Observation.LastAt.Sub(*ev.Observation.FirstAt).Seconds())
+			bwValue /= seconds
 		}
-		median, mad, zScore, samples := stats.observe(float64(ev.BytesOut))
+	}
+	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys {
+		bwKey := fmt.Sprintf("%q:%q:%d:%q", ev.EndpointID, cleanPath, ev.Protocol, ev.Observation.ByteBasis)
+		e.mu.Lock()
+		stats := e.bwTracker.get(bwKey, func() *bandwidthStats { return &bandwidthStats{} })
+		median, mad, zScore, samples := stats.observe(bwValue)
 		e.mu.Unlock()
 
 		baselined := samples >= int64(cfg.BandwidthMinSamples)
@@ -528,11 +543,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// and nothing about that is exfiltration. An operator who has vouched
 		// for a network has already answered this question, and a megabyte is
 		// the smallest transfer worth waking someone for.
-		outlier := baselined && zScore > 3.5 && ev.BytesOut > 1024*1024 && !isVouched
+		outlier := baselined && zScore > 3.5 && bwValue > 1024*1024 && !isVouched
 		// A burst large enough to matter on its own account, reported even
 		// without a baseline - but as the weaker finding it is, because with no
 		// baseline there is nothing to say it is unusual for this process.
-		burst := ev.BytesOut > 10*1024*1024
+		burst := bwValue > 10*1024*1024
 		if outlier || burst {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
 			// The severity follows the evidence rather than the detector's
@@ -554,6 +569,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    bwSeverity,
 					Mitigated:   false,
 				}
+				sampleUnit := "bytes per record"
+				if measuredRate {
+					sampleUnit = "bytes per second"
+					alert.Title = fmt.Sprintf("Outbound rate spike (%s/s)", humanBytes(int64(bwValue)))
+					alert.Description = fmt.Sprintf("Process %s sent %s to %s:%d over the recorded interval, averaging %s/s with a one-second minimum denominator. Baseline: %.0f bytes/s median, %.0f median absolute deviation, %d samples, modified Z %.2f.", procName, humanBytes(ev.BytesOut), ev.DstIP, ev.DstPort, humanBytes(int64(bwValue)), median, mad, samples, zScore)
+				}
 				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
@@ -564,7 +585,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Severity:    bwSeverity,
 					Title:       alert.Title,
 					Description: alert.Description,
-					Details:     fmt.Sprintf("Measured: %d bytes | Samples: %d | Usual transfer: %.0f bytes | Median absolute deviation: %.0f | Modified Z: %.2f | %s", ev.BytesOut, samples, median, mad, zScore, describeOwner(geo)),
+					Details:     fmt.Sprintf("Measured total: %d bytes | Sample: %.0f %s | Samples: %d | Baseline median: %.0f %s | Median absolute deviation: %.0f | Modified Z: %.2f | %s", ev.BytesOut, bwValue, sampleUnit, samples, median, sampleUnit, mad, zScore, describeOwner(geo)),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
@@ -639,15 +660,27 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// nothing about the browser talking to it. Browser-borne exfiltration shows
 	// up in the volume and storage rules above, which still apply in full.
 	browserToKnownNetwork := cfg.IsQuietClient(procName) && geo.Resolved()
-	if cfg.BeaconOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isVouched && !browserToKnownNetwork {
-		beaconKey := fmt.Sprintf("%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
+	// A collection cadence is not a packet cadence. Keep legacy behavior for
+	// older agents, but require one intact socket-I/O observation from new ones.
+	cadenceUsable := ev.Observation.Source == "" ||
+		(ev.Observation.Timing == "socket_io" && ev.Observation.Count == 1 && ev.Observation.Lost == 0 && !ev.Observation.Incomplete &&
+			ev.Observation.FirstAt != nil && ev.Observation.LastAt != nil && ev.Observation.FirstAt.Equal(*ev.Observation.LastAt))
+	beaconKey := fmt.Sprintf("%q:%q:%d:%q:%d", ev.EndpointID, ev.DstIP, ev.DstPort, cleanPath, ev.Protocol)
+	if !cadenceUsable {
 		e.mu.Lock()
-		bWin, exists := e.beaconTracker[beaconKey]
-		if !exists {
-			bWin = &beaconWindow{}
-			e.beaconTracker[beaconKey] = bWin
+		e.beaconTracker.remove(beaconKey)
+		if ev.Observation.Lost > 0 || ev.Observation.Incomplete {
+			// Collector loss can concern any peer from this endpoint/transport.
+			prefix, suffix := fmt.Sprintf("%q:", ev.EndpointID), fmt.Sprintf(":%d", ev.Protocol)
+			e.beaconTracker.removeMatching(func(key string) bool { return strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) })
 		}
+		e.mu.Unlock()
+	}
+
+	if cfg.BeaconOn && cadenceUsable && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
+		!isTrustedSys && !isVouched && !browserToKnownNetwork {
+		e.mu.Lock()
+		bWin := e.beaconTracker.get(beaconKey, func() *beaconWindow { return &beaconWindow{} })
 		bev, isBeacon := bWin.record(now, ev.BytesOut, ev.BytesIn+ev.BytesOut, cfg)
 		e.mu.Unlock()
 
@@ -1302,4 +1335,20 @@ func bandwidthDescription(baselined bool, procName string, bytesOut int64, dstIP
 	}
 	return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Only %d transfers have been observed for it, which is too few to say whether that is unusual for this process.",
 		procName, bytesOut, dstIP, dstPort, samples)
+}
+
+// InvalidateCollectorWindows handles health-only heartbeats too: an empty
+// event batch does not make a known observation gap disappear.
+func (e *Engine) InvalidateCollectorWindows(endpointID string) {
+	prefix := fmt.Sprintf("%q:", endpointID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	match := func(key string) bool { return strings.HasPrefix(key, prefix) }
+	e.beaconTracker.removeMatching(match)
+	e.bwTracker.removeMatching(match)
+}
+func (e *Engine) ObservationCoverage() map[string]any {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return map[string]any{"window_capacity": 8192, "bandwidth_windows": len(e.bwTracker.entries), "beacon_windows": len(e.beaconTracker.entries), "bandwidth_evictions": e.bwTracker.evictions, "beacon_evictions": e.beaconTracker.evictions}
 }

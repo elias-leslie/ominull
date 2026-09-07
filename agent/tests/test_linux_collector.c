@@ -257,11 +257,32 @@ static void test_package_query(void) {
           "uninstalled package query was accepted");
 }
 
+static void test_busy_flows_rotate(void) {
+    FLOW_CANDIDATE candidates[8] = {0};
+    PROC_SOCKET_OWNER owners[8] = {0};
+    size_t order[2];
+    bool seen[8] = {0};
+    for (size_t i = 0; i < 8; i++) {
+        snprintf(candidates[i].dst_ip, 64, "10.0.4.%u", (unsigned)(i + 20));
+        candidates[i].dst_port = 9000;
+        candidates[i].bytes_out = 5;
+        owners[i].pid = 9000 + (unsigned)i;
+    }
+    for (int round = 0; round < 4; round++) {
+        size_t n = SelectFlowCandidates(candidates, owners, 8, 2, order);
+        for (size_t i = 0; i < n; i++)
+            seen[order[i]] = true;
+    }
+    for (size_t i = 0; i < 8; i++)
+        check(seen[i], "busy flow starved behind fixed table order");
+}
+
 int main(void) {
     test_legacy_config();
     test_package_query();
     test_socket_state_filter();
     test_active_flows_win_the_batch();
+    test_busy_flows_rotate();
     test_own_hub_flow_is_not_reported();
     make_fixture();
 
@@ -289,10 +310,16 @@ int main(void) {
         check(strcmp(events[i].dst_ip, "10.0.0.4") != 0,
               "a finished socket was reported as an active flow");
     }
-    check(strcmp(events[1 + FIXTURE_SOCKETS / 2].src_ip, "::2") == 0,
-          "IPv6 local address was not decoded from tcp6");
-    check(strcmp(events[1 + FIXTURE_SOCKETS / 2].dst_ip, "2001:db8::1") == 0,
-          "IPv6 remote address was not decoded from tcp6");
+    size_t ipv6 = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (strchr(events[i].dst_ip, ':')) {
+            ipv6++;
+            check(strcmp(events[i].src_ip, "::2") == 0, "IPv6 local address was not decoded from tcp6");
+            check(strcmp(events[i].dst_ip, "2001:db8::1") == 0,
+                  "IPv6 remote address was not decoded from tcp6");
+        }
+    }
+    check(ipv6 == FIXTURE_SOCKETS / 2, "collector lost IPv6 rows");
 
     unsigned long one_index_walk = (unsigned long)FIXTURE_PROCESSES * FIXTURE_FDS;
     unsigned long allowed = one_index_walk + (unsigned long)FIXTURE_SOCKETS * 4UL;

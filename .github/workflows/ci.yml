@@ -47,20 +47,27 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install Linux BPF build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang libbpf-dev libelf-dev linux-tools-common linux-tools-generic mingw-w64 libcurl4-openssl-dev
+          bash scripts/build-bpf.sh
+
       - name: Compile and Run Linux Feedback Loops
         run: |
           mkdir -p build
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
-            -o build/test_baseline agent/tests/test_baseline.c -lcurl
+            -o build/test_baseline agent/tests/test_baseline.c -lbpf -lcurl
           build/test_baseline
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
-            -o build/test_linux_collector agent/tests/test_linux_collector.c -lcurl
+            -o build/test_linux_collector agent/tests/test_linux_collector.c -lbpf -lcurl
           build/test_linux_collector
+          bash scripts/test-native-telemetry.sh
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
             -o build/test_der_sig agent/tests/test_der_sig.c
           build/test_der_sig
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
-            -o build/ominulld agent/linux/main.c -lcurl
+            -o build/ominulld agent/linux/main.c -lbpf -lcurl
 
       - name: Install mingw-w64 Cross Toolchain
         run: |

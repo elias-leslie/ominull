@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <iphlpapi.h>
+#include <stdarg.h>
 #include "../include/agent.h"
 
 /* WinHTTP keeps a connection alive when its response body is drained. The old
@@ -360,6 +361,135 @@ static int AppendObservations(const AGENT_CONFIG* config, char* buf, size_t cap)
     return off;
 }
 
+static bool TelemetryAppend(char *json, size_t capacity, size_t *offset, const char *format, ...) {
+    if (*offset >= capacity)
+        return false;
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(json + *offset, capacity - *offset, format, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= capacity - *offset)
+        return false;
+    *offset += (size_t)n;
+    return true;
+}
+static bool TelemetryTime(UINT64 ticks, char *out, size_t capacity) {
+    if (!ticks)
+        return false;
+    FILETIME ft = {(DWORD)ticks, (DWORD)(ticks >> 32)};
+    SYSTEMTIME st;
+    if (!FileTimeToSystemTime(&ft, &st))
+        return false;
+    int n = snprintf(out, capacity, "%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ", st.wYear, st.wMonth, st.wDay,
+                     st.wHour, st.wMinute, st.wSecond, ticks % 10000000);
+    return n > 0 && (size_t)n < capacity;
+}
+char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *events, size_t count) {
+    if (!config || count > 64 || (count && !events))
+        return NULL;
+    size_t capacity = 16384 + 16384 * count, offset = 0;
+    char *json = malloc(capacity);
+    if (!json)
+        return NULL;
+#define APPEND(...)                                                                                          \
+    do {                                                                                                     \
+        if (!TelemetryAppend(json, capacity, &offset, __VA_ARGS__))                                          \
+            goto failed;                                                                                     \
+    } while (0)
+#define FIELD(name, value)                                                                                   \
+    do {                                                                                                     \
+        char escaped[6145];                                                                                  \
+        ProcessLineageWin_EscapeJSON(value, escaped, sizeof(escaped));                                       \
+        APPEND(",\"%s\":\"%s\"", name, escaped);                                                             \
+    } while (0)
+    APPEND("{\"type\":\"telemetry\",\"tenant_id\":\"default\"");
+    FIELD("endpoint_id", config->endpoint_id);
+    if (config->evidence_signing_key[0])
+        FIELD("evidence_signing_key", config->evidence_signing_key);
+    FIELD("location_id", config->location_id[0] ? config->location_id : "loc-home");
+    FIELD("role", config->role_tag[0] ? config->role_tag : "workstation");
+    FIELD("hostname", config->hostname);
+    FIELD("os", config->os_version);
+    FIELD("ip", config->primary_ip);
+    FIELD("mac", config->primary_mac);
+    FIELD("driver_version", OMINULL_AGENT_VERSION);
+    FIELD("update_capability", "msi");
+    FIELD("install_type", config->install_type);
+    FIELD("package_identifier", config->package_identifier);
+    FIELD("registered_package_version", config->registered_package_version);
+    FIELD("provenance_status", config->provenance_status);
+    APPEND(",\"events\":[");
+    for (size_t i = 0; i < count; i++) {
+        const OMINULL_EVENT *e = &events[i];
+        char local[64], remote[64];
+        if (e->IpVersion == 4) {
+            IPToString(e->Addr.Ipv4.LocalIp, local, sizeof(local));
+            IPToString(e->Addr.Ipv4.RemoteIp, remote, sizeof(remote));
+        } else if (e->IpVersion == 6) {
+            if (!InetNtopA(AF_INET6, (void *)e->Addr.Ipv6.LocalIp, local, sizeof(local)) ||
+                !InetNtopA(AF_INET6, (void *)e->Addr.Ipv6.RemoteIp, remote, sizeof(remote)))
+                goto failed;
+        } else
+            goto failed;
+        char path[OMINULL_MAX_PATH * 4] = {0};
+        if (e->ProcessPath[0] && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, e->ProcessPath, -1, path,
+                                                      sizeof(path), NULL, NULL))
+            goto failed;
+        APPEND("%s{\"protocol\":%u,\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%llu,\"bytes_out\":%llu,"
+               "\"process_id\":%llu",
+               i ? "," : "", e->Protocol, e->LocalPort, e->RemotePort, e->BytesIn, e->BytesOut, e->ProcessId);
+        FIELD("layer", e->Protocol == 17 ? "windows-etw-udp-v1" : EventTypeToString(e->EventType));
+        FIELD("action", e->Action == 1 ? "BLOCK" : "PERMIT");
+        FIELD("direction", e->Direction == 1 ? "OUTBOUND" : "INBOUND");
+        FIELD("src_ip", local);
+        FIELD("dst_ip", remote);
+        FIELD("process_path", path);
+        FIELD("process_instance_id", e->Enrichment.process_instance_id);
+        APPEND(",\"parent_pid\":%lu", e->Enrichment.ppid);
+        FIELD("parent_process_instance_id", e->Enrichment.parent_process_instance_id);
+        FIELD("command_line", e->Enrichment.command_line);
+        FIELD("user_identity", e->Enrichment.user_identity);
+        FIELD("executable_sha256", e->Enrichment.executable_sha256);
+        FIELD("attribution_status",
+              e->Enrichment.attribution_status[0] ? e->Enrichment.attribution_status : "unknown");
+        if (e->Enrichment.observed_at > 0) {
+            char observed[64];
+            UINT64 ticks = ((UINT64)e->Enrichment.observed_at + 11644473600ULL) * 10000000ULL;
+            if (!TelemetryTime(ticks, observed, sizeof(observed)))
+                goto failed;
+            FIELD("observed_at", observed);
+        }
+        if (e->ObservationCount) {
+            char first[64], last[64];
+            if (!TelemetryTime(e->FirstObservedAt, first, sizeof(first)) ||
+                !TelemetryTime(e->LastObservedAt, last, sizeof(last)))
+                goto failed;
+            FIELD("timestamp", last);
+            APPEND(",\"observation\":{\"source\":\"%s\",\"timing\":\"%s\",\"byte_basis\":\"%s\",\"count\":%"
+                   "llu,\"first_at\":\"%s\",\"last_at\":\"%s\"}",
+                   e->Protocol == 17 ? "windows-etw-udp" : "windows-estats",
+                   e->Protocol == 17 ? "socket_io" : "counter_sample",
+                   e->Protocol == 17 ? "udp_payload" : (e->BytesMeasured ? "tcp_socket_counter" : "unknown"),
+                   e->ObservationCount, first, last);
+        }
+        APPEND("}");
+    }
+    APPEND("]");
+    char health[1024];
+    if (Agent_CollectorHealthJSON(health, sizeof(health)))
+        APPEND(",\"collector_health\":[%s]", health);
+    char observations[4096];
+    if (AppendObservations(config, observations, sizeof(observations)) > 0)
+        APPEND("%s", observations);
+    APPEND("}");
+#undef FIELD
+#undef APPEND
+    return json;
+failed:
+    free(json);
+    return NULL;
+}
+
 bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
                             char* respOut, size_t respCap) {
     if (!config) {
@@ -383,139 +513,8 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     Hub_SplitURL(config->hub_url, hostStr, sizeof(hostStr), &port, &isHttps);
     MultiByteToWideChar(CP_UTF8, 0, hostStr, -1, wHost, 128);
 
-    // Build JSON Payload (64KB dynamic buffer)
-    size_t jsonCapacity = 65536;
-    char* jsonBuf = (char*)malloc(jsonCapacity);
+    char *jsonBuf = Hub_BuildTelemetryJSON(config, events, count);
     if (!jsonBuf) return false;
-
-    const char* role = config->role_tag[0] ? config->role_tag : "workstation";
-    const char* loc = config->location_id[0] ? config->location_id : "loc-home";
-
-    /* os, ip and mac are observed at startup rather than hardcoded. The hub
-     * records the agent's claims at confidence 1.0, so a literal string here
-     * would enter the asset model as ground truth and outrank a real scan. */
-    int offset = 0;
-    if (config->evidence_signing_key[0]) {
-        offset = snprintf(jsonBuf, jsonCapacity,
-            "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"evidence_signing_key\":\"%s\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
-            config->endpoint_id, config->evidence_signing_key, loc, role, config->hostname,
-            config->os_version, config->primary_ip, config->primary_mac,
-            OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
-            config->registered_package_version, config->provenance_status
-        );
-    } else {
-        offset = snprintf(jsonBuf, jsonCapacity,
-            "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"msi\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"events\":[",
-            config->endpoint_id, loc, role, config->hostname,
-            config->os_version, config->primary_ip, config->primary_mac,
-            OMINULL_AGENT_VERSION, config->install_type, config->package_identifier,
-            config->registered_package_version, config->provenance_status
-        );
-    }
-
-    for (size_t i = 0; events && i < count; i++) {
-        const OMINULL_EVENT* e = &events[i];
-        char srcIp[32] = {0}, dstIp[32] = {0};
-        if (e->IpVersion == 4) {
-            IPToString(e->Addr.Ipv4.LocalIp, srcIp, sizeof(srcIp));
-            IPToString(e->Addr.Ipv4.RemoteIp, dstIp, sizeof(dstIp));
-        } else {
-            strcpy(srcIp, "::1");
-            strcpy(dstIp, "::1");
-        }
-
-        char procPathEscaped[512] = {0};
-        int wLen = WideCharToMultiByte(CP_UTF8, 0, e->ProcessPath, -1, procPathEscaped, sizeof(procPathEscaped) - 1, NULL, NULL);
-        if (wLen <= 0) strcpy(procPathEscaped, "System");
-
-        char procJson[1024] = {0};
-        char* outP = procJson;
-        for (char* inP = procPathEscaped; *inP && (outP - procJson < (int)sizeof(procJson) - 2); inP++) {
-            if (*inP == '\\') {
-                *outP++ = '\\';
-                *outP++ = '\\';
-            } else {
-                *outP++ = *inP;
-            }
-        }
-
-        const char* comma = (i == count - 1) ? "" : ",";
-        /* Measured, at last. These were 1420 + (pid * 37 % 4096) and
-         * 512 + (pid * 19 % 2048) - arithmetic on the process id, sent as
-         * measured traffic and added up on the console as bandwidth - and then
-         * they were zero, because nothing here could count. The user-mode
-         * collector reads TCP Extended Statistics now (see EstatsMeasure), so
-         * what travels is the bytes that crossed this flow since the previous
-         * poll. Still zero when nothing counted it: a flow ESTATS could not be
-         * enabled on, or one seen for the first time. The collector reports
-         * zero when no byte counter was available.
-         * Zero means "not measured" the whole way up, and the hub reports it as
-         * that rather than as an absence of traffic. */
-        unsigned long long bIn = e->BytesIn;
-        unsigned long long bOut = e->BytesOut;
-
-        char escapedCmdline[2048] = {0};
-        ProcessLineageWin_EscapeJSON(e->Enrichment.command_line, escapedCmdline, sizeof(escapedCmdline));
-
-        char escapedUser[128] = {0};
-        ProcessLineageWin_EscapeJSON(e->Enrichment.user_identity, escapedUser, sizeof(escapedUser));
-
-        char obsTimeBuf[64] = {0};
-        if (e->Enrichment.observed_at > 0) {
-            time_t obsSec = (time_t)e->Enrichment.observed_at;
-            struct tm* pTm = gmtime(&obsSec);
-            if (pTm) {
-                strftime(obsTimeBuf, sizeof(obsTimeBuf), "%Y-%m-%dT%H:%M:%SZ", pTm);
-            }
-        }
-
-        char enrichmentJson[3072] = {0};
-        int enrichLen = snprintf(enrichmentJson, sizeof(enrichmentJson),
-            ",\"process_instance_id\":\"%s\",\"parent_pid\":%u,\"parent_process_instance_id\":\"%s\",\"command_line\":\"%s\",\"user_identity\":\"%s\",\"executable_sha256\":\"%s\",\"attribution_status\":\"%s\"",
-            e->Enrichment.process_instance_id,
-            (unsigned int)e->Enrichment.ppid,
-            e->Enrichment.parent_process_instance_id,
-            escapedCmdline,
-            escapedUser,
-            e->Enrichment.executable_sha256,
-            e->Enrichment.attribution_status[0] ? e->Enrichment.attribution_status : "unknown"
-        );
-        if (obsTimeBuf[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - 64) {
-            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen,
-                ",\"observed_at\":\"%s\"", obsTimeBuf);
-        }
-
-        int written = snprintf(jsonBuf + offset, jsonCapacity - offset,
-            "{\"layer\":\"%s\",\"action\":\"%s\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%llu,\"bytes_out\":%llu,\"process_path\":\"%s\",\"process_id\":%llu%s}%s",
-            EventTypeToString(e->EventType),
-            (e->Action == 1) ? "BLOCK" : "PERMIT",
-            (e->Direction == 1) ? "OUTBOUND" : "INBOUND",
-            e->Protocol,
-            srcIp, dstIp,
-            e->LocalPort, e->RemotePort,
-            bIn, bOut,
-            procJson,
-            (unsigned long long)e->ProcessId,
-            enrichmentJson,
-            comma
-        );
-
-        if (written > 0) {
-            offset += written;
-        }
-    }
-
-    offset += snprintf(jsonBuf + offset, jsonCapacity - offset, "]");
-
-    /* Rides on the heartbeat that is already going out: an agent that can report
-     * telemetry can report this, and a second request would be a second thing to
-     * fail - which on this platform has meant an endpoint that looked healthy in
-     * everything the console shows and had quietly stopped being manageable. */
-    char observations[4096];
-    if (AppendObservations(config, observations, sizeof(observations)) > 0) {
-        offset += snprintf(jsonBuf + offset, jsonCapacity - offset, "%s", observations);
-    }
-    snprintf(jsonBuf + offset, jsonCapacity - offset, "}");
 
     // Send HTTP POST via the persistent WinHTTP session/connection.
     if (!HubHTTPEnter()) {

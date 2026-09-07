@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -35,17 +34,18 @@ type Location struct {
 }
 
 type Endpoint struct {
-	ID                string `json:"id"`
-	TenantID          string `json:"tenant_id"`
-	LocationID        string `json:"location_id"`
-	LocationName      string `json:"location_name"`
-	Hostname          string `json:"hostname"`
-	OS                string `json:"os"`
-	IP                string `json:"ip"`
-	MAC               string `json:"mac"`
-	RoleTag           string `json:"role_tag"`
-	InstalledSoftware string `json:"installed_software"`
-	DriverVersion     string `json:"driver_version"`
+	CollectorHealth   CollectorHealthList `json:"collector_health,omitempty"`
+	ID                string              `json:"id"`
+	TenantID          string              `json:"tenant_id"`
+	LocationID        string              `json:"location_id"`
+	LocationName      string              `json:"location_name"`
+	Hostname          string              `json:"hostname"`
+	OS                string              `json:"os"`
+	IP                string              `json:"ip"`
+	MAC               string              `json:"mac"`
+	RoleTag           string              `json:"role_tag"`
+	InstalledSoftware string              `json:"installed_software"`
+	DriverVersion     string              `json:"driver_version"`
 	// UpdateCapability is the package format this endpoint can install for
 	// itself: "deb", "msi", or empty. The agent reports it, because
 	// the OS string is a display label and not a contract - matching on it is
@@ -74,6 +74,7 @@ type Endpoint struct {
 }
 
 type Event struct {
+	Observation FlowObservation `json:"observation,omitempty"`
 	// ThreatMatch is trusted hub enrichment, never accepted from agent JSON.
 	// The detector persists this evidence on its finding, independently of the
 	// endpoint's reported firewall action.
@@ -508,7 +509,8 @@ func (s *Store) initSchema() error {
 		user_identity TEXT DEFAULT '',
 		executable_sha256 TEXT DEFAULT '',
 		attribution_status TEXT DEFAULT '',
-		observed_at DATETIME
+		observed_at DATETIME,
+		observation_json TEXT DEFAULT '{}'
 	);
 
 	CREATE TABLE IF NOT EXISTS comm_profiles (
@@ -697,6 +699,8 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE events ADD COLUMN executable_sha256 TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN attribution_status TEXT DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
+		"ALTER TABLE events ADD COLUMN observation_json TEXT DEFAULT '{}'",
+		"ALTER TABLE endpoints ADD COLUMN collector_health TEXT DEFAULT '[]'",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
@@ -1104,8 +1108,8 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 	}
 
 	query := `
-	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, install_type, package_identifier, registered_package_version, provenance_status, status, is_isolated, last_seen_at, created_at, evidence_signing_key)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO endpoints (id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, install_type, package_identifier, registered_package_version, provenance_status, status, is_isolated, last_seen_at, created_at, evidence_signing_key, collector_health)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		hostname=excluded.hostname,
 		os=excluded.os,
@@ -1122,6 +1126,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		registered_package_version=CASE WHEN excluded.registered_package_version != '' THEN excluded.registered_package_version ELSE endpoints.registered_package_version END,
 		provenance_status=CASE WHEN excluded.provenance_status != '' THEN excluded.provenance_status ELSE endpoints.provenance_status END,
 		evidence_signing_key=CASE WHEN excluded.evidence_signing_key != '' THEN excluded.evidence_signing_key ELSE endpoints.evidence_signing_key END,
+		collector_health=excluded.collector_health,
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
@@ -1130,7 +1135,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		ep.ID, ep.TenantID, ep.LocationID, ep.LocationName, ep.Hostname, ep.OS, ep.IP, ep.MAC,
 		ep.RoleTag, ep.InstalledSoftware, ep.DriverVersion, ep.UpdateCapability,
 		ep.InstallType, ep.PackageIdentifier, ep.RegisteredPackageVersion, ep.ProvenanceStatus,
-		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt, ep.EvidenceSigningKey,
+		ep.Status, ep.IsIsolated, ep.LastSeenAt, ep.CreatedAt, ep.EvidenceSigningKey, ep.CollectorHealth,
 	); err != nil {
 		return err
 	}
@@ -1479,12 +1484,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1500,7 +1505,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth,
 		); err != nil {
 			return nil, err
 		}
@@ -1517,13 +1522,13 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, '') FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1654,9 +1659,9 @@ func (s *Store) InsertEvent(ev Event) error {
 	}
 
 	_, err := s.db.Exec(
-		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-		ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
+		ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
 	)
 	return err
 }
@@ -1672,8 +1677,8 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1697,7 +1702,7 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
 			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country,
 			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal,
+			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
 		); err != nil {
 			return fmt.Errorf("insert event batch: %w", err)
 		}
@@ -1725,7 +1730,7 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 		rows *sql.Rows
 		err  error
 	)
-	const queryCols = "id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, ''), COALESCE(process_instance_id, ''), COALESCE(parent_pid, 0), COALESCE(parent_process_instance_id, ''), COALESCE(command_line, ''), COALESCE(user_identity, ''), COALESCE(executable_sha256, ''), COALESCE(attribution_status, ''), observed_at"
+	const queryCols = "id, tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, COALESCE(domain, ''), COALESCE(sni, ''), COALESCE(process_instance_id, ''), COALESCE(parent_pid, 0), COALESCE(parent_process_instance_id, ''), COALESCE(command_line, ''), COALESCE(user_identity, ''), COALESCE(executable_sha256, ''), COALESCE(attribution_status, ''), observed_at, COALESCE(observation_json, '{}')"
 	if tenantID != "" && endpointID != "" {
 		rows, err = s.db.Query(
 			"SELECT "+queryCols+" FROM events WHERE tenant_id = ? AND endpoint_id = ? ORDER BY timestamp DESC LIMIT ?",
@@ -1764,7 +1769,7 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 			&ev.ID, &ev.TenantID, &ev.EndpointID, &ev.Timestamp, &ev.Layer, &ev.Action, &ev.Direction, &ev.Protocol,
 			&ev.SrcIP, &ev.DstIP, &ev.SrcPort, &ev.DstPort, &ev.BytesIn, &ev.BytesOut, &ev.Country, &ev.ProcessPath, &ev.ProcessID,
 			&ev.Domain, &ev.SNI,
-			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull,
+			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull, &ev.Observation,
 		); err != nil {
 			return nil, err
 		}
@@ -1787,53 +1792,7 @@ func (s *Store) QueryEvents(tenantID string, endpointID string, limit int) ([]Ev
 /* NETWORK COMMUNICATIONS PROFILING & ANOMALY TRACKING */
 
 func (s *Store) RecordNetworkComms(ev Event, hostname string, locationID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	cleanPath := strings.ReplaceAll(ev.ProcessPath, "\\", "/")
-	procName := filepath.Base(cleanPath)
-	if procName == "." || procName == "/" || procName == "\\" || procName == "" {
-		procName = "kernel/system"
-	}
-
-	protoStr := "TCP"
-	if ev.Protocol == 17 {
-		protoStr = "UDP"
-	} else if ev.Protocol == 1 {
-		protoStr = "ICMP"
-	}
-
-	dir := ev.Direction
-	if dir == "" {
-		dir = "OUTBOUND"
-	}
-	country := ev.Country
-	if country == "" {
-		country = "US"
-	}
-	if locationID == "" {
-		locationID = "loc-hq"
-	}
-
-	profID := fmt.Sprintf("%s:%s:%s:%d:%s", ev.EndpointID, procName, ev.DstIP, ev.DstPort, dir)
-
-	query := `
-	INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
-	ON CONFLICT(id) DO UPDATE SET
-		last_seen=excluded.last_seen,
-		event_count=comm_profiles.event_count + 1,
-		total_bytes_in=comm_profiles.total_bytes_in + excluded.total_bytes_in,
-		total_bytes_out=comm_profiles.total_bytes_out + excluded.total_bytes_out
-	`
-	_, err := s.db.Exec(
-		query,
-		profID, ev.TenantID, locationID, ev.EndpointID, hostname,
-		procName, ev.ProcessPath, ev.DstIP, ev.DstPort,
-		protoStr, dir, country, ev.Timestamp, ev.Timestamp,
-		ev.BytesIn, ev.BytesOut,
-	)
-	return err
+	return s.RecordNetworkCommsBatch([]Event{ev}, hostname, locationID)
 }
 
 func (s *Store) ListCommProfiles(level string, id string, limit int) ([]CommProfile, error) {
@@ -3248,7 +3207,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		spoke[srcIP] = true
 		spoke[dstIP] = true
 
-		protoStr := protoName(protoInt)
+		protoStr := ProtocolName(protoInt)
 
 		verdict := "clean"
 		if action == "BLOCK" {

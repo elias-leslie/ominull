@@ -53,7 +53,8 @@ echo "[*] 3. Running Go hub benchmarks (Heartbeat, SQLite, Gate Fail-Closed)..."
 
 echo ""
 echo "[*] 4. Running C agent baseline & process lineage tests..."
-gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_baseline agent/tests/test_baseline.c -lcurl
+bash scripts/build-bpf.sh
+gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_baseline agent/tests/test_baseline.c -lbpf -lcurl
 ./build/test_baseline
 rm -f build/test_baseline
 

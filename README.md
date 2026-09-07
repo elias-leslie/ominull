@@ -5,6 +5,10 @@ hub. The hub embeds the operator console and SQLite store. Agents use signed
 native packages, authenticated REST heartbeats, unique per-device credentials,
 and optional matching client certificates.
 
+Agents report TCP counter observations and passive UDP socket observations.
+[Collection semantics and build requirements](docs/UDP_OBSERVATION.md) describe
+timing, process attribution, byte units, and coverage limits.
+
 Supported products:
 
 - Linux hub `.deb`

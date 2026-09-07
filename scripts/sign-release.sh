@@ -80,7 +80,7 @@ sign_package "${windows_msi}"
 # survives hub package purge so artifact availability follows the data-retention
 # contract, while the signed source remains part of the release package.
 bundle_dir="$(mktemp -d "${TMPDIR:-/tmp}/ominull-hub-bundle.XXXXXX")"
-trap 'rm -rf "${bundle_dir}"' EXIT
+trap 'find "${bundle_dir}" -depth -delete' EXIT
 dpkg-deb --raw-extract "${hub_deb}" "${bundle_dir}/root"
 install -d -m 0755 "${bundle_dir}/root/usr/share/ominull/packages"
 for artifact in "${agent_deb}" "${agent_deb}.sig" "${agent_deb}.sha256" \

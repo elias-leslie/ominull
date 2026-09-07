@@ -117,36 +117,38 @@ type TrafficHeatmapCell struct {
 }
 
 type TrafficFlowItem struct {
-	ID                      string     `json:"id"`
-	TenantID                string     `json:"tenant_id"`
-	Timestamp               time.Time  `json:"timestamp"`
-	EndpointID              string     `json:"endpoint_id"`
-	Hostname                string     `json:"hostname"`
-	Layer                   string     `json:"layer"`
-	Action                  string     `json:"action"`
-	Direction               string     `json:"direction"`
-	Protocol                int        `json:"protocol"`
-	ProtoName               string     `json:"proto_name"`
-	SrcIP                   string     `json:"src_ip"`
-	DstIP                   string     `json:"dst_ip"`
-	SrcPort                 int        `json:"src_port"`
-	DstPort                 int        `json:"dst_port"`
-	ProcessPath             string     `json:"process_path"`
-	ProcessName             string     `json:"process_name"`
-	Domain                  string     `json:"domain"`
-	Country                 string     `json:"country"`
-	BytesIn                 int64      `json:"bytes_in"`
-	BytesOut                int64      `json:"bytes_out"`
-	IsAnomalous             bool       `json:"is_anomalous"`
-	AnomalyType             string     `json:"anomaly_type,omitempty"`
-	ProcessInstanceID       string     `json:"process_instance_id,omitempty"`
-	ParentPID               uint32     `json:"parent_pid,omitempty"`
-	ParentProcessInstanceID string     `json:"parent_process_instance_id,omitempty"`
-	CommandLine             string     `json:"command_line,omitempty"`
-	UserIdentity            string     `json:"user_identity,omitempty"`
-	ExecutableSHA256        string     `json:"executable_sha256,omitempty"`
-	AttributionStatus       string     `json:"attribution_status,omitempty"`
-	ObservedAt              *time.Time `json:"observed_at,omitempty"`
+	Observation             FlowObservation `json:"observation,omitempty"`
+	ProcessID               uint32          `json:"process_id"`
+	ID                      string          `json:"id"`
+	TenantID                string          `json:"tenant_id"`
+	Timestamp               time.Time       `json:"timestamp"`
+	EndpointID              string          `json:"endpoint_id"`
+	Hostname                string          `json:"hostname"`
+	Layer                   string          `json:"layer"`
+	Action                  string          `json:"action"`
+	Direction               string          `json:"direction"`
+	Protocol                int             `json:"protocol"`
+	ProtoName               string          `json:"proto_name"`
+	SrcIP                   string          `json:"src_ip"`
+	DstIP                   string          `json:"dst_ip"`
+	SrcPort                 int             `json:"src_port"`
+	DstPort                 int             `json:"dst_port"`
+	ProcessPath             string          `json:"process_path"`
+	ProcessName             string          `json:"process_name"`
+	Domain                  string          `json:"domain"`
+	Country                 string          `json:"country"`
+	BytesIn                 int64           `json:"bytes_in"`
+	BytesOut                int64           `json:"bytes_out"`
+	IsAnomalous             bool            `json:"is_anomalous"`
+	AnomalyType             string          `json:"anomaly_type,omitempty"`
+	ProcessInstanceID       string          `json:"process_instance_id,omitempty"`
+	ParentPID               uint32          `json:"parent_pid,omitempty"`
+	ParentProcessInstanceID string          `json:"parent_process_instance_id,omitempty"`
+	CommandLine             string          `json:"command_line,omitempty"`
+	UserIdentity            string          `json:"user_identity,omitempty"`
+	ExecutableSHA256        string          `json:"executable_sha256,omitempty"`
+	AttributionStatus       string          `json:"attribution_status,omitempty"`
+	ObservedAt              *time.Time      `json:"observed_at,omitempty"`
 }
 
 type TrafficFlowsResult struct {
@@ -835,7 +837,7 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			COALESCE(user_identity, ''),
 			COALESCE(executable_sha256, ''),
 			COALESCE(attribution_status, ''),
-			observed_at
+			observed_at, COALESCE(observation_json, '{}'), process_id
 		FROM events
 		%s
 		ORDER BY timestamp DESC, rowid DESC
@@ -883,10 +885,12 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			exeSHA      string
 			attrStat    string
 			obsAtNull   sql.NullTime
+			observation FlowObservation
+			processID   uint32
 		)
 		if err := rows.Scan(&rowID, &tenantID, &timestamp, &endpointID, &layer, &action, &direction,
 			&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
-			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull); err != nil {
+			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull, &observation, &processID); err != nil {
 			return nil, err
 		}
 
@@ -896,18 +900,13 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			obsAt = &t
 		}
 
-		protoName := "TCP"
-		if protocol == 17 {
-			protoName = "UDP"
-		} else if protocol == 1 {
-			protoName = "ICMP"
-		}
+		protoName := ProtocolName(protocol)
 
 		cleanPath := strings.ReplaceAll(processPath, "\\", "/")
 		parts := strings.Split(cleanPath, "/")
 		procName := parts[len(parts)-1]
 		if procName == "" || procName == "." {
-			procName = "kernel/system"
+			procName = "unknown"
 		}
 
 		flows = append(flows, TrafficFlowItem{
@@ -938,6 +937,8 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			ExecutableSHA256:        exeSHA,
 			AttributionStatus:       attrStat,
 			ObservedAt:              obsAt,
+			Observation:             observation,
+			ProcessID:               processID,
 		})
 	}
 
@@ -999,7 +1000,7 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 			COALESCE(user_identity, ''),
 			COALESCE(executable_sha256, ''),
 			COALESCE(attribution_status, ''),
-			observed_at
+			observed_at, COALESCE(observation_json, '{}'), process_id
 		FROM events
 		WHERE rowid = ?
 	`
@@ -1028,11 +1029,13 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 		exeSHA      string
 		attrStat    string
 		obsAtNull   sql.NullTime
+		observation FlowObservation
+		processID   uint32
 	)
 
 	err = s.db.QueryRow(query, rowID).Scan(&rowID, &tID, &timestamp, &endpointID, &layer, &action, &direction,
 		&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
-		&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull)
+		&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull, &observation, &processID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1050,17 +1053,13 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 		obsAt = &t
 	}
 
-	protoName := "TCP"
-	if protocol == 17 {
-		protoName = "UDP"
-	} else if protocol == 1 {
-		protoName = "ICMP"
-	}
+	protoName := ProtocolName(protocol)
+
 	cleanPath := strings.ReplaceAll(processPath, "\\", "/")
 	parts := strings.Split(cleanPath, "/")
 	procName := parts[len(parts)-1]
 	if procName == "" || procName == "." {
-		procName = "kernel/system"
+		procName = "unknown"
 	}
 
 	return &TrafficFlowItem{
@@ -1091,5 +1090,7 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 		ExecutableSHA256:        exeSHA,
 		AttributionStatus:       attrStat,
 		ObservedAt:              obsAt,
+		Observation:             observation,
+		ProcessID:               processID,
 	}, nil
 }

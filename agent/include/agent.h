@@ -17,7 +17,7 @@
 
 #include "process_lineage_windows.h"
 
-#define OMINULL_AGENT_VERSION "1.8.28"
+#define OMINULL_AGENT_VERSION "1.8.29"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
@@ -94,6 +94,11 @@ typedef struct _OMINULL_EVENT {
     WCHAR  ProcessPath[OMINULL_MAX_PATH];
     UINT64 BytesIn;
     UINT64 BytesOut;
+    /* FILETIME units, observed at the source; zero for legacy collectors. */
+    bool BytesMeasured;
+    UINT64 FirstObservedAt;
+    UINT64 LastObservedAt;
+    UINT64 ObservationCount;
     PROCESS_ENRICHMENT_WIN Enrichment;
 } OMINULL_EVENT, *POMINULL_EVENT;
 #pragma pack(pop)
@@ -143,6 +148,8 @@ DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
  * hub had stopped answering for. */
 const char* Agent_EnforcementStatus(void);
 const char* Agent_LastAppliedNote(void);
+size_t Agent_CollectorHealthJSON(char *out, size_t capacity);
+char* Hub_BuildTelemetryJSON(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count);
 
 /* Reduces the configured hub URL to an address literal. Shared rather than
  * copied: this is the address the pinhole is written for, and the readiness

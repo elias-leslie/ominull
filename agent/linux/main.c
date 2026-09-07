@@ -37,7 +37,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.28"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.29"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -118,8 +118,15 @@ typedef struct {
     uint32_t process_id;
     uint64_t bytes_in;
     uint64_t bytes_out;
+    bool bytes_measured;
+    uint64_t socket_identity;
+    uint64_t observation_count;
+    uint64_t first_observed_ns;
+    uint64_t last_observed_ns;
     PROCESS_ENRICHMENT enrichment;
 } LINUX_FLOW_EVENT;
+
+#include "udp_collector.h"
 
 typedef struct {
     unsigned long inode;
@@ -136,11 +143,14 @@ typedef struct {
     uint32_t cookie1;
     uint64_t bytes_in;
     uint64_t bytes_out;
+    uint64_t first_sample_ns, last_sample_ns;
     bool valid;
 } SOCKET_COUNTER;
 
 #define SOCKET_COUNTER_CAP 1024
 static SOCKET_COUNTER g_SocketCounters[SOCKET_COUNTER_CAP];
+static uint64_t g_TCPUnmeasured, g_TCPDeferred;
+static bool g_TCPQueryActive;
 
 static size_t SocketCounterSlot(unsigned long inode, uint32_t cookie0, uint32_t cookie1) {
     uint64_t h = (uint64_t)inode * 11400714819323198485ull;
@@ -157,31 +167,50 @@ static size_t SocketCounterSlot(unsigned long inode, uint32_t cookie0, uint32_t 
 static uint64_t SocketCounterDelta(unsigned long inode, uint32_t cookie0, uint32_t cookie1,
                                     uint64_t bytesIn, uint64_t bytesOut, uint64_t* outIn,
                                     uint64_t* outOut) {
+    struct timespec now;
+    clock_gettime(CLOCK_BOOTTIME, &now);
+    uint64_t sample = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
     size_t start = SocketCounterSlot(inode, cookie0, cookie1);
+    SOCKET_COUNTER *available = NULL;
     for (size_t probe = 0; probe < SOCKET_COUNTER_CAP; probe++) {
-        SOCKET_COUNTER* slot = &g_SocketCounters[(start + probe) & (SOCKET_COUNTER_CAP - 1)];
-        if (!slot->valid) {
-            slot->valid = true;
-            slot->inode = inode;
-            slot->cookie0 = cookie0;
-            slot->cookie1 = cookie1;
-            slot->bytes_in = bytesIn;
-            slot->bytes_out = bytesOut;
-            *outIn = 0;
-            *outOut = 0;
-            return 1;
-        }
-        if (slot->inode == inode && slot->cookie0 == cookie0 && slot->cookie1 == cookie1) {
+        SOCKET_COUNTER *slot = &g_SocketCounters[(start + probe) & (SOCKET_COUNTER_CAP - 1)];
+        if (slot->valid && slot->inode == inode && slot->cookie0 == cookie0 && slot->cookie1 == cookie1) {
             *outIn = bytesIn >= slot->bytes_in ? bytesIn - slot->bytes_in : 0;
             *outOut = bytesOut >= slot->bytes_out ? bytesOut - slot->bytes_out : 0;
+            slot->first_sample_ns = slot->last_sample_ns;
+            slot->last_sample_ns = sample;
             slot->bytes_in = bytesIn;
             slot->bytes_out = bytesOut;
             return 1;
+        }
+        if (!slot->valid || sample - slot->last_sample_ns > 300000000000ULL) {
+            if (!available)
+                available = slot;
         }
     }
     *outIn = 0;
     *outOut = 0;
-    return 0;
+    if (!available)
+        return 0;
+    *available = (SOCKET_COUNTER){.inode = inode,
+                                  .cookie0 = cookie0,
+                                  .cookie1 = cookie1,
+                                  .bytes_in = bytesIn,
+                                  .bytes_out = bytesOut,
+                                  .first_sample_ns = sample,
+                                  .last_sample_ns = sample,
+                                  .valid = true};
+    return 1;
+}
+static const SOCKET_COUNTER *SocketCounterWindow(const SOCKET_DIAG_RESULT *stats) {
+    size_t start = SocketCounterSlot(stats->inode, stats->cookie0, stats->cookie1);
+    for (size_t probe = 0; probe < SOCKET_COUNTER_CAP; probe++) {
+        const SOCKET_COUNTER *slot = &g_SocketCounters[(start + probe) & (SOCKET_COUNTER_CAP - 1)];
+        if (slot->valid && slot->inode == stats->inode && slot->cookie0 == stats->cookie0 &&
+            slot->cookie1 == stats->cookie1)
+            return slot;
+    }
+    return NULL;
 }
 
 static bool SocketDiagResultFor(const unsigned long* inodes, size_t count,
@@ -1010,36 +1039,59 @@ static void CollectSocketTable(const char* tableName, bool ipv6,
         return;
     }
 
-    while (*count < maxCandidates && fgets(line, sizeof(line), fp)) {
-        // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
-        int sl = 0, state = 0;
-        char localAddrHex[64] = {0}, remAddrHex[64] = {0};
-        unsigned int localPort = 0, remPort = 0;
-        unsigned long inode = 0;
-        int matched = sscanf(line, "%d: %64[0-9A-Fa-f]:%X %64[0-9A-Fa-f]:%X %X %*X:%*X %*X:%*X %*X %*d %*d %lu",
-                             &sl, localAddrHex, &localPort, remAddrHex, &remPort, &state, &inode);
-        if (matched < 7 || inode == 0 || remPort == 0 || IsZeroAddress(remAddrHex)) continue;
-        if (!IsReportableSocketState(state)) continue;
-
-        FLOW_CANDIDATE* candidate = &candidates[*count];
-        memset(candidate, 0, sizeof(*candidate));
-        if (ipv6) {
-            if (!ParseHexIPv6(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip)) ||
-                !ParseHexIPv6(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip))) {
+    static size_t cursor[2];
+    size_t start = cursor[ipv6 ? 1 : 0], eligible = 0, before = *count;
+    for (int pass = 0; pass < 2; pass++) {
+        while (fgets(line, sizeof(line), fp)) {
+            // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout
+            // inode
+            int sl = 0, state = 0;
+            char localAddrHex[64] = {0}, remAddrHex[64] = {0};
+            unsigned int localPort = 0, remPort = 0;
+            unsigned long inode = 0;
+            int matched =
+                sscanf(line, "%d: %64[0-9A-Fa-f]:%X %64[0-9A-Fa-f]:%X %X %*X:%*X %*X:%*X %*X %*d %*d %lu",
+                       &sl, localAddrHex, &localPort, remAddrHex, &remPort, &state, &inode);
+            if (matched < 7 || inode == 0 || remPort == 0 || IsZeroAddress(remAddrHex))
                 continue;
-            }
-        } else {
-            ParseHexIPv4(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip));
-            ParseHexIPv4(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip));
-        }
-        candidate->src_port = (uint16_t)localPort;
-        candidate->dst_port = (uint16_t)remPort;
-        if (IsLoopbackAddress(candidate->dst_ip) || IsLoopbackAddress(candidate->src_ip)) continue;
-        if (candidate->dst_port == 9999 && strcmp(candidate->dst_ip, candidate->src_ip) == 0) continue;
+            if (!IsReportableSocketState(state))
+                continue;
 
-        candidate->inode = inode;
-        (*count)++;
+            FLOW_CANDIDATE parsed;
+            FLOW_CANDIDATE *candidate = &parsed;
+            memset(candidate, 0, sizeof(*candidate));
+            if (ipv6) {
+                if (!ParseHexIPv6(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip)) ||
+                    !ParseHexIPv6(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip))) {
+                    continue;
+                }
+            } else {
+                ParseHexIPv4(localAddrHex, candidate->src_ip, sizeof(candidate->src_ip));
+                ParseHexIPv4(remAddrHex, candidate->dst_ip, sizeof(candidate->dst_ip));
+            }
+            candidate->src_port = (uint16_t)localPort;
+            candidate->dst_port = (uint16_t)remPort;
+            if (IsLoopbackAddress(candidate->dst_ip) || IsLoopbackAddress(candidate->src_ip))
+                continue;
+            if (candidate->dst_port == 9999 && strcmp(candidate->dst_ip, candidate->src_ip) == 0)
+                continue;
+
+            candidate->inode = inode;
+            if (eligible++ < start || *count >= maxCandidates)
+                continue;
+            candidates[(*count)++] = *candidate;
+        }
+        if (*count > before || start == 0)
+            break;
+        rewind(fp);
+        if (!fgets(line, sizeof(line), fp))
+            break;
+        start = 0;
+        eligible = 0;
     }
+    size_t selected = *count - before;
+    cursor[ipv6 ? 1 : 0] = eligible ? (start + selected) % eligible : 0;
+    g_TCPDeferred += eligible > selected ? eligible - selected : 0;
     fclose(fp);
 }
 
@@ -1153,9 +1205,11 @@ static bool IsOwnHubFlow(const FLOW_CANDIDATE* candidate, uint32_t pid) {
 static size_t SelectFlowCandidates(const FLOW_CANDIDATE* candidates,
                                    const PROC_SOCKET_OWNER* owners, size_t count,
                                    size_t maxEvents, size_t* order) {
-    size_t selected = 0;
+    static size_t cursor;
+    size_t selected = 0, next = cursor;
     for (int pass = 0; pass < 2 && selected < maxEvents; pass++) {
-        for (size_t i = 0; i < count && selected < maxEvents; i++) {
+        for (size_t visited = 0; visited < count && selected < maxEvents; visited++) {
+            size_t i = (cursor + visited) % count;
             bool active = candidates[i].bytes_in > 0 || candidates[i].bytes_out > 0;
             if ((pass == 0) != active) continue;
             if (IsOwnHubFlow(&candidates[i], owners[i].pid)) continue;
@@ -1164,13 +1218,15 @@ static size_t SelectFlowCandidates(const FLOW_CANDIDATE* candidates,
                 continue;
             }
             order[selected++] = i;
+            next = (i + 1) % count;
         }
     }
+    cursor = next;
     return selected;
 }
 
 // Capture active TCP socket flows from both Linux address families.
-static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) {
+static size_t CollectTCPObservations(LINUX_FLOW_EVENT *outEvents, size_t maxEvents) {
     /* Held across calls rather than on the stack: the candidate set is several
      * times the wire cap, and this daemon runs with a modest thread stack. */
     static FLOW_CANDIDATE candidates[MAX_FLOW_CANDIDATES];
@@ -1187,21 +1243,27 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
     memset(outEvents, 0, sizeof(LINUX_FLOW_EVENT) * maxEvents);
     if (maxEvents == 0) return 0;
 
-    CollectSocketTable("net/tcp", false, candidates, MAX_FLOW_CANDIDATES, &count);
+    g_TCPDeferred = 0;
+    CollectSocketTable("net/tcp", false, candidates, MAX_FLOW_CANDIDATES / 2, &count);
     CollectSocketTable("net/tcp6", true, candidates, MAX_FLOW_CANDIDATES, &count);
     for (size_t i = 0; i < count; i++) {
         targetInodes[i] = candidates[i].inode;
     }
 
-    (void)QuerySocketDiag(targetInodes, count, socketStats);
+    g_TCPQueryActive = QuerySocketDiag(targetInodes, count, socketStats);
     for (size_t i = 0; i < count; i++) {
-        if (!socketStats[i].found) continue;
+        if (!socketStats[i].found) {
+            g_TCPUnmeasured++;
+            continue;
+        }
         uint64_t bytesIn = 0, bytesOut = 0;
         if (SocketCounterDelta(socketStats[i].inode, socketStats[i].cookie0,
                                 socketStats[i].cookie1, socketStats[i].bytes_in,
                                 socketStats[i].bytes_out, &bytesIn, &bytesOut)) {
             candidates[i].bytes_in = bytesIn;
             candidates[i].bytes_out = bytesOut;
+        } else {
+            g_TCPUnmeasured++;
         }
     }
 
@@ -1221,6 +1283,20 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
         strncpy(ev->direction, "OUTBOUND", sizeof(ev->direction) - 1);
         ev->bytes_in = candidate->bytes_in;
         ev->bytes_out = candidate->bytes_out;
+        const SOCKET_DIAG_RESULT *stats = &socketStats[order[s]];
+        ev->socket_identity =
+            stats->found ? ((uint64_t)stats->cookie0 << 32) | stats->cookie1 : candidate->inode;
+        struct timespec observed;
+        clock_gettime(CLOCK_BOOTTIME, &observed);
+        ev->last_observed_ns = (uint64_t)observed.tv_sec * 1000000000ULL + observed.tv_nsec;
+        ev->first_observed_ns = ev->last_observed_ns;
+        const SOCKET_COUNTER *window = stats->found ? SocketCounterWindow(stats) : NULL;
+        if (window) {
+            ev->first_observed_ns = window->first_sample_ns;
+            ev->last_observed_ns = window->last_sample_ns;
+            ev->bytes_measured = window->last_sample_ns > window->first_sample_ns;
+        }
+        ev->observation_count = 1;
 
         if (owner->pid != 0) {
             ev->process_id = owner->pid;
@@ -1247,6 +1323,33 @@ static size_t CollectActiveFlows(LINUX_FLOW_EVENT* outEvents, size_t maxEvents) 
         }
     }
     return selected;
+}
+
+#include "tcp_pending.h"
+static size_t CollectTCPFlows(LINUX_FLOW_EVENT *outEvents, size_t maxEvents) {
+    static LINUX_FLOW_EVENT observed[MAX_FLOW_CANDIDATES];
+    size_t count = CollectTCPObservations(observed, MAX_FLOW_CANDIDATES);
+    for (size_t i = 0; i < count; i++)
+        TCPPendingAdd(&observed[i]);
+    return TCPPendingDrain(outEvents, maxEvents);
+}
+
+/* Reserve half the wire slots for pending UDP, then lend unused capacity to
+ * either protocol. UDP keys rotate independently of packet volume. */
+static size_t CollectActiveFlows(LINUX_FLOW_EVENT *outEvents, size_t maxEvents) {
+    if (!maxEvents)
+        return 0;
+    UDPCollectorPoll();
+    static bool singleTCP;
+    size_t udpBudget = (maxEvents + 1) / 2;
+    if (maxEvents == 1) {
+        singleTCP = !singleTCP;
+        if (singleTCP)
+            udpBudget = 0;
+    }
+    size_t udp = UDPCollectorDrain(outEvents, udpBudget);
+    size_t tcp = CollectTCPFlows(outEvents + udp, maxEvents - udp);
+    return udp + tcp + UDPCollectorDrain(outEvents + udp + tcp, maxEvents - udp - tcp);
 }
 
 /* IsIPLiteral accepts only a bare IPv4 or IPv6 address.
@@ -2727,40 +2830,45 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     char osStr[256];
     snprintf(osStr, sizeof(osStr), "%s %s (%s)", sysInfo.sysname, sysInfo.release, sysInfo.machine);
 
-    size_t bufCap = 65536;
+    if (flowCount > MAX_FLOWS_PER_BATCH)
+        flowCount = MAX_FLOWS_PER_BATCH;
+    size_t bufCap = 32768 + flowCount * 16384;
     char* jsonBuf = (char*)malloc(bufCap);
     if (!jsonBuf) return;
 
-    int offset = snprintf(jsonBuf, bufCap,
-        "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\",\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\",\"evidence_signing_key\":\"%s\",\"events\":[",
-        config->endpoint_id,
-        config->location_id[0] ? config->location_id : "loc-home",
-        config->role_tag[0] ? config->role_tag : "workstation",
-        config->hostname,
-        osStr,
-        config->primary_ip,
-        config->primary_mac,
-        OMINULL_LINUX_AGENT_VERSION,
-        config->install_type,
-        config->package_identifier,
-        config->registered_package_version,
-        config->provenance_status,
-        config->evidence_pubkey_hex
-    );
+    const char *rawHeader[] = {config->endpoint_id,
+                               config->location_id[0] ? config->location_id : "loc-home",
+                               config->role_tag[0] ? config->role_tag : "workstation",
+                               config->hostname,
+                               osStr,
+                               config->primary_ip,
+                               config->primary_mac,
+                               OMINULL_LINUX_AGENT_VERSION,
+                               config->install_type,
+                               config->package_identifier,
+                               config->registered_package_version,
+                               config->provenance_status,
+                               config->evidence_pubkey_hex};
+    char header[sizeof(rawHeader) / sizeof(rawHeader[0])][1537];
+    for (size_t i = 0; i < sizeof(rawHeader) / sizeof(rawHeader[0]); i++)
+        ProcessLineage_EscapeJSON(rawHeader[i], header[i], sizeof(header[i]));
 
-    for (size_t i = 0; i < flowCount && offset < (int)bufCap - 4096; i++) {
+    int offset =
+        snprintf(jsonBuf, bufCap,
+                 "{\"type\":\"telemetry\",\"endpoint_id\":\"%s\",\"tenant_id\":\"default\",\"location_id\":"
+                 "\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\","
+                 "\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_"
+                 "identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\","
+                 "\"evidence_signing_key\":\"%s\",\"events\":[",
+                 header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
+                 header[8], header[9], header[10], header[11], header[12]);
+
+    for (size_t i = 0; i < flowCount; i++) {
         const LINUX_FLOW_EVENT* f = &flows[i];
         const char* comma = (i == flowCount - 1) ? "" : ",";
 
-        // Escape JSON backslashes in process path if any
-        char escapedPath[MAX_PATH_LEN * 2] = {0};
-        char* outP = escapedPath;
-        for (const char* inP = f->process_path; *inP && (outP - escapedPath < (int)sizeof(escapedPath) - 2); inP++) {
-            if (*inP == '"' || *inP == '\\') {
-                *outP++ = '\\';
-            }
-            *outP++ = *inP;
-        }
+        char escapedPath[MAX_PATH_LEN * 6 + 1] = {0};
+        ProcessLineage_EscapeJSON(f->process_path, escapedPath, sizeof(escapedPath));
 
         const char* domain = LookupDnsDomain(f->dst_ip);
         char domainJson[256] = {0};
@@ -2768,10 +2876,10 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             snprintf(domainJson, sizeof(domainJson), ",\"domain\":\"%s\"", domain);
         }
 
-        char escapedCmdline[2048] = {0};
+        char escapedCmdline[sizeof(f->enrichment.command_line) * 6 + 1] = {0};
         ProcessLineage_EscapeJSON(f->enrichment.command_line, escapedCmdline, sizeof(escapedCmdline));
 
-        char escapedUser[128] = {0};
+        char escapedUser[sizeof(f->enrichment.user_identity) * 6 + 1] = {0};
         ProcessLineage_EscapeJSON(f->enrichment.user_identity, escapedUser, sizeof(escapedUser));
 
         char obsTimeBuf[64] = {0};
@@ -2782,7 +2890,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             strftime(obsTimeBuf, sizeof(obsTimeBuf), "%Y-%m-%dT%H:%M:%SZ", &tmBuf);
         }
 
-        char enrichmentJson[3072] = {0};
+        char enrichmentJson[8192] = {0};
         int enrichLen = snprintf(enrichmentJson, sizeof(enrichmentJson),
             ",\"process_instance_id\":\"%s\",\"parent_pid\":%u,\"parent_process_instance_id\":\"%s\",\"command_line\":\"%s\",\"user_identity\":\"%s\",\"executable_sha256\":\"%s\",\"attribution_status\":\"%s\"",
             f->enrichment.process_instance_id,
@@ -2798,29 +2906,36 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                 ",\"observed_at\":\"%s\"", obsTimeBuf);
         }
 
-        int written = snprintf(jsonBuf + offset, bufCap - offset,
-            "{\"layer\":\"linux-socket-v1\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_out\":%lu,\"process_path\":\"%s\",\"process_id\":%u%s%s}%s",
-            f->direction,
-            f->protocol,
-            f->src_ip,
-            f->dst_ip,
-            f->src_port,
-            f->dst_port,
-            (unsigned long)f->bytes_in,
-            (unsigned long)f->bytes_out,
-            escapedPath[0] ? escapedPath : OMINULL_UNATTRIBUTED_PROCESS,
-            f->process_id,
-            domainJson,
-            enrichmentJson,
-            comma
-        );
+        char observationJson[640];
+        FlowObservationJSON(f, observationJson, sizeof(observationJson));
+        int written =
+            snprintf(jsonBuf + offset, bufCap - offset,
+                     "{\"layer\":\"%s\",\"action\":\"PERMIT\",\"direction\":\"%s\",\"protocol\":%u,\"src_"
+                     "ip\":\"%s\",\"dst_ip\":\"%s\",\"src_port\":%u,\"dst_port\":%u,\"bytes_in\":%lu,\"bytes_"
+                     "out\":%lu,\"process_path\":\"%s\",\"process_id\":%u%s%s%s}%s",
+                     f->protocol == IPPROTO_UDP ? "linux-udp-bpf-v1" : "linux-socket-v1", f->direction,
+                     f->protocol, f->src_ip, f->dst_ip, f->src_port, f->dst_port, (unsigned long)f->bytes_in,
+                     (unsigned long)f->bytes_out, escapedPath[0] ? escapedPath : OMINULL_UNATTRIBUTED_PROCESS,
+                     f->process_id, domainJson, enrichmentJson, observationJson, comma);
 
-        if (written > 0) {
-            offset += written;
+        if (written < 0 || (size_t)written >= bufCap - (size_t)offset) {
+            fprintf(stderr, "Telemetry serialization exceeded its bounded buffer; batch not sent.\n");
+            free(jsonBuf);
+            return;
         }
+        offset += written;
     }
 
     offset += snprintf(jsonBuf + offset, bufCap - offset, "]");
+    offset += snprintf(jsonBuf + offset, bufCap - offset,
+                       ",\"collector_health\":[{\"name\":\"linux-bpf-udp\",\"state\":\"%s\",\"error\":%d,"
+                       "\"dropped\":%llu,\"queued\":%zu},{\"name\":\"linux-sock-diag\",\"state\":\"%s\","
+                       "\"dropped\":%llu,\"queued\":%zu,\"unmeasured\":%llu,\"deferred\":%llu}]",
+                       g_UDPStatus, g_UDPError, (unsigned long long)UDPCollectorDropped(),
+                       g_UDPStarted ? UDP_QUEUE_CAP - g_UDPFreeCount : (size_t)0,
+                       g_TCPQueryActive ? "active" : "unavailable", (unsigned long long)g_TCPDrops,
+                       g_TCPInitialized ? TCP_PENDING_CAP - g_TCPFreeCount : (size_t)0,
+                       (unsigned long long)g_TCPUnmeasured, (unsigned long long)g_TCPDeferred);
 
     /* What this host uses the network for, and whether it believes it could
      * still be released after an isolation. Both ride on the heartbeat that is
@@ -2852,6 +2967,14 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         }
     }
     HubContact(accepted);
+    if (!accepted) {
+        for (size_t i = 0; i < flowCount; i++) {
+            if (flows[i].protocol == 17)
+                g_UDPQueueDrops += flows[i].observation_count;
+            else
+                g_TCPDrops += flows[i].observation_count;
+        }
+    }
 
     free(jsonBuf);
 }
@@ -3074,6 +3197,7 @@ int main(int argc, char* argv[]) {
     int count = 0;
     while (g_Running) {
         sleep(1);
+        UDPCollectorPoll();
         if (++count >= 3) {
             flowCount = CollectActiveFlows(flows, MAX_FLOWS_PER_BATCH);
             SendTelemetryBatch(&config, flows, flowCount);
@@ -3084,6 +3208,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    UDPCollectorClose();
     printf("\n[*] Stopping Linux socket collection and shutting down gracefully...\n");
     return 0;
 }

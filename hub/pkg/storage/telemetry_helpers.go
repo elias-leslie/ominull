@@ -39,7 +39,7 @@ func parseStoredTime(value string) time.Time {
 	return time.Time{}
 }
 
-func protoName(proto int) string {
+func ProtocolName(proto int) string {
 	switch proto {
 	case 6:
 		return "TCP"

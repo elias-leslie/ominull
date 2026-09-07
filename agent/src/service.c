@@ -6,6 +6,8 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include "../include/agent.h"
+#include "../windows/udp_collector.h"
+#include "../windows/tcp_pending.h"
 #include "../include/forensics_windows.h"
 #include "../include/software_inventory_windows.h"
 
@@ -64,10 +66,13 @@ typedef struct {
     UINT8   used;
     UINT32  generation;
     ULONG64 bytesIn, bytesOut;      /* last cumulative reading */
+    UINT64 lastSample;
 } ESTATS_SLOT;
 
 static ESTATS_SLOT g_estats[ESTATS_TABLE_SIZE];
 static UINT32 g_estatsGeneration = 0;
+static UINT64 g_TCPWinUnmeasured, g_TCPWinDeferred;
+static DWORD g_TCPWinQueryError;
 
 #define PROCESS_PATH_CACHE_SIZE 256
 typedef struct {
@@ -153,23 +158,27 @@ static size_t EstatsHash(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport) {
  * whichever connection happened to hash to the same place. */
 static ESTATS_SLOT* EstatsSlot(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport, bool* isNew) {
     size_t start = EstatsHash(lip, lport, rip, rport);
+    ESTATS_SLOT *available = NULL;
     for (size_t probe = 0; probe < ESTATS_TABLE_SIZE; probe++) {
-        ESTATS_SLOT* slot = &g_estats[(start + probe) & (ESTATS_TABLE_SIZE - 1)];
-        if (!slot->used) {
-            slot->used = 1;
-            slot->localIp = lip; slot->localPort = lport;
-            slot->remoteIp = rip; slot->remotePort = rport;
-            slot->bytesIn = 0; slot->bytesOut = 0;
-            *isNew = true;
-            return slot;
-        }
-        if (slot->localIp == lip && slot->localPort == lport &&
-            slot->remoteIp == rip && slot->remotePort == rport) {
+        ESTATS_SLOT *slot = &g_estats[(start + probe) & (ESTATS_TABLE_SIZE - 1)];
+        if (slot->used && slot->localIp == lip && slot->localPort == lport && slot->remoteIp == rip &&
+            slot->remotePort == rport) {
             *isNew = false;
             return slot;
         }
+        if (!slot->used && !available)
+            available = slot;
     }
-    return NULL;
+    if (!available)
+        return NULL;
+    memset(available, 0, sizeof(*available));
+    available->used = 1;
+    available->localIp = lip;
+    available->localPort = lport;
+    available->remoteIp = rip;
+    available->remotePort = rport;
+    *isNew = true;
+    return available;
 }
 
 /* Connections that were not seen this poll are gone. Their slots are released
@@ -189,8 +198,16 @@ static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
     bool isNew = false;
     ESTATS_SLOT* slot = EstatsSlot(src->dwLocalAddr, (UINT16)src->dwLocalPort,
                                    src->dwRemoteAddr, (UINT16)src->dwRemotePort, &isNew);
-    if (!slot) return;
+    if (!slot) {
+        g_TCPWinUnmeasured++;
+        return;
+    }
     slot->generation = g_estatsGeneration;
+    FILETIME sample;
+    GetSystemTimeAsFileTime(&sample);
+    UINT64 now = UDPWinFileTime(sample);
+    ev->FirstObservedAt = slot->lastSample ? slot->lastSample : now;
+    ev->LastObservedAt = now;
 
     MIB_TCPROW row;
     memset(&row, 0, sizeof(row));
@@ -206,8 +223,20 @@ static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
         rw.EnableCollection = TRUE;
         /* Failure is not fatal and not worth logging every poll: the flow stays
          * at zero, which is the honest report for a flow nobody counted. */
-        (void)SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData,
-                                        (PUCHAR)&rw, 0, sizeof(rw), 0);
+        DWORD status =
+            SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, (PUCHAR)&rw, 0, sizeof(rw), 0);
+        TCP_ESTATS_DATA_ROD_v0 initial = {0};
+        if (status == NO_ERROR)
+            status = GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0,
+                                               (PUCHAR)&initial, 0, sizeof(initial));
+        if (status != NO_ERROR) {
+            g_TCPWinUnmeasured++;
+            slot->used = 0;
+            return;
+        }
+        slot->bytesIn = initial.DataBytesIn;
+        slot->bytesOut = initial.DataBytesOut;
+        slot->lastSample = now;
         return;
     }
 
@@ -216,6 +245,7 @@ static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
     if (GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData,
                                   NULL, 0, 0, NULL, 0, 0,
                                   (PUCHAR)&rod, 0, sizeof(rod)) != NO_ERROR) {
+        g_TCPWinUnmeasured++;
         return;
     }
 
@@ -224,8 +254,10 @@ static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
      * which would be a negative number in an unsigned field. */
     if (rod.DataBytesIn >= slot->bytesIn) ev->BytesIn = rod.DataBytesIn - slot->bytesIn;
     if (rod.DataBytesOut >= slot->bytesOut) ev->BytesOut = rod.DataBytesOut - slot->bytesOut;
+    ev->BytesMeasured = true;
     slot->bytesIn = rod.DataBytesIn;
     slot->bytesOut = rod.DataBytesOut;
+    slot->lastSample = now;
 }
 
 typedef struct {
@@ -285,6 +317,8 @@ typedef struct {
     MIB_TCPROW_OWNER_PID row;
     ULONG64 bytesIn;
     ULONG64 bytesOut;
+    UINT64 firstSample, lastSample;
+    bool measured;
     bool live;
 } FLOW_CANDIDATE_WIN;
 
@@ -409,7 +443,7 @@ static size_t SelectFlowCandidatesWin(const FLOW_CANDIDATE_WIN* candidates, size
     return selected;
 }
 
-static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) {
+static size_t PollTCPObservations(OMINULL_EVENT *outEvents, size_t maxEvents) {
     static FLOW_CANDIDATE_WIN candidates[MAX_FLOW_CANDIDATES_WIN];
     static size_t order[MAX_FLOW_CANDIDATES_WIN];
     size_t count = 0;
@@ -418,18 +452,31 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
     if (maxEvents == 0) return 0;
     ResolveSelfHubPeer();
     g_estatsGeneration++;
+    g_TCPWinDeferred = 0;
+    g_TCPWinQueryError = NO_ERROR;
 
     DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    g_TCPWinQueryError = ret == ERROR_INSUFFICIENT_BUFFER ? NO_ERROR : ret;
     if (ret == ERROR_INSUFFICIENT_BUFFER && dwSize > 0) {
         PMIB_TCPTABLE_OWNER_PID pTcpTable = (PMIB_TCPTABLE_OWNER_PID)malloc(dwSize);
         if (pTcpTable) {
-            if (GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
-                for (DWORD i = 0; i < pTcpTable->dwNumEntries && count < MAX_FLOW_CANDIDATES_WIN; i++) {
+            g_TCPWinQueryError =
+                GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+            if (g_TCPWinQueryError == NO_ERROR) {
+                static DWORD cursor;
+                DWORD next = cursor;
+                for (DWORD visited = 0; visited < pTcpTable->dwNumEntries; visited++) {
+                    DWORD i = (cursor + visited) % pTcpTable->dwNumEntries;
                     MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
                     if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
                     if (row.dwRemoteAddr == 0x0100007f || row.dwLocalAddr == 0x0100007f) continue; // Loopback
                     bool live = IsLiveTcpStateWin(row.dwState);
                     if (!live && !IsContactTcpStateWin(row.dwState)) continue;
+                    if (count >= MAX_FLOW_CANDIDATES_WIN) {
+                        g_TCPWinDeferred++;
+                        continue;
+                    }
+                    next = (i + 1) % pTcpTable->dwNumEntries;
 
                     /* Measured for every live socket, not only for the ones
                      * that end up on the wire. These are cumulative counters
@@ -444,11 +491,17 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
                     candidates[count].row = row;
                     candidates[count].bytesIn = measured.BytesIn;
                     candidates[count].bytesOut = measured.BytesOut;
+                    candidates[count].measured = measured.BytesMeasured;
+                    candidates[count].firstSample = measured.FirstObservedAt;
+                    candidates[count].lastSample = measured.LastObservedAt;
                     candidates[count].live = live;
                     count++;
                 }
+                cursor = next;
             }
             free(pTcpTable);
+        } else {
+            g_TCPWinQueryError = ERROR_NOT_ENOUGH_MEMORY;
         }
     }
     EstatsEvictUnseen();
@@ -470,6 +523,16 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
         ev->Addr.Ipv4.RemoteIp = ntohl(candidate->row.dwRemoteAddr);
         ev->BytesIn = candidate->bytesIn;
         ev->BytesOut = candidate->bytesOut;
+        ev->BytesMeasured = candidate->measured;
+        FILETIME sample;
+        GetSystemTimeAsFileTime(&sample);
+        ev->FirstObservedAt = ev->LastObservedAt = UDPWinFileTime(sample);
+        if (candidate->firstSample && candidate->lastSample) {
+            ev->FirstObservedAt = candidate->firstSample;
+            ev->LastObservedAt = candidate->lastSample;
+        }
+        ev->Timestamp = ev->LastObservedAt;
+        ev->ObservationCount = 1;
 
         ProcessPathFor(candidate->row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
 
@@ -488,6 +551,13 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT* outEvents, size_t maxEvents) 
     return selected;
 }
 
+static size_t PollActiveSocketFlows(OMINULL_EVENT *outEvents, size_t maxEvents) {
+    static OMINULL_EVENT observed[MAX_FLOW_CANDIDATES_WIN];
+    size_t count = PollTCPObservations(observed, MAX_FLOW_CANDIDATES_WIN);
+    for (size_t i = 0; i < count; i++)
+        TCPPendingAdd(&observed[i]);
+    return TCPPendingDrain(outEvents, maxEvents);
+}
 
 /* ---------------------------------------------------------------------------
  * Enforcing what the hub decided.
@@ -906,7 +976,7 @@ static void SyncSoftwareInventoryWin(const AGENT_CONFIG* config) {
 }
 
 void RunAgentLoop(AGENT_CONFIG* config) {
-    printf("[+] Windows collection layer: user-mode TCP socket table and ESTATS.\n");
+    printf("[+] Windows collection layer: TCP socket table/ESTATS and passive UDP ETW.\n");
 
     if (config->evidence_signing_key[0] == '\0') {
         uint8_t ep_pub[32], ep_priv[64];
@@ -918,7 +988,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
     DWORD lastFlush = GetTickCount();
 
     printf("[+] Ominull Agent running. Streaming network flows to Hub: %s\n", config->hub_url);
-    ProcessLineageWin_InitETW();
+    UDPWinStart();
     SyncSoftwareInventoryWin(config);
 
     while (1) {
@@ -929,8 +999,11 @@ void RunAgentLoop(AGENT_CONFIG* config) {
         // Poll live socket table flows.
         DWORD now = GetTickCount();
         if (now - lastFlush >= 2500) {
-            size_t socketCount = PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
-            batchCount += socketCount;
+            /* Reserve capacity for both sources, then lend unused TCP slots to
+             * UDP. Pending UDP observations survive between heartbeats. */
+            batchCount += UDPWinDrain(eventBatch + batchCount, (64 - batchCount) / 2);
+            batchCount += PollActiveSocketFlows(eventBatch + batchCount, 64 - batchCount);
+            batchCount += UDPWinDrain(eventBatch + batchCount, 64 - batchCount);
 
             /* The reply now carries the resolved baseline policy as well as the
              * peer list and the allow list. Four kilobytes truncated it once the
@@ -939,6 +1012,12 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             char hubResponse[16384];
             bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
                                                    hubResponse, sizeof(hubResponse));
+            if (!accepted) {
+                UDPWinTransportLost(eventBatch, batchCount);
+                for (size_t i = 0; i < batchCount; i++)
+                    if (eventBatch[i].Protocol == 6)
+                        g_TCPDrops += eventBatch[i].ObservationCount;
+            }
             batchCount = 0;
             lastFlush = now;
             HubContact(accepted);
@@ -963,7 +1042,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
         Sleep(100);
     }
 
-    ProcessLineageWin_StopETW();
+    UDPWinStop();
 
     if (batchCount > 0) {
         Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0);
@@ -1406,4 +1485,18 @@ void Service_MigrateKeyToFile(const AGENT_CONFIG* config) {
 
     CloseServiceHandle(schService);
     CloseServiceHandle(schSCManager);
+}
+
+size_t Agent_CollectorHealthJSON(char *out, size_t capacity) {
+    size_t offset = UDPWinHealthJSON(out, capacity);
+    if (!offset || offset >= capacity)
+        return 0;
+    int n =
+        snprintf(out + offset, capacity - offset,
+                 ",{\"name\":\"windows-estats\",\"state\":\"%s\",\"error\":%lu,\"dropped\":%llu,\"queued\":%"
+                 "llu,\"unmeasured\":%llu,\"deferred\":%llu}",
+                 g_TCPWinQueryError ? "error" : "active", g_TCPWinQueryError, (unsigned long long)g_TCPDrops,
+                 (unsigned long long)(g_TCPInitialized ? TCP_PENDING_CAP - g_TCPFreeCount : 0),
+                 g_TCPWinUnmeasured, g_TCPWinDeferred);
+    return n > 0 && (size_t)n < capacity - offset ? offset + (size_t)n : 0;
 }

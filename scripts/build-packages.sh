@@ -35,13 +35,14 @@ find "${DIST_DIR}" -maxdepth 1 -type f \( \
     -name 'ominull-hub_*.deb' -o -name 'ominull-hub_*.deb.sig' -o -name 'ominull-hub_*.deb.sha256' \
 \) -delete
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ominull-packages.XXXXXX")"
-trap 'rm -rf "${WORK_DIR}"' EXIT
+trap 'find "${WORK_DIR}" -depth -delete' EXIT
 
 echo "[*] Building retained Ominull packages v${VERSION}."
 
+bash "${ROOT_DIR}/scripts/build-bpf.sh"
 echo "[*] Building Linux agent."
 gcc -Wall -Wextra -Wformat=2 -O2 -I"${ROOT_DIR}/agent/include" \
-    "${ROOT_DIR}/agent/linux/main.c" -lcurl -lutil -o "${BUILD_DIR}/ominulld"
+    "${ROOT_DIR}/agent/linux/main.c" -lbpf -lcurl -lutil -o "${BUILD_DIR}/ominulld"
 
 echo "[*] Building hub and response authority."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \

@@ -26,12 +26,18 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	if strings.TrimSpace(batch.EndpointID) == "" {
 		return nil, fmt.Errorf("endpoint_id is required")
 	}
+	var previousHealth storage.CollectorHealthList
 	if existing, err := s.store.GetEndpoint(batch.EndpointID); err != nil {
 		return nil, fmt.Errorf("load endpoint before ingestion: %w", err)
 	} else if existing != nil && existing.Status == "retired" {
 		return nil, errRetiredEndpoint
+	} else if existing != nil {
+		previousHealth = existing.CollectorHealth
 	}
 
+	if err := validateObservationBatch(batch.Events, batch.CollectorHealth); err != nil {
+		return nil, err
+	}
 	if err := validateTelemetryAddresses(batch.Events); err != nil {
 		return nil, err
 	}
@@ -52,6 +58,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		ip = a.String()
 	}
 	ep := storage.Endpoint{
+		CollectorHealth:          batch.CollectorHealth,
 		ID:                       batch.EndpointID,
 		TenantID:                 tenantID,
 		LocationID:               batch.LocationID,
@@ -100,6 +107,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	}
 
 	events := normalizeTelemetryEvents(batch.Events, tenantID, batch.EndpointID, now)
+	applyCollectorLoss(events, previousHealth, batch.CollectorHealth)
 	snapshot, err := s.telemetrySnapshot(tenantID, *persisted, events)
 	if err != nil {
 		return nil, err
@@ -119,6 +127,17 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	// Detection sees only durable rows. A detector failure is not allowed to
 	// erase accepted telemetry; it is surfaced by the detector's own metrics and
 	// logs while the request's durability contract remains true.
+	previous := map[string]storage.CollectorHealth{}
+	for _, h := range previousHealth {
+		previous[h.Name] = h
+	}
+	for _, h := range batch.CollectorHealth {
+		old := previous[h.Name]
+		if unlocatedCollectorLoss(h) != unlocatedCollectorLoss(old) || h.Unmeasured != old.Unmeasured || h.BuffersLost != old.BuffersLost || h.State != "active" {
+			s.detector.InvalidateCollectorWindows(batch.EndpointID)
+			break
+		}
+	}
 	s.detector.EvaluateBatch(events, snapshot)
 
 	return s.telemetryControlResponse(r, tenantID, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
@@ -142,9 +161,20 @@ func normalizeTelemetryEvents(input []storage.Event, tenantID, endpointID string
 		if a, err := netaddr.Parse(events[i].DstIP); err == nil {
 			events[i].DstIP = a.String()
 		}
+		if events[i].Observation.FirstAt != nil {
+			first := events[i].Observation.FirstAt.UTC()
+			last := events[i].Observation.LastAt.UTC()
+			events[i].Observation.FirstAt = &first
+			events[i].Observation.LastAt = &last
+			if events[i].Timestamp.IsZero() {
+				events[i].Timestamp = last
+			}
+		}
 		events[i].Timestamp = events[i].Timestamp.UTC()
 		events[i].TenantID = tenantID
-		events[i].EndpointID = endpointID
+		if endpointID != "" {
+			events[i].EndpointID = endpointID
+		}
 		if events[i].Timestamp.IsZero() {
 			events[i].Timestamp = now
 		}
@@ -312,6 +342,9 @@ func (s *Server) telemetryControlResponse(r *http.Request, tenantID, endpointID,
 }
 
 func (s *Server) ingestLegacyEvents(tenantID string, events []storage.Event) error {
+	if err := validateObservationBatch(events, nil); err != nil {
+		return err
+	}
 	if err := validateTelemetryAddresses(events); err != nil {
 		return err
 	}

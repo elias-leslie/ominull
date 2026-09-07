@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libcurl4 | libcurl3, openssl, iptables
+Depends: libcurl4 | libcurl3, libbpf1, openssl, iptables
 Maintainer: Ominull Project <secops@example.invalid>
 Description: Ominull Linux network telemetry and threat nullification agent
  The daemon collects bounded network flow telemetry and applies authenticated
