@@ -737,6 +737,9 @@ func (s *Store) initSchema() error {
 	if err := s.initLearningSchema(); err != nil {
 		return err
 	}
+	if err := s.initRouterSchema(); err != nil {
+		return err
+	}
 	if err := s.initRollupCubesSchema(); err != nil {
 		return err
 	}

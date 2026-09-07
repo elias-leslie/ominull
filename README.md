@@ -193,6 +193,9 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
 | `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
+| `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries |
+| `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
+| `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 

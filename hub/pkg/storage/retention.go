@@ -25,6 +25,7 @@ type RetentionPolicy struct {
 	Alerts         time.Duration
 	AuditLogs      time.Duration
 	QuarantineLift time.Duration
+	RouterFlows    time.Duration
 }
 
 // DefaultRetention is what a hub uses unless an operator says otherwise.
@@ -35,6 +36,7 @@ func DefaultRetention() RetentionPolicy {
 		AnomalyAlerts: 30 * 24 * time.Hour,
 		Alerts:        30 * 24 * time.Hour,
 		AuditLogs:     365 * 24 * time.Hour,
+		RouterFlows:   30 * 24 * time.Hour,
 	}
 }
 
@@ -95,6 +97,16 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 				break
 			}
 		}
+	}
+
+	// router_flows keys its bucket as epoch seconds rather than a timestamp, so
+	// it cannot ride the loop above and is pruned on its own terms.
+	if policy.RouterFlows > 0 {
+		n, err := s.pruneRouterFlowsLocked(policy.RouterFlows)
+		if err != nil {
+			return removed, fmt.Errorf("pruning router_flows: %w", err)
+		}
+		removed["router_flows"] = n
 	}
 
 	return removed, nil
