@@ -335,62 +335,61 @@ var defaultSignatures = []DeviceSignature{
 	},
 }
 
-// OUI Vendor Database (Embedded Hardware Manufacturers Table)
+// ouiVendorTable is an overlay on the IEEE registry in oui_registry.tsv, not
+// a replacement for it. The registry answers who holds a block; an entry here
+// exists only to add product or platform context the registrant's own name
+// does not carry - "Amazon Technologies (Echo/Ring)" over "Amazon
+// Technologies Inc.". An entry that contradicts the registrant is a bug, and
+// this table held thirty-five of them: blocks belonging to Apple, Siemens and
+// ASUSTek were labelled WatchGuard, Palo Alto and Tuya. Check a new entry
+// against the registry before adding it.
 var ouiVendorTable = map[string]string{
+	// Same registrant under a later name, or a platform whose origin the
+	// registry records under the originating company. These add product
+	// context without contradicting who IEEE says holds the block.
+	"BC:24:11": "Proxmox QEMU / KVM Virtual",
+	"08:00:27": "Oracle VirtualBox",
+	"D8:6C:63": "Google Nest / Chromecast",
+	"00:50:B6": "Good Way Technology (Dell Hub)",
+	"00:1E:0B": "HP Inc.",
+	"00:25:B3": "HP Inc.",
+	"00:0B:86": "HPE / Aruba Networks",
+	"3C:A8:2A": "HPE ProLiant Server",
+	"D4:85:64": "HPE iLO Remote Management",
 	"00:04:4B": "NVIDIA Corporation",
 	"48:B0:2D": "NVIDIA Corporation",
-	"BC:24:11": "Proxmox QEMU / KVM Virtual",
 	"00:50:56": "VMware, Inc.",
 	"00:0C:29": "VMware, Inc.",
 	"00:15:5D": "Microsoft Hyper-V",
 	"52:54:00": "QEMU Virtual NIC",
 	"F0:18:98": "Apple, Inc.",
 	"3C:06:30": "Apple, Inc.",
-	"AC:DE:48": "Apple, Inc.",
 	"DC:A6:32": "Raspberry Pi Foundation",
 	"B8:27:EB": "Raspberry Pi Foundation",
 	"E4:5F:01": "Raspberry Pi Foundation",
 	"00:11:32": "Synology Inc.",
-	"00:1E:0B": "HP Inc.",
-	"00:25:B3": "HP Inc.",
 	"00:00:0C": "Cisco Systems, Inc.",
 	"74:83:C2": "Ubiquiti Networks",
 	"24:A4:3C": "Ubiquiti Networks",
 	"E0:63:DA": "Ubiquiti Networks",
 	"F0:9F:C2": "Ubiquiti Networks",
-	"A4:2B:B0": "Espressif Inc. (IoT / Smart Device)",
-	"D8:32:14": "Espressif Inc. (IoT / Smart Device)",
 	"24:6F:28": "Espressif Inc. (IoT / Smart Device)",
 	"30:AE:A4": "Espressif Inc. (IoT / Smart Device)",
 	"84:F3:EB": "Espressif Inc. (IoT / Smart Device)",
-	"00:1A:7D": "Sony Interactive Entertainment",
-	"08:00:27": "Oracle VirtualBox",
 	"00:0E:58": "Sonos, Inc.",
 	"5C:AA:FD": "Sonos, Inc.",
 	"94:9F:3E": "Sonos, Inc.",
 	"B8:E9:37": "Sonos, Inc.",
 	"00:17:88": "Philips Lighting (Hue)",
 	"EC:B5:FA": "Philips Lighting (Hue)",
-	"00:50:B6": "Good Way Technology (Dell Hub)",
 	"18:66:DA": "Dell Inc.",
 	"50:9A:4C": "Dell Inc.",
-	"B4:2E:99": "Intel Corporation",
-	"E8:D8:D1": "Intel Corporation",
 	"70:85:C2": "ASRock Incorporation",
 	"00:E0:4C": "Realtek Semiconductor",
-	"80:6D:97": "Realtek Semiconductor",
-	"54:E1:AD": "Google Nest / Chromecast",
-	"D8:6C:63": "Google Nest / Chromecast",
 	"40:B4:CD": "Amazon Technologies (Echo/Ring)",
 	"68:37:E9": "Amazon Technologies (Echo/Ring)",
-	"D0:52:A8": "Roku, Inc.",
 	"B0:EE:7B": "Roku, Inc.",
-	"60:A4:4C": "Tuya Smart Inc. (IoT)",
-	"D4:D2:D6": "Tuya Smart Inc. (IoT)",
-	"CC:50:E3": "Shelly / Allterco Robotics",
-	"3C:61:05": "Shelly / Allterco Robotics",
 	"00:1F:D0": "GIGA-BYTE TECHNOLOGY",
-	"E0:D5:5E": "ASUSTek Computer Inc.",
 	"00:25:90": "Supermicro Computer, Inc.",
 	"0C:C4:7A": "Supermicro Computer, Inc.",
 	// Enterprise Firewalls & Security Appliances
@@ -399,54 +398,71 @@ var ouiVendorTable = map[string]string{
 	"08:5B:0E": "Fortinet, Inc. (FortiGate)",
 	"00:65:B2": "Fortinet, Inc. (FortiGate)",
 	"00:1B:17": "Palo Alto Networks",
-	"00:30:48": "Palo Alto Networks",
 	"08:66:1F": "Palo Alto Networks",
-	"D4:F5:27": "Palo Alto Networks",
 	"00:06:B1": "SonicWall Inc.",
 	"00:17:C5": "SonicWall Inc.",
 	"18:B1:69": "SonicWall Inc.",
 	"2C:B8:ED": "SonicWall Inc.",
 	"00:90:7F": "WatchGuard Technologies",
-	"00:15:35": "WatchGuard Technologies",
-	"00:26:08": "WatchGuard Technologies",
 	"00:1A:8C": "Sophos Ltd",
 	"7C:5A:1C": "Sophos Ltd",
 	"00:1C:7F": "Check Point Software Technologies",
-	"00:90:FB": "Check Point Software Technologies",
-	"00:08:A2": "Netgate (pfSense Hardware)",
 	// Enterprise Storage & SAN
-	"00:08:9B": "QNAP Systems, Inc.",
 	"24:5E:BE": "QNAP Systems, Inc.",
 	"00:A0:98": "NetApp, Inc.",
 	"00:A0:B8": "NetApp, Inc.",
 	"00:60:48": "Dell EMC Storage",
-	"00:01:E6": "Dell EMC Storage",
 	// Hypervisors, Clustering & Enterprise Switching
 	"50:6B:8D": "Nutanix, Inc.",
 	"00:19:E2": "Juniper Networks",
 	"00:24:DC": "Juniper Networks",
 	"00:1C:73": "Arista Networks",
 	"28:99:3A": "Arista Networks",
-	"00:24:A5": "HPE / Aruba Networks",
-	"00:0B:86": "HPE / Aruba Networks",
-	"D4:85:64": "HPE iLO Remote Management",
-	"3C:A8:2A": "HPE ProLiant Server",
-	"00:09:6B": "Lenovo Enterprise Server",
-	"40:F2:E9": "Lenovo Enterprise Server",
-	"E4:1F:13": "IBM / Lenovo System x",
 }
 
-// LookupVendor returns the hardware manufacturer for a given MAC address
+// VendorUnknown is the answer when no assignment covers the address.
+const VendorUnknown = "Generic / Unassigned Hardware"
+
+// VendorRandomised is the answer for an address the device invented for
+// itself rather than drew from an assigned block. Phones and laptops
+// randomise per network by default, so this is the ordinary reason a MAC
+// matches nothing - it is a real answer, not a failure to find one.
+const VendorRandomised = "Randomised MAC (locally administered)"
+
+// VendorPrivate is IEEE's placeholder for a registrant who asked not to be
+// listed. The block is assigned; the holder is withheld.
+const VendorPrivate = "Unlisted registrant (IEEE private)"
+
+// LookupVendor returns the hardware manufacturer for a given MAC address, or
+// a description of why there is no manufacturer to name.
 func LookupVendor(mac string) string {
-	cleanMAC := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, "-", ":"), ".", ":"))
-	parts := strings.Split(cleanMAC, ":")
-	if len(parts) >= 3 {
-		prefix := parts[0] + ":" + parts[1] + ":" + parts[2]
-		if vendor, ok := ouiVendorTable[prefix]; ok {
-			return vendor
-		}
+	name, _ := LookupVendorDetail(mac)
+	return name
+}
+
+// LookupVendorDetail returns the vendor string and whether it actually names
+// a manufacturer. Callers that build device identity from the vendor need the
+// second value: a randomised or withheld address yields a true and useful
+// description that identifies nobody, and reading one as a manufacturer
+// produces confident nonsense like "Randomised MAC device".
+func LookupVendorDetail(mac string) (string, bool) {
+	if vendor, ok := ouiVendorTable[macPrefix(mac)]; ok {
+		return vendor, true
 	}
-	return "Generic / Unassigned Hardware"
+	hex := macHex(mac)
+	if hex == "" {
+		return VendorUnknown, false
+	}
+	if org, ok := registryVendor(hex); ok {
+		if strings.EqualFold(org, "private") {
+			return VendorPrivate, false
+		}
+		return org, true
+	}
+	if isLocallyAdministered(hex) {
+		return VendorRandomised, false
+	}
+	return VendorUnknown, false
 }
 
 // hypervisorOUIs are the prefixes a virtual machine wears regardless of what it
@@ -509,12 +525,16 @@ type sigScore struct {
 // winner only if it is both good enough and clearly ahead.
 func matchSignature(mac string, ttl int, openPorts []int, banners []string, appDeltaMs float64, customSigs []DeviceSignature) (string, float64, string, []string) {
 	allSigs := append(append([]DeviceSignature{}, customSigs...), defaultSignatures...)
-	vendor := LookupVendor(mac)
+	vendor, vendorKnown := LookupVendorDetail(mac)
 	prefix := macPrefix(mac)
 
 	scored := make([]sigScore, 0, len(allSigs))
 	for _, sig := range allSigs {
-		s := scoreSignature(sig, prefix, vendor, ttl, openPorts, banners, appDeltaMs)
+		scoreVendor := ""
+		if vendorKnown {
+			scoreVendor = vendor
+		}
+		s := scoreSignature(sig, prefix, scoreVendor, ttl, openPorts, banners, appDeltaMs)
 		scored = append(scored, s)
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].ratio > scored[j].ratio })
@@ -532,7 +552,7 @@ func matchSignature(mac string, ttl int, openPorts []int, banners []string, appD
 			return "Apple device", 0.62, "Workstation", append(why, "OUI "+prefix+" is registered to "+vendor)
 		case strings.Contains(low, "nvidia"):
 			return "NVIDIA device", 0.62, "Smart TV / Media Streamer", append(why, "OUI "+prefix+" is registered to "+vendor)
-		case vendor != "" && vendor != "Generic / Unassigned Hardware":
+		case vendorKnown:
 			return vendor + " device", 0.55, "Unclassified", append(why, "OUI "+prefix+" is registered to "+vendor)
 		}
 		return "Unidentified host", 0.25, "Unclassified", why

@@ -317,14 +317,18 @@ func TestExpandedOUIVendorLookup(t *testing.T) {
 		mac        string
 		wantVendor string
 	}{
-		{"CC:50:E3:11:22:33", "Shelly / Allterco Robotics"},
 		{"00:17:88:AA:BB:CC", "Philips Lighting (Hue)"},
 		{"00:0E:58:12:34:56", "Sonos, Inc."},
-		{"D0:52:A8:99:88:77", "Roku, Inc."},
-		{"60:A4:4C:44:55:66", "Tuya Smart Inc. (IoT)"},
 		{"E0:63:DA:01:02:03", "Ubiquiti Networks"},
 		{"18:66:DA:77:88:99", "Dell Inc."},
-		{"B4:2E:99:11:33:55", "Intel Corporation"},
+		// These four were asserted as Shelly, Roku, Tuya and Intel by a
+		// hand-written table. IEEE records the blocks against the companies
+		// below, and Roku's own assignments are elsewhere (00:0D:4B,
+		// 08:05:81, B0:EE:7B among them). The test was locking in the error.
+		{"CC:50:E3:11:22:33", "Espressif Inc."},
+		{"D0:52:A8:99:88:77", "Physical Graph Corporation"},
+		{"60:A4:4C:44:55:66", "ASUSTek COMPUTER INC."},
+		{"B4:2E:99:11:33:55", "GIGA-BYTE TECHNOLOGY CO.,LTD."},
 	}
 
 	for _, tc := range tests {
