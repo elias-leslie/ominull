@@ -26,17 +26,21 @@ type RetentionPolicy struct {
 	AuditLogs      time.Duration
 	QuarantineLift time.Duration
 	RouterFlows    time.Duration
+	// A name-to-address binding goes stale quickly on a CDN, so the mapping is
+	// kept for less time than the flows it exists to explain.
+	DNSResolutions time.Duration
 }
 
 // DefaultRetention is what a hub uses unless an operator says otherwise.
 func DefaultRetention() RetentionPolicy {
 	return RetentionPolicy{
-		Events:        14 * 24 * time.Hour,
-		CommProfiles:  14 * 24 * time.Hour,
-		AnomalyAlerts: 30 * 24 * time.Hour,
-		Alerts:        30 * 24 * time.Hour,
-		AuditLogs:     365 * 24 * time.Hour,
-		RouterFlows:   30 * 24 * time.Hour,
+		Events:         14 * 24 * time.Hour,
+		CommProfiles:   14 * 24 * time.Hour,
+		AnomalyAlerts:  30 * 24 * time.Hour,
+		Alerts:         30 * 24 * time.Hour,
+		AuditLogs:      365 * 24 * time.Hour,
+		RouterFlows:    30 * 24 * time.Hour,
+		DNSResolutions: 14 * 24 * time.Hour,
 	}
 }
 
@@ -107,6 +111,14 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 			return removed, fmt.Errorf("pruning router_flows: %w", err)
 		}
 		removed["router_flows"] = n
+	}
+
+	if policy.DNSResolutions > 0 {
+		n, err := s.pruneDNSResolutionsLocked(policy.DNSResolutions)
+		if err != nil {
+			return removed, fmt.Errorf("pruning dns_resolutions: %w", err)
+		}
+		removed["dns_resolutions"] = n
 	}
 
 	return removed, nil

@@ -81,6 +81,7 @@ func TestRouterTelemetryReplyCarriesNoInstructions(t *testing.T) {
 		"leases_accepted": true, "leases_rejected": true,
 		"flows_accepted": true, "flows_rejected": true,
 		"dns_accepted": true, "dns_rejected": true,
+		"resolutions_accepted": true, "resolutions_rejected": true,
 		"assets_touched": true,
 	}
 	for k := range raw {
@@ -252,5 +253,59 @@ func TestRouterFlowsFilterBySource(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	if out.Count != 1 || len(out.Flows) != 1 || out.Flows[0].SrcIP != "10.0.0.36" {
 		t.Fatalf("the src filter did not hold: %+v", out)
+	}
+}
+
+// The payoff: a talker's destinations come back as names, not bare addresses.
+func TestRouterTalkersNameDestinations(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+
+	if _, _, err := store.RecordRouterFlows("gw", []storage.RouterFlow{
+		{SrcIP: "10.0.0.36", DstIP: "10.9.9.9", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
+	}, now); err != nil {
+		t.Fatalf("seeding flow: %v", err)
+	}
+	if _, _, err := store.RecordDNSResolutions([]storage.DNSResolution{
+		{Domain: "firmware.nest.com", IP: "10.9.9.9", At: now},
+	}, now); err != nil {
+		t.Fatalf("seeding resolution: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/router/talkers?hours=24", nil)
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.authMiddleware(srv.handleRouterTalkers).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("talkers returned %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "firmware.nest.com") {
+		t.Fatalf("the destination was not named: %s", w.Body.String())
+	}
+}
+
+// Resolutions fold independently, like every other section.
+func TestRouterTelemetryIngestsResolutions(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	w := postTelemetry(t, srv, `{
+		"router_id":"gw",
+		"resolutions":[
+			{"domain":"firmware.nest.com","ip":"10.9.9.9"},
+			{"domain":"NXDOMAIN","ip":"10.9.9.8"}
+		]
+	}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest returned %d: %s", w.Code, w.Body.String())
+	}
+	var out storage.RouterIngestResult
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out.ResolutionsAccepted != 1 || out.ResolutionsRejected != 1 {
+		t.Fatalf("expected one kept and one refused, got %+v", out)
+	}
+	if store.NameForIP("10.9.9.9") != "firmware.nest.com" {
+		t.Fatalf("the resolution did not reach the store")
 	}
 }

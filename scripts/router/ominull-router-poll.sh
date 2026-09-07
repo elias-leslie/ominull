@@ -181,7 +181,10 @@ if [ "$DNS_LOG" = "1" ]; then
 	# sent is remembered, and only what follows it is new. If that line is no
 	# longer in the buffer the buffer rolled, and everything present is new.
 	DNS_STATE=/tmp/ominull-router-dns.last
-	all=$(logread -e dnsmasq 2>/dev/null | grep -F 'query[')
+	# Queries say who asked for what; replies say which address the name
+	# resolved to. Both share one marker so the dedup stays a single position
+	# in one stream rather than two that can drift apart.
+	all=$(logread -e dnsmasq 2>/dev/null | grep -E 'query\[| reply ')
 	if [ -n "$all" ] && [ -r "$DNS_STATE" ]; then
 		last=$(cat "$DNS_STATE" 2>/dev/null)
 		if printf '%s\n' "$all" | grep -qxF "$last"; then
@@ -214,8 +217,31 @@ if [ "$DNS_LOG" = "1" ]; then
 		done
 		printf ']'
 	} > "$WORK/dns.json"
+
+	# "reply <name> is <address>". dnsmasq puts NXDOMAIN, NODATA-IPv6 and a
+	# CNAME target in the same position, so only values that look like an
+	# address are kept; the hub validates them properly on arrival.
+	{
+		printf '['
+		first=1
+		printf '%s\n' "$all" | grep -F ' reply ' | while read -r line; do
+			name=$(expr "$line" : '.* reply \([^ ]*\) is ')
+			addr=$(expr "$line" : '.* is \([0-9a-fA-F.:]*\)$')
+			[ -n "$name" ] && [ -n "$addr" ] || continue
+			case "$addr" in
+				*[0-9a-fA-F]*) ;;
+				*) continue ;;
+			esac
+			[ $first -eq 1 ] || printf ','
+			first=0
+			printf '{"domain":"%s","ip":"%s"}' \
+				"$(printf '%s' "$name" | json_escape)" "$addr"
+		done
+		printf ']'
+	} > "$WORK/resolutions.json"
 else
 	printf '[]' > "$WORK/dns.json"
+	printf '[]' > "$WORK/resolutions.json"
 fi
 
 # ---- post ------------------------------------------------------------------
@@ -228,6 +254,8 @@ fi
 	cat "$WORK/flows.json"
 	printf ',"dns":'
 	cat "$WORK/dns.json"
+	printf ',"resolutions":'
+	cat "$WORK/resolutions.json"
 	printf '}'
 } > "$WORK/body.json"
 

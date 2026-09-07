@@ -746,6 +746,9 @@ func (s *Store) initSchema() error {
 	if err := s.initDNSSchema(); err != nil {
 		return err
 	}
+	if err := s.initDNSResolutionSchema(); err != nil {
+		return err
+	}
 	if err := s.initNetworkAttributionSchema(); err != nil {
 		return err
 	}

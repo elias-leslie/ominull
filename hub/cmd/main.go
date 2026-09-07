@@ -33,7 +33,7 @@ const banner = `
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
 const (
-	defaultAgentVersion = "1.8.21"
+	defaultAgentVersion = "1.8.22"
 	defaultDNSListen    = "disabled"
 )
 

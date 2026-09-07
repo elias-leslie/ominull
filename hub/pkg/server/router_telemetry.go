@@ -38,11 +38,12 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		RouterID string                `json:"router_id"`
-		Label    string                `json:"label"`
-		Leases   []storage.RouterLease `json:"leases"`
-		Flows    []storage.RouterFlow  `json:"flows"`
-		DNS      []routerDNSLine       `json:"dns"`
+		RouterID string                  `json:"router_id"`
+		Label    string                  `json:"label"`
+		Leases   []storage.RouterLease   `json:"leases"`
+		Flows    []storage.RouterFlow    `json:"flows"`
+		DNS      []routerDNSLine         `json:"dns"`
+		Resolved []storage.DNSResolution `json:"resolutions"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, routerIngestLimit)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "unreadable telemetry: "+err.Error())
@@ -82,11 +83,19 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 	if len(req.DNS) > 0 {
 		out.DNSAccepted, out.DNSRejected = s.recordRouterDNS(routerID, req.DNS, now)
 	}
+	if len(req.Resolved) > 0 {
+		a, rj, err := s.store.RecordDNSResolutions(req.Resolved, now)
+		if err != nil {
+			log.Printf("[!] router %s: resolution ingest failed: %v", routerID, err)
+		}
+		out.ResolutionsAccepted, out.ResolutionsRejected = a, rj
+	}
 
-	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d",
+	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d names %d/%d",
 		out.LeasesAccepted, out.LeasesAccepted+out.LeasesRejected,
 		out.FlowsAccepted, out.FlowsAccepted+out.FlowsRejected,
-		out.DNSAccepted, out.DNSAccepted+out.DNSRejected)
+		out.DNSAccepted, out.DNSAccepted+out.DNSRejected,
+		out.ResolutionsAccepted, out.ResolutionsAccepted+out.ResolutionsRejected)
 	if err := s.store.TouchRouterSource(routerID, req.Label, summary, now); err != nil {
 		log.Printf("[!] router %s: could not record the source: %v", routerID, err)
 	}
@@ -219,13 +228,30 @@ func (s *Server) handleRouterTalkers(w http.ResponseWriter, r *http.Request) {
 				byIP[a.IP] = a
 			}
 		}
+		// Name the destinations too. "10.9.9.9" is not an answer; the resolver
+		// already told us the name it was looked up under, and that is the
+		// thing an analyst can act on.
+		var everyDst []string
+		for _, t := range talkers {
+			everyDst = append(everyDst, t.Destinations...)
+		}
+		dstNames, _ := s.store.NamesForIPs(everyDst)
+
 		enriched := make([]map[string]interface{}, 0, len(talkers))
 		for _, t := range talkers {
+			named := make([]string, 0, len(t.Destinations))
+			for _, d := range t.Destinations {
+				if n := dstNames[d]; n != "" {
+					named = append(named, n+" ("+d+")")
+					continue
+				}
+				named = append(named, d)
+			}
 			row := map[string]interface{}{
 				"ip":            t.IP,
 				"conversations": t.Conversations,
 				"bytes":         t.Bytes,
-				"destinations":  t.Destinations,
+				"destinations":  named,
 			}
 			if a, ok := byIP[t.IP]; ok {
 				row["hostname"] = a.Hostname

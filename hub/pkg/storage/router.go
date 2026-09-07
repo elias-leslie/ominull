@@ -97,7 +97,12 @@ type RouterIngestResult struct {
 	FlowsRejected  int `json:"flows_rejected"`
 	DNSAccepted    int `json:"dns_accepted"`
 	DNSRejected    int `json:"dns_rejected"`
-	AssetsTouched  int `json:"assets_touched"`
+	// Resolutions are the name-to-address answers the resolver gave. They are
+	// what lets a finding say "firmware.nest.com" instead of quoting an edge
+	// address that will be a different one tomorrow.
+	ResolutionsAccepted int `json:"resolutions_accepted"`
+	ResolutionsRejected int `json:"resolutions_rejected"`
+	AssetsTouched       int `json:"assets_touched"`
 }
 
 func (s *Store) initRouterSchema() error {
