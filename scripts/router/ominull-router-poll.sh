@@ -59,6 +59,7 @@ EOF
 	echo $(( (_a << 24) + (_b << 16) + (_c << 8) + _d ))
 }
 
+LAN_SELF=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
 LAN_NET=''
 LAN_MASKINT=''
 if [ -n "${LAN_CIDR:-}" ]; then
@@ -181,6 +182,13 @@ if [ "$DNS_LOG" = "1" ]; then
 			qtype=$(expr "$line" : '.*query\[\([A-Z0-9]*\)\]')
 			name=$(expr "$line" : '.*query\[[A-Z0-9]*\] \([^ ]*\) from')
 			client=$(expr "$line" : '.*from \([0-9.]*\)')
+			# A lookup made by the gateway itself arrives as 127.0.0.1, which
+			# is not an asset anybody can act on. Attribute it to the gateway's
+			# own address, so a router phoning somewhere unexpected is visible
+			# as the gateway doing it.
+			case "$client" in
+				127.*) client=${LAN_SELF:-$client} ;;
+			esac
 			[ -n "$name" ] && [ -n "$client" ] || continue
 			[ $first -eq 1 ] || printf ','
 			first=0
