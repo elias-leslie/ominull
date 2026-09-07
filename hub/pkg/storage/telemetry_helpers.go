@@ -1,9 +1,10 @@
 package storage
 
 import (
-	"strconv"
-	"strings"
+	"fmt"
 	"time"
+
+	"ominull/hub/pkg/netaddr"
 )
 
 // scanTime handles the values returned by SQLite aggregate functions over a
@@ -40,32 +41,30 @@ func parseStoredTime(value string) time.Time {
 
 func protoName(proto int) string {
 	switch proto {
+	case 6:
+		return "TCP"
 	case 17:
 		return "UDP"
 	case 1:
 		return "ICMP"
+	case 58:
+		return "ICMPv6"
 	default:
-		return "TCP"
+		return fmt.Sprintf("IP/%d", proto)
 	}
 }
 
-// IsPrivateIPv4 reports RFC1918 address space for topology grouping. It does
-// not identify or infer an endpoint; unmanaged addresses remain flow-only
-// nodes until an independent scanner or agent supplies identity.
+// IsPrivateIPv4 is the compatibility name for non-public address classification.
+// It supports both families and does not prove asset identity or membership.
 func IsPrivateIPv4(ip string) bool {
-	parts := strings.Split(ip, ".")
-	if len(parts) != 4 {
-		return false
+	return netaddr.IsLocal(ip)
+}
+
+// canonicalAddress normalizes valid address fields without inventing a value
+// for absent or legacy non-address fields. Ingress validation remains separate.
+func canonicalAddress(raw string) string {
+	if a, err := netaddr.Parse(raw); err == nil {
+		return a.String()
 	}
-	values := make([]int, 4)
-	for i, part := range parts {
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 || value > 255 {
-			return false
-		}
-		values[i] = value
-	}
-	return values[0] == 10 ||
-		(values[0] == 172 && values[1] >= 16 && values[1] <= 31) ||
-		(values[0] == 192 && values[1] == 168)
+	return raw
 }

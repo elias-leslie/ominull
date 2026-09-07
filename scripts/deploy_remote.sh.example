@@ -31,9 +31,14 @@ for file in "${required[@]}"; do
     [ -f "${DIST_DIR}/${file}" ] || { echo "[-] Missing dist/${file}; build and sign first." >&2; exit 1; }
 done
 
-remote_tmp="/tmp/ominull-release-${VERSION}"
-ssh "${PROXMOX_HOST}" "rm -rf -- '${remote_tmp}' && mkdir -m 0700 '${remote_tmp}'"
-cleanup() { ssh "${PROXMOX_HOST}" "rm -rf -- '${remote_tmp}'" >/dev/null 2>&1 || true; }
+remote_tmp="$(ssh "${PROXMOX_HOST}" "mktemp -d /tmp/ominull-release-${VERSION}.XXXXXX")"
+cleanup() {
+    local file
+    for file in "${required[@]}"; do
+        ssh "${PROXMOX_HOST}" "rm -f -- '${remote_tmp}/${file}'" >/dev/null 2>&1 || true
+    done
+    ssh "${PROXMOX_HOST}" "rmdir -- '${remote_tmp}'" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 echo "[*] Staging signed hub package and retained artifacts in LXC ${LXC_VMID}."
@@ -54,12 +59,13 @@ for file in "${required[@]}"; do
 done
 ssh "${PROXMOX_HOST}" "pct exec '${LXC_VMID}' -- systemctl restart ominull-hub.service"
 
-status_cfg="$(mktemp)"
-trap 'rm -f "${status_cfg}"; cleanup' EXIT
-chmod 0600 "${status_cfg}"
-printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY:?set OMINULL_ADMIN_KEY}" > "${status_cfg}"
+: "${OMINULL_ADMIN_KEY:?set OMINULL_ADMIN_KEY}"
+hdr() {
+    printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY}"
+}
 for attempt in 1 2 3 4 5; do
-    if status="$(curl -fsS --config "${status_cfg}" "http://${LXC_IP}:9999/api/v1/hierarchy")"; then
+    exec 3< <(hdr)
+    if status="$(curl -fsS -K /dev/fd/3 "http://${LXC_IP}:9999/api/v1/hierarchy")"; then
         printf '%s' "${status}" | jq -e . >/dev/null
         echo "[+] Hub package v${VERSION} installed and live."
         exit 0

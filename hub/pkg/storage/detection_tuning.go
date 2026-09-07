@@ -3,11 +3,17 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
+
+	"ominull/hub/pkg/netaddr"
 )
+
+var ErrInvalidDetectionTuning = errors.New("invalid detection tuning")
 
 // DetectionTuning is every number the behavioural detectors used to have
 // compiled into them. It is one row, edited in the console, because the answer
@@ -82,6 +88,9 @@ type DetectionTuning struct {
 	// QuietPairs are one-off exceptions, written "process@owner" - the shape
 	// the console's Expected button and the learning proposals produce.
 	QuietPairs []string `json:"quiet_pairs"`
+
+	// ContainerCIDRs are explicit lateral-movement exemptions, never guessed from private address space.
+	ContainerCIDRs []string `json:"container_cidrs"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
@@ -229,6 +238,23 @@ func (s *Store) GetDetectionTuning() DetectionTuning {
 // without saying so.
 func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuning, error) {
 	t = t.normalised()
+	for i, raw := range t.ContainerCIDRs {
+		p, err := netip.ParsePrefix(raw)
+		valid := false
+		if err == nil && !p.Addr().Is4In6() {
+			for _, space := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"} {
+				private := netip.MustParsePrefix(space)
+				if p.Bits() >= private.Bits() && private.Contains(p.Masked().Addr()) {
+					valid = true
+					break
+				}
+			}
+		}
+		if !valid {
+			return t, fmt.Errorf("%w: container network %q must lie wholly inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, raw)
+		}
+		t.ContainerCIDRs[i] = p.Masked().String()
+	}
 	blob, err := json.Marshal(t)
 	if err != nil {
 		return t, err
@@ -293,6 +319,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.QuietOrgs = tidyList(t.QuietOrgs)
 	t.QuietClients = tidyList(t.QuietClients)
 	t.QuietPairs = tidyPairs(t.QuietPairs)
+	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
 	return t
 }
 
@@ -452,4 +479,19 @@ func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
 // OffHoursLabel renders the window the way it is shown next to an alert.
 func (t DetectionTuning) OffHoursLabel() string {
 	return fmt.Sprintf("%02d:00-%02d:00 %s", t.OffHoursStart, t.OffHoursEnd, t.Location())
+}
+
+// IsContainerAddress matches only operator-configured container networks.
+func (t DetectionTuning) IsContainerAddress(raw string) bool {
+	a, err := netaddr.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for _, cidr := range t.ContainerCIDRs {
+		p, err := netip.ParsePrefix(cidr)
+		if err == nil && p.Contains(a.WithZone("")) {
+			return true
+		}
+	}
+	return false
 }

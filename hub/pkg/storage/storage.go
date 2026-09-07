@@ -74,6 +74,10 @@ type Endpoint struct {
 }
 
 type Event struct {
+	// ThreatMatch is trusted hub enrichment, never accepted from agent JSON.
+	// The detector persists this evidence on its finding, independently of the
+	// endpoint's reported firewall action.
+	ThreatMatch             *IOC       `json:"-"`
 	ID                      int64      `json:"id"`
 	TenantID                string     `json:"tenant_id"`
 	EndpointID              string     `json:"endpoint_id"`
@@ -238,19 +242,23 @@ type QuarantinedPeer struct {
 }
 
 type TopologyNode struct {
-	ID         string   `json:"id"`
-	Label      string   `json:"label"`
-	Type       string   `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"
-	IP         string   `json:"ip"`
-	OS         string   `json:"os"`
-	Role       string   `json:"role"`
-	Risk       string   `json:"risk"` // "CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"
-	IsIsolated bool     `json:"is_isolated"`
-	Group      string   `json:"group"`
-	AssetID    string   `json:"asset_id,omitempty"`
-	Evidence   []string `json:"evidence"` // agent / scan / operator
-	Confidence float64  `json:"confidence,omitempty"`
-	Rationale  string   `json:"rationale,omitempty"`
+	AddressScope string   `json:"address_scope"`
+	EstateMember bool     `json:"estate_member"`
+	NetworkID    string   `json:"network_id"`
+	NetworkLabel string   `json:"network_label"`
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Type         string   `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"
+	IP           string   `json:"ip"`
+	OS           string   `json:"os"`
+	Role         string   `json:"role"`
+	Risk         string   `json:"risk"` // "CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"
+	IsIsolated   bool     `json:"is_isolated"`
+	Group        string   `json:"group"`
+	AssetID      string   `json:"asset_id,omitempty"`
+	Evidence     []string `json:"evidence"` // agent / scan / operator
+	Confidence   float64  `json:"confidence,omitempty"`
+	Rationale    string   `json:"rationale,omitempty"`
 	// Quiet marks a known asset that said nothing inside the window. Absence
 	// is information on a security graph, so it is dimmed, never omitted.
 	Quiet bool `json:"quiet"`
@@ -292,6 +300,7 @@ type TopologyMetrics struct {
 	TotalNodes          int `json:"total_nodes"`
 	TotalEdges          int `json:"total_edges"`
 	AnomalousEdgeCount  int `json:"anomalous_edge_count"`
+	BlockedEdgeCount    int `json:"blocked_edge_count"`
 	ManagedNodesCount   int `json:"managed_nodes_count"`
 	UnmanagedNodesCount int `json:"unmanaged_nodes_count"`
 	QuietNodesCount     int `json:"quiet_nodes_count"`
@@ -1052,6 +1061,7 @@ func (s *Store) ListLocations(tenantID string) ([]Location, error) {
 }
 
 func (s *Store) UpsertEndpoint(ep Endpoint) error {
+	ep.IP = canonicalAddress(ep.IP)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1622,6 +1632,8 @@ func (s *Store) GetHierarchy(tenantID string) ([]HierarchyClient, error) {
 }
 
 func (s *Store) InsertEvent(ev Event) error {
+	ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
+	ev.Timestamp = ev.Timestamp.UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1669,6 +1681,8 @@ func (s *Store) InsertEventsBatch(events []Event) error {
 	defer stmt.Close()
 
 	for _, ev := range events {
+		ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
+		ev.Timestamp = ev.Timestamp.UTC()
 		if ev.TenantID == "" {
 			ev.TenantID = "default"
 		}
@@ -2089,7 +2103,7 @@ const (
 	HeldAny = "all"
 )
 
-func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity, held string) ([]AnomalyAlert, int64, error) {
+func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity, held string, search ...string) ([]AnomalyAlert, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -2131,6 +2145,9 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 	}
 
 	var total int64
+	searchSQL, searchArgs := anomalySearchSQL(search)
+	whereClause += searchSQL
+	args = append(args, searchArgs...)
 	countQuery := "SELECT COUNT(*) FROM anomaly_alerts" + whereClause
 	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -2191,7 +2208,7 @@ type AnomalyAlertGroup struct {
 // Every matching host is returned - the set is bounded by the size of the
 // fleet, and truncating it here would make the summary disagree with the total
 // again, this time silently.
-func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyType, severity, held string) ([]AnomalyAlertGroup, error) {
+func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyType, severity, held string, search ...string) ([]AnomalyAlertGroup, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -2222,6 +2239,10 @@ func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyT
 		where += " AND severity = ?"
 		args = append(args, severity)
 	}
+
+	searchSQL, searchArgs := anomalySearchSQL(search)
+	where += searchSQL
+	args = append(args, searchArgs...)
 
 	// One pass at host x type x severity granularity. That is a handful of
 	// rows per host, so the whole fleet summary costs a single scan rather
@@ -2852,14 +2873,12 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 	const baselineDays = 7
 	baselineFrom := liveFrom.Add(-baselineDays * 24 * time.Hour)
 
-	// Query bandwidth_buckets by hour bucket
+	// Include observations within partial boundary hours, not rounded hourly totals.
 	hourly := func(from, to time.Time) (map[int]int64, error) {
 		out := make(map[int]int64)
-		fromStr := from.UTC().Format("2006-01-02T15:04:05Z")
-		toStr := to.UTC().Format("2006-01-02T15:04:05Z")
-		query := `SELECT CAST(strftime('%H', hour_bucket) AS INTEGER) AS hr, COALESCE(SUM(flow_count), 0)
-			FROM bandwidth_buckets WHERE hour_bucket >= ? AND hour_bucket < ?`
-		args := []interface{}{fromStr, toStr}
+		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
+   FROM events WHERE timestamp >= ? AND timestamp < ?`
+		args := []interface{}{from.UTC(), to.UTC()}
 		if tenantID != "" {
 			query += " AND tenant_id = ?"
 			args = append(args, tenantID)
@@ -3112,6 +3131,10 @@ func (s *Store) GetEndpoints() []Endpoint {
 // every node arrives with its evidence and its role attached, and an asset
 // that said nothing in the window is drawn quiet rather than dropped.
 func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error) {
+	networks, err := s.TopologyNetworks()
+	if err != nil {
+		return TopologyData{}, err
+	}
 	var data TopologyData
 	data.Nodes = make([]TopologyNode, 0)
 	data.Edges = make([]TopologyEdge, 0)
@@ -3176,9 +3199,6 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 			continue
 		}
 		risk := "CLEAN"
-		if ep.IsIsolated {
-			risk = "CRITICAL"
-		}
 		nodeMap[ep.IP] = &TopologyNode{
 			ID: ep.IP, Label: ep.Hostname, Type: "managed", IP: ep.IP, OS: ep.OS,
 			Role: ep.RoleTag, Risk: risk, IsIsolated: ep.IsIsolated, Group: ep.RoleTag,
@@ -3187,14 +3207,13 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	}
 
 	cutoff := time.Now().UTC().Add(-timeWindow)
-	startDay := cutoff.Format("2006-01-02")
 	rows, err := s.db.Query(
-		`SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(total_bytes), 0), COALESCE(SUM(flow_count), 0),
-		        COALESCE(SUM(measured_flows), 0), MAX(last_seen_at)
-		 FROM topology_edges_cube
-		 WHERE day_bucket >= ? AND last_seen_at >= ?
+		`SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
+		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
+		 FROM events
+		 WHERE timestamp >= ? AND timestamp <= ?
 		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
-		startDay, cutoff,
+		cutoff, time.Now().UTC(),
 	)
 	if err != nil {
 		return data, err
@@ -3280,6 +3299,7 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 	unmanagedCount := 0
 	quietCount := 0
 	for ip, n := range nodeMap {
+		describeTopologyNetwork(n, networks)
 		n.Quiet = !spoke[ip]
 		if n.Quiet {
 			quietCount++
@@ -3318,8 +3338,11 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 			e.Protocol = ports[0].Protocol
 		}
 		data.Edges = append(data.Edges, *e)
-		if e.Verdict != "clean" {
+		if e.Verdict == "anomalous" {
 			anomEdges++
+		}
+		if e.Verdict == "blocked" {
+			data.Metrics.BlockedEdgeCount++
 		}
 	}
 	sort.SliceStable(data.Edges, func(i, j int) bool { return data.Edges[i].ID < data.Edges[j].ID })
@@ -3363,9 +3386,6 @@ func assetNode(a Asset, endpointByID map[string]Endpoint, isolatedByIP map[strin
 	if risk == "" {
 		risk = "MEDIUM"
 	}
-	if isolated {
-		risk = "CRITICAL"
-	}
 
 	role := a.Role
 	if role == "" {
@@ -3374,7 +3394,7 @@ func assetNode(a Asset, endpointByID map[string]Endpoint, isolatedByIP map[strin
 	if role == "" {
 		role = "unknown"
 	}
-	if isGatewayRole(role) || strings.HasSuffix(a.IP, ".1") {
+	if isGatewayRole(role) {
 		nType = "gateway"
 	}
 
@@ -3410,11 +3430,6 @@ func ensureFlowNode(nodeMap map[string]*TopologyNode, ip, action string, isTarge
 		nType = "cloud"
 		group = "External"
 		risk = "CLEAN"
-		if isTarget && action == "BLOCK" {
-			nType = "threat"
-			group = "Blocked destination"
-			risk = "CRITICAL"
-		}
 	}
 
 	nodeMap[ip] = &TopologyNode{
@@ -3646,4 +3661,18 @@ func (s *Store) EnsureBootstrapAdmin(email string) error {
 		return nil
 	}
 	return s.UpsertOperator(email, "admin", "bootstrap")
+}
+
+// anomalySearchSQL shares literal, case-insensitive search between pages and summaries.
+func anomalySearchSQL(search []string) (string, []interface{}) {
+	if len(search) == 0 || strings.TrimSpace(search[0]) == "" {
+		return "", nil
+	}
+	var clauses []string
+	var args []interface{}
+	for _, field := range []string{"hostname", "endpoint_id", "process_path", "dst_ip", "title", "description", "anomaly_type"} {
+		clauses = append(clauses, "instr(lower(COALESCE("+field+", '')), ?) > 0")
+		args = append(args, strings.ToLower(strings.TrimSpace(search[0])))
+	}
+	return " AND (" + strings.Join(clauses, " OR ") + ")", args
 }

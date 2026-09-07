@@ -189,8 +189,8 @@ func TestRouterTalkersAreRankedAndNamed(t *testing.T) {
 		t.Fatalf("seeding lease: %v", err)
 	}
 	if _, _, err := store.RecordRouterFlows("gw", []storage.RouterFlow{
-		{SrcIP: "10.0.0.36", DstIP: "10.9.9.1", DstPort: 443, Protocol: "tcp", OrigBytes: 10},
-		{SrcIP: "10.0.0.99", DstIP: "10.9.9.2", DstPort: 443, Protocol: "tcp", OrigBytes: 900000},
+		{SrcIP: "10.0.0.36", DstIP: "198.51.100.1", DstPort: 443, Protocol: "tcp", OrigBytes: 10},
+		{SrcIP: "10.0.0.99", DstIP: "198.51.100.2", DstPort: 443, Protocol: "tcp", OrigBytes: 900000},
 	}, now); err != nil {
 		t.Fatalf("seeding flows: %v", err)
 	}
@@ -264,12 +264,12 @@ func TestRouterTalkersNameDestinations(t *testing.T) {
 	now := time.Now().UTC()
 
 	if _, _, err := store.RecordRouterFlows("gw", []storage.RouterFlow{
-		{SrcIP: "10.0.0.36", DstIP: "10.9.9.9", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
+		{SrcIP: "10.0.0.36", DstIP: "198.51.100.9", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
 	}, now); err != nil {
 		t.Fatalf("seeding flow: %v", err)
 	}
 	if _, _, err := store.RecordDNSResolutions([]storage.DNSResolution{
-		{Domain: "firmware.nest.com", IP: "10.9.9.9", At: now},
+		{Domain: "firmware.nest.com", IP: "198.51.100.9", At: now},
 	}, now); err != nil {
 		t.Fatalf("seeding resolution: %v", err)
 	}

@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"ominull/hub/pkg/detector"
+	"ominull/hub/pkg/netaddr"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
 
 var errRetiredEndpoint = errors.New("endpoint is retired")
+var errInvalidTelemetryAddress = errors.New("invalid telemetry address")
 
 // ingestTelemetry is the hub's single authenticated telemetry seam. It keeps
 // request decoding in the HTTP handler and owns the ordered work after that:
@@ -30,10 +32,24 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		return nil, errRetiredEndpoint
 	}
 
+	if err := validateTelemetryAddresses(batch.Events); err != nil {
+		return nil, err
+	}
+	if err := validateTelemetryAddress(batch.IP, "endpoint IP"); err != nil {
+		return nil, err
+	}
+	for _, asset := range batch.DiscoveredAssets {
+		if err := validateTelemetryAddress(asset.IP, "discovered IP"); err != nil {
+			return nil, err
+		}
+	}
 	now := time.Now().UTC()
 	ip := requestRemoteIP(r)
 	if strings.TrimSpace(batch.IP) != "" {
 		ip = strings.TrimSpace(batch.IP)
+	}
+	if a, err := netaddr.Parse(ip); err == nil {
+		ip = a.String()
 	}
 	ep := storage.Endpoint{
 		ID:                       batch.EndpointID,
@@ -95,7 +111,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	}
 
 	for _, da := range batch.DiscoveredAssets {
-		if da.IP != "" && da.IP != "127.0.0.1" && da.IP != "::1" {
+		if da.IP != "" && !netaddr.IsLoopback(da.IP) {
 			_ = s.store.UpsertAssetFromScan(da.IP, da.MAC, da.Vendor, da.Hostname, "IoT/Network Device", "discovered", "CLEAN", 0.85, nil, now)
 		}
 	}
@@ -120,6 +136,13 @@ func normalizeTelemetryEvents(input []storage.Event, tenantID, endpointID string
 	events := make([]storage.Event, len(input))
 	copy(events, input)
 	for i := range events {
+		if a, err := netaddr.Parse(events[i].SrcIP); err == nil {
+			events[i].SrcIP = a.String()
+		}
+		if a, err := netaddr.Parse(events[i].DstIP); err == nil {
+			events[i].DstIP = a.String()
+		}
+		events[i].Timestamp = events[i].Timestamp.UTC()
 		events[i].TenantID = tenantID
 		events[i].EndpointID = endpointID
 		if events[i].Timestamp.IsZero() {
@@ -205,14 +228,14 @@ func applyThreatIntel(ti *threatintel.Manager, events []storage.Event, endpointI
 	}
 	for i := range events {
 		if ioc := checked[events[i].DstIP]; ioc != nil {
-			events[i].Action = "BLOCK"
-			log.Printf("[!] THREAT MATCH: endpoint %s -> %s blocked (source: %s, threat: %s, confidence: %d%%)",
+			events[i].ThreatMatch = ioc
+			log.Printf("[!] THREAT MATCH: endpoint %s -> %s observed (source: %s, threat: %s, confidence: %d%%)",
 				endpointID, events[i].DstIP, ioc.Source, ioc.ThreatType, ioc.Confidence)
 			continue
 		}
 		if ioc := checked[events[i].SrcIP]; ioc != nil {
-			events[i].Action = "BLOCK"
-			log.Printf("[!] THREAT MATCH: inbound %s blocked on endpoint %s (source: %s, threat: %s)",
+			events[i].ThreatMatch = ioc
+			log.Printf("[!] THREAT MATCH: inbound %s observed on endpoint %s (source: %s, threat: %s)",
 				events[i].SrcIP, endpointID, ioc.Source, ioc.ThreatType)
 		}
 	}
@@ -289,6 +312,9 @@ func (s *Server) telemetryControlResponse(r *http.Request, tenantID, endpointID,
 }
 
 func (s *Server) ingestLegacyEvents(tenantID string, events []storage.Event) error {
+	if err := validateTelemetryAddresses(events); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	events = normalizeTelemetryEvents(events, tenantID, "", now)
 	if len(events) == 0 {
@@ -303,5 +329,27 @@ func (s *Server) ingestLegacyEvents(tenantID string, events []storage.Event) err
 		return fmt.Errorf("persist legacy telemetry batch: %w", err)
 	}
 	s.detector.EvaluateBatch(events, snapshot)
+	return nil
+}
+
+func validateTelemetryAddress(raw, field string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := netaddr.Parse(raw); err != nil {
+		return fmt.Errorf("%w: %s", errInvalidTelemetryAddress, field)
+	}
+	return nil
+}
+
+func validateTelemetryAddresses(events []storage.Event) error {
+	for _, ev := range events {
+		if err := validateTelemetryAddress(ev.SrcIP, "source IP"); err != nil {
+			return err
+		}
+		if err := validateTelemetryAddress(ev.DstIP, "destination IP"); err != nil {
+			return err
+		}
+	}
 	return nil
 }

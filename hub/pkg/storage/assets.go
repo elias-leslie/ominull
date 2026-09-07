@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -226,6 +227,7 @@ func SubnetOf(ip string) string {
 // known, otherwise its address inside a subnet. Identity is what survives a
 // hub restart and what a second source joins against.
 func AssetIdentity(mac, ip, subnet string) (kind, value string) {
+	ip = canonicalAddress(ip)
 	if m := NormalizeMAC(mac); m != "" {
 		return "mac", m
 	}
@@ -236,6 +238,11 @@ func AssetIdentity(mac, ip, subnet string) (kind, value string) {
 }
 
 func assetIDFor(kind, value string) string {
+	// Keep existing MAC and IPv4 IDs. IPv6 punctuation is significant: removing
+	// colons aliases distinct addresses, including addresses on different links.
+	if kind == "ip" && strings.Contains(value, ":") {
+		return "asset-ip-v6-" + hex.EncodeToString([]byte(value))
+	}
 	safe := strings.NewReplacer(":", "", "|", "-", "/", "-", ".", "-").Replace(value)
 	return "asset-" + kind + "-" + safe
 }
@@ -270,6 +277,7 @@ func addressSortKey(ip string) string {
 // at least with its IP; either way we land on the existing row and promote it
 // to MAC identity rather than opening a second record for the same machine.
 func (s *Store) resolveAssetIDLocked(mac, ip, subnet, agentEndpointID string, now time.Time) (string, error) {
+	ip = canonicalAddress(ip)
 	normMAC := NormalizeMAC(mac)
 	if subnet == "" {
 		subnet = SubnetOf(ip)
@@ -431,6 +439,7 @@ func (s *Store) upsertAssetFromEndpointLocked(ep Endpoint) error {
 // survive a hub restart: the scanner's in-memory cache is now a cache of
 // this table rather than the only copy.
 func (s *Store) UpsertAssetFromScan(ip, mac, vendor, hostname, osGuess, category, risk string, confidence float64, ports []AssetPort, seen time.Time) error {
+	ip = canonicalAddress(ip)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -376,41 +376,8 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 		filter.Action == "" && !filter.MeasuredOnly
 
 	// 1. Totals & Coverage Query
-	if isUnfiltered && end.Sub(start) >= 6*time.Hour {
-		// FAST PATH: Read from bandwidth_buckets cube
-		startBucket := start.Format("2006-01-02T15:00:00Z")
-		endBucket := end.Format("2006-01-02T15:00:00Z")
-		totQuery := `
-			SELECT
-				COALESCE(SUM(flow_count), 0),
-				COALESCE(SUM(measured_count), 0),
-				COALESCE(SUM(bytes_in), 0),
-				COALESCE(SUM(bytes_out), 0),
-				COALESCE(SUM(block_count), 0)
-			FROM bandwidth_buckets
-			WHERE hour_bucket >= ? AND hour_bucket <= ?
-		`
-		totArgs := []interface{}{startBucket, endBucket}
-		if filter.TenantID != "" {
-			totQuery += " AND tenant_id = ?"
-			totArgs = append(totArgs, filter.TenantID)
-		}
-		var totalFlows, measuredFlows, bytesIn, bytesOut, blockCount int64
-		_ = s.db.QueryRow(totQuery, totArgs...).Scan(&totalFlows, &measuredFlows, &bytesIn, &bytesOut, &blockCount)
-		overview.TotalFlows = totalFlows
-		overview.MeasuredFlows = measuredFlows
-		if totalFlows > 0 {
-			overview.MeasuredFlowCoverage = float64(measuredFlows) / float64(totalFlows)
-		}
-		overview.Totals = TrafficTotals{
-			BytesIn:    bytesIn,
-			BytesOut:   bytesOut,
-			TotalBytes: bytesIn + bytesOut,
-			FlowCount:  totalFlows,
-			BlockCount: blockCount,
-		}
-	} else {
-		totalsQuery := fmt.Sprintf(`
+
+	totalsQuery := fmt.Sprintf(`
 			SELECT
 				COUNT(*),
 				COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0),
@@ -421,29 +388,28 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 			%s
 		`, whereClause)
 
-		var (
-			totalFlows    int64
-			measuredFlows int64
-			bytesIn       int64
-			bytesOut      int64
-			blockCount    int64
-		)
-		if err := s.db.QueryRow(totalsQuery, args...).Scan(&totalFlows, &measuredFlows, &bytesIn, &bytesOut, &blockCount); err != nil {
-			return nil, fmt.Errorf("query totals: %w", err)
-		}
+	var (
+		totalFlows    int64
+		measuredFlows int64
+		bytesIn       int64
+		bytesOut      int64
+		blockCount    int64
+	)
+	if err := s.db.QueryRow(totalsQuery, args...).Scan(&totalFlows, &measuredFlows, &bytesIn, &bytesOut, &blockCount); err != nil {
+		return nil, fmt.Errorf("query totals: %w", err)
+	}
 
-		overview.TotalFlows = totalFlows
-		overview.MeasuredFlows = measuredFlows
-		if totalFlows > 0 {
-			overview.MeasuredFlowCoverage = float64(measuredFlows) / float64(totalFlows)
-		}
-		overview.Totals = TrafficTotals{
-			BytesIn:    bytesIn,
-			BytesOut:   bytesOut,
-			TotalBytes: bytesIn + bytesOut,
-			FlowCount:  totalFlows,
-			BlockCount: blockCount,
-		}
+	overview.TotalFlows = totalFlows
+	overview.MeasuredFlows = measuredFlows
+	if totalFlows > 0 {
+		overview.MeasuredFlowCoverage = float64(measuredFlows) / float64(totalFlows)
+	}
+	overview.Totals = TrafficTotals{
+		BytesIn:    bytesIn,
+		BytesOut:   bytesOut,
+		TotalBytes: bytesIn + bytesOut,
+		FlowCount:  totalFlows,
+		BlockCount: blockCount,
 	}
 
 	// Count Anomalies in same window
@@ -454,7 +420,9 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 		anomQuery += " AND tenant_id = ?"
 		anomArgs = append(anomArgs, filter.TenantID)
 	}
-	_ = s.db.QueryRow(anomQuery, anomArgs...).Scan(&anomalyCount)
+	if err := s.db.QueryRow(anomQuery, anomArgs...).Scan(&anomalyCount); err != nil {
+		return nil, fmt.Errorf("query anomaly totals: %w", err)
+	}
 	overview.Totals.AnomalyCount = anomalyCount
 
 	// 2. Trendline Buckets
@@ -462,10 +430,17 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 	overview.RetainedFrom = s.earliestRetainedEvent(filter.TenantID)
 
 	// 3. Distributions (Protocols, Actions, Directions)
-	overview.Distributions = s.queryDistributions(whereClause, args, overview.TotalFlows, overview.Totals.TotalBytes, isUnfiltered, start, end, filter.TenantID)
+	var err error
+	overview.Distributions, err = s.queryDistributions(whereClause, args, overview.TotalFlows)
+	if err != nil {
+		return nil, fmt.Errorf("query distributions: %w", err)
+	}
 
 	// 4. Rankings (Top Endpoints, Processes, Destinations, Domains, Countries, Ports)
-	overview.Rankings = s.queryRankings(whereClause, args, start, end, filter, isUnfiltered)
+	overview.Rankings, err = s.queryRankings(whereClause, args)
+	if err != nil {
+		return nil, fmt.Errorf("query rankings: %w", err)
+	}
 
 	// 5. Heatmap (for ranges >= 24 hours)
 	if end.Sub(start) >= 24*time.Hour {
@@ -511,46 +486,6 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 		// offset, because that boundary is what the grouped query counts into and
 		// what the axis label under the bar then claims the bar covers.
 		buckets = append(buckets, TrafficTrendBucket{Timestamp: time.Unix(key*stepSec, 0).UTC()})
-	}
-
-	// FAST PATH: If unfiltered and window >= 6h, read from bandwidth_buckets
-	if isUnfiltered && end.Sub(start) >= 6*time.Hour {
-		startBucket := start.Format("2006-01-02T15:00:00Z")
-		endBucket := end.Format("2006-01-02T15:00:00Z")
-		cubeQuery := `
-			SELECT hour_bucket, COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(flow_count), 0), COALESCE(SUM(block_count), 0)
-			FROM bandwidth_buckets
-			WHERE hour_bucket >= ? AND hour_bucket <= ?
-		`
-		cubeArgs := []interface{}{startBucket, endBucket}
-		if tenantID != "" {
-			cubeQuery += " AND tenant_id = ?"
-			cubeArgs = append(cubeArgs, tenantID)
-		}
-		cubeQuery += " GROUP BY hour_bucket ORDER BY hour_bucket ASC"
-
-		rows, err := s.db.Query(cubeQuery, cubeArgs...)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var (
-					hStr                     string
-					bin, bout, flows, blocks int64
-				)
-				if err := rows.Scan(&hStr, &bin, &bout, &flows, &blocks); err == nil {
-					if t, err := time.Parse(time.RFC3339, hStr); err == nil {
-						key := t.Unix() / stepSec
-						if idx, ok := bucketIndex[key]; ok {
-							buckets[idx].BytesIn += bin
-							buckets[idx].BytesOut += bout
-							buckets[idx].Flows += flows
-							buckets[idx].Blocks += blocks
-						}
-					}
-				}
-			}
-			return buckets
-		}
 	}
 
 	trendQuery := fmt.Sprintf(`
@@ -615,209 +550,43 @@ func (s *Store) earliestRetainedEvent(tenantID string) *time.Time {
 	return &at
 }
 
-func (s *Store) queryDistributions(whereClause string, args []interface{}, totalFlows, totalBytes int64, isUnfiltered bool, start, end time.Time, tenantID string) TrafficDistributions {
-	dist := TrafficDistributions{
-		Protocols:  []DistributionSlice{},
-		Actions:    []DistributionSlice{},
-		Directions: []DistributionSlice{},
-	}
-
-	if isUnfiltered && end.Sub(start) >= 6*time.Hour {
-		startBucket := start.Format("2006-01-02T15:00:00Z")
-		endBucket := end.Format("2006-01-02T15:00:00Z")
-
-		// Directions from bandwidth_buckets
-		dirQuery := `SELECT direction, COALESCE(SUM(flow_count), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
-			FROM bandwidth_buckets WHERE hour_bucket >= ? AND hour_bucket <= ?`
-		dirArgs := []interface{}{startBucket, endBucket}
-		if tenantID != "" {
-			dirQuery += " AND tenant_id = ?"
-			dirArgs = append(dirArgs, tenantID)
+func (s *Store) queryDistributions(whereClause string, args []interface{}, totalFlows int64) (TrafficDistributions, error) {
+	dist := TrafficDistributions{Protocols: []DistributionSlice{}, Actions: []DistributionSlice{}, Directions: []DistributionSlice{}}
+	for _, group := range []struct {
+		expression string
+		target     *[]DistributionSlice
+	}{
+		{"CASE WHEN protocol = 6 THEN 'TCP' WHEN protocol = 17 THEN 'UDP' WHEN protocol = 1 THEN 'ICMP' WHEN protocol = 58 THEN 'ICMPv6' ELSE 'IP/' || protocol END", &dist.Protocols},
+		{"CASE WHEN action = '' THEN 'Unknown' ELSE action END", &dist.Actions},
+		{"CASE WHEN direction = '' THEN 'Unknown' ELSE direction END", &dist.Directions},
+	} {
+		query := "SELECT " + group.expression + " AS label, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0) FROM events " + whereClause + " GROUP BY label ORDER BY COUNT(*) DESC"
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return dist, err
 		}
-		dirQuery += " GROUP BY direction ORDER BY SUM(flow_count) DESC"
-		if rows, err := s.db.Query(dirQuery, dirArgs...); err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var label string
-				var count, bytesVal int64
-				if err := rows.Scan(&label, &count, &bytesVal); err == nil {
-					pct := 0.0
-					if totalFlows > 0 {
-						pct = float64(count) / float64(totalFlows)
-					}
-					dist.Directions = append(dist.Directions, DistributionSlice{
-						Label:      label,
-						Count:      count,
-						TotalBytes: bytesVal,
-						Percentage: pct,
-					})
-				}
-			}
-		}
-
-		// Actions from bandwidth_buckets
-		actQuery := `SELECT 'PERMIT', COALESCE(SUM(flow_count - block_count), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
-			FROM bandwidth_buckets WHERE hour_bucket >= ? AND hour_bucket <= ?`
-		actArgs := []interface{}{startBucket, endBucket}
-		if tenantID != "" {
-			actQuery += " AND tenant_id = ?"
-			actArgs = append(actArgs, tenantID)
-		}
-		if rows, err := s.db.Query(actQuery, actArgs...); err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var label string
-				var count, bytesVal int64
-				if err := rows.Scan(&label, &count, &bytesVal); err == nil && count > 0 {
-					pct := 0.0
-					if totalFlows > 0 {
-						pct = float64(count) / float64(totalFlows)
-					}
-					dist.Actions = append(dist.Actions, DistributionSlice{
-						Label:      label,
-						Count:      count,
-						TotalBytes: bytesVal,
-						Percentage: pct,
-					})
-				}
-			}
-		}
-
-		// Protocols from comm_profiles
-		protoQuery := `SELECT UPPER(protocol), SUM(event_count), SUM(total_bytes_in + total_bytes_out)
-			FROM comm_profiles WHERE last_seen >= ?`
-		protoArgs := []interface{}{start}
-		if tenantID != "" {
-			protoQuery += " AND tenant_id = ?"
-			protoArgs = append(protoArgs, tenantID)
-		}
-		protoQuery += " GROUP BY protocol ORDER BY SUM(event_count) DESC LIMIT 6"
-		if rows, err := s.db.Query(protoQuery, protoArgs...); err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var label string
-				var count, bytesVal int64
-				if err := rows.Scan(&label, &count, &bytesVal); err == nil {
-					pct := 0.0
-					if totalFlows > 0 {
-						pct = float64(count) / float64(totalFlows)
-					}
-					dist.Protocols = append(dist.Protocols, DistributionSlice{
-						Label:      label,
-						Count:      count,
-						TotalBytes: bytesVal,
-						Percentage: pct,
-					})
-				}
-			}
-		}
-		return dist
-	}
-
-	// Standard path
-	protoQuery := fmt.Sprintf(`
-		SELECT
-			CASE WHEN protocol = 6 THEN 'TCP' WHEN protocol = 17 THEN 'UDP' WHEN protocol = 1 THEN 'ICMP' ELSE 'OTHER (' || protocol || ')' END as proto_name,
-			COUNT(*),
-			COALESCE(SUM(bytes_in + bytes_out), 0)
-		FROM events
-		%s
-		GROUP BY proto_name
-		ORDER BY COUNT(*) DESC
-		LIMIT 6
-	`, whereClause)
-
-	rows, err := s.db.Query(protoQuery, args...)
-	if err == nil {
-		defer rows.Close()
 		for rows.Next() {
-			var label string
-			var count, bytesVal int64
-			if err := rows.Scan(&label, &count, &bytesVal); err == nil {
-				pct := 0.0
-				if totalFlows > 0 {
-					pct = float64(count) / float64(totalFlows)
-				}
-				dist.Protocols = append(dist.Protocols, DistributionSlice{
-					Label:      label,
-					Count:      count,
-					TotalBytes: bytesVal,
-					Percentage: pct,
-				})
+			var item DistributionSlice
+			if err := rows.Scan(&item.Label, &item.Count, &item.TotalBytes); err != nil {
+				rows.Close()
+				return dist, err
 			}
+			if totalFlows > 0 {
+				item.Percentage = float64(item.Count) / float64(totalFlows)
+			}
+			*group.target = append(*group.target, item)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return dist, err
 		}
 	}
-
-	// B. Actions
-	actionQuery := fmt.Sprintf(`
-		SELECT
-			CASE WHEN action = '' THEN 'PERMIT' ELSE action END as act_name,
-			COUNT(*),
-			COALESCE(SUM(bytes_in + bytes_out), 0)
-		FROM events
-		%s
-		GROUP BY act_name
-		ORDER BY COUNT(*) DESC
-	`, whereClause)
-
-	rowsAct, err := s.db.Query(actionQuery, args...)
-	if err == nil {
-		defer rowsAct.Close()
-		for rowsAct.Next() {
-			var label string
-			var count, bytesVal int64
-			if err := rowsAct.Scan(&label, &count, &bytesVal); err == nil {
-				pct := 0.0
-				if totalFlows > 0 {
-					pct = float64(count) / float64(totalFlows)
-				}
-				dist.Actions = append(dist.Actions, DistributionSlice{
-					Label:      label,
-					Count:      count,
-					TotalBytes: bytesVal,
-					Percentage: pct,
-				})
-			}
-		}
-	}
-
-	// C. Directions
-	dirQuery := fmt.Sprintf(`
-		SELECT
-			CASE WHEN direction = '' THEN 'OUTBOUND' ELSE direction END as dir_name,
-			COUNT(*),
-			COALESCE(SUM(bytes_in + bytes_out), 0)
-		FROM events
-		%s
-		GROUP BY dir_name
-		ORDER BY COUNT(*) DESC
-	`, whereClause)
-
-	rowsDir, err := s.db.Query(dirQuery, args...)
-	if err == nil {
-		defer rowsDir.Close()
-		for rowsDir.Next() {
-			var label string
-			var count, bytesVal int64
-			if err := rowsDir.Scan(&label, &count, &bytesVal); err == nil {
-				pct := 0.0
-				if totalFlows > 0 {
-					pct = float64(count) / float64(totalFlows)
-				}
-				dist.Directions = append(dist.Directions, DistributionSlice{
-					Label:      label,
-					Count:      count,
-					TotalBytes: bytesVal,
-					Percentage: pct,
-				})
-			}
-		}
-	}
-
-	return dist
+	return dist, nil
 }
 
-func (s *Store) queryRankings(whereClause string, args []interface{}, start, end time.Time, filter TrafficFilter, isUnfiltered bool) TrafficRankings {
+func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRankings, error) {
+	var err error
 	rankings := TrafficRankings{
 		TopEndpoints:    []RankingItem{},
 		TopProcesses:    []RankingItem{},
@@ -825,73 +594,6 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		TopDomains:      []RankingItem{},
 		TopCountries:    []RankingItem{},
 		TopPorts:        []RankingItem{},
-	}
-
-	if isUnfiltered && end.Sub(start) >= 6*time.Hour {
-		startBucket := start.Format("2006-01-02T15:00:00Z")
-		endBucket := end.Format("2006-01-02T15:00:00Z")
-
-		// 1. Top Endpoints from comm_profiles
-		epQ := "SELECT endpoint_id, endpoint_id, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out), SUM(total_bytes_in + total_bytes_out) FROM comm_profiles WHERE last_seen >= ?"
-		epArgs := []interface{}{start}
-		if filter.TenantID != "" {
-			epQ += " AND tenant_id = ?"
-			epArgs = append(epArgs, filter.TenantID)
-		}
-		epQ += " GROUP BY endpoint_id ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 8"
-		rankings.TopEndpoints = s.scanRankings(epQ, epArgs)
-
-		// 2. Top Processes from comm_profiles
-		procQ := "SELECT process_name, process_name, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out), SUM(total_bytes_in + total_bytes_out) FROM comm_profiles WHERE last_seen >= ?"
-		procArgs := []interface{}{start}
-		if filter.TenantID != "" {
-			procQ += " AND tenant_id = ?"
-			procArgs = append(procArgs, filter.TenantID)
-		}
-		procQ += " GROUP BY process_name ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 8"
-		rankings.TopProcesses = s.scanRankings(procQ, procArgs)
-
-		// 3. Top Destinations from comm_profiles
-		dstQ := "SELECT dst_ip, dst_ip, SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out), SUM(total_bytes_in + total_bytes_out) FROM comm_profiles WHERE last_seen >= ?"
-		dstArgs := []interface{}{start}
-		if filter.TenantID != "" {
-			dstQ += " AND tenant_id = ?"
-			dstArgs = append(dstArgs, filter.TenantID)
-		}
-		dstQ += " GROUP BY dst_ip ORDER BY SUM(total_bytes_in + total_bytes_out) DESC LIMIT 8"
-		rankings.TopDestinations = s.scanRankings(dstQ, dstArgs)
-
-		// 4. Top Domains from dns_events
-		domQ := "SELECT domain, domain, COUNT(*), 0, 0, 0 FROM dns_events WHERE timestamp >= ? AND timestamp <= ? AND domain != ''"
-		domArgs := []interface{}{start, end}
-		if filter.TenantID != "" {
-			domQ += " AND tenant_id = ?"
-			domArgs = append(domArgs, filter.TenantID)
-		}
-		domQ += " GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 8"
-		rankings.TopDomains = s.scanRankings(domQ, domArgs)
-
-		// 5. Top Countries from bandwidth_buckets
-		ctryQ := "SELECT country, country, SUM(flow_count), SUM(bytes_in), SUM(bytes_out), SUM(bytes_in + bytes_out) FROM bandwidth_buckets WHERE hour_bucket >= ? AND hour_bucket <= ? AND country != ''"
-		ctryArgs := []interface{}{startBucket, endBucket}
-		if filter.TenantID != "" {
-			ctryQ += " AND tenant_id = ?"
-			ctryArgs = append(ctryArgs, filter.TenantID)
-		}
-		ctryQ += " GROUP BY country ORDER BY SUM(flow_count) DESC LIMIT 8"
-		rankings.TopCountries = s.scanRankings(ctryQ, ctryArgs)
-
-		// 6. Top Ports from comm_profiles
-		portQ := "SELECT CAST(dst_port AS TEXT), CAST(dst_port AS TEXT), SUM(event_count), SUM(total_bytes_in), SUM(total_bytes_out), SUM(total_bytes_in + total_bytes_out) FROM comm_profiles WHERE last_seen >= ? AND dst_port > 0"
-		portArgs := []interface{}{start}
-		if filter.TenantID != "" {
-			portQ += " AND tenant_id = ?"
-			portArgs = append(portArgs, filter.TenantID)
-		}
-		portQ += " GROUP BY dst_port ORDER BY SUM(event_count) DESC LIMIT 8"
-		rankings.TopPorts = s.scanRankings(portQ, portArgs)
-
-		return rankings
 	}
 
 	// Standard path
@@ -910,7 +612,10 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
 		LIMIT 8
 	`, whereClause)
-	rankings.TopEndpoints = s.scanRankings(epQuery, args)
+	rankings.TopEndpoints, err = s.scanRankings(epQuery, args)
+	if err != nil {
+		return rankings, err
+	}
 
 	// 2. Top Processes
 	procQuery := fmt.Sprintf(`
@@ -930,7 +635,10 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
 		LIMIT 8
 	`, whereClause)
-	rankings.TopProcesses = s.scanRankings(procQuery, args)
+	rankings.TopProcesses, err = s.scanRankings(procQuery, args)
+	if err != nil {
+		return rankings, err
+	}
 
 	// 3. Top Destinations
 	dstQuery := fmt.Sprintf(`
@@ -947,33 +655,19 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
 		LIMIT 8
 	`, whereClause)
-	rankings.TopDestinations = s.scanRankings(dstQuery, args)
-
-	// 4. Top Domains: Query from dns_events for rich domain name intelligence
-	domQuery := `
-		SELECT
-			domain,
-			domain,
-			COUNT(*),
-			0,
-			0,
-			0
-		FROM dns_events
-		WHERE timestamp >= ? AND timestamp <= ? AND domain != ''
-	`
-	domArgs := []interface{}{start, end}
-	if filter.TenantID != "" {
-		domQuery += " AND tenant_id = ?"
-		domArgs = append(domArgs, filter.TenantID)
+	rankings.TopDestinations, err = s.scanRankings(dstQuery, args)
+	if err != nil {
+		return rankings, err
 	}
-	domQuery += " GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 8"
-	rankings.TopDomains = s.scanRankings(domQuery, domArgs)
-	if len(rankings.TopDomains) == 0 {
-		fallbackDomQuery := fmt.Sprintf(`
-			SELECT domain, domain, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
-			FROM events %s AND domain != '' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 8
-		`, whereClause)
-		rankings.TopDomains = s.scanRankings(fallbackDomQuery, args)
+
+	// Domain rankings describe these flows, not unrelated resolver queries.
+	domQuery := fmt.Sprintf(`
+  SELECT domain, domain, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
+  FROM events %s AND domain != '' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 8
+ `, whereClause)
+	rankings.TopDomains, err = s.scanRankings(domQuery, args)
+	if err != nil {
+		return rankings, err
 	}
 
 	// 5. Top Countries
@@ -991,7 +685,10 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		ORDER BY COUNT(*) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
 		LIMIT 8
 	`, whereClause)
-	rankings.TopCountries = s.scanRankings(ctryQuery, args)
+	rankings.TopCountries, err = s.scanRankings(ctryQuery, args)
+	if err != nil {
+		return rankings, err
+	}
 
 	// 6. Top Ports
 	portQuery := fmt.Sprintf(`
@@ -1008,23 +705,29 @@ func (s *Store) queryRankings(whereClause string, args []interface{}, start, end
 		ORDER BY COUNT(*) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
 		LIMIT 8
 	`, whereClause)
-	rankings.TopPorts = s.scanRankings(portQuery, args)
+	rankings.TopPorts, err = s.scanRankings(portQuery, args)
+	if err != nil {
+		return rankings, err
+	}
 
-	return rankings
+	return rankings, nil
 }
 
-func (s *Store) scanRankings(query string, args []interface{}) []RankingItem {
+func (s *Store) scanRankings(query string, args []interface{}) ([]RankingItem, error) {
 	var items []RankingItem
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return items
+		return nil, err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var key, label string
 		var count, bin, bout, total int64
-		if err := rows.Scan(&key, &label, &count, &bin, &bout, &total); err == nil {
+		if err := rows.Scan(&key, &label, &count, &bin, &bout, &total); err != nil {
+			return nil, err
+		}
+		{
 			if label == "" {
 				label = "—"
 			}
@@ -1038,48 +741,11 @@ func (s *Store) scanRankings(query string, args []interface{}) []RankingItem {
 			})
 		}
 	}
-	return items
+	return items, rows.Err()
 }
 
 func (s *Store) queryHeatmap(whereClause string, args []interface{}, isUnfiltered bool, start, end time.Time, tenantID string) []TrafficHeatmapCell {
 	var cells []TrafficHeatmapCell
-
-	if isUnfiltered && end.Sub(start) >= 6*time.Hour {
-		startBucket := start.Format("2006-01-02T15:00:00Z")
-		endBucket := end.Format("2006-01-02T15:00:00Z")
-		query := `
-			SELECT
-				CAST(strftime('%w', hour_bucket) AS INTEGER) as dow,
-				CAST(strftime('%H', hour_bucket) AS INTEGER) as hod,
-				COALESCE(SUM(flow_count), 0),
-				COALESCE(SUM(bytes_in + bytes_out), 0)
-			FROM bandwidth_buckets
-			WHERE hour_bucket >= ? AND hour_bucket <= ?
-		`
-		hArgs := []interface{}{startBucket, endBucket}
-		if tenantID != "" {
-			query += " AND tenant_id = ?"
-			hArgs = append(hArgs, tenantID)
-		}
-		query += " GROUP BY dow, hod ORDER BY dow ASC, hod ASC"
-
-		if rows, err := s.db.Query(query, hArgs...); err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var dow, hod int
-				var flows, totalBytes int64
-				if err := rows.Scan(&dow, &hod, &flows, &totalBytes); err == nil {
-					cells = append(cells, TrafficHeatmapCell{
-						DayOfWeek:  dow,
-						HourOfDay:  hod,
-						Flows:      flows,
-						TotalBytes: totalBytes,
-					})
-				}
-			}
-			return cells
-		}
-	}
 
 	query := fmt.Sprintf(`
 		SELECT

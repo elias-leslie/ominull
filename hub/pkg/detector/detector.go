@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"ominull/hub/pkg/netaddr"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
@@ -389,7 +389,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	}
 
 	// 1. Automated Threat Nullification for Feed Matches (Feodo Tracker / Emerging Threats)
-	if ev.Action == "BLOCK" {
+	if ev.ThreatMatch != nil {
 		alertKey := fmt.Sprintf("nullify:%s:%s", ev.EndpointID, ev.DstIP)
 		if !e.shouldSuppressAlert(alertKey, 10*time.Second) {
 			alert := storage.Alert{
@@ -397,10 +397,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
-				Title:       "Critical Threat Nullification Triggered",
-				Description: fmt.Sprintf("Confirmed C2 threat connection to %s (%s, %s) blocked by the endpoint firewall.", ev.DstIP, geo.CountryName, geo.Org),
+				Title:       "Threat Intelligence Match",
+				Description: fmt.Sprintf("Traffic matched indicator %s from %s (%s, confidence %d%%). Endpoint reported action: %s.", ev.ThreatMatch.Value, ev.ThreatMatch.Source, ev.ThreatMatch.ThreatType, ev.ThreatMatch.Confidence, ev.Action),
 				Severity:    "CRITICAL",
-				Mitigated:   true,
+				Mitigated:   ev.Action == "BLOCK",
 			}
 			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 				ID:          alert.ID,
@@ -412,7 +412,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "CRITICAL",
 				Title:       alert.Title,
 				Description: alert.Description,
-				Details:     fmt.Sprintf("%s", describeOwner(geo)),
+				Details:     alert.Description,
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
@@ -838,8 +838,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	}
 
 	// 7. Topological Graph Outlier: Internal Lateral Movement / Subnet Fan-Out (Evaluated per-process)
-	if isPrivateIP(ev.DstIP) && ev.Direction == "OUTBOUND" && ev.DstIP != "127.0.0.1" &&
-		!isBridgeOrContainerSubnet(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
+	destination, _ := netaddr.Parse(ev.DstIP)
+	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
+	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
+		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
 
 		e.mu.Lock()
 		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
@@ -1004,30 +1006,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 }
 
 func isPrivateIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
-}
-
-// isBridgeOrContainerSubnet checks if an IP belongs to standard local bridge/container subnets
-func isBridgeOrContainerSubnet(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	if v4 := ip.To4(); v4 != nil {
-		// 172.17.0.0/16 through 172.31.0.0/16 (Docker / Podman default bridges)
-		if v4[0] == 172 && v4[1] >= 17 && v4[1] <= 31 {
-			return true
-		}
-		// 10.244.0.0/16 and 10.96.0.0/12 (Kubernetes pod / service CIDRs)
-		if v4[0] == 10 && (v4[1] == 244 || v4[1] >= 96 && v4[1] <= 111) {
-			return true
-		}
-	}
-	return false
+	return netaddr.IsLocal(ipStr)
 }
 
 // isKnownInfrastructureProcess checks if a process is a container runtime, local DNS resolver, or test runner

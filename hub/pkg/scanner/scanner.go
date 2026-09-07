@@ -630,8 +630,6 @@ func (s *Scanner) probeHost(ip, mac string, ports []int, profile ScanProfile, ma
 	if mac == "" {
 		if ep, ok := managedMap[ip]; ok && ep.MAC != "" {
 			mac = ep.MAC
-		} else {
-			mac = "02:42:0a:00:00:01"
 		}
 	}
 
@@ -1008,5 +1006,7 @@ func (s *Scanner) GetScanStatus(scanID string) (*ScanStatus, error) {
 	if !ok {
 		return nil, fmt.Errorf("scan %s not found", scanID)
 	}
-	return st, nil
+	// Return a snapshot; the worker continues updating the shared status.
+	snapshot := *st
+	return &snapshot, nil
 }

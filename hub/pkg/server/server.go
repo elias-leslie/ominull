@@ -2353,6 +2353,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("[-] telemetry ingestion failed for %s: %v", batch.EndpointID, err)
 				status := http.StatusInternalServerError
+				if errors.Is(err, errInvalidTelemetryAddress) {
+					status = http.StatusBadRequest
+				}
 				if errors.Is(err, errRetiredEndpoint) {
 					status = http.StatusGone
 				}
@@ -2369,7 +2372,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(bodyBytes, &rawEvents); err == nil {
 			if err := s.ingestLegacyEvents(tenantID, rawEvents); err != nil {
 				log.Printf("[-] legacy telemetry ingestion failed: %v", err)
-				writeJSONError(w, http.StatusInternalServerError, "telemetry was not accepted: "+err.Error())
+				status := http.StatusInternalServerError
+				if errors.Is(err, errInvalidTelemetryAddress) {
+					status = http.StatusBadRequest
+				}
+				writeJSONError(w, status, "telemetry was not accepted: "+err.Error())
 				return
 			}
 			qPeers, err := s.store.GetQuarantinedPeers()
@@ -2713,7 +2720,7 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			Action:    "CREATE_EXCLUSION",
 			Resource:  ex.ID,
 			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s:%d)", ex.Name, ex.ProcessPath, ex.Port),
-			IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+			IPAddress: clientIP(r),
 			Timestamp: time.Now().UTC(),
 		})
 
@@ -2800,7 +2807,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		held = storage.HeldAny
 	}
 
-	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity, held)
+	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity, held, r.URL.Query().Get("search"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2817,7 +2824,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	// console used to derive it from the page it had just been handed, so the
 	// summary tiles added up to the page size (fifty) while the header above
 	// them reported the real total.
-	breakdown, err := s.store.SummarizeAnomalyAlerts(tenantID, unackOnly, anomalyType, severity, held)
+	breakdown, err := s.store.SummarizeAnomalyAlerts(tenantID, unackOnly, anomalyType, severity, held, r.URL.Query().Get("search"))
 	if err != nil {
 		log.Printf("[!] The alert summary could not be built: %v", err)
 		breakdown = nil
@@ -3169,7 +3176,7 @@ func (s *Server) handleAssetCorrect(w http.ResponseWriter, r *http.Request) {
 		Action:    action,
 		Resource:  asset.ID,
 		Details:   req.Field + " = " + req.Value,
-		IPAddress: strings.Split(r.RemoteAddr, ":")[0],
+		IPAddress: clientIP(r),
 		Timestamp: time.Now().UTC(),
 	})
 
@@ -3437,6 +3444,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	// 8. Visual Communications Topology Graph API
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
+	mux.HandleFunc("/api/v1/topology/networks", s.authMiddleware(requireAdmin(s.handleTopologyNetworks)))
 
 	// 8b. Unified asset graph.
 	mux.HandleFunc("/api/v1/assets", s.authMiddleware(s.handleAssets))

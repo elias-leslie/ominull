@@ -31,6 +31,19 @@
 #   DNS_LOG="0"
 #   LAN_CIDR=""          # optional override, e.g. 10.0.0.0/24
 
+# Conntrack emits compressed literals. This is a scope filter, not evidence
+# that a destination belongs to this estate. The hub validates both families
+# again, including expanded and IPv4-mapped forms from other poller versions.
+is_local_destination() {
+	case "$1" in
+		10.*|192.168.*|127.*|169.254.*|0.*|255.*|22[4-9].*|23[0-9].*) return 0 ;;
+		172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+		100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;
+		::|::1|[fF][cCdD][0-9a-fA-F][0-9a-fA-F]:*|[fF][eE][89aAbB][0-9a-fA-F]:*|[fF][fF][0-9a-fA-F][0-9a-fA-F]:*) return 0 ;;
+	esac
+	return 1
+}
+
 set -u
 
 CONF=/etc/ominull-router.conf
@@ -151,11 +164,7 @@ json_escape() {
 			[ -n "$src" ] && [ -n "$dst" ] || continue
 			[ -n "$dport" ] || dport=0
 
-			# skip conversations that never left the estate
-			case "$dst" in
-				10.*|192.168.*|127.*|169.254.*|224.*|255.*) continue ;;
-				172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
-			esac
+			is_local_destination "$dst" && continue
 
 			[ $first -eq 1 ] || printf ','
 			first=0

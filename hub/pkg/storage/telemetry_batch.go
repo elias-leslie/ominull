@@ -55,6 +55,8 @@ func (s *Store) RecordNetworkCommsBatch(events []Event, hostname, locationID str
 }
 
 func communicationValues(ev Event, hostname, locationID string) []interface{} {
+	ev.Timestamp = ev.Timestamp.UTC()
+	ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
 	cleanPath := strings.ReplaceAll(ev.ProcessPath, "\\", "/")
 	procName := filepath.Base(cleanPath)
 	if procName == "." || procName == "/" || procName == "\\" || procName == "" {
@@ -204,6 +206,8 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 
 	tenantIDs := make(map[string]struct{}, 1)
 	for _, ev := range events {
+		ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
+		ev.Timestamp = ev.Timestamp.UTC()
 		country := ev.Country
 		if country == "" {
 			country = CountryUnknown

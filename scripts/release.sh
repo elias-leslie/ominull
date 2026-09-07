@@ -64,6 +64,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     fi
     (cd "${ROOT_DIR}/hub" && go test -race ./... && go vet ./...)
     node --check "${ROOT_DIR}/hub/pkg/server/web/app.js"
+    node --test "${ROOT_DIR}"/hub/pkg/server/web_tests/*.test.cjs
+    python3 "${ROOT_DIR}/scripts/router/test-address-filter.py"
+    python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
         "${ROOT_DIR}/scripts/deploy_remote.sh.example" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
@@ -115,23 +118,21 @@ fi
     echo "[-] OMINULL_HUB_URL is required for an agent rollout." >&2
     exit 1
 }
-ADMIN_KEY="${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY for the rollout phase}"
-HEADER_FILE="$(mktemp "${TMPDIR:-/tmp}/ominull-release-header.XXXXXX")"
-chmod 0600 "${HEADER_FILE}"
-printf 'X-API-Key: %s\n' "${ADMIN_KEY}" > "${HEADER_FILE}"
-unset ADMIN_KEY
-cleanup() { rm -f -- "${HEADER_FILE}"; }
-trap cleanup EXIT
+: "${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY for the rollout phase}"
+hdr() {
+    printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY}"
+}
 
 api() {
     local method="$1" path="$2" body="${3:-}"
+    exec 3< <(hdr)
     if [ -n "${body}" ]; then
         curl -fsS --connect-timeout 5 --max-time 20 -X "${method}" \
-            -H "@${HEADER_FILE}" -H 'Content-Type: application/json' \
+            -K /dev/fd/3 -H 'Content-Type: application/json' \
             --data "${body}" "${HUB_URL}${path}"
     else
         curl -fsS --connect-timeout 5 --max-time 20 -X "${method}" \
-            -H "@${HEADER_FILE}" "${HUB_URL}${path}"
+            -K /dev/fd/3 "${HUB_URL}${path}"
     fi
 }
 

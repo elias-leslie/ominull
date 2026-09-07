@@ -196,9 +196,9 @@ func TestTalkersRankUnagentedDevices(t *testing.T) {
 	now := time.Now().UTC()
 
 	if _, _, err := store.RecordRouterFlows("gw", []RouterFlow{
-		{SrcIP: "10.0.0.36", DstIP: "10.9.9.1", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
-		{SrcIP: "10.0.0.36", DstIP: "10.9.9.2", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
-		{SrcIP: "10.0.0.99", DstIP: "10.9.9.3", DstPort: 443, Protocol: "tcp", OrigBytes: 900000},
+		{SrcIP: "10.0.0.36", DstIP: "198.51.100.1", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
+		{SrcIP: "10.0.0.36", DstIP: "198.51.100.2", DstPort: 443, Protocol: "tcp", OrigBytes: 100},
+		{SrcIP: "10.0.0.99", DstIP: "198.51.100.3", DstPort: 443, Protocol: "tcp", OrigBytes: 900000},
 	}, now); err != nil {
 		t.Fatalf("recording: %v", err)
 	}

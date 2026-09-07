@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -35,7 +36,11 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 		}
 		saved, err := s.store.SaveDetectionTuning(req, by)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, storage.ErrInvalidDetectionTuning) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, status, err.Error())
 			return
 		}
 		// The engine caches the row for a few seconds; drop it so the operator
@@ -106,6 +111,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("quiet networks", len(before.QuietOrgs), len(after.QuietOrgs))
 	add("expected clients", len(before.QuietClients), len(after.QuietClients))
 	add("expected pairs", len(before.QuietPairs), len(after.QuietPairs))
+	add("container networks", strings.Join(before.ContainerCIDRs, ","), strings.Join(after.ContainerCIDRs, ","))
 	add("silence threshold (minutes)", before.SilenceAfterMinutes, after.SilenceAfterMinutes)
 	add("silence detection", before.SilenceOn, after.SilenceOn)
 	if len(parts) == 0 {

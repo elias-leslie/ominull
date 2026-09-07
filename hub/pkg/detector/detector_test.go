@@ -28,14 +28,17 @@ func TestDetectorEngine(t *testing.T) {
 	})
 
 	// 1. Test Blocked Threat Auto-Nullification
+	// A block alone is not intelligence. Supply the hub-verified feed evidence
+	// this test previously assumed without establishing.
 	engine.Evaluate(storage.Event{
-		TenantID:   "default",
-		EndpointID: "test-host-01",
-		Timestamp:  time.Now().UTC(),
-		Action:     "BLOCK",
-		Direction:  "OUTBOUND",
-		DstIP:      "185.220.101.5",
-		DstPort:    443,
+		ThreatMatch: &storage.IOC{Value: "185.220.101.5", Source: "test-feed", ThreatType: "c2", Confidence: 100, Active: true},
+		TenantID:    "default",
+		EndpointID:  "test-host-01",
+		Timestamp:   time.Now().UTC(),
+		Action:      "BLOCK",
+		Direction:   "OUTBOUND",
+		DstIP:       "185.220.101.5",
+		DstPort:     443,
 	})
 
 	if atomic.LoadInt32(&isolatedCount) != 1 {

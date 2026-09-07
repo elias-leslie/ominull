@@ -1701,6 +1701,7 @@
         { label: "Unmanaged", value: String(m.unmanaged_nodes_count || 0), tone: "warn" },
         { label: "Quiet in window", value: String(m.quiet_nodes_count || 0) },
         { label: "Anomalous edges", value: String(m.anomalous_edge_count || 0), tone: m.anomalous_edge_count ? "warn" : "" },
+        { label: "Blocked edges", value: String(m.blocked_edge_count || 0), tone: m.blocked_edge_count ? "warn" : "" },
         /* Volume is only as real as the share of flows that carried a byte
            count. Reporting it beside the graph keeps every figure on the page
            readable as what it is. */
@@ -3518,12 +3519,32 @@
       alertsSearchInput.value = af.search || "";
       alertsSearchInput.addEventListener("input", function () {
         (state.alertsFilter || af).search = alertsSearchInput.value;
-        renderBody();
+        (state.alertsFilter || af).page = 1;
+        refresh();
       });
     } else if (document.activeElement !== alertsSearchInput) {
       alertsSearchInput.value = af.search || "";
     }
     var searchInput = alertsSearchInput;
+
+    // Filter anomalies by search text
+    var filteredAnomalies = allAnomalies.filter(function (a) {
+      if (af.endpoint_id && a.hostname !== af.endpoint_id && a.endpoint_id !== af.endpoint_id) return false;
+      if (af.severity && (a.severity || "").toUpperCase() !== af.severity) return false;
+      if (af.unacknowledged_only && a.acknowledged) return false;
+      if (af.search) {
+        var q = af.search.toLowerCase();
+        var match = (a.hostname || "").toLowerCase().includes(q) ||
+          (a.endpoint_id || "").toLowerCase().includes(q) ||
+          (a.process_path || "").toLowerCase().includes(q) ||
+          (a.dst_ip || "").toLowerCase().includes(q) ||
+          (a.title || "").toLowerCase().includes(q) ||
+          (a.description || "").toLowerCase().includes(q) ||
+          (a.anomaly_type || "").toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
 
     // Bulk actions
     var selectedAlertIds = Object.keys(state.selectedAlerts || {}).filter(function (k) { return state.selectedAlerts[k]; });
@@ -3545,21 +3566,22 @@
 
     var ackAllBtn = h("button", {
       cls: "btn mini", type: "button",
-      text: "Acknowledge All (" + allAnomalies.length + ")",
+      text: "Acknowledge page (" + filteredAnomalies.filter(function (a) { return !a.acknowledged; }).length + ")",
+      disabled: !filteredAnomalies.some(function (a) { return !a.acknowledged; }),
       on: {
         click: function () {
-          /* One click marked every unread detection in the fleet as seen,
-             including ones that had arrived in the seconds since the count in
-             the label was rendered. There is no un-acknowledge. */
+          var ids = filteredAnomalies.filter(function (a) { return !a.acknowledged; }).map(function (a) { return a.id; });
+          if (!ids.length) return;
           confirmSheet({
-            title: "Acknowledge every open alert",
-            consequence: "All " + allAnomalies.length + " open alerts are marked as seen by you and leave the unacknowledged view. There is no way to undo this, and anything that arrived since this page last refreshed is acknowledged too.",
-            confirmLabel: "Acknowledge all " + allAnomalies.length,
+            title: "Acknowledge this page",
+            consequence: ids.length + " visible open alerts will be marked as seen. This cannot be undone.",
+            confirmLabel: "Acknowledge " + ids.length,
             confirmTone: "primary",
             onConfirm: function () {
-              request("/api/v1/anomalies/acknowledge", "POST", { all: true })
+              request("/api/v1/anomalies/acknowledge", "POST", { ids: ids })
                 .then(function () {
-                  toast("Acknowledged all anomalies", "ok");
+                  toast("Acknowledged " + ids.length + " alerts", "ok");
+                  state.selectedAlerts = {};
                   refresh();
                 })
                 .catch(function (e) { toast("Action failed: " + e.message, "crit"); });
@@ -3595,25 +3617,6 @@
     var filterBar = h("div", { cls: "traffic-filter-bar" },
       h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
-
-    // Filter anomalies by search text
-    var filteredAnomalies = allAnomalies.filter(function (a) {
-      if (af.endpoint_id && a.hostname !== af.endpoint_id && a.endpoint_id !== af.endpoint_id) return false;
-      if (af.severity && (a.severity || "").toUpperCase() !== af.severity) return false;
-      if (af.unacknowledged_only && a.acknowledged) return false;
-      if (af.search) {
-        var q = af.search.toLowerCase();
-        var match = (a.hostname || "").toLowerCase().includes(q) ||
-          (a.endpoint_id || "").toLowerCase().includes(q) ||
-          (a.process_path || "").toLowerCase().includes(q) ||
-          (a.dst_ip || "").toLowerCase().includes(q) ||
-          (a.title || "").toLowerCase().includes(q) ||
-          (a.description || "").toLowerCase().includes(q) ||
-          (a.anomaly_type || "").toLowerCase().includes(q);
-        if (!match) return false;
-      }
-      return true;
-    });
 
     // 3. Alerts Table
     var tableRows = [];
@@ -3764,9 +3767,16 @@
             h("th", { text: "Action" }))),
         h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "9" }, emptyBox("No alerts match active filters."))))));
 
-    var totalAlerts = (state.alertsData && state.alertsData.total) || allAnomalies.length;
+    var totalAlerts = state.alertsData && typeof state.alertsData.total === "number" ? state.alertsData.total : allAnomalies.length;
+    var pageCount = Math.max(1, Math.ceil(totalAlerts / af.limit));
+    var pager = h("nav", { cls: "actions", "aria-label": "Alert pages" },
+      h("button", {cls: "btn mini", type: "button", text: "Previous", disabled: af.page <= 1,
+        on: {click: function () { af.page--; state.selectedAlerts = {}; refresh(); }}}),
+      h("span", {text: "Page " + af.page + " of " + pageCount + " · " + totalAlerts + " matching alerts"}),
+      h("button", {cls: "btn mini", type: "button", text: "Next", disabled: af.page >= pageCount,
+        on: {click: function () { af.page++; state.selectedAlerts = {}; refresh(); }}}));
     var alertsCard = card("Active Security Anomaly Stream (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
-      h("div", { cls: "stack" }, alertsTable));
+      h("div", { cls: "stack" }, alertsTable, pager));
 
     view.appendChild(h("div", { cls: "pad stack alerts-workspace" },
       chartCard,
@@ -3779,18 +3789,9 @@
      does not jump between five-second refreshes. */
   function getClusterCategory(node) {
     if (node.is_isolated || node.type === "threat" || node.risk === "CRITICAL" || node.risk === "HIGH") return "threats";
-    var ip = node.ip || node.id || "";
-    var label = (node.label || node.id || "").toLowerCase();
-    
-    if (ip === "10.0.0.1" || ip === "10.0.0.58" || label.indexOf("hub") !== -1 || label.indexOf("router") !== -1 || label.indexOf("gateway") !== -1) {
-      return "infra";
-    }
-    if (node.is_managed || nodeKind(node) === "managed" || (node.role && node.role !== "unknown" && node.role !== "unmanaged")) {
-      return "fleet";
-    }
-    if (ip.indexOf("192.168.") === 0 || ip.indexOf("10.") === 0 || ip.indexOf("172.16.") === 0 || ip.indexOf("172.18.") === 0 || ip.indexOf("172.20.") === 0) {
-      return "iot";
-    }
+    if (node.type === "gateway") return "infra";
+    if (node.type === "managed" || node.is_managed === true) return "fleet";
+    if (node.estate_member || (node.address_scope && node.address_scope !== "public" && node.address_scope !== "invalid")) return "iot";
     return "cloud";
   }
 
@@ -3800,10 +3801,10 @@
 
     // Define 5 clean semantic visual cluster zones
     var clusters = {
-      infra:   { id: "infra", label: "Gateways & DNS Services", x: 680, y: 170, color: "var(--info)", nodes: [] },
-      fleet:   { id: "fleet", label: "Managed Fleet Workstations", x: 300, y: 440, color: "var(--ok)", nodes: [] },
-      iot:     { id: "iot", label: "Local IoT & Subnet Assets", x: 680, y: 650, color: "var(--warn)", nodes: [] },
-      cloud:   { id: "cloud", label: "External Cloud & SaaS Services", x: 1060, y: 440, color: "var(--brand)", nodes: [] },
+      infra:   { id: "infra", label: "Gateways", x: 680, y: 170, color: "var(--info)", nodes: [] },
+      fleet:   { id: "fleet", label: "Managed endpoints", x: 300, y: 440, color: "var(--ok)", nodes: [] },
+      iot:     { id: "iot", label: "Local and estate assets", x: 680, y: 650, color: "var(--warn)", nodes: [] },
+      cloud:   { id: "cloud", label: "External destinations", x: 1060, y: 440, color: "var(--brand)", nodes: [] },
       threats: { id: "threats", label: "Isolated & Flagged Hosts", x: 1060, y: 170, color: "var(--crit)", nodes: [] }
     };
 
@@ -3914,33 +3915,8 @@
       return { managed: "Agented", unmanaged: "No agent", gateway: "Gateways",
                isolated: "Quarantined", threat: "External" }[nodeKind(n)] || "Other";
     }
-    /* Subnet. The /24 a host sits in is the closest thing to "where on the
-       network is this" that the graph holds without asking the hub - but only
-       for an address on this network. Grouping the internet by /24 put every
-       CDN edge in a segment of its own: a fleet of 493 hosts collapsed into
-       122 boxes, which is the dot cloud again with bigger dots. Everything
-       off-network is one destination as far as this view is concerned. */
-    var ip = String(n.ip || "");
-    if (!topoOnNetwork(ip)) {
-      if (ip || n.type === "threat" || n.type === "cloud") return "Internet";
-      return n.group || "No address";
-    }
-    var m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.\d+$/);
-    return m[1] + "." + m[2] + "." + m[3] + ".0/24";
-  }
-
-  /* RFC1918, CGNAT, link-local and loopback: the addresses that belong to a
-     network somebody here runs. Anything else is the internet. */
-  function topoOnNetwork(ip) {
-    var m = String(ip).match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (!m) return false;
-    var a = +m[1], b = +m[2];
-    if (a > 255 || b > 255 || +m[3] > 255 || +m[4] > 255) return false;
-    return a === 10 || a === 127 ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254);
+    // Scope and estate membership come from the hub, never a second IP parser.
+    return n.network_id || "unknown";
   }
 
   var TOPO_RISK_ORDER = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, CLEAN: 0 };
@@ -4013,7 +3989,7 @@
       var g = groups[k];
       if (!g) {
         g = groups[k] = {
-          label: k, members: [], risk: "CLEAN", managed: 0, unmanaged: 0,
+          label: mode === "subnet" ? (n.network_label || "Address unknown") : k, members: [], risk: "CLEAN", managed: 0, unmanaged: 0,
           isolated: 0, threat: 0, quietAll: true,
           internalFlows: 0, internalBytes: 0, internalMeasured: 0
         };
@@ -4061,6 +4037,8 @@
         id: "grp:" + k, label: g.label + " (" + g.members.length + ")",
         type: g.threat ? "threat" : (g.managed >= g.unmanaged ? "managed" : "unmanaged"),
         ip: "", os: "", role: "", risk: g.risk, group: g.label, evidence: [],
+        estate_member: g.members.some(function (n) { return n.estate_member; }),
+        address_scope: g.members[0].address_scope, network_id: k, network_label: g.label,
         is_isolated: g.isolated > 0 && g.isolated === g.members.length,
         quiet: g.quietAll, _group: g
       };
@@ -5369,7 +5347,7 @@
       hours.forEach(function (hour) {
         dMax = Math.max(dMax, Number(base[hour]) || 0, Number(live[hour]) || 0);
       });
-      var dsvg = s("svg", { "class": "chart", viewBox: "0 0 120 60", preserveAspectRatio: "none", role: "img", "aria-label": "Normal hourly volume against the current day" });
+      var dsvg = s("svg", { "class": "chart", viewBox: "0 0 120 60", preserveAspectRatio: "none", role: "img", "aria-label": "Estate event counts by UTC hour: last 24 hours and seven-day baseline" });
       var baseLine = [], liveLine = [];
       hours.forEach(function (hour, i) {
         var x = (i / 23) * 118 + 1;
@@ -5383,43 +5361,16 @@
       var dticks = h("div", { cls: "chart-ticks" });
       [0, 6, 12, 18, 23].forEach(function (hour) { dticks.appendChild(h("span", { text: pad(hour, 2) + ":00" })); });
 
-      diurnalCard = card("Normal Day Against Today",
-        h("div", { cls: "card-body" }, dsvg, dticks,
+      diurnalCard = card("Estate activity by UTC hour",
+        h("div", { cls: "card-body" },
+          h("p", {cls: "why", text: "Whole-estate comparison, independent of the traffic filters above. Event counts, not bytes."}), dsvg, dticks,
           h("div", { cls: "legend u-mt1" },
-            h("span", { text: "\u2504 Grey: the usual volume for this hour" }),
-            h("span", { text: "\u2500 Blue: today" }))));
+            h("span", { text: "\u2504 Grey: mean hourly events over the preceding seven days" }),
+            h("span", { text: "\u2500 Blue: events in the last 24 hours" }))));
     } else {
-      diurnalCard = card("Normal Day Against Today",
+      diurnalCard = card("Estate activity by UTC hour",
         emptyBox("The hub needs a day of history before it can say what normal looks like."));
     }
-
-    var talkers = arrayOf(an.top_talkers);
-    var talkerCard = card("Loudest Processes On The Estate",
-      h("div", { cls: "card-body" },
-        talkers.length
-          ? barList(talkers, function (t) { return Number(t.total_bytes) || 0; },
-              function (t) { return t.process || "\u2014"; },
-              function (t) { return t.flow_count + " flows \u00b7 " + bytes(t.total_bytes); },
-              { onPick: function (t) { tf.process = t.process; refresh(); } })
-          : emptyBox("Nothing has been attributed to a process yet.")));
-
-    var geo = arrayOf(an.geo_stats);
-    var geoCard = card("Where The Traffic Goes",
-      h("div", { cls: "card-body" },
-        geo.length
-          ? simpleTable(["Country", "Flows", "Volume", "Threat hits"],
-              geo.map(function (g) {
-                return [
-                  h("span", { text: (g.country_name || g.country || "\u2014") }),
-                  h("span", { cls: "ago", text: String(g.flow_count || 0) }),
-                  h("span", { cls: "ago", text: bytes(g.total_bytes || 0) }),
-                  Number(g.threat_count) > 0
-                    ? h("span", { cls: "st", "data-state": "crit", text: String(g.threat_count) })
-                    : h("span", { cls: "dim-3", text: "0" })
-                ];
-              }),
-              { key: "traffic-geo", empty: "No destination has been geolocated." })
-          : emptyBox("No destination has been geolocated.")));
 
     // Assemble View
     view.appendChild(h("div", { cls: "pad stack traffic-workspace" },
@@ -5428,7 +5379,6 @@
       dualChartCard,
       diurnalCard,
       heatCard,
-      h("div", { cls: "cols" }, talkerCard, geoCard),
       h("div", { cls: "distrib-grid" }, protoCards, actCards, dirCards),
       h("div", { cls: "cols" }, epCard, ctryCard),
       h("div", { cls: "cols" }, procCard, dstCard),
@@ -6572,6 +6522,7 @@
     var silenceAfter = numberField(t.silence_after_minutes, 5, 1440, 1);
 
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
+    var containers = listField(t.container_cidrs, "172.17.0.0/16, fd12:3456::/64");
     var procs = listField(t.quiet_processes, "svchost.exe, apsd, systemd-timesyncd");
     var orgs = listField(t.quiet_orgs, "apple, microsoft, cloudflare");
     var clients = listField(t.quiet_clients, "chrome, firefox, msedge.exe");
@@ -6580,6 +6531,7 @@
     var body = h("div", { cls: "stack" },
       h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored." }),
 
+      tuningRow("Container networks", "Explicit private CIDRs excluded from lateral fan-out detection. Leave empty when unknown; private addresses alone do not prove container traffic.", containers),
       h("h4", { cls: "tune-head", text: "Periodic beaconing" }),
       h("div", { cls: "tune-list" },
         tuningRow("", "", beaconOn.node),
@@ -6640,7 +6592,8 @@
         quiet_processes: parseList(procs.value),
         quiet_orgs: parseList(orgs.value),
         quiet_clients: parseList(clients.value),
-        quiet_pairs: parseList(pairs.value)
+        quiet_pairs: parseList(pairs.value),
+        container_cidrs: parseList(containers.value)
       };
       request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
         state.tuning = res;
@@ -11386,6 +11339,7 @@
     var aParams = "?limit=" + af.limit + "&offset=" + offset;
     if (af.unacknowledged_only) aParams += "&unacknowledged_only=true";
     if (af.severity) aParams += "&severity=" + encodeURIComponent(af.severity);
+    if (af.search) aParams += "&search=" + encodeURIComponent(af.search);
     if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
     if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
     /* The Held tab. A learning window records findings without raising them,
@@ -11403,6 +11357,11 @@
       request("/api/v1/learning/windows").then(function (d) { state.learningWindows = arrayOf(d && d.windows); }).catch(function () { state.learningWindows = []; }),
       request("/api/v1/anomalies" + aParams).then(function (d) {
         if (d && Array.isArray(d.alerts)) {
+          var lastPage = Math.max(1, Math.ceil((Number(d.total) || 0) / af.limit));
+          if (af.page > lastPage) {
+            af.page = lastPage;
+            state.queuedRefresh = true;
+          }
           state.alertsData = d;
           state.anomalies = d.alerts;
           state.unackAlertsTotal = Number(d.unacknowledged_total) || 0;

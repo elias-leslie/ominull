@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"ominull/hub/pkg/netaddr"
 )
 
 // Router telemetry.
@@ -159,8 +161,8 @@ func normaliseIP(raw string) (string, bool) {
 	if raw == "" || len(raw) > maxRouterFieldLen {
 		return "", false
 	}
-	ip := net.ParseIP(raw)
-	if ip == nil {
+	ip, err := netaddr.Parse(raw)
+	if err != nil {
 		return "", false
 	}
 	return ip.String(), true
@@ -397,11 +399,17 @@ type RouterTalker struct {
 // SummariseRouterTalkers answers the question the whole ingest exists for: of the
 // devices that can never carry an agent, which ones are talking, and to whom.
 func (s *Store) SummariseRouterTalkers(since time.Time, limit int) ([]RouterTalker, error) {
+	networks, err := s.TopologyNetworks()
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	rows, err := s.db.Query(`SELECT src_ip, dst_ip, SUM(orig_bytes + reply_bytes) AS b
-		FROM router_flows WHERE bucket >= ? GROUP BY src_ip, dst_ip`,
+		FROM router_flows WHERE bucket >= ?
+ AND NOT EXISTS (SELECT 1 FROM assets WHERE assets.ip = router_flows.dst_ip)
+ GROUP BY src_ip, dst_ip`,
 		since.UTC().Truncate(time.Hour).Unix())
 	if err != nil {
 		return nil, err
@@ -414,6 +422,14 @@ func (s *Store) SummariseRouterTalkers(since time.Time, limit int) ([]RouterTalk
 		var b int64
 		if err := rows.Scan(&src, &dst, &b); err != nil {
 			return nil, err
+		}
+		if netaddr.IsLocal(dst) {
+			continue
+		}
+		node := TopologyNode{IP: dst}
+		describeTopologyNetwork(&node, networks)
+		if node.EstateMember || node.AddressScope == "invalid" {
+			continue
 		}
 		t, ok := byIP[src]
 		if !ok {
