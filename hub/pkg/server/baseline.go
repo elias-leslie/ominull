@@ -21,9 +21,8 @@ import (
 //
 // Now the answer is a policy: named services, named destinations, authored in
 // the console. The hub resolves it per endpoint and hands the agent exactly that
-// set. Two things stay compiled in and are not listed here - the hub pinhole and
-// loopback - because they are what make an isolation reversible, and an
-// allow-list an operator can accidentally empty is a way to lose a host.
+// set. Hub recovery, loopback and IPv6 link control stay compiled in so an
+// accidentally empty allow-list cannot remove the recovery path.
 //
 // The gate is the other half. An endpoint reports the services it actually uses;
 // if the baseline does not cover them, isolating it is refused with the
@@ -142,6 +141,7 @@ func (s *Server) handleBaselineEndpoint(w http.ResponseWriter, r *http.Request) 
 		"always_permitted": []map[string]string{
 			{"what": "hub pinhole", "why": "the only path by which this isolation can be lifted"},
 			{"what": "loopback", "why": "local software talking to itself"},
+			{"what": "IPv6 link control", "why": "neighbor/router discovery and related network error feedback keep configured connectivity working"},
 		},
 	})
 }

@@ -191,16 +191,16 @@ static void DetectOSVersion(char* out, size_t outLen) {
 }
 
 /* Picks the adapter that actually carries this host's traffic: up, not
- * loopback, holding an IPv4 address. An adapter with a gateway wins outright -
+ * loopback, holding an IPv4 or globally scoped IPv6 address. An adapter with a gateway wins outright -
  * that is the same "default route" test the Linux agent makes - so a host with
  * a live NIC plus a stack of virtual bridges reports the NIC. */
 static void DetectPrimaryAdapter(char* outIp, size_t ipLen, char* outMac, size_t macLen) {
     outIp[0] = '\0';
     outMac[0] = '\0';
 
-    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS;
     ULONG size = 0;
-    if (GetAdaptersAddresses(AF_INET, flags, NULL, NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
+    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
         return;
     }
 
@@ -208,7 +208,7 @@ static void DetectPrimaryAdapter(char* outIp, size_t ipLen, char* outMac, size_t
     if (!adapters) {
         return;
     }
-    if (GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &size) != NO_ERROR) {
+    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, adapters, &size) != NO_ERROR) {
         free(adapters);
         return;
     }
@@ -220,14 +220,28 @@ static void DetectPrimaryAdapter(char* outIp, size_t ipLen, char* outMac, size_t
         if (a->PhysicalAddressLength != 6) continue;
         if (!a->FirstUnicastAddress) continue;
 
-        struct sockaddr_in* sa = (struct sockaddr_in*)a->FirstUnicastAddress->Address.lpSockaddr;
-        if (!sa || sa->sin_family != AF_INET) continue;
+        char address[64] = {0};
+        for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next) {
+            struct sockaddr *sa = u->Address.lpSockaddr;
+            if (!sa) continue;
+            if (sa->sa_family == AF_INET) {
+                struct sockaddr_in *v4 = (void *)sa;
+                if (v4->sin_addr.s_addr && InetNtopA(AF_INET, &v4->sin_addr, address, sizeof(address))) break;
+            } else if (sa->sa_family == AF_INET6 && !address[0]) {
+                struct sockaddr_in6 *v6 = (void *)sa;
+                /* A globally scoped address identifies an IPv6-only endpoint.
+                 * Link-local needs an interface and is retained by flow rows. */
+                if (IN6_IS_ADDR_UNSPECIFIED(&v6->sin6_addr) || IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr) ||
+                    IN6_IS_ADDR_LINKLOCAL(&v6->sin6_addr)) continue;
+                InetNtopA(AF_INET6, &v6->sin6_addr, address, sizeof(address));
+            }
+        }
+        if (!address[0]) continue;
 
         bool hasGateway = (a->FirstGatewayAddress != NULL);
         if (haveGateway && !hasGateway) continue;
 
-        const unsigned char* o = (const unsigned char*)&sa->sin_addr;
-        snprintf(outIp, ipLen, "%u.%u.%u.%u", o[0], o[1], o[2], o[3]);
+        snprintf(outIp, ipLen, "%s", address);
 
         const unsigned char* m = a->PhysicalAddress;
         snprintf(outMac, macLen, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -384,6 +398,19 @@ static bool TelemetryTime(UINT64 ticks, char *out, size_t capacity) {
                      st.wHour, st.wMinute, st.wSecond, ticks % 10000000);
     return n > 0 && (size_t)n < capacity;
 }
+/* A link-local TCP row supplies its interface index. ETW rows without one
+ * are omitted by their collector; never serialize an ambiguous address. */
+static bool IPv6AddressText(const UINT8 address[16], DWORD scope, char *out, size_t capacity) {
+    if (!InetNtopA(AF_INET6, (void *)address, out, capacity)) return false;
+    if (address[0] == 0xfe && (address[1] & 0xc0) == 0x80) {
+        if (!scope) return false;
+        size_t length = strlen(out);
+        int n = snprintf(out + length, capacity - length, "%%%lu", (unsigned long)scope);
+        if (n < 0 || (size_t)n >= capacity - length) return false;
+    }
+    return true;
+}
+
 char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *events, size_t count) {
     if (!config || count > 64 || (count && !events))
         return NULL;
@@ -426,8 +453,8 @@ char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *ev
             IPToString(e->Addr.Ipv4.LocalIp, local, sizeof(local));
             IPToString(e->Addr.Ipv4.RemoteIp, remote, sizeof(remote));
         } else if (e->IpVersion == 6) {
-            if (!InetNtopA(AF_INET6, (void *)e->Addr.Ipv6.LocalIp, local, sizeof(local)) ||
-                !InetNtopA(AF_INET6, (void *)e->Addr.Ipv6.RemoteIp, remote, sizeof(remote)))
+            if (!IPv6AddressText(e->Addr.Ipv6.LocalIp, e->LocalScopeId, local, sizeof(local)) ||
+                !IPv6AddressText(e->Addr.Ipv6.RemoteIp, e->RemoteScopeId, remote, sizeof(remote)))
                 goto failed;
         } else
             goto failed;

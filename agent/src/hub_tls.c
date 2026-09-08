@@ -27,6 +27,7 @@
  * ------------------------------------------------------------------------- */
 
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
@@ -51,27 +52,10 @@
  * revoked or replaced hub identity is noticed within one coffee break. */
 #define PIN_REVALIDATE_MS (15 * 60 * 1000)
 
-void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BOOL* isHttps) {
-    const char* p = hubUrl;
-    *isHttps = FALSE;
-    *port = 80;
-    if (strncmp(p, "https://", 8) == 0) {
-        *isHttps = TRUE;
-        *port = 443;
-        p += 8;
-    } else if (strncmp(p, "http://", 7) == 0) {
-        p += 7;
-    }
-    const char* colon = strchr(p, ':');
-    const char* slash = strchr(p, '/');
-    if (colon) {
-        snprintf(host, hostLen, "%.*s", (int)(colon - p), p);
-        *port = (WORD)atoi(colon + 1);
-    } else if (slash) {
-        snprintf(host, hostLen, "%.*s", (int)(slash - p), p);
-    } else {
-        snprintf(host, hostLen, "%s", p);
-    }
+void Hub_SplitURL(const char *url, char *host, size_t capacity, WORD *port, BOOL *isHttps) {
+    bool tls = false;
+    OminullParseHubURL(url, host, capacity, port, &tls);
+    *isHttps = tls;
 }
 
 bool Hub_UsesTLS(const AGENT_CONFIG* config) {

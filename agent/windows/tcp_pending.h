@@ -21,6 +21,7 @@ static unsigned TCPHash(const OMINULL_EVENT *f) {
 static bool TCPKeyEqual(const OMINULL_EVENT *a, const OMINULL_EVENT *b) {
     return a->FlowId == b->FlowId && a->ProcessId == b->ProcessId && a->IpVersion == b->IpVersion &&
            a->LocalPort == b->LocalPort && a->RemotePort == b->RemotePort &&
+           a->LocalScopeId == b->LocalScopeId && a->RemoteScopeId == b->RemoteScopeId &&
            !memcmp(&a->Addr, &b->Addr, sizeof(a->Addr)) &&
            !strcmp(a->Enrichment.process_instance_id, b->Enrichment.process_instance_id);
 }

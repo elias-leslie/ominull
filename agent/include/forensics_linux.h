@@ -1143,12 +1143,12 @@ static inline bool Forensics_CollectSocketToProcess(char** out_data, size_t* out
         while (fgets(line, sizeof(line), fp)) {
             unsigned int l_ip = 0, l_port = 0, r_ip = 0, r_port = 0, st = 0;
             unsigned long inode = 0;
+            char lip6[33] = {0}, rip6[33] = {0};
 
             if (!is_v6) {
                 if (sscanf(line, "%*d: %x:%x %x:%x %x %*x:%*x %*x:%*x %*x %*d %*d %lu",
                     &l_ip, &l_port, &r_ip, &r_port, &st, &inode) != 6) continue;
             } else {
-                char lip6[64] = {0}, rip6[64] = {0};
                 if (sscanf(line, "%*d: %32s:%x %32s:%x %x %*x:%*x %*x:%*x %*x %*d %*d %lu",
                     lip6, &l_port, rip6, &r_port, &st, &inode) != 6) continue;
             }
@@ -1161,8 +1161,22 @@ static inline bool Forensics_CollectSocketToProcess(char** out_data, size_t* out
                 inet_ntop(AF_INET, &lia, local_addr, sizeof(local_addr));
                 inet_ntop(AF_INET, &ria, remote_addr, sizeof(remote_addr));
             } else {
-                strncpy(local_addr, "::", sizeof(local_addr));
-                strncpy(remote_addr, "::", sizeof(remote_addr));
+                /* /proc emits four native-endian 32-bit words. Copy each
+                 * parsed word as bytes, as for its IPv4 representation. */
+                struct in6_addr local6, remote6;
+                bool valid = strlen(lip6) == 32 && strlen(rip6) == 32;
+                for (size_t word = 0; valid && word < 4; word++) {
+                    unsigned int local_word, remote_word;
+                    if (sscanf(lip6 + word * 8, "%8x", &local_word) != 1 ||
+                        sscanf(rip6 + word * 8, "%8x", &remote_word) != 1) {
+                        valid = false;
+                        break;
+                    }
+                    memcpy(local6.s6_addr + word * 4, &local_word, 4);
+                    memcpy(remote6.s6_addr + word * 4, &remote_word, 4);
+                }
+                if (!valid || !inet_ntop(AF_INET6, &local6, local_addr, sizeof(local_addr)) ||
+                    !inet_ntop(AF_INET6, &remote6, remote_addr, sizeof(remote_addr))) continue;
             }
 
             int proc_pid = 0;

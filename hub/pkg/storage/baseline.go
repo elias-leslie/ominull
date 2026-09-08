@@ -23,12 +23,10 @@ import (
 // A baseline policy names the infrastructure an isolated host is still allowed
 // to reach, by service and by destination. It is authored in the console, it is
 // resolved by the hub, and the agents enforce exactly what they are given and
-// nothing more. Only the hub pinhole and loopback remain compiled in: those two
-// are what make an isolation reversible, so they are not the operator's to
-// remove by accident.
+// nothing more, apart from hub recovery, loopback and IPv6 link control. Those
+// remain compiled in to preserve configured connectivity and recovery.
 //
-// An empty baseline is legal and means exactly what it says - hub and loopback
-// only. It is not a footgun, because the readiness gate refuses to isolate a
+// An empty baseline leaves only those intrinsic permits. It is not a footgun, because the readiness gate refuses to isolate a
 // host whose observed services the baseline does not cover.
 
 // ServiceSpec is what a named service resolves to on the wire. The catalogue is

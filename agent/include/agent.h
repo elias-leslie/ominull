@@ -17,7 +17,7 @@
 
 #include "process_lineage_windows.h"
 
-#define OMINULL_AGENT_VERSION "1.8.29"
+#define OMINULL_AGENT_VERSION "1.8.30"
 #define OMINULL_MAX_PATH 260
 #define SERVICE_NAME "ominulld"
 #define SERVICE_DISPLAY_NAME "Ominull Threat Nullification Service"
@@ -90,6 +90,7 @@ typedef struct _OMINULL_EVENT {
         struct { UINT32 LocalIp; UINT32 RemoteIp; } Ipv4;
         struct { UINT8 LocalIp[16]; UINT8 RemoteIp[16]; } Ipv6;
     } Addr;
+    DWORD LocalScopeId, RemoteScopeId;
     UINT64 FlowId;
     WCHAR  ProcessPath[OMINULL_MAX_PATH];
     UINT64 BytesIn;
@@ -132,7 +133,8 @@ typedef struct {
  * is empty. The first keeps the compiled-in permits - tightening the floor under
  * a fleet whose hub never asked for it would cut hosts off during a hub upgrade.
  * The second means hub and loopback only, and is obeyed. */
-DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
+#include "hub_address.h"
+DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
                      const char* const* blockedIPs, int blockedCount,
                      const char* const* allowIPs, int allowCount,
                      const OMINULL_BASELINE_RULE* baseline, int baselineCount,

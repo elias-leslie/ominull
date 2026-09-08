@@ -1055,7 +1055,8 @@
       warning: "",
       always_permitted: [
         { what: "hub pinhole", why: "the only path by which this isolation can be lifted" },
-        { what: "loopback", why: "local software talking to itself" }
+        { what: "loopback", why: "local software talking to itself" },
+        { what: "IPv6 link control", why: "neighbor/router discovery and related network error feedback keep configured connectivity working" }
       ]
     };
   }
@@ -6190,8 +6191,8 @@
 
   /* -------------------------------------------------- isolation baseline */
 
-  /* What an isolated host may still reach. Two permits - the hub pinhole and
-     loopback - are compiled into every agent and are deliberately not policy:
+  /* What an isolated host may still reach. Hub recovery, loopback and IPv6
+     link control remain compiled in:
      they are what makes an isolation reversible, and an allow-list an operator
      can empty by accident is a way to lose a host. Everything else is authored
      here and shown before the button is pressed. */
@@ -6292,7 +6293,7 @@
         cls: "mini", type: "button", text: "Add rule",
         on: { click: function () { addRow({ service: "dns", destination: "" }); } }
       })),
-      h("p", { cls: "pending", text: "Policies at every scope are added together, never overridden. The hub pinhole and loopback are permitted on every isolated host and are not listed here." }));
+      h("p", { cls: "pending", text: "Policies at every scope are added together, never overridden. Hub recovery, loopback and IPv6 link control remain permitted and are not listed here." }));
 
     openSheet(p.id ? "Edit baseline policy" : "New baseline policy", body, [
       h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
@@ -6442,7 +6443,7 @@
     });
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "why pad-x", text: "What a host may still reach while it is isolated. The hub pinhole and loopback are permitted on every isolated host and cannot be removed here; everything else an isolated host can talk to is in this list." }),
+      h("p", { cls: "why pad-x", text: "What a host may still reach while it is isolated. Hub recovery, loopback and IPv6 link control remain permitted. Other permitted destinations come from this list." }),
       simpleTable(["Name", "Scope", "Rules", "State", ""], rows));
 
     var actions = IS_ADMIN ? [h("button", {

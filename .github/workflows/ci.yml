@@ -63,6 +63,7 @@ jobs:
             -o build/test_linux_collector agent/tests/test_linux_collector.c -lbpf -lcurl
           build/test_linux_collector
           bash scripts/test-native-telemetry.sh
+          bash scripts/test-native-ipv6.sh
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
             -o build/test_der_sig agent/tests/test_der_sig.c
           build/test_der_sig

@@ -26,6 +26,7 @@
 #include <curl/curl.h>
 
 #include "../include/release_key.h"
+#include "../include/hub_address.h"
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_linux.h"
 #include "../include/forensics_linux.h"
@@ -37,7 +38,7 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
-#define OMINULL_LINUX_AGENT_VERSION "1.8.29"
+#define OMINULL_LINUX_AGENT_VERSION "1.8.30"
 
 // Where enrolment leaves the hub's CA certificate. The agent verifies every
 // hub connection against this file and nothing else, so it sits beside the
@@ -1522,48 +1523,10 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
  * hole is written as an address, so the name in the URL is resolved here while
  * the host can still resolve names. */
 static bool HubAddressLiteral(const LINUX_AGENT_CONFIG* config, char* out, size_t cap) {
-    const char* p = strstr(config->hub_url, "://");
-    p = p ? p + 3 : config->hub_url;
-
-    char host[256] = {0};
-    size_t i = 0;
-    if (*p == '[') {                       /* [2001:db8::1]:9443 */
-        p++;
-        while (*p && *p != ']' && i < sizeof(host) - 1) host[i++] = *p++;
-    } else {
-        while (*p && *p != ':' && *p != '/' && i < sizeof(host) - 1) host[i++] = *p++;
-    }
-    host[i] = '\0';
-    if (!host[0]) return false;
-
-    if (IsIPLiteral(host)) {
-        snprintf(out, cap, "%s", host);
-        return true;
-    }
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = NULL;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return false;
-
-    bool ok = false;
-    if (res->ai_family == AF_INET) {
-        char buf[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, buf, sizeof(buf))) {
-            snprintf(out, cap, "%s", buf);
-            ok = true;
-        }
-    } else if (res->ai_family == AF_INET6) {
-        char buf[INET6_ADDRSTRLEN];
-        if (inet_ntop(AF_INET6, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, buf, sizeof(buf))) {
-            snprintf(out, cap, "%s", buf);
-            ok = true;
-        }
-    }
-    freeaddrinfo(res);
-    return ok;
+    OMINULL_HUB_TARGETS targets;
+    if (!cap || !OminullResolveHub(config->hub_url, &targets) || strlen(targets.addresses[0]) >= cap) return false;
+    strcpy(out, targets.addresses[0]);
+    return true;
 }
 
 /* The baseline isolation policy, as this agent receives it.
@@ -1705,10 +1668,10 @@ static void EnforcementTeardown(const char* tool) {
  * anything to enforce, not only while isolated: quarantining the controller
  * from an endpoint is not an operation with a way back.
  *
- * Built before hooked, so there is no moment where traffic is evaluated against
- * a chain that has no DROP in it yet. Both families are always built: leaving
- * ip6tables alone would isolate a host that then carried on over IPv6. */
-static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
+ * First installation builds chains before hooking them. Existing-chain reloads
+ * still flush and refill live chains sequentially, a known non-atomic reload
+ * risk. Both families are built; nftables migration remains separate work. */
+static void EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_TARGETS *hub,
                              char allow[][64], int allowCount,
                              char peers[][64], int peerCount,
                              char threats[][64], int threatCount,
@@ -1725,12 +1688,19 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
     (void)RunTool(flushIn);
     (void)RunTool(flushOut);
 
-    /* 1. The hub, ahead of every block below it. */
-    if (hubIP && hubIP[0] && ((strchr(hubIP, ':') != NULL) == v6)) {
-        const char* hubIn[]  = { tool, "-A", OMINULL_CHAIN_IN,  "-s", hubIP, "-j", "RETURN", NULL };
-        const char* hubOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-d", hubIP, "-j", "RETURN", NULL };
-        (void)RunTool(hubIn);
-        (void)RunTool(hubOut);
+    /* 1. Complete A/AAAA pinholes, ahead of peer blocks, TCP port only. */
+    if (hub && hub->port) {
+        char port[6]; snprintf(port, sizeof(port), "%u", hub->port);
+        for (size_t i = 0; i < hub->count; i++) {
+            const char *address = hub->addresses[i];
+            if ((strchr(address, ':') != NULL) != v6) continue;
+            const char *hubIn[] = {tool, "-A", OMINULL_CHAIN_IN, "-s", address,
+                "-p", "tcp", "--sport", port, "-j", "RETURN", NULL};
+            const char *hubOut[] = {tool, "-A", OMINULL_CHAIN_OUT, "-d", address,
+                "-p", "tcp", "--dport", port, "-j", "RETURN", NULL};
+            (void)RunTool(hubIn);
+            (void)RunTool(hubOut);
+        }
     }
 
     /* 2. Loopback. */
@@ -1738,6 +1708,29 @@ static void EnforcementBuild(const char* tool, bool isolated, const char* hubIP,
     const char* loOut[] = { tool, "-A", OMINULL_CHAIN_OUT, "-o", "lo", "-j", "RETURN", NULL };
     (void)RunTool(loIn);
     (void)RunTool(loOut);
+
+    /* IPv6 neighbor/router discovery is the link control plane, like ARP
+     * for IPv4. Blocking it strands even an explicitly permitted hub after
+     * neighbor entries expire. Hop-limit 255 confines NDP to this link. */
+    if (v6) {
+        const char *types[] = {"133", "134", "135", "136"};
+        for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+            const char *ndIn[] = {tool, "-A", OMINULL_CHAIN_IN, "-p", "ipv6-icmp",
+                "--icmpv6-type", types[i], "-m", "hl", "--hl-eq", "255", "-j", "RETURN", NULL};
+            const char *ndOut[] = {tool, "-A", OMINULL_CHAIN_OUT, "-p", "ipv6-icmp",
+                "--icmpv6-type", types[i], "-m", "hl", "--hl-eq", "255", "-j", "RETURN", NULL};
+            (void)RunTool(ndIn);
+            (void)RunTool(ndOut);
+        }
+        /* Preserve path-MTU/error feedback for existing flows, not arbitrary
+         * ICMPv6 requests that could bypass peer quarantine. */
+        const char *errorIn[] = {tool, "-A", OMINULL_CHAIN_IN, "-p", "ipv6-icmp",
+            "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+        const char *errorOut[] = {tool, "-A", OMINULL_CHAIN_OUT, "-p", "ipv6-icmp",
+            "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+        (void)RunTool(errorIn);
+        (void)RunTool(errorOut);
+    }
 
     /* 3. DHCP, above the peer blocks. */
     if (baselineKnown) {
@@ -1857,6 +1850,7 @@ static int ParseAddressList(const char* respJson, const char* key,
  * the mesh quarantine it was also holding in place. */
 static bool known = false;              /* nothing reconciled yet this run */
 static bool appliedIsolated = false;
+static OMINULL_HUB_TARGETS appliedHubTargets;
 static char appliedAllow[MAX_ISOLATION_ALLOW][64];
 static int appliedAllowCount = 0;
 static char appliedPeers[MAX_QUARANTINED_PEERS][64];
@@ -1948,9 +1942,10 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     }
     if (!changed) return;
 
-    char hubIP[64] = {0};
-    bool haveHub = HubAddressLiteral(config, hubIP, sizeof(hubIP));
-    if (wantIsolated && !haveHub) {
+    OMINULL_HUB_TARGETS hubTargets = {0};
+    bool haveHub = OminullResolveHub(config->hub_url, &hubTargets);
+    const char *hubIP = haveHub ? hubTargets.addresses[0] : "";
+    if ((wantIsolated || peerCount || threatCount) && !haveHub) {
         /* Refused, deliberately. An isolation with no hole for the hub can
          * never be lifted by the hub, so it is not a quarantine - it is a
          * host taken off the network permanently by a name lookup that
@@ -1988,12 +1983,13 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
         EnforcementTeardown("iptables");
         EnforcementTeardown("ip6tables");
     } else {
-        EnforcementBuild("iptables", wantIsolated, hubIP, allow, allowCount, peers, peerCount, threats, threatCount,
+        EnforcementBuild("iptables", wantIsolated, &hubTargets, allow, allowCount, peers, peerCount, threats, threatCount,
                          baseline, baselineCount, baselineKnown);
-        EnforcementBuild("ip6tables", wantIsolated, hubIP, allow, allowCount, peers, peerCount, threats, threatCount,
+        EnforcementBuild("ip6tables", wantIsolated, &hubTargets, allow, allowCount, peers, peerCount, threats, threatCount,
                          baseline, baselineCount, baselineKnown);
     }
 
+    appliedHubTargets = hubTargets;
     appliedIsolated = wantIsolated;
     memcpy(appliedAllow, allow, sizeof(allow));
     appliedAllowCount = allowCount;
@@ -2039,11 +2035,11 @@ static void HubContact(bool accepted) {
            missed, appliedPeerCount);
     fflush(stdout);
 
-    EnforcementBuild("iptables", false, NULL, appliedAllow, 0,
+    EnforcementBuild("iptables", false, &appliedHubTargets, appliedAllow, 0,
                      appliedPeers, appliedPeerCount,
                      appliedThreats, appliedThreatCount,
                      appliedBaseline, appliedBaselineCount, appliedBaselineKnown);
-    EnforcementBuild("ip6tables", false, NULL, appliedAllow, 0,
+    EnforcementBuild("ip6tables", false, &appliedHubTargets, appliedAllow, 0,
                      appliedPeers, appliedPeerCount,
                      appliedThreats, appliedThreatCount,
                      appliedBaseline, appliedBaselineCount, appliedBaselineKnown);

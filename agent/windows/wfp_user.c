@@ -51,6 +51,10 @@ DEFINE_GUID(OMINULL_LAYER_ALE_AUTH_RECV_ACCEPT_V4,  /* e1cd9fe7-f4b5-4273-96c0-5
 DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_ADDRESS,    /* b235ae9a-1d64-49b8-a44c-5ff3d9095045 */
     0xb235ae9a, 0x1d64, 0x49b8, 0xa4, 0x4c, 0x5f, 0xf3, 0xd9, 0x09, 0x50, 0x45);
 
+/* ICMP_TYPE aliases IP_LOCAL_PORT in Microsoft's SDK fwpmu.h. */
+DEFINE_GUID(OMINULL_CONDITION_ICMP_TYPE,
+    0x0c1ba1af, 0x5765, 0x453f, 0xaf, 0x22, 0xa8, 0xf7, 0x91, 0xac, 0x77, 0x5b);
+
 DEFINE_GUID(OMINULL_CONDITION_IP_REMOTE_PORT,       /* c35a604d-d22b-4e1a-91b4-68f674ee674b */
     0xc35a604d, 0xd22b, 0x4e1a, 0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b);
 
@@ -79,9 +83,13 @@ DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,           /* d78e1e87-8644-4ea5-9437-d
 #define OMINULL_WEIGHT_PERMIT_ALLOW    10
 #define OMINULL_WEIGHT_BLOCK_ALL        0
 
+// Native probes override only this byte to own a separate dynamic sublayer.
+#ifndef OMINULL_WFP_SUBLAYER_LAST_BYTE
+#define OMINULL_WFP_SUBLAYER_LAST_BYTE 0x11
+#endif
 // Sublayer & Provider GUIDs
 DEFINE_GUID(OMINULL_SUBLAYER_USER_GUID,
-    0xb413e784, 0xa15f, 0x4f98, 0x89, 0x5f, 0x55, 0x82, 0x23, 0x6e, 0xb, 0x11);
+    0xb413e784, 0xa15f, 0x4f98, 0x89, 0x5f, 0x55, 0x82, 0x23, 0x6e, 0xb, OMINULL_WFP_SUBLAYER_LAST_BYTE);
 
 DEFINE_GUID(OMINULL_PROVIDER_USER_GUID,
     0xc524f895, 0xb26a, 0x5a09, 0x90, 0x6a, 0x66, 0x93, 0x34, 0x7f, 0x1c, 0x22);
@@ -237,6 +245,7 @@ static int AddressCondition(const char* ipStr, FWPM_FILTER_CONDITION0* cond, FWP
         return OMINULL_FAMILY_V4;
     }
     if (ipStr && ipStr[0] && inet_pton(AF_INET6, ipStr, &a6) == 1) {
+        if (a6.s6_addr[0] == 0xfe && (a6.s6_addr[1] & 0xc0) == 0x80) return 0;
         memcpy(store->byteArray16, &a6, sizeof(store->byteArray16));
         cond->conditionValue.type = FWP_BYTE_ARRAY16_TYPE;
         cond->conditionValue.byteArray16 = store;
@@ -275,6 +284,8 @@ static void UdpRemotePort(FWPM_FILTER_CONDITION0* cond, UINT16 port) {
 static int ServiceCondition(const OMINULL_BASELINE_RULE* rule,
                             FWPM_FILTER_CONDITION0* cond, FWP_BYTE_ARRAY16* store) {
     memset(cond, 0, sizeof(cond[0]) * 3);
+    if (rule->port < 1 || rule->port > 65535 ||
+        (strcmp(rule->protocol, "tcp") && strcmp(rule->protocol, "udp"))) return 0;
 
     int family = AddressCondition(rule->destination, &cond[0], store);
     if (!family) return 0;
@@ -320,6 +331,48 @@ static DWORD AddBaselineRules(const OMINULL_BASELINE_RULE* baseline, int baselin
     return ERROR_SUCCESS;
 }
 
+/* ALE authorizes non-error ICMP as well as TCP/UDP. NDP must survive a
+ * cold neighbor cache and router/prefix renewal. Windows validates NDP's
+ * required hop limit in its IPv6 stack; ALE has no hop-limit condition. */
+static DWORD Wfp_AddIPv6LinkControl(void) {
+    for (UINT16 type = 133; type <= 136; type++) {
+        FWPM_FILTER_CONDITION0 conditions[3] = {0};
+        conditions[0].fieldKey = OMINULL_CONDITION_IP_PROTOCOL;
+        conditions[0].matchType = FWP_MATCH_EQUAL;
+        conditions[0].conditionValue.type = FWP_UINT8;
+        conditions[0].conditionValue.uint8 = IPPROTO_ICMPV6;
+        conditions[1].fieldKey = OMINULL_CONDITION_ICMP_TYPE;
+        conditions[1].matchType = FWP_MATCH_EQUAL;
+        conditions[1].conditionValue.type = FWP_UINT16;
+        conditions[1].conditionValue.uint16 = type;
+        conditions[2].fieldKey = OMINULL_CONDITION_IP_REMOTE_PORT;
+        conditions[2].matchType = FWP_MATCH_EQUAL;
+        conditions[2].conditionValue.type = FWP_UINT16;
+        conditions[2].conditionValue.uint16 = 0; /* ICMP code */
+        DWORD status = AddFilterEverywhere(L"Ominull IPv6 Link Control", FWP_ACTION_PERMIT,
+            OMINULL_WEIGHT_PERMIT_DHCP, conditions, 3, OMINULL_FAMILY_V6);
+        if (status != ERROR_SUCCESS) return status;
+    }
+    return ERROR_SUCCESS;
+}
+
+static DWORD Wfp_AddHubPermits(const OMINULL_HUB_TARGETS *hub) {
+    if (!hub || !hub->count) return ERROR_SUCCESS;
+    FWPM_FILTER_CONDITION0 cond[3]; FWP_BYTE_ARRAY16 store;
+    /* Every resolved hub address gets only its configured TCP port. */
+    for (size_t i = 0; i < hub->count; i++) {
+        OMINULL_BASELINE_RULE rule = {0};
+        snprintf(rule.destination, sizeof(rule.destination), "%s", hub->addresses[i]);
+        strcpy(rule.protocol, "tcp"); rule.port = hub->port;
+        int family = ServiceCondition(&rule, cond, &store);
+        DWORD status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_HUB, cond, 3, family);
+        if (status != ERROR_SUCCESS) return status;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 /* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.
  *
  * The floor is loopback, the hub, DHCP and DNS - the same four the Linux chains
@@ -333,36 +386,17 @@ static DWORD AddBaselineRules(const OMINULL_BASELINE_RULE* baseline, int baselin
  * the hub resolves that per endpoint. A hub too old to send one leaves
  * baselineKnown at 0 and the old permits stay, because tightening the floor
  * under a fleet whose hub never asked for it would cut hosts off. */
-DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int allowCount,
+static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
                       const OMINULL_BASELINE_RULE* baseline, int baselineCount,
                       int baselineKnown) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     printf("[*] Activating WFP User-Mode Network Isolation (Default-Deny)...\n");
 
-    DWORD status = FwpmTransactionBegin0(g_hEngine, 0);
-    if (status != ERROR_SUCCESS) {
-        printf("[-] Failed to begin WFP transaction: 0x%08lX\n", (unsigned long)status);
-        return status;
-    }
+    DWORD status;
 
-    FWPM_FILTER_CONDITION0 cond[2];
+    FWPM_FILTER_CONDITION0 cond[3];
     FWP_BYTE_ARRAY16 store;
-
-    /* 1. The hub. Highest weight of anything here: a peer block that happened
-     *    to name the hub must not be what takes away the only way to release
-     *    this host. */
-    int hubFamily = AddressCondition(hubIpStr, &cond[0], &store);
-    if (hubFamily) {
-        status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
-                                     OMINULL_WEIGHT_PERMIT_HUB, cond, 1, hubFamily);
-        if (status != ERROR_SUCCESS) {
-            printf("[-] Failed to add Hub permit filter: 0x%08lX\n", (unsigned long)status);
-            FwpmTransactionAbort0(g_hEngine);
-            return status;
-        }
-        printf("[+] Added Hub pinhole filter (IP: %s)\n", hubIpStr);
-    }
 
     /* 2. Loopback, in both families. */
     AddressCondition("127.0.0.1", &cond[0], &store);
@@ -375,7 +409,6 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
     }
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add loopback permit filter: 0x%08lX\n", (unsigned long)status);
-        FwpmTransactionAbort0(g_hEngine);
         return status;
     }
 
@@ -399,7 +432,6 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
     }
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add DHCP permit filter: 0x%08lX\n", (unsigned long)status);
-        FwpmTransactionAbort0(g_hEngine);
         return status;
     }
 
@@ -415,7 +447,6 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
     }
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add DNS permit filter: 0x%08lX\n", (unsigned long)status);
-        FwpmTransactionAbort0(g_hEngine);
         return status;
     }
 
@@ -433,7 +464,6 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
         if (status != ERROR_SUCCESS) {
             printf("[-] Failed to add allow-list filter for %s: 0x%08lX\n",
                    allowIPs[i], (unsigned long)status);
-            FwpmTransactionAbort0(g_hEngine);
             return status;
         }
     }
@@ -444,26 +474,9 @@ DWORD Wfp_IsolateHost(const char* hubIpStr, const char* const* allowIPs, int all
                                  OMINULL_WEIGHT_BLOCK_ALL, NULL, 0, OMINULL_FAMILY_BOTH);
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add default block filter: 0x%08lX\n", (unsigned long)status);
-        FwpmTransactionAbort0(g_hEngine);
         return status;
     }
 
-    status = FwpmTransactionCommit0(g_hEngine);
-    if (status != ERROR_SUCCESS) {
-        printf("[-] Failed to commit WFP transaction: 0x%08lX\n", (unsigned long)status);
-        return status;
-    }
-
-    if (baselineKnown) {
-        printf("[+] Host isolation active (IPv4 and IPv6). Permitted: hub %s, loopback, "
-               "%d baseline rule(s), %d allow-list address(es).\n",
-               hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", baselineCount, allowCount);
-    } else {
-        printf("[+] Host isolation active (IPv4 and IPv6). This hub sends no baseline policy, so the "
-               "built-in floor applies: hub %s, loopback, DHCP and DNS to any destination, "
-               "%d allow-list address(es).\n",
-               hubIpStr && hubIpStr[0] ? hubIpStr : "(none)", allowCount);
-    }
     return ERROR_SUCCESS;
 }
 
@@ -487,7 +500,7 @@ static DWORD Wfp_DeleteOwnFilters(void) {
     DWORD status = FwpmFilterCreateEnumHandle0(g_hEngine, NULL, &hEnum);
     if (status != ERROR_SUCCESS) return status;
 
-    UINT64 doomed[512];
+    UINT64 doomed[4096];
     UINT32 doomedCount = 0;
 
     for (;;) {
@@ -502,13 +515,17 @@ static DWORD Wfp_DeleteOwnFilters(void) {
             if (memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0) {
                 if (doomedCount < (UINT32)(sizeof(doomed) / sizeof(doomed[0]))) {
                     doomed[doomedCount++] = entries[i]->filterId;
+                } else {
+                    status = ERROR_BUFFER_OVERFLOW;
+                    break;
                 }
             }
         }
         FwpmFreeMemory0((void**)&entries);
-        if (got < 64) break;
+        if (status != ERROR_SUCCESS || got < 64) break;
     }
     FwpmFilterDestroyEnumHandle0(g_hEngine, hEnum);
+    if (status != ERROR_SUCCESS) return status;
 
     DWORD firstFailure = ERROR_SUCCESS;
     for (UINT32 i = 0; i < doomedCount; i++) {
@@ -523,35 +540,16 @@ static DWORD Wfp_DeleteOwnFilters(void) {
     return firstFailure;
 }
 
-DWORD Wfp_UnisolateHost() {
-    if (!g_hEngine) return ERROR_INVALID_HANDLE;
+DWORD Wfp_UnisolateHost(void) {
+    return Wfp_ApplyState(NULL, 0, NULL, 0, NULL, 0, NULL, 0, 1);
+}
 
-    printf("[*] Removing WFP User-Mode Network Isolation...\n");
-
-    // Filters first, then the sublayer they live in.
-    DWORD status = Wfp_DeleteOwnFilters();
-    if (status != ERROR_SUCCESS) {
-        printf("[-] Could not remove every Ominull filter: 0x%08lX. This host is still filtered.\n",
-               (unsigned long)status);
-        return status;
-    }
-
-    status = FwpmSubLayerDeleteByKey0(g_hEngine, &OMINULL_SUBLAYER_USER_GUID);
-    if (status != ERROR_SUCCESS && status != (DWORD)FWP_E_SUBLAYER_NOT_FOUND) {
-        printf("[-] FwpmSubLayerDeleteByKey0 returned: 0x%08lX\n", (unsigned long)status);
-        return status;
-    }
-
-    // Recreate sublayer for future operations
-    FWPM_SUBLAYER0 sublayer;
-    memset(&sublayer, 0, sizeof(sublayer));
-    sublayer.subLayerKey = OMINULL_SUBLAYER_USER_GUID;
-    sublayer.displayData.name = L"Ominull Zero-Friction User-Mode WFP Sublayer";
-    sublayer.weight = 0xFF00;
-    FwpmSubLayerAdd0(g_hEngine, &sublayer, NULL);
-
-    printf("[+] SUCCESS: Host network isolation removed. Normal connectivity restored.\n");
-    return ERROR_SUCCESS;
+DWORD Wfp_IsolateHost(const char *address, UINT16 port, const char *const *allow, int allowCount,
+                      const OMINULL_BASELINE_RULE *baseline, int baselineCount, int baselineKnown) {
+    OMINULL_HUB_TARGETS hub = {0};
+    if (!address || strlen(address) >= sizeof(hub.addresses[0]) || !port) return ERROR_INVALID_PARAMETER;
+    strcpy(hub.addresses[0], address); hub.count = 1; hub.port = port;
+    return Wfp_ApplyState(&hub, 1, NULL, 0, allow, allowCount, baseline, baselineCount, baselineKnown);
 }
 
 /* Wfp_BlockIP quarantines one peer, in both directions and in whichever address
@@ -580,38 +578,50 @@ DWORD Wfp_BlockIP(const char* ipStr) {
     return status;
 }
 
-/* Wfp_ApplyState makes the engine match one description of what this host should
- * be enforcing, and is the only entry point the agent uses.
- *
- * It rebuilds rather than diffs: deleting the sublayer drops every filter in it
- * atomically, and the set is small enough that reasoning about which individual
- * filter to add or remove would cost more than it saves. It runs only when the
- * hub's answer actually changes, so the moment where nothing is enforced is not
- * on the steady-state path. */
-DWORD Wfp_ApplyState(const char* hubIpStr, int isolate,
+/* Replace this sublayer's filters in one transaction. Failed additions or
+ * deletions leave the previous policy intact, including its default deny. */
+DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
                      const char* const* blockedIPs, int blockedCount,
                      const char* const* allowIPs, int allowCount,
                      const OMINULL_BASELINE_RULE* baseline, int baselineCount,
                      int baselineKnown) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
-
-    /* Removes this agent's filters and recreates the sublayer empty. If the
-     * kernel would not give them up, say so rather than reporting a release
-     * that did not happen. */
-    DWORD cleared = Wfp_UnisolateHost();
-    if (cleared != ERROR_SUCCESS) return cleared;
-
-    if (isolate) {
-        DWORD status = Wfp_IsolateHost(hubIpStr, allowIPs, allowCount,
+    if (blockedCount < 0 || allowCount < 0 || baselineCount < 0 ||
+        (blockedCount && !blockedIPs) || (allowCount && !allowIPs) ||
+        (baselineCount && !baseline)) return ERROR_INVALID_PARAMETER;
+    FWPM_FILTER_CONDITION0 condition;
+    FWP_BYTE_ARRAY16 address;
+    if (isolate || (hub && hub->count)) {
+        if (!hub || !hub->count || hub->count > OMINULL_MAX_HUB_ADDRESSES || !hub->port)
+            return ERROR_INVALID_PARAMETER;
+        for (size_t i = 0; i < hub->count; i++)
+            if (!AddressCondition(hub->addresses[i], &condition, &address)) return ERROR_INVALID_PARAMETER;
+    }
+    for (int i = 0; i < blockedCount; i++)
+        if (!AddressCondition(blockedIPs[i], &condition, &address)) return ERROR_INVALID_PARAMETER;
+    for (int i = 0; i < allowCount; i++)
+        if (!AddressCondition(allowIPs[i], &condition, &address)) return ERROR_INVALID_PARAMETER;
+    for (int i = 0; i < baselineCount; i++) {
+        FWPM_FILTER_CONDITION0 conditions[3];
+        if (!ServiceCondition(&baseline[i], conditions, &address)) return ERROR_INVALID_PARAMETER;
+    }
+    DWORD status = FwpmTransactionBegin0(g_hEngine, 0);
+    if (status != ERROR_SUCCESS) return status;
+    status = Wfp_DeleteOwnFilters();
+    if (status == ERROR_SUCCESS) status = Wfp_AddHubPermits(hub);
+    if (status == ERROR_SUCCESS && (isolate || blockedCount)) status = Wfp_AddIPv6LinkControl();
+    if (status == ERROR_SUCCESS && isolate)
+        status = Wfp_AddIsolationRules(allowIPs, allowCount,
                                        baseline, baselineCount, baselineKnown);
-        if (status != ERROR_SUCCESS) return status;
+    for (int i = 0; status == ERROR_SUCCESS && i < blockedCount; i++)
+        status = Wfp_BlockIP(blockedIPs[i]);
+    if (status != ERROR_SUCCESS) {
+        FwpmTransactionAbort0(g_hEngine);
+        return status;
     }
-    for (int i = 0; i < blockedCount; i++) {
-        if (blockedIPs[i] && blockedIPs[i][0]) {
-            Wfp_BlockIP(blockedIPs[i]);
-        }
-    }
-    return ERROR_SUCCESS;
+    status = FwpmTransactionCommit0(g_hEngine);
+    if (status != ERROR_SUCCESS) FwpmTransactionAbort0(g_hEngine);
+    return status;
 }
 
 #ifndef OMINULL_WFP_EMBEDDED
@@ -682,7 +692,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("Ominull Windows Zero-Friction User-Mode WFP Engine\n");
         printf("Usage:\n");
-        printf("  ominull_wfp_user.exe isolate <hub_ip>   - Isolate host network (default-deny with hub pinhole)\n");
+        printf("  ominull_wfp_user.exe isolate <hub_ip> <hub_port> - Isolate host network (default-deny with hub pinhole)\n");
         printf("  ominull_wfp_user.exe unisolate          - Lift isolation and restore normal traffic\n");
         printf("  ominull_wfp_user.exe uninstall           - Lift isolation and remove agent identity\n");
         printf("  ominull_wfp_user.exe block-ip <ip>      - Block specific IPv4 address\n");
@@ -696,12 +706,18 @@ int main(int argc, char* argv[]) {
     }
 
     if (strcmp(argv[1], "isolate") == 0) {
-        const char* hubIp = (argc >= 3) ? argv[2] : "10.0.0.57";
+        char *end = NULL;
+        unsigned long port = argc >= 4 ? strtoul(argv[3], &end, 10) : 0;
+        if (argc < 4 || !end || *end || !port || port > 65535) {
+            fprintf(stderr, "Isolation requires the exact hub IP and TCP port.\n");
+            Wfp_Close(); return 1;
+        }
+        const char *hubIp = argv[2];
         /* No hub connection here, so no baseline policy: this is the recovery
          * tool, and it applies the permissive built-in floor. An operator
          * isolating a host by hand from its own console wants the floor that
          * keeps DNS and DHCP working, not an empty policy they cannot see. */
-        Wfp_IsolateHost(hubIp, NULL, 0, NULL, 0, 0);
+        status = Wfp_IsolateHost(hubIp, (UINT16)port, NULL, 0, NULL, 0, 0);
     } else if (strcmp(argv[1], "unisolate") == 0) {
         Wfp_UnisolateHost();
     } else if (strcmp(argv[1], "uninstall") == 0) {

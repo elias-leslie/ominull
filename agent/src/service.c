@@ -60,14 +60,51 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
 
 #define ESTATS_TABLE_SIZE 4096
 
+/* All address bytes and ports use network order. Zero initialized keys include
+ * family, scope and process creation time, never a TCP state or counter. */
 typedef struct {
-    UINT32  localIp, remoteIp;      /* network order, exactly as the table gives them */
-    UINT16  localPort, remotePort;  /* network order */
-    UINT8   used;
-    UINT32  generation;
-    ULONG64 bytesIn, bytesOut;      /* last cumulative reading */
+    UINT8 family;
+    UINT8 local[16], remote[16];
+    UINT16 localPort, remotePort;
+    DWORD localScope, remoteScope, pid;
+    UINT64 created;
+} TCP_KEY_WIN;
+typedef struct { TCP_KEY_WIN key; DWORD state; } TCP_ROW_WIN;
+typedef struct {
+    TCP_KEY_WIN key;
+    bool used;
+    UINT32 generation;
+    ULONG64 bytesIn, bytesOut;
     UINT64 lastSample;
 } ESTATS_SLOT;
+
+static UINT64 TCPProcessCreated(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    UINT64 value = GetProcessTimes(process, &created, &exited, &kernel, &user)
+        ? UDPWinFileTime(created) : 0;
+    CloseHandle(process);
+    return value;
+}
+
+static size_t TCPKeyHash(const TCP_KEY_WIN *key) {
+    const unsigned char *bytes = (const unsigned char *)key;
+    UINT32 hash = 2166136261u;
+    for (size_t i = 0; i < sizeof(*key); i++) hash = (hash ^ bytes[i]) * 16777619u;
+    return hash;
+}
+
+static bool TCPAddressReportable(const TCP_KEY_WIN *key) {
+    static const UINT8 zero[16] = {0}, loop6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+    if (!key->remotePort) return false;
+    if (key->family == 4)
+        return key->local[0] != 127 && key->remote[0] != 127 && memcmp(key->remote, zero, 4);
+    if ((key->local[0] == 0xfe && (key->local[1] & 0xc0) == 0x80 && !key->localScope) ||
+        (key->remote[0] == 0xfe && (key->remote[1] & 0xc0) == 0x80 && !key->remoteScope)) return false;
+    return memcmp(key->remote, zero, 16) && memcmp(key->local, loop6, 16) &&
+           memcmp(key->remote, loop6, 16);
+}
 
 static ESTATS_SLOT g_estats[ESTATS_TABLE_SIZE];
 static UINT32 g_estatsGeneration = 0;
@@ -146,37 +183,21 @@ static void ProcessPathFor(DWORD pid, WCHAR* out, DWORD outCap) {
     CloseHandle(hProc);
 }
 
-static size_t EstatsHash(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport) {
-    UINT32 h = lip * 2654435761u;
-    h ^= (UINT32)rip + 0x9e3779b9u + (h << 6) + (h >> 2);
-    h ^= ((UINT32)lport << 16 | (UINT32)rport) + 0x85ebca6bu + (h << 6) + (h >> 2);
-    return (size_t)(h & (ESTATS_TABLE_SIZE - 1));
-}
-
-/* Finds this connection's slot, claiming a free one if it is new. NULL when the
- * table is full: the flow is then reported unmeasured rather than attributed to
- * whichever connection happened to hash to the same place. */
-static ESTATS_SLOT* EstatsSlot(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rport, bool* isNew) {
-    size_t start = EstatsHash(lip, lport, rip, rport);
+static ESTATS_SLOT* EstatsSlot(const TCP_KEY_WIN *key, bool *isNew) {
+    size_t start = TCPKeyHash(key) & (ESTATS_TABLE_SIZE - 1);
     ESTATS_SLOT *available = NULL;
     for (size_t probe = 0; probe < ESTATS_TABLE_SIZE; probe++) {
         ESTATS_SLOT *slot = &g_estats[(start + probe) & (ESTATS_TABLE_SIZE - 1)];
-        if (slot->used && slot->localIp == lip && slot->localPort == lport && slot->remoteIp == rip &&
-            slot->remotePort == rport) {
+        if (slot->used && !memcmp(&slot->key, key, sizeof(*key))) {
             *isNew = false;
             return slot;
         }
-        if (!slot->used && !available)
-            available = slot;
+        if (!slot->used && !available) available = slot;
     }
-    if (!available)
-        return NULL;
+    if (!available) return NULL;
     memset(available, 0, sizeof(*available));
-    available->used = 1;
-    available->localIp = lip;
-    available->localPort = lport;
-    available->remoteIp = rip;
-    available->remotePort = rport;
+    available->used = true;
+    available->key = *key;
     *isNew = true;
     return available;
 }
@@ -185,8 +206,11 @@ static ESTATS_SLOT* EstatsSlot(UINT32 lip, UINT16 lport, UINT32 rip, UINT16 rpor
  * so a later connection reusing the same ports starts from zero rather than
  * inheriting a stale total and reporting a negative delta as a huge one. */
 static void EstatsEvictUnseen(void) {
+    FILETIME sample; GetSystemTimeAsFileTime(&sample);
+    UINT64 now = UDPWinFileTime(sample);
     for (size_t i = 0; i < ESTATS_TABLE_SIZE; i++) {
-        if (g_estats[i].used && g_estats[i].generation != g_estatsGeneration) {
+        if (g_estats[i].used && g_estats[i].generation != g_estatsGeneration &&
+            now >= g_estats[i].lastSample && now - g_estats[i].lastSample > 300ULL * 10000000ULL) {
             memset(&g_estats[i], 0, sizeof(g_estats[i]));
         }
     }
@@ -194,118 +218,88 @@ static void EstatsEvictUnseen(void) {
 
 /* Reads this connection's byte counters and returns what crossed it since the
  * previous poll. Enables collection the first time the connection is seen. */
-static void EstatsMeasure(const MIB_TCPROW_OWNER_PID* src, OMINULL_EVENT* ev) {
-    bool isNew = false;
-    ESTATS_SLOT* slot = EstatsSlot(src->dwLocalAddr, (UINT16)src->dwLocalPort,
-                                   src->dwRemoteAddr, (UINT16)src->dwRemotePort, &isNew);
-    if (!slot) {
-        g_TCPWinUnmeasured++;
-        return;
+static DWORD TCPReadCounters(const TCP_ROW_WIN *src, bool enable, TCP_ESTATS_DATA_ROD_v0 *rod) {
+    MIB_TCPROW row = {0};
+    MIB_TCP6ROW row6 = {0};
+    const TCP_KEY_WIN *key = &src->key;
+    if (key->family == 6) {
+        row6.State = src->state;
+        memcpy(&row6.LocalAddr, key->local, 16);
+        memcpy(&row6.RemoteAddr, key->remote, 16);
+        row6.dwLocalScopeId = key->localScope;
+        row6.dwRemoteScopeId = key->remoteScope;
+        row6.dwLocalPort = key->localPort;
+        row6.dwRemotePort = key->remotePort;
+    } else {
+        row.dwState = src->state;
+        memcpy(&row.dwLocalAddr, key->local, 4);
+        memcpy(&row.dwRemoteAddr, key->remote, 4);
+        row.dwLocalPort = key->localPort;
+        row.dwRemotePort = key->remotePort;
     }
+    if (enable) {
+        TCP_ESTATS_DATA_RW_v0 rw = {0}; rw.EnableCollection = TRUE;
+        DWORD result = key->family == 6
+            ? SetPerTcp6ConnectionEStats(&row6, TcpConnectionEstatsData, (PUCHAR)&rw, 0, sizeof(rw), 0)
+            : SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, (PUCHAR)&rw, 0, sizeof(rw), 0);
+        if (result != NO_ERROR) return result;
+    }
+    return key->family == 6
+        ? GetPerTcp6ConnectionEStats(&row6, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod))
+        : GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod));
+}
+
+static void EstatsMeasure(const TCP_ROW_WIN *src, OMINULL_EVENT *ev) {
+    bool isNew = false;
+    ESTATS_SLOT *slot = EstatsSlot(&src->key, &isNew);
+    if (!slot) { g_TCPWinUnmeasured++; return; }
     slot->generation = g_estatsGeneration;
-    FILETIME sample;
-    GetSystemTimeAsFileTime(&sample);
+    FILETIME sample; GetSystemTimeAsFileTime(&sample);
     UINT64 now = UDPWinFileTime(sample);
     ev->FirstObservedAt = slot->lastSample ? slot->lastSample : now;
     ev->LastObservedAt = now;
-
-    MIB_TCPROW row;
-    memset(&row, 0, sizeof(row));
-    row.dwState = src->dwState;
-    row.dwLocalAddr = src->dwLocalAddr;
-    row.dwLocalPort = src->dwLocalPort;
-    row.dwRemoteAddr = src->dwRemoteAddr;
-    row.dwRemotePort = src->dwRemotePort;
-
-    if (isNew) {
-        TCP_ESTATS_DATA_RW_v0 rw;
-        memset(&rw, 0, sizeof(rw));
-        rw.EnableCollection = TRUE;
-        /* Failure is not fatal and not worth logging every poll: the flow stays
-         * at zero, which is the honest report for a flow nobody counted. */
-        DWORD status =
-            SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, (PUCHAR)&rw, 0, sizeof(rw), 0);
-        TCP_ESTATS_DATA_ROD_v0 initial = {0};
-        if (status == NO_ERROR)
-            status = GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0,
-                                               (PUCHAR)&initial, 0, sizeof(initial));
-        if (status != NO_ERROR) {
-            g_TCPWinUnmeasured++;
-            slot->used = 0;
-            return;
-        }
-        slot->bytesIn = initial.DataBytesIn;
-        slot->bytesOut = initial.DataBytesOut;
-        slot->lastSample = now;
-        return;
-    }
-
-    TCP_ESTATS_DATA_ROD_v0 rod;
-    memset(&rod, 0, sizeof(rod));
-    if (GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData,
-                                  NULL, 0, 0, NULL, 0, 0,
-                                  (PUCHAR)&rod, 0, sizeof(rod)) != NO_ERROR) {
+    TCP_ESTATS_DATA_ROD_v0 rod = {0};
+    if (TCPReadCounters(src, isNew, &rod) != NO_ERROR) {
         g_TCPWinUnmeasured++;
+        slot->used = false;
         return;
     }
-
-    /* A counter that went backwards means the four-tuple was reused by a new
-     * connection between polls. Re-baseline rather than report the difference,
-     * which would be a negative number in an unsigned field. */
-    if (rod.DataBytesIn >= slot->bytesIn) ev->BytesIn = rod.DataBytesIn - slot->bytesIn;
-    if (rod.DataBytesOut >= slot->bytesOut) ev->BytesOut = rod.DataBytesOut - slot->bytesOut;
-    ev->BytesMeasured = true;
+    /* Either counter going backwards invalidates the whole interval. */
+    if (!isNew && rod.DataBytesIn >= slot->bytesIn && rod.DataBytesOut >= slot->bytesOut) {
+        ev->BytesIn = rod.DataBytesIn - slot->bytesIn;
+        ev->BytesOut = rod.DataBytesOut - slot->bytesOut;
+        ev->BytesMeasured = true;
+    }
     slot->bytesIn = rod.DataBytesIn;
     slot->bytesOut = rod.DataBytesOut;
     slot->lastSample = now;
 }
 
-typedef struct {
-    UINT32 remoteIp;
-    UINT16 remotePort;
-    UINT8 protocol;
-    DWORD processId;
-    DWORD lastReported;
-    bool valid;
-} FLOW_DEDUP_SLOT_WIN;
-
+typedef struct { TCP_KEY_WIN key; DWORD lastReported; bool valid; } FLOW_DEDUP_SLOT_WIN;
 #define FLOW_DEDUP_CAP_WIN 2048
-static FLOW_DEDUP_SLOT_WIN g_FlowDedupWin[FLOW_DEDUP_CAP_WIN];
-
-/* How often a socket that is merely present, rather than moving data, may be
- * re-released. A live connection repeats on the ordinary rollup; a finished
- * one is a record that contact happened, and repeating that on a short timer
- * is what made closed sockets look like check-ins. */
 #define FLOW_ROLLUP_MS_WIN 30000
 #define FLOW_CONTACT_ROLLUP_MS_WIN 600000
-
-static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid, ULONG64 bytesIn, ULONG64 bytesOut, DWORD rollupMs) {
-    if (rip == 0x7f000001 || rip == 0) return false; // 127.0.0.1 or 0.0.0.0
-    if (bytesIn > 0 || bytesOut > 0) return true;
-
+static FLOW_DEDUP_SLOT_WIN g_FlowDedupWin[FLOW_DEDUP_CAP_WIN];
+static bool ShouldReportFlowWin(const TCP_KEY_WIN *key, ULONG64 bytesIn, ULONG64 bytesOut, DWORD rollupMs) {
+    if (!TCPAddressReportable(key)) return false;
+    if (bytesIn || bytesOut) return true;
     DWORD now = GetTickCount();
-    UINT32 hash = rip ^ ((UINT32)rport << 16) ^ (pid * 2654435761u) ^ proto;
-    size_t start = (size_t)(hash & (FLOW_DEDUP_CAP_WIN - 1));
-
+    size_t start = TCPKeyHash(key) & (FLOW_DEDUP_CAP_WIN - 1);
+    FLOW_DEDUP_SLOT_WIN *available = NULL;
     for (size_t probe = 0; probe < FLOW_DEDUP_CAP_WIN; probe++) {
-        FLOW_DEDUP_SLOT_WIN* slot = &g_FlowDedupWin[(start + probe) & (FLOW_DEDUP_CAP_WIN - 1)];
-        if (!slot->valid) {
-            slot->valid = true;
-            slot->remoteIp = rip;
-            slot->remotePort = rport;
-            slot->protocol = proto;
-            slot->processId = pid;
+        FLOW_DEDUP_SLOT_WIN *slot = &g_FlowDedupWin[(start + probe) & (FLOW_DEDUP_CAP_WIN - 1)];
+        if (slot->valid && !memcmp(&slot->key, key, sizeof(*key))) {
+            if (now - slot->lastReported < rollupMs) return false;
             slot->lastReported = now;
-            return true; // Novel flow
+            return true;
         }
-        if (slot->remoteIp == rip && slot->remotePort == rport && slot->protocol == proto && slot->processId == pid) {
-            if (now - slot->lastReported >= rollupMs) {
-                slot->lastReported = now;
-                return true; // rollup
-            }
-            return false; // Suppress duplicate idle keepalive
-        }
+        if ((!slot->valid || now - slot->lastReported >= FLOW_CONTACT_ROLLUP_MS_WIN) && !available)
+            available = slot;
     }
+    if (!available) available = &g_FlowDedupWin[start];
+    available->valid = true;
+    available->key = *key;
+    available->lastReported = now;
     return true;
 }
 
@@ -314,7 +308,7 @@ static bool ShouldReportFlowWin(UINT32 rip, UINT16 rport, UINT8 proto, DWORD pid
  * process open, a path read and a lineage walk, so candidates stay cheap
  * enough to hold several times the wire cap. */
 typedef struct {
-    MIB_TCPROW_OWNER_PID row;
+    TCP_ROW_WIN row;
     ULONG64 bytesIn;
     ULONG64 bytesOut;
     UINT64 firstSample, lastSample;
@@ -376,36 +370,23 @@ static bool IsContactTcpStateWin(DWORD state) {
  * three-second polling path. */
 bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
 
-static UINT32 g_HubPeerIp = 0;
-static UINT16 g_HubPeerPort = 0;
-static DWORD g_SelfPid = 0;
-static bool g_HubPeerResolved = false;
-
+static bool ResolveHubTargets(const AGENT_CONFIG *config, OMINULL_HUB_TARGETS *targets);
+static OMINULL_HUB_TARGETS g_HubPeers;
+static DWORD g_SelfPid;
+static bool g_HubPeerResolved;
 static void ResolveSelfHubPeer(void) {
     if (g_HubPeerResolved) return;
-    g_HubPeerResolved = true;
     g_SelfPid = GetCurrentProcessId();
-
-    char literal[64] = {0};
-    if (!HubAddressLiteral(&g_Config, literal, sizeof(literal))) return;
-    struct in_addr parsed;
-    if (inet_pton(AF_INET, literal, &parsed) != 1) return;
-    g_HubPeerIp = ntohl(parsed.s_addr);
-
-    bool tls = strncmp(g_Config.hub_url, "https://", 8) == 0;
-    const char* p = strstr(g_Config.hub_url, "://");
-    p = p ? p + 3 : g_Config.hub_url;
-    const char* colon = strchr(p, ':');
-    const char* slash = strchr(p, '/');
-    unsigned long port = (colon && (!slash || colon < slash)) ? strtoul(colon + 1, NULL, 10)
-                                                              : (tls ? 443UL : 80UL);
-    g_HubPeerPort = (port > 0 && port <= 0xFFFF) ? (UINT16)port : 0;
+    g_HubPeerResolved = ResolveHubTargets(&g_Config, &g_HubPeers);
 }
-
-static bool IsOwnHubFlowWin(const FLOW_CANDIDATE_WIN* candidate) {
-    return g_HubPeerPort != 0 && candidate->row.dwOwningPid == g_SelfPid &&
-           ntohl(candidate->row.dwRemoteAddr) == g_HubPeerIp &&
-           ntohs((u_short)candidate->row.dwRemotePort) == g_HubPeerPort;
+static bool IsOwnHubFlowWin(const FLOW_CANDIDATE_WIN *candidate) {
+    const TCP_KEY_WIN *key = &candidate->row.key;
+    if (!g_HubPeers.port || key->pid != g_SelfPid || ntohs(key->remotePort) != g_HubPeers.port) return false;
+    char address[64];
+    if (!inet_ntop(key->family == 6 ? AF_INET6 : AF_INET, key->remote, address, sizeof(address))) return false;
+    for (size_t i = 0; i < g_HubPeers.count; i++)
+        if (!strcmp(address, g_HubPeers.addresses[i])) return true;
+    return false;
 }
 
 /* SelectFlowCandidatesWin chooses which sockets get this batch's wire slots.
@@ -429,9 +410,7 @@ static size_t SelectFlowCandidatesWin(const FLOW_CANDIDATE_WIN* candidates, size
             bool active = candidates[i].bytesIn > 0 || candidates[i].bytesOut > 0;
             if ((pass == 0) != active) continue;
             if (IsOwnHubFlowWin(&candidates[i])) continue;
-            if (!ShouldReportFlowWin(ntohl(candidates[i].row.dwRemoteAddr),
-                                     ntohs((u_short)candidates[i].row.dwRemotePort),
-                                     IPPROTO_TCP, candidates[i].row.dwOwningPid,
+            if (!ShouldReportFlowWin(&candidates[i].row.key,
                                      candidates[i].bytesIn, candidates[i].bytesOut,
                                      candidates[i].live ? FLOW_ROLLUP_MS_WIN
                                                         : FLOW_CONTACT_ROLLUP_MS_WIN)) {
@@ -455,55 +434,60 @@ static size_t PollTCPObservations(OMINULL_EVENT *outEvents, size_t maxEvents) {
     g_TCPWinDeferred = 0;
     g_TCPWinQueryError = NO_ERROR;
 
-    DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-    g_TCPWinQueryError = ret == ERROR_INSUFFICIENT_BUFFER ? NO_ERROR : ret;
-    if (ret == ERROR_INSUFFICIENT_BUFFER && dwSize > 0) {
-        PMIB_TCPTABLE_OWNER_PID pTcpTable = (PMIB_TCPTABLE_OWNER_PID)malloc(dwSize);
-        if (pTcpTable) {
-            g_TCPWinQueryError =
-                GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-            if (g_TCPWinQueryError == NO_ERROR) {
-                static DWORD cursor;
-                DWORD next = cursor;
-                for (DWORD visited = 0; visited < pTcpTable->dwNumEntries; visited++) {
-                    DWORD i = (cursor + visited) % pTcpTable->dwNumEntries;
-                    MIB_TCPROW_OWNER_PID row = pTcpTable->table[i];
-                    if (row.dwRemoteAddr == 0 || row.dwRemotePort == 0) continue;
-                    if (row.dwRemoteAddr == 0x0100007f || row.dwLocalAddr == 0x0100007f) continue; // Loopback
-                    bool live = IsLiveTcpStateWin(row.dwState);
-                    if (!live && !IsContactTcpStateWin(row.dwState)) continue;
-                    if (count >= MAX_FLOW_CANDIDATES_WIN) {
-                        g_TCPWinDeferred++;
-                        continue;
-                    }
-                    next = (i + 1) % pTcpTable->dwNumEntries;
-
-                    /* Measured for every live socket, not only for the ones
-                     * that end up on the wire. These are cumulative counters
-                     * read as interval deltas, so a socket skipped this poll
-                     * and reported the next would otherwise arrive carrying
-                     * everything it had ever sent. A finished connection has
-                     * no estats to read. */
-                    OMINULL_EVENT measured;
-                    memset(&measured, 0, sizeof(measured));
-                    if (live) EstatsMeasure(&row, &measured);
-
-                    candidates[count].row = row;
-                    candidates[count].bytesIn = measured.BytesIn;
-                    candidates[count].bytesOut = measured.BytesOut;
-                    candidates[count].measured = measured.BytesMeasured;
-                    candidates[count].firstSample = measured.FirstObservedAt;
-                    candidates[count].lastSample = measured.LastObservedAt;
-                    candidates[count].live = live;
-                    count++;
-                }
-                cursor = next;
-            }
-            free(pTcpTable);
-        } else {
-            g_TCPWinQueryError = ERROR_NOT_ENOUGH_MEMORY;
+    static DWORD cursor[2];
+    static unsigned firstFamily;
+    for (unsigned pass = 0; pass < 2; pass++) {
+        unsigned f = (firstFamily + pass) % 2;
+        ULONG family = f ? AF_INET6 : AF_INET;
+        dwSize = 0;
+        DWORD ret = GetExtendedTcpTable(NULL, &dwSize, TRUE, family, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (ret != ERROR_INSUFFICIENT_BUFFER || !dwSize) {
+            if (ret != NO_ERROR) g_TCPWinQueryError = ret;
+            continue;
         }
+        void *table = malloc(dwSize);
+        if (!table) { g_TCPWinQueryError = ERROR_NOT_ENOUGH_MEMORY; continue; }
+        ret = GetExtendedTcpTable(table, &dwSize, TRUE, family, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (ret != NO_ERROR) { g_TCPWinQueryError = ret; free(table); continue; }
+        DWORD entries = *(DWORD *)table, next = cursor[f];
+        size_t limit = pass == 0 ? MAX_FLOW_CANDIDATES_WIN / 2 : MAX_FLOW_CANDIDATES_WIN;
+        for (DWORD visited = 0; visited < entries; visited++) {
+            DWORD i = (cursor[f] + visited) % entries;
+            TCP_ROW_WIN row; memset(&row, 0, sizeof(row));
+            row.key.family = f ? 6 : 4;
+            if (f) {
+                MIB_TCP6ROW_OWNER_PID *r = &((MIB_TCP6TABLE_OWNER_PID *)table)->table[i];
+                memcpy(row.key.local, r->ucLocalAddr, 16); memcpy(row.key.remote, r->ucRemoteAddr, 16);
+                row.key.localScope = r->dwLocalScopeId; row.key.remoteScope = r->dwRemoteScopeId;
+                row.key.localPort = (UINT16)r->dwLocalPort; row.key.remotePort = (UINT16)r->dwRemotePort;
+                row.key.pid = r->dwOwningPid; row.state = r->dwState;
+            } else {
+                MIB_TCPROW_OWNER_PID *r = &((MIB_TCPTABLE_OWNER_PID *)table)->table[i];
+                memcpy(row.key.local, &r->dwLocalAddr, 4); memcpy(row.key.remote, &r->dwRemoteAddr, 4);
+                row.key.localPort = (UINT16)r->dwLocalPort; row.key.remotePort = (UINT16)r->dwRemotePort;
+                row.key.pid = r->dwOwningPid; row.state = r->dwState;
+            }
+            if (!TCPAddressReportable(&row.key)) continue;
+            bool live = IsLiveTcpStateWin(row.state);
+            if (!live && !IsContactTcpStateWin(row.state)) continue;
+            if (count >= limit) { g_TCPWinDeferred++; continue; }
+            next = (i + 1) % entries;
+            row.key.created = TCPProcessCreated(row.key.pid);
+            OMINULL_EVENT measured; memset(&measured, 0, sizeof(measured));
+            if (live) EstatsMeasure(&row, &measured);
+            candidates[count].row = row;
+            candidates[count].bytesIn = measured.BytesIn;
+            candidates[count].bytesOut = measured.BytesOut;
+            candidates[count].measured = measured.BytesMeasured;
+            candidates[count].firstSample = measured.FirstObservedAt;
+            candidates[count].lastSample = measured.LastObservedAt;
+            candidates[count].live = live;
+            count++;
+        }
+        cursor[f] = next;
+        free(table);
     }
+    firstFamily ^= 1;
     EstatsEvictUnseen();
 
     size_t selected = SelectFlowCandidatesWin(candidates, count, maxEvents, order);
@@ -511,16 +495,24 @@ static size_t PollTCPObservations(OMINULL_EVENT *outEvents, size_t maxEvents) {
         const FLOW_CANDIDATE_WIN* candidate = &candidates[order[s]];
         OMINULL_EVENT* ev = &outEvents[s];
         memset(ev, 0, sizeof(OMINULL_EVENT));
-        ev->EventType = OMINULL_EVENT_FLOW_ESTABLISHED_V4;
+        ev->EventType = candidate->row.key.family == 6 ? OMINULL_EVENT_FLOW_ESTABLISHED_V6 : OMINULL_EVENT_FLOW_ESTABLISHED_V4;
         ev->Action = 0; // Permit
         ev->Direction = 1; // Outbound
         ev->Protocol = IPPROTO_TCP;
-        ev->IpVersion = 4;
-        ev->ProcessId = candidate->row.dwOwningPid;
-        ev->LocalPort = ntohs((u_short)candidate->row.dwLocalPort);
-        ev->RemotePort = ntohs((u_short)candidate->row.dwRemotePort);
-        ev->Addr.Ipv4.LocalIp = ntohl(candidate->row.dwLocalAddr);
-        ev->Addr.Ipv4.RemoteIp = ntohl(candidate->row.dwRemoteAddr);
+        ev->IpVersion = candidate->row.key.family;
+        ev->ProcessId = candidate->row.key.pid;
+        ev->LocalPort = ntohs((u_short)candidate->row.key.localPort);
+        ev->RemotePort = ntohs((u_short)candidate->row.key.remotePort);
+        if (ev->IpVersion == 6) {
+            memcpy(ev->Addr.Ipv6.LocalIp, candidate->row.key.local, 16);
+            memcpy(ev->Addr.Ipv6.RemoteIp, candidate->row.key.remote, 16);
+            ev->LocalScopeId = candidate->row.key.localScope;
+            ev->RemoteScopeId = candidate->row.key.remoteScope;
+        } else {
+            UINT32 local, remote;
+            memcpy(&local, candidate->row.key.local, 4); memcpy(&remote, candidate->row.key.remote, 4);
+            ev->Addr.Ipv4.LocalIp = ntohl(local); ev->Addr.Ipv4.RemoteIp = ntohl(remote);
+        }
         ev->BytesIn = candidate->bytesIn;
         ev->BytesOut = candidate->bytesOut;
         ev->BytesMeasured = candidate->measured;
@@ -534,18 +526,22 @@ static size_t PollTCPObservations(OMINULL_EVENT *outEvents, size_t maxEvents) {
         ev->Timestamp = ev->LastObservedAt;
         ev->ObservationCount = 1;
 
-        ProcessPathFor(candidate->row.dwOwningPid, ev->ProcessPath, OMINULL_MAX_PATH);
+        ProcessPathFor(candidate->row.key.pid, ev->ProcessPath, OMINULL_MAX_PATH);
 
         bool foundInBatch = false;
         for (size_t j = 0; j < s; j++) {
-            if (outEvents[j].ProcessId == candidate->row.dwOwningPid) {
+            if (outEvents[j].ProcessId == candidate->row.key.pid) {
                 ev->Enrichment = outEvents[j].Enrichment;
                 foundInBatch = true;
                 break;
             }
         }
         if (!foundInBatch) {
-            ProcessLineageWin_InspectProcess(candidate->row.dwOwningPid, &ev->Enrichment);
+            ProcessLineageWin_InspectProcess(candidate->row.key.pid, &ev->Enrichment);
+        }
+        if (!candidate->row.key.created || TCPProcessCreated(candidate->row.key.pid) != candidate->row.key.created) {
+            memset(&ev->Enrichment, 0, sizeof(ev->Enrichment));
+            wcscpy(ev->ProcessPath, L"unknown");
         }
     }
     return selected;
@@ -570,61 +566,18 @@ static size_t PollActiveSocketFlows(OMINULL_EVENT *outEvents, size_t maxEvents) 
 #define MAX_BLOCKED_PEERS 64
 #define PEER_ADDR_LEN 64
 
-/* HubAddressLiteral reduces the configured hub URL to an IPv4 literal.
- *
- * Isolation must leave a hole for the hub or it can never be lifted, and the
- * hole is written as an address, so a name is resolved here while this host can
- * still resolve names. */
-bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap) {
-    const char* p = strstr(config->hub_url, "://");
-    p = p ? p + 3 : config->hub_url;
-
-    char host[256] = {0};
-    size_t i = 0;
-    while (*p && *p != ':' && *p != '/' && i < sizeof(host) - 1) host[i++] = *p++;
-    host[i] = '\0';
-    if (!host[0]) return false;
-
-    struct in_addr probe;
-    if (inet_pton(AF_INET, host, &probe) == 1) {
-        _snprintf(out, cap, "%s", host);
-        out[cap - 1] = '\0';
-        return true;
-    }
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;          /* the filters are v4; a v6-only hub has no hole */
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = NULL;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return false;
-
-    bool ok = false;
-    char buf[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, buf, sizeof(buf))) {
-        _snprintf(out, cap, "%s", buf);
-        out[cap - 1] = '\0';
-        ok = true;
-    }
-    freeaddrinfo(res);
-    return ok;
+/* WFP address-only rules cannot distinguish link-local interfaces. Refuse
+ * those policy destinations rather than widen an interface-specific order. */
+static bool IsIPLiteralAny(const char *s) { return OminullUnscopedPolicyIP(s); }
+static bool ResolveHubTargets(const AGENT_CONFIG *config, OMINULL_HUB_TARGETS *targets) {
+    return OminullResolveHub(config->hub_url, targets);
 }
 
-static bool IsIPv4Literal(const char* s) {
-    struct in_addr v4;
-    return s && s[0] && inet_pton(AF_INET, s, &v4) == 1;
-}
-
-/* An address literal of either family. The peer and allow lists are IPv4 only
- * on this platform, but a baseline destination is not: a DHCPv6 server or the
- * ff02::1:2 relay address are both legitimate entries, and the filter engine
- * builds conditions for both families. */
-static bool IsIPLiteralAny(const char* s) {
-    struct in_addr v4;
-    struct in6_addr v6;
-    if (!s || !s[0]) return false;
-    if (inet_pton(AF_INET, s, &v4) == 1) return true;
-    return inet_pton(AF_INET6, s, &v6) == 1;
+bool HubAddressLiteral(const AGENT_CONFIG *config, char *out, size_t cap) {
+    OMINULL_HUB_TARGETS targets;
+    if (!cap || !ResolveHubTargets(config, &targets) || strlen(targets.addresses[0]) >= cap) return false;
+    strcpy(out, targets.addresses[0]);
+    return true;
 }
 
 /* JsonStringField pulls one flat "key":"value" out of an object fragment. The
@@ -679,18 +632,17 @@ static int ParseBaselineRules(const char* json, OMINULL_BASELINE_RULE* out, int 
          * filter conditions in the user-mode filtering API; the value itself is never echoed,
          * because it is attacker-controlled text on its way to a log. */
         if (!IsIPLiteralAny(r.destination)) {
-            printf("[!] Hub sent a baseline rule whose destination is not an IP address; ignoring it.\n");
-            continue;
+            printf("[!] Unsupported baseline destination; refusing policy update.\n");
+            return -2;
         }
         if (strcmp(r.protocol, "udp") != 0 && strcmp(r.protocol, "tcp") != 0) {
-            printf("[!] Hub sent a baseline rule for an unsupported protocol; ignoring it.\n");
-            continue;
+            return -2;
         }
         if (r.port < 1 || r.port > 65535) {
-            printf("[!] Hub sent a baseline rule with an out-of-range port; ignoring it.\n");
-            continue;
+            return -2;
         }
-        if (count < maxOut) out[count++] = r;
+        if (count >= maxOut) return -2;
+        out[count++] = r;
     }
     return count;
 }
@@ -699,32 +651,34 @@ static int ParseBaselineRules(const char* json, OMINULL_BASELINE_RULE* out, int 
 static int ParseAddressArray(const char* json, const char* key,
                              char out[][PEER_ADDR_LEN], int maxOut) {
     char needle[64];
-    _snprintf(needle, sizeof(needle), "\"%s\":[", key);
-    needle[sizeof(needle) - 1] = '\0';
-    const char* p = strstr(json, needle);
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
     if (!p) return 0;
     p += strlen(needle);
-
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p++ != ':') return -1;
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p++ != '[') return -1;
     int count = 0;
-    while (*p && *p != ']' && count < maxOut) {
-        while (*p && (*p == ' ' || *p == ',' || *p == '"')) p++;
-        if (*p == ']' || !*p) break;
-        char ip[PEER_ADDR_LEN] = {0};
-        int idx = 0;
-        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
-            ip[idx++] = *p++;
+    for (;;) {
+        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        if (*p == ']') return count;
+        if (count >= maxOut || *p++ != '"') return -1;
+        char ip[PEER_ADDR_LEN]; size_t length = 0;
+        while (*p && *p != '"') {
+            if (length >= sizeof(ip) - 1 || *p == '\\') return -1;
+            ip[length++] = *p++;
         }
-        if (!ip[0]) continue;
-        /* Not echoed: it is attacker-controlled text on its way to a log. */
-        if (!IsIPv4Literal(ip)) {
-            printf("[!] Hub sent an entry in %s that is not an IPv4 address; ignoring it.\n", key);
-            continue;
-        }
-        _snprintf(out[count], PEER_ADDR_LEN, "%s", ip);
-        out[count][PEER_ADDR_LEN - 1] = '\0';
-        count++;
+        if (*p++ != '"') return -1;
+        ip[length] = '\0';
+        if (!IsIPLiteralAny(ip)) return -1;
+        strcpy(out[count++], ip);
+        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        if (*p == ']') return count;
+        if (*p++ != ',') return -1;
+        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        if (*p == ']') return -1;
     }
-    return count;
 }
 
 /* What this agent has actually put in the filtering engine. At file scope rather than
@@ -733,6 +687,7 @@ static int ParseAddressArray(const char* json, const char* key,
  * it was also holding in place. */
 static bool known = false;
 static bool appliedIsolated = false;
+static OMINULL_HUB_TARGETS appliedHubTargets;
 static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
 static int appliedPeerCount = 0;
 static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
@@ -744,6 +699,7 @@ static bool engineReady = false;
 static bool engineTried = false;
 static bool g_ForgetApplied = false;
 static char g_DeadmanNote[160] = {0};
+static char g_ApplyNote[160] = {0};
 
 /* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
  * host is isolated before it releases itself.
@@ -787,7 +743,7 @@ const char* Agent_EnforcementStatus(void) {
         : "the user-mode filtering engine would not open; this host cannot enforce an isolation";
 }
 
-const char* Agent_LastAppliedNote(void) { return g_DeadmanNote; }
+const char* Agent_LastAppliedNote(void) { return g_ApplyNote[0] ? g_ApplyNote : g_DeadmanNote; }
 
 /* SyncEnforcement reconciles isolation and the mesh block list against the hub's
  * answer. The user-mode Windows Filtering Platform is the only enforcement
@@ -814,9 +770,17 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
 
     char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
     int allowCount = ParseAddressArray(respJson, "isolation_allow_ips", allow, MAX_BLOCKED_PEERS);
+    if (peerCount < 0 || allowCount < 0) {
+        strcpy(g_ApplyNote, "policy not applied: invalid, unsupported or oversized address list");
+        return;
+    }
 
     OMINULL_BASELINE_RULE baseline[OMINULL_MAX_BASELINE_RULES];
     int baselineCount = ParseBaselineRules(respJson, baseline, OMINULL_MAX_BASELINE_RULES);
+    if (baselineCount == -2) {
+        strcpy(g_ApplyNote, "policy not applied: invalid or oversized baseline");
+        return;
+    }
     bool baselineKnown = baselineCount >= 0;
     if (!baselineKnown) baselineCount = 0;
 
@@ -838,10 +802,11 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
     for (int i = 0; !changed && i < allowCount; i++) {
         if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
-    if (!changed) return;
+    if (!changed) { g_ApplyNote[0] = '\0'; return; }
 
-    char hubIP[64] = {0};
-    if (wantIsolated && !HubAddressLiteral(config, hubIP, sizeof(hubIP))) {
+    OMINULL_HUB_TARGETS hubTargets = {0};
+    if ((wantIsolated || peerCount) && !ResolveHubTargets(config, &hubTargets)) {
+        strcpy(g_ApplyNote, "policy not applied: no complete usable hub address set");
         /* Refused on purpose. An isolation with no hole for the hub can never
          * be lifted by the hub - it is not a quarantine, it is a host taken off
          * the network by a failed name lookup. The order stands and is retried
@@ -858,25 +823,28 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
         const char* allowed[MAX_BLOCKED_PEERS];
         for (int i = 0; i < allowCount; i++) allowed[i] = allow[i];
 
-        if (Wfp_ApplyState(hubIP, wantIsolated ? 1 : 0, blocked, peerCount,
-                           allowed, allowCount, baseline, baselineCount,
-                           baselineKnown ? 1 : 0) != ERROR_SUCCESS) {
+        DWORD status = Wfp_ApplyState(&hubTargets, wantIsolated ? 1 : 0, blocked, peerCount,
+                           allowed, allowCount, baseline, baselineCount, baselineKnown ? 1 : 0);
+        if (status != ERROR_SUCCESS) {
+            snprintf(g_ApplyNote, sizeof(g_ApplyNote), "policy not applied: WFP error 0x%08lx", (unsigned long)status);
             printf("[-] The user-mode filtering engine refused the change; state not applied.\n");
             return;
         }
         if (wantIsolated && baselineKnown) {
             printf("[!] Threat Nullification: host isolated. Permitted: hub %s, loopback, "
                    "%d baseline rule(s), %d allow-list address(es). %d peer block(s) in force.\n",
-                   hubIP, baselineCount, allowCount, peerCount);
+                   hubTargets.addresses[0], baselineCount, allowCount, peerCount);
         } else if (wantIsolated) {
             printf("[!] Threat Nullification: host isolated. This hub sends no baseline policy, so "
                    "the built-in floor applies: hub %s, loopback, DHCP and DNS to any destination, "
                    "%d allow-list address(es). %d peer block(s) in force.\n",
-                   hubIP, allowCount, peerCount);
+                   hubTargets.addresses[0], allowCount, peerCount);
         } else {
             printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
         }
 
+    g_ApplyNote[0] = '\0';
+    appliedHubTargets = hubTargets;
 	appliedIsolated = wantIsolated;
     memcpy(appliedPeers, peers, sizeof(peers));
     appliedPeerCount = peerCount;
@@ -927,7 +895,7 @@ static void HubContact(bool accepted) {
     if (engineReady) {
         const char* blocked[MAX_BLOCKED_PEERS];
         for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
-        released = (Wfp_ApplyState(NULL, 0, blocked, appliedPeerCount, NULL, 0,
+        released = (Wfp_ApplyState(&appliedHubTargets, 0, blocked, appliedPeerCount, NULL, 0,
                                    appliedBaseline, appliedBaselineCount,
                                    appliedBaselineKnown ? 1 : 0) == ERROR_SUCCESS);
     }
