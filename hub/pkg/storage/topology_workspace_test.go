@@ -100,3 +100,35 @@ func TestTopologyGatewayRetainsAgentCoverage(t *testing.T) {
 		t.Fatalf("gateway agent evidence lost: %+v", n)
 	}
 }
+
+func TestTopologyExplicitVirtualNetworkClassification(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SetTopologyNetworks([]TopologyNetwork{{CIDR: "172.20.0.0/16", Label: "Container network", Kind: "virtual"}}); err != nil {
+		t.Fatal(err)
+	}
+	nets, err := s.TopologyNetworks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := TopologyNode{IP: "172.20.0.8"}
+	describeTopologyNetwork(&node, nets)
+	if node.NetworkKind != "virtual" {
+		t.Fatalf("explicit classification lost: %+v", node)
+	}
+	node = TopologyNode{IP: "172.17.0.8"}
+	describeTopologyNetwork(&node, nets)
+	if node.NetworkKind != "" {
+		t.Fatal("private range fabricated virtual classification")
+	}
+	if err := s.SetTopologyNetworks([]TopologyNetwork{{CIDR: "10.0.4.0/24", Kind: "guess"}}); err == nil {
+		t.Fatal("invalid network kind accepted")
+	}
+}
+
+func TestTopologyViewRegionValidation(t *testing.T) {
+	for _, raw := range []string{`{"regions":"yes"}`, `{"regionOverrides":{"lan":"guess"}}`, `{"collapsedRegions":{"discovery":"yes"}}`} {
+		if validTopologyViewState([]byte(raw)) {
+			t.Errorf("invalid region state accepted: %s", raw)
+		}
+	}
+}

@@ -250,6 +250,7 @@ type TopologyNode struct {
 	EstateMember bool     `json:"estate_member"`
 	NetworkID    string   `json:"network_id"`
 	NetworkLabel string   `json:"network_label"`
+	NetworkKind  string   `json:"network_kind,omitempty"`
 	ID           string   `json:"id"`
 	Label        string   `json:"label"`
 	Type         string   `json:"type"` // "managed", "unmanaged", "cloud", "threat", "gateway"

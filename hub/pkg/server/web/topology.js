@@ -48,6 +48,7 @@
   function mount(container, api) {
     let data = { nodes: [], edges: [], conversations: [] },
       projection,
+      reporterLabels = new Map(),
       cy,
       worker,
       layoutID = 0,
@@ -66,6 +67,9 @@
       saveError = "";
     let state = {
       group: "network",
+      regions: true,
+      regionOverrides: {},
+      collapsedRegions: { discovery: true },
       query: "",
       expanded: {},
       positions: {},
@@ -73,7 +77,7 @@
       window: api.window || "24h",
       mode: "pan",
       list: false,
-      details: window.innerWidth >= 1200,
+      details: false,
       activeOnly: false,
       coverage: "",
       protocol: "",
@@ -161,7 +165,7 @@
         {},
         el("h1", { text: "Network topology" }),
         el("p", {
-          text: "Observed communication · drag to arrange · select to inspect",
+          text: "Observed communication",
         }),
       ),
       el("div", { class: "tg-saved" }, saved, save, saveAs, removeView),
@@ -216,10 +220,18 @@
         change();
       },
     });
+    const regions = el("input", {
+      type: "checkbox",
+      onchange: () => {
+        state.regions = regions.checked;
+        change(true);
+      },
+    });
     filterPanel.append(
       el(
         "div",
         { class: "tg-filter-body" },
+        el("label", { class: "tg-check" }, regions, "Separate logical regions"),
         coverage,
         protocol,
         verdict,
@@ -250,6 +262,22 @@
           "Interactive communication graph. Use List view for keyboard access.",
       }),
       list = el("div", { class: "tg-list", hidden: "" });
+    const tooltip = el("div", {
+      class: "tg-tooltip",
+      id: "topology-tooltip",
+      role: "tooltip",
+      hidden: "",
+    });
+    const directionKey = el(
+      "div",
+      { class: "tg-direction-key" },
+      el("span", { class: "tg-incoming", text: "← Incoming" }),
+      el("span", { class: "tg-outgoing", text: "Outgoing →" }),
+      el("span", {
+        class: "tg-direction-reference",
+        text: "Hover or select a node",
+      }),
+    );
     const inspector = el("aside", {
       class: "tg-inspector",
       "aria-label": "Topology inspector",
@@ -257,7 +285,14 @@
     const stage = el(
       "div",
       { class: "tg-stage" },
-      el("div", { class: "tg-graph-area" }, canvas, list),
+      el(
+        "div",
+        { class: "tg-graph-area" },
+        canvas,
+        list,
+        directionKey,
+        tooltip,
+      ),
       inspector,
     );
     const pan = button(
@@ -389,7 +424,7 @@
           },
         },
         {
-          selector: "node[!groupNode][!agent]",
+          selector: "node[!groupNode][!regionNode][!agent]",
           style: {
             "background-color": "#30343b",
             "border-color": "#979fa9",
@@ -432,8 +467,37 @@
           },
         },
         {
+          selector: "node[regionNode]",
+          style: {
+            width: 260,
+            height: 100,
+            "background-color": "#263945",
+            "background-opacity": 0.55,
+            "border-color": "#829daa",
+            "border-width": 1.5,
+            "border-style": "solid",
+            "font-size": 18,
+            "font-weight": 500,
+            "text-max-width": 320,
+            padding: 0,
+          },
+        },
+        { selector: "node[regionNode]:parent", style: { padding: 42 } },
+        {
+          selector: 'node[regionKey="external"]',
+          style: { "background-color": "#30374b", "border-color": "#909fc0" },
+        },
+        {
+          selector: 'node[regionKey="discovery"]',
+          style: { "background-color": "#3a3740", "border-color": "#a49aae" },
+        },
+        {
+          selector: 'node[regionKey="virtual"]',
+          style: { "background-color": "#293f39", "border-color": "#83aa99" },
+        },
+        {
           selector: "node[?quiet]",
-          style: { "border-style": "dashed", "background-opacity": 0.55 },
+          style: { "background-opacity": 0.4 },
         },
         {
           selector: "node[?isolated]",
@@ -478,7 +542,23 @@
             opacity: 1,
           },
         },
-        { selector: ".muted", style: { opacity: 0.2 } },
+        { selector: ".muted", style: { opacity: 0.18 } },
+        {
+          selector: "edge.incoming",
+          style: {
+            "line-color": "#81adff",
+            "target-arrow-color": "#81adff",
+            opacity: 1,
+          },
+        },
+        {
+          selector: "edge.outgoing",
+          style: {
+            "line-color": "#64d5ba",
+            "target-arrow-color": "#64d5ba",
+            opacity: 1,
+          },
+        },
       ],
     });
     pin.disabled = unpin.disabled = true;
@@ -505,14 +585,219 @@
         first = false;
         fitNext = false;
       }
-      status.textContent = e.data.compact
-        ? "Compact overview ready. Positions stay fixed during refresh."
-        : "Layout ready. Positions stay fixed during refresh.";
+      status.textContent = e.data.regioned
+        ? "Regions arranged"
+        : "Layout ready";
     };
     worker.onerror = () => {
       status.textContent =
         "Layout worker unavailable. Drag nodes manually or use List view.";
     };
+    let hoverTimer,
+      hideTimer,
+      hoverID = "",
+      tooltipTrigger = null,
+      tooltipState = null,
+      restoringListFocus = false;
+    function hideTooltip() {
+      clearTimeout(hoverTimer);
+      clearTimeout(hideTimer);
+      tooltip.hidden = true;
+      if (tooltipTrigger) tooltipTrigger.removeAttribute("aria-describedby");
+      tooltipTrigger = null;
+      tooltipState = null;
+    }
+    function deferHide() {
+      hideTimer = setTimeout(() => {
+        if (
+          !tooltip.matches(":hover") &&
+          !hoverID &&
+          !(tooltipTrigger && tooltipTrigger === document.activeElement)
+        )
+          hideTooltip();
+      }, 150);
+    }
+    tooltip.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+    tooltip.addEventListener("mouseleave", deferHide);
+    function escapeTooltip(e) {
+      if (e.key === "Escape") hideTooltip();
+    }
+    root.addEventListener("keydown", escapeTooltip);
+    // Canvas hover does not imply DOM focus, so Escape also works from the page.
+    document.addEventListener("keydown", escapeTooltip);
+    function highlight(id) {
+      cy.elements().removeClass("incoming outgoing muted");
+      const hovered = cy.getElementById(id || "");
+      const ref =
+        hovered.length && hovered.isNode()
+          ? hovered
+          : cy.getElementById(selected);
+      const caption = directionKey.querySelector(".tg-direction-reference");
+      if (!ref.length || !ref.isNode()) {
+        caption.textContent = "Hover or select a node";
+        return;
+      }
+      const members = new Set(ref.union(ref.descendants()).map((n) => n.id()));
+      cy.edges().forEach((e) => {
+        const source = members.has(e.source().id()),
+          target = members.has(e.target().id());
+        e.addClass(
+          source && !target
+            ? "outgoing"
+            : target && !source
+              ? "incoming"
+              : source && target
+                ? ""
+                : "muted",
+        );
+      });
+      const n = projection.nodes.find((n) => n.id === ref.id());
+      caption.textContent = "At " + (n ? M.shortLabel(n) : ref.id());
+    }
+    function showTooltip(id, point, trigger) {
+      hideTooltip();
+      const n = projection.nodes.find((n) => n.id === id);
+      const edge = projection.edges.find((e) => "edge:" + e.id === id);
+      if (!n && !edge) return;
+      tooltip.replaceChildren();
+      if (n) {
+        tooltip.append(el("strong", { text: M.shortLabel(n) }));
+        const lines = n.is_region
+          ? [
+              n.description,
+              num(n.count) + (n.count === 1 ? " address" : " addresses"),
+              n.collapsed
+                ? "Click to expand or inspect"
+                : "Drag region to move its groups",
+            ]
+          : n.is_group
+            ? [
+                n.label,
+                num(n.count) + (n.count === 1 ? " address" : " addresses"),
+                "Click to expand or inspect",
+              ]
+            : [
+                n.ip,
+                n.address_scope ? "Scope: " + n.address_scope : "",
+                n.quiet
+                  ? "No observed traffic in this window"
+                  : "Traffic observed in this window",
+                M.coverage(n) === "managed" ? "Agent installed" : "No agent",
+                n.is_isolated ? "Isolated" : "",
+              ];
+        lines
+          .filter(Boolean)
+          .filter((v, i, a) => a.indexOf(v) === i && v !== M.shortLabel(n))
+          .forEach((text) => tooltip.append(el("div", { text })));
+      } else {
+        const source = projection.nodes.find((n) => n.id === edge.source),
+          target = projection.nodes.find((n) => n.id === edge.target);
+        tooltip.append(
+          el("strong", {
+            text: M.shortLabel(source) + " → " + M.shortLabel(target),
+          }),
+        );
+        tooltip.append(
+          el("div", {
+            text:
+              num(edge.flow_count) +
+              " observations · " +
+              bytes(edge.total_bytes) +
+              " measured",
+          }),
+        );
+        const ports = [
+          ...new Set(
+            edge.ports.map((p) => p.protocol + (p.port ? "/" + p.port : "")),
+          ),
+        ];
+        if (ports.length)
+          tooltip.append(
+            el("div", {
+              text:
+                ports.slice(0, 5).join(" · ") +
+                (ports.length > 5 ? " +" + (ports.length - 5) : ""),
+            }),
+          );
+        const records = edge.relations || [];
+        const domains = [
+          ...new Set(records.map((r) => r.domain).filter(Boolean)),
+        ];
+        const processes = [
+          ...new Set(
+            records
+              .filter((r) => r.process)
+              .map((r) => {
+                const reporter = reporterLabels.get(r.endpoint_id);
+                return (
+                  r.process.split(/[\\/]/).pop() +
+                  " · " +
+                  (reporter || r.endpoint_id || "Unattributed reporter")
+                );
+              }),
+          ),
+        ];
+        for (const [label, values] of [
+          ["Domains", domains],
+          ["Processes / reporter", processes],
+        ])
+          if (values.length)
+            tooltip.append(
+              el("div", {
+                text:
+                  label +
+                  ": " +
+                  values.slice(0, 2).join("; ") +
+                  (values.length > 2 ? " +" + (values.length - 2) : ""),
+              }),
+            );
+        if (edge.verdict !== "clean")
+          tooltip.append(
+            el("div", {
+              class: "tg-tooltip-finding",
+              text:
+                edge.verdict === "blocked"
+                  ? "Contains blocked observations"
+                  : "Contains anomalous observations",
+            }),
+          );
+        tooltip.append(
+          el("small", { text: "Click for full evidence · Esc to dismiss" }),
+        );
+      }
+      tooltip.hidden = false;
+      tooltipState = { id, point, trigger };
+      const area = canvas.parentElement.getBoundingClientRect();
+      tooltip.style.left =
+        Math.max(
+          8,
+          Math.min(point.x + 12, area.width - tooltip.offsetWidth - 8),
+        ) + "px";
+      tooltip.style.top =
+        Math.max(
+          8,
+          Math.min(point.y + 12, area.height - tooltip.offsetHeight - 40),
+        ) + "px";
+      if (trigger) {
+        tooltipTrigger = trigger;
+        trigger.setAttribute("aria-describedby", tooltip.id);
+      }
+    }
+    cy.on("mouseover", "node, edge", (e) => {
+      hoverID = e.target.id();
+      clearTimeout(hideTimer);
+      clearTimeout(hoverTimer);
+      if (e.target.isNode()) highlight(hoverID);
+      const point = e.renderedPosition || e.target.renderedPosition();
+      hoverTimer = setTimeout(() => showTooltip(e.target.id(), point), 200);
+    });
+    cy.on("mouseout", "node, edge", () => {
+      hoverID = "";
+      clearTimeout(hoverTimer);
+      deferHide();
+      highlight();
+    });
+    cy.on("pan zoom grab", hideTooltip);
     cy.on("tap", "node, edge", (e) => {
       selected = e.target.id();
       revealInspector();
@@ -639,9 +924,11 @@
       protocol.querySelector("select").value = state.protocol;
       verdict.querySelector("select").value = state.verdict;
       active.checked = state.activeOnly;
+      regions.checked = state.regions;
     }
     function renderGraph(skipCapture) {
       if (dragging) return;
+      const previousTooltip = tooltipState;
       if (!skipCapture) capture();
       projection = M.project(data, state);
       const elements = projection.nodes.map((n, i) => ({
@@ -650,15 +937,15 @@
           id: n.id,
           parent: n.parent || undefined,
           kind: n.type,
-          display: n.is_group
-            ? n.label
-                .replace(" (address group)", "")
-                .replace(" (segment unknown)", " · scope unknown") +
-              "\n" +
-              num(n.count) +
-              (n.count === 1 ? " host" : " hosts")
-            : (n.label || n.ip || n.id) + (n.quiet ? "\nQuiet in window" : ""),
+          display:
+            M.shortLabel(n) +
+            (n.is_group || (n.is_region && n.collapsed)
+              ? "\n" +
+                num(n.count) +
+                (n.count === 1 ? " address" : " addresses")
+              : ""),
           ...(n.is_group ? { groupNode: true } : {}),
+          ...(n.is_region ? { regionNode: true, regionKey: n.key } : {}),
           agent: !!n.endpoint_id || n.type === "managed",
           quiet: !!n.quiet,
           isolated: !!n.is_isolated,
@@ -701,7 +988,7 @@
           "span",
           {},
           el("strong", { text: num(projection.matched) }),
-          " of " + num(projection.total) + " hosts",
+          " of " + num(projection.total) + " addresses",
         ),
         el(
           "span",
@@ -713,7 +1000,7 @@
           "span",
           {},
           el("strong", { text: num(projection.edges.length) }),
-          " directed links shown",
+          " links",
         ),
         el("span", {
           class: "tg-window",
@@ -780,10 +1067,20 @@
         (state.query
           ? "Search finds hosts and observed relations; link totals cover the matching host pairs. "
           : "") +
-        "Arrows follow recorded source → destination. Counts are observations, not unique sessions.";
+        "";
       if (saveError) status.textContent = saveError;
       renderList();
       inspect();
+      if (previousTooltip) {
+        const trigger = state.list
+          ? [...list.querySelectorAll("button")].find(
+              (b) => b.dataset.topologyId === previousTooltip.id,
+            )
+          : null;
+        if (!state.list || trigger)
+          showTooltip(previousTooltip.id, previousTooltip.point, trigger);
+        else hideTooltip();
+      }
       if (first && projection.nodes.length) arrange(false);
     }
     function arrange(selectionOnly) {
@@ -824,10 +1121,15 @@
         (n) => n.id === id || n.asset_id === id || n.ip === id,
       );
       if (!n) return;
-      state.expanded[M.groupKey(n, state.group)] = Math.max(
-        100,
-        state.expanded[M.groupKey(n, state.group)] || 0,
-      );
+      const group = M.project(data, {
+        ...state,
+        query: "",
+        coverage: "",
+        activeOnly: false,
+      }).groups.find((g) => g.members.some((m) => m.id === n.id));
+      if (!group) return;
+      state.collapsedRegions[group.region] = false;
+      state.expanded[group.key] = Math.max(100, state.expanded[group.key] || 0);
       state.query = n.ip || n.label;
       syncControls();
       renderGraph();
@@ -841,6 +1143,9 @@
     }
     function renderList() {
       if (!state.list) return;
+      const focusedID = list.contains(document.activeElement)
+        ? document.activeElement.dataset.topologyId
+        : null;
       list.replaceChildren();
       const table = el(
         "table",
@@ -868,11 +1173,13 @@
               text: n.ip || num(n.count) + (n.count === 1 ? " host" : " hosts"),
             }),
             el("td", {
-              text: n.is_group
-                ? "Group"
-                : M.coverage(n) === "managed"
-                  ? "Agent installed"
-                  : "No agent",
+              text: n.is_region
+                ? "Region"
+                : n.is_group
+                  ? "Group"
+                  : M.coverage(n) === "managed"
+                    ? "Agent installed"
+                    : "No agent",
             }),
             el(
               "td",
@@ -886,10 +1193,66 @@
           ),
         ),
       );
+      function evidenceButton(id) {
+        const b = button("Inspect", () => {
+          selected = id;
+          revealInspector();
+          inspect();
+        });
+        b.dataset.topologyId = id;
+        const show = () => {
+          if (restoringListFocus) return;
+          highlight(id);
+          const r = b.getBoundingClientRect(),
+            area = list.getBoundingClientRect();
+          showTooltip(id, { x: r.left - area.left, y: r.bottom - area.top }, b);
+        };
+        b.addEventListener("focus", show);
+        b.addEventListener("mouseenter", show);
+        b.addEventListener("blur", deferHide);
+        b.addEventListener("mouseleave", deferHide);
+        return b;
+      }
+      [...body.rows].forEach((row, i) =>
+        row.lastElementChild.replaceChildren(
+          evidenceButton(projection.nodes[i].id),
+        ),
+      );
+      projection.edges.forEach((e) => {
+        const source = projection.nodes.find((n) => n.id === e.source),
+          target = projection.nodes.find((n) => n.id === e.target);
+        body.append(
+          el(
+            "tr",
+            {},
+            el("td", {
+              text: M.shortLabel(source) + " → " + M.shortLabel(target),
+            }),
+            el("td", { text: num(e.flow_count) + " observations" }),
+            el("td", { text: "Directed link" }),
+            el("td", {}, evidenceButton("edge:" + e.id)),
+          ),
+        );
+      });
       table.append(body);
       list.append(table);
+      if (focusedID) {
+        const target = [...list.querySelectorAll("button")].find(
+          (b) => b.dataset.topologyId === focusedID,
+        );
+        restoringListFocus = true;
+        target?.focus({ preventScroll: true });
+        restoringListFocus = false;
+        if (target && tooltipState?.id === focusedID) {
+          tooltipTrigger = target;
+          tooltipState.trigger = target;
+          target.setAttribute("aria-describedby", tooltip.id);
+        }
+      }
     }
     function detail(label, value) {
+      if (value == null || value === "" || /^unknown$/i.test(String(value)))
+        return null;
       return el(
         "div",
         { class: "tg-detail" },
@@ -899,6 +1262,7 @@
     }
     function inspect() {
       inspector.replaceChildren();
+      if (cy && projection) highlight(hoverID);
       const n = projection && projection.nodes.find((n) => n.id === selected),
         edge =
           projection &&
@@ -914,8 +1278,12 @@
             "div",
             { class: "tg-legend" },
             el("p", { text: "Host solid border · agent installed" }),
-            el("p", { text: "Host dashed border · no agent or quiet" }),
-            el("p", { text: "Arrow · recorded direction" }),
+            el("p", {
+              text: "Host dashed border · no agent. Dim fill · no traffic in this window.",
+            }),
+            el("p", {
+              text: "Arrows follow recorded source → destination. Counts are observations, not unique sessions.",
+            }),
             el("p", { text: "Amber border · pinned position" }),
           ),
           el("p", {
@@ -930,18 +1298,72 @@
           class: "tg-eyebrow",
           text: edge
             ? "Directed communication"
-            : n.is_group
-              ? "Network group"
-              : "Host",
+            : n.is_region
+              ? "Visual region"
+              : n.is_group
+                ? "Network group"
+                : "Host",
         }),
-        el("h2", { text: edge ? "Observed link" : n.label || n.ip }),
+        el("h2", { text: edge ? "Observed link" : M.shortLabel(n) }),
         button("Clear selection", () => {
           selected = "";
           cy.elements().unselect();
           inspect();
         }),
       );
+      if (n && n.is_region) {
+        inspector.append(
+          el("p", { text: n.description }),
+          el("p", {
+            text: num(n.count) + (n.count === 1 ? " address" : " addresses"),
+          }),
+          button(n.collapsed ? "Expand region" : "Collapse region", () => {
+            const node = cy.getElementById(n.id);
+            if (
+              node
+                .union(node.descendants())
+                .some((x) => state.pins.includes(x.id()))
+            ) {
+              status.textContent =
+                "Unpin region contents before changing their grouping.";
+              return;
+            }
+            state.collapsedRegions[n.key] = !n.collapsed;
+            change(true);
+          }),
+          button("Focus region", () => {
+            cy.fit(
+              cy
+                .getElementById(n.id)
+                .union(cy.getElementById(n.id).descendants()),
+              35,
+            );
+            markDirty();
+          }),
+        );
+        return;
+      }
       if (n && n.is_group) {
+        if (state.regions && state.group === "network") {
+          const regionChoice = select(
+            "Visual region",
+            [
+              ["", "Automatic"],
+              ...Object.entries(M.regionDefinitions).map(([key, v]) => [
+                key,
+                v.label,
+              ]),
+            ],
+            (v) => {
+              state.regionOverrides[n.baseKey] = v;
+              selected = "";
+              change(true);
+            },
+          );
+          regionChoice.querySelector("select").value =
+            state.regionOverrides[n.baseKey] || "";
+          inspector.append(regionChoice);
+        }
         inspector.append(
           el("p", {
             text:
@@ -1053,15 +1475,7 @@
             detail("Verdict", edge.verdict),
           ),
         );
-        const original = new Set(edge.originals);
-        const pairs = new Set(
-          (data.edges || [])
-            .filter((e) => original.has(e.id))
-            .map((e) => JSON.stringify([e.source, e.target])),
-        );
-        records = (data.conversations || []).filter((r) =>
-          pairs.has(JSON.stringify([r.source, r.target])),
-        );
+        records = edge.relations || [];
       }
       const domains = new Map(),
         processes = new Map();
@@ -1168,7 +1582,13 @@
     function applyView(v) {
       saveError = "";
       currentView = v;
-      state = { ...state, ...v.state };
+      state = {
+        ...state,
+        ...v.state,
+        regions: v.state.regions ?? false,
+        collapsedRegions: v.state.collapsedRegions || {},
+        regionOverrides: v.state.regionOverrides || {},
+      };
       state.expanded = state.expanded || {};
       state.positions = state.positions || {};
       state.pins = state.pins || [];
@@ -1312,6 +1732,11 @@
         return;
       }
       data = next;
+      reporterLabels = new Map(
+        (data.nodes || [])
+          .filter((n) => n.endpoint_id)
+          .map((n) => [n.endpoint_id, n.label || n.ip]),
+      );
       const restoreDraft = api.draft;
       const viewport = restoreDraft && state.viewport;
       renderGraph(!!restoreDraft);
@@ -1331,6 +1756,8 @@
       destroy() {
         destroyed = true;
         clearTimeout(searchTimer);
+        hideTooltip();
+        document.removeEventListener("keydown", escapeTooltip);
         observer.disconnect();
         worker.terminate();
         cy.destroy();

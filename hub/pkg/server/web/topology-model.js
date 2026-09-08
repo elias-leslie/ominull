@@ -14,6 +14,96 @@
         ? n.role || "Unknown role"
         : n.network_id || "unknown";
   }
+  const regionDefinitions = {
+    internal: {
+      label: "Internal networks",
+      description:
+        "Known estate and local address space. Address scope alone does not prove a routed LAN.",
+    },
+    virtual: {
+      label: "Virtual / container networks",
+      description:
+        "Explicitly classified networks or a personal view override.",
+    },
+    external: {
+      label: "External destinations",
+      description:
+        "Public addresses outside the known estate. Domains remain observed associations.",
+    },
+    discovery: {
+      label: "Discovery & multicast",
+      description:
+        "Multicast destinations and unclaimed link-local peers observed only communicating with multicast.",
+    },
+    unknown: {
+      label: "Unclassified",
+      description: "Insufficient address or estate evidence.",
+    },
+  };
+  function regionAssignments(data, options) {
+    const all = data.nodes || [],
+      byID = new Map(all.map((n) => [n.id, n]));
+    const peers = new Map();
+    (data.edges || []).forEach((e) => {
+      for (const [a, b] of [
+        [e.source, e.target],
+        [e.target, e.source],
+      ]) {
+        if (!peers.has(a)) peers.set(a, []);
+        peers.get(a).push(byID.get(b));
+      }
+    });
+    return new Map(
+      all.map((n) => {
+        const override = (options.regionOverrides || {})[
+          n.network_id || "unknown"
+        ];
+        let region = "unknown";
+        if (regionDefinitions[override]) region = override;
+        else if (n.address_scope === "multicast") region = "discovery";
+        else if (n.network_kind === "virtual") region = "virtual";
+        else if (
+          n.address_scope === "link-local" &&
+          !n.asset_id &&
+          !n.endpoint_id &&
+          !n.estate_member &&
+          (peers.get(n.id) || []).length &&
+          peers.get(n.id).every((p) => p && p.address_scope === "multicast")
+        )
+          region = "discovery";
+        else if (
+          n.estate_member ||
+          n.asset_id ||
+          n.endpoint_id ||
+          ["private", "shared", "link-local"].includes(n.address_scope) ||
+          n.type === "managed"
+        )
+          region = "internal";
+        else if (n.address_scope === "public" || n.type === "cloud")
+          region = "external";
+        return [n.id, region];
+      }),
+    );
+  }
+  function shortLabel(n) {
+    if (n.is_region) return regionDefinitions[n.key].label;
+    const label = n.label || n.ip || n.id;
+    if (!n.is_group) return label;
+    const member = (n.members || [])[0] || {};
+    const net = member.network_id || "";
+    // Only shorten generated labels. Operator-supplied names remain intact.
+    if (label.includes("(segment unknown)")) {
+      const zone = net.split(":").slice(2).join(":");
+      if (net.startsWith("link-local:"))
+        return "Scoped peers" + (zone ? " · " + zone : "");
+      if (net.startsWith("multicast:")) return "Multicast";
+      if (net.startsWith("private:")) return "Local addresses";
+      if (net === "estate-unassigned") return "Known estate";
+    }
+    return label
+      .replace(" (address group)", "")
+      .replace(/^Unknown (role|segment)$/, "Unclassified");
+  }
   function project(data, options) {
     const o = options || {},
       all = data.nodes || [],
@@ -84,7 +174,9 @@
     );
     const keep = new Set(nodes.map((n) => n.id));
     edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));
-    const nodeByID = new Map(nodes.map((n) => [n.id, n]));
+    const assignments = regionAssignments(data, o),
+      regionMap = new Map(),
+      groupByNode = new Map();
     const groups = new Map(),
       weights = new Map();
     edges.forEach((e) =>
@@ -93,18 +185,40 @@
       ),
     );
     nodes.forEach((n) => {
-      const k = groupKey(n, o.group);
+      const region = assignments.get(n.id);
+      const baseKey = groupKey(n, o.group);
+      const k = o.regions ? region + "|" + baseKey : baseKey;
+      groupByNode.set(n.id, k);
+      if (o.regions && !regionMap.has(region))
+        regionMap.set(region, {
+          id: "region:" + region,
+          key: region,
+          ...regionDefinitions[region],
+          is_region: true,
+          type: "region",
+          members: [],
+          count: 0,
+          collapsed: !!(o.collapsedRegions || {})[region],
+        });
+      if (o.regions) {
+        regionMap.get(region).members.push(n);
+        regionMap.get(region).count++;
+      }
+
       if (!groups.has(k))
         groups.set(k, {
           id: "group:" + k,
           key: k,
+          baseKey,
+          parent: o.regions ? "region:" + region : undefined,
+          region: region,
           label:
             o.group && o.group !== "network"
               ? o.group === "coverage"
-                ? k === "managed"
+                ? baseKey === "managed"
                   ? "Agent installed"
                   : "No agent"
-                : k
+                : baseKey
               : n.network_label || "Unknown segment",
           members: [],
           is_group: true,
@@ -135,6 +249,11 @@
         g.expanded = count > 0;
         g.shown = count;
         g.count = g.members.length;
+        const region = regionMap.get(g.region);
+        if (region && region.collapsed) {
+          g.members.forEach((n) => mapping.set(n.id, region.id));
+          return;
+        }
         result.push(g);
         g.members.forEach((n, i) => {
           if (i < count) {
@@ -153,7 +272,7 @@
         target = mapping.get(e.target);
       if (!source || !target) return;
       if (source === target) {
-        const g = groups.get(groupKey(nodeByID.get(e.source), o.group));
+        const g = groups.get(groupByNode.get(e.source));
         if (g) {
           g.internal_flows += e.flow_count || 0;
           g.total_bytes += e.total_bytes || 0;
@@ -172,6 +291,7 @@
           verdict: "clean",
           ports: [],
           originals: [],
+          relations: [],
         });
       const m = merged.get(id);
       m.flow_count += e.flow_count || 0;
@@ -185,11 +305,34 @@
       )
         m.verdict = e.verdict;
     });
+    const keptPairs = new Set(
+      edges.map((e) => JSON.stringify([e.source, e.target])),
+    );
+    relations.forEach((r) => {
+      if (!keptPairs.has(JSON.stringify([r.source, r.target]))) return;
+      const protocol =
+        r.protocol === 6
+          ? "TCP"
+          : r.protocol === 17
+            ? "UDP"
+            : [1, 58].includes(r.protocol)
+              ? "ICMP"
+              : String(r.protocol);
+      if (o.protocol && o.protocol !== protocol) return;
+      const edge = merged.get(
+        JSON.stringify([mapping.get(r.source), mapping.get(r.target)]),
+      );
+      if (edge) edge.relations.push(r);
+    });
     const drawnEdges = [...merged.values()].sort(
       (a, b) => b.flow_count - a.flow_count || a.id.localeCompare(b.id),
     );
     return {
-      nodes: result,
+      nodes: [...regionMap.values(), ...result],
+      regions: [...regionMap.values()],
+      hostCount: nodes.filter((n) => n.address_scope !== "multicast").length,
+      destinationCount: nodes.filter((n) => n.address_scope === "multicast")
+        .length,
       edges: drawnEdges.slice(0, 3000),
       groups: [...groups.values()],
       hidden,
@@ -198,5 +341,5 @@
       total: all.length,
     };
   }
-  return { project, groupKey, coverage };
+  return { project, groupKey, coverage, regionDefinitions, shortLabel };
 });

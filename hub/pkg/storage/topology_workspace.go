@@ -194,9 +194,12 @@ func validTopologyViewState(raw json.RawMessage) bool {
 			X float64 `json:"x"`
 			Y float64 `json:"y"`
 		} `json:"positions"`
-		Expanded map[string]int `json:"expanded"`
-		Pins     []string       `json:"pins"`
-		Viewport *struct {
+		Expanded         map[string]int    `json:"expanded"`
+		Regions          bool              `json:"regions"`
+		RegionOverrides  map[string]string `json:"regionOverrides"`
+		CollapsedRegions map[string]bool   `json:"collapsedRegions"`
+		Pins             []string          `json:"pins"`
+		Viewport         *struct {
 			Zoom float64 `json:"zoom"`
 			Pan  struct {
 				X float64 `json:"x"`
@@ -206,6 +209,13 @@ func validTopologyViewState(raw json.RawMessage) bool {
 	}
 	if json.Unmarshal(raw, &state) != nil || len(state.Query) > 512 || len(state.Positions) > 20000 || len(state.Pins) > 20000 {
 		return false
+	}
+	for _, region := range state.RegionOverrides {
+		switch region {
+		case "", "internal", "virtual", "external", "discovery", "unknown":
+		default:
+			return false
+		}
 	}
 	switch state.Group {
 	case "", "network", "role", "coverage":

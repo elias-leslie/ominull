@@ -186,6 +186,7 @@
 .tg-canvas {
   position: absolute;
   inset: 0;
+  bottom: 32px;
   background-image: radial-gradient(var(--line) 0.7px, transparent 0.7px);
   background-size: 20px 20px;
 }
@@ -430,4 +431,62 @@ body[data-section="topology"] #view {
 
 .tg-table th:first-child {
   width: 40%;
+}
+
+.tg-tooltip {
+  position: absolute;
+  z-index: 15;
+  max-width: min(350px, calc(100% - 16px));
+  padding: 12px 14px;
+  border: 1px solid var(--ink-3);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 24px #0007;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+}
+.tg-tooltip strong,
+.tg-tooltip small {
+  display: block;
+}
+.tg-tooltip div {
+  margin-top: 5px;
+}
+.tg-tooltip small {
+  margin-top: 8px;
+  color: var(--ink-2);
+}
+.tg-tooltip-finding {
+  color: #e89786;
+}
+.tg-direction-key {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  background: var(--ground);
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  pointer-events: none;
+}
+.tg-incoming {
+  color: #81adff;
+}
+.tg-outgoing {
+  color: #64d5ba;
+}
+.tg-direction-reference {
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tg-list {
+  bottom: 32px;
 }

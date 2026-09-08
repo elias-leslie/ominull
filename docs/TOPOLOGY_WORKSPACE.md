@@ -68,3 +68,46 @@ labels on wide disconnected networks. Expanded hosts keep fCoSE layout. Compact
 arrangement never overrides pins or fixed nodes outside an arrangement selection.
 At widths below 1,200 pixels the inspector starts hidden to leave room for the
 graph. Details toggles it; selecting a host, group or link opens it automatically.
+
+## Logical regions and hover evidence
+
+New workspaces separate internal networks, explicitly classified virtual networks,
+external destinations and discovery traffic. Multicast and unclaimed link-local
+peers seen only communicating with multicast enter Discovery, initially collapsed.
+Known assets stay in the estate. Private ranges alone never imply virtualization.
+An optional `kind: "virtual"` or `kind: "physical"` on an operator-configured network
+provides explicit classification. Existing network settings need no migration.
+
+The worker arranges each region independently, then packs region bounds with clear
+gutters. Cross-region links cannot distort the layout within a region. Drag a
+region's background to move its contents. Select it to pin all visible leaves,
+collapse it or focus it. Pinned contents must be unpinned before collapsing the
+region. The network group inspector offers a personal visual-region override.
+This changes the saved view, never network policy or asset identity.
+
+Saved views retain regions, overrides, collapsed regions, positions and pins.
+Older views open in their original flat layout to preserve their coordinates.
+Enable “Separate logical regions” under Filters to convert an old view, then Save.
+
+Canvas labels omit repeated unknown-scope and quiet-window text. Hover or inspect
+an item for full scope and activity evidence. Counts describe addresses, including
+multicast destinations, rather than claiming every address is a physical host.
+
+Incoming links are blue and outgoing links teal relative to the hovered or selected
+node or region. Arrowheads and the text key retain direction without relying on
+color. With no node reference, links retain neutral/status colors. Blocked links
+remain dashed when direction colors apply; findings also appear in link evidence.
+
+Link tooltips show observed protocols/ports, counts, measured bytes, domains and
+short executable names with reporting hosts. Full executable paths and attribution
+remain in the inspector. Evidence follows protocol filtering. Domain associations
+do not establish machine identity. List view exposes the same tooltips on keyboard
+focus and provides buttons to inspect every drawn link. Tooltips remain hoverable,
+can be dismissed with Escape and have no interactive controls inside them.
+
+Design references: W3C requires information beyond color alone and predictable,
+dismissible, hoverable content. See [Use of Color](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html)
+and [Content on Hover or Focus](https://www.w3.org/WAI/WCAG22/Understanding/content-on-hover-or-focus.html).
+Graphviz's [tooltip reference](https://graphviz.org/docs/attrs/tooltip/) also
+recommends explicit tooltip content when derived labels are unhelpful. These
+principles informed the implementation; they are not a claim of a full WCAG audit.

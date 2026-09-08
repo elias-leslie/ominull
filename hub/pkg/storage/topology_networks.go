@@ -14,12 +14,16 @@ import (
 type TopologyNetwork struct {
 	CIDR  string `json:"cidr"`
 	Label string `json:"label"`
+	Kind  string `json:"kind,omitempty"`
 }
 
 // ValidateTopologyNetworks checks and canonicalizes an explicit estate network list.
 func ValidateTopologyNetworks(networks []TopologyNetwork) error {
 	seen := map[string]bool{}
 	for i := range networks {
+		if networks[i].Kind != "" && networks[i].Kind != "physical" && networks[i].Kind != "virtual" {
+			return fmt.Errorf("network %d has an invalid kind", i+1)
+		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(networks[i].CIDR))
 		if err != nil || p.Bits() == 0 || p.Addr().Is4In6() || p.Addr().IsMulticast() || p.Addr().IsLoopback() {
 			return fmt.Errorf("network %d requires an explicit unicast IPv4 or IPv6 prefix", i+1)
@@ -87,6 +91,7 @@ func describeTopologyNetwork(n *TopologyNode, networks []TopologyNetwork) {
 		if p.Contains(a.WithZone("")) {
 			n.EstateMember = true
 			n.NetworkID, n.NetworkLabel = network.CIDR, network.Label
+			n.NetworkKind = network.Kind
 			if n.Type == "cloud" {
 				n.Type, n.Group = "unmanaged", "Seen in traffic only"
 			}
