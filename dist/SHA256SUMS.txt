@@ -1,3 +1,3 @@
-8b3012f05b3236e80db40ccff5c33abd53a3694bca2a4cdf6e46d11f49cf6ec0  ominull-agent-windows-1.8.31.msi
-9b2ce9aad9d60328da5b822a4e8751abecee95de8bf663884e8d9dee0ba9e4ca  ominull-agent_1.8.31_amd64.deb
-2f684e4996b89db5e6c91fba0f9a9add02e3ef02911dae4cdaefa4a60584ea85  ominull-hub_1.8.31_amd64.deb
+1beb888002d92791a3526bedda4884603e789404c8ec6051184094a367b92f20  ominull-agent-windows-1.8.32.msi
+8f49e932e5d523c6a731a5be36672349be85f3cdbd886aa3fffc21a84da1f080  ominull-agent_1.8.32_amd64.deb
+ac60f6b94d20a790e4ad4fe6f99722a5e803e630f10cdae0dbb85f439225f930  ominull-hub_1.8.32_amd64.deb

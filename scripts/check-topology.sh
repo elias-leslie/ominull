@@ -7,3 +7,4 @@ for file in app topology topology-model; do
   node --check "$ROOT_DIR/hub/pkg/server/web/$file.js"
 done
 node --test "$ROOT_DIR"/hub/pkg/server/web_tests/*.test.cjs
+node --test "$ROOT_DIR"/web-build/*.test.cjs

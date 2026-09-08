@@ -61,3 +61,10 @@ cache. It does not introduce another rollup projection: exact window semantics
 remain auditable, and a new projection needs measured query pressure to justify
 its migration and reconciliation cost. Graph layout runs independently of that
 query on a worker. Performance evidence records query and rendering separately.
+
+A collapsed overview uses a compact card arrangement when a force layout would
+reduce labels below 11 screen pixels in the current viewport. This avoids tiny
+labels on wide disconnected networks. Expanded hosts keep fCoSE layout. Compact
+arrangement never overrides pins or fixed nodes outside an arrangement selection.
+At widths below 1,200 pixels the inspector starts hidden to leave room for the
+graph. Details toggles it; selecting a host, group or link opens it automatically.

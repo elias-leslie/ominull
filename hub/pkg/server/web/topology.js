@@ -73,6 +73,7 @@
       window: api.window || "24h",
       mode: "pan",
       list: false,
+      details: window.innerWidth >= 1200,
       activeOnly: false,
       coverage: "",
       protocol: "",
@@ -269,6 +270,25 @@
       () => setMode("select"),
       "Drag a box to select hosts. Drag selected hosts to move them together.",
     );
+    const detailsButton = button(
+      "Details",
+      () => {
+        state.details = !state.details;
+        updateDetails();
+        cy.fit(undefined, 25);
+        markDirty();
+      },
+      "Show or hide the inspector",
+    );
+    function updateDetails() {
+      inspector.hidden = !state.details;
+      detailsButton.setAttribute("aria-expanded", String(!!state.details));
+      if (cy) cy.resize();
+    }
+    function revealInspector() {
+      state.details = true;
+      updateDetails();
+    }
     const listButton = button("List view", () => {
       state.list = !state.list;
       canvas.hidden = state.list;
@@ -318,6 +338,7 @@
       pin,
       unpin,
       undo,
+      detailsButton,
       listButton,
     );
     root.append(
@@ -484,7 +505,9 @@
         first = false;
         fitNext = false;
       }
-      status.textContent = "Layout ready. Positions stay fixed during refresh.";
+      status.textContent = e.data.compact
+        ? "Compact overview ready. Positions stay fixed during refresh."
+        : "Layout ready. Positions stay fixed during refresh.";
     };
     worker.onerror = () => {
       status.textContent =
@@ -492,6 +515,7 @@
     };
     cy.on("tap", "node, edge", (e) => {
       selected = e.target.id();
+      revealInspector();
       inspect();
     });
     cy.on("tap", (e) => {
@@ -532,6 +556,7 @@
     const observer = new ResizeObserver(() => cy.resize());
     observer.observe(canvas);
     setMode(state.mode);
+    updateDetails();
     syncControls();
     canvas.hidden = state.list;
     list.hidden = !state.list;
@@ -784,6 +809,7 @@
         .map((n) => ({ nodeId: n.id(), position: n.position() }));
       fitNext = !selectionOnly;
       worker.postMessage({
+        viewport: { width: cy.width(), height: cy.height() },
         id: ++layoutID,
         elements: cy.elements().map((e) => ({
           data: e.data(),
@@ -806,6 +832,7 @@
       syncControls();
       renderGraph();
       selected = n.id;
+      revealInspector();
       cy.elements().unselect();
       cy.getElementById(n.id).select();
       cy.fit(cy.getElementById(n.id).closedNeighborhood(), 80);
@@ -852,6 +879,7 @@
               {},
               button("Inspect", () => {
                 selected = n.id;
+                revealInspector();
                 inspect();
               }),
             ),
@@ -1146,6 +1174,7 @@
       state.pins = state.pins || [];
       syncControls();
       setMode(state.mode);
+      updateDetails();
       lastStructure = "";
       first = false;
       const viewport = state.viewport;
