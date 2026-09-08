@@ -38,6 +38,7 @@ const (
 	SourceOperator = "operator"
 	SourceAgent    = "agent"
 	SourceScan     = "scan"
+	SourceRouter   = "router"
 	SourceInferred = "inferred"
 )
 
@@ -59,7 +60,7 @@ func sourceRank(source string) int {
 		return 3
 	case SourceAgent:
 		return 2
-	case SourceScan:
+	case SourceScan, SourceRouter:
 		return 1
 	}
 	return 0
@@ -555,7 +556,8 @@ func mergeClaims(a *Asset, claims []AssetClaim) {
 		prev := claims[j]
 		if sourceRank(c.Source) > sourceRank(prev.Source) ||
 			(sourceRank(c.Source) == sourceRank(prev.Source) && c.Confidence > prev.Confidence) ||
-			(sourceRank(c.Source) == sourceRank(prev.Source) && c.Confidence == prev.Confidence && c.Source == SourceScan) {
+			(sourceRank(c.Source) == sourceRank(prev.Source) && c.Confidence == prev.Confidence &&
+				(c.ObservedAt.After(prev.ObservedAt) || (c.ObservedAt.Equal(prev.ObservedAt) && c.Source == SourceScan))) {
 			best[c.Field] = i
 		}
 	}

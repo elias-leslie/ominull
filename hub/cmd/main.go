@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"ominull/hub/pkg/configuration"
-	"ominull/hub/pkg/dns"
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/setup"
 	"ominull/hub/pkg/storage"
@@ -33,8 +32,7 @@ const banner = `
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
 const (
-	defaultAgentVersion = "1.8.35"
-	defaultDNSListen    = "disabled"
+	defaultAgentVersion = "1.8.36"
 )
 
 func main() {
@@ -73,8 +71,6 @@ func main() {
 	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
 	accessAdmin := flag.String("access-bootstrap-admin", envOr("OMINULL_ACCESS_BOOTSTRAP_ADMIN", ""), "Email guaranteed to hold the admin role at startup")
 	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
-	dnsListen := flag.String("dns-listen", envOr("OMINULL_DNS_LISTEN", defaultDNSListen), "DNS forwarder and threat sinkhole listen address (disabled by default; for example :53)")
-	dhcpSnoop := flag.Bool("dhcp-snoop", envBool("OMINULL_DHCP_SNOOP", false), "Passively observe DHCP broadcasts on UDP/67 (disabled by default)")
 	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
 	enableResponse := flag.Bool("enable-unreleased-response", envBool("OMINULL_ENABLE_UNRELEASED_RESPONSE", false), "Enable unreleased response, evidence, terminal, script, and vulnerability routes (disabled by default)")
 	flag.String("config", configPath, "Package-owned hub environment file")
@@ -186,7 +182,6 @@ func main() {
 		Events:        time.Duration(*retentionDays) * 24 * time.Hour,
 		CommProfiles:  time.Duration(*commRetentionDays) * 24 * time.Hour,
 		AnomalyAlerts: time.Duration(*alertRetentionDays) * 24 * time.Hour,
-		Alerts:        time.Duration(*alertRetentionDays) * 24 * time.Hour,
 		AuditLogs:     time.Duration(*auditRetentionDays) * 24 * time.Hour,
 	}
 	stopRetention := store.StartRetention(retention, time.Hour)
@@ -226,30 +221,11 @@ func main() {
 	}); err != nil {
 		log.Fatalf("[-] Cloudflare Access: %v", err)
 	}
-	if *dhcpSnoop {
-		if err := srv.StartDHCPSnooping(); err != nil {
-			log.Printf("[!] Warning: passive DHCP snooping could not start: %v", err)
-		} else {
-			log.Printf("[+] Passive DHCP snooping active on UDP/67 (explicitly enabled)")
-		}
-	} else {
-		log.Printf("[*] Passive DHCP snooping disabled (enable explicitly with --dhcp-snoop)")
-	}
 	go func() {
 		if err := srv.Start(*listenAddr); err != nil && err != os.ErrClosed {
 			log.Fatalf("[-] Hub server error: %v", err)
 		}
 	}()
-
-	if *dnsListen != "" && *dnsListen != "off" && *dnsListen != "disabled" {
-		dnsServer := dns.NewServer(*dnsListen, []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}, store, srv.ThreatIntel())
-		srv.SetDNSServer(dnsServer)
-		if err := dnsServer.Start(); err != nil {
-			log.Printf("[!] Warning: DNS Forwarder could not bind to %s: %v (skipping port 53 listener)", *dnsListen, err)
-		} else {
-			defer dnsServer.Stop()
-		}
-	}
 
 	// --listen may be ":9999" or "127.0.0.1:9999". Pasting "localhost" in front
 	// of the second form printed "http://localhost127.0.0.1:9999", a URL nobody

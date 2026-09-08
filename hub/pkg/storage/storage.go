@@ -586,16 +586,6 @@ func (s *Store) initSchema() error {
 		last_seen_at DATETIME NOT NULL
 	);
 
-	CREATE TABLE IF NOT EXISTS alerts (
-		id TEXT PRIMARY KEY,
-		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-		endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
-		timestamp DATETIME NOT NULL,
-		title TEXT NOT NULL,
-		description TEXT NOT NULL,
-		severity TEXT NOT NULL,
-		mitigated INTEGER NOT NULL DEFAULT 0
-	);
 
 	CREATE TABLE IF NOT EXISTS audit_logs (
 		id TEXT PRIMARY KEY,
@@ -634,13 +624,11 @@ func (s *Store) initSchema() error {
 	-- prefix; the global callers still get a covering scan.
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_country ON events(tenant_id, country, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_process ON events(tenant_id, process_path);
-	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity ON alerts(tenant_id, severity);
 	-- The operator dashboard has a deliberate all-tenant view. A second
 	-- covering order avoids making that view scan a tenant-prefixed index and
 	-- keeps the cold global projection below its latency budget.
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_country_global ON events(country, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_events_analytics_process_global ON events(process_path);
-	CREATE INDEX IF NOT EXISTS idx_alerts_analytics_severity_global ON alerts(severity);
 	-- Time-window cards group on parsed UTC hour and topology dimensions. Keep
 	-- those projected columns beside the timestamp so cold reads stay covering
 	-- instead of evaluating string date functions over the event table.
@@ -655,7 +643,6 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_exclusions_tenant ON exclusions(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_anomaly_time ON anomaly_alerts(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
-	CREATE INDEX IF NOT EXISTS idx_alerts_tenant_time ON alerts(tenant_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
 
 	CREATE TABLE IF NOT EXISTS operators (
@@ -869,15 +856,31 @@ func (s *Store) initRollupCubesSchema() error {
 		}
 	}
 
-	// The legacy alert copy is emptied once. Every detector wrote a row here
-	// and an identical finding into anomaly_alerts, and only the second was
-	// ever read, acknowledged or cleared - so this table accumulated every
-	// finding the fleet had ever raised, 48,046 of them, none of which any
-	// operator could see or dismiss. The findings themselves are untouched in
-	// anomaly_alerts; what goes is the copy. The table is left in place for one
-	// release so a hub that is rolled back still starts.
-	if _, err := s.db.Exec("DELETE FROM alerts"); err != nil {
-		return fmt.Errorf("clearing the superseded alert copy: %w", err)
+	// The grace release already emptied this unused copy. Retire only an
+	// empty table; upgrades skipping that release must preserve unexpected data.
+	var legacyExists int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='alerts'").Scan(&legacyExists); err != nil {
+		return err
+	}
+	if legacyExists > 0 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		var rows int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM alerts").Scan(&rows); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if rows == 0 {
+			if _, err := tx.Exec("DROP TABLE alerts"); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("retiring empty legacy alerts: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 
 	var topoCount int64
@@ -1254,7 +1257,6 @@ func (s *Store) DeleteDisposableEndpoint(id string) error {
 	}
 	for _, query := range []string{
 		"DELETE FROM events WHERE endpoint_id = ?",
-		"DELETE FROM alerts WHERE endpoint_id = ?",
 		"DELETE FROM anomaly_alerts WHERE endpoint_id = ?",
 		"DELETE FROM comm_profiles WHERE endpoint_id = ?",
 		"DELETE FROM enrollment_tokens WHERE endpoint_id = ?",

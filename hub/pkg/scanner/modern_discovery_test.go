@@ -265,53 +265,6 @@ func TestHTTPServerBannerMatching(t *testing.T) {
 	}
 }
 
-func TestDHCPFingerprintMatching(t *testing.T) {
-	tests := []struct {
-		input    string
-		wantName string
-		wantCat  string
-	}{
-		{
-			input:    "dhcp:vendor=android-dhcp-14,host=Galaxy-S24",
-			wantName: "Android Mobile Device",
-			wantCat:  "Mobile",
-		},
-		{
-			input:    "dhcp:vendor=Apple-iPhone,host=Alex-iPhone",
-			wantName: "Apple iOS Device (iPhone/iPad)",
-			wantCat:  "Mobile",
-		},
-		{
-			input:    "dhcp:vendor=MSFT 5.0,host=DESKTOP-TEST01",
-			wantName: "Windows Host (DHCP MSFT 5.0)",
-			wantCat:  "Workstation",
-		},
-		{
-			input:    "dhcp:vendor=Roku/DV-1.0,host=Living-Room-Roku",
-			wantName: "Roku Streaming Player",
-			wantCat:  "Smart TV / Media Streamer",
-		},
-		{
-			input:    "dhcp:vendor=shellyplugus-1234,host=shelly-kitchen",
-			wantName: "Shelly Smart Relay / Sensor",
-			wantCat:  "Smart Home / IoT",
-		},
-	}
-
-	for _, tc := range tests {
-		id := identityFromDHCP(tc.input)
-		if id == nil {
-			t.Fatalf("identityFromDHCP(%q) returned nil", tc.input)
-		}
-		if id.Name != tc.wantName {
-			t.Errorf("identityFromDHCP(%q) Name = %q; want %q", tc.input, id.Name, tc.wantName)
-		}
-		if id.Category != tc.wantCat {
-			t.Errorf("identityFromDHCP(%q) Category = %q; want %q", tc.input, id.Category, tc.wantCat)
-		}
-	}
-}
-
 func TestExpandedOUIVendorLookup(t *testing.T) {
 	tests := []struct {
 		mac        string
@@ -336,53 +289,6 @@ func TestExpandedOUIVendorLookup(t *testing.T) {
 		if got != tc.wantVendor {
 			t.Errorf("LookupVendor(%q) = %q; want %q", tc.mac, got, tc.wantVendor)
 		}
-	}
-}
-
-func TestDHCPPacketParser(t *testing.T) {
-	// Construct a synthetic RFC-2131 DHCP Request packet
-	buf := make([]byte, 300)
-	buf[0] = 0x01                                                // BootRequest
-	buf[1] = 0x01                                                // 10mb ethernet
-	buf[2] = 0x06                                                // hlen
-	copy(buf[28:34], []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) // CHAddr
-
-	// Magic cookie at 236
-	buf[236] = 0x63
-	buf[237] = 0x82
-	buf[238] = 0x53
-	buf[239] = 0x63
-
-	// Option 53: DHCP Request (3)
-	buf[240] = 53
-	buf[241] = 1
-	buf[242] = 3
-
-	// Option 12: Hostname "test-device"
-	buf[243] = 12
-	buf[244] = 11
-	copy(buf[245:256], []byte("test-device"))
-
-	// Option 60: Vendor Class "android-dhcp-14"
-	buf[256] = 60
-	buf[257] = 15
-	copy(buf[258:273], []byte("android-dhcp-14"))
-
-	// Option 255: End
-	buf[273] = 255
-
-	pkt := parseDHCPPacket(buf)
-	if pkt == nil {
-		t.Fatalf("parseDHCPPacket returned nil for valid DHCP packet")
-	}
-	if pkt.CHAddr.String() != "00:11:22:33:44:55" {
-		t.Errorf("CHAddr = %q; want 00:11:22:33:44:55", pkt.CHAddr.String())
-	}
-	if pkt.Hostname != "test-device" {
-		t.Errorf("Hostname = %q; want 'test-device'", pkt.Hostname)
-	}
-	if pkt.VendorClass != "android-dhcp-14" {
-		t.Errorf("VendorClass = %q; want 'android-dhcp-14'", pkt.VendorClass)
 	}
 }
 
@@ -541,18 +447,5 @@ func TestSchedulerOffByDefault(t *testing.T) {
 	sched.Stop()
 	if sched.isRunning {
 		t.Errorf("scheduler should be stopped after Stop()")
-	}
-}
-
-func TestDHCPSnooperLifecycle(t *testing.T) {
-	sc := New(nil)
-	snooper := NewDHCPSnooper(sc)
-	if snooper.IsServing() {
-		t.Errorf("expected IsServing() false on new instance")
-	}
-	// Stop on inactive instance is a safe no-op
-	snooper.Stop()
-	if snooper.IsServing() {
-		t.Errorf("expected IsServing() false after Stop()")
 	}
 }

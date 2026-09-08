@@ -89,7 +89,6 @@ type Scanner struct {
 	customSigs   []DeviceSignature
 	activeScans  map[string]*ScanStatus
 	cachedAssets map[string]DiscoveredAsset
-	dhcpSnooper  *DHCPSnooper
 	scheduler    *Scheduler
 	mu           sync.RWMutex
 }
@@ -101,7 +100,6 @@ func New(store *storage.Store) *Scanner {
 		activeScans:  make(map[string]*ScanStatus),
 		cachedAssets: make(map[string]DiscoveredAsset),
 	}
-	s.dhcpSnooper = NewDHCPSnooper(s)
 	s.scheduler = NewScheduler(s, store, 4*time.Hour, nil)
 	// Discovery used to live only in cachedAssets, so a hub restart erased
 	// every host the scanner had ever found. The assets table is now the
@@ -111,87 +109,17 @@ func New(store *storage.Store) *Scanner {
 }
 
 // StartBackground launches only the explicitly configured sweep scheduler.
-// DHCP uses the server port and therefore has its own opt-in start path.
 func (s *Scanner) StartBackground() {
 	if s.scheduler != nil {
 		s.scheduler.Start()
 	}
 }
 
-// StartDHCPSnooping enables passive DHCP observation explicitly.
-func (s *Scanner) StartDHCPSnooping() error {
-	if s.dhcpSnooper == nil {
-		return nil
-	}
-	return s.dhcpSnooper.Start()
-}
-
-// DHCPSnooping reports whether the passive listener currently owns its port.
-func (s *Scanner) DHCPSnooping() bool {
-	return s.dhcpSnooper != nil && s.dhcpSnooper.IsServing()
-}
-
-// StopBackground stops the passive DHCP listener and sweep scheduler
+// StopBackground stops the sweep scheduler.
 func (s *Scanner) StopBackground() {
-	if s.dhcpSnooper != nil {
-		s.dhcpSnooper.Stop()
-	}
 	if s.scheduler != nil {
 		s.scheduler.Stop()
 	}
-}
-
-// RecordPassiveDHCP handles a passively snooped DHCP packet from the local network segment
-func (s *Scanner) RecordPassiveDHCP(ip, mac, hostname, vendorClass string, params []byte) {
-	if mac == "" {
-		return
-	}
-
-	vendor, vendorKnown := LookupVendorDetail(mac)
-	dhcpStr := fmt.Sprintf("dhcp:vendor=%s,host=%s", vendorClass, hostname)
-	ident := identityFromDHCP(dhcpStr)
-
-	osGuess := "Generic Network Host"
-	category := "Workstation"
-	confidence := 0.60
-	method := "dhcp-snoop"
-	evidence := []string{dhcpStr}
-
-	if ident != nil {
-		osGuess = ident.Name
-		category = ident.Category
-		confidence = ident.Confidence
-		method = ident.Method
-		evidence = ident.Evidence
-	} else if vendorKnown {
-		// Only a real manufacturer belongs in an OS guess. A randomised or
-		// withheld address would otherwise read as "Randomised MAC
-		// (locally administered) Device".
-		osGuess = vendor + " Device"
-	}
-
-	asset := DiscoveredAsset{
-		IP:             ip,
-		MAC:            mac,
-		Vendor:         VendorClaim(mac),
-		Hostname:       hostname,
-		OSGuess:        osGuess,
-		Category:       category,
-		Confidence:     confidence,
-		RiskScore:      "LOW",
-		Weakpoints:     []string{"Passively Discovered via DHCP Broadcast"},
-		IdentityMethod: method,
-		IdentityWhy:    evidence,
-		LastSeen:       time.Now().UTC(),
-	}
-
-	s.mu.Lock()
-	if ip != "" {
-		s.cachedAssets[ip] = asset
-	}
-	s.mu.Unlock()
-
-	s.persist(asset)
 }
 
 // hydrateFromStore refills the in-memory cache from the persisted asset

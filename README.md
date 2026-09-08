@@ -71,16 +71,11 @@ OMINULL_BINARY_DIR=/opt/ominull/bin
 OMINULL_LISTEN=:9999
 OMINULL_TLS_LISTEN=:9443
 OMINULL_CLIENT_CERTS=optional
-OMINULL_DNS_LISTEN=disabled
-OMINULL_DHCP_SNOOP=false
 ```
 
-DNS forwarding and passive DHCP observation are disabled unless an operator
-explicitly enables them. `OMINULL_DNS_LISTEN=:53` opens the DNS forwarder on
-TCP and UDP port 53. `OMINULL_DHCP_SNOOP=true` opens a read-only DHCP observer
-on UDP port 67; it does not issue leases. Ominull never changes router DNS or
-DHCP configuration. Test DNS on a temporary high port before making it part of
-a client network path.
+The hub does not forward DNS or bind a DHCP listener. Router telemetry supplies
+leases, DNS observations, and optional DHCPv4 fingerprints without putting the
+hub in the client network path. See [router collection](scripts/router/README.md).
 
 ## Network, TLS, and identity
 

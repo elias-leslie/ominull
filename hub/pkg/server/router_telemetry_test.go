@@ -351,3 +351,31 @@ func TestRouterLeaseNamesTheManufacturer(t *testing.T) {
 		}
 	}
 }
+
+func TestRouterDHCPFingerprintRemainsObservedEvidence(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	w := postTelemetry(t, srv, `{"router_id":"gw","leases":[{"mac":"da:bb:cc:dd:ee:01","ip":"10.0.0.9","dhcp":{"vendor_class":"android-dhcp-14","requested_options":"1,3,6,15,26,28,51,58,59","observed_at":"2026-09-01T12:00:00Z"}}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", w.Code, w.Body.String())
+	}
+	a, err := store.GetAsset("10.0.0.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]string{}
+	for _, c := range a.Claims {
+		if strings.HasPrefix(c.Field, "dhcp_") {
+			if c.Source != "router" || c.ObservedAt.Format(time.RFC3339) != "2026-09-01T12:00:00Z" {
+				t.Fatalf("false observation provenance: %+v", c)
+			}
+			found[c.Field] = c.Value
+		}
+	}
+	if found["dhcp_vendor_class"] != "android-dhcp-14" || found["dhcp_requested_options"] != "1,3,6,15,26,28,51,58,59" {
+		t.Fatalf("missing fingerprint: %v", found)
+	}
+	if a.OS != "" {
+		t.Fatalf("self-reported fingerprint invented OS: %q", a.OS)
+	}
+}

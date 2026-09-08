@@ -65,6 +65,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     (cd "${ROOT_DIR}/hub" && go test -race ./... && go vet ./...)
     bash "${ROOT_DIR}/scripts/check-topology.sh"
     python3 "${ROOT_DIR}/scripts/router/test-address-filter.py"
+    python3 "${ROOT_DIR}/scripts/router/test-dhcp-fingerprint.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
         "${ROOT_DIR}/scripts/deploy_remote.sh.example" \

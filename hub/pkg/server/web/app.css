@@ -1176,7 +1176,7 @@ tr.grp .tw[aria-expanded="false"] .ic-twist {
   color: var(--ink-3);
 }
 
-/* Provenance strip: agent · scan · inferred */
+/* Provenance strip: agent · scan · router */
 .ev {
   display: inline-flex;
   gap: 2px;
@@ -1199,7 +1199,7 @@ tr.grp .tw[aria-expanded="false"] .ic-twist {
   background: var(--warn);
 }
 
-.ev i[data-on="inferred"] {
+.ev i[data-on="router"] {
   background: var(--info);
 }
 
@@ -1229,7 +1229,7 @@ tr.grp .tw[aria-expanded="false"] .ic-twist {
 
 .evkey i[data-on="agent"] { background: var(--ok); }
 .evkey i[data-on="scan"] { background: var(--warn); }
-.evkey i[data-on="inferred"] { background: var(--info); }
+.evkey i[data-on="router"] { background: var(--info); }
 .evkey i[data-on="none"] { background: var(--line); }
 
 .menu-btn {
@@ -3158,15 +3158,15 @@ input[type="url"] {
   stroke-width: 2.5px;
 }
 
-/* DNS Intelligence Panel */
-.dns-grid {
+/* Asset and traffic summaries */
+.summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--s-2);
   margin-bottom: var(--s-2);
 }
 
-.dns-stat-box {
+.summary-stat-box {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -3176,14 +3176,14 @@ input[type="url"] {
   gap: var(--s-0);
 }
 
-.dns-stat-val {
+.summary-stat-val {
   font-family: var(--f-mono);
   font-size: var(--t-4);
   font-weight: 700;
   color: var(--brand);
 }
 
-.dns-stat-label {
+.summary-stat-label {
   font-size: var(--t-1);
   color: var(--ink-3);
   text-transform: uppercase;
@@ -4537,8 +4537,6 @@ input[type="url"] {
 }
 
 /* A DNS counter that is not zero says so in its hue as well as its number. */
-.dns-stat-val[data-tone="crit"] { color: var(--crit); }
-.dns-stat-val[data-tone="warn"] { color: var(--warn); }
 
 /* A sortable column heading. The button is the whole heading so the keyboard
    path is the same as the pointer one; the caret says which way, and the
@@ -4760,3 +4758,6 @@ hr.line {
   border-top: 1px solid var(--line);
   margin: var(--s-3) 0;
 }
+
+.summary-stat-val[data-tone="crit"] { color: var(--crit); }
+.summary-stat-val[data-tone="warn"] { color: var(--warn); }

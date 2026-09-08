@@ -17,7 +17,7 @@
 # able to ask the hub what to do next.
 #
 # Install:
-#   scp this to /usr/bin/ominull-router-poll.sh on the gateway, chmod +x,
+#   pipe this over SSH to /usr/bin/ominull-router-poll.sh, chmod +x,
 #   write /etc/ominull-router.conf, then add to /etc/crontabs/root:
 #     */5 * * * * /usr/bin/ominull-router-poll.sh >/dev/null 2>&1
 #
@@ -58,6 +58,7 @@ CONF=/etc/ominull-router.conf
 : "${DNS_LOG:=0}"
 : "${LEASEFILE:=/tmp/dhcp.leases}"
 : "${MAX_FLOWS:=20000}"
+: "${DHCP_CACHE:=/tmp/ominull-dhcp}"
 
 # The lease file is not authoritative about what is on this network. It keeps
 # records from earlier configurations - a router that once served a different
@@ -104,7 +105,7 @@ in_lan() {
 }
 
 WORK=$(mktemp -d /tmp/ominull-poll.XXXXXX) || exit 1
-trap 'rm -rf "$WORK"' EXIT INT TERM
+trap 'rm -f "$WORK/leases.json" "$WORK/flows.json" "$WORK/dns.json" "$WORK/resolutions.json" "$WORK/body.json" "$WORK/reply.json" "$WORK/dns.log" "$WORK/code" "$WORK/err"; rmdir "$WORK"' EXIT INT TERM
 
 # json_escape keeps a device-chosen hostname from breaking the document. The
 # hub bounds these again on arrival; doing it here too means a malformed name
@@ -112,6 +113,25 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 json_escape() {
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\x08/\\b/g' -e 's/\x0c/\\f/g' \
 	    -e 's/\r/\\r/g' -e 's/\t/\\t/g' -e 's/[[:cntrl:]]//g'
+}
+
+# Read only a validated MAC filename, never source client-controlled content.
+fingerprint_json() {
+ _mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+ case "$_mac" in
+  [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+  *) return ;;
+ esac
+ [ -f "$DHCP_CACHE/$_mac" ] || return 0
+ # Three lines, bounded before shell parsing even if the cache is corrupted.
+ _fingerprint=$(head -c 1400 "$DHCP_CACHE/$_mac")
+ _observed=$(printf '%s\n' "$_fingerprint" | sed -n '1p')
+ _vendor=$(printf '%s\n' "$_fingerprint" | sed -n '2p' | json_escape)
+ _options=$(printf '%s\n' "$_fingerprint" | sed -n '3p')
+ case "$_observed" in ????-??-??T??:??:??Z) ;; *) return ;; esac
+ case "$_observed" in *[!0-9TZ:-]*) return ;; esac
+ case "$_options" in *[!0-9,]*) return ;; esac
+ printf ',"dhcp":{"observed_at":"%s","vendor_class":"%s","requested_options":"%s"}' "$_observed" "$_vendor" "$_options"
 }
 
 # ---- leases ----------------------------------------------------------------
@@ -129,9 +149,11 @@ json_escape() {
 			esc=$(printf '%s' "$host" | json_escape)
 			[ $first -eq 1 ] || printf ','
 			first=0
-			printf '{"mac":"%s","ip":"%s","hostname":"%s","expires_at":"%s"}' \
+			printf '{"mac":"%s","ip":"%s","hostname":"%s","expires_at":"%s"' \
 				"$mac" "$ip" "$esc" \
 				"$(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+			fingerprint_json "$mac"
+			printf '}'
 		done < "$LEASEFILE"
 	fi
 	printf ']'

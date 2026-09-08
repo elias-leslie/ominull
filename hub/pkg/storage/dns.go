@@ -2,23 +2,11 @@ package storage
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-// DNSRule represents a local or feed-derived DNS permit/sinkhole rule.
-type DNSRule struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenant_id"`
-	Domain    string    `json:"domain"`
-	Action    string    `json:"action"` // "ALLOW" or "BLOCK"
-	Source    string    `json:"source"` // "local", "threatfox", "feed", etc.
-	Comment   string    `json:"comment"`
-	CreatedAt time.Time `json:"created_at"`
-}
 
 // DNSEvent represents a telemetry log record for a resolved or sinkholed query.
 type DNSEvent struct {
@@ -51,18 +39,6 @@ type DNSEventFilter struct {
 
 func (s *Store) initDNSSchema() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS dns_rules (
-		id TEXT PRIMARY KEY,
-		tenant_id TEXT NOT NULL DEFAULT 'default',
-		domain TEXT NOT NULL,
-		action TEXT NOT NULL, -- 'ALLOW' or 'BLOCK'
-		source TEXT NOT NULL DEFAULT 'local',
-		comment TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_dns_rules_tenant_domain ON dns_rules(tenant_id, domain);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_dns_rules_unique ON dns_rules(tenant_id, domain, action);
-
 	CREATE TABLE IF NOT EXISTS dns_events (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -84,85 +60,6 @@ func (s *Store) initDNSSchema() error {
 	`
 	_, err := s.db.Exec(schema)
 	return err
-}
-
-func (s *Store) SaveDNSRule(rule *DNSRule) error {
-	if rule.Domain == "" {
-		return fmt.Errorf("domain cannot be empty")
-	}
-	rule.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rule.Domain), "."))
-	if rule.Action != "ALLOW" && rule.Action != "BLOCK" {
-		rule.Action = "BLOCK"
-	}
-	if rule.ID == "" {
-		rule.ID = uuid.New().String()
-	}
-	if rule.TenantID == "" {
-		rule.TenantID = "default"
-	}
-	if rule.CreatedAt.IsZero() {
-		rule.CreatedAt = time.Now().UTC()
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	query := `
-	INSERT INTO dns_rules (id, tenant_id, domain, action, source, comment, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(tenant_id, domain, action) DO UPDATE SET
-		source=excluded.source,
-		comment=excluded.comment,
-		created_at=excluded.created_at
-	`
-	_, err := s.db.Exec(query, rule.ID, rule.TenantID, rule.Domain, rule.Action, rule.Source, rule.Comment, rule.CreatedAt)
-	return err
-}
-
-func (s *Store) DeleteDNSRule(id string, tenantID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var query string
-	var args []interface{}
-	if tenantID != "" {
-		query = "DELETE FROM dns_rules WHERE id = ? AND tenant_id = ?"
-		args = []interface{}{id, tenantID}
-	} else {
-		query = "DELETE FROM dns_rules WHERE id = ?"
-		args = []interface{}{id}
-	}
-	_, err := s.db.Exec(query, args...)
-	return err
-}
-
-func (s *Store) ListDNSRules(tenantID string) ([]DNSRule, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	query := "SELECT id, tenant_id, domain, action, source, comment, created_at FROM dns_rules"
-	var args []interface{}
-	if tenantID != "" {
-		query += " WHERE tenant_id = ?"
-		args = append(args, tenantID)
-	}
-	query += " ORDER BY domain ASC"
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var rules []DNSRule
-	for rows.Next() {
-		var r DNSRule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Domain, &r.Action, &r.Source, &r.Comment, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	return rules, rows.Err()
 }
 
 func (s *Store) RecordDNSEvent(ev DNSEvent) error {

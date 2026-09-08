@@ -23,7 +23,6 @@ import (
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
-	"ominull/hub/pkg/dns"
 	"ominull/hub/pkg/evidence"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/response"
@@ -39,7 +38,6 @@ import (
 type Server struct {
 	store     *storage.Store
 	ti        *threatintel.Manager
-	dnsServer *dns.Server
 	detector  *detector.Engine
 	pki       *pki.Manager
 	scanner   *scanner.Scanner
@@ -285,14 +283,6 @@ func (s *Server) AccessConfigured() bool { return s.access != nil }
 
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
-}
-
-func (s *Server) SetDNSServer(ds *dns.Server) {
-	s.dnsServer = ds
-}
-
-func (s *Server) DNSServer() *dns.Server {
-	return s.dnsServer
 }
 
 func (s *Server) tenantFromRequest(r *http.Request) string {
@@ -3430,10 +3420,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/traffic/overview", s.authMiddleware(s.handleTrafficOverview))
 	mux.HandleFunc("/api/v1/traffic/flows", s.authMiddleware(s.handleTrafficFlows))
 	mux.HandleFunc("/api/v1/traffic/flows/", s.authMiddleware(s.handleTrafficFlows))
-	mux.HandleFunc("/api/v1/dns/status", s.authMiddleware(s.handleDNSStatus))
-	mux.HandleFunc("/api/v1/dns/events", s.authMiddleware(s.handleDNSEvents))
-	mux.HandleFunc("/api/v1/dns/policy", s.authMiddleware(s.handleDNSPolicy))
-	mux.HandleFunc("/api/v1/dns/policy/test", s.authMiddleware(s.handleDNSPolicyTest))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))

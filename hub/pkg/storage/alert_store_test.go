@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,38 +98,57 @@ func TestTheLegacyAlertEndpointServesTheFindings(t *testing.T) {
 
 // Every detector used to write a row into `alerts` as well, and nothing ever
 // read, acknowledged or cleared it - 48,046 of them had accumulated in
-// production. The copy is emptied once, on the release that stops writing it.
-func TestTheSupersededAlertCopyIsEmptiedOnce(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "legacy-rows.db")
-	store := openStore(t, dbPath)
-	if err := store.Close(); err != nil {
-		t.Fatalf("closing: %v", err)
+// production. Retire the empty copy, preserving unexpected data on older upgrades.
+func TestRetireEmptyLegacyAlertsWithoutLosingFindings(t *testing.T) {
+	for _, rows := range []int{0, 1} {
+		t.Run(fmt.Sprint(rows), func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "legacy.db")
+			store := openStore(t, dbPath)
+			seedAnomaly(t, store, "retained", "HIGH", false)
+			store.Close()
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, tenant_id TEXT, endpoint_id TEXT, timestamp DATETIME, title TEXT, description TEXT, severity TEXT)"); err != nil {
+				t.Fatal(err)
+			}
+			if rows > 0 {
+				if _, err := db.Exec("INSERT INTO alerts (id, tenant_id, endpoint_id, timestamp, title, description, severity) VALUES ('legacy', 'default', 'ep-1', CURRENT_TIMESTAMP, 'old', 'old', 'HIGH')"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db.Close()
+			store = openStore(t, dbPath)
+			defer store.Close()
+			var exists int
+			if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='alerts'").Scan(&exists); err != nil {
+				t.Fatal(err)
+			}
+			if exists != rows {
+				t.Fatalf("legacy table exists=%d; want %d (only empty tables may retire)", exists, rows)
+			}
+			if rows > 0 {
+				var n int
+				if err := store.db.QueryRow("SELECT COUNT(*) FROM alerts").Scan(&n); err != nil || n != rows {
+					t.Fatalf("legacy data lost: rows=%d err=%v", n, err)
+				}
+			}
+			if n, err := store.CountAnomalyAlerts("default", true); err != nil || n != 1 {
+				t.Fatalf("current finding lost: count=%d err=%v", n, err)
+			}
+		})
 	}
+}
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("reopening the file: %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		if _, err := db.Exec(
-			"INSERT INTO alerts (id, tenant_id, endpoint_id, timestamp, title, description, severity, mitigated) VALUES (?, 'default', 'ep-1', ?, 'stale', 'stale', 'HIGH', 0)",
-			time.Now().UnixNano()+int64(i), time.Now().UTC(),
-		); err != nil {
-			t.Fatalf("seeding the legacy copy: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("closing the raw handle: %v", err)
-	}
-
-	store = openStore(t, dbPath)
+func TestRetentionAfterLegacyAlertsRetirement(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "retired-retention.db"))
 	defer store.Close()
-
-	var left int
-	if err := store.db.QueryRow("SELECT COUNT(*) FROM alerts").Scan(&left); err != nil {
-		t.Fatalf("counting what is left: %v", err)
+	seedAnomaly(t, store, "current", "HIGH", false)
+	if _, err := store.PruneOldData(DefaultRetention()); err != nil {
+		t.Fatalf("retention still depends on retired table: %v", err)
 	}
-	if left != 0 {
-		t.Fatalf("%d rows of the superseded copy survived the upgrade", left)
+	if n, err := store.CountAnomalyAlerts("default", true); err != nil || n != 1 {
+		t.Fatalf("current findings changed: %d %v", n, err)
 	}
 }

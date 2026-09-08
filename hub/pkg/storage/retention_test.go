@@ -36,10 +36,6 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 				_, err = store.db.Exec(`INSERT INTO anomaly_alerts
 					(id, tenant_id, endpoint_id, anomaly_type, title, description, timestamp)
 					VALUES (?, 'default','e1','beacon','t','d',?)`, id, ts)
-			case "alerts":
-				_, err = store.db.Exec(`INSERT INTO alerts
-					(id, tenant_id, endpoint_id, timestamp, title, description, severity)
-					VALUES (?, 'default','e1',?,'t','d','HIGH')`, id, ts)
 			case "audit_logs":
 				_, err = store.db.Exec(`INSERT INTO audit_logs
 					(id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp)
@@ -69,7 +65,6 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 	seed("comm_profiles", "last_seen", now.Add(-1*time.Hour), 2)
 	seed("anomaly_alerts", "timestamp", now.Add(-90*24*time.Hour), 4)
 	seed("anomaly_alerts", "timestamp", now.Add(-1*time.Hour), 2)
-	seed("alerts", "timestamp", now.Add(-90*24*time.Hour), 5)
 	seed("audit_logs", "timestamp", now.Add(-400*24*time.Hour), 6)
 	seed("audit_logs", "timestamp", now.Add(-10*24*time.Hour), 1)
 
@@ -86,9 +81,6 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 	}
 	if got := count("anomaly_alerts"); got != 2 {
 		t.Errorf("anomaly_alerts: kept %d rows, want 2", got)
-	}
-	if got := count("alerts"); got != 0 {
-		t.Errorf("alerts: kept %d rows, want 0", got)
 	}
 	// Audit is the record of who did what and outlives everything else.
 	if got := count("audit_logs"); got != 1 {

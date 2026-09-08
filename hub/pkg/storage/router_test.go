@@ -238,3 +238,109 @@ func TestRouterFlowsArePruned(t *testing.T) {
 		t.Fatalf("expected the stale bucket to be pruned, removed %d", n)
 	}
 }
+
+func TestRouterLeasePreservesScanEvidence(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "router.db"))
+	now := time.Now().UTC()
+	if err := s.UpsertAssetFromScan("10.0.0.9", "aa:bb:cc:dd:ee:01", "", "scan-name", "Linux", "Server", "LOW", .8, []AssetPort{{Port: 443, Protocol: "tcp", Service: "https"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RecordRouterLeases("gateway", []RouterLease{{MAC: "aa:bb:cc:dd:ee:01", IP: "10.0.0.9", Hostname: "lease-name"}}, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.GetAsset("10.0.0.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Ports) != 1 || a.Ports[0].Port != 443 || a.OS != "Linux" {
+		t.Fatalf("lease erased scan evidence: ports=%v os=%q", a.Ports, a.OS)
+	}
+	for _, c := range a.Claims {
+		if c.Field == FieldHostname && c.Value == "lease-name" {
+			if c.Source != "router" || !strings.Contains(c.Rationale, "DHCP") {
+				t.Fatalf("false lease provenance: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing router hostname claim")
+}
+
+func TestRouterFingerprintBoundsAndObservationAge(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "fingerprints.db"))
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	lease := RouterLease{MAC: "da:bb:cc:dd:ee:01", IP: "10.0.0.9", DHCP: &RouterDHCPFingerprint{VendorClass: "valid", RequestedOptions: "1,3,6", ObservedAt: now.Add(-time.Hour)}}
+	record := func() {
+		t.Helper()
+		a, r, err := s.RecordRouterLeases("gateway", []RouterLease{lease}, nil, now)
+		if err != nil || a != 1 || r != 0 {
+			t.Fatalf("optional metadata lost lease: accepted=%d rejected=%d err=%v", a, r, err)
+		}
+	}
+	record()
+	lease.DHCP = &RouterDHCPFingerprint{VendorClass: "stale", RequestedOptions: "6,3,1", ObservedAt: now.Add(-2 * time.Hour)}
+	record()
+	lease.DHCP = &RouterDHCPFingerprint{VendorClass: "future", RequestedOptions: "6,3,1", ObservedAt: now.Add(time.Hour)}
+	record()
+	a, err := s.GetAsset(lease.IP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, c := range a.Claims {
+		switch c.Field {
+		case "dhcp_vendor_class":
+			found++
+			if c.Value != "valid" || !c.ObservedAt.Equal(now.Add(-time.Hour)) {
+				t.Fatalf("replay changed evidence: %+v", c)
+			}
+		case "dhcp_requested_options":
+			found++
+			if c.Value != "1,3,6" {
+				t.Fatalf("replay changed options: %+v", c)
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatalf("found %d fingerprint claims", found)
+	}
+	for _, raw := range []string{"1,3,6", "", "1,,3", "0,3", "255", "-1", "1,03", "1, 3", strings.Repeat("1,", 255) + "1", strings.Repeat("9", 2000)} {
+		want := ""
+		if raw == "1,3,6" {
+			want = raw
+		}
+		if got := validDHCPOptions(raw); got != want {
+			t.Errorf("options %q: got %q want %q", raw, got, want)
+		}
+	}
+	lease.DHCP = &RouterDHCPFingerprint{VendorClass: "bad\x00\x1b" + strings.Repeat("A", 1000), RequestedOptions: "1,$(bad)", ObservedAt: now}
+	record()
+	a, err = s.GetAsset(lease.IP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range a.Claims {
+		if c.Field == "dhcp_vendor_class" && (!strings.HasPrefix(c.Value, "badA") || !c.ObservedAt.Equal(now)) {
+			t.Fatalf("new observation did not replace older fingerprint: %+v", c)
+		}
+		if c.Field == "dhcp_vendor_class" && (len(c.Value) > 255 || strings.ContainsAny(c.Value, "\x00\x1b")) {
+			t.Fatalf("unbounded vendor class: %+v", c)
+		}
+		if c.Field == "dhcp_requested_options" && c.Value != "1,3,6" {
+			t.Fatalf("malformed options replaced evidence: %+v", c)
+		}
+	}
+}
+
+func TestRouterClaimRefreshWinsEqualConfidenceScan(t *testing.T) {
+	now := time.Now().UTC()
+	a := Asset{}
+	mergeClaims(&a, []AssetClaim{
+		{Field: FieldHostname, Source: SourceScan, Value: "old-name", Confidence: .9, ObservedAt: now.Add(-time.Hour)},
+		{Field: FieldHostname, Source: SourceRouter, Value: "current-name", Confidence: .9, ObservedAt: now},
+	})
+	if a.Hostname != "current-name" {
+		t.Fatalf("stale scan claim hid current lease: %q", a.Hostname)
+	}
+}

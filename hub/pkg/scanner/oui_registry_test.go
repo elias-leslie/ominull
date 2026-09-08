@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ominull/hub/pkg/storage"
 )
@@ -205,33 +206,33 @@ func TestVendorClaimDropsOnlyTheUselessAnswer(t *testing.T) {
 	}
 }
 
-// The OS guess is built by appending " Device" to the vendor. Widening what a
-// vendor lookup can return meant an unguarded branch would emit "Randomised
-// MAC (locally administered) Device" as a device's operating system.
-func TestPassiveDHCPDoesNotTurnANonVendorIntoAnOSGuess(t *testing.T) {
+// Router leases may resolve a manufacturer, but never derive an OS from it.
+func TestRouterDHCPDoesNotTurnVendorIntoOS(t *testing.T) {
 	store, err := storage.New(filepath.Join(t.TempDir(), "scan.db"))
 	if err != nil {
-		t.Fatalf("opening store: %v", err)
+		t.Fatal(err)
 	}
 	defer store.Close()
-	s := New(store)
-
-	s.RecordPassiveDHCP("10.0.0.77", "DA:BB:CC:DD:EE:FF", "phone", "", nil)
-	s.RecordPassiveDHCP("10.0.0.78", "F4:03:2A:11:22:33", "echo", "", nil)
-
-	s.mu.RLock()
-	randomised := s.cachedAssets["10.0.0.77"]
-	known := s.cachedAssets["10.0.0.78"]
-	s.mu.RUnlock()
-
-	if strings.Contains(randomised.OSGuess, "Randomised") || strings.Contains(randomised.OSGuess, "locally administered") {
-		t.Errorf("a randomised address became an OS guess: %q", randomised.OSGuess)
+	_, _, err = store.RecordRouterLeases("gateway", []storage.RouterLease{
+		{IP: "10.0.0.77", MAC: "DA:BB:CC:DD:EE:FF", Hostname: "phone"},
+		{IP: "10.0.0.78", MAC: "F4:03:2A:11:22:33", Hostname: "echo"},
+	}, VendorClaim, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if randomised.Vendor != VendorRandomised {
-		t.Errorf("randomised vendor = %q; want %q", randomised.Vendor, VendorRandomised)
-	}
-	// A real manufacturer still drives the guess.
-	if known.OSGuess != "Amazon Technologies Inc. Device" {
-		t.Errorf("known vendor OS guess = %q; want %q", known.OSGuess, "Amazon Technologies Inc. Device")
+	for _, ip := range []string{"10.0.0.77", "10.0.0.78"} {
+		a, err := store.GetAsset(ip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.OS != "" {
+			t.Fatalf("vendor became an OS guess: %q", a.OS)
+		}
+		if ip == "10.0.0.77" && a.Vendor != VendorRandomised {
+			t.Fatalf("randomised-MAC explanation lost: %q", a.Vendor)
+		}
+		if ip == "10.0.0.78" && a.Vendor != "Amazon Technologies Inc." {
+			t.Fatalf("manufacturer lost: %q", a.Vendor)
+		}
 	}
 }

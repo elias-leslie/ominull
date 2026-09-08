@@ -8,7 +8,7 @@ import (
 
 // Retention.
 //
-// Nothing ever deleted a row. Telemetry, anomaly alerts and alerts accumulated
+// Nothing ever deleted a row. Telemetry and anomaly alerts accumulated
 // for the life of the deployment, and the only thing that ever stopped the file
 // growing was the disk filling - at which point sqlite fails every write and the
 // hub stops being able to record that anything is wrong, which is the worst
@@ -22,7 +22,6 @@ type RetentionPolicy struct {
 	Events         time.Duration
 	CommProfiles   time.Duration
 	AnomalyAlerts  time.Duration
-	Alerts         time.Duration
 	AuditLogs      time.Duration
 	QuarantineLift time.Duration
 	RouterFlows    time.Duration
@@ -37,7 +36,6 @@ func DefaultRetention() RetentionPolicy {
 		Events:         14 * 24 * time.Hour,
 		CommProfiles:   14 * 24 * time.Hour,
 		AnomalyAlerts:  30 * 24 * time.Hour,
-		Alerts:         30 * 24 * time.Hour,
 		AuditLogs:      365 * 24 * time.Hour,
 		RouterFlows:    30 * 24 * time.Hour,
 		DNSResolutions: 14 * 24 * time.Hour,
@@ -73,7 +71,6 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		{"dns_events", "timestamp", policy.Events},
 		{"comm_profiles", "last_seen", policy.CommProfiles},
 		{"anomaly_alerts", "timestamp", policy.AnomalyAlerts},
-		{"alerts", "timestamp", policy.Alerts},
 		{"audit_logs", "timestamp", policy.AuditLogs},
 	} {
 		if target.keep <= 0 {
@@ -146,9 +143,9 @@ func (s *Store) StartRetention(policy RetentionPolicy, every time.Duration) func
 			total += n
 		}
 		if total > 0 {
-			log.Printf("[*] Retention: removed %d rows in %s (events %d, comm_profiles %d, anomalies %d, alerts %d, audit %d)",
+			log.Printf("[*] Retention: removed %d rows in %s (events %d, comm_profiles %d, anomalies %d, audit %d)",
 				total, time.Since(start).Round(time.Millisecond),
-				removed["events"], removed["comm_profiles"], removed["anomaly_alerts"], removed["alerts"], removed["audit_logs"])
+				removed["events"], removed["comm_profiles"], removed["anomaly_alerts"], removed["audit_logs"])
 		}
 	}
 

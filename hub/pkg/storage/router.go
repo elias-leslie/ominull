@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,10 +48,19 @@ const RouterSourceConntrack = "conntrack"
 
 // RouterLease is one DHCP lease as the gateway holds it.
 type RouterLease struct {
-	MAC       string    `json:"mac"`
-	IP        string    `json:"ip"`
-	Hostname  string    `json:"hostname"`
-	ExpiresAt time.Time `json:"expires_at"`
+	MAC       string                 `json:"mac"`
+	IP        string                 `json:"ip"`
+	Hostname  string                 `json:"hostname"`
+	ExpiresAt time.Time              `json:"expires_at"`
+	DHCP      *RouterDHCPFingerprint `json:"dhcp,omitempty"`
+}
+
+// RouterDHCPFingerprint preserves client-supplied DHCPv4 options as evidence,
+// not a verified OS. RequestedOptions retains wire order (option 55).
+type RouterDHCPFingerprint struct {
+	VendorClass      string    `json:"vendor_class"`
+	RequestedOptions string    `json:"requested_options"`
+	ObservedAt       time.Time `json:"observed_at"`
 }
 
 // RouterFlow is one conversation the gateway is tracking, rolled up to the hour.
@@ -235,7 +245,7 @@ func (s *Store) RecordRouterLeases(routerID string, leases []RouterLease, vendor
 		if vendorFor != nil {
 			vendor = vendorFor(mac)
 		}
-		if err := s.UpsertAssetFromScan(ip, mac, vendor, host, "", "", "", 0.9, nil, now); err != nil {
+		if err := s.upsertRouterLease(routerID, ip, mac, vendor, host, l.DHCP, now); err != nil {
 			rejected++
 			continue
 		}
@@ -473,4 +483,69 @@ func (s *Store) pruneRouterFlowsLocked(olderThan time.Duration) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// Leases contribute identity without replacing active-scan port evidence.
+func (s *Store) upsertRouterLease(routerID, ip, mac, vendor, hostname string, fingerprint *RouterDHCPFingerprint, seen time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, err := s.resolveAssetIDLocked(mac, ip, "", "", seen)
+	if err != nil {
+		return err
+	}
+	if err := s.putClaimLocked(id, FieldHostname, SourceRouter, hostname, .9, "Client hostname from DHCP lease reported by "+clampField(routerID), seen); err != nil {
+		return err
+	}
+	if err := s.putClaimLocked(id, FieldVendor, SourceRouter, vendor, .9, "IEEE OUI lookup on DHCP lease hardware address", seen); err != nil {
+		return err
+	}
+	if fingerprint == nil || fingerprint.ObservedAt.IsZero() || fingerprint.ObservedAt.After(seen) {
+		return nil
+	}
+	// Invalid optional metadata must not discard an otherwise valid lease.
+	values := map[string]string{
+		"dhcp_vendor_class":      clampField(fingerprint.VendorClass),
+		"dhcp_requested_options": validDHCPOptions(fingerprint.RequestedOptions),
+	}
+	for field, value := range values {
+		if value == "" {
+			continue
+		}
+		// Driver-written DATETIME values are Go timestamps, not necessarily
+		// SQLite julianday input. Compare decoded instants while holding mu.
+		var prior time.Time
+		err := s.db.QueryRow(`SELECT observed_at FROM asset_claims WHERE asset_id=? AND field=? AND source=?`, id, field, SourceRouter).Scan(&prior)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil && !fingerprint.ObservedAt.After(prior) {
+			continue
+		}
+		if err := s.putClaimLocked(id, field, SourceRouter, value, .5,
+			"Client-reported DHCPv4 option via "+clampField(routerID)+"; fingerprint evidence, not a verified OS",
+			fingerprint.ObservedAt.UTC()); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+// RFC 2132 option 55 is at most 255 option codes. Reject malformed or
+// overlong lists rather than truncating them into a different fingerprint.
+func validDHCPOptions(raw string) string {
+	if len(raw) > 1019 || raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 255 {
+		return ""
+	}
+	for _, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 1 || n > 254 || strconv.Itoa(n) != part {
+			return ""
+		}
+	}
+	return raw
 }

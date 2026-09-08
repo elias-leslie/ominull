@@ -95,7 +95,6 @@ func bestStatedIdentity(strs []string) *Identity {
 		identityFromHTTPServer,
 		identityFromSSDP,
 		identityFromNetBIOS,
-		identityFromDHCP,
 		identityFromHostname,
 	} {
 		for _, s := range strs {
@@ -636,52 +635,6 @@ func identityFromHTTPTitle(s string) *Identity {
 		return stated("OctoPrint 3D Print Server", "Printer / Appliance")
 	case strings.Contains(low, "plex"):
 		return derived("Plex Media Server", "Media Streamer")
-	}
-	return nil
-}
-
-// ------------------------------------------------------------------ DHCP
-
-// identityFromDHCP parses DHCP options (Vendor Class ID, Hostname, Option 55 list)
-func identityFromDHCP(s string) *Identity {
-	if !strings.HasPrefix(s, "dhcp:") {
-		return nil
-	}
-	dhcpInfo := strings.TrimPrefix(s, "dhcp:")
-	low := strings.ToLower(dhcpInfo)
-	ev := []string{s}
-
-	stated := func(name, cat string) *Identity {
-		return &Identity{Name: name, Category: cat, Confidence: confStated, Method: "dhcp-fingerprint", Evidence: ev}
-	}
-
-	switch {
-	case strings.Contains(low, "android-dhcp"):
-		return stated("Android Mobile Device", "Mobile")
-	case strings.Contains(low, "apple-iphone") || strings.Contains(low, "ios"):
-		return stated("Apple iOS Device (iPhone/iPad)", "Mobile")
-	case strings.Contains(low, "msft 5.0") || strings.Contains(low, "msft 98"):
-		return stated("Windows Host (DHCP MSFT 5.0)", "Workstation")
-	case strings.Contains(low, "roku"):
-		return stated("Roku Streaming Player", "Smart TV / Media Streamer")
-	case strings.Contains(low, "playstation") || strings.Contains(low, "ps5") || strings.Contains(low, "ps4"):
-		return stated("Sony PlayStation Gaming Console", "Gaming Console")
-	case strings.Contains(low, "xbox"):
-		return stated("Microsoft Xbox Gaming Console", "Gaming Console")
-	case strings.Contains(low, "cisco ap") || strings.Contains(low, "cisco-ap"):
-		return stated("Cisco Wireless Access Point", "Network Gear")
-	case strings.Contains(low, "ring"):
-		return stated("Ring Smart Home Camera", "Smart Home / IoT")
-	case strings.Contains(low, "nest") || strings.Contains(low, "google-nest"):
-		return stated("Google Nest Smart Device", "Smart Home / IoT")
-	case strings.Contains(low, "shelly"):
-		return stated("Shelly Smart Relay / Sensor", "Smart Home / IoT")
-	case strings.Contains(low, "espressif") || strings.Contains(low, "esp_"):
-		return stated("Espressif IoT Device", "Smart Home / IoT")
-	case strings.Contains(low, "hue-bridge") || strings.Contains(low, "philips-hue"):
-		return stated("Philips Hue Bridge", "Smart Home / IoT")
-	case strings.Contains(low, "sonos"):
-		return stated("Sonos Smart Audio Device", "Smart Home / Audio")
 	}
 	return nil
 }

@@ -434,9 +434,6 @@
     trafficFlows: null,
     trafficFilter: { range: "1h", endpoint_id: "", src_ip: "", dst_ip: "", process: "", domain: "", country: "", protocol: "", port: "", direction: "", action: "", measured_only: false, cursor: "" },
     selectedFlow: null,
-    dnsStatus: null,
-    dnsEvents: [],
-    dnsPolicy: [],
     terminalAvailable: false,
     /* The hub runs 24 checks with remediation text and the console never asked
        for them once. They are not on the 5s poll: each run has an 8 second
@@ -1362,6 +1359,7 @@
     return {
       agent: !!a.agent_endpoint_id,
       scan: claimGrade(scanClaim),
+      router: arrayOf(a.claims).some(function (c) { return c.source === "router"; }),
       operator: !!bestClaim(a, "role", "operator") || !!bestClaim(a, "category", "operator")
     };
   }
@@ -2276,10 +2274,11 @@
     var wrap = h("span", {
       cls: "ev",
       title: "Known by \u2014 agent: " + (asset.evidence.agent ? "yes" : "no") +
-        ", scan: " + (asset.evidence.scan || "no")
+        ", scan: " + (asset.evidence.scan || "no") + ", router: " + (asset.evidence.router ? "yes" : "no")
     });
     wrap.appendChild(h("i", { "data-on": asset.evidence.agent ? "agent" : null }));
     wrap.appendChild(h("i", { "data-on": asset.evidence.scan ? "scan" : null }));
+    wrap.appendChild(h("i", { "data-on": asset.evidence.router ? "router" : null }));
     return wrap;
   }
 
@@ -2334,7 +2333,8 @@
 
   var FIELD_LABEL = {
     hostname: "Hostname", os: "Operating system", vendor: "Vendor",
-    category: "Device class", role: "Role", risk: "Risk"
+    category: "Device class", role: "Role", risk: "Risk",
+    dhcp_vendor_class: "DHCP vendor class", dhcp_requested_options: "DHCP requested options"
   };
 
   /* Every source's opinion, winner first, losers kept. An operator has to be
@@ -2360,7 +2360,9 @@
     order.forEach(function (field) {
       wrap.appendChild(h("div", { cls: "claim-field", text: FIELD_LABEL[field] || field }));
       byField[field].forEach(function (c) {
-        wrap.appendChild(claimRow(c.source, c.value, Number(c.confidence) || 0, !!c.winner));
+        var row = claimRow(c.source, c.value, c.field.indexOf("dhcp_") === 0 ? null : Number(c.confidence) || 0, !!c.winner);
+        row.title = (c.rationale || "") + (c.observed_at ? " · Observed " + c.observed_at : "");
+        wrap.appendChild(row);
       });
     });
     return wrap;
@@ -2475,6 +2477,8 @@
           (asset.vendor ? " and the " + asset.vendor + " OUI" : "") +
           ". Nothing in the last day of traffic gives it a role.")));
       whyCol.appendChild(h("div", { cls: "detail-acts" }, meter(((osClaim ? Number(osClaim.confidence) : 0) || 0))));
+    } else if (asset.evidence.router) {
+      whyCol.appendChild(h("p", { cls: "why", text: "The router reported this DHCP lease. Client-supplied names and DHCP options are identity evidence, not a verified operating system. Ports require a scan." }));
     } else {
       whyCol.appendChild(h("p", { cls: "why", text: "Seen, but not yet identified by any source." }));
     }
@@ -2677,7 +2681,7 @@
     2: function (r) { return (r.name || "").toLowerCase(); },
     3: function (r) { return r.sortKey; },
     4: function (r) { return (r.identity || "").toLowerCase(); },
-    5: function (r) { return (r.evidence.agent ? 2 : 0) + (r.evidence.scan ? 1 : 0); },
+    5: function (r) { return (r.evidence.agent ? 4 : 0) + (r.evidence.scan ? 2 : 0) + (r.evidence.router ? 1 : 0); },
     6: function (r) { return (r.state || "").toLowerCase(); },
     7: function (r) { return r.riskyPorts * 10000 + r.ports.length; },
     8: function (r) {
@@ -2762,7 +2766,7 @@
       assetSortHeader(2, "Asset"),
       assetSortHeader(3, "Address"),
       assetSortHeader(4, "Identity"),
-      assetSortHeader(5, "Known by", { title: "agent \u00b7 scan" }),
+      assetSortHeader(5, "Known by", { title: "agent \u00b7 scan \u00b7 router" }),
       assetSortHeader(6, "State"),
       assetSortHeader(7, "Exposure"),
       assetSortHeader(8, "Agent"),
@@ -2826,6 +2830,7 @@
     var key = h("div", { cls: "evkey" },
       h("span", {}, h("i", { "data-on": "agent" }), h("span", { text: "agent \u2014 ground truth" })),
       h("span", {}, h("i", { "data-on": "scan" }), h("span", { text: "scan \u2014 probed" })),
+      h("span", {}, h("i", { "data-on": "router" }), h("span", { text: "router \u2014 DHCP lease" })),
       h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
       h("span", { text: "j/k move \u00b7 Ctrl/Shift+Click range select \u00b7 i isolate \u00b7 r rescan \u00b7 enter open" }));
 
@@ -2947,7 +2952,7 @@
 
   var tableSortState = {};
 
-  /* Backs every table in Response, Forensics, Audit, Access and the DNS policy
+  /* Backs every table in Response, Forensics, Audit and Access
      list. Three things it did not have and needed:
        - a caller-supplied empty string. "Nothing recorded." was fixed, so a
          failed operator load and a genuinely empty evidence bundle read
@@ -3259,16 +3264,16 @@
     var statusSummary = h("div", { cls: "stack" },
       h("p", { cls: "sub", text: "Active subnet asset sweep and OS fingerprinting engine." }),
       scanProgressCard(),
-      h("div", { cls: "dns-grid" },
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(covered ? cov.total_discovered : state.assets.length) }),
-          h("span", { cls: "dns-stat-label", text: "Total Network Assets" })),
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: covered ? pct(cov.coverage_percent) : "—" }),
-          h("span", { cls: "dns-stat-label", text: "Fleet Agent Coverage" })),
-        h("div", { cls: "dns-stat-box" },
-          h("span", { cls: "dns-stat-val", text: String(cov.critical_risks || 0), "data-tone": cov.critical_risks ? "crit" : null }),
-          h("span", { cls: "dns-stat-label", text: "Critical Risk Weakpoints" }))),
+      h("div", { cls: "summary-grid" },
+        h("div", { cls: "summary-stat-box" },
+          h("span", { cls: "summary-stat-val", text: String(covered ? cov.total_discovered : state.assets.length) }),
+          h("span", { cls: "summary-stat-label", text: "Total Network Assets" })),
+        h("div", { cls: "summary-stat-box" },
+          h("span", { cls: "summary-stat-val", text: covered ? pct(cov.coverage_percent) : "—" }),
+          h("span", { cls: "summary-stat-label", text: "Fleet Agent Coverage" })),
+        h("div", { cls: "summary-stat-box" },
+          h("span", { cls: "summary-stat-val", text: String(cov.critical_risks || 0), "data-tone": cov.critical_risks ? "crit" : null }),
+          h("span", { cls: "summary-stat-label", text: "Critical Risk Weakpoints" }))),
       h("div", { cls: "form-row" },
         h("label", { cls: "field" }, h("span", { text: "Target Subnet CIDR" }), subnetInput),
         h("label", { cls: "field" }, h("span", { text: "Sweep Profile" }), profileSel)));
@@ -4154,19 +4159,19 @@
     var covPct = Math.round((Number(ov.measured_flow_coverage) || 0) * 100);
 
     var totals = ov.totals || {};
-    var statsGrid = h("div", { cls: "dns-grid" },
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: bytes((Number(totals.bytes_in) || 0) + (Number(totals.bytes_out) || 0)) }),
-        h("span", { cls: "dns-stat-label", text: "Total Volume (" + bytes(totals.bytes_in) + " in / " + bytes(totals.bytes_out) + " out)" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(totals.flow_count || totalFlows) }),
-        h("span", { cls: "dns-stat-label", text: "Tracked Flow Events (" + covPct + "% Socket Measured)" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(totals.block_count || 0), "data-tone": totals.block_count ? "crit" : null }),
-        h("span", { cls: "dns-stat-label", text: "Threat & Policy Block Drops" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(totals.anomaly_count || 0), "data-tone": totals.anomaly_count ? "warn" : null }),
-        h("span", { cls: "dns-stat-label", text: "Anomalous Behavioral Detections" })));
+    var statsGrid = h("div", { cls: "summary-grid" },
+      h("div", { cls: "summary-stat-box" },
+        h("span", { cls: "summary-stat-val", text: bytes((Number(totals.bytes_in) || 0) + (Number(totals.bytes_out) || 0)) }),
+        h("span", { cls: "summary-stat-label", text: "Total Volume (" + bytes(totals.bytes_in) + " in / " + bytes(totals.bytes_out) + " out)" })),
+      h("div", { cls: "summary-stat-box" },
+        h("span", { cls: "summary-stat-val", text: String(totals.flow_count || totalFlows) }),
+        h("span", { cls: "summary-stat-label", text: "Tracked Flow Events (" + covPct + "% Socket Measured)" })),
+      h("div", { cls: "summary-stat-box" },
+        h("span", { cls: "summary-stat-val", text: String(totals.block_count || 0), "data-tone": totals.block_count ? "crit" : null }),
+        h("span", { cls: "summary-stat-label", text: "Threat & Policy Block Drops" })),
+      h("div", { cls: "summary-stat-box" },
+        h("span", { cls: "summary-stat-val", text: String(totals.anomaly_count || 0), "data-tone": totals.anomaly_count ? "warn" : null }),
+        h("span", { cls: "summary-stat-label", text: "Anomalous Behavioral Detections" })));
 
     // 3. Dual Synchronized Time Lanes
     var trends = arrayOf(ov.trends);
@@ -4458,62 +4463,6 @@
     var flowStreamCard = card("Active Flow Telemetry (" + (flowsData.total || flowsList.length) + " matching events)",
       h("div", { cls: "stack" }, flowsTable, pagination));
 
-    // 7. DNS Gateway & Threat Sinkhole Telemetry (Driven by real DNS APIs)
-    var dnsStatus = state.dnsStatus || {};
-    var dnsEventsList = arrayOf(state.dnsEvents);
-    var dnsGrid = h("div", { cls: "card-body dns-grid" },
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(dnsStatus.state || "active").toUpperCase() }),
-        h("span", { cls: "dns-stat-label", text: "DNS Gateway State" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(dnsStatus.queries_total || 0) }),
-        h("span", { cls: "dns-stat-label", text: "RFC-53 Queries Handled" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: String(dnsStatus.blocked_total || 0), "data-tone": dnsStatus.blocked_total ? "crit" : null }),
-        h("span", { cls: "dns-stat-label", text: "Domain Threat Drops (0.0.0.0)" })),
-      h("div", { cls: "dns-stat-box" },
-        h("span", { cls: "dns-stat-val", text: Math.round((Number(dnsStatus.cache_hit_ratio) || 0) * 100) + "%" }),
-        h("span", { cls: "dns-stat-label", text: "RAM Cache Hit Ratio" })));
-
-    var dnsRows = dnsEventsList.map(function (e) {
-      return [
-        stamp(parseTime(e.timestamp)),
-        h("span", { cls: "st", "data-state": e.action === "BLOCK" ? "crit" : "ok" },
-          icon(e.action === "BLOCK" ? "g-quarantine" : "g-online", true),
-          h("span", { text: e.action || "PERMIT" })),
-        h("span", { cls: "ip", text: e.client_ip || "—" }),
-        h("span", { cls: "ip", text: e.domain || "—" }),
-        h("span", { cls: "dim-3", text: (e.transport || "udp").toUpperCase() + " · " + (e.qtype || "A") }),
-        h("span", { cls: "dim", text: (e.latency_us ? (e.latency_us / 1000).toFixed(2) + " ms" : "< 1 ms") + " · " + (e.status || "HIT") })
-      ];
-    });
-
-    /* The rules behind the verdicts above. A blocked query with no visible rule
-       is an unexplained block, which is how an operator ends up disabling the
-       whole sinkhole to get a host working again. */
-    var dnsPolicyRules = arrayOf(state.dnsPolicy);
-    var dnsPolicyRows = dnsPolicyRules.map(function (r) {
-      return [
-        chip(r.action === "BLOCK" ? "crit" : "ok", r.action || "BLOCK"),
-        h("span", { cls: "ip", text: r.domain || "—" }),
-        h("span", { cls: "dim-3", text: r.source || "local" }),
-        h("span", { cls: "dim", text: r.comment || "—" }),
-        stamp(parseTime(r.created_at))
-      ];
-    });
-
-    var dnsStreamCard = card("RFC-Compliant DNS Gateway & Threat Sinkhole",
-      h("div", { cls: "stack" },
-        dnsGrid,
-        dnsRows.length
-          ? simpleTable(["Time", "Verdict", "Client IP", "Queried Domain", "Proto/Type", "Latency & Cache"], dnsRows)
-          : emptyBox("No DNS queries recorded."),
-        h("div", { cls: "card-sub", text: "Sinkhole policy — " + dnsPolicyRules.length + " rule(s)" }),
-        dnsPolicyRows.length
-          ? simpleTable(["Verdict", "Domain", "Source", "Comment", "Added"], dnsPolicyRows,
-              { empty: "No sinkhole rules configured — every query resolves upstream." })
-          : emptyBox("No sinkhole rules configured — every query resolves upstream.")));
-
     /* The hub bins every flow by day-of-week and hour-of-day whenever the
        window is a day or longer, and the console never asked for the grid.
        "Is this host talking at 3am on a Sunday" is a beaconing question that
@@ -4618,7 +4567,6 @@
       h("div", { cls: "cols" }, epCard, ctryCard),
       h("div", { cls: "cols" }, procCard, dstCard),
       h("div", { cls: "cols" }, domCard, portCard),
-      dnsStreamCard,
       flowStreamCard));
 
     // Render Drawer if Flow is Selected
@@ -10691,12 +10639,6 @@
 
       jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { state.trafficOverview = d || null; }));
       jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { state.trafficFlows = d || null; }));
-      jobs.push(request("/api/v1/dns/status").then(function (d) { state.dnsStatus = d || null; }));
-      jobs.push(request("/api/v1/dns/events?limit=40").then(function (d) { state.dnsEvents = arrayOf(d && d.events); }));
-      /* The sinkhole's own rules, beside the queries they decided. This was
-         guarded on `state.section === "dns"`, and there is no dns section, so
-         the hub's rule list was fetched by nobody and rendered by nobody. */
-      jobs.push(request("/api/v1/dns/policy").then(function (d) { state.dnsPolicy = arrayOf(d && d.rules); }).catch(function () {}));
       /* The whole analytics summary existed in this file only as a demo
          fixture: the hub computes a diurnal baseline, a live diurnal curve,
          the top talkers by volume and a per-country breakdown with threat
