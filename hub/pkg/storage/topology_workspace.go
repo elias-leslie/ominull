@@ -181,15 +181,24 @@ func validTopologyViewState(raw json.RawMessage) bool {
 		return false
 	}
 	var state struct {
-		Coverage   string `json:"coverage"`
-		Protocol   string `json:"protocol"`
-		Verdict    string `json:"verdict"`
-		Mode       string `json:"mode"`
-		List       bool   `json:"list"`
-		ActiveOnly bool   `json:"activeOnly"`
-		Group      string `json:"group"`
-		Window     string `json:"window"`
-		Query      string `json:"query"`
+		Scope *struct {
+			Kind    string `json:"kind"`
+			ID      string `json:"id"`
+			Process string `json:"process"`
+			Peer    string `json:"peer"`
+		} `json:"scope"`
+		ScopeLimit int               `json:"scopeLimit"`
+		ScopeLabel string            `json:"scopeLabel"`
+		Trail      []json.RawMessage `json:"trail"`
+		Coverage   string            `json:"coverage"`
+		Protocol   string            `json:"protocol"`
+		Verdict    string            `json:"verdict"`
+		Mode       string            `json:"mode"`
+		List       bool              `json:"list"`
+		ActiveOnly bool              `json:"activeOnly"`
+		Group      string            `json:"group"`
+		Window     string            `json:"window"`
+		Query      string            `json:"query"`
 		Positions  map[string]struct {
 			X float64 `json:"x"`
 			Y float64 `json:"y"`
@@ -209,6 +218,31 @@ func validTopologyViewState(raw json.RawMessage) bool {
 	}
 	if json.Unmarshal(raw, &state) != nil || len(state.Query) > 512 || len(state.Positions) > 20000 || len(state.Pins) > 20000 {
 		return false
+	}
+	if state.ScopeLimit < 0 || state.ScopeLimit > 1500 || len(state.ScopeLabel) > 4096 || len(state.Trail) > 12 {
+		return false
+	}
+	if state.Scope != nil {
+		switch state.Scope.Kind {
+		case "overview", "region", "group", "host", "process":
+		default:
+			return false
+		}
+		if (state.Scope.Kind != "overview" && state.Scope.ID == "") || len(state.Scope.ID) > 4096 || len(state.Scope.Peer) > 4096 || len(state.Scope.Process) > 4096 {
+			return false
+		}
+	}
+	for _, entry := range state.Trail {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(entry, &fields) != nil || fields == nil {
+			return false
+		}
+		if _, nested := fields["trail"]; nested {
+			return false
+		}
+		if !validTopologyViewState(entry) {
+			return false
+		}
 	}
 	for _, region := range state.RegionOverrides {
 		switch region {

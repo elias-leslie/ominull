@@ -188,12 +188,73 @@ function layoutRegions(cy, fixed, viewport) {
   }
   return positions;
 }
+function layoutScope(cy, fixed, viewport, scope) {
+  const leaves = cy.nodes().filter((n) => !n.isParent());
+  const positions = Object.fromEntries(
+    (fixed || []).map((p) => [p.nodeId, { ...p.position }]),
+  );
+  const detail = scope === "host" || scope === "process";
+  const left = leaves.filter((n) =>
+    detail ? !!n.data("parent") : !n.data("context"),
+  );
+  const right = leaves.filter((n) => !left.has(n));
+  const occupied = Object.values(positions);
+  function grid(nodes, start, columns) {
+    let cell = 0;
+    nodes.forEach((n) => {
+      if (positions[n.id()]) return;
+      let p;
+      do {
+        p = {
+          x: start + (cell % columns) * 190,
+          y: Math.floor(cell / columns) * 125,
+        };
+        cell++;
+      } while (
+        occupied.some(
+          (q) => Math.abs(q.x - p.x) < 155 && Math.abs(q.y - p.y) < 100,
+        )
+      );
+      positions[n.id()] = p;
+      occupied.push(p);
+    });
+  }
+  const cols = detail
+    ? Math.min(2, Math.max(1, Math.ceil(Math.sqrt(left.length / 2))))
+    : Math.min(
+        5,
+        Math.max(
+          1,
+          Math.ceil(
+            Math.sqrt(
+              (left.length * (viewport?.width || 1000)) /
+                (viewport?.height || 500),
+            ),
+          ),
+        ),
+      );
+  grid(left, 0, cols);
+  const leftMax = Math.max(0, ...left.map((n) => positions[n.id()].x));
+  grid(
+    right,
+    leftMax + 300,
+    detail
+      ? Math.min(3, Math.max(1, Math.ceil(Math.sqrt(right.length))))
+      : Math.min(2, Math.max(1, Math.ceil(Math.sqrt(right.length / 2)))),
+  );
+  return positions;
+}
 self.onmessage = function (event) {
-  const { id, elements, fixed, viewport } = event.data;
+  const { id, elements, fixed, viewport, scope } = event.data;
   let cy;
   try {
     cy = create(elements);
-    if (cy.nodes().some((n) => n.data("regionNode"))) {
+    if (scope && scope !== "overview") {
+      self.postMessage({
+        id,
+        positions: layoutScope(cy, fixed, viewport, scope),
+      });
+    } else if (cy.nodes().some((n) => n.data("regionNode"))) {
       self.postMessage({
         id,
         positions: layoutRegions(cy, fixed, viewport),

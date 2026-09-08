@@ -132,3 +132,14 @@ func TestTopologyViewRegionValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestTopologyViewScopeValidation(t *testing.T) {
+	for _, raw := range []string{`{"scope":{"kind":"guess","id":"a"}}`, `{"scope":{"kind":"host"}}`, `{"trail":"bad"}`, `{"trail":[{"trail":[{}]}]}`, `{"scopeLimit":-1}`} {
+		if validTopologyViewState([]byte(raw)) {
+			t.Errorf("invalid scope state accepted: %s", raw)
+		}
+	}
+	if !validTopologyViewState([]byte(`{"scope":{"kind":"process","id":"a","process":"/bin/client"},"trail":[{"scope":null,"positions":{"a":{"x":12,"y":42}},"viewport":{"zoom":1,"pan":{"x":0,"y":0}}}]}`)) {
+		t.Fatal("valid navigation state rejected")
+	}
+}

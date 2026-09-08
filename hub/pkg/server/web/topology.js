@@ -77,7 +77,10 @@
       window: api.window || "24h",
       mode: "pan",
       list: false,
-      details: false,
+      scope: null,
+      scopeLabel: "Overview",
+      scopeLimit: 60,
+      trail: [],
       activeOnly: false,
       coverage: "",
       protocol: "",
@@ -165,7 +168,7 @@
         {},
         el("h1", { text: "Network topology" }),
         el("p", {
-          text: "Observed communication",
+          text: "Observed communication · double-click to explore · scroll to zoom",
         }),
       ),
       el("div", { class: "tg-saved" }, saved, save, saveAs, removeView),
@@ -278,9 +281,9 @@
         text: "Hover or select a node",
       }),
     );
-    const inspector = el("aside", {
-      class: "tg-inspector",
-      "aria-label": "Topology inspector",
+    const context = el("div", {
+      class: "tg-context",
+      "aria-label": "Selected item actions",
     });
     const stage = el(
       "div",
@@ -293,7 +296,7 @@
         directionKey,
         tooltip,
       ),
-      inspector,
+      context,
     );
     const pan = button(
       "Pan",
@@ -305,25 +308,6 @@
       () => setMode("select"),
       "Drag a box to select hosts. Drag selected hosts to move them together.",
     );
-    const detailsButton = button(
-      "Details",
-      () => {
-        state.details = !state.details;
-        updateDetails();
-        cy.fit(undefined, 25);
-        markDirty();
-      },
-      "Show or hide the inspector",
-    );
-    function updateDetails() {
-      inspector.hidden = !state.details;
-      detailsButton.setAttribute("aria-expanded", String(!!state.details));
-      if (cy) cy.resize();
-    }
-    function revealInspector() {
-      state.details = true;
-      updateDetails();
-    }
     const listButton = button("List view", () => {
       state.list = !state.list;
       canvas.hidden = state.list;
@@ -373,7 +357,8 @@
       pin,
       unpin,
       undo,
-      detailsButton,
+      button("−", () => zoomBy(1 / 1.25), "Zoom out"),
+      button("+", () => zoomBy(1.25), "Zoom in"),
       listButton,
     );
     root.append(
@@ -387,125 +372,147 @@
       status,
     );
     container.replaceChildren(root);
+    const iconPaths = {
+      endpoint:
+        '<circle cx="24" cy="21" r="12"/><path d="M18 39h12M24 33v6"/><circle cx="24" cy="21" r="3"/>',
+      computer:
+        '<rect x="5" y="7" width="38" height="27" rx="3"/><path d="M17 42h14M24 34v8M6 28h36"/>',
+      server:
+        '<rect x="10" y="4" width="28" height="40" rx="3"/><path d="M10 17h28M10 30h28M16 11h2M16 24h2M16 37h2M25 11h7M25 24h7M25 37h7"/>',
+      mobile:
+        '<rect x="13" y="3" width="22" height="42" rx="4"/><path d="M21 9h6M21 39h6"/>',
+      router:
+        '<rect x="5" y="22" width="38" height="17" rx="3"/><path d="M11 22V8M37 22V8M12 31h2M21 31h2M30 31h6"/>',
+      network:
+        '<rect x="16" y="3" width="16" height="12" rx="2"/><rect x="3" y="32" width="14" height="12" rx="2"/><rect x="31" y="32" width="14" height="12" rx="2"/><path d="M24 15v9M10 32v-8h28v8"/>',
+      domain:
+        '<circle cx="24" cy="24" r="19"/><ellipse cx="24" cy="24" rx="8" ry="19"/><path d="M6 17h36M6 31h36"/>',
+      process:
+        '<rect x="8" y="8" width="32" height="32" rx="6"/><path d="M18 17l7 7-7 7M27 31h6M17 3v5M31 3v5M17 40v5M31 40v5M3 17h5M3 31h5M40 17h5M40 31h5"/>',
+      broadcast:
+        '<circle cx="24" cy="35" r="3"/><path d="M15 26a13 13 0 0 1 18 0M8 19a23 23 0 0 1 32 0M2 12a32 32 0 0 1 44 0"/>',
+      printer:
+        '<path d="M13 16V4h22v12M12 35H5V16h38v19h-7M13 28h22v16H13zM34 22h2"/>',
+    };
+    const iconCache = new Map();
+    function icon(n) {
+      const kind = M.iconKind(n),
+        color =
+          n.type === "process"
+            ? "#64d5ba"
+            : n.context || kind === "domain"
+              ? "#a8bcea"
+              : "#b4d6d9";
+      const key = kind + color;
+      if (!iconCache.has(key))
+        iconCache.set(
+          key,
+          "data:image/svg+xml;utf8," +
+            encodeURIComponent(
+              '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="' +
+                color +
+                '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                iconPaths[kind] +
+                "</g></svg>",
+            ),
+        );
+      return iconCache.get(key);
+    }
+    function zoomBy(factor) {
+      cy.zoom({
+        level: Math.max(
+          cy.minZoom(),
+          Math.min(cy.maxZoom(), cy.zoom() * factor),
+        ),
+        renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+      });
+      markDirty();
+    }
     cy = window.OminullCytoscape({
       container: canvas,
       elements: [],
       minZoom: 0.12,
       maxZoom: 2.8,
       selectionType: "additive",
+      userZoomingEnabled: true,
+      zoomingEnabled: true,
       boxSelectionEnabled: false,
       style: [
         {
           selector: "node",
           style: {
-            shape: "round-rectangle",
-            width: 150,
-            height: 50,
-            "background-color": "#263640",
-            "border-color": "#75b8c7",
-            "border-width": 1.5,
+            shape: "ellipse",
+            width: 52,
+            height: 52,
+            "background-opacity": 0,
+            "background-image": "data(icon)",
+            "background-fit": "contain",
+            "background-clip": "none",
+            "border-width": 0,
             label: "data(display)",
             "font-family": "IBM Plex Sans",
             "font-size": 13,
             color: "#e6edf2",
             "text-wrap": "wrap",
-            "text-max-width": 138,
-            "text-valign": "center",
-            "text-halign": "center",
+            "text-max-width": 160,
+            "text-valign": "bottom",
+            "text-margin-y": 9,
             "overlay-opacity": 0,
           },
         },
         {
-          selector: 'node[kind="cloud"]',
+          selector: "node[groupNode], node[regionNode]",
           style: {
-            "background-color": "#293145",
-            "border-color": "#819ccc",
-            shape: "round-diamond",
-          },
-        },
-        {
-          selector: "node[!groupNode][!regionNode][!agent]",
-          style: {
-            "background-color": "#30343b",
-            "border-color": "#979fa9",
-            "border-style": "dashed",
-          },
-        },
-        {
-          selector: 'node[kind="gateway"]',
-          style: {
-            "background-color": "#333b32",
-            "border-color": "#a8bf82",
-            shape: "hexagon",
-          },
-        },
-        {
-          selector: "node[groupNode]",
-          style: {
-            width: 190,
-            height: 74,
-            "background-color": "#243a40",
-            "border-color": "#6ea5b1",
-            "border-width": 2,
+            width: 64,
+            height: 64,
             "font-size": 15,
-            "text-max-width": 175,
+            "text-max-width": 200,
           },
         },
         {
           selector: ":parent",
           style: {
-            "background-color": "#22323b",
-            "background-opacity": 0.35,
-            "border-color": "#617984",
-            "border-style": "solid",
+            shape: "round-rectangle",
+            "background-image": "none",
+            "background-color": "#253b42",
+            "background-opacity": 0.18,
+            "border-color": "#68858c",
             "border-width": 1,
-            padding: 32,
+            "border-opacity": 0.4,
+            padding: 38,
             "text-valign": "top",
-            "text-margin-y": -10,
-            "font-size": 14,
-            "text-max-width": 260,
+            "text-margin-y": -12,
+            "font-size": 15,
+            "text-max-width": 300,
           },
         },
         {
-          selector: "node[regionNode]",
-          style: {
-            width: 260,
-            height: 100,
-            "background-color": "#263945",
-            "background-opacity": 0.55,
-            "border-color": "#829daa",
-            "border-width": 1.5,
-            "border-style": "solid",
-            "font-size": 18,
-            "font-weight": 500,
-            "text-max-width": 320,
-            padding: 0,
-          },
-        },
-        { selector: "node[regionNode]:parent", style: { padding: 42 } },
-        {
-          selector: 'node[regionKey="external"]',
-          style: { "background-color": "#30374b", "border-color": "#909fc0" },
+          selector: 'node[regionKey="external"]:parent',
+          style: { "background-color": "#394565" },
         },
         {
-          selector: 'node[regionKey="discovery"]',
-          style: { "background-color": "#3a3740", "border-color": "#a49aae" },
+          selector: 'node[regionKey="virtual"]:parent',
+          style: { "background-color": "#34564b" },
         },
         {
-          selector: 'node[regionKey="virtual"]',
-          style: { "background-color": "#293f39", "border-color": "#83aa99" },
+          selector: 'node[regionKey="discovery"]:parent',
+          style: { "background-color": "#4b4055" },
         },
         {
           selector: "node[?quiet]",
-          style: { "background-opacity": 0.4 },
+          style: { "background-image-opacity": 0.5 },
         },
         {
           selector: "node[?isolated]",
-          style: { "border-color": "#e89786", "border-width": 3 },
+          style: {
+            "border-color": "#e89786",
+            "border-width": 2,
+            "border-style": "dashed",
+          },
         },
         {
           selector: "node[pinned]",
-          style: { "border-width": 3, "border-color": "#e0bf76" },
+          style: { "border-color": "#e0bf76", "border-width": 2 },
         },
         {
           selector: "edge",
@@ -515,7 +522,16 @@
             "target-arrow-color": "#627782",
             "target-arrow-shape": "triangle",
             "arrow-scale": 1.1,
-            "curve-style": "bezier",
+            "curve-style": "unbundled-bezier",
+            "control-point-distances": "data(bend)",
+            "control-point-weights": 0.5,
+            label: "data(edgeLabel)",
+            "font-size": 11,
+            color: "#aebdc5",
+            "text-background-color": "#101719",
+            "text-background-opacity": 0.95,
+            "text-background-padding": 3,
+            "text-rotation": "autorotate",
             opacity: 0.72,
             "overlay-opacity": 0,
           },
@@ -585,9 +601,14 @@
         first = false;
         fitNext = false;
       }
-      status.textContent = e.data.regioned
-        ? "Regions arranged"
-        : "Layout ready";
+      status.textContent =
+        projection?.notice ||
+        (e.data.regioned ? "Regions arranged" : "Layout ready");
+      if (projection?.omittedEdges)
+        status.textContent +=
+          " " +
+          num(projection.omittedEdges) +
+          " additional links; use Show more.";
     };
     worker.onerror = () => {
       status.textContent =
@@ -631,7 +652,9 @@
       const ref =
         hovered.length && hovered.isNode()
           ? hovered
-          : cy.getElementById(selected);
+          : cy.getElementById(
+              selected || (projection?.detail ? state.scope?.id : ""),
+            );
       const caption = directionKey.querySelector(".tg-direction-reference");
       if (!ref.length || !ref.isNode()) {
         caption.textContent = "Hover or select a node";
@@ -667,22 +690,36 @@
               n.description,
               num(n.count) + (n.count === 1 ? " address" : " addresses"),
               n.collapsed
-                ? "Click to expand or inspect"
+                ? "Double-click to explore"
                 : "Drag region to move its groups",
             ]
           : n.is_group
             ? [
                 n.label,
                 num(n.count) + (n.count === 1 ? " address" : " addresses"),
-                "Click to expand or inspect",
+                "Double-click to explore",
               ]
             : [
+                n.description,
+                n.process,
+                n.type === "process"
+                  ? "Reported by " +
+                    (reporterLabels.get(n.endpoint_id) || n.endpoint_id)
+                  : "",
                 n.ip,
+                n.role && !/^unknown$/i.test(n.role) ? "Role: " + n.role : "",
+                n.os && !/^unknown$/i.test(n.os) ? "OS: " + n.os : "",
+                n.risk && n.risk !== "CLEAN" ? "Risk: " + n.risk : "",
+                n.evidence?.length ? "Evidence: " + n.evidence.join(", ") : "",
                 n.address_scope ? "Scope: " + n.address_scope : "",
                 n.quiet
                   ? "No observed traffic in this window"
                   : "Traffic observed in this window",
-                M.coverage(n) === "managed" ? "Agent installed" : "No agent",
+                ["process", "domain", "traffic"].includes(n.type)
+                  ? ""
+                  : M.coverage(n) === "managed"
+                    ? "Agent installed"
+                    : "No agent",
                 n.is_isolated ? "Isolated" : "",
               ];
         lines
@@ -762,7 +799,7 @@
             }),
           );
         tooltip.append(
-          el("small", { text: "Click for full evidence · Esc to dismiss" }),
+          el("small", { text: "Double-click to explore · Esc to dismiss" }),
         );
       }
       tooltip.hidden = false;
@@ -800,8 +837,16 @@
     cy.on("pan zoom grab", hideTooltip);
     cy.on("tap", "node, edge", (e) => {
       selected = e.target.id();
-      revealInspector();
       inspect();
+    });
+    let lastDoubleTap = 0;
+    cy.on("dbltap", "node, edge", (e) => {
+      lastDoubleTap = Date.now();
+      drill(e.target.id());
+    });
+    // Native double-click events can arrive without two separate tap events.
+    canvas.addEventListener("dblclick", () => {
+      if (selected && Date.now() - lastDoubleTap > 500) drill(selected);
     });
     cy.on("tap", (e) => {
       if (e.target === cy) {
@@ -838,10 +883,16 @@
     cy.on("pan zoom", () => {
       state.viewport = { zoom: cy.zoom(), pan: cy.pan() };
     });
+    canvas.tabIndex = 0;
+    canvas.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && selected) {
+        e.preventDefault();
+        drill(selected);
+      }
+    });
     const observer = new ResizeObserver(() => cy.resize());
     observer.observe(canvas);
     setMode(state.mode);
-    updateDetails();
     syncControls();
     canvas.hidden = state.list;
     list.hidden = !state.list;
@@ -930,13 +981,16 @@
       if (dragging) return;
       const previousTooltip = tooltipState;
       if (!skipCapture) capture();
-      projection = M.project(data, state);
+      projection = M.scene(data, state);
       const elements = projection.nodes.map((n, i) => ({
         group: "nodes",
         data: {
           id: n.id,
           parent: n.parent || undefined,
           kind: n.type,
+          icon: icon(n),
+          detailNode: !!projection.detail,
+          context: !!n.context,
           display:
             M.shortLabel(n) +
             (n.is_group || (n.is_region && n.collapsed)
@@ -955,7 +1009,7 @@
           y: Math.floor(i / 8) * 130,
         },
       }));
-      projection.edges.forEach((e) =>
+      projection.edges.forEach((e, edgeIndex) =>
         elements.push({
           group: "edges",
           data: {
@@ -963,7 +1017,19 @@
             source: e.source,
             target: e.target,
             verdict: e.verdict,
-            width: Math.min(6, 1 + Math.log10(1 + e.flow_count)),
+            bend: 35 + (edgeIndex % 4) * 18,
+            width: Math.min(5, 1 + Math.log10(1 + e.flow_count)),
+            edgeLabel: projection.detail
+              ? [
+                  ...new Set(
+                    (e.ports || []).map(
+                      (p) => p.protocol + (p.port ? "/" + p.port : ""),
+                    ),
+                  ),
+                ]
+                  .slice(0, 2)
+                  .join(" · ")
+              : "",
           },
         }),
       );
@@ -977,7 +1043,7 @@
         selection.forEach((id) => cy.getElementById(id).select());
         restorePositions();
         lastStructure = structure;
-        if (!first && !skipCapture) cy.fit(undefined, 25);
+        // Telemetry must not move the operator's viewport. Fit is explicit.
       } else
         cy.batch(() =>
           elements.forEach((e) => cy.getElementById(e.data.id).data(e.data)),
@@ -987,20 +1053,38 @@
         el(
           "span",
           {},
-          el("strong", { text: num(projection.matched) }),
-          " of " + num(projection.total) + " addresses",
+          el("strong", {
+            text: num(
+              projection.detail
+                ? projection.nodes.filter(
+                    (n) => !n.parent && n.id !== state.scope.id,
+                  ).length
+                : projection.matched,
+            ),
+          }),
+          projection.detail
+            ? " destinations shown"
+            : " of " + num(projection.total) + " addresses",
         ),
         el(
           "span",
           {},
-          el("strong", { text: num(projection.groups.length) }),
-          " groups",
+          el("strong", {
+            text: num(
+              projection.detail
+                ? projection.nodes.filter((n) => n.type === "process").length
+                : projection.groups.length,
+            ),
+          }),
+          projection.detail ? " processes" : " groups",
         ),
         el(
           "span",
           {},
           el("strong", { text: num(projection.edges.length) }),
-          " links",
+          " of " +
+            num(projection.edges.length + projection.omittedEdges) +
+            " links",
         ),
         el("span", {
           class: "tg-window",
@@ -1030,32 +1114,34 @@
             ),
           );
       });
-      crumbs.replaceChildren(
-        button("All groups", () => {
-          state.expanded = {};
-          selected = "";
-          change(true);
+      crumbs.replaceChildren();
+      if (state.trail?.length) crumbs.append(button("← Back", () => goBack()));
+      (state.trail || []).forEach((entry, i) =>
+        crumbs.append(button(entry.label, () => goBack(i))),
+      );
+      crumbs.append(
+        el("span", {
+          text: state.scopeLabel || "Overview",
+          "aria-current": "page",
         }),
       );
-      projection.groups
-        .filter((g) => g.expanded)
-        .forEach((g) =>
-          crumbs.append(
-            button(
-              g.label + " · " + g.shown + "/" + g.count + " ×",
-              () => {
-                delete state.expanded[g.key];
-                selected = "";
-                change(true);
-              },
-              "Collapse " + g.label,
-            ),
-          ),
+      if (
+        state.scope &&
+        state.scope.kind !== "region" &&
+        !projection.capacityReached &&
+        (state.scopeLimit || 0) < 1500 &&
+        (projection.hidden || projection.omittedEdges)
+      )
+        crumbs.append(
+          button("Show more", () => {
+            state.scopeLimit = Math.min(1500, (state.scopeLimit || 60) + 60);
+            change(true);
+          }),
         );
       status.textContent =
         (projection.hidden
           ? num(projection.hidden) +
-            " hosts remain collapsed. Expand more from the group inspector. "
+            " addresses grouped. Double-click to explore. "
           : "") +
         (projection.omittedEdges
           ? num(projection.omittedEdges) +
@@ -1068,6 +1154,10 @@
           ? "Search finds hosts and observed relations; link totals cover the matching host pairs. "
           : "") +
         "";
+      if (projection.notice) status.textContent += projection.notice;
+      if (projection.capacityReached)
+        status.textContent +=
+          " Drawing limit reached; narrow filters to see other relations.";
       if (saveError) status.textContent = saveError;
       renderList();
       inspect();
@@ -1106,6 +1196,7 @@
         .map((n) => ({ nodeId: n.id(), position: n.position() }));
       fitNext = !selectionOnly;
       worker.postMessage({
+        scope: state.scope?.kind,
         viewport: { width: cy.width(), height: cy.height() },
         id: ++layoutID,
         elements: cy.elements().map((e) => ({
@@ -1120,26 +1211,7 @@
       const n = (data.nodes || []).find(
         (n) => n.id === id || n.asset_id === id || n.ip === id,
       );
-      if (!n) return;
-      const group = M.project(data, {
-        ...state,
-        query: "",
-        coverage: "",
-        activeOnly: false,
-      }).groups.find((g) => g.members.some((m) => m.id === n.id));
-      if (!group) return;
-      state.collapsedRegions[group.region] = false;
-      state.expanded[group.key] = Math.max(100, state.expanded[group.key] || 0);
-      state.query = n.ip || n.label;
-      syncControls();
-      renderGraph();
-      selected = n.id;
-      revealInspector();
-      cy.elements().unselect();
-      cy.getElementById(n.id).select();
-      cy.fit(cy.getElementById(n.id).closedNeighborhood(), 80);
-      inspect();
-      markDirty();
+      if (n) navigate({ kind: "host", id: n.id }, M.shortLabel(n));
     }
     function renderList() {
       if (!state.list) return;
@@ -1186,7 +1258,6 @@
               {},
               button("Inspect", () => {
                 selected = n.id;
-                revealInspector();
                 inspect();
               }),
             ),
@@ -1196,8 +1267,13 @@
       function evidenceButton(id) {
         const b = button("Inspect", () => {
           selected = id;
-          revealInspector();
           inspect();
+        });
+        b.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            drill(id);
+          }
         });
         b.dataset.topologyId = id;
         const show = () => {
@@ -1250,316 +1326,158 @@
         }
       }
     }
-    function detail(label, value) {
-      if (value == null || value === "" || /^unknown$/i.test(String(value)))
-        return null;
-      return el(
-        "div",
-        { class: "tg-detail" },
-        el("dt", { text: label }),
-        el("dd", { text: String(value || "Unknown") }),
-      );
+    function navigate(scope, label) {
+      capture();
+      state.trail = [
+        ...(state.trail || []),
+        {
+          scope: state.scope,
+          label: state.scopeLabel || "Overview",
+          positions: state.positions,
+          pins: state.pins,
+          viewport: state.viewport,
+          scopeLimit: state.scopeLimit,
+        },
+      ].slice(-12);
+      state.scope = scope;
+      state.scopeLabel = label;
+      state.scopeLimit =
+        scope.kind === "host" || scope.kind === "process" ? 12 : 24;
+      state.positions = {};
+      state.pins = [];
+      state.viewport = null;
+      selected = "";
+      history = [];
+      undo.disabled = true;
+      lastStructure = "";
+      first = true;
+      hideTooltip();
+      renderGraph(true);
+      markDirty();
+    }
+    function goBack(index = (state.trail || []).length - 1) {
+      const entry = state.trail?.[index];
+      if (!entry) return;
+      ++layoutID;
+      state.trail = state.trail.slice(0, index);
+      Object.assign(state, entry, { scopeLabel: entry.label });
+      selected = "";
+      history = [];
+      undo.disabled = true;
+      lastStructure = "";
+      first = false;
+      hideTooltip();
+      const viewport = state.viewport;
+      renderGraph(true);
+      if (viewport) {
+        cy.zoom(viewport.zoom);
+        cy.pan(viewport.pan);
+      }
+      markDirty();
+    }
+    function drill(id) {
+      const n = projection?.nodes.find((n) => n.id === id);
+      if (!n) {
+        const e = projection?.edges.find((e) => "edge:" + e.id === id);
+        if (e) {
+          const source = projection.nodes.find((n) => n.id === e.source);
+          const target = projection.nodes.find((n) => n.id === e.target);
+          const host =
+            source?.host_id ||
+            (!source?.is_group && !source?.is_region && source?.id);
+          if (host)
+            navigate(
+              { kind: "host", id: host, peer: target?.host_id || target?.id },
+              M.shortLabel(source) + " → " + M.shortLabel(target),
+            );
+          else if (source) drill(source.id);
+        }
+        return;
+      }
+      if (n.remainder) {
+        state.scopeLimit = Math.min(1500, (state.scopeLimit || 24) + 60);
+        change(true);
+        return;
+      }
+      if (n.is_region) navigate({ kind: "region", id: n.id }, M.shortLabel(n));
+      else if (n.is_group)
+        navigate({ kind: "group", id: n.id }, M.shortLabel(n));
+      else if (n.type === "process")
+        navigate(
+          { kind: "process", id: n.host_id, process: n.process },
+          n.label,
+        );
+      else if (n.type !== "traffic")
+        navigate({ kind: "host", id: n.host_id || n.id }, M.shortLabel(n));
     }
     function inspect() {
-      inspector.replaceChildren();
+      context.replaceChildren();
       if (cy && projection) highlight(hoverID);
-      const n = projection && projection.nodes.find((n) => n.id === selected),
-        edge =
-          projection &&
-          projection.edges.find((e) => "edge:" + e.id === selected);
-      if (!n && !edge) {
-        inspector.append(
-          el("p", { class: "tg-eyebrow", text: "Explore the network" }),
-          el("h2", { text: "Start with a group" }),
-          el("p", {
-            text: "Select a group to see its hosts. Expand it to arrange hosts and inspect their observed communication.",
-          }),
-          el(
-            "div",
-            { class: "tg-legend" },
-            el("p", { text: "Host solid border · agent installed" }),
-            el("p", {
-              text: "Host dashed border · no agent. Dim fill · no traffic in this window.",
-            }),
-            el("p", {
-              text: "Arrows follow recorded source → destination. Counts are observations, not unique sessions.",
-            }),
-            el("p", { text: "Amber border · pinned position" }),
-          ),
-          el("p", {
-            class: "tg-muted",
-            text: "Domain labels are evidence from observations. They do not establish machine identity. Layout changes never change network policy.",
-          }),
-        );
-        return;
-      }
-      inspector.append(
-        el("p", {
-          class: "tg-eyebrow",
-          text: edge
-            ? "Directed communication"
-            : n.is_region
-              ? "Visual region"
-              : n.is_group
-                ? "Network group"
-                : "Host",
-        }),
-        el("h2", { text: edge ? "Observed link" : M.shortLabel(n) }),
-        button("Clear selection", () => {
-          selected = "";
-          cy.elements().unselect();
-          inspect();
-        }),
+      const n = projection?.nodes.find((n) => n.id === selected);
+      const edge = projection?.edges.find((e) => "edge:" + e.id === selected);
+      if (!n && !edge) return;
+      context.append(
+        el("strong", { text: n ? M.shortLabel(n) : "Observed communication" }),
       );
-      if (n && n.is_region) {
-        inspector.append(
-          el("p", { text: n.description }),
-          el("p", {
-            text: num(n.count) + (n.count === 1 ? " address" : " addresses"),
-          }),
-          button(n.collapsed ? "Expand region" : "Collapse region", () => {
-            const node = cy.getElementById(n.id);
-            if (
-              node
-                .union(node.descendants())
-                .some((x) => state.pins.includes(x.id()))
-            ) {
-              status.textContent =
-                "Unpin region contents before changing their grouping.";
-              return;
-            }
-            state.collapsedRegions[n.key] = !n.collapsed;
-            change(true);
-          }),
-          button("Focus region", () => {
-            cy.fit(
-              cy
-                .getElementById(n.id)
-                .union(cy.getElementById(n.id).descendants()),
-              35,
-            );
-            markDirty();
-          }),
-        );
-        return;
-      }
-      if (n && n.is_group) {
-        if (state.regions && state.group === "network") {
-          const regionChoice = select(
-            "Visual region",
-            [
-              ["", "Automatic"],
-              ...Object.entries(M.regionDefinitions).map(([key, v]) => [
-                key,
-                v.label,
-              ]),
-            ],
-            (v) => {
-              state.regionOverrides[n.baseKey] = v;
-              selected = "";
-              change(true);
-            },
-          );
-          regionChoice.querySelector("select").value =
-            state.regionOverrides[n.baseKey] || "";
-          inspector.append(regionChoice);
-        }
-        inspector.append(
-          el("p", {
-            text:
-              num(n.count) +
-              (n.count === 1 ? " host · " : " hosts · ") +
-              num(n.internal_flows) +
-              " observations inside collapsed group",
-          }),
-          (!n.expanded || n.shown < n.count) &&
-            button(n.expanded ? "Show more hosts" : "Expand group", () => {
-              if (state.pins.includes(n.id)) {
-                status.textContent =
-                  "Unpin this group before expanding it. Expanded hosts can then be pinned together.";
-                return;
-              }
-              state.expanded[n.key] = Math.min(
-                n.count,
-                (state.expanded[n.key] || 0) + 100,
-              );
-              change(true);
-            }),
-        );
-        if (n.expanded)
-          inspector.append(
-            button("Focus group", () => {
-              cy.fit(
-                cy
-                  .getElementById(n.id)
-                  .union(cy.getElementById(n.id).descendants()),
-                30,
-              );
-              markDirty();
-            }),
-            button("Collapse group", () => {
-              delete state.expanded[n.key];
-              change(true);
-            }),
-          );
-        const members = el("div", { class: "tg-members" });
-        n.members
-          .slice(0, 100)
-          .forEach((m) =>
-            members.append(
-              button(m.label || m.ip, () => focus(m.id), m.ip || m.id),
-            ),
-          );
-        inspector.append(members);
-        if (n.count > 100)
-          inspector.append(
-            el("p", {
-              text: "First 100 by activity shown. Search to find another host.",
-            }),
-          );
-        return;
-      }
-      let ids, records;
-      if (n) {
-        ids = new Set([n.id]);
-        records = (data.conversations || []).filter(
-          (r) => ids.has(r.source) || ids.has(r.target),
-        );
-        inspector.append(
-          el(
-            "dl",
-            {},
-            detail("Address", n.ip),
-            detail(
-              "Agent coverage",
-              M.coverage(n) === "managed" ? "Agent installed" : "No agent",
-            ),
-            detail("Address scope", n.address_scope),
-            detail(
-              "Estate membership",
-              n.estate_member ? "Known / configured" : "Not established",
-            ),
-            detail("Role", n.role),
-            detail("Recorded risk", n.risk),
-            detail("Containment", n.is_isolated ? "Isolated" : "Not isolated"),
-            detail("Evidence", (n.evidence || []).join(", ")),
-            detail(
-              "Activity",
-              n.quiet ? "Quiet in this window" : "Observed in window",
-            ),
-          ),
-        );
-        inspector.append(
-          button("Open asset", () => api.onAsset(n)),
-          button("Outgoing traffic", () => api.onTraffic({ src_ip: n.ip })),
-          button("Incoming traffic", () => api.onTraffic({ dst_ip: n.ip })),
-        );
-      } else {
-        const source = projection.nodes.find((x) => x.id === edge.source),
-          target = projection.nodes.find((x) => x.id === edge.target);
-        inspector.append(
-          el("p", {
-            class: "tg-direction",
-            text:
-              (source.label || source.ip) + " → " + (target.label || target.ip),
-          }),
-          el(
-            "dl",
-            {},
-            detail("Observations", num(edge.flow_count)),
-            detail("Measured volume", bytes(edge.total_bytes)),
-            detail(
-              "With byte counts",
-              num(edge.measured_flows) + " / " + num(edge.flow_count),
-            ),
-            detail("Verdict", edge.verdict),
-          ),
-        );
-        records = edge.relations || [];
-      }
-      const domains = new Map(),
-        processes = new Map();
-      records.forEach((r) => {
-        if (r.domain) domains.set(r.domain + " · " + r.domain_source, r);
-        if (r.process) processes.set(r.endpoint_id + "\0" + r.process, r);
-      });
-      inspector.append(el("h3", { text: "Observed domains" }));
-      if (!domains.size)
-        inspector.append(
-          el("p", {
-            class: "tg-muted",
-            text: "No domain evidence in this window.",
-          }),
-        );
-      [...domains].slice(0, 30).forEach(([label, r]) =>
-        inspector.append(
+      if (n?.ip) context.append(el("span", { text: n.ip }));
+      if (n?.type !== "traffic")
+        context.append(
           button(
-            label,
-            () => {
-              search.value = state.query = r.domain;
-              change();
-            },
-            "Filter communication for " + r.domain,
+            "Explore",
+            () => drill(selected),
+            "Double-click an item to explore it",
           ),
-        ),
-      );
-      inspector.append(el("h3", { text: "Processes" }));
-      if (!processes.size)
-        inspector.append(
-          el("p", {
-            class: "tg-muted",
-            text: "No process attribution reported.",
-          }),
         );
-      [...processes.values()].slice(0, 30).forEach((r) =>
-        inspector.append(
-          el(
-            "div",
-            { class: "tg-process" },
-            button(
-              r.process,
-              () => {
-                search.value = state.query = r.process;
-                change();
-              },
-              "Find this executable path across reporters",
-            ),
-            el("small", { text: "Reported by " + r.endpoint_id }),
-            button("Traffic details", () =>
-              api.onTraffic({ process: r.process, endpoint_id: r.endpoint_id }),
-            ),
+      if (n?.asset_id && n.type !== "process")
+        context.append(button("Open asset", () => api.onAsset(n)));
+      if (n?.type === "process")
+        context.append(
+          button("Traffic records", () =>
+            api.onTraffic({ process: n.process, endpoint_id: n.endpoint_id }),
           ),
-        ),
-      );
-      inspector.append(el("h3", { text: "Recent relations" }));
-      records.slice(0, 20).forEach((r) =>
-        inspector.append(
-          el("p", {
-            class: "tg-relation",
-            text:
-              (r.protocol === 6
-                ? "TCP"
-                : r.protocol === 17
-                  ? "UDP"
-                  : r.protocol) +
-              "/" +
-              r.port +
-              " · " +
-              num(r.flow_count) +
-              " observations · " +
-              bytes(r.total_bytes) +
-              "\n" +
-              time(r.last_seen),
-          }),
-        ),
-      );
-      if (domains.size > 30 || processes.size > 30 || records.length > 20)
-        inspector.append(
-          el("p", {
-            class: "tg-muted",
-            text: "Inspector lists are shortened. Use Traffic details for individual observations.",
-          }),
         );
+      else if (n?.ip) {
+        context.append(
+          button("Outgoing records", () => api.onTraffic({ src_ip: n.ip })),
+          button("Incoming records", () => api.onTraffic({ dst_ip: n.ip })),
+        );
+      }
+      if (n?.is_group && state.group === "network") {
+        const choice = select(
+          "Region",
+          [
+            ["", "Automatic"],
+            ...Object.entries(M.regionDefinitions).map(([k, v]) => [
+              k,
+              v.label,
+            ]),
+          ],
+          (value) => {
+            state.regionOverrides[n.baseKey || n.key] = value;
+            if (state.scope?.kind === "group" && state.scope.id === n.id) {
+              const moved = M.project(data, state).groups.find(
+                (g) => g.baseKey === n.baseKey,
+              );
+              if (moved) state.scope.id = moved.id;
+            }
+            change(true);
+          },
+        );
+        choice.querySelector("select").value =
+          state.regionOverrides[n.baseKey || n.key] || "";
+        context.append(choice);
+      }
+      context.append(
+        button(
+          "×",
+          () => {
+            selected = "";
+            cy.elements().unselect();
+            inspect();
+          },
+          "Clear selection",
+        ),
+      );
     }
     function refreshViews() {
       return api
@@ -1586,6 +1504,10 @@
         ...state,
         ...v.state,
         regions: v.state.regions ?? false,
+        scope: v.state.scope || null,
+        scopeLabel: v.state.scopeLabel || "Overview",
+        scopeLimit: v.state.scopeLimit || 60,
+        trail: v.state.trail || [],
         collapsedRegions: v.state.collapsedRegions || {},
         regionOverrides: v.state.regionOverrides || {},
       };
@@ -1594,7 +1516,6 @@
       state.pins = state.pins || [];
       syncControls();
       setMode(state.mode);
-      updateDetails();
       lastStructure = "";
       first = false;
       const viewport = state.viewport;

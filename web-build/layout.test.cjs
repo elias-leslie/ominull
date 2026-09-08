@@ -191,3 +191,28 @@ test("default regions retain readable group labels on a narrow console", () => {
   const size = 15 * Math.min(896 / w, 328 / h);
   assert.ok(size >= 11, `labels shrink to ${size}px`);
 });
+test("scoped layout keeps contextual peers separate and respects pins", () => {
+  const elements = [
+    ...Array.from({ length: 12 }, (_, i) => ({ data: { id: "h" + i } })),
+    ...Array.from({ length: 3 }, (_, i) => ({
+      data: { id: "c" + i, context: true },
+    })),
+  ];
+  self.onmessage({
+    data: {
+      id: 9,
+      elements,
+      scope: "group",
+      fixed: [{ nodeId: "h0", position: { x: 20, y: 30 } }],
+      viewport: { width: 1000, height: 500 },
+    },
+  });
+  assert.deepEqual(result.positions.h0, { x: 20, y: 30 });
+  assert.ok(
+    Math.min(...[0, 1, 2].map((i) => result.positions["c" + i].x)) >
+      Math.max(
+        ...Array.from({ length: 12 }, (_, i) => result.positions["h" + i].x),
+      ) +
+        100,
+  );
+});

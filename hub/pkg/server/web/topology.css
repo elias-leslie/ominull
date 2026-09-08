@@ -190,47 +190,6 @@
   background-image: radial-gradient(var(--line) 0.7px, transparent 0.7px);
   background-size: 20px 20px;
 }
-.tg-inspector {
-  width: 300px;
-  min-width: 240px;
-  max-width: 50%;
-  resize: horizontal;
-  overflow: auto;
-  border-left: 1px solid var(--line);
-  background: var(--panel);
-  padding: 20px;
-  box-sizing: border-box;
-  flex-shrink: 0;
-}
-.tg-inspector h2 {
-  font-size: 20px;
-  font-weight: 500;
-  margin: 8px 0 15px;
-  overflow-wrap: anywhere;
-}
-.tg-inspector h3 {
-  font-size: 13px;
-  margin: 22px 0 10px;
-  color: var(--ink);
-}
-.tg-inspector p {
-  font-size: 13px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-.tg-eyebrow {
-  font: 11px var(--f-mono);
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--brand);
-  margin-top: 0;
-}
-.tg-inspector > .tg-button {
-  margin: 3px 4px 3px 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  text-align: left;
-}
 .tg-muted,
 .tg-legend {
   color: var(--ink-2);
@@ -369,10 +328,6 @@ body[data-section="topology"] #view {
   .tg-heading p {
     display: none;
   }
-  .tg-inspector {
-    width: 260px;
-    padding: 14px;
-  }
   .tg-saved .tg-field select {
     max-width: 160px;
   }
@@ -489,4 +444,51 @@ body[data-section="topology"] #view {
 }
 .tg-list {
   bottom: 32px;
+}
+
+.tg-stage {
+  position: relative;
+  flex-direction: column;
+}
+.tg-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+}
+.tg-context:empty {
+  display: none;
+}
+.tg-context > .tg-button:last-child {
+  margin-left: auto;
+}
+.tg-context .tg-field {
+  flex-direction: row;
+  align-items: center;
+}
+.tg-canvas {
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+.tg-crumbs {
+  font-size: 12px;
+  min-height: 24px;
+}
+.tg-crumbs > span {
+  color: var(--ink-2);
+  padding: 0 4px;
+}
+.tg-context {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 40px;
+  z-index: 5;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px #0004;
 }
