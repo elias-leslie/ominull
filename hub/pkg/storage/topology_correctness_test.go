@@ -411,3 +411,19 @@ func TestTopologyScopeGroupsRetainAddressFamily(t *testing.T) {
 		t.Errorf("IPv4 and IPv6 share a mislabeled group: %+v", g.Nodes)
 	}
 }
+
+func TestTopologyExcludesAllLoopbackPeers(t *testing.T) {
+	s := newTestStore(t)
+	for _, ip := range []string{"127.0.0.2", "127.17.1.9", "::1", "::ffff:127.0.0.9"} {
+		if err := s.InsertEvent(Event{TenantID: "default", EndpointID: "fixture", Timestamp: time.Now().UTC(), SrcIP: "10.0.4.2", DstIP: ip, Protocol: 6}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, err := s.GetTopologyGraph(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Edges) != 0 {
+		t.Fatalf("loopback appeared as network peers: %d edges", len(g.Edges))
+	}
+}

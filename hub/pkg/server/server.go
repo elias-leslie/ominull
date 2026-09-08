@@ -3462,6 +3462,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/scanner/feedback", s.authMiddleware(requireAdmin(s.handleScannerFeedback)))
 
 	// 8. Visual Communications Topology Graph API
+	mux.HandleFunc("/api/v1/topology/workspace", s.authMiddleware(requireTopologyOperator(s.handleTopologyWorkspace)))
+	mux.HandleFunc("/api/v1/topology/views", s.authMiddleware(requireTopologyOperator(s.handleTopologyViews)))
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
 	mux.HandleFunc("/api/v1/topology/networks", s.authMiddleware(requireAdmin(s.handleTopologyNetworks)))
 

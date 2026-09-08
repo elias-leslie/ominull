@@ -108,3 +108,6 @@ scripts/validate_m1.py
 scripts/verify_m1_live.py
 scripts/verify_m3_live.py
 scripts/vm_test_pipeline.py
+
+# Local frontend dependency installation
+web-build/node_modules/

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"ominull/hub/pkg/netaddr"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -243,6 +245,7 @@ type QuarantinedPeer struct {
 }
 
 type TopologyNode struct {
+	EndpointID   string   `json:"endpoint_id,omitempty"`
 	AddressScope string   `json:"address_scope"`
 	EstateMember bool     `json:"estate_member"`
 	NetworkID    string   `json:"network_id"`
@@ -417,6 +420,7 @@ func (s *Store) Close() error {
 
 func (s *Store) initSchema() error {
 	schema := `
+ CREATE TABLE IF NOT EXISTS topology_views (owner TEXT NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL,updated_at DATETIME NOT NULL,PRIMARY KEY(owner,id));
 	CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -3090,6 +3094,11 @@ func (s *Store) GetEndpoints() []Endpoint {
 // every node arrives with its evidence and its role attached, and an asset
 // that said nothing in the window is drawn quiet rather than dropped.
 func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error) {
+	to := time.Now().UTC()
+	return s.topologyGraphBetween(to.Add(-timeWindow), to, timeWindow)
+}
+
+func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Duration) (TopologyData, error) {
 	networks, err := s.TopologyNetworks()
 	if err != nil {
 		return TopologyData{}, err
@@ -3159,20 +3168,19 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		}
 		risk := "CLEAN"
 		nodeMap[ep.IP] = &TopologyNode{
-			ID: ep.IP, Label: ep.Hostname, Type: "managed", IP: ep.IP, OS: ep.OS,
+			ID: ep.IP, EndpointID: ep.ID, Label: ep.Hostname, Type: "managed", IP: ep.IP, OS: ep.OS,
 			Role: ep.RoleTag, Risk: risk, IsIsolated: ep.IsIsolated, Group: ep.RoleTag,
 			Evidence: []string{SourceAgent}, Confidence: 1.0, Quiet: true,
 		}
 	}
 
-	cutoff := time.Now().UTC().Add(-timeWindow)
 	rows, err := s.db.Query(
 		`SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
 		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
 		 FROM events
 		 WHERE timestamp >= ? AND timestamp <= ?
 		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
-		cutoff, time.Now().UTC(),
+		cutoff, to,
 	)
 	if err != nil {
 		return data, err
@@ -3192,10 +3200,10 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		var maxTimeRaw interface{}
 
 		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &measuredFlows, &maxTimeRaw); err != nil {
-			continue
+			return data, err
 		}
 		maxTime := scanTime(maxTimeRaw)
-		if srcIP == "127.0.0.1" || dstIP == "127.0.0.1" {
+		if netaddr.IsLoopback(srcIP) || netaddr.IsLoopback(dstIP) {
 			continue
 		}
 		if retiredByIP[srcIP] || retiredByIP[dstIP] {
@@ -3252,6 +3260,10 @@ func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error)
 		if verdict != "clean" {
 			ps.Verdict = verdict
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return data, err
 	}
 
 	managedCount := 0
@@ -3365,7 +3377,7 @@ func assetNode(a Asset, endpointByID map[string]Endpoint, isolatedByIP map[strin
 	return TopologyNode{
 		ID: a.IP, Label: label, Type: nType, IP: a.IP,
 		OS: a.OS, Role: role, Risk: risk, IsIsolated: isolated, Group: group,
-		AssetID: a.ID, Evidence: a.Sources, Confidence: a.RoleConf, Rationale: a.Rationale,
+		AssetID: a.ID, EndpointID: a.AgentEndpointID, Evidence: a.Sources, Confidence: a.RoleConf, Rationale: a.Rationale,
 	}
 }
 

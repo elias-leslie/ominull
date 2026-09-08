@@ -1,0 +1,15 @@
+{
+  "name": "ominull-topology-build",
+  "private": true,
+  "scripts": {
+    "build": "node build.cjs"
+  },
+  "dependencies": {
+    "cytoscape": "3.34.3",
+    "cytoscape-fcose": "2.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "prettier": "3.9.6"
+  }
+}

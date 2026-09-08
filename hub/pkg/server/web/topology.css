@@ -1,0 +1,433 @@
+.tg-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 560px;
+  color: var(--ink);
+  font-family: var(--f-sans);
+  gap: 10px;
+  padding: 18px 20px 10px;
+  box-sizing: border-box;
+}
+.tg-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.tg-heading h1 {
+  font-size: 23px;
+  font-weight: 500;
+  margin: 0 0 4px;
+  letter-spacing: -0.4px;
+}
+.tg-heading p {
+  font-size: 12px;
+  margin: 0;
+  color: var(--ink-2);
+}
+.tg-saved,
+.tg-toolbar,
+.tg-canvas-tools,
+.tg-crumbs,
+.tg-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tg-saved {
+  flex-wrap: nowrap;
+}
+.tg-toolbar {
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  gap: 14px;
+}
+.tg-field {
+  display: flex;
+  gap: 5px;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.tg-field select,
+.tg-search,
+.tg-dialog input {
+  border: 1px solid var(--ink-3);
+  border-radius: 4px;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  min-height: 35px;
+}
+.tg-search {
+  flex: 1;
+  min-width: 200px;
+  max-width: 560px;
+}
+.tg-field select {
+  max-width: 220px;
+}
+.tg-button {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink);
+  padding: 7px 10px;
+  border-radius: 4px;
+  font: 12px var(--f-sans);
+  cursor: pointer;
+  min-height: 32px;
+  line-height: 1.3;
+}
+.tg-button:hover {
+  border-color: var(--brand);
+  background: var(--panel);
+}
+.tg-button[aria-pressed="true"] {
+  border-color: var(--brand);
+  background: var(--panel);
+  color: var(--brand);
+}
+.tg-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tg-button:focus-visible,
+.tg-field select:focus-visible,
+.tg-search:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.tg-filters {
+  position: relative;
+  align-self: flex-end;
+}
+.tg-filters summary {
+  padding: 8px 14px;
+  border: 1px solid var(--ink-3);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.tg-filter-body {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  z-index: 12;
+  background: var(--panel);
+  border: 1px solid var(--ink-3);
+  box-shadow: 0 12px 30px #0006;
+  padding: 18px;
+  width: 240px;
+  display: grid;
+  gap: 14px;
+}
+.tg-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.tg-chips:empty {
+  display: none;
+}
+.tg-chips .tg-button {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.tg-summary {
+  display: flex;
+  gap: 24px;
+  font-size: 12px;
+  color: var(--ink-2);
+  flex-wrap: wrap;
+}
+.tg-summary strong {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.tg-window {
+  margin-left: auto;
+}
+.tg-crumbs .tg-button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--brand);
+  padding: 2px 4px;
+  min-height: 23px;
+}
+.tg-canvas-tools {
+  gap: 5px;
+}
+.tg-canvas-tools .tg-button:last-child {
+  margin-left: auto;
+}
+.tg-stage {
+  flex: 1;
+  min-height: 320px;
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--ground);
+}
+.tg-graph-area {
+  position: relative;
+  flex: 1;
+  min-width: 240px;
+}
+.tg-canvas {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(var(--line) 0.7px, transparent 0.7px);
+  background-size: 20px 20px;
+}
+.tg-inspector {
+  width: 300px;
+  min-width: 240px;
+  max-width: 50%;
+  resize: horizontal;
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 20px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.tg-inspector h2 {
+  font-size: 20px;
+  font-weight: 500;
+  margin: 8px 0 15px;
+  overflow-wrap: anywhere;
+}
+.tg-inspector h3 {
+  font-size: 13px;
+  margin: 22px 0 10px;
+  color: var(--ink);
+}
+.tg-inspector p {
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.tg-eyebrow {
+  font: 11px var(--f-mono);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--brand);
+  margin-top: 0;
+}
+.tg-inspector > .tg-button {
+  margin: 3px 4px 3px 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.tg-muted,
+.tg-legend {
+  color: var(--ink-2);
+}
+.tg-legend {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  margin: 24px 0;
+  padding: 8px 0;
+}
+.tg-legend p {
+  margin: 8px 0;
+  font-size: 12px;
+}
+.tg-detail {
+  display: grid;
+  grid-template-columns: 105px 1fr;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.tg-detail dt {
+  color: var(--ink-2);
+}
+.tg-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.tg-members {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  margin-top: 15px;
+}
+.tg-members button {
+  text-align: left;
+}
+.tg-process {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 12px 0;
+}
+.tg-process .tg-button {
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  text-align: left;
+}
+.tg-process small {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.tg-direction {
+  color: var(--brand);
+}
+.tg-relation {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+  white-space: pre-line;
+}
+.tg-status {
+  font-size: 11px;
+  color: var(--ink-2);
+  min-height: 18px;
+  line-height: 1.5;
+}
+.tg-list {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+}
+.tg-table {
+  min-width: 0;
+  table-layout: fixed;
+  overflow-wrap: anywhere;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.tg-table th,
+.tg-table td {
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.tg-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+.tg-dialog {
+  max-width: 420px;
+  padding: 24px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--ink-3);
+  border-radius: 8px;
+}
+.tg-dialog::backdrop {
+  background: #0009;
+}
+.tg-dialog h2 {
+  font-size: 19px;
+}
+.tg-dialog p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.tg-dialog input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 16px;
+}
+.tg-dialog button {
+  margin-right: 8px;
+}
+body[data-section="topology"] #strip {
+  display: none;
+}
+body[data-section="topology"] #view {
+  padding: 0;
+  overflow: hidden;
+}
+.tg-workspace [hidden] {
+  display: none !important;
+}
+@media (max-width: 1100px) {
+  .tg-workspace {
+    padding: 12px;
+    gap: 8px;
+  }
+  .tg-heading p {
+    display: none;
+  }
+  .tg-inspector {
+    width: 260px;
+    padding: 14px;
+  }
+  .tg-saved .tg-field select {
+    max-width: 160px;
+  }
+  .tg-summary {
+    gap: 12px;
+  }
+  .tg-toolbar {
+    gap: 9px;
+  }
+  .tg-field select {
+    max-width: 160px;
+  }
+  .tg-heading h1 {
+    font-size: 20px;
+  }
+}
+@media (max-height: 760px) {
+  .tg-heading {
+    gap: 8px;
+  }
+  .tg-heading p {
+    display: none;
+  }
+  .tg-toolbar {
+    padding: 8px;
+  }
+  .tg-field {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .tg-field select {
+    padding: 6px;
+  }
+  .tg-workspace {
+    gap: 6px;
+    padding-top: 10px;
+  }
+  .tg-stage {
+    min-height: 200px;
+  }
+  .tg-heading h1 {
+    font-size: 19px;
+  }
+  .tg-heading .tg-field {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tg-summary {
+    gap: 14px;
+  }
+  .tg-crumbs:has(> :only-child) {
+    display: none;
+  }
+}
+
+.tg-table th:first-child {
+  width: 40%;
+}

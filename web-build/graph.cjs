@@ -1,0 +1,1 @@
+window.OminullCytoscape = require("cytoscape");

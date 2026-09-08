@@ -197,6 +197,8 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
 | `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
+| `/api/v1/topology/workspace` | GET | grouped communication data with stable asset IDs and observed domain/process evidence |
+| `/api/v1/topology/views` | GET, PUT, DELETE | personal saved layouts with revision conflict checks; auditors read only |
 | `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries and the answers they returned |
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
 | `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
@@ -206,6 +208,9 @@ tenant-scoped. Agent routes use a unique device credential.
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
 the profile API and returns device identity in the protected response.
+
+See [Topology workspace](docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins,
+saved views and the limits of observed domain/process evidence.
 
 ## Build, test, and release
 

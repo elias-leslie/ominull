@@ -63,8 +63,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
         fi
     fi
     (cd "${ROOT_DIR}/hub" && go test -race ./... && go vet ./...)
-    node --check "${ROOT_DIR}/hub/pkg/server/web/app.js"
-    node --test "${ROOT_DIR}"/hub/pkg/server/web_tests/*.test.cjs
+    bash "${ROOT_DIR}/scripts/check-topology.sh"
     python3 "${ROOT_DIR}/scripts/router/test-address-filter.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
