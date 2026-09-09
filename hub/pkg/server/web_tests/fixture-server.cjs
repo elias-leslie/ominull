@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '../web');
 const sourceRoot = process.env.OMINULL_FIXTURE_SOURCE || root;
 const mime = {'.js':'application/javascript','.css':'text/css','.html':'text/html','.svg':'image/svg+xml','.png':'image/png','.woff2':'font/woff2','.webmanifest':'application/manifest+json'};
 const server = http.createServer((req,res) => {
+ if(server.offline) { req.socket.destroy(); return; }
  if(req.method !== 'GET') { res.writeHead(405).end(); return; }
  let name = new URL(req.url,'http://fixture').pathname;
  if(name === '/') name = '/index.html';
@@ -16,7 +17,7 @@ const server = http.createServer((req,res) => {
   let body = fs.readFileSync(name === '/app.js' || name === '/sw.js' ? path.join(sourceRoot,name) : file);
   if(name === '/index.html') body = body.toString().replaceAll('{{HUB_VERSION}}','fixture').replaceAll('{{ADMIN_KEY}}','AUDIT_SENTINEL').replaceAll('{{OPERATOR}}','fixture@example.invalid').replaceAll('{{OPERATOR_ROLE}}','admin');
   if(name === '/app.js') body = body.toString().replace('  if (document.readyState === "loading")', '  window.audit={state,render,renderBody,buildAssets,sortAssetRows,openRoute,closeRoute,renderRoute,openAccountPop,closeAccountPop,openSheet,closeAllSheets,go,request,stamp,cellText,cellSortKey,refresh,h};\n  if (document.readyState === "loading")');
-  if(name === '/sw.js') body = body.toString().replaceAll('{{HUB_VERSION}}','fixture');
+  if(name === '/sw.js') body = body.toString().replaceAll('{{HUB_VERSION}}',server.fixtureVersion || 'fixture');
   res.setHeader('Content-Type',mime[path.extname(name)] || 'application/octet-stream');
   res.setHeader('Cache-Control','no-store');
   res.end(body);
