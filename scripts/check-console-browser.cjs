@@ -11,8 +11,11 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
   try {await fetch(url);} catch {server=require('../hub/pkg/server/web_tests/fixture-server.cjs');await new Promise(r=>server.listening?r():server.once('listening',r));}
   let results, performanceResults;
   if(process.env.GITHUB_ACTIONS==='true') {
-   const {chromium}=require('../web-build/node_modules/playwright');
-   const browser=await chromium.launch({headless:true});
+   const engine=process.env.OMINULL_TEST_BROWSER || 'chromium';
+   if(!['chromium','firefox','webkit'].includes(engine))throw Error('Unsupported fixture browser: '+engine);
+   const playwright=require('../web-build/node_modules/playwright');
+   const browser=await playwright[engine].launch({headless:true});
+   console.log('Fixture browser: '+engine+' '+browser.version());
    const context=await browser.newContext();
    const page=await context.newPage();
    try {
@@ -24,6 +27,8 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
     const accessibility=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();
     results.push({name:'Assets WCAG A/AA automation',pass:accessibility.violations.length===0,error:accessibility.violations.map(v=>v.id).join(', ')});
     performanceResults=await page.evaluate(performanceSuite);
+    fs.mkdirSync(path.join(root,'build'),{recursive:true});
+    fs.writeFileSync(path.join(root,'build/console-performance.json'),JSON.stringify({engine,version:browser.version(),...performanceResults},null,2));
     if(errors.length)results.push({name:'browser runtime',pass:false,error:errors.join('; ')});
     if(results.some(r=>!r.pass)) {fs.mkdirSync(path.join(root,'build'),{recursive:true});await page.screenshot({path:path.join(root,'build/console-failure.png'),fullPage:true});}
    } catch(error) {
@@ -49,7 +54,9 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
   const large=performanceResults.results.find(r=>r.assets===1007);
   // A conservative shared-runner budget; the recorded reference target is
   // 100ms. Timing is secondary to the deterministic mounted-row bound.
-  results.push({name:'1007 assets: <=100 mounted rows and <250ms render budget',pass:!!large && large.mountedRows<=100 && Math.max(...large.renders)<250});
+  results.push({name:'1007 assets: <=100 mounted rows',pass:!!large && large.mountedRows<=100});
+  if(!process.env.OMINULL_TEST_BROWSER || process.env.OMINULL_TEST_BROWSER==='chromium')
+   results.push({name:'Chromium: <250ms render budget',pass:!!large && Math.max(...large.renders)<250});
   for(const result of results) console.log(`${result.pass?'PASS':'FAIL'} ${result.name}${result.error?': '+result.error:''}`);
   if(results.some(result=>!result.pass))process.exitCode=1;
  } finally {if(server)server.close();}

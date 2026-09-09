@@ -31,21 +31,34 @@ jobs:
           python3 scripts/test-release-convergence.py
 
   test-topology:
-    name: Topology bundles and console tests
+    name: Topology and console (${{ matrix.browser }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    env:
+      OMINULL_TEST_BROWSER: ${{ matrix.browser }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: npm --prefix web-build ci --ignore-scripts
-      - run: web-build/node_modules/.bin/playwright install --with-deps chromium
+      - run: web-build/node_modules/.bin/playwright install --with-deps ${{ matrix.browser }}
       - run: bash scripts/check-topology.sh
       - name: Preserve sanitized browser failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: console-failure-evidence
+          name: console-failure-evidence-${{ matrix.browser }}
           path: |
             build/console-failure.png
             build/console-trace.zip
+          if-no-files-found: ignore
+      - name: Preserve sanitized performance measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: console-performance-${{ matrix.browser }}
+          path: build/console-performance.json
           if-no-files-found: ignore
 
   test-hub:
