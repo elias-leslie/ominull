@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// The three unicast assignment sizes. Order here is only cosmetic; the
+// The four registries use three unicast assignment sizes. Order here is only cosmetic; the
 // lookup consults them longest-first at runtime.
 var registries = []struct {
 	name    string
@@ -32,6 +32,7 @@ var registries = []struct {
 	{"MA-L", "https://standards-oui.ieee.org/oui/oui.csv", 6},
 	{"MA-M", "https://standards-oui.ieee.org/oui28/mam.csv", 7},
 	{"MA-S", "https://standards-oui.ieee.org/oui36/oui36.csv", 9},
+	{"IAB", "https://standards-oui.ieee.org/iab/iab.csv", 9},
 }
 
 const maxOrgLen = 96
@@ -140,7 +141,7 @@ func main() {
 	fmt.Fprintf(&b, "# IEEE MAC address block registry, fetched %s\n", time.Now().UTC().Format("2006-01-02"))
 	fmt.Fprintf(&b, "# Source: https://standards-oui.ieee.org/ (IEEE asserts no copyright; distribution unrestricted)\n")
 	fmt.Fprintf(&b, "# Regenerate with: go generate ./pkg/scanner/\n")
-	fmt.Fprintf(&b, "# MA-L %d, MA-M %d, MA-S %d\n", counts["MA-L"], counts["MA-M"], counts["MA-S"])
+	fmt.Fprintf(&b, "# MA-L %d, MA-M %d, MA-S %d, IAB %d\n", counts["MA-L"], counts["MA-M"], counts["MA-S"], counts["IAB"])
 	for _, e := range out {
 		fmt.Fprintf(&b, "%s\t%s\n", e.prefix, e.org)
 	}
@@ -149,6 +150,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "write: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("oui_registry.tsv: %d assignments (MA-L %d, MA-M %d, MA-S %d); skipped %d group-bit, %d duplicate, %d malformed\n",
-		len(out), counts["MA-L"], counts["MA-M"], counts["MA-S"], skippedGroup, skippedDupe, skippedShort)
+	fmt.Printf("oui_registry.tsv: %d assignments (MA-L %d, MA-M %d, MA-S %d, IAB %d); skipped %d group-bit, %d duplicate, %d malformed\n",
+		len(out), counts["MA-L"], counts["MA-M"], counts["MA-S"], counts["IAB"], skippedGroup, skippedDupe, skippedShort)
 }

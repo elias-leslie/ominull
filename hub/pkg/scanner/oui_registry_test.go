@@ -27,6 +27,18 @@ func TestRegistryNamesBlocksTheHandTableNeverHeld(t *testing.T) {
 // IEEE subdivides many /24s and holds the enclosing block under its own name.
 // Matching on 24 bits alone would report the registry itself as the
 // manufacturer for every device in 13,000-odd sub-assignments.
+// IAB sub-assignees verified directly against IEEE iab.csv, September 2026.
+func TestIABSubAssignments(t *testing.T) {
+	for _, tc := range []struct{ mac, want string }{
+		{"40:D8:55:0D:70:01", "Avant Technologies"},
+		{"00:50:C2:F7:10:01", "RF Code"},
+	} {
+		if got := LookupVendor(tc.mac); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.mac, got, tc.want)
+		}
+	}
+}
+
 func TestLongestAssignmentWins(t *testing.T) {
 	for _, tc := range []struct{ mac, want string }{
 		{"00:55:DA:01:22:33", "Shinko Technos co.,ltd."}, // MA-M, 28 bits

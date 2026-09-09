@@ -119,3 +119,16 @@ func TestEveryBuiltinOwnerDeclaresItsTenancy(t *testing.T) {
 		}
 	}
 }
+
+func TestOfflineIPv6OwnerSeeds(t *testing.T) {
+	for _, tc := range []struct{ ip, owner string }{
+		{"2403:300::1", "Apple Inc."}, {"2620:149::1", "Apple Inc."},
+		{"2606:4700::1", "Cloudflare, Inc."}, {"2001:4860::8888", "Google LLC"},
+		{"2600:1f18::1", "Amazon.com, Inc."},
+	} {
+		got := ResolveGeoIP(tc.ip)
+		if got.Org != tc.owner || got.Source != "built-in" {
+			t.Errorf("%s: %+v", tc.ip, got)
+		}
+	}
+}

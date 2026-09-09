@@ -1419,7 +1419,9 @@
     });
     return {
       agent: !!a.agent_endpoint_id,
-      scan: claimGrade(scanClaim),
+      // Historical router leases also used source=scan. A claim alone cannot
+      // establish a probe; persisted port observations can.
+      scan: arrayOf(a.ports).length ? (claimGrade(scanClaim) || "partial") : false,
       router: arrayOf(a.claims).some(function (c) { return c.source === "router"; }),
       operator: !!bestClaim(a, "role", "operator") || !!bestClaim(a, "category", "operator")
     };
@@ -2507,7 +2509,7 @@
         ports.appendChild(h("span", { cls: "port", "data-risk": p.risk_level || "LOW", text: p.port + (p.service ? " " + p.service : "") }));
       });
     } else {
-      ports.appendChild(h("span", { cls: "dim-3", text: asset.evidence.scan ? "No open ports observed" : "Not scanned" }));
+      ports.appendChild(h("span", { cls: "dim-3", text: "No port observations recorded" }));
     }
 
     var exposureCol = h("div", {}, h("h4", { text: "Observed exposure" }), ports);
@@ -2527,14 +2529,14 @@
     if (ep && asset.evidence.scan) {
       var osScan = bestClaim({ claims: asset.claims }, "os", "scan");
       whyCol.appendChild(h("p", { cls: "why" },
-        h("b", { text: "Agent and scan agree on this host." }),
-        document.createTextNode(" The agent reports " + (ep.os || "an OS") + " directly; the probe independently fingerprinted " +
+        h("b", { text: "Agent and port observations are available." }),
+        document.createTextNode(" The agent reports " + (ep.os || "an OS") + " directly; the stored discovery record reports " +
           ((osScan && osScan.value) || "the same host") + " at " + ((osScan ? Number(osScan.confidence) : 0) || 0).toFixed(2) + " confidence.")));
       whyCol.appendChild(h("div", { cls: "detail-acts" }, meter((osScan ? Number(osScan.confidence) : 0) || 0)));
     } else if (ep) {
       whyCol.appendChild(h("p", { cls: "why" },
         h("b", { text: "Agent ground truth only." }),
-        document.createTextNode(" No scan has covered this address and no flow shape names it, so open ports and the OUI vendor are unknown. Run Discovery over " +
+        document.createTextNode(" No port observations are retained for this address. Registry or legacy discovery claims alone do not prove an active probe. Run Discovery over " +
           (asset.subnet || "its subnet") + " to add the second source.")));
     } else if (asset.evidence.scan) {
       var osClaim = bestClaim({ claims: asset.claims }, "os", "scan");

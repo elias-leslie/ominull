@@ -97,6 +97,9 @@ var (
 	}
 )
 
+// IPv6 seeds verified 2026-09-09 against Apple support article 101555,
+// cloudflare.com/ips-v6, gstatic.com/ipranges/goog.json, and
+// ip-ranges.amazonaws.com/ip-ranges.json. Live feeds keep precedence.
 // ownerBlocks lists the networks the table knows, as CIDR strings against one
 // owner each. City is deliberately absent: an owner's allocation spans
 // continents, and naming a city for it would be the same invention this file
@@ -112,6 +115,7 @@ var ownerBlocks = []struct {
 	{
 		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS15169", Org: "Google LLC", Tenancy: TenancyVendor, Source: "built-in"},
 		[]string{
+			"2001:4860::/32", "2404:6800::/32",
 			"8.8.4.0/24", "8.8.8.0/24", "8.34.208.0/20", "8.35.192.0/20",
 			"23.236.48.0/20", "23.251.128.0/19",
 			"34.64.0.0/10", "34.128.0.0/10",
@@ -136,6 +140,7 @@ var ownerBlocks = []struct {
 	{
 		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS13335", Org: "Cloudflare, Inc.", Tenancy: TenancySharedCDN, Source: "built-in"},
 		[]string{
+			"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
 			"1.0.0.0/24", "1.1.1.0/24",
 			"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
 			"104.16.0.0/13", "104.24.0.0/14",
@@ -157,6 +162,7 @@ var ownerBlocks = []struct {
 	{
 		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS16509", Org: "Amazon.com, Inc.", Tenancy: TenancyHosting, Source: "built-in"},
 		[]string{
+			"2600:1f18::/33", "2600:1f18:c000::/36", "2600:1f18:8000::/36",
 			"3.0.0.0/8", "13.32.0.0/15", "13.224.0.0/14", "15.177.0.0/16",
 			"18.0.0.0/8", "44.192.0.0/10", "52.0.0.0/11", "52.32.0.0/11",
 			"52.64.0.0/12", "52.84.0.0/15", "52.88.0.0/13", "54.0.0.0/8",
@@ -165,7 +171,7 @@ var ownerBlocks = []struct {
 	},
 	{
 		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS714", Org: "Apple Inc.", Tenancy: TenancyVendor, Source: "built-in"},
-		[]string{"17.0.0.0/8"},
+		[]string{"17.0.0.0/8", "2403:300::/32", "2620:149::/32"},
 	},
 	{
 		GeoRecord{Country: "US", CountryName: "United States", ASN: "AS54113", Org: "Fastly, Inc.", Tenancy: TenancySharedCDN, Source: "built-in"},

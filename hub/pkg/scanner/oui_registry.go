@@ -1,9 +1,12 @@
 package scanner
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:generate go run gen_oui.go
@@ -112,4 +115,12 @@ func hexByte(hex string) (byte, bool) {
 		}
 	}
 	return byte(v), true
+}
+
+// RegistryMetadata describes the actual embedded snapshot, not the build date.
+func RegistryMetadata() (fetched time.Time, assignments int, revision string) {
+	ouiOnce.Do(loadOUIRegistry)
+	first := strings.SplitN(ouiRegistryTSV, "\n", 2)[0]
+	fetched, _ = time.Parse("2006-01-02", strings.TrimPrefix(first, "# IEEE MAC address block registry, fetched "))
+	return fetched, len(ouiBlock), fmt.Sprintf("%x", sha256.Sum256([]byte(ouiRegistryTSV)))
 }

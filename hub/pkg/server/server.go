@@ -317,6 +317,11 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		log.Printf("[-] Warning: Failed to backfill the asset graph from endpoints: %v", err)
 	}
 
+	_, _, registryRevision := scanner.RegistryMetadata()
+	if _, err := store.RefreshRegistryVendorClaims(registryRevision, scanner.VendorClaim); err != nil {
+		log.Printf("[-] Warning: Failed to refresh registry-derived vendor claims: %v", err)
+	}
+
 	respStore, err := response.NewStore(store.DB())
 	if err != nil {
 		log.Printf("[-] Warning: Failed to initialize response store: %v", err)

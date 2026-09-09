@@ -721,3 +721,59 @@ func (s *Store) BackfillAssetsFromEndpoints() error {
 	}
 	return nil
 }
+
+// RefreshRegistryVendorClaims is a versioned data migration. It only revises
+// registry-derived sources and preserves the observation time: refreshing the
+// registry is not evidence that a device was observed again.
+func (s *Store) RefreshRegistryVendorClaims(revision string, vendorFor func(string) string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	const key = "asset_vendor_registry_revision"
+	var current string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&current)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if current == revision {
+		return 0, nil
+	}
+	rows, err := tx.Query(`SELECT c.asset_id,c.source,c.value,a.mac FROM asset_claims c JOIN assets a ON a.id=c.asset_id WHERE c.field='vendor' AND c.source IN ('scan','router') AND a.mac<>''`)
+	if err != nil {
+		return 0, err
+	}
+	type change struct{ id, source, value string }
+	var changes []change
+	for rows.Next() {
+		var id, source, old, mac string
+		if err := rows.Scan(&id, &source, &old, &mac); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		value := vendorFor(mac)
+		if value != old {
+			changes = append(changes, change{id, source, value})
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range changes {
+		if _, err := tx.Exec(`UPDATE asset_claims SET value=?,rationale=? WHERE asset_id=? AND field='vendor' AND source=?`, c.value, "IEEE registry reattribution of stored hardware address; original observation time retained", c.id, c.source); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, revision); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(changes), nil
+}

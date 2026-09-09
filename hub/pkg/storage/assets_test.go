@@ -328,3 +328,39 @@ func TestTopologyReportsHowMuchTrafficCarriedByteCounts(t *testing.T) {
 			graph.Metrics.MeasuredFlowCount, graph.Metrics.TotalFlowCount)
 	}
 }
+
+func TestRegistryRefreshPreservesAuthorityAndObservation(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	seen := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := s.UpsertAssetFromScan("10.0.0.9", "00:50:C2:F7:10:01", "Wrong vendor", "", "", "", "", .9, nil, seen); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.GetAsset("10.0.0.9")
+	if err := s.putClaimLocked(a.ID, FieldVendor, SourceOperator, "Operator evidence", 1, "manual", seen); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.putClaimLocked(a.ID, FieldVendor, SourceAgent, "Agent evidence", 1, "agent", seen); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s.RefreshRegistryVendorClaims("test-registry", func(string) string { return "RF Code" })
+	if err != nil || count != 1 {
+		t.Fatalf("refresh: %d %v", count, err)
+	}
+	a, _ = s.GetAsset("10.0.0.9")
+	if a.Vendor != "Operator evidence" {
+		t.Fatalf("operator overwritten: %s", a.Vendor)
+	}
+	scan, _ := claimFor(*a, FieldVendor, SourceScan)
+	agent, _ := claimFor(*a, FieldVendor, SourceAgent)
+	if scan.Value != "RF Code" || !scan.ObservedAt.Equal(seen) || agent.Value != "Agent evidence" {
+		t.Fatalf("bad claims: %+v", a.Claims)
+	}
+	count, err = s.RefreshRegistryVendorClaims("test-registry", func(string) string { t.Fatal("same revision rebuilt"); return "" })
+	if err != nil || count != 0 {
+		t.Fatalf("idempotence: %d %v", count, err)
+	}
+}

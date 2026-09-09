@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"ominull/hub/pkg/configuration"
 	"ominull/hub/pkg/diagnostics"
+	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/threatintel"
 )
@@ -54,6 +55,7 @@ func (s *Server) diagnosticChecks() []diagnostics.Check {
 		s.checkHeartbeats,
 		s.checkBackups,
 		s.checkNetworkAttribution,
+		s.checkVendorRegistry,
 	}
 }
 
@@ -714,4 +716,15 @@ func (s *Server) checkNetworkAttribution(context.Context) diagnostics.Result {
 	}
 	return diag("network-attribution", "Destination attribution", diagnostics.Pass,
 		fmt.Sprintf("%d prefixes in force", status.Count), evidence, "")
+}
+
+func (s *Server) checkVendorRegistry(context.Context) diagnostics.Result {
+	fetched, count, revision := scanner.RegistryMetadata()
+	state := diagnostics.Pass
+	summary := fmt.Sprintf("%d embedded IEEE assignments, fetched %s", count, fetched.Format("2006-01-02"))
+	if fetched.IsZero() || time.Since(fetched) > 180*24*time.Hour {
+		state = diagnostics.Warn
+		summary += "; registry refresh is due"
+	}
+	return diag("vendor_registry", "Hardware vendor registry", state, summary, "MA-L, MA-M, MA-S and IAB; SHA-256 "+revision, "Refresh the embedded IEEE registry and publish a verified release when stale")
 }
