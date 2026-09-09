@@ -3,7 +3,7 @@ module.exports=async function(page){
  const {default:AxeBuilder}=require('../../../../web-build/node_modules/@axe-core/playwright');
  await page.reload();await page.waitForFunction(()=>window.audit?.state.assets.length>0);
  const results=[];fs.mkdirSync('build/console-design',{recursive:true});
- for(const width of [1280,480])for(const theme of ['graphite','bunker','ash','phosphor'])for(const section of ['assets','alerts','traffic','policy','response']){
+ for(const width of [390,768,1024,1440])for(const theme of ['graphite','bunker','ash','phosphor'])for(const section of ['assets','alerts','traffic','policy','response']){
   await page.setViewportSize({width,height:800});
   await page.evaluate(({theme,section})=>{const a=window.audit;a.state.policyHealth=false;a.state.section=section;a.applyTheme(theme,false);a.render();},{theme,section});
   const violations=(await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze()).violations;
