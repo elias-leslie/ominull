@@ -337,10 +337,11 @@
   /* A <time> so the machine-readable instant travels with the text, and so a
      copy-paste out of the console lands somewhere with a timezone on it. */
   function stamp(date, extraCls) {
-    if (!date) return h("span", { cls: "ago" + (extraCls ? " " + extraCls : ""), text: "\u2014" });
+    if (!date || !Number.isFinite(date.getTime())) return h("span", { cls: "ago" + (extraCls ? " " + extraCls : ""), text: "\u2014" });
     return h("time", {
       cls: "stamp" + (extraCls ? " " + extraCls : ""),
       datetime: date.toISOString(),
+      "data-sort": String(date.getTime()),
       title: stampTitle(date),
       text: stampText(date)
     });
@@ -505,21 +506,42 @@
     return path;
   }
 
+  var resources = {};
+  var refreshGeneration = 0;
+  var pendingReads = {};
+  var resourcePaint = 0;
   function request(path, method, body) {
     if (state.demo) return demoResponse(path, method, body);
+    var reading = !method || method === "GET";
+    if (!reading && READ_ONLY) return Promise.reject(Object.assign(new Error("Read-only access"), {status:403}));
+    var record = resources[path] || (resources[path] = {});
+    if (reading && pendingReads[path]) return pendingReads[path];
+    var ageBudget = /^\/api\/v1\/(hierarchy|locations|scanner\/coverage|learning\/windows|agents\/update-status)(\?|$)/.test(path) ? 60000 : 0;
+    if (reading && record.updated && !record.error && Date.now() - record.updated < ageBudget) return Promise.resolve(record.value);
+    if (reading && record.retryAt > Date.now()) return Promise.reject(record.error);
+    var controller = new AbortController();
+    var deadline = setTimeout(function () { controller.abort(); }, 15000);
+    if (reading) { record.loading = true; record.controller = controller; }
     /* An empty X-API-Key is a failed credential as far as the hub is concerned,
        and failed credentials are throttled by source address. When there is no
        key the session cookie is the credential, so send nothing rather than
        something wrong. */
     var headers = { "Content-Type": "application/json" };
     if (API_KEY) headers["X-API-Key"] = API_KEY;
+    if (reading && record.etag) headers["If-None-Match"] = record.etag;
     var opts = {
       method: method || "GET",
       headers: headers,
-      credentials: "same-origin"
+      credentials: "same-origin",
+      signal: controller.signal
     };
     if (body) opts.body = JSON.stringify(body);
-    return fetch(apiURL(path), opts).then(function (res) {
+    var operation = fetch(apiURL(path), opts).then(function (res) {
+      if (reading) {
+        record.snapshotAt = res.headers.get("X-Snapshot-At") || record.snapshotAt;
+        record.etag = res.headers.get("ETag") || record.etag;
+      }
+      if (res.status === 304 && Object.prototype.hasOwnProperty.call(record, "value")) return record.value;
       if (!res.ok) {
         return res.text().then(function (t) {
           /* The hub answers a refusal as {"error": "..."} written for a person
@@ -538,10 +560,49 @@
           throw err;
         });
       }
+      if (!reading && res.status === 204) return null;
       var ct = res.headers.get("content-type") || "";
-      if (ct.indexOf("application/json") < 0) return res.text();
+      if (ct.indexOf("application/json") < 0) {
+        var typeError = new Error(ct.indexOf("text/html") >= 0 ? "Sign in required" : "Unexpected response type");
+        typeError.status = ct.indexOf("text/html") >= 0 ? 401 : 502;
+        throw typeError;
+      }
       return res.json();
+    }).then(function (value) {
+      if (controller.signal.aborted) throw Object.assign(new Error("Scope changed"), {name:"AbortError"});
+      if (reading) { record.value = value; record.updated = Date.now(); record.error = null; record.failures = 0; record.retryAt = 0; }
+      return value;
+    }).catch(function (error) {
+      if (controller.signal.reason === "scope changed") throw error;
+      if (error.name === "AbortError") error = new Error(reading ? "Request timed out; retry available" : "Request timed out; check action status before retrying");
+      if (reading) {
+        record.error = error;
+        record.failures = (record.failures || 0) + 1;
+        record.retryAt = Date.now() + Math.min(60000, 5000 * Math.pow(2, record.failures - 1));
+      }
+      throw error;
+    }).finally(function () {
+      clearTimeout(deadline);
+      if (reading && pendingReads[path] === operation) {
+        record.loading = false;
+        record.controller = null;
+        delete pendingReads[path];
+        // Paint after the caller has applied this result, independently of slow siblings.
+        if (!resourcePaint) resourcePaint = setTimeout(function () {
+          resourcePaint = 0;
+          buildAssets();
+          updateCrumb();
+          var selection = window.getSelection ? window.getSelection() : null;
+          renderStrip();
+          if (!sheetEl && !routeEl && !typingInField({target: document.activeElement}) && !state.pointerDragging && (!selection || selection.isCollapsed)) { setStale(false); renderBody(); }
+          else setStale(true);
+        }, 0);
+      } else if (!reading) {
+        Object.keys(resources).forEach(function (key) { resources[key].updated = 0; });
+      }
     });
+    if (reading) pendingReads[path] = operation;
+    return operation;
   }
 
   function arrayOf(v) {
@@ -1595,6 +1656,11 @@
   }
 
   function renderStrip() {
+    if (sectionUnavailable().length) {
+      clear($("strip"));
+      $("strip").appendChild(h("p", {cls:"pending", role:"status", text:"Waiting for " + state.section + " data"}));
+      return;
+    }
     var strip = $("strip");
     clear(strip);
 
@@ -1738,7 +1804,7 @@
     }
     if (state.section === "audit") {
       return [
-        { label: "Audit entries", value: String(state.audit.length) },
+        { label: "Latest entries (limit 100)", value: String(state.audit.length) },
         /* These two are pages, not totals - the hub returns at most EVENT_PAGE
            events and ANOMALY_PAGE alerts. Rendering the page size as a count
            made a busy fleet and a quiet one read identically at 100. */
@@ -2276,6 +2342,9 @@
       title: "Known by \u2014 agent: " + (asset.evidence.agent ? "yes" : "no") +
         ", scan: " + (asset.evidence.scan || "no") + ", router: " + (asset.evidence.router ? "yes" : "no")
     });
+    wrap.setAttribute("role", "img");
+    wrap.setAttribute("aria-label", wrap.title);
+    wrap.setAttribute("tabindex", "0");
     wrap.appendChild(h("i", { "data-on": asset.evidence.agent ? "agent" : null }));
     wrap.appendChild(h("i", { "data-on": asset.evidence.scan ? "scan" : null }));
     wrap.appendChild(h("i", { "data-on": asset.evidence.router ? "router" : null }));
@@ -2682,7 +2751,7 @@
     3: function (r) { return r.sortKey; },
     4: function (r) { return (r.identity || "").toLowerCase(); },
     5: function (r) { return (r.evidence.agent ? 4 : 0) + (r.evidence.scan ? 2 : 0) + (r.evidence.router ? 1 : 0); },
-    6: function (r) { return (r.state || "").toLowerCase(); },
+    6: function (r) { return (r.state && r.state.word || "").toLowerCase(); },
     7: function (r) { return r.riskyPorts * 10000 + r.ports.length; },
     8: function (r) {
       if (!r.endpoint) return -1;
@@ -2739,16 +2808,26 @@
     return th;
   }
 
+  var assetRowCache = {};
+  var assetPage = 1;
+  var assetPageScope = "";
   function renderAssets() {
     var view = $("view");
-    var rows = sortAssetRows(visibleAssets());
+    var allRows = sortAssetRows(visibleAssets());
+    var scope = JSON.stringify([state.query, activeFilters(), state.assetSort]);
+    if (scope !== assetPageScope) { assetPage = 1; assetPageScope = scope; }
+    var pages = Math.max(1, Math.ceil(allRows.length / 100));
+    assetPage = Math.min(assetPage, pages);
+    var rows = allRows.slice((assetPage - 1) * 100, assetPage * 100);
+    var order = rows.map(function (r) { return r.key; }).join("|");
+    var retained = {};
     var cols = 10;
 
     var head = h("tr", {},
       h("th", { cls: "c-sel" }, (function () {
         var all = rows.length > 0 && rows.every(function (r) { return state.selected[r.key]; });
         var box = h("input", {
-          type: "checkbox", "aria-label": "Select all rows",
+          type: "checkbox", "aria-label": "Select all assets on this page",
           on: {
             change: function (e) {
               rows.forEach(function (r) {
@@ -2816,7 +2895,11 @@
         })(currentGroup);
       }
       if (state.collapsedGroups[currentGroup]) return;
-      tbody.appendChild(assetRow(r, cols, idx, rows));
+      var signature = JSON.stringify([r, state.selected[r.key], state.cursorKey === r.key, state.expandedKey === r.key, idx, order]);
+      var cached = assetRowCache[r.key];
+      if (!cached || cached.signature !== signature) cached = {signature: signature, node: assetRow(r, cols, idx, rows)};
+      retained[r.key] = cached;
+      tbody.appendChild(cached.node);
       if (state.expandedKey === r.key) tbody.appendChild(detailRow(r, cols));
     });
 
@@ -2825,7 +2908,8 @@
         h("div", { cls: "empty", text: state.loading ? "Loading fleet\u2026" : "No asset matches the current filters." }))));
     }
 
-    var wrap = h("div", { cls: "tblwrap" }, h("table", {}, h("thead", {}, head), tbody));
+    assetRowCache = retained;
+    var wrap = h("div", { cls: "tblwrap", tabindex: "0", "aria-label": "Assets table; scroll for additional columns" }, h("table", {}, h("thead", {}, head), tbody));
 
     var key = h("div", { cls: "evkey" },
       h("span", {}, h("i", { "data-on": "agent" }), h("span", { text: "agent \u2014 ground truth" })),
@@ -2837,6 +2921,10 @@
     clear(view);
     view.appendChild(wrap);
     view.appendChild(key);
+    view.appendChild(h("div", {cls: "asset-pages", role: "navigation", "aria-label": "Asset pages"},
+      h("button", {cls: "btn", type: "button", text: "Previous", disabled: assetPage === 1, on: {click: function () { assetPage--; renderBody(); }}}),
+      h("span", {role: "status", text: "Page " + assetPage + " of " + pages + " · " + allRows.length + " matching assets · " + selectedKeys().length + " selected across pages"}),
+      h("button", {cls: "btn", type: "button", text: "Next", disabled: assetPage === pages, on: {click: function () { assetPage++; renderBody(); }}})));
 
     // Floating Context Action Bar when rows are selected
     var selKeys = selectedKeys();
@@ -3177,10 +3265,12 @@
   var accountPop = null;
 
   function closeAccountPop() {
+    var wasOpen = !!accountPop;
+    if (accountPop && accountPop._trap) document.removeEventListener("keydown", accountPop._trap, true);
     if (accountPop && accountPop.parentNode) accountPop.parentNode.removeChild(accountPop);
     accountPop = null;
     var btn = $("user-avatar-btn");
-    if (btn) btn.setAttribute("aria-expanded", "false");
+    if (btn) { btn.setAttribute("aria-expanded", "false"); if (wasOpen) restoreFocus(btn); }
   }
 
   function openAccountPop() {
@@ -3219,7 +3309,7 @@
           })));
     });
 
-    var statusUrl = "/status" + (API_KEY ? "?key=" + encodeURIComponent(API_KEY) : "");
+    var statusUrl = "/status";
 
     var links = h("div", { cls: "account-links" },
       h("a", { cls: "account-link-btn", href: statusUrl, target: "_blank" },
@@ -3235,7 +3325,7 @@
 
     var footer = h("div", { cls: "account-pop-footer" },
       h("span", { text: "Ominull Hub v" + (HUB_VERSION || "1.8.1") }),
-      h("span", { text: "ECDSA Verified" }));
+      h("span", { text: READ_ONLY ? "Read-only access" : roleName(ROLE) }));
 
     pop.appendChild(header);
     pop.appendChild(body);
@@ -3246,6 +3336,9 @@
     var pr = pop.getBoundingClientRect();
     placeOverlay(pop, Math.max(8, r.right - pr.width), r.bottom + 8);
     accountPop = pop;
+    pop._trap = trapFocus(pop);
+    document.addEventListener("keydown", pop._trap, true);
+    pop.querySelector(FOCUSABLE).focus();
     btn.setAttribute("aria-expanded", "true");
   }
 
@@ -3610,16 +3703,18 @@
       }
     });
 
+    if (READ_ONLY) [bulkAckBtn, ackAllBtn, clearResolvedBtn].forEach(function (button) { button.disabled = true; button.title = "Read-only access"; });
     var filterBar = h("div", { cls: "traffic-filter-bar" },
       h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
 
     // 3. Alerts Table
     var tableRows = [];
+    var selectedAlertDetail = null;
     var allRowsSelected = filteredAnomalies.length > 0 && filteredAnomalies.every(function (a) { return state.selectedAlerts && state.selectedAlerts[a.id]; });
 
     var headCheckbox = h("input", {
-      type: "checkbox",
+      type: "checkbox", "aria-label": "Select all alerts on this page",
       checked: allRowsSelected,
       on: {
         change: function (e) {
@@ -3633,12 +3728,14 @@
       }
     });
 
+    headCheckbox.indeterminate = !allRowsSelected && filteredAnomalies.some(function (a) { return state.selectedAlerts && state.selectedAlerts[a.id]; });
     filteredAnomalies.forEach(function (a) {
       var isExpanded = state.expandedAlertId === a.id;
       var isSelected = state.selectedAlerts && state.selectedAlerts[a.id];
 
       var rowCheckbox = h("input", {
         type: "checkbox",
+        "aria-label": "Select alert " + a.id + " on " + (a.hostname || a.endpoint_id || "unknown host") + " at " + a.timestamp,
         checked: !!isSelected,
         on: {
           click: function (e) { e.stopPropagation(); },
@@ -3658,7 +3755,7 @@
          triage into fewer alerts instead of the same alert tomorrow. The hub
          refuses the pair if the process is unattributed or the destination is
          rented compute, and says why. */
-      var ackAction = a.acknowledged
+      var ackAction = READ_ONLY ? h("span", {text:"Read-only"}) : a.acknowledged
         ? h("span", { cls: "dim-3", text: "Acknowledged" })
         : h("span", { cls: "row-actions" },
           h("button", {
@@ -3709,7 +3806,7 @@
         h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
-        h("td", {}, h("span", { text: a.title || a.description || "—" })),
+        h("td", {}, h("button", {cls:"btn alert-inspect", type:"button", "aria-expanded":String(isExpanded), text: a.title || a.description || "Inspect alert", on:{click:function(e){e.stopPropagation();state.expandedAlertId=isExpanded?"":a.id;renderBody();}}})),
         h("td", {}, ackAction));
 
       tableRows.push(tr);
@@ -3743,8 +3840,8 @@
               on: { click: function (e) { e.stopPropagation(); copyText(a.id); toast("Copied alert ID", "ok"); } }
             })));
 
-        var expTr = h("tr", { cls: "exp" }, h("td", { colspan: "9" }, expBox));
-        tableRows.push(expTr);
+        expBox.prepend(h("p", {cls:"why", text:"Acknowledge marks this finding as read. Expected changes detection tuning for this program and counterparty."}));
+        selectedAlertDetail = h("aside", {cls:"alert-detail", "aria-label":"Selected alert evidence"}, expBox);
       }
     });
 
@@ -3771,8 +3868,8 @@
       h("span", {text: "Page " + af.page + " of " + pageCount + " · " + totalAlerts + " matching alerts"}),
       h("button", {cls: "btn mini", type: "button", text: "Next", disabled: af.page >= pageCount,
         on: {click: function () { af.page++; state.selectedAlerts = {}; refresh(); }}}));
-    var alertsCard = card("Active Security Anomaly Stream (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
-      h("div", { cls: "stack" }, alertsTable, pager));
+    var alertsCard = card("Alerts (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
+      h("div", { cls: "stack" }, h("div", {cls:"alert-split"}, alertsTable, selectedAlertDetail), pager));
 
     view.appendChild(h("div", { cls: "pad stack alerts-workspace" },
       chartCard,
@@ -3803,7 +3900,29 @@
   }
 
   var topologyUI = null, topologyDraft = null;
+  var featureLoads = {};
+  function loadFeature(name, paths) {
+    if (featureLoads[name]) return featureLoads[name];
+    featureLoads[name] = paths.reduce(function (previous, path) {
+      return previous.then(function () { return new Promise(function (resolve, reject) {
+        var script = document.createElement("script");
+        script.src = path + "?v=" + encodeURIComponent(HUB_VERSION);
+        script.onload = resolve;
+        script.onerror = function () { script.remove(); reject(new Error("Could not load " + name + "; check connection and retry")); };
+        document.head.appendChild(script);
+      }); });
+    }, Promise.resolve()).catch(function (error) { delete featureLoads[name]; throw error; });
+    return featureLoads[name];
+  }
   function renderTopology() {
+    if (!window.OminullTopology) {
+      clear($("view"));
+      $("view").appendChild(h("p", {cls: "empty", role: "status", text: "Loading topology…"}));
+      loadFeature("topology", ["vendor/topology-graph.js", "topology-model.js", "topology.js"]).then(function () { if (state.section === "topology") renderBody(); }).catch(function (e) {
+        if (state.section === "topology") { clear($("view")); $("view").appendChild(h("p", {role:"alert", text:e.message})); $("view").appendChild(h("button", {cls:"btn", type:"button", text:"Retry", on:{click:renderBody}})); }
+      });
+      return;
+    }
     if (!topologyUI) topologyUI = window.OminullTopology.mount($("view"), {
       request: request, role: ROLE, version: CFG.version, window: state.topoWindow, draft: topologyDraft,
       onWindow: function (w) { state.topoWindow = w; loadTopology().then(function () { if (topologyUI) topologyUI.update(state.topology, state.topologyError); }); },
@@ -4299,6 +4418,8 @@
             svg,
             ticks,
             coverageNote,
+            h("details", {}, h("summary", {text:"Timeline values · bytes and event counts"}), simpleTable(["Time", "Bytes in", "Bytes out", "Flows", "Blocks", "Anomalies"], trends.map(function(p){return [stamp(parseTime(p.timestamp)),String(p.bytes_in||0),String(p.bytes_out||0),String(p.flows||0),String(p.blocks||0),String(p.anomalies||0)];}))),
+            h("p", {cls:"why", text:"Scale: bytes 0–" + bytes(maxB) + "; flows 0–" + maxF + " per interval"}),
             h("div", { cls: "legend pad-x u-mt1" },
               h("span", { text: "■ Blue: Bytes In" }),
               h("span", { text: "■ Indigo: Bytes Out" }),
@@ -4548,6 +4669,7 @@
       diurnalCard = card("Estate activity by UTC hour",
         h("div", { cls: "card-body" },
           h("p", {cls: "why", text: "Whole-estate comparison, independent of the traffic filters above. Event counts, not bytes."}), dsvg, dticks,
+          h("details", {}, h("summary", {text:"Hourly event counts"}), simpleTable(["UTC hour", "Last 24 hours", "Seven-day hourly mean"], hours.map(function(hour){return [pad(hour,2)+":00",String(live[hour]||0),String(base[hour]||0)];}))),
           h("div", { cls: "legend u-mt1" },
             h("span", { text: "\u2504 Grey: mean hourly events over the preceding seven days" }),
             h("span", { text: "\u2500 Blue: events in the last 24 hours" }))));
@@ -4679,7 +4801,9 @@
      top of the document every time they dismiss anything. */
   function trapFocus(container) {
     return function (e) {
-      if (e.key !== "Tab") return;
+      if (e.key !== "Tab" || !container.isConnected) return;
+      var top = paletteEl || sheetEl || ctxMenu || accountPop || routeEl || drawerEl;
+      if (top && top !== container) return;
       var items = Array.prototype.filter.call(container.querySelectorAll(FOCUSABLE), function (el) {
         return el.offsetParent !== null || el === document.activeElement;
       });
@@ -5870,7 +5994,7 @@
         h("span", { cls: "dim", text: (w.scope_type || "") + " \u00b7 " + (w.scope_label || w.scope_id || "") }),
         h("span", { cls: "st", "data-state": row.open ? "ok" : "idle" },
           h("span", { text: label })),
-        h("span", { cls: "dim-3", text: row.open ? (row.remaining_minutes + " min left") : stamp(parseTime(w.ends_at)) }),
+        h("span", { cls: "dim-3", title: stampTitle(parseTime(w.ends_at)) }, row.open ? (Number.isFinite(Number(row.remaining_minutes)) ? Math.floor(row.remaining_minutes / 1440) + "d " + Math.floor(row.remaining_minutes % 1440 / 60) + "h remaining" : "Unknown end time") : (parseTime(w.ends_at) ? stamp(parseTime(w.ends_at)) : "Unknown end time")),
         h("span", { cls: "dim-3", text: w.note || "" }),
         h("div", { cls: "row-actions" },
           h("button", {
@@ -6956,6 +7080,11 @@
 
   function openTerminalEmulator(session, reattaching) {
     if (!session || !session.session_id) return;
+    if (!window.Terminal || !window.FitAddon) {
+      toast("Loading remote terminal…");
+      loadFeature("terminal", ["vendor/xterm.js", "vendor/addon-fit.js"]).then(function () { openTerminalEmulator(session, reattaching); }).catch(function (e) { toast(e.message, "crit"); });
+      return;
+    }
 
     var epId = session.endpoint_id || "unknown";
     var asset = assetForEndpoint(epId);
@@ -7472,7 +7601,7 @@
           h("button", { cls: "btn btn-primary", type: "button", text: "Unlock Response Session", on: { click: function () { openUnlockResponseSheet(); } } })
         ];
 
-    var authCard = card("Response Authority (Ring-0/Proof)", h("div", { cls: "card-body stack" },
+    var authCard = card("Response access", h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
         chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Response Unlocked" : "Response Locked"),
         h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
@@ -7539,7 +7668,7 @@
       })
     );
 
-    var termCard = card("Remote Terminal Sessions (ConPTY / forkpty)",
+    var termCard = card("Remote terminals",
       termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Recording", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No active terminal sessions. Click 'Launch Endpoint Shell' to open a session." }),
       [termCardHead]
     );
@@ -7557,8 +7686,8 @@
             }
           }
         }),
-        h("span", { text: j.endpoint_id || "" }),
-        h("span", { text: j.action_kind || j.kind || "" }),
+        h("span", { text: (assetForEndpoint(j.endpoint_id) || {}).name || j.endpoint_id || "" }),
+        h("span", { text: String(j.action_kind || j.kind || "").replace(/_/g, " ") }),
         /* A failed job's error_code is the difference between "it failed" and
            "the grant had expired", and it was fetched and dropped. */
         h("div", { cls: "uf-col" },
@@ -7600,8 +7729,8 @@
       ];
     });
 
-    var jobsCard = card("Active Response Jobs",
-      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: "No active response jobs in queue." })
+    var jobsCard = card("Response jobs — active and recent history",
+      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: "No response jobs in the latest 50 records." })
     );
 
     var scriptRows = (state.scripts || []).map(function (sc) {
@@ -9033,6 +9162,8 @@
 
   function softwareInventoryCard(asset) {
     var epID = asset.endpoint.id;
+    var softwareRead = resources["/api/v1/software?endpoint_id=" + encodeURIComponent(epID)];
+    if (softwareRead && softwareRead.error) return card("Installed software", h("p", {role:"status", text:"Inventory unavailable: " + softwareRead.error.message}), null, true);
     var pkgs = state.softwareByEndpoint[epID];
     if (!pkgs) {
       return card("Installed Software Inventory", emptyBox("Reading installed software inventory…"), null, true);
@@ -9462,7 +9593,7 @@
     if (!creds.length) {
       return card("Enrolled device credentials",
         h("div", { cls: "card-body" },
-          emptyBox("No device credential has been issued. Agents are still authenticating with the shared tenant key.")));
+          emptyBox("No device credentials recorded. Check each endpoint’s authentication details to establish how it authenticates.")));
     }
 
     var rows = creds.map(function (cr) {
@@ -9515,6 +9646,27 @@
     if (wasOpen) syncURL(true);
   }
 
+  var hostScopes = {};
+  function loadHostScope(key) {
+    var asset = state.assetByKey[key];
+    if (!asset) return;
+    var scope = hostScopes[key] || { alerts: null, flows: null, error: "" };
+    if (scope.loading) return;
+    scope.loading = true;
+    scope.error = "";
+    hostScopes[key] = scope;
+    var filter = asset.endpoint ? "endpoint_id=" + encodeURIComponent(asset.endpoint.id) : "src_ip=" + encodeURIComponent(asset.ip);
+    var reads = [request("/api/v1/traffic/flows?range=24h&limit=25&" + filter).then(function (d) { scope.flows = d; })];
+    // Unmanaged assets have no endpoint alert identity. Do not claim that a
+    // destination match is an alert raised on this host.
+    if (asset.endpoint) reads.push(request("/api/v1/anomalies?limit=50&offset=0&unacknowledged_only=true&endpoint_id=" + encodeURIComponent(asset.endpoint.id)).then(function (d) { scope.alerts = d; }));
+    Promise.all(reads).catch(function (e) { scope.error = e.message; }).finally(function () {
+      scope.loading = false;
+      scope.updated = Date.now();
+      if (state.routeKey === key && hostScopes[key] === scope) renderRoute();
+    });
+  }
+
   function openRoute(key) {
     /* Whatever the operator was on when the full view opened, so Escape puts
        them back there instead of at the top of the document. Recorded before
@@ -9525,14 +9677,7 @@
     state.routeKey = key;
     syncURL(true);
     renderRoute();
-    /* The full view shows this asset's recent flows, which only the Traffic and
-       Audit sections load; fetch them on demand so the panel is never empty. */
-    if (!state.events.length) {
-      request("/api/v1/events").then(function (d) {
-        state.events = arrayOf(d);
-        if (state.routeKey) renderRoute();
-      }).catch(function () { /* the panel degrades to "nothing recorded" */ });
-    }
+    loadHostScope(key);
     /* Same for the baseline. Waiting for the next refresh tick left "what
        happens if I isolate this host" reading "Reading the baseline" for five
        seconds, which is long enough for someone to act without it. */
@@ -9608,6 +9753,8 @@
      actually has in front of an alert. */
   function commProfileCard(asset) {
     var epID = asset.endpoint.id;
+    var profileRead = resources["/api/v1/network-profiles?level=endpoint&id=" + encodeURIComponent(epID)];
+    if (profileRead && profileRead.error) return card("What this host talks to", h("p", {role:"status", text:"Communication profile unavailable: " + profileRead.error.message}), null, true);
     var profiles = state.profilesByEndpoint[epID];
     if (!profiles) return card("What this host talks to", emptyBox("Reading this host's communication profile\u2026"), null, true);
     if (!profiles.length) {
@@ -9644,7 +9791,9 @@
 
   function renderRoute() {
     var previousScrollTop = 0;
+    var previousFocusIndex = routeEl && routeEl.contains(document.activeElement) ? Array.prototype.indexOf.call(routeEl.querySelectorAll(FOCUSABLE), document.activeElement) : -1;
     if (routeEl) {
+      if (routeEl._trap) document.removeEventListener("keydown", routeEl._trap, true);
       var prevBody = routeEl.querySelector(".route-body");
       if (prevBody) previousScrollTop = prevBody.scrollTop;
       if (routeEl.parentNode) routeEl.parentNode.removeChild(routeEl);
@@ -9704,9 +9853,8 @@
     evBody.appendChild(claimsPanel(asset));
     evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing scan claims stay on the row so an operator can see how the identity was formed." }));
 
-    var flows = state.events.filter(function (e) {
-      return (ep && e.endpoint_id === ep.id) || (asset.ip && (e.src_ip === asset.ip || e.dst_ip === asset.ip));
-    }).slice(0, 25);
+    var hostScope = hostScopes[state.routeKey] || {loading: true};
+    var flows = arrayOf(hostScope.flows && hostScope.flows.flows);
     var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process", "Forensics"],
       flows.map(function (e) {
         var procNode = [h("span", { cls: "dim", text: e.process_path || e.domain || "—" })];
@@ -9727,12 +9875,18 @@
           h("div", { cls: "uf uf-wrap uf-g1" }, procNode),
           forensicsBtn
         ];
-      })), null, true);
+      }), {empty: hostScope.loading ? "Loading host flows…" : hostScope.error ? "Host flows unavailable" : "No source flows in the last 24 hours."}), null, true);
 
-    var alerts = state.anomalies.filter(function (a) { return (ep && a.endpoint_id === ep.id) || (asset.ip && a.dst_ip === asset.ip); });
-    var alertCard = card("Open alerts", alerts.length
-      ? h("div", {}, alerts.map(function (a) { return alertCardNode(a, true); }))
-      : emptyBox("No open alert on this asset."), null, true);
+    var alerts = arrayOf(hostScope.alerts && hostScope.alerts.alerts).filter(function (a) { return !a.acknowledged && !a.held_reason; });
+    var alertCard = card("Open alerts", hostScope.error
+      ? h("p", {role: "status", text: "Host history unavailable: " + hostScope.error})
+      : hostScope.loading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
+      : !ep ? h("p", {text: "No endpoint alert identity for this unmanaged asset. Destination references are not alerts raised on this host."})
+      : h("div", {}, h("p", {text: (hostScope.alerts ? hostScope.alerts.total : "Unknown") + " open alerts · raised, unacknowledged · all retained history · latest 50 shown"}),
+        alerts.map(function (a) { return alertCardNode(a, true); }),
+        h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep.id, unacknowledged_only:true}; go("alerts"); }}})), null, true);
+    flowCard.appendChild(h("p", {role: "status", text: hostScope.error ? "Recent flows unavailable: " + hostScope.error : hostScope.loading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + (hostScope.flows ? hostScope.flows.total : "unknown") + " matching"}));
+    flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
       ep ? baselineEndpointCard(asset) : null,
@@ -9772,8 +9926,8 @@
        top of the panel while somebody is reading it. */
     routeEl._trap = trapFocus(routeEl);
     document.addEventListener("keydown", routeEl._trap, true);
-    if (!routeEl.contains(document.activeElement)) {
-      try { routeEl.focus(); } catch (e) { /* not focusable in every engine */ }
+    if (!sheetEl && !paletteEl && !accountPop && !ctxMenu && !routeEl.contains(document.activeElement)) {
+      try { (routeEl.querySelectorAll(FOCUSABLE)[previousFocusIndex] || routeEl).focus(); } catch (e) { /* not focusable in every engine */ }
     }
   }
 
@@ -10181,11 +10335,13 @@
   }
 
   function moveCursor(delta) {
-    var rows = visibleAssets().filter(function (r) { return !state.collapsedGroups[r.groupKey]; });
+    var ordered = sortAssetRows(visibleAssets());
+    var rows = ordered.filter(function (r) { return !state.collapsedGroups[r.groupKey]; });
     if (!rows.length) return;
     var i = cursorIndex(rows);
     i = i < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, i + delta));
     state.cursorKey = rows[i].key;
+    assetPage = Math.floor(ordered.indexOf(rows[i]) / 100) + 1;
     render();
     var el = document.querySelector('tr.row[data-key="' + cssEscape(state.cursorKey) + '"]');
     if (el) el.scrollIntoView({ block: "nearest" });
@@ -10232,8 +10388,8 @@
       /* Escape belongs to whatever is running in the shell. Dismiss the
          terminal with the header ✕ or Detach Viewer. */
       if (inTerminal) return;
-      if (sheetEl) { requestCloseSheet(); return; }
       if (paletteEl) { restoreFocus(closePalette()); return; }
+      if (sheetEl) { requestCloseSheet(); return; }
       if (ctxMenu) { closeCtx(); return; }
       if (accountPop) { closeAccountPop(); return; }
       if (routeEl) { closeRoute(); return; }
@@ -10242,7 +10398,7 @@
       return;
     }
 
-    if (paletteEl || typingInField(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (paletteEl || sheetEl || accountPop || ctxMenu || drawerEl || typingInField(e) || e.ctrlKey || e.metaKey || e.altKey || (e.target.closest && e.target.closest("button, a, [role=menuitem]"))) return;
 
     /* Row operations. Terminal muscle memory, no mouse round-trip. */
     if (state.section !== "assets" || routeEl) {
@@ -10349,15 +10505,21 @@
     }
 
     var health = $("health");
-    var hstate = state.lastError ? "down" : (assetStats().offline > 0 ? "degraded" : "ok");
+    var errors = Object.keys(resources).map(function (key) { return resources[key].error; }).filter(Boolean);
+    var hstate = errors.length || state.lastError ? "degraded" : "ok";
     health.setAttribute("data-state", hstate);
     health.setAttribute("data-stale", state.viewStale ? "true" : "false");
-    var title = state.lastError
-      ? "Hub unreachable: " + state.lastError
-      : (hstate === "degraded" ? "Hub healthy \u00b7 some endpoints offline" : "Hub healthy");
+    var latestRead = Math.max.apply(Math, [0].concat(Object.keys(resources).map(function (key) { return resources[key].updated || 0; })));
+    var title = navigator.onLine === false ? "Offline" : errors.some(function (e) { return e.status === 401; }) ? "Sign in required" : hstate === "degraded" ? "Data delayed" : latestRead || state.demo ? "Connected" : "Connecting";
+    if (READ_ONLY) title = "Read-only · " + title;
+    if (latestRead) title += " · checked " + Math.floor((Date.now() - latestRead) / 1000) + "s ago";
+    var snapshot = resources["/api/v1/topology/workspace?window=" + encodeURIComponent(state.topoWindow)];
+    if (state.section === "topology" && snapshot && snapshot.snapshotAt) title += " · snapshot " + Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.snapshotAt)) / 1000)) + "s old";
     if (state.viewStale) title += " \u00b7 view paused while you are typing";
     health.setAttribute("title", title);
     $("health-word").textContent = title;
+    var freshness = $("connection-status");
+    if (freshness) { freshness.textContent = title; freshness.href = errors.some(function (e) { return e.status === 401; }) ? "/" : "/status"; }
   }
 
   /* Says out loud that the view is not being repainted, so a paused console is
@@ -10415,6 +10577,31 @@
 
   /* --------------------------------------------------------------- render */
 
+  function sectionUnavailable() {
+    var requirements = {
+      assets: ["/api/v1/endpoints", "/api/v1/assets"],
+      alerts: ["/api/v1/anomalies"],
+      traffic: ["/api/v1/traffic/overview", "/api/v1/traffic/flows"],
+      topology: ["/api/v1/topology/workspace"],
+      policy: ["/api/v1/baseline/policies", "/api/v1/detection/tuning", "/api/v1/learning/windows"],
+      access: ["/api/v1/operators", "/api/v1/device-auth/credentials"],
+      forensics: ["/api/v1/evidence/bundles", "/api/v1/vulnerabilities"],
+      response: ["/api/v1/response/jobs", "/api/v1/terminal/sessions"],
+      audit: ["/api/v1/audit/logs"]
+    };
+    return state.demo ? [] : (requirements[state.section] || []).filter(function (prefix) {
+      var matches = Object.keys(resources).filter(function (key) {
+        if (key.split("?")[0] !== prefix) return false;
+        var query = new URLSearchParams(key.split("?")[1] || "");
+        if (state.section === "topology") return query.get("window") === String(state.topoWindow);
+        if (state.section === "traffic") return key === prefix + trafficQuery();
+        if (state.section === "alerts") return key === prefix + alertQuery();
+        return true;
+      });
+      return !matches.some(function (key) { return resources[key].updated; });
+    });
+  }
+
   function renderBody() {
     document.body.dataset.section = state.section;
     if (state.section !== "topology" && topologyUI) { topologyDraft = topologyUI.getDraft(); topologyUI.destroy(); topologyUI = null; }
@@ -10432,11 +10619,23 @@
        afterwards is the whole fix. */
     var focused = document.activeElement;
     var refocus = focused && focused !== document.body && view.contains(focused) ? focused : null;
+    var focusTitle = refocus && refocus.getAttribute("title");
+    var focusLabel = refocus && refocus.getAttribute("aria-label");
     var selStart = null, selEnd = null;
     if (refocus && typeof refocus.selectionStart === "number") {
       try { selStart = refocus.selectionStart; selEnd = refocus.selectionEnd; } catch (e) { selStart = null; }
     }
 
+    var unavailable = sectionUnavailable();
+    state.loading = !!(unavailable && unavailable.length);
+    if (unavailable && unavailable.length) {
+      clear(view);
+      var failures = unavailable.map(function (prefix) { return Object.keys(resources).filter(function (key) { return key.split("?")[0] === prefix; }).map(function (key) { return resources[key].error; }).filter(Boolean)[0]; }).filter(Boolean);
+      view.appendChild(h("div", {cls: "empty", role: "status", text: failures.length ? failures.map(function (e) { return e.status === 401 ? "Sign in required" : e.status === 403 ? "Permission required" : e.message; }).join(" · ") : "Loading " + state.section + "…"}));
+      if (failures.length) view.appendChild(h("button", {cls: "btn", type: "button", text: "Retry", on: {click: function () { Object.keys(resources).forEach(function (key) { resources[key].retryAt = 0; }); refresh(); }}}));
+      if (failures.some(function (e) { return e.status === 401; })) view.appendChild(h("a", {cls: "btn", href: "/", text: "Sign in"}));
+      return;
+    }
     if (state.section === "assets") renderAssets();
     else if (state.section === "topology") renderTopology();
     else if (state.section === "traffic") renderTraffic();
@@ -10448,6 +10647,12 @@
     else if (state.section === "access") renderAccess();
     else renderAssets();
 
+    if (!state.demo) {
+      var failed = Object.keys(resources).filter(function (key) { return resources[key].error && resources[key].updated; });
+      if (failed.length) view.prepend(h("div", {cls:"pending", role:"status"},
+        h("span", {text:failed.map(function (key) { return key.split("?")[0].replace("/api/v1/", "") + ": " + resources[key].error.message + " (last success " + new Date(resources[key].updated).toLocaleString() + ")"; }).join(" · ")}),
+        h("button", {cls:"btn", type:"button", text:"Retry delayed data", on:{click:function () { failed.forEach(function (key) { resources[key].retryAt=0; }); refresh(); }}})));
+    }
     /* What the view now holds, so a guard that skips a redundant rebuild can
        tell "the poll came round again" from "the operator navigated here". */
     view.dataset.section = state.section;
@@ -10459,6 +10664,11 @@
       if (newTbl) newTbl.scrollLeft = tblScrollLeft;
     }
 
+    if (refocus && !view.contains(refocus)) {
+      refocus = Array.prototype.find.call(view.querySelectorAll("button, input, a"), function (el) {
+        return focusTitle ? el.getAttribute("title") === focusTitle : focusLabel && el.getAttribute("aria-label") === focusLabel;
+      });
+    }
     if (refocus && view.contains(refocus) && document.activeElement !== refocus) {
       try {
         refocus.focus();
@@ -10479,8 +10689,32 @@
     if (drawerEl) renderDrawer();
   }
 
+  function guardNavigation(proceed) {
+    var frames = sheetStack.map(function (f) { return f.el; }).concat(sheetEl || []);
+    if (frames.some(function (el) { return el._dirty || el._isTerminal; })) {
+      confirmSheet({ title: "Leave this work?", consequence: "Unsaved forms will be discarded and terminal viewers detached. Running sessions remain available in Response.", confirmLabel: "Leave", stack: true, onConfirm: function () { closeAllSheets(); proceed(); } });
+      return false;
+    }
+    proceed();
+    return true;
+  }
+
   function go(section) {
+    return guardNavigation(function () { navigateSection(section); });
+  }
+
+  function cancelScopeReads() {
+    Object.keys(resources).forEach(function (path) {
+      var resource = resources[path];
+      if (resource.controller && /\/(traffic|topology|evidence|vulnerabilities|operators|device-auth|anomalies)(\/|\?|$)/.test(path)) { resource.controller.abort("scope changed"); resource.controller = null; resource.loading = false; delete pendingReads[path]; }
+    });
+    refreshGeneration++;
+    state.refreshing = false;
+  }
+
+  function navigateSection(section) {
     if (section === "discovery") section = "assets";
+    cancelScopeReads();
     state.section = section;
     closeAllSheets();
     closeRoute();
@@ -10500,14 +10734,7 @@
       .catch(function (e) { if (id === topologyRequestID) state.topologyError = e.message; });
   }
 
-  function refresh() {
-    if (state.refreshing) {
-      state.queuedRefresh = true;
-      return Promise.resolve();
-    }
-    state.refreshing = true;
-    state.queuedRefresh = false;
-
+  function alertQuery() {
     var af = state.alertsFilter || { page: 1, limit: 50 };
     var offset = (af.page - 1) * af.limit;
     var aParams = "?limit=" + af.limit + "&offset=" + offset;
@@ -10521,6 +10748,47 @@
        operator could not see. */
     if (af.held) aParams += "&held=true";
 
+    return aParams;
+  }
+
+  function trafficQuery() {
+      var tf = state.trafficFilter || { range: "1h" };
+      var qs = "?range=" + encodeURIComponent(tf.range || "1h");
+      if (tf.endpoint_id) qs += "&endpoint_id=" + encodeURIComponent(tf.endpoint_id);
+      if (tf.src_ip) qs += "&src_ip=" + encodeURIComponent(tf.src_ip);
+      if (tf.dst_ip) qs += "&dst_ip=" + encodeURIComponent(tf.dst_ip);
+      if (tf.process) qs += "&process=" + encodeURIComponent(tf.process);
+      if (tf.domain) qs += "&domain=" + encodeURIComponent(tf.domain);
+      if (tf.country) qs += "&country=" + encodeURIComponent(tf.country);
+      if (tf.protocol) qs += "&protocol=" + encodeURIComponent(tf.protocol);
+      if (tf.port) qs += "&port=" + encodeURIComponent(tf.port);
+      if (tf.direction) qs += "&direction=" + encodeURIComponent(tf.direction);
+      if (tf.action) qs += "&action=" + encodeURIComponent(tf.action);
+      if (tf.hash) qs += "&hash=" + encodeURIComponent(tf.hash);
+      if (tf.user) qs += "&user=" + encodeURIComponent(tf.user);
+      if (tf.attribution) qs += "&attribution=" + encodeURIComponent(tf.attribution);
+      if (tf.measured_only) qs += "&measured_only=true";
+      if (tf.cursor) qs += "&cursor=" + encodeURIComponent(tf.cursor);
+
+      return qs;
+  }
+
+  var activeRefreshScope = "";
+  function refresh() {
+    var scope = JSON.stringify([state.section, alertQuery(), trafficQuery(), state.topoWindow, state.vulnFilterStatus]);
+    if (state.refreshing && scope !== activeRefreshScope) cancelScopeReads();
+    activeRefreshScope = scope;
+    if (state.refreshing) {
+      state.queuedRefresh = true;
+      return Promise.resolve();
+    }
+    state.refreshing = true;
+    var generation = ++refreshGeneration;
+    state.queuedRefresh = false;
+
+    var af = state.alertsFilter || { page: 1, limit: 50 };
+    var aParams = alertQuery();
+
     var jobs = [
       request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
       request("/api/v1/endpoints").then(function (d) { state.endpoints = arrayOf(d); }),
@@ -10528,8 +10796,9 @@
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
-      request("/api/v1/learning/windows").then(function (d) { state.learningWindows = arrayOf(d && d.windows); }).catch(function () { state.learningWindows = []; }),
+      request("/api/v1/learning/windows").then(function (d) { state.learningWindows = arrayOf(d && d.windows); }).catch(function () { /* Keep last successful snapshot; request records the error. */ }),
       request("/api/v1/anomalies" + aParams).then(function (d) {
+        if (aParams !== alertQuery()) return;
         if (d && Array.isArray(d.alerts)) {
           var lastPage = Math.max(1, Math.ceil((Number(d.total) || 0) / af.limit));
           if (af.page > lastPage) {
@@ -10594,12 +10863,8 @@
           }
         }
       })
-      .catch(function () {
-        /* responseGate answers 404 when the response feature is off, and the
-           auditor role is refused outright. Either way there is nothing to
-           show and nothing to report: the banner simply does not render. */
-        state.terminalSessions = [];
-        state.terminalAvailable = false;
+      .catch(function (e) {
+        if (e.status === 404 || e.status === 403) state.terminalAvailable = false;
       }));
     if (state.section === "response") {
       jobs.push(request("/api/v1/response/auth/status").then(function (d) { state.responseAuthStatus = d || null; }).catch(function () {}));
@@ -10619,26 +10884,10 @@
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "traffic") {
-      var tf = state.trafficFilter || { range: "1h" };
-      var qs = "?range=" + encodeURIComponent(tf.range || "1h");
-      if (tf.endpoint_id) qs += "&endpoint_id=" + encodeURIComponent(tf.endpoint_id);
-      if (tf.src_ip) qs += "&src_ip=" + encodeURIComponent(tf.src_ip);
-      if (tf.dst_ip) qs += "&dst_ip=" + encodeURIComponent(tf.dst_ip);
-      if (tf.process) qs += "&process=" + encodeURIComponent(tf.process);
-      if (tf.domain) qs += "&domain=" + encodeURIComponent(tf.domain);
-      if (tf.country) qs += "&country=" + encodeURIComponent(tf.country);
-      if (tf.protocol) qs += "&protocol=" + encodeURIComponent(tf.protocol);
-      if (tf.port) qs += "&port=" + encodeURIComponent(tf.port);
-      if (tf.direction) qs += "&direction=" + encodeURIComponent(tf.direction);
-      if (tf.action) qs += "&action=" + encodeURIComponent(tf.action);
-      if (tf.hash) qs += "&hash=" + encodeURIComponent(tf.hash);
-      if (tf.user) qs += "&user=" + encodeURIComponent(tf.user);
-      if (tf.attribution) qs += "&attribution=" + encodeURIComponent(tf.attribution);
-      if (tf.measured_only) qs += "&measured_only=true";
-      if (tf.cursor) qs += "&cursor=" + encodeURIComponent(tf.cursor);
+      var qs = trafficQuery();
 
-      jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { state.trafficOverview = d || null; }));
-      jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { state.trafficFlows = d || null; }));
+      jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { if (qs === trafficQuery()) state.trafficOverview = d || null; }));
+      jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { if (qs === trafficQuery()) state.trafficFlows = d || null; }));
       /* The whole analytics summary existed in this file only as a demo
          fixture: the hub computes a diurnal baseline, a live diurnal curve,
          the top talkers by volume and a per-country breakdown with threat
@@ -10649,6 +10898,7 @@
     if (state.section === "topology") jobs.push(loadTopology());
 
     if (state.routeKey && state.assetByKey[state.routeKey] && state.assetByKey[state.routeKey].endpoint) {
+      loadHostScope(state.routeKey);
       var openEp = state.assetByKey[state.routeKey].endpoint.id;
       jobs.push(request("/api/v1/baseline/endpoint?endpoint_id=" + encodeURIComponent(openEp))
         .then(function (d) { state.baselineByEndpoint[openEp] = d || {}; }));
@@ -10668,6 +10918,7 @@
         return null;
       });
     })).then(function () {
+      if (generation !== refreshGeneration) return;
       state.lastError = cycleError;
       state.loading = false;
       buildAssets();
@@ -10707,6 +10958,7 @@
       setStale(false);
       render();
     }).finally(function () {
+      if (generation !== refreshGeneration) return;
       state.refreshing = false;
       if (state.queuedRefresh) {
         state.queuedRefresh = false;
@@ -10779,7 +11031,22 @@
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("/sw.js").catch(function () {});
+        navigator.serviceWorker.register("/sw.js").then(function (registration) {
+          function offerUpdate() {
+            if (!registration.waiting || $("pwa-update")) return;
+            var button = h("button", {id:"pwa-update", cls:"btn", type:"button", text:"Update available", title:"Close other Ominull windows before updating", on:{click:function () {
+              guardNavigation(function () { registration.waiting.postMessage({type:"ACTIVATE_UPDATE"}); });
+            }}});
+            $("connection-status").after(button);
+          }
+          offerUpdate();
+          registration.addEventListener("updatefound", function () {
+            var worker = registration.installing;
+            worker.addEventListener("statechange", offerUpdate);
+          });
+          navigator.serviceWorker.addEventListener("controllerchange", function () { if ($("pwa-update")) location.reload(); });
+          navigator.serviceWorker.addEventListener("message", function (event) { if (event.data && event.data.type === "UPDATE_BLOCKED") toast("Close other Ominull windows, then select Update available again."); });
+        }).catch(function () { toast("Offline support could not be installed", "warn"); });
       });
     }
 
@@ -10806,16 +11073,30 @@
 
     window.addEventListener("popstate", function (e) {
       /* Back and Forward move the console, not the browser off it. */
-      suppressHistory = true;
-      closeAllSheets();
-      closeDrawer();
-      applyURLState(e.state || decodeURLState(location.hash) || { section: "assets" });
-      suppressHistory = false;
-      render();
-      if (state.routeKey) renderRoute();
-      refresh();
+      var target = e.state || decodeURLState(location.hash) || { section: "assets" };
+      syncURL(false);
+      guardNavigation(function () {
+        suppressHistory = true;
+        closeAllSheets();
+        closeDrawer();
+        closeRoute();
+        applyURLState(target);
+        suppressHistory = false;
+        syncURL(false);
+        render();
+        refresh();
+      });
     });
 
+    window.addEventListener("beforeunload", function (event) {
+      if ([sheetEl].concat(sheetStack.map(function (frame) { return frame.el; })).some(function (el) { return el && (el._dirty || el._isTerminal); })) { event.preventDefault(); event.returnValue = ""; }
+    });
+    var navToggle = $("nav-toggle");
+    if (navToggle) navToggle.addEventListener("click", function () { var expanded = document.body.classList.toggle("nav-expanded"); navToggle.setAttribute("aria-expanded", String(expanded)); });
+    if (READ_ONLY) {
+      document.body.classList.add("read-only");
+      ["topbar-install-btn", "topbar-sweep-btn"].forEach(function (id) { var el = $(id); if (el) { el.disabled = true; el.title = "Read-only access"; } });
+    }
     render();
     refresh();
     setInterval(function () {

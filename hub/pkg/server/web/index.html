@@ -174,7 +174,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
 <div class="app">
 
   <nav class="rail" aria-label="Console sections">
-    <div class="rail-mark" aria-hidden="true">&Oslash;</div>
+    <button class="rail-mark" id="nav-toggle" type="button" aria-label="Expand navigation" aria-expanded="false">☰</button>
 
     <button class="rail-btn" type="button" data-section="assets" aria-current="true">
       <svg class="ic"><use href="#i-assets"/></svg>
@@ -271,6 +271,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       </button>
     </header>
 
+    <a id="connection-status" class="connection-status" href="/status" aria-label="Hub connection and freshness" aria-live="polite">Connecting</a>
     <div class="strip" id="strip" role="group" aria-label="Filters"></div>
 
     <main class="view" id="view"></main>
@@ -279,11 +280,6 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
-<script src="vendor/xterm.js?v={{HUB_VERSION}}"></script>
-<script src="vendor/addon-fit.js?v={{HUB_VERSION}}"></script>
-<script src="vendor/topology-graph.js?v={{HUB_VERSION}}"></script>
-<script src="topology-model.js?v={{HUB_VERSION}}"></script>
-<script src="topology.js?v={{HUB_VERSION}}"></script>
 <script src="app.js?v={{HUB_VERSION}}"></script>
 </body>
 </html>

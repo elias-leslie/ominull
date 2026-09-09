@@ -217,12 +217,12 @@ func TestConsoleStampsStyleNonce(t *testing.T) {
 	if shim < 0 {
 		t.Fatal("index.html does not stamp a nonce onto runtime-created style elements")
 	}
-	xterm := strings.Index(html, "vendor/xterm.js")
+	xterm := strings.Index(html, "app.js?v=")
 	if xterm < 0 {
-		t.Fatal("index.html does not load the vendored xterm bundle")
+		t.Fatal("index.html does not load the feature loader")
 	}
 	if shim > xterm {
-		t.Error("the style-nonce shim must run before xterm.js loads, or its first stylesheet is refused")
+		t.Error("the style-nonce shim must run before the feature loader")
 	}
 	if !strings.Contains(html[shim-800:shim], cspNoncePlaceholder) {
 		t.Error("the shim must read the serve-time nonce placeholder")

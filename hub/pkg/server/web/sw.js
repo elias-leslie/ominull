@@ -1,101 +1,53 @@
-/* Ominull Service Worker
- * Provides PWA installability, shell caching, and offline support.
- * Live API routes (/api/v1/*) are always fetched live over the network.
- *
- * {{HUB_VERSION}} is substituted at serve time, the same way index.html's
- * asset URLs are. It was a hardcoded "v1.8.1" against a VERSION that had moved
- * on twice: the cache name therefore never changed, the `activate` purge that
- * deletes every other cache never had anything to delete, and each release's
- * assets accumulated in the same bucket for ever. The precache also asked for
- * "/app.js" while the document asks for "/app.js?v=<version>", so the entry
- * never matched a request and was pure weight - these carry the query now.
- */
+/* Only public assets belong in persistent storage. Authenticated documents and
+ * API responses are always network-only; the offline document contains no user
+ * identity, credentials, or stale fleet claims. */
 const HUB_VERSION = "{{HUB_VERSION}}";
 const CACHE_NAME = "ominull-shell-v" + HUB_VERSION;
 const STATIC_ASSETS = [
-  "/",
   "/app.css?v=" + HUB_VERSION,
   "/app.js?v=" + HUB_VERSION,
-  "/manifest.webmanifest",
-  "/icon.svg",
-  "/icon-192.png",
-  "/icon-512.png"
+  "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"
 ];
-
+const OFFLINE_DOCUMENT = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Ominull — Offline</title><main><h1>Ominull is offline</h1><p>Current fleet state and authenticated identity are unavailable. Reconnect to the hub and sign in to continue.</p><a href="/">Try again</a></main></html>';
 self.addEventListener("install", function (event) {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(function (cache) {
-      return cache.addAll(STATIC_ASSETS);
-    }).then(function () {
-      return self.skipWaiting();
-    })
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then(function (cache) {
+    return Promise.all(STATIC_ASSETS.map(async function (path) {
+      const response = await fetch(path, {credentials: "omit"});
+      if (!response.ok || response.redirected || (response.headers.get("Content-Type") || "").includes("text/html")) throw new Error("Public shell asset unavailable");
+      await cache.put(path, response);
+    }));
+  }));
 });
-
+self.addEventListener("message", function (event) {
+  if (!event.data || event.data.type !== "ACTIVATE_UPDATE") return;
+  event.waitUntil(self.clients.matchAll({type: "window", includeUncontrolled: true}).then(function (clients) {
+    // Do not replace the worker underneath another window's unsaved work.
+    if (clients.length <= 1) return self.skipWaiting();
+    if (event.source) event.source.postMessage({type: "UPDATE_BLOCKED"});
+  }));
+});
 self.addEventListener("activate", function (event) {
-  event.waitUntil(
-    caches.keys().then(function (keys) {
-      return Promise.all(
-        keys.map(function (key) {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
-      );
-    }).then(function () {
-      return self.clients.claim();
-    })
-  );
+  event.waitUntil(caches.keys().then(function (keys) {
+    return Promise.all(keys.filter(function (key) { return key.startsWith("ominull-shell-v") && key !== CACHE_NAME; }).map(function (key) { return caches.delete(key); }));
+  }).then(function () { return self.clients.claim(); }));
 });
-
 self.addEventListener("fetch", function (event) {
   const url = new URL(event.request.url);
-
-  // API endpoints, agent downloads, OIDC authentication are network-only
-  if (
-    event.request.method !== "GET" ||
-    url.pathname.startsWith("/api/") ||
-    url.pathname.startsWith("/status") ||
-    url.pathname.startsWith("/agent/") ||
-    url.pathname.startsWith("/oidc/")
-  ) {
-    return;
-  }
-
-  // HTML navigation (e.g. initial load or section changes)
+  if (event.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/status") || url.pathname.startsWith("/agent/") || url.pathname.startsWith("/oidc/")) return;
   if (event.request.mode === "navigate" || url.pathname === "/") {
-    event.respondWith(
-      fetch(event.request).then(function (response) {
-        if (response && response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(function (cache) {
-            cache.put(event.request, clone);
-          });
-        }
-        return response;
-      }).catch(function () {
-        return caches.match("/") || caches.match(event.request);
-      })
-    );
+    event.respondWith(fetch(event.request).catch(function () {
+      return new Response(OFFLINE_DOCUMENT, {status: 503, headers: {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}});
+    }));
     return;
   }
-
-  // Static shell assets: Stale-while-revalidate for fast rendering
-  event.respondWith(
-    caches.match(event.request).then(function (cached) {
-      const liveFetch = fetch(event.request).then(function (response) {
-        if (response && response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(function (cache) {
-            cache.put(event.request, clone);
-          });
-        }
-        return response;
-      }).catch(function () {
-        return cached;
-      });
-
-      return cached || liveFetch;
-    })
-  );
+  // Exact allowlist: never cache arbitrary successful responses (including an
+  // HTML Access/sign-in redirect served under a script URL).
+  if (!STATIC_ASSETS.includes(url.pathname + url.search)) return;
+  event.respondWith(caches.open(CACHE_NAME).then(async function (cache) {
+    const cached = await cache.match(event.request);
+    if (cached) return cached;
+    const response = await fetch(event.request);
+    if (response.ok && !response.redirected && !(response.headers.get("Content-Type") || "").includes("text/html")) await cache.put(event.request, response.clone());
+    return response;
+  }));
 });

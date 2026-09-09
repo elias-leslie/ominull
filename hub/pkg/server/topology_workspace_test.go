@@ -81,3 +81,21 @@ func TestTopologySavedViewsUseAuthenticatedOwner(t *testing.T) {
 		t.Fatalf("trailing JSON: %d", w.Code)
 	}
 }
+
+func TestTopologySnapshotConditionalRead(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	first := httptest.NewRecorder()
+	srv.handleTopologyWorkspace(first, httptest.NewRequest("GET", "/api/v1/topology/workspace?window=24h", nil))
+	tag := first.Header().Get("ETag")
+	if first.Code != 200 || tag == "" || first.Header().Get("X-Snapshot-At") == "" {
+		t.Fatalf("missing snapshot validators: status=%d etag=%q", first.Code, tag)
+	}
+	req := httptest.NewRequest("GET", "/api/v1/topology/workspace?window=24h", nil)
+	req.Header.Set("If-None-Match", tag)
+	second := httptest.NewRecorder()
+	srv.handleTopologyWorkspace(second, req)
+	if second.Code != 304 || second.Body.Len() != 0 {
+		t.Fatalf("unchanged snapshot transferred: status=%d bytes=%d", second.Code, second.Body.Len())
+	}
+}

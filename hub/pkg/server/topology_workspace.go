@@ -39,25 +39,18 @@ func (s *Server) handleTopologyWorkspace(w http.ResponseWriter, r *http.Request)
 	}
 	window := topologyWindow(r.URL.Query().Get("window"))
 	key := "workspace:" + window.String()
-	now := time.Now()
-	if body := s.topology.get(key, now); body != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
-		return
-	}
-	g, err := s.store.GetTopologyWorkspace(window)
+	entry, err := s.topology.snapshot(key, func() ([]byte, error) {
+		graph, err := s.store.GetTopologyWorkspace(window)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(graph)
+	})
 	if err != nil {
 		writeJSONError(w, 500, "could not read topology")
 		return
 	}
-	body, err := json.Marshal(g)
-	if err != nil {
-		writeJSONError(w, 500, "could not encode topology")
-		return
-	}
-	s.topology.put(key, body, now)
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(body)
+	writeSnapshot(w, r, entry)
 }
 func (s *Server) handleTopologyViews(w http.ResponseWriter, r *http.Request) {
 	// Identity is populated only by authMiddleware. Never accept an owner in a body.

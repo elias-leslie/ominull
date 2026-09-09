@@ -8,3 +8,5 @@ for file in app topology topology-model; do
 done
 node --test "$ROOT_DIR"/hub/pkg/server/web_tests/*.test.cjs
 node --test "$ROOT_DIR"/web-build/*.test.cjs
+
+node "$ROOT_DIR/scripts/check-console-browser.cjs"

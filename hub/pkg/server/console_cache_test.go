@@ -28,12 +28,17 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 		"app.js?v=" + srv.agentVersion,
 		"app.css?v=" + srv.agentVersion,
 		"vendor/xterm.css?v=" + srv.agentVersion,
-		"vendor/xterm.js?v=" + srv.agentVersion,
-		"vendor/addon-fit.js?v=" + srv.agentVersion,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the console does not ask for %s", want)
 		}
+	}
+	app := consoleSource(t, "app.js")
+	if !strings.Contains(app, `script.src = path + "?v=" + encodeURIComponent(HUB_VERSION)`) || !strings.Contains(app, `loadFeature("terminal", ["vendor/xterm.js", "vendor/addon-fit.js"])`) {
+		t.Error("on-demand terminal scripts must preserve versioned URLs and dependency order")
+	}
+	if strings.Contains(body, `<script src="vendor/xterm.js`) {
+		t.Error("terminal must not load on Assets startup")
 	}
 	if strings.Contains(body, "{{HUB_VERSION}}") {
 		t.Errorf("the version placeholder survived into the served document")

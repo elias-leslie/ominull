@@ -9,7 +9,9 @@
     "cytoscape-fcose": "2.2.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "esbuild": "0.28.2",
+    "playwright": "1.63.0",
     "prettier": "3.9.6"
   }
 }
