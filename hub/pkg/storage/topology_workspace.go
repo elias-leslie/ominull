@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"ominull/hub/pkg/netaddr"
 )
 
 // TopologyConversation is an observed relation, not a claim that DNS identifies
@@ -39,7 +37,8 @@ type TopologyWorkspace struct {
 func (s *Store) GetTopologyWorkspace(window time.Duration) (TopologyWorkspace, error) {
 	// Freeze one interval for graph and evidence queries.
 	to := time.Now().UTC()
-	graph, err := s.topologyGraphBetween(to.Add(-window), to, window)
+	conversations := []TopologyConversation{}
+	graph, err := s.topologyGraphBetween(to.Add(-window), to, window, &conversations)
 	if err != nil {
 		return TopologyWorkspace{}, err
 	}
@@ -64,39 +63,15 @@ func (s *Store) GetTopologyWorkspace(window time.Duration) (TopologyWorkspace, e
 		key, _ := json.Marshal([]string{e.Source, e.Target})
 		e.ID = string(key)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`SELECT src_ip,dst_ip,endpoint_id,process_path,COALESCE(NULLIF(sni,''),domain,''),
- CASE WHEN sni<>'' THEN 'TLS SNI' WHEN domain<>'' THEN 'reported domain' ELSE '' END,
- protocol,dst_port,action,COUNT(*),SUM(bytes_in+bytes_out),MIN(timestamp),MAX(timestamp)
- FROM events WHERE timestamp>=? AND timestamp<=?
- GROUP BY src_ip,dst_ip,endpoint_id,process_path,COALESCE(NULLIF(sni,''),domain,''),
- CASE WHEN sni<>'' THEN 'TLS SNI' WHEN domain<>'' THEN 'reported domain' ELSE '' END,protocol,dst_port,action
- ORDER BY MAX(timestamp) DESC`, out.From, out.To)
-	if err != nil {
-		return out, err
+	if len(conversations) > 20000 {
+		out.EvidenceTruncated = true
+		conversations = conversations[:20000]
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var r TopologyConversation
-		var first, last interface{}
-		if err := rows.Scan(&r.Source, &r.Target, &r.EndpointID, &r.Process, &r.Domain, &r.DomainSource, &r.Protocol, &r.Port, &r.Action, &r.FlowCount, &r.TotalBytes, &first, &last); err != nil {
-			return out, err
-		}
-		if netaddr.IsLoopback(r.Source) || netaddr.IsLoopback(r.Target) || ids[r.Source] == "" || ids[r.Target] == "" {
-			continue
-		}
-		if len(out.Conversations) == 20000 {
-			out.EvidenceTruncated = true
-			break
-		}
-		r.Source = ids[r.Source]
-		r.Target = ids[r.Target]
-		r.FirstSeen = scanTime(first)
-		r.LastSeen = scanTime(last)
-		out.Conversations = append(out.Conversations, r)
+	for _, conversation := range conversations {
+		conversation.Source, conversation.Target = ids[conversation.Source], ids[conversation.Target]
+		out.Conversations = append(out.Conversations, conversation)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type TopologyView struct {

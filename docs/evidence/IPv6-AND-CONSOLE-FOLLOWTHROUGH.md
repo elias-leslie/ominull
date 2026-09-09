@@ -90,3 +90,39 @@ it cannot measure physical battery use. The local managed browser failed to open
 The managed service runtime currently addresses local user units only; it has
 no remote Go hub adapter. Ominull's canonical hub-first release remains the actual
 remote deployment path. Do not report a local service restart as fleet evidence.
+
+## Final query and lifecycle follow-through
+
+The workspace now obtains graph aggregates and conversation evidence in one SQL
+pass through the existing graph builder. It still builds every edge while retaining
+only the latest 20,000 eligible conversations and the truncation sentinel. A parity
+fixture checks direction, asset identity, byte/flow/measured totals and verdicts
+against independent graph aggregation. That test exposed an order-dependent port
+verdict: anomalous permitted traffic could overwrite a blocked port. Blocked
+observations now retain priority regardless of group order.
+
+Under the same opt-in fixture, Go profiler settings and development host, with
+other task tests/builds stopped, four uncached query samples changed from
+1,014.84 / 975.17 / 980.86 / 1,003.47 ms to
+869.49 / 863.36 / 856.36 / 873.79 ms. Median 992.17 → 866.43 ms, about 12.7% lower.
+The 100,000 events, 1,090 nodes, 83,581 directed edges and 20,000 conversation bound
+were unchanged. These are synthetic samples, not production percentiles.
+
+At 3856473, CI 34410572126 passed every job: Chromium, Firefox and WebKit behavior,
+accessibility/row budgets, Go/race/vulnerabilities, native Linux/Windows and package
+checks. The isolated Linux Chromium PWA test installed the app, selected standalone
+mode, launched two app windows, exercised dirty draft/update protection and upgrade,
+and restarted the installed app offline with anonymous content. It does not certify
+Windows installation or provide a manual screen-reader review.
+
+Firefox first-install tracing revealed an unsolicited controller-change reload.
+Fail-before regressions confirmed both first control and a previously blocked update
+could reload without current approval. Reload now requires an explicit guarded update;
+a blocked request clears that authorization. Host alert and flow reads also have
+independent loading/error state; a failing flow read cannot conceal healthy alerts.
+
+The first soak run used the small demo fleet after ordinary refresh replaced the
+initial large population. It is not accepted as a 1,007-asset result. The corrected
+soak runs an installed standalone app, serves the large sanitized fleet over real
+throttled loopback HTTP, and asserts 1,007 assets on every sample. Final soak and
+release results remain to be appended.

@@ -222,7 +222,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: npm --prefix web-build ci --ignore-scripts
       - run: web-build/node_modules/.bin/playwright install --with-deps chromium
-      - run: node scripts/soak-console.cjs
+      - run: xvfb-run --auto-servernum node scripts/soak-console.cjs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

@@ -3,6 +3,8 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -141,5 +143,57 @@ func TestTopologyViewScopeValidation(t *testing.T) {
 	}
 	if !validTopologyViewState([]byte(`{"scope":{"kind":"process","id":"a","process":"/bin/client"},"trail":[{"scope":null,"positions":{"a":{"x":12,"y":42}},"viewport":{"zoom":1,"pan":{"x":0,"y":0}}}]}`)) {
 		t.Fatal("valid navigation state rejected")
+	}
+}
+
+func TestWorkspaceGraphMatchesIndependentAggregation(t *testing.T) {
+	s := newTestStore(t)
+	at := time.Now().UTC().Add(-time.Minute)
+	if err := s.UpsertAssetFromScan("10.0.0.2", "02:00:00:00:00:02", "", "fixture", "", "", "CRITICAL", 1, nil, at); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 120; i++ {
+		action := "PERMIT"
+		if i%7 == 0 {
+			action = "BLOCK"
+		}
+		source, target := "10.0.0.2", "2001:db8::9"
+		if i%3 == 0 {
+			source, target = target, source
+		}
+		measured := int64(0)
+		if i%2 == 0 {
+			measured = int64(i + 1)
+		}
+		if err := s.InsertEvent(Event{TenantID: "fixture", EndpointID: "fixture", Timestamp: at.Add(time.Duration(i) * time.Millisecond), SrcIP: source, DstIP: target, Protocol: 6, DstPort: 443, ProcessPath: fmt.Sprintf("fixture-%d", i%5), Domain: fmt.Sprintf("host-%d.example.invalid", i%4), Action: action, BytesOut: measured}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	to := time.Now().UTC()
+	from := to.Add(-time.Hour)
+	independent, err := s.topologyGraphBetween(from, to, time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conversations []TopologyConversation
+	shared, err := s.topologyGraphBetween(from, to, time.Hour, &conversations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(independent, shared) {
+		t.Fatalf("shared grouping changed graph:\nindependent=%+v\nshared=%+v", independent, shared)
+	}
+	for _, edge := range shared.Edges {
+		if edge.Verdict != "blocked" || edge.Ports[0].Verdict != "blocked" {
+			t.Fatal("blocked evidence lost", edge)
+		}
+	}
+	var count, total int64
+	for _, c := range conversations {
+		count += c.FlowCount
+		total += c.TotalBytes
+	}
+	if count != 120 || count != shared.Metrics.TotalFlowCount || total == 0 {
+		t.Fatalf("evidence totals %d/%d graph %+v", count, total, shared.Metrics)
 	}
 }

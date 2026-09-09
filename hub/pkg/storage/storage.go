@@ -3082,10 +3082,10 @@ func (s *Store) GetEndpoints() []Endpoint {
 // that said nothing in the window is drawn quiet rather than dropped.
 func (s *Store) GetTopologyGraph(timeWindow time.Duration) (TopologyData, error) {
 	to := time.Now().UTC()
-	return s.topologyGraphBetween(to.Add(-timeWindow), to, timeWindow)
+	return s.topologyGraphBetween(to.Add(-timeWindow), to, timeWindow, nil)
 }
 
-func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Duration) (TopologyData, error) {
+func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Duration, conversations *[]TopologyConversation) (TopologyData, error) {
 	networks, err := s.TopologyNetworks()
 	if err != nil {
 		return TopologyData{}, err
@@ -3161,14 +3161,20 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 		}
 	}
 
-	rows, err := s.db.Query(
-		`SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
-		        SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
-		 FROM events
-		 WHERE timestamp >= ? AND timestamp <= ?
-		 GROUP BY src_ip, dst_ip, protocol, dst_port, action`,
-		cutoff, to,
-	)
+	query := `SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
+ SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
+ FROM events WHERE timestamp >= ? AND timestamp <= ? GROUP BY src_ip, dst_ip, protocol, dst_port, action`
+	if conversations != nil {
+		// Workspace evidence and edges share one grouping pass. Edge totals are
+		// folded below across process/domain groups by the same graph builder.
+		query = `SELECT src_ip,dst_ip,protocol,dst_port,action,COALESCE(SUM(bytes_in+bytes_out),0),COUNT(*),
+ SUM(CASE WHEN bytes_in+bytes_out>0 THEN 1 ELSE 0 END),MAX(timestamp),endpoint_id,process_path,
+ COALESCE(NULLIF(sni,''),domain,''),CASE WHEN sni<>'' THEN 'TLS SNI' WHEN domain<>'' THEN 'reported domain' ELSE '' END,MIN(timestamp)
+ FROM events WHERE timestamp>=? AND timestamp<=?
+ GROUP BY src_ip,dst_ip,protocol,dst_port,action,endpoint_id,process_path,COALESCE(NULLIF(sni,''),domain,''),
+ CASE WHEN sni<>'' THEN 'TLS SNI' WHEN domain<>'' THEN 'reported domain' ELSE '' END ORDER BY MAX(timestamp) DESC`
+	}
+	rows, err := s.db.Query(query, cutoff, to)
 	if err != nil {
 		return data, err
 	}
@@ -3186,7 +3192,13 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 		var measuredFlows int64
 		var maxTimeRaw interface{}
 
-		if err := rows.Scan(&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &measuredFlows, &maxTimeRaw); err != nil {
+		var conversation TopologyConversation
+		var firstTimeRaw interface{}
+		destinations := []any{&srcIP, &dstIP, &protoInt, &dstPort, &action, &totalBytes, &flowCount, &measuredFlows, &maxTimeRaw}
+		if conversations != nil {
+			destinations = append(destinations, &conversation.EndpointID, &conversation.Process, &conversation.Domain, &conversation.DomainSource, &firstTimeRaw)
+		}
+		if err := rows.Scan(destinations...); err != nil {
 			return data, err
 		}
 		maxTime := scanTime(maxTimeRaw)
@@ -3195,6 +3207,16 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 		}
 		if retiredByIP[srcIP] || retiredByIP[dstIP] {
 			continue
+		}
+
+		// One extra record is the existing evidence-truncation sentinel. Edge
+		// construction continues through every group after this bound.
+		if conversations != nil && len(*conversations) < 20001 {
+			conversation.Source, conversation.Target = srcIP, dstIP
+			conversation.Protocol, conversation.Port, conversation.Action = protoInt, dstPort, action
+			conversation.FlowCount, conversation.TotalBytes = flowCount, totalBytes
+			conversation.FirstSeen, conversation.LastSeen = scanTime(firstTimeRaw), maxTime
+			*conversations = append(*conversations, conversation)
 		}
 
 		ensureFlowNode(nodeMap, srcIP, action, false)
@@ -3244,7 +3266,7 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 		ps.FlowCount += flowCount
 		ps.TotalBytes += totalBytes
 		ps.MeasuredFlows += measuredFlows
-		if verdict != "clean" {
+		if verdict == "blocked" || (verdict == "anomalous" && ps.Verdict == "clean") {
 			ps.Verdict = verdict
 		}
 	}
