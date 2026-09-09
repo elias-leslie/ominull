@@ -55,7 +55,7 @@ module.exports = async function workerLifecycle(page, context, server, url) {
   // Close incoming sockets rather than relying on browser offline emulation,
   // which did not stop worker networking in the original managed-browser audit.
   server.offline = true;
-  await page.goto(url);
+  await page.reload();
   assert.equal(await page.title(), 'Ominull — Offline');
   const body = await page.locator('body').innerText();
   assert.match(body, /authenticated identity are unavailable/);
