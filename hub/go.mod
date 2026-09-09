@@ -1,6 +1,6 @@
 module ominull/hub
 
-go 1.25.0
+go 1.26.7
 
 require (
 	github.com/google/uuid v1.6.0

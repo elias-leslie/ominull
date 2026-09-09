@@ -48,7 +48,7 @@ done
 if [ -n "${VERSION}" ]; then
     "${ROOT_DIR}/scripts/version.sh" bump "${VERSION}"
 else
-    VERSION="$(${ROOT_DIR}/scripts/version.sh show)"
+    VERSION="$("${ROOT_DIR}/scripts/version.sh" show)"
     "${ROOT_DIR}/scripts/version.sh" check
 fi
 
@@ -67,6 +67,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/router/test-address-filter.py"
     python3 "${ROOT_DIR}/scripts/router/test-dhcp-fingerprint.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
+    python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
         "${ROOT_DIR}/scripts/deploy_remote.sh.example" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
@@ -139,10 +140,6 @@ api() {
     fi
 }
 
-api GET /api/v1/agents/update-status >/dev/null || {
-    echo "[-] Live hub did not answer at ${HUB_URL}; no rollout was queued." >&2
-    exit 1
-}
 
 target_json() {
     jq -cn --arg ids "${1}" '$ids | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))'
@@ -159,12 +156,28 @@ queue() {
     api POST /api/v1/agents/update "${body}"
 }
 
+validate_status() {
+    jq -e --arg version "${VERSION}" '
+        def identifier: type == "string" and length > 0;
+        type == "object" and .latest_version == $version and
+        (.endpoints | type == "array" and length > 0) and
+        all(.endpoints[];
+            type == "object" and (.endpoint_id | identifier) and
+            (.driver_version | identifier) and (.status == "online" or .status == "offline")) and
+        ([.endpoints[].endpoint_id] | length == (unique | length)) and
+        (. as $status | all(["outdated", "provenance_issues", "retired", "pending"][];
+            . as $key | $status | has($key) and
+            (.[$key] | . == null or (type == "array" and all(.[];
+                type == "object" and (.endpoint_id | identifier))))))
+    ' >/dev/null
+}
+
 wait_for() {
-    local ids="$1" status remaining native
+    local ids="$1" status remaining native unavailable
     status='{}'
-    local ids_json="[]"
+    local ids_json="${COHORT_IDS_JSON}"
     if [ -n "${ids}" ]; then ids_json="$(target_json "${ids}")"; fi
-    local scope="retained fleet"
+    local scope="online cohort"
     if [ -n "${ids}" ]; then scope="canary endpoints"; fi
     echo "[*] Waiting for ${scope} to report v${VERSION}."
     for _ in $(seq 1 60); do
@@ -173,28 +186,38 @@ wait_for() {
             sleep 5
             continue
         fi
-        if ! printf '%s' "${status}" | jq -e --arg version "${VERSION}" --argjson ids "${ids_json}" '
-            .latest_version == $version and
-            (.endpoints | type == "array" and length > 0) and
-            ([.endpoints[].endpoint_id] as $observed | all($ids[]; . as $id | $observed | index($id) != null))
-        ' >/dev/null; then
-            echo "[-] Update status lacks the requested version or endpoint observations; convergence is unverified." >&2
+        if ! printf '%s' "${status}" | validate_status ||
+           ! printf '%s' "${status}" | jq -e --argjson ids "${ids_json}" '
+               [.endpoints[].endpoint_id] as $observed |
+               ($ids | length > 0) and all($ids[]; . as $id | $observed | index($id) != null)
+           ' >/dev/null; then
+            echo "[-] Update status lacks valid requested-version or captured endpoint observations; convergence is unverified." >&2
             return 1
         fi
-        if [ -n "${ids}" ]; then
-            remaining="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
-                '[.outdated[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
-            native="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
-                '[.provenance_issues[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
-        else
-            remaining="$(printf '%s' "${status}" | jq -r '(.outdated // []) | length')"
-            native="$(printf '%s' "${status}" | jq -r '(.provenance_issues // []) | length')"
-        fi
-        if [ "${remaining}" = "0" ] && [ "${native}" = "0" ]; then
+        remaining="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" --arg version "${VERSION}" '
+            [.endpoints[] | select(.endpoint_id as $id | ($ids | index($id)) != null) |
+             select(.driver_version != $version) | .endpoint_id] +
+            [.outdated[]? | select(.endpoint_id as $id | ($ids | index($id)) != null) | .endpoint_id] |
+            unique | length')"
+        native="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
+            '[.provenance_issues[]? | select(.endpoint_id as $id | ($ids | index($id)) != null)] | length')"
+        unavailable="$(printf '%s' "${status}" | jq -r --argjson ids "${ids_json}" \
+            '[.endpoints[] | select(.endpoint_id as $id | ($ids | index($id)) != null) | select(.status != "online")] | length')"
+        if [ "${remaining}" = "0" ] && [ "${native}" = "0" ] && [ "${unavailable}" = "0" ]; then
             echo "[+] ${scope} converged on v${VERSION}; native provenance gate passed."
+            if [ -z "${ids}" ]; then
+                printf '%s' "${status}" | jq -c --argjson offline "${OFFLINE_IDS_JSON}" '
+                    ([.outdated[]?.endpoint_id, .provenance_issues[]?.endpoint_id, .pending[]?.endpoint_id] | unique) as $unresolved |
+                    [.endpoints[].endpoint_id] as $observed |
+                    {offline_pending_count: ([$offline[] | select(. as $id | ($unresolved | index($id)) != null or ($observed | index($id)) == null)] | length),
+                     offline_at_start_count: ($offline | length),
+                     fleet_outdated_count: ((.outdated // []) | length),
+                     fleet_provenance_issue_count: ((.provenance_issues // []) | length),
+                     fleet_pending_count: ((.pending // []) | length)}'
+            fi
             return 0
         fi
-        echo "    ${remaining} outdated, ${native} provenance issue(s)."
+        echo "    ${remaining} not at requested version, ${native} provenance issue(s), ${unavailable} required endpoint(s) offline."
         sleep 5
     done
     echo "[-] Rollout did not converge within five minutes." >&2
@@ -207,6 +230,33 @@ queue_report() {
     response="$(queue "${ids}")"
     printf '%s' "${response}" | jq -c '{desired_version,scheduled_count: ((.scheduled // []) | length),unsupported_count: ((.unsupported // []) | length)}'
 }
+
+# Freeze required observations before the first queue, including the canary phase.
+# Offline-at-start endpoints still receive jobs but do not extend the release wait.
+INITIAL_STATUS="$(api GET /api/v1/agents/update-status)" || {
+    echo "[-] Live hub did not answer; no rollout was queued." >&2
+    exit 1
+}
+if ! printf '%s' "${INITIAL_STATUS}" | validate_status; then
+    echo "[-] Invalid update-status schema or requested version; no rollout was queued." >&2
+    exit 1
+fi
+CANARY_IDS_JSON="$(target_json "${CANARY_IDS}")"
+if ! printf '%s' "${INITIAL_STATUS}" | jq -e --argjson ids "${CANARY_IDS_JSON}" '
+    [.endpoints[].endpoint_id] as $observed |
+    all($ids[]; . as $id | $observed | index($id) != null)
+' >/dev/null || { [ -n "${CANARY_IDS}" ] && [ "${CANARY_IDS_JSON}" = "[]" ]; }; then
+    echo "[-] Canary endpoints are absent or invalid; no rollout was queued." >&2
+    exit 1
+fi
+COHORT_IDS_JSON="$(printf '%s' "${INITIAL_STATUS}" | jq -c --argjson canaries "${CANARY_IDS_JSON}" \
+    '[.endpoints[] | select(.status == "online") | .endpoint_id] + $canaries | unique')"
+OFFLINE_IDS_JSON="$(printf '%s' "${INITIAL_STATUS}" | jq -c --argjson required "${COHORT_IDS_JSON}" \
+    '[.endpoints[] | select(.status == "offline") | .endpoint_id | select(. as $id | ($required | index($id)) == null)]')"
+if [ "${WAIT_FOR_AGENTS}" -eq 1 ] && [ "${COHORT_IDS_JSON}" = "[]" ]; then
+    echo "[-] No online cohort or explicit canary can be verified; no rollout was queued. Use --no-wait to queue only." >&2
+    exit 1
+fi
 
 if [ -n "${CANARY_IDS}" ]; then
     queue_report "${CANARY_IDS}"

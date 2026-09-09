@@ -5,6 +5,7 @@ import json
 import shlex
 import subprocess
 import unittest
+from typing import Any
 
 class ReleaseHeaders(unittest.TestCase):
     def test_fresh_descriptor_for_each_request(self):
@@ -34,16 +35,24 @@ curl() {
         wait_match = re.search(r'^wait_for\(\) \{.*?^\}', source, re.M | re.S)
         assert wait_match is not None
         wait = wait_match.group()
+        validate_match = re.search(r'^validate_status\(\) \{.*?^\}', source, re.M | re.S)
+        assert validate_match is not None
+        validate = validate_match.group()
         target_match = re.search(r'^target_json\(\) \{.*?^\}', source, re.M | re.S)
         assert target_match is not None
         target = target_match.group()
-        for response in [
+        responses: list[dict[str, Any]] = [
             {"latest_version": "1.2.0", "outdated": [], "endpoints": []},
             {"latest_version": "1.2.0", "outdated": [], "endpoints": [{"endpoint_id": "other"}]},
             {"latest_version": "1.1.0", "outdated": [], "endpoints": [{"endpoint_id": "canary"}]},
-        ]:
-            script = "VERSION=1.2.0\napi() { printf '%s' " + shlex.quote(json.dumps(response)) + "; }\nsleep() { :; }\n"
-            script += target + "\n" + wait + "\nwait_for canary\n"
+        ]
+        for response in responses:
+            for key in ("provenance_issues", "retired", "pending"):
+                response[key] = None
+            for endpoint in response["endpoints"]:
+                endpoint.update(driver_version="1.2.0", status="online")
+            script = "VERSION=1.2.0\nCOHORT_IDS_JSON='[\"canary\"]'\napi() { printf '%s' " + shlex.quote(json.dumps(response)) + "; }\nsleep() { :; }\n"
+            script += target + "\n" + validate + "\n" + wait + "\nwait_for canary\n"
             result = subprocess.run(['bash', '-c', script], text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertNotIn('converged on', result.stdout)

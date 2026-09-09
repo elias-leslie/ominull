@@ -294,15 +294,29 @@ func TestDetachedSessionSurvivesMoreThanTheQueueCap(t *testing.T) {
 		writeFrame(t, agentWS, TerminalFrame{Type: FrameStdout, Data: chunk})
 	}
 
-	// Give the read pump time to have destroyed the session if it were going to.
-	time.Sleep(300 * time.Millisecond)
-
-	sess.mu.RLock()
-	state := sess.State
-	reason := sess.CloseReason
-	sess.mu.RUnlock()
-	if state != StateDetached {
-		t.Fatalf("2 MiB of detached stdout ended the session: state=%s reason=%s", state, reason)
+	// Observe the read pump recording every frame before reattaching. A fixed
+	// sleep can reattach early on a loaded race-test runner and miss output.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sess.mu.RLock()
+		state, reason := sess.State, sess.CloseReason
+		var recorded int
+		for _, frame := range sess.Frames {
+			if frame.Type == FrameStdout {
+				recorded++
+			}
+		}
+		sess.mu.RUnlock()
+		if state != StateDetached {
+			t.Fatalf("2 MiB of detached stdout ended the session: state=%s reason=%s", state, reason)
+		}
+		if recorded >= 64 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("detached read pump recorded %d of 64 stdout frames within 3s", recorded)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// And it is still reattachable and still carries the output.
