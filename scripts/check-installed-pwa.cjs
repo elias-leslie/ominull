@@ -8,7 +8,7 @@ const {chromium}=require('../web-build/node_modules/playwright');
  await new Promise(r=>server.listening?r():server.once('listening',r));
  const profile=fs.mkdtempSync(path.join(os.tmpdir(),'ominull-installed-fixture-'));
  const origin='http://127.0.0.1:18764/';const appURL=origin+'?demo=true&pwa-fixture=true#/assets';
- let context;const evidence={platform:process.platform,display:'isolated Xvfb desktop',checks:[]};
+ let context;const evidence={platform:process.platform,display:process.platform==='win32'?'isolated Windows CI desktop':'isolated Xvfb desktop',checks:[]};
  async function launch(){
   const cdp=await context.browser().newBrowserCDPSession();
   const pages=context.pages();
