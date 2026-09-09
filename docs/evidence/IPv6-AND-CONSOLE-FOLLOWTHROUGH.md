@@ -190,7 +190,7 @@ CSS, plus viewport tests. The soak uses ordinary host keys at 1280px; these chan
 do not alter that exercised path. `1.8.38-soak.json` retains the measured summary.
 
 Remaining verification limits: real screen-reader use and a complete 200% browser
-zoom/operator walkthrough; Windows-installed PWA integration; real public identity-provider walkthrough;
+zoom/operator walkthrough; real public identity-provider walkthrough;
 physical battery measurement;
 and the embedder-memory trend above. Direct cookie sign-in/diagnostics and signed
 session server tests are separate evidence. Production IPv6 packet reception cannot
@@ -246,3 +246,15 @@ Reproduce that optional browser integration from `hub/` with
 The expired-session HTTP assertion runs in ordinary Go CI; this optional browser
 portion requires ST's managed profile. Public identity-provider integration remains
 separate from these local signed-cookie checks.
+
+
+## Installed Windows PWA follow-up
+
+Test-only checkpoint `ba30bd3` extends the same installed Chromium lifecycle to
+an isolated Windows CI desktop. Both Windows and Linux jobs passed in run
+`34415868983`. Windows recorded real installed standalone launch, two app windows
+protecting dirty work during upgrade, anonymous offline reload, and an installed
+standalone restart while the fixture origin was offline. This closes the earlier
+Windows-installed-app verification deferral; it does not certify every Windows
+version, public identity-provider configuration or assistive technology.
+The fixture never uses the operator desktop or production credentials.
