@@ -21,8 +21,11 @@ module.exports = async function workerLifecycle(page, context, server, url) {
    document.querySelector('.sheet input').dispatchEvent(new Event('input', {bubbles:true}));
   });
   server.fixtureVersion = 'fixture-upgrade';
-  await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
-  await page.waitForFunction(async () => !!(await navigator.serviceWorker.getRegistration()).waiting);
+  await page.evaluate(async () => {
+   window.fixtureRegistration = await navigator.serviceWorker.getRegistration();
+   await window.fixtureRegistration.update();
+  });
+  await page.waitForFunction(() => !!window.fixtureRegistration.waiting);
   await page.evaluate(async () => {
    window.fixtureUpdateBlocked = false;
    navigator.serviceWorker.addEventListener('message', event => {
