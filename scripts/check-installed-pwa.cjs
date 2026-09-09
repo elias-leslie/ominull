@@ -22,6 +22,7 @@ const {chromium}=require('../web-build/node_modules/playwright');
   const tab=context.pages()[0];await tab.goto(appURL);await tab.waitForFunction(()=>!!window.audit && !!navigator.serviceWorker.controller);
   const cdp=await context.browser().newBrowserCDPSession();
   await cdp.send('PWA.install',{manifestId:origin,installUrlOrBundleUrl:appURL});
+  await cdp.send('PWA.changeAppUserSettings',{manifestId:origin,displayMode:'standalone'});
   evidence.installed_state=await cdp.send('PWA.getOsAppState',{manifestId:origin});
   const app=await launch();
   assert.equal(await app.evaluate(()=>matchMedia('(display-mode: standalone)').matches),true);

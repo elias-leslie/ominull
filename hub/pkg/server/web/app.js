@@ -3437,7 +3437,7 @@
        instead - which is what this did - drew a strip that summed to fifty
        under a header reporting thousands. Older hubs do not send it, so the
        page grouping stays as the fallback and says so. */
-    var breakdown = (state.alertsData && Array.isArray(state.alertsData.breakdown)) ? state.alertsData.breakdown : null;
+    var breakdown = (!af.asset_id && state.alertsData && Array.isArray(state.alertsData.breakdown)) ? state.alertsData.breakdown : null;
     var sysMap = {};
     if (breakdown) {
       breakdown.forEach(function (g) {
@@ -3502,6 +3502,7 @@
                hub, so it is not offered as a filter at all rather than
                offered and then silently emptied. */
             if (!s.epId) { toast("No endpoint id on these alerts \u2014 cannot filter", "warn"); return; }
+            af.asset_id = "";
             af.endpoint_id = (af.endpoint_id === s.epId) ? "" : s.epId;
             af.page = 1;
             renderBody();
@@ -3710,6 +3711,10 @@
     var filterBar = h("div", { cls: "traffic-filter-bar" },
       h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
+
+    if (af.asset_id || af.endpoint_id) filterBar.appendChild(h("div", { cls: "uf uf-g2" },
+      h("span", { text: "Host scope: " + (af.asset_id || af.endpoint_id) + (af.asset_id ? " · recorded source identity only; older unattributed findings excluded" : "") }),
+      h("button", { cls: "btn mini", type: "button", text: "Clear host scope", on: { click: function () { af.asset_id=""; af.endpoint_id=""; af.page=1; refresh(); } } })));
 
     // 3. Alerts Table
     var tableRows = [];
@@ -9741,20 +9746,22 @@
   function loadHostScope(key) {
     var asset = state.assetByKey[key];
     if (!asset) return;
-    var scope = hostScopes[key] || { alerts: null, flows: null, error: "" };
+    var scope = hostScopes[key] || { alerts: null, flows: null };
     if (scope.loading) return;
     scope.loading = true;
-    scope.error = "";
     hostScopes[key] = scope;
+    function read(kind, path) {
+      scope[kind + "Loading"] = true;
+      scope[kind + "Error"] = "";
+      return request(path).then(function (data) { scope[kind] = data; scope[kind + "Updated"] = Date.now(); })
+        .catch(function (error) { scope[kind + "Error"] = error.message; })
+        .finally(function () { scope[kind + "Loading"] = false; if (state.routeKey === key && hostScopes[key] === scope) renderRoute(); });
+    }
     var filter = asset.endpoint ? "endpoint_id=" + encodeURIComponent(asset.endpoint.id) : "src_ip=" + encodeURIComponent(asset.ip);
-    var reads = [request("/api/v1/traffic/flows?range=24h&limit=25&" + filter).then(function (d) { scope.flows = d; })];
+    var reads = [read("flows", "/api/v1/traffic/flows?range=24h&limit=25&" + filter)];
     var alertScope = asset.endpoint ? "endpoint_id=" + encodeURIComponent(asset.endpoint.id) : asset.assetId ? "asset_id=" + encodeURIComponent(asset.assetId) : "";
-    if (alertScope) reads.push(request("/api/v1/anomalies?limit=50&offset=0&unacknowledged_only=true&" + alertScope).then(function (d) { scope.alerts = d; }));
-    Promise.all(reads).catch(function (e) { scope.error = e.message; }).finally(function () {
-      scope.loading = false;
-      scope.updated = Date.now();
-      if (state.routeKey === key && hostScopes[key] === scope) renderRoute();
-    });
+    if (alertScope) reads.push(read("alerts", "/api/v1/anomalies?limit=50&offset=0&unacknowledged_only=true&" + alertScope));
+    Promise.all(reads).finally(function () { scope.loading = false; });
   }
 
   function openRoute(key) {
@@ -9943,7 +9950,7 @@
     evBody.appendChild(claimsPanel(asset));
     evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing scan claims stay on the row so an operator can see how the identity was formed." }));
 
-    var hostScope = hostScopes[state.routeKey] || {loading: true};
+    var hostScope = hostScopes[state.routeKey] || {alertsLoading: true, flowsLoading: true};
     var flows = arrayOf(hostScope.flows && hostScope.flows.flows);
     var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process", "Forensics"],
       flows.map(function (e) {
@@ -9965,17 +9972,17 @@
           h("div", { cls: "uf uf-wrap uf-g1" }, procNode),
           forensicsBtn
         ];
-      }), {empty: hostScope.loading ? "Loading host flows…" : hostScope.error ? "Host flows unavailable" : "No source flows in the last 24 hours."}), null, true);
+      }), {empty: hostScope.flowsLoading ? "Loading host flows…" : hostScope.flowsError ? "Host flows unavailable" : "No source flows in the last 24 hours."}), null, true);
 
     var alerts = arrayOf(hostScope.alerts && hostScope.alerts.alerts).filter(function (a) { return !a.acknowledged && !a.held_reason; });
-    var alertCard = card("Open alerts", hostScope.error
-      ? h("p", {role: "status", text: "Host history unavailable: " + hostScope.error})
-      : hostScope.loading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
+    var alertCard = card("Open alerts", hostScope.alertsError
+      ? h("p", {role: "status", text: "Host alerts unavailable: " + hostScope.alertsError})
+      : hostScope.alertsLoading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
       : !ep && !asset.assetId ? h("p", {text: "No stored source identity for this asset. Destination references are not alerts raised on this host."})
       : h("div", {}, h("p", {text: (hostScope.alerts ? hostScope.alerts.total : "Unknown") + " open alerts · raised, unacknowledged · latest 50 shown" + (!ep ? " · recorded source identity only; older unattributed findings excluded" : " · all retained history")}),
         alerts.map(function (a) { return alertCardNode(a, true); }),
         h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep ? ep.id : "", asset_id:ep ? "" : asset.assetId, unacknowledged_only:true}; go("alerts"); }}})), null, true);
-    flowCard.appendChild(h("p", {role: "status", text: hostScope.error ? "Recent flows unavailable: " + hostScope.error : hostScope.loading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + (hostScope.flows ? hostScope.flows.total : "unknown") + " matching"}));
+    flowCard.appendChild(h("p", {role: "status", text: hostScope.flowsError ? "Recent flows unavailable: " + hostScope.flowsError : hostScope.flowsLoading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + (hostScope.flows ? hostScope.flows.total : "unknown") + " matching"}));
     flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
@@ -10797,7 +10804,7 @@
   function cancelScopeReads() {
     Object.keys(resources).forEach(function (path) {
       var resource = resources[path];
-      if (resource.controller && /\/(traffic|topology|evidence|vulnerabilities|operators|device-auth|anomalies)(\/|\?|$)/.test(path)) { resource.controller.abort("scope changed"); resource.controller = null; resource.loading = false; delete pendingReads[path]; }
+      if (resource.controller && /\/(traffic|topology|evidence|vulnerabilities|operators|device-auth|anomalies|audit)(\/|\?|$)/.test(path)) { resource.controller.abort("scope changed"); resource.controller = null; resource.loading = false; delete pendingReads[path]; }
     });
     refreshGeneration++;
     state.refreshing = false;
@@ -10867,7 +10874,7 @@
 
   var activeRefreshScope = "";
   function refresh() {
-    var scope = JSON.stringify([state.section, alertQuery(), trafficQuery(), state.topoWindow, state.vulnFilterStatus]);
+    var scope = JSON.stringify([state.section, alertQuery(), trafficQuery(), auditQuery(), state.topoWindow, state.vulnFilterStatus]);
     if (state.refreshing && scope !== activeRefreshScope) cancelScopeReads();
     activeRefreshScope = scope;
     if (state.refreshing) {
@@ -10972,7 +10979,8 @@
       jobs.push(request("/api/v1/vulnerabilities/snapshots/active").then(function (d) { state.activeSnapshot = (d && d.snapshot) || null; }).catch(function () { state.activeSnapshot = null; }));
     }
     if (state.section === "audit") {
-      jobs.push(request("/api/v1/audit/logs" + auditQuery()).then(function (d) { state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
+      var auditScopeQuery = auditQuery();
+      jobs.push(request("/api/v1/audit/logs" + auditScopeQuery).then(function (d) { if (auditScopeQuery !== auditQuery()) return; state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "traffic") {
@@ -11124,10 +11132,11 @@
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {
         navigator.serviceWorker.register("/sw.js").then(function (registration) {
+          var updateRequested = false;
           function offerUpdate() {
-            if (!registration.waiting || $("pwa-update")) return;
+            if (!registration.waiting || !registration.active || $("pwa-update")) return;
             var button = h("button", {id:"pwa-update", cls:"btn", type:"button", text:"Update available", title:"Close other Ominull windows before updating", on:{click:function () {
-              guardNavigation(function () { registration.waiting.postMessage({type:"ACTIVATE_UPDATE"}); });
+              guardNavigation(function () { if (registration.waiting) { updateRequested = true; registration.waiting.postMessage({type:"ACTIVATE_UPDATE"}); } });
             }}});
             $("connection-status").after(button);
           }
@@ -11136,8 +11145,8 @@
             var worker = registration.installing;
             worker.addEventListener("statechange", offerUpdate);
           });
-          navigator.serviceWorker.addEventListener("controllerchange", function () { if ($("pwa-update")) location.reload(); });
-          navigator.serviceWorker.addEventListener("message", function (event) { if (event.data && event.data.type === "UPDATE_BLOCKED") toast("Close other Ominull windows, then select Update available again."); });
+          navigator.serviceWorker.addEventListener("controllerchange", function () { if (updateRequested) location.reload(); else { var button = $("pwa-update"); if (button) button.remove(); } });
+          navigator.serviceWorker.addEventListener("message", function (event) { if (event.data && event.data.type === "UPDATE_BLOCKED") { updateRequested = false; toast("Close other Ominull windows, then select Update available again."); } });
         }).catch(function () { toast("Offline support could not be installed", "warn"); });
       });
     }
