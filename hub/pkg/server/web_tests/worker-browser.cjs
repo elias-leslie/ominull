@@ -43,6 +43,8 @@ module.exports = async function workerLifecycle(page, context, server, url) {
    (await navigator.serviceWorker.getRegistration()).waiting.postMessage({type:'ACTIVATE_UPDATE'});
   });
   await page.waitForFunction(() => window.fixtureControllerChanged);
+  // controllerchange can precede completion of activate.waitUntil cleanup.
+  await page.waitForFunction(() => navigator.serviceWorker.controller?.state === 'activated');
   assert.deepEqual((await page.evaluate(() => caches.keys())).sort(),
    ['ominull-shell-vfixture-upgrade', 'unrelated-fixture-cache']);
   const cachedPaths = await page.evaluate(async () => {
