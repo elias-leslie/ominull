@@ -1,0 +1,78 @@
+{
+  "browser": "153.0.8010.12",
+  "viewport": [
+    1280,
+    720
+  ],
+  "cpu_slowdown": 4,
+  "network": {
+    "latency_ms": 150,
+    "download_bytes_per_second": 187500
+  },
+  "duration_ms": 1800334,
+  "installed_app": true,
+  "physical_battery_measured": false,
+  "errors": [],
+  "source": "3525f64088d52bad2ce9c88d561e3b7cf035e194",
+  "workflow": 34411619767,
+  "samples": 114,
+  "assets": [
+    1007
+  ],
+  "mounted_rows": [
+    100
+  ],
+  "sort_median_ms": 202.1500000000524,
+  "long_task_count": 1559,
+  "long_task_max_ms": 360,
+  "five_minute_medians": [
+    {
+      "interval": 1,
+      "samples": 19,
+      "js_heap": 4770864,
+      "embedder_heap": 9419752,
+      "nodes": 5621,
+      "listeners": 464
+    },
+    {
+      "interval": 2,
+      "samples": 20,
+      "js_heap": 4314268.0,
+      "embedder_heap": 9736740.0,
+      "nodes": 5621.0,
+      "listeners": 464.0
+    },
+    {
+      "interval": 3,
+      "samples": 19,
+      "js_heap": 4381436,
+      "embedder_heap": 10209512,
+      "nodes": 5621,
+      "listeners": 464
+    },
+    {
+      "interval": 4,
+      "samples": 19,
+      "js_heap": 4400652,
+      "embedder_heap": 10501272,
+      "nodes": 5621,
+      "listeners": 464
+    },
+    {
+      "interval": 5,
+      "samples": 18,
+      "js_heap": 4404856.0,
+      "embedder_heap": 10986344.0,
+      "nodes": 5621.0,
+      "listeners": 464.0
+    },
+    {
+      "interval": 6,
+      "samples": 19,
+      "js_heap": 4412416,
+      "embedder_heap": 11320968,
+      "nodes": 5621,
+      "listeners": 464
+    }
+  ]
+}

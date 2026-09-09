@@ -2,11 +2,16 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"ominull/hub/pkg/auth"
 )
@@ -25,6 +30,83 @@ func sessionFor(t *testing.T, srv *Server, email, role string) *http.Cookie {
 		t.Fatalf("minting a session: %v", err)
 	}
 	return &http.Cookie{Name: consoleSessionCookie, Value: token}
+}
+
+// The HTTP assertion always runs. The optional browser portion uses ST's
+// managed headless profile and a disposable hub, never the deployed hub or an
+// operator credential. A distinct loopback address isolates its host cookies.
+func TestExpiredConsoleSessionAndBrowserRecovery(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	token, err := auth.GenerateJWT(auth.Claims{Username: "fixture@example.invalid", Role: auth.RoleAdmin}, srv.adminKey, -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := &http.Cookie{Name: consoleSessionCookie, Value: token, Path: "/", HttpOnly: true}
+	req := httptest.NewRequest("GET", "/api/v1/endpoints", nil)
+	req.AddCookie(expired)
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expired signed session returned %d", recorder.Code)
+	}
+	if os.Getenv("OMINULL_MANAGED_BROWSER_TEST") != "1" {
+		return
+	}
+	if err := store.UpsertOperator("sentinel-switch@example.invalid", auth.RoleAuditor, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	auditor := sessionFor(t, srv, "sentinel-switch@example.invalid", auth.RoleAuditor)
+	auditor.Path, auditor.HttpOnly = "/", true
+
+	handler := srv.Handler()
+	fixture := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fixture/expire":
+			http.SetCookie(w, expired)
+			w.WriteHeader(http.StatusNoContent)
+		case "/fixture/logout":
+			http.SetCookie(w, &http.Cookie{Name: consoleSessionCookie, Path: "/", MaxAge: -1, HttpOnly: true})
+			w.WriteHeader(http.StatusNoContent)
+		case "/fixture/auditor":
+			http.SetCookie(w, auditor)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			handler.ServeHTTP(w, r)
+		}
+	}))
+	fixture.Listener.Close()
+	fixture.Listener, err = net.Listen("tcp", "127.0.0.55:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.Start()
+	defer fixture.Close()
+	run := func(args ...string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "st", append([]string{"browser"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("managed fixture browser: %v: %s", err, out)
+		}
+	}
+	run("open", fixture.URL)
+	defer run("open", "about:blank")
+	key, _ := json.Marshal(srv.adminKey)
+	login := `(async()=>{const r=await fetch('/',{method:'POST',body:new URLSearchParams({key:` + string(key) + `})});if(!r.ok)throw Error('fixture sign-in failed');return 'signed in';})()`
+	run("eval", login)
+	// Cookie-authenticated GET clears the POST response's bootstrap API key.
+	run("reload")
+	run("eval", `(async()=>{if(!document.querySelector('#view'))throw Error('console not rendered');if((await fetch('/api/v1/endpoints')).status!==200)throw Error('cookie read refused');if([...document.querySelectorAll('a')].some(a=>a.href.includes('mock_admin_token')))throw Error('credential in navigation');return 'cookie console verified';})()`)
+	run("eval", `(async()=>{await fetch('/fixture/expire');if((await fetch('/api/v1/endpoints')).status!==401)throw Error('expired session accepted');const until=Date.now()+20000;while(Date.now()<until){if(document.querySelector('.connection-status')?.textContent.includes('Sign in required'))return 'expiry visible';await new Promise(r=>setTimeout(r,100));}throw Error('expiry not visible in console');})()`)
+	run("open", fixture.URL+"/status")
+	run("eval", `(()=>{if(!document.querySelector('input[name="key"]'))throw Error('expired diagnostics did not recover through sign-in');return 'sign-in required';})()`)
+	run("eval", login)
+	run("open", fixture.URL)
+	run("eval", `(async()=>{if(!document.querySelector('#view')||(await fetch('/api/v1/endpoints')).status!==200)throw Error('sign-in recovery failed');await fetch('/fixture/auditor');return 'recovered and switched fixture identity';})()`)
+	run("reload")
+	run("eval", `(async()=>{document.getElementById('user-avatar-btn').click();if(!document.body.innerText.includes('Read-only access'))throw Error('auditor role not visible');if((await fetch('/api/v1/endpoints/isolate',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"endpoint_id":"nonexistent-fixture"}'})).status!==403)throw Error('auditor mutation not refused');await navigator.serviceWorker.ready;const names=(await caches.keys()).filter(n=>n.startsWith('ominull-shell-v'));if(!names.length)throw Error('worker cache not installed');for(const name of names){const cache=await caches.open(name);for(const request of await cache.keys()){const pathname=new URL(request.url).pathname;if(pathname==='/'||pathname.startsWith('/api/'))throw Error('personalized route cached');const body=await(await cache.match(request)).text();if(body.includes('mock_admin_token')||body.includes('sentinel-switch@example.invalid'))throw Error('identity or credential cached');}}await fetch('/fixture/logout');await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister()));await Promise.all(names.map(n=>caches.delete(n)));return 'auditor role, authorization and anonymous cache verified';})()`)
 }
 
 // TestAnAuditorCannotChangeAnything. requireAdmin guards the routes that were

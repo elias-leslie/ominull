@@ -1,6 +1,6 @@
 # IPv6 infrastructure and console follow-through
 
-Implementation checkpoint; release evidence will be appended after deployment.
+Released as v1.8.38 on September 9, 2026; final release evidence follows below.
 No production IPv6 packet coverage is claimed: the reference deployment has
 IPv6 disabled. Tests below use documentation addresses and isolated namespaces.
 
@@ -16,6 +16,10 @@ IPv6 disabled. Tests below use documentation addresses and isolated namespaces.
   interface. It never changes routing, DNS, addresses or containment. It reports
   missing raw-socket capability and persistence failures, instead of claiming
   healthy coverage. It starts disabled, with no automatically trusted peers.
+  The native hub unit deliberately retains only `CAP_NET_BIND_SERVICE`; packet
+  capture additionally requires an operator-approved `CAP_NET_RAW` grant in the
+  hub service bounding and ambient sets. This release does not broaden the
+  default service privileges or enable capture on an IPv6-disabled deployment.
 - Complete IPv6 RA/RS/ND, direct DHCPv6 and UDP WPAD queries are validated and
   aggregated. Prefix/address observations support investigating SLAAC; they do
   not prove how an endpoint configured an address. Fragments, encrypted packets,
@@ -86,7 +90,7 @@ Release verification must record actual cold/warm route measurements separately.
 Headless Chromium/Firefox/WebKit worker and application tests are separate from
 OS-installed application integration and real assistive technology. The soak
 records heap, DOM/listener counts and long tasks under CPU/network throttling;
-it cannot measure physical battery use. The local managed browser failed to open.
+it cannot measure physical battery use. The local managed browser initially failed to open, then recovered before release.
 The managed service runtime currently addresses local user units only; it has
 no remote Go hub adapter. Ominull's canonical hub-first release remains the actual
 remote deployment path. Do not report a local service restart as fleet evidence.
@@ -126,3 +130,119 @@ initial large population. It is not accepted as a 1,007-asset result. The correc
 soak runs an installed standalone app, serves the large sanitized fleet over real
 throttled loopback HTTP, and asserts 1,007 assets on every sample. Final soak and
 release results remain to be appended.
+
+
+## Code scanning review
+
+A successful scan workflow means analysis completed; it does not mean no alerts
+remain. The September 9 state check found eight new prototype-assignment alerts
+(#47–54) sharing a host-cache lookup. A fail-before regression using `__proto__`
+confirmed mutation of `Object.prototype.loading`. The cache now has no prototype;
+`__proto__`, `constructor` and `toString` are ordinary own entries. Host-resource
+failure independence remains covered.
+
+The other 22 open alerts predate this audit remediation (August 30–September 6).
+They remain open, with no dismissals, suppressions or security-gate changes:
+
+- #6–8: DOM/exception flows through the shared DOM builder. Inspection shows
+  text-node construction at the reported lines; full source-to-sink triage remains.
+- #31: noncryptographic randomness for a browser response-session identifier.
+- #12–15, #27–30: package/evidence/signer paths and legacy password verification.
+  Evidence item writes require an existing tenant-owned generated item, and the
+  password path retains legacy verification alongside bcrypt; these observations
+  do not close the alerts or certify all callers.
+- #22–24: setup JSON quoting and scanner certificate-verification bypasses.
+- #20, #32–34: Linux credential/history file races and lineage test-fixture races.
+- #35–37: configurable vulnerability-feed request destinations.
+
+These are explicit existing security backlog, separate from the audit findings;
+this release must not be described as having zero open CodeQL alerts.
+
+
+## Final browser and soak evidence
+
+Standard CI `34413316385` at `9426c13` passed every job, including Go/race,
+reachable-vulnerability checks, actual isolated packet capture, Linux and Windows
+native tests, package inspection, Chromium/Firefox/WebKit and installed Linux PWA.
+All 80 viewport/theme axe and overflow checks passed: five sections, four themes,
+390/768/1024/1440px. Compact state labels remain on one line after visual review.
+This is automated accessibility evidence, not a manual screen-reader certification.
+
+The corrected installed standalone Chromium 153 soak (`34411619767`, source
+`3525f64`) ran 1,800,334ms with 4x CPU slowdown, 150ms network latency and
+187,500 bytes/s download. All 114 samples retained exactly 1,007 assets and 100
+mounted rows; no page errors occurred. After warm-up, all five-minute median
+DOM/listener readings remained 5,621/464. JavaScript heap median changed from
+4.77MB in the first five minutes to 4.41MB in the last five minutes. Browser
+embedder-heap median rose from 9.42MB to 11.32MB; attribution of that native-memory
+trend requires further profiling. Do not claim complete memory or battery stability.
+
+Throttled synchronous sort/render median was 202.15ms (178.30–247.10ms). The
+1,559 observed long tasks include the deliberate repeated route rebuild stress;
+maximum duration was 360ms. This is not a production percentile or the unthrottled
+reference-machine budget. The final non-throttled Chromium CI fixture rendered
+1,007 assets in 25.4–29.9ms with 100 rows mounted and 3,308 nodes. The comparable
+older before/after evidence remains in `1.8.37-console-audit.md`; do not compare
+unmatched CI runners or confuse the original 315–475ms audit samples with it.
+
+Changes after the soak source are the prototype-safe host dictionary and compact
+CSS, plus viewport tests. The soak uses ordinary host keys at 1280px; these changes
+do not alter that exercised path. `1.8.38-soak.json` retains the measured summary.
+
+Remaining verification limits: real screen-reader use and a complete 200% browser
+zoom/operator walkthrough; Windows-installed PWA integration; real public identity-provider walkthrough;
+physical battery measurement;
+and the embedder-memory trend above. Direct cookie sign-in/diagnostics and signed
+session server tests are separate evidence. Production IPv6 packet reception cannot
+be verified on the reference IPv6-disabled LAN. None of these limits is represented
+as a passing check.
+
+
+## v1.8.38 release and live evidence
+
+The canonical full release completed hub first, then explicit Linux/Windows
+canaries and the frozen online cohort. All six captured online endpoints reported
+v1.8.38 with valid native provenance. Two initially offline endpoints remain queued;
+they did not shrink the captured cohort. Version sites and generated package digests
+are included in the release checkpoint. No monitoring was enabled or service
+capability broadened on the reference deployment.
+
+The first release attempt stopped before deployment when ST's managed browser
+could not open. Its failure log was retained. A direct managed headless recheck and
+the complete canonical browser gate subsequently passed. The full release workflow
+was restarted without skip flags; retained Go/race/vet, browser/model, native
+collector/isolation, signed packaging and isolated package-lifecycle gates passed.
+The separate managed-service adapter still lacks a remote Go hub deployment hook;
+the canonical Ominull release script performed the actual deployment.
+
+Live read-only verification found:
+
+- Deployed `app.js` and `app.css` hashes match the tested checkout. Registry
+  diagnostics report 58,451 assignments fetched September 9; the read-only database
+  migration marker matches the embedded registry SHA-256.
+- A topology workspace with 1,174 nodes, 1,275 edges and 9,623 conversations
+  returned 362,851 gzip bytes for 4,972,870 decoded bytes, a 92.7% transfer reduction
+  for that exact representation. Identity and decoded bytes matched exactly.
+  The first observed read took 7,723.62ms; cached identity took 43.52ms and a
+  conditional repeat returned 304/zero bytes in 0.63ms. An unauthenticated
+  conditional request still returned 401. These are bounded route samples;
+  the earlier 4.32MB/8,637.19ms read had different live data.
+- Normal POST sign-in, cookie console and credential-free diagnostics return 200.
+  Cookie GET HTML contains no admin credential. Two audit-history pages each
+  contain 100 entries with no repeated IDs. The IPv6 monitor accurately reports
+  disabled/no observations.
+
+An additional disposable real-Go-hub test passed in ST's managed headless browser:
+normal POST sign-in followed by cookie GET; a genuinely expired signed JWT; actual
+API 401 and visible Sign in required; diagnostics authentication recovery;
+reauthentication; switching to an auditor; visible read-only role and actual 403
+mutation refusal. The installed worker's caches contained neither personalized
+routes nor sentinel credentials/identity after the account switch. The test clears
+its own cookie/cache/worker and closes the disposable hub; no real credentials,
+fleet actions or production sign-in state are involved.
+
+Reproduce that optional browser integration from `hub/` with
+`OMINULL_MANAGED_BROWSER_TEST=1 go test ./pkg/server -run '^TestExpiredConsoleSessionAndBrowserRecovery$' -count=1 -v`.
+The expired-session HTTP assertion runs in ordinary Go CI; this optional browser
+portion requires ST's managed profile. Public identity-provider integration remains
+separate from these local signed-cookie checks.
