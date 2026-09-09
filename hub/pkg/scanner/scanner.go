@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
@@ -313,31 +314,36 @@ func getServiceName(port int) string {
 // inside the worker, because the console now shows the host count while the scan
 // runs and "254" was being reported for every subnet, /30 included.
 func targetsFor(subnet string) []string {
-	var ips []string
-	if strings.Contains(subnet, "/") {
-		if _, ipNet, err := net.ParseCIDR(subnet); err == nil {
-			ips = generateIPs(ipNet)
+	if _, network, err := net.ParseCIDR(subnet); err == nil {
+		return generateIPs(network)
+	}
+	if ip, err := netip.ParseAddr(subnet); err == nil {
+		return []string{ip.Unmap().String()}
+	}
+	// Preserve the documented bare IPv4 /24 shorthand, never infer a different
+	// target from an invalid literal or an IPv6 prefix that cannot be swept.
+	prefix := strings.TrimSuffix(subnet, ".")
+	if strings.Count(prefix, ".") == 2 {
+		if ip := net.ParseIP(prefix + ".0").To4(); ip != nil {
+			return generateIPs(&net.IPNet{IP: ip, Mask: net.CIDRMask(24, 32)})
 		}
 	}
-	if len(ips) == 0 {
-		// Default to local class C /24
-		base := "10.0.0."
-		if strings.HasPrefix(subnet, "192.168.") || strings.HasPrefix(subnet, "10.") || strings.HasPrefix(subnet, "172.") {
-			parts := strings.Split(subnet, ".")
-			if len(parts) >= 3 {
-				base = parts[0] + "." + parts[1] + "." + parts[2] + "."
-			}
-		}
-		for i := 1; i <= 254; i++ {
-			ips = append(ips, fmt.Sprintf("%s%d", base, i))
-		}
-	}
-	return ips
+	return nil
 }
 
 // StartScan initiates an asynchronous network discovery job
 func (s *Scanner) StartScan(subnet string, profile ScanProfile) (string, error) {
 	ips := targetsFor(subnet)
+	if len(ips) == 0 {
+		var err error
+		ips, err = discoverIPv6Targets(subnet, profile != ProfilePassive)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no targets or IPv6 neighbors found; use an observed address or a directly connected IPv6 prefix")
+	}
 
 	s.mu.Lock()
 	scanID := fmt.Sprintf("scan-%d", time.Now().UnixNano()/1000000)
@@ -368,6 +374,15 @@ func (s *Scanner) runScanWorker(scanID string, ips []string, profile ScanProfile
 
 	// Parse local ARP / Neighbor Cache
 	arpTable := parseLocalARPTable()
+	for _, target := range ips {
+		if strings.Contains(target, ":") {
+			neighbors, _ := readIPv6Neighbors()
+			for ip, mac := range neighbors {
+				arpTable[ip] = mac
+			}
+			break
+		}
+	}
 
 	targetPorts := standardPorts
 	if profile == ProfileAggressive {
@@ -791,18 +806,26 @@ func resolveMAC(ip string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_ = exec.CommandContext(ctx, "ping", "-c", "1", "-W", "1", ip).Run()
+	if strings.Contains(ip, ":") {
+		table, _ := readIPv6Neighbors()
+		return table[ip]
+	}
 	table := parseLocalARPTable()
 	return table[ip]
 }
 
 func generateIPs(ipNet *net.IPNet) []string {
+	ones, bits := ipNet.Mask.Size()
+	if bits-ones > 16 {
+		return nil
+	} // shared 65,536-target sweep budget
 	var ips []string
 	ip := ipNet.IP.Mask(ipNet.Mask)
 	for ipNet.Contains(ip) {
 		ips = append(ips, ip.String())
 		inc(ip)
 	}
-	if len(ips) > 2 {
+	if ipNet.IP.To4() != nil && len(ips) > 2 {
 		return ips[1 : len(ips)-1] // exclude network and broadcast
 	}
 	return ips

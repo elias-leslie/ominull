@@ -176,6 +176,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
   <nav class="rail" aria-label="Console sections">
     <button class="rail-mark" id="nav-toggle" type="button" aria-label="Expand navigation" aria-expanded="false">☰</button>
 
+    <span class="rail-group">Monitor</span>
     <button class="rail-btn" type="button" data-section="assets" aria-current="true">
       <svg class="ic"><use href="#i-assets"/></svg>
       <span class="tip" aria-hidden="true">Assets</span>
@@ -191,17 +192,13 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span class="tip" aria-hidden="true">Traffic</span>
       <span class="sr">Traffic</span>
     </button>
-    <button class="rail-btn" type="button" data-section="policy" aria-current="false">
-      <svg class="ic"><use href="#i-policy"/></svg>
-      <span class="tip" aria-hidden="true">Policy</span>
-      <span class="sr">Policy</span>
-    </button>
     <button class="rail-btn rail-btn-alerts" type="button" data-section="alerts" aria-current="false">
       <svg class="ic"><use href="#i-alert"/></svg>
       <span class="rail-alert-badge" id="rail-alert-badge" data-n="0">0</span>
       <span class="tip" aria-hidden="true">Alerts</span>
       <span class="sr">Alerts</span>
     </button>
+    <span class="rail-group">Investigate</span>
     <button class="rail-btn" type="button" data-section="response" aria-current="false">
       <svg class="ic"><use href="#i-unlock"/></svg>
       <span class="tip" aria-hidden="true">Response</span>
@@ -212,20 +209,22 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span class="tip" aria-hidden="true">Forensics</span>
       <span class="sr">Forensics</span>
     </button>
+    <span class="rail-group">Administer</span>
+    <button class="rail-btn" type="button" data-section="policy" aria-current="false">
+      <svg class="ic"><use href="#i-policy"/></svg>
+      <span class="tip" aria-hidden="true">Policy</span>
+      <span class="sr">Policy</span>
+    </button>
     <button class="rail-btn" type="button" data-section="audit" aria-current="false">
       <svg class="ic"><use href="#i-audit"/></svg>
       <span class="tip" aria-hidden="true">Audit</span>
       <span class="sr">Audit</span>
     </button>
-    <!-- Removed from the rail entirely for anyone who is not an administrator.
-         The hub refuses the routes behind it regardless; hiding the button keeps
-         the console from offering a door that will not open. -->
     <button class="rail-btn" type="button" data-section="access" aria-current="false" id="rail-access" hidden>
       <svg class="ic"><use href="#i-access"/></svg>
       <span class="tip" aria-hidden="true">Access</span>
       <span class="sr">Access</span>
     </button>
-
     <span class="rail-gap"></span>
 
     <div class="rail-foot">
@@ -271,6 +270,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       </button>
     </header>
 
+    <select id="compact-section-menu" class="compact-section-menu" aria-label="Console section"></select>
     <a id="connection-status" class="connection-status" href="/status" aria-label="Hub connection and freshness" aria-live="polite">Connecting</a>
     <div class="strip" id="strip" role="group" aria-label="Filters"></div>
 

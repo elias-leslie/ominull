@@ -1,6 +1,7 @@
 name: Ominull CI Pipeline
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
@@ -58,7 +59,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: console-performance-${{ matrix.browser }}
-          path: build/console-performance.json
+          path: |
+            build/console-performance.json
+            build/console-design/
           if-no-files-found: ignore
 
   test-hub:
@@ -85,6 +88,9 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
           go test -v -race ./...
+
+      - name: Verify isolated IPv6 packet capture
+        run: bash scripts/test-ipv6-monitor.sh
 
       - name: Check reachable Go vulnerabilities
         working-directory: hub
@@ -206,3 +212,19 @@ jobs:
               assert int(files[file_id]["FileSize"]) > 0
           print(f"Verified Linux and Windows package identities and MSI payloads for {version}")
           PY
+
+  console-soak:
+    name: Thirty minute throttled console soak
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: npm --prefix web-build ci --ignore-scripts
+      - run: web-build/node_modules/.bin/playwright install --with-deps chromium
+      - run: node scripts/soak-console.cjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: console-soak
+          path: build/console-soak.json

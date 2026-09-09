@@ -56,6 +56,7 @@ func (s *Server) diagnosticChecks() []diagnostics.Check {
 		s.checkBackups,
 		s.checkNetworkAttribution,
 		s.checkVendorRegistry,
+		s.checkIPv6Monitor,
 	}
 }
 

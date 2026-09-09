@@ -1806,7 +1806,7 @@
     }
     if (state.section === "audit") {
       return [
-        { label: "Latest entries (limit 100)", value: String(state.audit.length) },
+        { label: "Entries on this page", value: String(state.audit.length) },
         /* These two are pages, not totals - the hub returns at most EVENT_PAGE
            events and ANOMALY_PAGE alerts. Rendering the page size as a count
            made a busy fleet and a quiet one read identically at 100. */
@@ -3323,6 +3323,7 @@
       h("div", { cls: "account-section" },
         h("div", { cls: "account-section-title", text: "Color Theme" }),
         h("div", { cls: "account-theme-grid" }, themeOpts)),
+      h("label", { cls: "field" }, h("span", { text: "Table density" }), h("select", { "aria-label": "Table density", on: { change: function (event) { document.body.dataset.density = event.target.value; writeStore("ominull-density", event.target.value); } } }, ["comfortable", "compact"].map(function (density) { return h("option", { value: density, selected: (document.body.dataset.density || "comfortable") === density, text: density === "compact" ? "Compact" : "Comfortable" }); }))),
       links);
 
     var footer = h("div", { cls: "account-pop-footer" },
@@ -6136,6 +6137,57 @@
       .catch(function (e) { toast("Could not read the proposals: " + e.message, "crit"); });
   }
 
+  function openIPv6Monitor() {
+    var body = h("div", { cls: "stack", role: "status", text: "Reading IPv6 monitor configuration…" });
+    openSheet("IPv6 infrastructure monitor", body, [], "", { stack: true });
+    var frame = sheetEl;
+    request("/api/v1/ipv6/monitor").then(function (data) {
+      if (!frame.isConnected) return;
+      clear(body);
+      var cfg = data.config || {}, status = data.status || {};
+      var enabled = h("input", { type: "checkbox" }); enabled.checked = !!cfg.enabled;
+      var tenant = h("select", {}, state.hierarchy.map(function (row) { return h("option", { value: row.tenant.id, text: row.tenant.name || row.tenant.id }); }));
+      tenant.value = cfg.tenant_id || (state.hierarchy[0] && state.hierarchy[0].tenant.id) || "";
+      var iface = h("select", {}, [h("option", { value: "", text: "Choose a link" })].concat(arrayOf(data.interfaces).map(function (name) { return h("option", { value: name, text: name }); })));
+      iface.value = cfg.interface || "";
+      function peerText(peers) { return arrayOf(peers).map(function (p) { return p.ip + " " + p.mac; }).join("\n"); }
+      var routers = h("textarea", { rows: "3", value: peerText(cfg.routers), placeholder: "fe80::1 02:00:00:00:00:01" });
+      var dhcp = h("textarea", { rows: "3", value: peerText(cfg.dhcp_servers) });
+      var prefixes = h("textarea", { rows: "3", value: arrayOf(cfg.prefixes).join("\n"), placeholder: "2001:db8:1::/64" });
+      var dns = h("textarea", { rows: "3", value: arrayOf(cfg.dns).join("\n"), placeholder: "2001:db8::53" });
+      var result = h("p", { role: "status" });
+      function field(label, input) { return h("label", { cls: "field" }, h("span", { text: label }), input); }
+      body.appendChild(h("p", { cls: "note", text: "Administrator configuration. Capture is passive and limited to packets visible on the selected hub link. Empty trust lists record observations without declaring discovered infrastructure approved. Findings follow learning holds and never trigger automatic isolation." }));
+      body.appendChild(chip(status.active ? "ok" : cfg.enabled ? "crit" : "idle", status.active ? "Capture active" : cfg.enabled ? "Configured but inactive" : "Disabled"));
+      if (status.error || status.persistence_error) body.appendChild(h("p", { role: "alert", text: status.error || status.persistence_error }));
+      body.appendChild(h("p", { text: "Since capture started: " + (status.observations || 0) + " observations; " + (status.malformed || 0) + " invalid packets; " + (status.dropped || 0) + " observations dropped at the batch limit." }));
+      body.appendChild(h("div", { cls: "form-row" }, field("Enabled", enabled), field("Owning tenant", tenant), field("Hub interface", iface)));
+      body.appendChild(field("Approved routers — one IPv6 address and MAC pair per line", routers));
+      body.appendChild(field("Approved DHCPv6 servers — one IPv6 address and MAC pair per line", dhcp));
+      body.appendChild(field("Approved advertised prefixes — one CIDR per line", prefixes));
+      body.appendChild(field("Approved IPv6 DNS servers — one address per line", dns));
+      body.appendChild(result);
+      var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save monitoring configuration", on: { click: function () {
+        function lines(input) { return input.value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean); }
+        function peers(input) { return lines(input).map(function (line) { var pair = line.split(/\s+/); if (pair.length !== 2) throw new Error("Each trusted peer needs one IPv6 address and one MAC."); return { ip: pair[0], mac: pair[1] }; }); }
+        var payload;
+        try { payload = { enabled: enabled.checked, tenant_id: tenant.value, interface: iface.value, routers: peers(routers), dhcp_servers: peers(dhcp), prefixes: lines(prefixes), dns: lines(dns) }; }
+        catch (e) { result.textContent = e.message; return; }
+        save.disabled = true; result.textContent = "Saving…";
+        request("/api/v1/ipv6/monitor", "PUT", payload).then(function (saved) {
+          frame._dirty = false;
+          var current = saved.status || {};
+          result.textContent = current.error || current.persistence_error ? "Configuration saved; monitor needs attention: " + (current.error || current.persistence_error) : "Configuration saved. " + (current.active ? "Capture is active." : "Capture is disabled.");
+          loadDiagnostics();
+        }).catch(function (e) { result.textContent = "Save failed: " + e.message; }).finally(function () { save.disabled = false; });
+      } } });
+      body.appendChild(save);
+      body.appendChild(h("h3", { text: "Recent observed infrastructure" }));
+      body.appendChild(h("p", { cls: "dim", text: "Latest 100 of up to 2,048 distinct observations per tenant. Repeated packets are counted. ND addresses and autonomous prefixes are evidence for investigating SLAAC; they do not prove how a host configured its address. Encrypted, fragmented, DHCP relay and TCP DNS traffic are not decoded." }));
+      body.appendChild(simpleTable(["Last seen", "Source / MAC", "Observation", "Count"], arrayOf(data.observations).map(function (o) { return [stamp(parseTime(o.last_seen)), h("span", { cls: "u-break", text: o.source + " / " + o.mac }), h("span", { cls: "u-break", text: o.kind.replace(/_/g, " ") + ": " + arrayOf(o.prefixes).concat(arrayOf(o.addresses), arrayOf(o.dns), arrayOf(o.domains)).join(", ") }), h("span", { text: String(o.count) })]; }), { empty: "No observations recorded. This does not establish that the link is safe or quiet." }));
+    }).catch(function (e) { if (frame.isConnected) body.textContent = "Could not read monitor: " + e.message; });
+  }
+
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -6197,10 +6249,11 @@
         ];
       }));
 
-    if (!state.diagnostics && !state.diagnosticsRunning && !state.diagnosticsError) loadDiagnostics();
+    if (state.policyHealth && !state.diagnostics && !state.diagnosticsRunning && !state.diagnosticsError) loadDiagnostics();
 
     var stackItems = [
       diagnosticsCard(),
+      IS_ADMIN ? card("IPv6 infrastructure", h("p", { cls: "card-body", text: "Inspect passive link observations and configure approved routers, DHCPv6 servers, prefixes and DNS." }), [h("button", { cls: "btn", type: "button", text: "Configure and inspect", on: { click: openIPv6Monitor } })]) : null,
       convergenceCard(),
       baselineCard(),
       tuningCard(),
@@ -6221,7 +6274,10 @@
       card("Peer-mesh quarantine", mesh)
     ];
 
-    view.appendChild(h("div", { cls: "pad stack" }, stackItems.filter(Boolean)));
+    var policyTabs = h("div", { cls: "uf uf-g2", role: "group", "aria-label": "Policy views" },
+      h("button", { cls: "btn", type: "button", "aria-pressed": String(!state.policyHealth), text: "Baseline and detection", on: { click: function () { state.policyHealth=false; renderBody(); } } }),
+      h("button", { cls: "btn", type: "button", "aria-pressed": String(!!state.policyHealth), text: "Hub health and updates", on: { click: function () { state.policyHealth=true; renderBody(); } } }));
+    view.appendChild(h("div", { cls: "pad stack" }, policyTabs, (state.policyHealth ? stackItems.slice(0,3) : stackItems.slice(3)).filter(Boolean)));
   }
 
   /* "Is the fleet actually on the release I shipped?"
@@ -6363,6 +6419,30 @@
     ] : null);
   }
 
+  var auditHistory = { cursor: "", previous: [], next: "", filter: {} };
+  function auditQuery() {
+    var query = "?page=true";
+    if (auditHistory.cursor) query += "&cursor=" + encodeURIComponent(auditHistory.cursor);
+    Object.keys(auditHistory.filter).forEach(function (key) { if (auditHistory.filter[key]) query += "&" + key + "=" + encodeURIComponent(auditHistory.filter[key]); });
+    return query;
+  }
+  function openAuditFilters() {
+    var f = auditHistory.filter;
+    var actor = h("input", { value: f.actor || "" });
+    var action = h("input", { value: f.action || "", placeholder: "ISOLATE_HOST" });
+    var from = h("input", { type: "date", value: (f.from || "").slice(0,10) });
+    var to = h("input", { type: "date", value: (f.to || "").slice(0,10) });
+    var body = h("div", { cls: "stack" },
+      h("label", { cls: "field" }, h("span", { text: "Actor — exact username or ID" }), actor),
+      h("label", { cls: "field" }, h("span", { text: "Action — exact recorded action" }), action),
+      h("label", { cls: "field" }, h("span", { text: "From date (UTC, inclusive)" }), from),
+      h("label", { cls: "field" }, h("span", { text: "Before date (UTC, exclusive)" }), to));
+    openSheet("Filter audit history", body, [h("button", { cls: "btn btn-primary", type: "button", text: "Apply filters", on: { click: function () {
+      auditHistory.filter = { actor: actor.value.trim(), action: action.value.trim(), from: from.value ? from.value + "T00:00:00Z" : "", to: to.value ? to.value + "T00:00:00Z" : "" };
+      auditHistory.cursor = ""; auditHistory.previous = []; closeSheet(); refresh();
+    } } })]);
+  }
+
   function renderAudit() {
     var view = $("view");
     clear(view);
@@ -6379,6 +6459,14 @@
     });
 
     view.appendChild(h("div", { cls: "pad stack" },
+      h("div", { cls: "uf uf-wrap uf-g2" },
+        h("button", { cls: "btn", type: "button", text: "Filter history", on: {click: openAuditFilters} }),
+        h("button", { cls: "btn", type: "button", text: "Newest entries", on: {click: function () { auditHistory.cursor=""; auditHistory.previous=[]; refresh(); }} }),
+        h("button", { cls: "btn", type: "button", text: "Previous page", disabled: !auditHistory.previous.length, on: {click: function () { auditHistory.cursor=auditHistory.previous.pop() || ""; refresh(); }} }),
+        h("button", { cls: "btn", type: "button", text: "Older entries", disabled: !auditHistory.next, on: {click: function () { auditHistory.previous.push(auditHistory.cursor); auditHistory.cursor=auditHistory.next; refresh(); }} }),
+        h("button", { cls: "btn", type: "button", text: "Export this page (JSON)", on: {click: function () { downloadText("ominull-audit-page.json", JSON.stringify({exported_at:new Date().toISOString(), scope:"current authorized page", filter:auditHistory.filter, entries:state.audit},null,2)); }} })),
+      h("p", {text: "Page " + (auditHistory.previous.length+1) + " · " + state.audit.length + " entries · up to 100 per page. Older pages retain the original snapshot. Time sorting applies to this page."}),
+      Object.values(auditHistory.filter).some(Boolean) ? h("p", {text: "Filters: " + Object.keys(auditHistory.filter).filter(function (key) {return auditHistory.filter[key];}).map(function (key) {return key + " = " + auditHistory.filter[key];}).join(" · ")}) : null,
       card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows))));
   }
 
@@ -7675,7 +7763,7 @@
       [termCardHead]
     );
 
-    var jobRows = (state.responseJobs || []).map(function (j) {
+    var jobRows = (state.responseJobs || []).filter(function (job) { return state.responseHistory ? !responseJobIsOpen(job) : responseJobIsOpen(job); }).map(function (j) {
       return [
         h("a", {
           cls: "ip mono",
@@ -7731,8 +7819,9 @@
       ];
     });
 
-    var jobsCard = card("Response jobs — active and recent history",
-      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: "No response jobs in the latest 50 records." })
+    var jobsCard = card(state.responseHistory ? "Response history" : "Active response jobs",
+      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: state.responseHistory ? "No completed jobs in the latest 50 records." : "No active jobs in the latest 50 records." }),
+      [h("button", { cls: "btn", type: "button", text: state.responseHistory ? "Show active jobs" : "Show completed history", on: { click: function () { state.responseHistory = !state.responseHistory; renderBody(); } } })]
     );
 
     var scriptRows = (state.scripts || []).map(function (sc) {
@@ -9659,9 +9748,8 @@
     hostScopes[key] = scope;
     var filter = asset.endpoint ? "endpoint_id=" + encodeURIComponent(asset.endpoint.id) : "src_ip=" + encodeURIComponent(asset.ip);
     var reads = [request("/api/v1/traffic/flows?range=24h&limit=25&" + filter).then(function (d) { scope.flows = d; })];
-    // Unmanaged assets have no endpoint alert identity. Do not claim that a
-    // destination match is an alert raised on this host.
-    if (asset.endpoint) reads.push(request("/api/v1/anomalies?limit=50&offset=0&unacknowledged_only=true&endpoint_id=" + encodeURIComponent(asset.endpoint.id)).then(function (d) { scope.alerts = d; }));
+    var alertScope = asset.endpoint ? "endpoint_id=" + encodeURIComponent(asset.endpoint.id) : asset.assetId ? "asset_id=" + encodeURIComponent(asset.assetId) : "";
+    if (alertScope) reads.push(request("/api/v1/anomalies?limit=50&offset=0&unacknowledged_only=true&" + alertScope).then(function (d) { scope.alerts = d; }));
     Promise.all(reads).catch(function (e) { scope.error = e.message; }).finally(function () {
       scope.loading = false;
       scope.updated = Date.now();
@@ -9883,10 +9971,10 @@
     var alertCard = card("Open alerts", hostScope.error
       ? h("p", {role: "status", text: "Host history unavailable: " + hostScope.error})
       : hostScope.loading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
-      : !ep ? h("p", {text: "No endpoint alert identity for this unmanaged asset. Destination references are not alerts raised on this host."})
-      : h("div", {}, h("p", {text: (hostScope.alerts ? hostScope.alerts.total : "Unknown") + " open alerts · raised, unacknowledged · all retained history · latest 50 shown"}),
+      : !ep && !asset.assetId ? h("p", {text: "No stored source identity for this asset. Destination references are not alerts raised on this host."})
+      : h("div", {}, h("p", {text: (hostScope.alerts ? hostScope.alerts.total : "Unknown") + " open alerts · raised, unacknowledged · latest 50 shown" + (!ep ? " · recorded source identity only; older unattributed findings excluded" : " · all retained history")}),
         alerts.map(function (a) { return alertCardNode(a, true); }),
-        h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep.id, unacknowledged_only:true}; go("alerts"); }}})), null, true);
+        h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep ? ep.id : "", asset_id:ep ? "" : asset.assetId, unacknowledged_only:true}; go("alerts"); }}})), null, true);
     flowCard.appendChild(h("p", {role: "status", text: hostScope.error ? "Recent flows unavailable: " + hostScope.error : hostScope.loading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + (hostScope.flows ? hostScope.flows.total : "unknown") + " matching"}));
     flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
 
@@ -10606,6 +10694,7 @@
 
   function renderBody() {
     document.body.dataset.section = state.section;
+    if ($("compact-section-menu")) $("compact-section-menu").value = state.section;
     if (state.section !== "topology" && topologyUI) { topologyDraft = topologyUI.getDraft(); topologyUI.destroy(); topologyUI = null; }
     var view = $("view");
     var scrollTop = view.scrollTop;
@@ -10745,6 +10834,7 @@
     if (af.search) aParams += "&search=" + encodeURIComponent(af.search);
     if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
     if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
+    if (af.asset_id) aParams += "&asset_id=" + encodeURIComponent(af.asset_id);
     /* The Held tab. A learning window records findings without raising them,
        and a console that never showed them would be quiet for a reason the
        operator could not see. */
@@ -10882,7 +10972,7 @@
       jobs.push(request("/api/v1/vulnerabilities/snapshots/active").then(function (d) { state.activeSnapshot = (d && d.snapshot) || null; }).catch(function () { state.activeSnapshot = null; }));
     }
     if (state.section === "audit") {
-      jobs.push(request("/api/v1/audit/logs").then(function (d) { state.audit = arrayOf(d); }));
+      jobs.push(request("/api/v1/audit/logs" + auditQuery()).then(function (d) { state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
     }
     if (state.section === "traffic") {
@@ -11093,8 +11183,19 @@
     window.addEventListener("beforeunload", function (event) {
       if ([sheetEl].concat(sheetStack.map(function (frame) { return frame.el; })).some(function (el) { return el && (el._dirty || el._isTerminal); })) { event.preventDefault(); event.returnValue = ""; }
     });
+    document.body.dataset.density = readStore("ominull-density", "comfortable") === "compact" ? "compact" : "comfortable";
+    document.body.classList.toggle("nav-expanded", readStore("ominull-nav-expanded", "false") === "true");
     var navToggle = $("nav-toggle");
-    if (navToggle) navToggle.addEventListener("click", function () { var expanded = document.body.classList.toggle("nav-expanded"); navToggle.setAttribute("aria-expanded", String(expanded)); });
+    if (navToggle) {
+      navToggle.setAttribute("aria-expanded", String(document.body.classList.contains("nav-expanded")));
+      navToggle.addEventListener("click", function () { var expanded = document.body.classList.toggle("nav-expanded"); navToggle.setAttribute("aria-expanded", String(expanded)); navToggle.setAttribute("aria-label", expanded ? "Collapse navigation" : "Expand navigation"); writeStore("ominull-nav-expanded", String(expanded)); });
+    }
+    var sectionMenu = $("compact-section-menu");
+    if (sectionMenu) {
+      SECTIONS.forEach(function (section) { sectionMenu.appendChild(h("option", { value: section.id, text: section.label })); });
+      sectionMenu.value = state.section;
+      sectionMenu.addEventListener("change", function () { var target = sectionMenu.value; sectionMenu.value = state.section; go(target); });
+    }
     if (READ_ONLY) {
       document.body.classList.add("read-only");
       ["topbar-install-btn", "topbar-sweep-btn"].forEach(function (id) { var el = $(id); if (el) { el.disabled = true; el.title = "Read-only access"; } });

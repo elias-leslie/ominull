@@ -16,7 +16,8 @@ const server = http.createServer((req,res) => {
  try {
   let body = fs.readFileSync(name === '/app.js' || name === '/sw.js' ? path.join(sourceRoot,name) : file);
   if(name === '/index.html') body = body.toString().replaceAll('{{HUB_VERSION}}','fixture').replaceAll('{{ADMIN_KEY}}','AUDIT_SENTINEL').replaceAll('{{OPERATOR}}','fixture@example.invalid').replaceAll('{{OPERATOR_ROLE}}','admin');
-  if(name === '/app.js') body = body.toString().replace('  if (document.readyState === "loading")', '  window.audit={state,render,renderBody,buildAssets,sortAssetRows,openRoute,closeRoute,renderRoute,openAccountPop,closeAccountPop,openSheet,closeAllSheets,go,request,stamp,cellText,cellSortKey,refresh,h};\n  if (document.readyState === "loading")');
+  if(name === '/app.js') body = body.toString().replace('  if (document.readyState === "loading")', '  window.audit={state,render,renderBody,applyTheme,openIPv6Monitor,buildAssets,sortAssetRows,openRoute,closeRoute,renderRoute,openAccountPop,closeAccountPop,openSheet,closeAllSheets,go,request,stamp,cellText,cellSortKey,refresh,h};\n  if (document.readyState === "loading")');
+  if(name === '/app.js') body = body.toString().replace('"serviceWorker" in navigator && !state.demo', '"serviceWorker" in navigator && (!state.demo || location.search.includes("pwa-fixture"))');
   if(name === '/sw.js') body = body.toString().replaceAll('{{HUB_VERSION}}',server.fixtureVersion || 'fixture');
   res.setHeader('Content-Type',mime[path.extname(name)] || 'application/octet-stream');
   res.setHeader('Cache-Control','no-store');

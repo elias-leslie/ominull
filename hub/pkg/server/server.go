@@ -24,6 +24,7 @@ import (
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/evidence"
+	"ominull/hub/pkg/ipv6guard"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
@@ -36,14 +37,15 @@ import (
 )
 
 type Server struct {
-	store     *storage.Store
-	ti        *threatintel.Manager
-	detector  *detector.Engine
-	pki       *pki.Manager
-	scanner   *scanner.Scanner
-	adminKey  string
-	binaryDir string
-	hubURL    string
+	ipv6Monitor *ipv6guard.Monitor
+	store       *storage.Store
+	ti          *threatintel.Manager
+	detector    *detector.Engine
+	pki         *pki.Manager
+	scanner     *scanner.Scanner
+	adminKey    string
+	binaryDir   string
+	hubURL      string
 	// Whether hubURL actually serves this hub, and when that was last checked.
 	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
 	publicURLMu      sync.Mutex
@@ -404,6 +406,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		}
 		return nil
 	})
+	s.ipv6Monitor = ipv6guard.New(s.persistIPv6Observations)
 	return s
 }
 
@@ -672,6 +675,11 @@ func (s *Server) Start(addr string) error {
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
 	s.scanner.StartBackground()
+	if cfg, err := s.store.IPv6GuardConfig(); err != nil {
+		s.ipv6Monitor.PersistenceResult(err)
+	} else if err = s.ipv6Monitor.Configure(cfg); err != nil {
+		log.Printf("IPv6 monitoring unavailable: %v", err)
+	}
 
 	mux := s.routes()
 
@@ -981,6 +989,9 @@ func (s *Server) hubOwnsAddress(ip string) string {
 }
 
 func (s *Server) Close() error {
+	if s.ipv6Monitor != nil {
+		s.ipv6Monitor.Stop()
+	}
 	s.ti.Stop()
 	s.detector.Stop()
 	s.scanner.StopBackground()
@@ -2548,6 +2559,32 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		tenantID = r.Header.Get("X-Tenant-ID")
 	}
 
+	if r.URL.Query().Get("page") == "true" {
+		q := r.URL.Query()
+		filter := storage.AuditFilter{Actor: q.Get("actor"), Action: q.Get("action")}
+		for name, dest := range map[string]*time.Time{"from": &filter.From, "to": &filter.To} {
+			if value := q.Get(name); value != "" {
+				parsed, err := time.Parse(time.RFC3339, value)
+				if err != nil {
+					writeJSONError(w, 400, "dates must use RFC3339")
+					return
+				}
+				*dest = parsed
+			}
+		}
+		if len(q.Get("cursor")) > 2048 {
+			writeJSONError(w, 400, "invalid audit cursor")
+			return
+		}
+		page, err := s.store.AuditHistory(tenantID, 100, q.Get("cursor"), filter)
+		if err != nil {
+			writeJSONError(w, 400, "could not read audit page; check cursor and filters")
+			return
+		}
+		writeJSON(w, 200, page)
+		return
+	}
+
 	logs, err := s.store.ListAuditLogs(tenantID, 100)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2812,9 +2849,28 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		held = storage.HeldAny
 	}
 
-	anomalies, total, err := s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity, held, r.URL.Query().Get("search"))
+	assetID := r.URL.Query().Get("asset_id")
+	var anomalies []storage.AnomalyAlert
+	var total int64
+	var err error
+	if assetID != "" {
+		if endpointID != "" {
+			writeJSONError(w, 400, "choose one host scope")
+			return
+		}
+		anomalies, total, err = s.store.QueryAssetAnomalyAlerts(tenantID, assetID, limit, offset, unackOnly, anomalyType, severity, held, r.URL.Query().Get("search"))
+	} else {
+		anomalies, total, err = s.store.QueryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, anomalyType, severity, held, r.URL.Query().Get("search"))
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if assetID != "" {
+		_, unack, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldExclude, "")
+		_, heldCount, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldOnly, "")
+		writeJSON(w, 200, map[string]any{"alerts": anomalies, "total": total, "unacknowledged_total": unack, "held_total": heldCount, "breakdown": []storage.AnomalyAlertGroup{}, "scope": "recorded_source_asset", "coverage": "Only findings with recorded source identity; older unattributed findings are excluded"})
 		return
 	}
 
@@ -3456,6 +3512,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/topology/workspace", s.authMiddleware(requireTopologyOperator(s.handleTopologyWorkspace)))
 	mux.HandleFunc("/api/v1/topology/views", s.authMiddleware(requireTopologyOperator(s.handleTopologyViews)))
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
+	mux.HandleFunc("/api/v1/ipv6/monitor", s.authMiddleware(requireAdmin(s.handleIPv6Monitor)))
 	mux.HandleFunc("/api/v1/topology/networks", s.authMiddleware(requireAdmin(s.handleTopologyNetworks)))
 
 	// 8b. Unified asset graph.

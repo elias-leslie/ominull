@@ -234,8 +234,19 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 // severity, the technique - and only its visibility changes, because the host
 // that was already compromised when its learning window opened is the one host
 // whose findings must survive that window.
-func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep storage.Endpoint, anomaly storage.AnomalyAlert) {
+func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep storage.Endpoint, anomaly storage.AnomalyAlert) error {
 	anomaly.Evidence = withFlowContext(anomaly.Evidence, ev, geo)
+	if ev.SrcIP != "" {
+		if asset, err := e.store.GetAsset(ev.SrcIP); err == nil && asset != nil && (asset.TenantID == "" || asset.TenantID == anomaly.TenantID) {
+			fields := map[string]any{}
+			if json.Unmarshal([]byte(anomaly.Evidence), &fields) == nil && fields != nil {
+				fields["source_asset_id"] = asset.ID
+				raw, _ := json.Marshal(fields)
+				anomaly.Evidence = string(raw)
+			}
+		}
+	}
+
 	if anomaly.HeldReason == "" {
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning
@@ -243,7 +254,9 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 	}
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
 		log.Printf("[-] anomaly write failed for %s/%s: %v", anomaly.EndpointID, anomaly.Title, err)
+		return err
 	}
+	return nil
 }
 
 // withFlowContext folds what the agent already reported about the process into
@@ -275,6 +288,7 @@ func withFlowContext(evidence string, ev storage.Event, geo threatintel.GeoRecor
 	if ev.Observation.Source != "" {
 		fields["observation"] = ev.Observation
 	}
+	set("source_ip", ev.SrcIP)
 	set("command_line", ev.CommandLine)
 	set("user_identity", ev.UserIdentity)
 	set("executable_sha256", ev.ExecutableSHA256)

@@ -704,6 +704,10 @@ func (s *Store) initSchema() error {
 		}
 	}
 
+	if err := s.initAuditHistorySchema(); err != nil {
+		return err
+	}
+
 	// The asset graph is additive: three new tables and their indexes. It
 	// touches nothing above, so an existing hub upgrades without migrating a
 	// single endpoints row.
@@ -740,6 +744,9 @@ func (s *Store) initSchema() error {
 		return err
 	}
 	if err := s.initLearningSchema(); err != nil {
+		return err
+	}
+	if err := s.initIPv6GuardSchema(); err != nil {
 		return err
 	}
 	if err := s.initRouterSchema(); err != nil {
@@ -2070,6 +2077,14 @@ const (
 )
 
 func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity, held string, search ...string) ([]AnomalyAlert, int64, error) {
+	return s.queryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, "", anomalyType, severity, held, search...)
+}
+
+func (s *Store) QueryAssetAnomalyAlerts(tenantID, assetID string, limit, offset int, unackOnly bool, anomalyType, severity, held, search string) ([]AnomalyAlert, int64, error) {
+	return s.queryAnomalyAlerts(tenantID, limit, offset, unackOnly, "", assetID, anomalyType, severity, held, search)
+}
+
+func (s *Store) queryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, assetID, anomalyType, severity, held string, search ...string) ([]AnomalyAlert, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -2101,6 +2116,11 @@ func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 		whereClause += " AND (endpoint_id = ? OR hostname = ?)"
 		args = append(args, endpointID, endpointID)
 	}
+	if assetID != "" {
+		whereClause += " AND CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.source_asset_id') END = ?"
+		args = append(args, assetID)
+	}
+
 	if anomalyType != "" {
 		whereClause += " AND anomaly_type = ?"
 		args = append(args, anomalyType)
@@ -3031,51 +3051,15 @@ func (s *Store) RecordAudit(entry AuditEntry) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(
-		"INSERT INTO audit_logs (id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		entry.ID, entry.TenantID, entry.UserID, entry.Username, entry.Action, entry.Resource, entry.Details, entry.IPAddress, entry.Timestamp,
+		"INSERT INTO audit_logs (id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp, event_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		entry.ID, entry.TenantID, entry.UserID, entry.Username, entry.Action, entry.Resource, entry.Details, entry.IPAddress, entry.Timestamp, entry.Timestamp.UnixNano(),
 	)
 	return err
 }
 
 func (s *Store) ListAuditLogs(tenantID string, limit int) ([]AuditEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if tenantID != "" {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp FROM audit_logs WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT ?",
-			tenantID, limit,
-		)
-	} else {
-		rows, err = s.db.Query(
-			"SELECT id, tenant_id, user_id, username, action, resource, details, ip_address, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT ?",
-			limit,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []AuditEntry
-	for rows.Next() {
-		var a AuditEntry
-		if err := rows.Scan(
-			&a.ID, &a.TenantID, &a.UserID, &a.Username, &a.Action, &a.Resource, &a.Details, &a.IPAddress, &a.Timestamp,
-		); err != nil {
-			return nil, err
-		}
-		list = append(list, a)
-	}
-	return list, nil
+	page, err := s.AuditHistory(tenantID, limit, "", AuditFilter{})
+	return page.Entries, err
 }
 
 func (s *Store) GetEndpoints() []Endpoint {

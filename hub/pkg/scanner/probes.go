@@ -190,12 +190,22 @@ func mdnsLocalName(name string) string {
 	return name
 }
 
-func reverseARPAName(ip string) string {
-	v4 := net.ParseIP(ip).To4()
-	if v4 == nil {
+func reverseARPAName(raw string) string {
+	ip := net.ParseIP(strings.SplitN(raw, "%", 2)[0])
+	if ip == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", v4[3], v4[2], v4[1], v4[0])
+	if v4 := ip.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", v4[3], v4[2], v4[1], v4[0])
+	}
+	hex := fmt.Sprintf("%032x", []byte(ip.To16()))
+	var name strings.Builder
+	for i := len(hex) - 1; i >= 0; i-- {
+		name.WriteByte(hex[i])
+		name.WriteByte('.')
+	}
+	name.WriteString("ip6.arpa")
+	return name.String()
 }
 
 // mdnsAsk sends one question and returns the raw reply.

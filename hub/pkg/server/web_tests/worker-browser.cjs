@@ -3,18 +3,19 @@ const assert = require('node:assert/strict');
 module.exports = async function workerLifecycle(page, context, server, url) {
  assert.ok(server, 'Lifecycle tests require an owned fixture origin');
  let other;
+ const appURL=url.replace("?demo=true", "?demo=true&pwa-fixture=true");
  try {
   await page.evaluate(async () => {
    await caches.open('unrelated-fixture-cache');
    await caches.open('ominull-shell-vobsolete');
-   await navigator.serviceWorker.register('/sw.js');
-   await navigator.serviceWorker.ready;
+
   });
-  await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+  await page.goto(appURL);
+  await page.waitForFunction(() => !!navigator.serviceWorker.controller && !!window.audit);
   assert.deepEqual((await page.evaluate(() => caches.keys())).sort(),
    ['ominull-shell-vfixture', 'unrelated-fixture-cache']);
   other = await context.newPage();
-  await other.goto(url);
+  await other.goto(appURL);
   await other.waitForFunction(() => !!window.audit);
   await other.evaluate(() => {
    window.audit.openSheet('Unsaved fixture', window.audit.h('input', {value:'unsent draft'}));
@@ -26,25 +27,25 @@ module.exports = async function workerLifecycle(page, context, server, url) {
    await window.fixtureRegistration.update();
   });
   await page.waitForFunction(() => !!window.fixtureRegistration.waiting);
-  await page.evaluate(async () => {
-   window.fixtureUpdateBlocked = false;
-   navigator.serviceWorker.addEventListener('message', event => {
-    if(event.data?.type === 'UPDATE_BLOCKED') window.fixtureUpdateBlocked = true;
-   });
-   (await navigator.serviceWorker.getRegistration()).waiting.postMessage({type:'ACTIVATE_UPDATE'});
+  await page.locator('#pwa-update').waitFor();
+  await page.evaluate(() => {
+   window.audit.openSheet('Current window draft', window.audit.h('input', {value:'keep this draft'}));
+   document.querySelector('.sheet input').dispatchEvent(new Event('input',{bubbles:true}));
   });
-  await page.waitForFunction(() => window.fixtureUpdateBlocked);
+  // Programmatic click exercises navigation guard; normal modal focus keeps the
+  // update control behind the dialog inaccessible until the dialog is closed.
+  await page.locator('#pwa-update').evaluate(button=>button.click());
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert.equal(await page.locator('.sheet input').inputValue(),'keep this draft');
+  await page.locator('#pwa-update').evaluate(button=>button.click());
+  await page.getByRole('button',{name:'Leave',exact:true}).click();
+  await page.getByText('Close other Ominull windows, then select Update available again.',{exact:true}).waitFor();
   assert.ok(await page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration()).waiting));
   assert.equal(await other.locator('.sheet input').inputValue(), 'unsent draft');
   await other.close(); other = null;
-  await page.evaluate(async () => {
-   window.fixtureControllerChanged = false;
-   navigator.serviceWorker.addEventListener('controllerchange', () => {window.fixtureControllerChanged = true;});
-   (await navigator.serviceWorker.getRegistration()).waiting.postMessage({type:'ACTIVATE_UPDATE'});
-  });
-  await page.waitForFunction(() => window.fixtureControllerChanged);
-  // controllerchange can precede completion of activate.waitUntil cleanup.
-  await page.waitForFunction(() => navigator.serviceWorker.controller?.state === 'activated');
+  await page.locator('#pwa-update').click();
+  await page.waitForFunction(async () => (await caches.keys()).includes('ominull-shell-vfixture-upgrade') && !(await caches.keys()).includes('ominull-shell-vfixture'));
+  await page.waitForFunction(() => !!window.audit && !document.getElementById('pwa-update'));
   assert.deepEqual((await page.evaluate(() => caches.keys())).sort(),
    ['ominull-shell-vfixture-upgrade', 'unrelated-fixture-cache']);
   const cachedPaths = await page.evaluate(async () => {

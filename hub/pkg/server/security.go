@@ -128,6 +128,11 @@ func validateSubnet(v string) (string, error) {
 		return "", fmt.Errorf("%q is not a CIDR subnet", v)
 	}
 	ones, bits := ipNet.Mask.Size()
+	// Large IPv6 prefixes use bounded local neighbor/all-nodes discovery,
+	// never address-space enumeration. The scanner reports an empty scope.
+	if bits == 128 && bits-ones > 16 {
+		return ipNet.String(), nil
+	}
 	if bits-ones > 32 || uint64(1)<<uint(bits-ones) > maxScanHosts {
 		return "", fmt.Errorf("%s covers more than %d addresses; scan it in smaller blocks", v, maxScanHosts)
 	}

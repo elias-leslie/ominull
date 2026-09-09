@@ -85,6 +85,15 @@
    let rejected=false; try { await a.request('/api/v1/fixture-error-'+status+'-'+type); } catch { rejected=true; } assert(rejected,'Invalid API response accepted');
   } } finally {window.fetch=original;a.state.demo=true;}
  });
+ await check('IPv6 configuration is labeled and guards an edited draft', async () => {
+  const original=window.fetch;a.state.demo=false;
+  window.fetch=async()=>new Response(JSON.stringify({config:{enabled:false,routers:[],dhcp_servers:[],prefixes:[],dns:[]},status:{active:false},interfaces:['fixture-link'],observations:[]}),{headers:{'Content-Type':'application/json'}});
+  try {a.openIPv6Monitor();await wait();
+   const dialog=document.querySelector('.sheet');assert(dialog.textContent.includes('Capture is passive'),'Missing coverage explanation');
+   const input=dialog.querySelector('textarea');input.value='fe80::1 02:00:00:00:00:01';input.dispatchEvent(new Event('input',{bubbles:true}));
+   a.go('traffic');assert(document.querySelectorAll('.sheet').length===2,'Edited monitoring configuration was discarded');
+  }finally{a.closeAllSheets();window.fetch=original;a.state.demo=true;}
+ });
  a.state.section='assets';a.render();
  return results;
 })()

@@ -1,9 +1,13 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,8 +36,10 @@ type responseCache struct {
 }
 
 type responseEntry struct {
-	body     []byte
-	computed time.Time
+	body       []byte
+	compressed []byte
+	tag        string
+	computed   time.Time
 }
 
 func (c *responseCache) get(key string, now time.Time) []byte {
@@ -47,12 +53,20 @@ func (c *responseCache) get(key string, now time.Time) []byte {
 }
 
 func (c *responseCache) put(key string, body []byte, now time.Time) {
+	entry := responseEntry{body: body, computed: now, tag: fmt.Sprintf(`W/"%x"`, sha256.Sum256(body))}
+	var compressed bytes.Buffer
+	zip, _ := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+	_, _ = zip.Write(body)
+	_ = zip.Close()
+	if compressed.Len() < len(body) {
+		entry.compressed = compressed.Bytes()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[string]responseEntry)
 	}
-	c.entries[key] = responseEntry{body: body, computed: now}
+	c.entries[key] = entry
 }
 
 // serialize a cold computation across simultaneous viewers, preserving the
@@ -74,15 +88,51 @@ func (c *responseCache) snapshot(key string, build func() ([]byte, error)) (resp
 }
 
 func writeSnapshot(w http.ResponseWriter, r *http.Request, entry responseEntry) {
-	tag := fmt.Sprintf(`"%x"`, sha256.Sum256(entry.body))
+	tag := entry.tag
+	if tag == "" {
+		tag = fmt.Sprintf(`W/"%x"`, sha256.Sum256(entry.body))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("Vary", "Cookie, X-API-Key")
+	w.Header().Set("Vary", "Cookie, X-API-Key, Accept-Encoding")
 	w.Header().Set("ETag", tag)
 	w.Header().Set("X-Snapshot-At", entry.computed.UTC().Format(time.RFC3339Nano))
 	if r.Header.Get("If-None-Match") == tag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	_, _ = w.Write(entry.body)
+	body := entry.body
+	if len(entry.compressed) > 0 && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		w.Header().Set("Content-Encoding", "gzip")
+		body = entry.compressed
+	}
+	_, _ = w.Write(body)
+}
+
+// An explicit gzip refusal overrides a wildcard, including q=0.
+func acceptsGzip(header string) bool {
+	wildcard := false
+	for _, value := range strings.Split(header, ",") {
+		fields := strings.Split(strings.TrimSpace(value), ";")
+		name := strings.TrimSpace(fields[0])
+		quality := 1.0
+		for _, param := range fields[1:] {
+			key, value, ok := strings.Cut(strings.TrimSpace(param), "=")
+			if ok && strings.EqualFold(key, "q") {
+				q, err := strconv.ParseFloat(value, 64)
+				if err != nil || q < 0 || q > 1 {
+					quality = 0
+				} else {
+					quality = q
+				}
+			}
+		}
+		if strings.EqualFold(name, "gzip") {
+			return quality > 0
+		}
+		if name == "*" {
+			wildcard = quality > 0
+		}
+	}
+	return wildcard
 }

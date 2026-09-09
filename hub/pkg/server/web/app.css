@@ -4807,3 +4807,16 @@ body[data-section="assets"] .tblwrap th:nth-child(3), body[data-section="assets"
 .alert-detail { min-width: 0; overflow-wrap: anywhere; }
 .alert-inspect { white-space: normal; text-align: left; text-transform: none; }
 @media (min-width: 1200px) { .alert-split:has(.alert-detail) { grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); } }
+
+/* Density changes spacing, never hides identity or state. */
+body[data-density="comfortable"] .tblwrap td { padding-block: 10px; }
+body[data-density="compact"] .tblwrap td { padding-block: 5px; }
+.rail { overflow-y: auto; }
+.rail-group { width: 100%; border-top: 1px solid var(--line); font-size: 0; margin-top: 8px; }
+.nav-expanded .rail-group { font-size: var(--t-1); padding: 8px 14px 0; color: var(--ink-3); }
+.compact-section-menu { display: none; }
+@media (max-width: 600px) {
+  .app, .nav-expanded .app { grid-template-columns: 1fr; }
+  .rail { display: none; }
+  .compact-section-menu { display: block; width: calc(100% - 16px); margin: 4px 8px; min-height: 36px; }
+}

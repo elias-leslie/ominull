@@ -29,8 +29,9 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
     performanceResults=await page.evaluate(performanceSuite);
     fs.mkdirSync(path.join(root,'build'),{recursive:true});
     fs.writeFileSync(path.join(root,'build/console-performance.json'),JSON.stringify({engine,version:browser.version(),...performanceResults},null,2));
+    if(engine==='chromium') await require('../hub/pkg/server/web_tests/console-design.cjs')(page);
     await require('../hub/pkg/server/web_tests/worker-browser.cjs')(page,context,server,url);
-    results.push({name:'Worker install, two-tab update protection and anonymous offline navigation',pass:true});
+    results.push({name:'Application update guard, two-tab protection and anonymous offline navigation',pass:true});
     if(errors.length)results.push({name:'browser runtime',pass:false,error:errors.join('; ')});
     if(results.some(r=>!r.pass)) {fs.mkdirSync(path.join(root,'build'),{recursive:true});await page.screenshot({path:path.join(root,'build/console-failure.png'),fullPage:true});}
    } catch(error) {
