@@ -9742,7 +9742,7 @@
     if (wasOpen) syncURL(true);
   }
 
-  var hostScopes = {};
+  var hostScopes = Object.create(null);
   function loadHostScope(key) {
     var asset = state.assetByKey[key];
     if (!asset) return;

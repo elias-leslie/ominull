@@ -7,3 +7,14 @@ test('host flow failure does not mark successfully loaded alerts unavailable',as
  assert.equal(scope.hostScopes.host.alerts.total,73);
  assert.equal(scope.hostScopes.host.error || '', '', 'unrelated flow failure poisons alert status');
 });
+
+test('host identifiers cannot inherit or modify object prototypes',async()=>{
+ for(const key of ['__proto__','constructor','toString']) {
+  const assets=Object.create(null);assets[key]={endpoint:{id:'fixture'}};
+  const scope={state:{assetByKey:assets,routeKey:key},renderRoute(){},request(){return Promise.resolve({total:1});}};
+  vm.runInNewContext(code,scope);scope.loadHostScope(key);await new Promise(r=>setImmediate(r));
+  assert.equal(vm.runInNewContext('Object.prototype.loading',scope),undefined);
+  assert.equal(Object.hasOwn(scope.hostScopes,key),true);
+  assert.equal(scope.hostScopes[key].alerts.total,1);
+ }
+});
