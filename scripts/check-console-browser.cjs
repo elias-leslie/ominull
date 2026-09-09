@@ -13,8 +13,9 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
   if(process.env.GITHUB_ACTIONS==='true') {
    const {chromium}=require('../web-build/node_modules/playwright');
    const browser=await chromium.launch({headless:true});
+   const context=await browser.newContext();
+   const page=await context.newPage();
    try {
-    const page=await browser.newPage();
     await page.context().tracing.start({screenshots:true,snapshots:true});
     const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto(url);await page.waitForFunction(()=>window.audit?.state.assets.length>0);
@@ -23,11 +24,17 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
     const accessibility=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();
     results.push({name:'Assets WCAG A/AA automation',pass:accessibility.violations.length===0,error:accessibility.violations.map(v=>v.id).join(', ')});
     performanceResults=await page.evaluate(performanceSuite);
-    fs.mkdirSync(path.join(root,"build"),{recursive:true});
-    await page.context().tracing.stop({path:path.join(root,"build/console-trace.zip")});
     if(errors.length)results.push({name:'browser runtime',pass:false,error:errors.join('; ')});
     if(results.some(r=>!r.pass)) {fs.mkdirSync(path.join(root,'build'),{recursive:true});await page.screenshot({path:path.join(root,'build/console-failure.png'),fullPage:true});}
-   } finally {await browser.close();}
+   } catch(error) {
+    fs.mkdirSync(path.join(root,'build'),{recursive:true});
+    await page.screenshot({path:path.join(root,'build/console-failure.png'),fullPage:true});
+    throw error;
+   } finally {
+    fs.mkdirSync(path.join(root,'build'),{recursive:true});
+    await context.tracing.stop({path:path.join(root,'build/console-trace.zip')});
+    await browser.close();
+   }
   } else {
    cp.execFileSync('st',['browser','open',url],{stdio:'ignore'});
    cp.execFileSync('st',['browser','eval',`(async()=>{if(location.origin!=='http://127.0.0.1:18764')throw Error('Fixture origin required');await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister()));await Promise.all((await caches.keys()).filter(k=>k.startsWith('ominull-shell-v')).map(k=>caches.delete(k)));})()`],{stdio:'ignore'});
