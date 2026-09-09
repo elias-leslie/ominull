@@ -228,3 +228,18 @@ jobs:
         with:
           name: console-soak
           path: build/console-soak.json
+
+  installed-pwa:
+    name: Installed Chromium PWA lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: npm --prefix web-build ci --ignore-scripts
+      - run: web-build/node_modules/.bin/playwright install --with-deps chromium
+      - run: xvfb-run --auto-servernum node scripts/check-installed-pwa.cjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: installed-pwa
+          path: build/installed-pwa.json

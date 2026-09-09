@@ -1,20 +1,22 @@
 // Actual browser workers on the loopback fixture; never an installed production app.
 const assert = require('node:assert/strict');
-module.exports = async function workerLifecycle(page, context, server, url) {
+module.exports = async function workerLifecycle(page, context, server, url, createOther) {
  assert.ok(server, 'Lifecycle tests require an owned fixture origin');
  let other;
  const appURL=url.replace("?demo=true", "?demo=true&pwa-fixture=true");
  try {
   await page.evaluate(async () => {
+   for(const registration of await navigator.serviceWorker.getRegistrations()) await registration.unregister();
    await caches.open('unrelated-fixture-cache');
    await caches.open('ominull-shell-vobsolete');
 
   });
   await page.goto(appURL);
   await page.waitForFunction(() => !!navigator.serviceWorker.controller && !!window.audit);
+  await page.waitForFunction(async () => !(await caches.keys()).includes('ominull-shell-vobsolete'));
   assert.deepEqual((await page.evaluate(() => caches.keys())).sort(),
    ['ominull-shell-vfixture', 'unrelated-fixture-cache']);
-  other = await context.newPage();
+  other = createOther ? await createOther() : await context.newPage();
   await other.goto(appURL);
   await other.waitForFunction(() => !!window.audit);
   await other.evaluate(() => {
@@ -43,7 +45,7 @@ module.exports = async function workerLifecycle(page, context, server, url) {
   assert.ok(await page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration()).waiting));
   assert.equal(await other.locator('.sheet input').inputValue(), 'unsent draft');
   await other.close(); other = null;
-  await page.locator('#pwa-update').click();
+  await Promise.all([page.waitForEvent('load'), page.locator('#pwa-update').click()]);
   await page.waitForFunction(async () => (await caches.keys()).includes('ominull-shell-vfixture-upgrade') && !(await caches.keys()).includes('ominull-shell-vfixture'));
   await page.waitForFunction(() => !!window.audit && !document.getElementById('pwa-update'));
   assert.deepEqual((await page.evaluate(() => caches.keys())).sort(),
