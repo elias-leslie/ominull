@@ -91,7 +91,10 @@
   try {a.openIPv6Monitor();await wait();
    const dialog=document.querySelector('.sheet');assert(dialog.textContent.includes('Capture is passive'),'Missing coverage explanation');
    const input=dialog.querySelector('textarea');input.value='fe80::1 02:00:00:00:00:01';input.dispatchEvent(new Event('input',{bubbles:true}));
-   a.go('traffic');assert(document.querySelectorAll('.sheet').length===2,'Edited monitoring configuration was discarded');
+   const section=a.state.section;a.go('traffic');
+   assert(a.state.section===section && document.querySelector('.sheet').getAttribute('aria-label')==='Leave this work?','Navigation bypassed the draft guard');
+   [...document.querySelectorAll('.sheet button')].find(button=>button.textContent==='Cancel').click();
+   assert(document.querySelector('.sheet textarea').value==='fe80::1 02:00:00:00:00:01','Cancel lost monitoring draft');
   }finally{a.closeAllSheets();window.fetch=original;a.state.demo=true;}
  });
  a.state.section='assets';a.render();
