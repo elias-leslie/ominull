@@ -244,11 +244,21 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, http.StatusBadRequest, "online sync supports only the built-in feed URLs")
 				return
 			}
+			// Build the destinations from constants after validating selection;
+			// no request string becomes an outbound request URL.
 			opts := vuln.FeedSyncOptions{
-				NVDURL:        req.NVDURL,
-				CISAKEVURL:    req.CISAKEVURL,
-				EPSSURL:       req.EPSSURL,
+				NVDURL:        vuln.DefaultNVD20URL,
+				CISAKEVURL:    vuln.DefaultCISAKEVURL,
 				MaxNVDResults: req.MaxNVDResults,
+			}
+			if req.NVDURL == "disabled" {
+				opts.NVDURL = "disabled"
+			}
+			if req.CISAKEVURL == "disabled" {
+				opts.CISAKEVURL = "disabled"
+			}
+			if req.EPSSURL == vuln.DefaultEPSSURL {
+				opts.EPSSURL = vuln.DefaultEPSSURL
 			}
 			snap, err := vuln.SyncFeeds(r.Context(), s.vulnStore, opts, req.SnapshotID, req.Metadata)
 			if err != nil {
