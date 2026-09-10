@@ -4821,3 +4821,17 @@ body[data-density="compact"] .tblwrap td { padding-block: 5px; }
   .rail { display: none; }
   .compact-section-menu { display: block; width: calc(100% - 16px); margin: 4px 8px; min-height: 36px; }
 }
+
+/* Chromium's native table print rule uses a functional media query. Rebuilding
+   headers can retain each evaluated query in the style engine. Keep equivalent
+   screen/paged behavior with one static media rule instead. */
+thead,
+tfoot {
+  break-inside: auto;
+}
+@media (overflow-block: paged) {
+  thead,
+  tfoot {
+    break-inside: avoid;
+  }
+}

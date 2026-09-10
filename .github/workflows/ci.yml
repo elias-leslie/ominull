@@ -61,6 +61,7 @@ jobs:
           name: console-performance-${{ matrix.browser }}
           path: |
             build/console-performance.json
+            build/console-memory.json
             build/console-design/
           if-no-files-found: ignore
 

@@ -25,6 +25,12 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
     const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto(url);await page.waitForFunction(()=>window.audit?.state.assets.length>0);
     results=await page.evaluate(suite);
+    if(engine==='chromium'){
+     const memory=await require('../hub/pkg/server/web_tests/console-memory.cjs')(page);
+     results.push({name:'100 table renders retain no native media queries',pass:true});
+     fs.mkdirSync(path.join(root,'build'),{recursive:true});
+     fs.writeFileSync(path.join(root,'build/console-memory.json'),JSON.stringify(memory,null,2));
+    }
     const {default:AxeBuilder}=require('../web-build/node_modules/@axe-core/playwright');
     const accessibility=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();
     results.push({name:'Assets WCAG A/AA automation',pass:accessibility.violations.length===0,error:accessibility.violations.map(v=>v.id).join(', ')});
