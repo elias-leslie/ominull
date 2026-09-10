@@ -440,8 +440,13 @@ func (s *Store) StoreItemChunk(tenantID, itemID string, chunkIndex int, offset, 
 	}
 
 	// Write chunk to staging assembly file
-	stagingPath := filepath.Join(s.storageDir, fmt.Sprintf("staging_%s.bin", itemID))
-	f, err := os.OpenFile(stagingPath, os.O_WRONLY|os.O_CREATE, 0600)
+	root, err := os.OpenRoot(s.storageDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	stagingPath := fmt.Sprintf("staging_%s.bin", itemID)
+	f, err := root.OpenFile(stagingPath, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open staging file: %w", err)
 	}
@@ -479,7 +484,7 @@ func (s *Store) StoreItemChunk(tenantID, itemID string, chunkIndex int, offset, 
 
 	// If all bytes received, assemble, encrypt, and complete item
 	if newReceived == totalSize {
-		assembledData, err := os.ReadFile(stagingPath)
+		assembledData, err := root.ReadFile(stagingPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read complete staging file: %w", err)
 		}
@@ -537,7 +542,7 @@ func (s *Store) StoreItemChunk(tenantID, itemID string, chunkIndex int, offset, 
 			return nil, err
 		}
 
-		_ = os.Remove(stagingPath)
+		_ = root.Remove(stagingPath)
 		it.Status = "completed"
 		it.SHA256 = plainSHA
 		it.StorageDigest = storageDigest

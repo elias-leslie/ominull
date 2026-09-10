@@ -302,8 +302,7 @@ static void test_executable_hashing_and_lru(void) {
         FILE* np = fopen(noPermBin, "wb");
         if (np) {
             fwrite("NO_PERM", 1, 7, np);
-            fclose(np);
-            chmod(noPermBin, 0000);
+            fchmod(fileno(np), 0000);
 
             make_mock_exe("105", noPermBin);
 
@@ -314,7 +313,8 @@ static void test_executable_hashing_and_lru(void) {
             check(strcmp(permStatus, "permission_denied") == 0,
                   "Unreadable executable status is 'permission_denied'", permStatus);
 
-            chmod(noPermBin, 0644); // restore for cleanup
+            fchmod(fileno(np), 0644); // restore the same open fixture for cleanup
+            fclose(np);
         }
     } else {
         printf("  [*] Skipping permission_denied check (running as root)\n");

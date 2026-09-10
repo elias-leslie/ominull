@@ -200,8 +200,8 @@ func (a *Authority) Close() error {
 
 // GetOrCreateTenantKey returns or generates the Ed25519 response keypair for a tenant.
 func (a *Authority) GetOrCreateTenantKey(tenantID string) (ed25519.PublicKey, string, error) {
-	if tenantID == "" {
-		return nil, "", errors.New("empty tenant ID")
+	if tenantID == "" || tenantID == "." || tenantID == ".." || strings.ContainsAny(tenantID, "/\\\x00") {
+		return nil, "", errors.New("invalid tenant ID")
 	}
 
 	a.mu.Lock()
@@ -252,8 +252,15 @@ func (a *Authority) GetOrCreateTenantKey(tenantID string) (ed25519.PublicKey, st
 
 	// Maintain file key for legacy backwards compatibility
 	if a.cfg.StateDir != "" {
-		keyPath := filepath.Join(a.cfg.StateDir, "keys", tenantID+".key")
-		_ = os.WriteFile(keyPath, []byte(keyHex), 0600)
+		root, err := os.OpenRoot(filepath.Join(a.cfg.StateDir, "keys"))
+		if err != nil {
+			return nil, "", fmt.Errorf("open legacy key directory: %w", err)
+		}
+		err = root.WriteFile(tenantID+".key", []byte(keyHex), 0600)
+		_ = root.Close()
+		if err != nil {
+			return nil, "", fmt.Errorf("write legacy tenant key: %w", err)
+		}
 	}
 
 	a.tenantKeys[tenantID] = priv

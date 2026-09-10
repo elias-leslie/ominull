@@ -364,19 +364,22 @@ static void DetectPackageProvenance(LINUX_AGENT_CONFIG* config) {
  * checked because a 0644 key file would give back exactly the exposure the
  * file was introduced to remove. */
 static bool ReadKeyFile(const char* path, char* out, size_t cap) {
+    /* Validate the opened object, never a pathname checked before fopen. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        printf("[!] Cannot open the device credential file: %s\n", strerror(errno));
+        return false;
+    }
     struct stat st;
-    if (stat(path, &st) != 0) {
-        printf("[!] Cannot read the device credential file %s: %s\n", path, strerror(errno));
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (st.st_uid != 0 && st.st_uid != geteuid()) ||
+        (st.st_mode & (S_IRWXG | S_IRWXO))) {
+        printf("[!] Device credential requires an owner-only regular file.\n");
+        close(fd);
         return false;
     }
-    if (st.st_mode & (S_IRGRP | S_IROTH)) {
-        printf("[!] Device credential file %s is readable beyond its owner; tighten it to 0600.\n", path);
-    }
-    FILE* f = fopen(path, "r");
-    if (!f) {
-        printf("[!] Cannot open the device credential file %s: %s\n", path, strerror(errno));
-        return false;
-    }
+    FILE* f = fdopen(fd, "r");
+    if (!f) { close(fd); return false; }
     char line[512] = {0};
     char* got = fgets(line, sizeof(line), f);
     fclose(f);

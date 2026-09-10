@@ -8,6 +8,16 @@
  }
  function assert(condition, message) { if (!condition) throw new Error(message); }
  a.state.section = 'assets'; a.render();
+ await check('DOM builder treats untrusted text and exceptions as literal text',()=>{
+  const payload='<img src=x onerror="window.fixtureExecuted=true">';
+  const text=document.createElement('span');text.textContent=payload;
+  const exception=new Error(payload);
+  const container=a.h('div',{},text.textContent,exception.message,[a.h('span',{text:payload})]);
+  document.body.appendChild(container);
+  assert(container.textContent===payload.repeat(3),'Text changed during rendering');
+  assert(!container.querySelector('img') && !window.fixtureExecuted,'Text interpreted as HTML');
+  container.remove();
+ });
  await check('all asset comparators accept real row types and retain sort focus', () => {
   for (let col=2; col<=9; col++) for (const dir of ['asc','desc']) { a.state.assetSort={col,dir}; a.sortAssetRows(a.state.assets); a.render(); }
   a.state.assetSort=null; a.render();

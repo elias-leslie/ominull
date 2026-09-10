@@ -129,6 +129,11 @@ func (s *Server) handleSoftwareInventory(w http.ResponseWriter, r *http.Request)
 
 // handleVulnerabilities handles querying and syncing the CVE catalog and correlated matches.
 func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
+	// Both the catalog and /sync alias reach this handler.
+	if r.Method != http.MethodGet && r.Header.Get("X-Role") != "admin" {
+		writeJSONError(w, http.StatusForbidden, "admin role required")
+		return
+	}
 	tenantID := s.tenantFromRequest(r)
 	if tenantID == "" {
 		tenantID = "default"
@@ -231,6 +236,14 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.Online {
+			// Request bodies may select the built-in feeds or disable one;
+			// custom mirrors require trusted programmatic configuration.
+			if (req.NVDURL != "" && req.NVDURL != "disabled" && req.NVDURL != vuln.DefaultNVD20URL) ||
+				(req.CISAKEVURL != "" && req.CISAKEVURL != "disabled" && req.CISAKEVURL != vuln.DefaultCISAKEVURL) ||
+				(req.EPSSURL != "" && req.EPSSURL != "disabled" && req.EPSSURL != vuln.DefaultEPSSURL) {
+				writeJSONError(w, http.StatusBadRequest, "online sync supports only the built-in feed URLs")
+				return
+			}
 			opts := vuln.FeedSyncOptions{
 				NVDURL:        req.NVDURL,
 				CISAKEVURL:    req.CISAKEVURL,

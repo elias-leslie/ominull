@@ -470,3 +470,33 @@ func TestEvidence_RetentionPruningAndLegalHold(t *testing.T) {
 		t.Fatalf("expected b3 to be preserved: %v", err)
 	}
 }
+
+func TestChunkStagingCannotFollowOutsideSymlink(t *testing.T) {
+	store, dir, cleanup := setupTestStore(t)
+	defer cleanup()
+	bundle, err := store.CreateBundle("fixture", "endpoint", "job", "diagnostic", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.CreateItem("fixture", bundle.ID, "fixture.bin", "application/octet-stream", 4, "collected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("safe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "staging_"+item.ID+".bin")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.StoreItemChunk("fixture", item.ID, 0, 0, 4, []byte("evil")); err == nil {
+		t.Error("staging followed outside symlink")
+	}
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "safe" {
+		t.Error("outside file was modified")
+	}
+}

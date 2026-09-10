@@ -1262,3 +1262,56 @@ func TestResponseRoutesFailClosedByDefault(t *testing.T) {
 		t.Errorf("telemetry response contained response_offers while gated off: %s", wTel.Body.String())
 	}
 }
+
+func TestPackageNameRejectsPathVersions(t *testing.T) {
+	for _, version := range []string{"../escape", "1.2.3/../../escape", `1.2.3\escape`, "", "1.2.3?x"} {
+		if got := agentPackageName(version, "deb"); got != "" {
+			t.Errorf("accepted unsafe version %q: %q", version, got)
+		}
+	}
+}
+
+func TestVulnerabilitySyncBoundaries(t *testing.T) {
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.SetResponseEnabled(true)
+	if err := store.UpsertOperator("analyst@example.invalid", "analyst", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/v1/vulnerabilities", "/api/v1/vulnerabilities/sync"} {
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{"vulnerabilities":[{"cve_id":"CVE-2026-0001"}]}`))
+		req.AddCookie(sessionFor(t, srv, "analyst@example.invalid", "analyst"))
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s non-admin mutation: %d", path, w.Code)
+		}
+	}
+	req := httptest.NewRequest("POST", "/api/v1/vulnerabilities/sync", strings.NewReader(`{"online":true,"nvd_url":"http://127.0.0.1:1/fixture","cisa_kev_url":"disabled"}`))
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid online source: %d", w.Code)
+	}
+}
+
+func TestSetupStateRemainsJSONData(t *testing.T) {
+	sentinel := `</script><script>window.fixtureExecuted=true</script>"` + "\u2028"
+	doc, _ := setupWizardDocument(sentinel, "1.8.38", false)
+	start := strings.Index(string(doc), "var SETUP=") + len("var SETUP=")
+	end := strings.Index(string(doc)[start:], ",current=0") + start
+	var state map[string]interface{}
+	if start < len("var SETUP=") || end < start {
+		t.Fatal("setup state missing")
+	}
+	if err := json.Unmarshal(doc[start:end], &state); err != nil {
+		t.Fatal(err)
+	}
+	if state["csrf"] != sentinel {
+		t.Fatal("state changed")
+	}
+	if bytes.Contains(doc[start:end], []byte("</script>")) {
+		t.Fatal("JSON escapes inline script")
+	}
+}

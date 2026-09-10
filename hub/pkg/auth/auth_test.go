@@ -50,3 +50,11 @@ func TestJWTTokenLifecycle(t *testing.T) {
 		t.Errorf("expected validation to fail with wrong secret")
 	}
 }
+
+// The legacy helper has no runtime callers; reject fast-hash verifiers before
+// a future caller can accidentally make them an authentication mechanism.
+func TestLegacyPasswordVerifierIsRejected(t *testing.T) {
+	if CheckPassword("fixture-only", "ba60912f8312e9443c2731cbe06cd1019e4ce773ce656c12bfb0a3f9504ba69a", "fixture-salt") {
+		t.Fatal("legacy fast verifier accepted")
+	}
+}

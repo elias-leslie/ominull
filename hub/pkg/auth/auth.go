@@ -66,26 +66,15 @@ func HashPassword(password string) (hash, salt string, err error) {
 // current hardware: unnoticeable on a login, ruinous on a dictionary.
 const bcryptCost = 12
 
-// CheckPassword verifies a password against a stored verifier.
-//
-// It accepts the legacy hex SHA-256 form as well, so a users table written by
-// an older build still authenticates rather than locking everyone out; those
-// rows should be rehashed on next login by whatever calls this. The legacy
-// comparison stays constant-time.
+// CheckPassword accepts bcrypt verifiers only. The old SHA-256 fallback had
+// no runtime callers and must not become a future password-authentication path.
 func CheckPassword(password, hash, salt string) bool {
-	if strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$") {
-		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
-	}
-
-	h := sha256.New()
-	h.Write([]byte(salt + password))
-	expected := hex.EncodeToString(h.Sum(nil))
-	return hmac.Equal([]byte(expected), []byte(hash))
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
 // NeedsRehash reports whether a stored verifier is in the superseded format, so
-// a caller that has just verified a password in the legacy form can replace it
-// with a bcrypt one while it still holds the plaintext.
+// an importer can require a password reset instead of authenticating a legacy
+// fast-hash verifier. CheckPassword deliberately rejects those verifiers.
 func NeedsRehash(hash string) bool {
 	return !strings.HasPrefix(hash, "$2a$") && !strings.HasPrefix(hash, "$2b$") && !strings.HasPrefix(hash, "$2y$")
 }

@@ -1333,6 +1333,9 @@ func probeServesHub(base string) bool {
 // agentPackageName is the on-disk filename of an agent package. Signature and
 // digest sidecars hang off it, so name resolution has exactly one home.
 func agentPackageName(version, pkg string) string {
+	if !releaseVersion.MatchString(version) {
+		return ""
+	}
 	switch pkg {
 	case "windows-native":
 		return "ominull-agent-windows-" + version + ".msi"
@@ -1362,6 +1365,9 @@ func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
 // as an install failure on every endpoint.
 func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (map[string]string, bool) {
 	name := agentPackageName(version, pkg)
+	if name == "" || !downloadArtifact.MatchString(name) {
+		return nil, false
+	}
 	if _, err := os.Stat(filepath.Join(s.binaryDir, name)); err != nil {
 		return nil, false
 	}
@@ -1525,6 +1531,10 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	version := strings.TrimSpace(req.Version)
 	if version == "" {
 		version = s.desiredAgentVersion()
+	}
+	if agentPackageName(version, "deb") == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid release version")
+		return
 	}
 	if compareVersions(s.agentVersion, version) > 0 {
 		http.Error(w, `{"error":"refusing to downgrade: hub bundle ships agent `+s.agentVersion+`"}`, http.StatusBadRequest)
@@ -1839,6 +1849,7 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 // the signed release artifacts, and the five payloads the bootstrap scripts
 // name. Anything else is not found, whether or not it is on disk.
 var (
+	releaseVersion   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.msi|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.sha256)?$`)
 	downloadPayloads = map[string]bool{
 		// Native installers fetch only signed package artifacts. Raw binaries

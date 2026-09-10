@@ -443,7 +443,9 @@ func probeSNMP(ip string) string {
 
 // -------------------------------------------------- TLS Certificate Inspection
 
-// probeTLSCert performs a non-blocking TLS handshake to extract subject, SAN, and issuer data
+// probeTLSCert extracts untrusted certificate metadata, including self-signed
+// certificates. This is discovery evidence, not identity verification; it sends
+// no credentials and does not change the TLS policy of hub or agent transports.
 func probeTLSCert(ip string, port int) string {
 	target := net.JoinHostPort(ip, strconv.Itoa(port))
 	dialer := &net.Dialer{Timeout: probeTimeout}
@@ -489,7 +491,9 @@ func probeTLSCert(ip string, port int) string {
 
 // -------------------------------------------------- HTTP Title & Header Fingerprinting
 
-// probeHTTPInfo fetches root HTTP response to extract HTML <title>, Server header, and status
+// probeHTTPInfo fetches public root-page metadata without credentials. Private
+// appliances commonly use self-signed certificates; the observed title/header
+// is an untrusted fingerprint, never authenticated identity or trust proof.
 func probeHTTPInfo(ip string, port int, isTLS bool) (title string, server string, banner string) {
 	scheme := "http"
 	if isTLS {

@@ -128,3 +128,16 @@ func TestAuthority_FullLifecycle(t *testing.T) {
 		t.Fatalf("expected SignGrant to fail on locked session")
 	}
 }
+
+func TestTenantKeyRejectsPathComponents(t *testing.T) {
+	a, err := NewAuthority(Config{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, id := range []string{"../escaped", "a/b", `a\b`, ".", ".."} {
+		if _, _, err := a.GetOrCreateTenantKey(id); err == nil {
+			t.Errorf("accepted path-shaped tenant %q", id)
+		}
+	}
+}

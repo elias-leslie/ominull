@@ -6816,7 +6816,7 @@
           submitBtn.textContent = "Generating Key & Unlocking\u2026";
           errBox.setAttribute("hidden", "");
 
-          var browserSessionId = "sess-browser-" + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          var browserSessionId = "sess-browser-" + bufToHex(window.crypto.getRandomValues(new Uint8Array(16)).buffer);
 
           window.crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"])
             .then(function (keyPair) {

@@ -277,7 +277,25 @@ static void test_busy_flows_rotate(void) {
         check(seen[i], "busy flow starved behind fixed table order");
 }
 
+static void test_credential_file_boundary(void) {
+    char path[] = "/tmp/ominull-key-test-XXXXXX", out[512] = {0}, linkpath[128];
+    int fd = mkstemp(path);
+    check(fd >= 0, "create credential fixture");
+    if (fd < 0) return;
+    const char *fixture = "omd_fixture_only_not_a_real_credential\n";
+    check(write(fd, fixture, strlen(fixture)) == (ssize_t)strlen(fixture), "write credential fixture");
+    check(ReadKeyFile(path, out, sizeof(out)), "private regular credential file rejected");
+    check(fchmod(fd, 0644) == 0, "set fixture mode");
+    check(!ReadKeyFile(path, out, sizeof(out)), "world-readable credential accepted");
+    check(fchmod(fd, 0600) == 0, "restore fixture mode");
+    snprintf(linkpath, sizeof(linkpath), "%s-link", path);
+    check(symlink(path, linkpath) == 0, "create credential symlink fixture");
+    check(!ReadKeyFile(linkpath, out, sizeof(out)), "credential symlink accepted");
+    unlink(linkpath); close(fd); unlink(path);
+}
+
 int main(void) {
+    test_credential_file_boundary();
     test_legacy_config();
     test_package_query();
     test_socket_state_filter();

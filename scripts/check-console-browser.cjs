@@ -2,6 +2,8 @@
  * headless profile; GitHub CI uses an isolated Playwright browser. */
 const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
 const root=path.resolve(__dirname,'..');
+const execFile=require('node:util').promisify(cp.execFile);
+async function st(args){return (await execFile('st',args,{encoding:'utf8',maxBuffer:1024*1024})).stdout;}
 const suite=fs.readFileSync(path.join(root,'hub/pkg/server/web_tests/console-browser.js'),'utf8');
 const performanceSuite=fs.readFileSync(path.join(root,'hub/pkg/server/web_tests/console-performance.js'),'utf8');
 const url='http://127.0.0.1:18764/?demo=true#/assets';
@@ -44,13 +46,13 @@ const url='http://127.0.0.1:18764/?demo=true#/assets';
     await browser.close();
    }
   } else {
-   cp.execFileSync('st',['browser','open',url],{stdio:'ignore'});
-   cp.execFileSync('st',['browser','eval',`(async()=>{if(location.origin!=='http://127.0.0.1:18764')throw Error('Fixture origin required');await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister()));await Promise.all((await caches.keys()).filter(k=>k.startsWith('ominull-shell-v')).map(k=>caches.delete(k)));})()`],{stdio:'ignore'});
-   cp.execFileSync('st',['browser','reload'],{stdio:'ignore'});
-   const output=cp.execFileSync('st',['browser','eval',suite],{encoding:'utf8',maxBuffer:1024*1024});
+   await st(['browser','open',url]);
+   await st(['browser','eval',`(async()=>{if(location.origin!=='http://127.0.0.1:18764')throw Error('Fixture origin required');await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister()));await Promise.all((await caches.keys()).filter(k=>k.startsWith('ominull-shell-v')).map(k=>caches.delete(k)));})()`]);
+   await st(['browser','reload']);
+   const output=await st(['browser','eval',suite]);
    const detail=output.match(/details:([^|\s]+)/);
    results=JSON.parse(detail?fs.readFileSync(path.resolve(root,detail[1]),'utf8'):output);
-   const perfOutput=cp.execFileSync('st',['browser','eval',performanceSuite],{encoding:'utf8',maxBuffer:1024*1024});
+   const perfOutput=await st(['browser','eval',performanceSuite]);
    const perfDetail=perfOutput.match(/details:([^|\s]+)/);
    performanceResults=JSON.parse(perfDetail?fs.readFileSync(path.resolve(root,perfDetail[1]),'utf8'):perfOutput);
   }

@@ -206,6 +206,9 @@ const (
 )
 
 // FeedSyncOptions configures the vulnerability feed ingestion pipeline.
+// A nil HTTPClient permits only built-in URLs and does not follow redirects.
+// A custom client and mirror URL are trusted programmatic configuration, never
+// accepted from the operator API request body.
 type FeedSyncOptions struct {
 	HTTPClient    *http.Client
 	NVDURL        string
@@ -218,7 +221,11 @@ type FeedSyncOptions struct {
 // FetchCISAKEV retrieves and parses the CISA KEV feed from the given URL.
 func FetchCISAKEV(ctx context.Context, client *http.Client, url string) ([]CISAKEVItem, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		if url != "" && url != DefaultCISAKEVURL {
+			return nil, errors.New("custom feed URL requires a trusted configured client")
+		}
+		url = DefaultCISAKEVURL
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	if url == "" {
 		url = DefaultCISAKEVURL
@@ -249,7 +256,11 @@ func FetchCISAKEV(ctx context.Context, client *http.Client, url string) ([]CISAK
 // FetchEPSS retrieves and parses the EPSS feed from the given URL.
 func FetchEPSS(ctx context.Context, client *http.Client, url string) (map[string]EPSSScore, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		if url != "" && url != DefaultEPSSURL {
+			return nil, errors.New("custom feed URL requires a trusted configured client")
+		}
+		url = DefaultEPSSURL
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	if url == "" {
 		url = DefaultEPSSURL
@@ -349,7 +360,11 @@ func ParseNVD20WithTotal(r io.Reader) ([]Vulnerability, int, error) {
 // FetchNVD20Page retrieves and parses a single page from the NVD 2.0 API.
 func FetchNVD20Page(ctx context.Context, client *http.Client, baseURL, apiKey string, startIndex, resultsPerPage int) ([]Vulnerability, int, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		if baseURL != "" && baseURL != DefaultNVD20URL {
+			return nil, 0, errors.New("custom feed URL requires a trusted configured client")
+		}
+		baseURL = DefaultNVD20URL
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	if baseURL == "" {
 		baseURL = DefaultNVD20URL

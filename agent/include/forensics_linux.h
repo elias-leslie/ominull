@@ -1911,10 +1911,11 @@ static inline bool Forensics_CollectShellHistory(char** out_data, size_t* out_si
     int files_collected = 0;
     for (int i = 0; i < target_count; i++) {
         const char* target_path = history_targets[i];
-        if (access(target_path, F_OK) != 0) continue;
-
+        /* Existence is not an authorization check; open once and handle the
+         * actual result instead of racing a separate pathname lookup. */
         int fd = open(target_path, O_RDONLY);
         if (fd < 0) {
+            if (errno == ENOENT) continue;
             char header[512];
             int hlen = snprintf(header, sizeof(header), "=== %s [permission denied] ===\n\n", target_path);
             if (off + (size_t)hlen < max_bytes) {
