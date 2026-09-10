@@ -40,9 +40,9 @@ Scanning results after publication are recorded below, separately from CI succes
   target was used to reproduce SSRF.
 - **Related authorization defect:** POST to the general vulnerabilities endpoint
   previously accepted an analyst while its `/sync` alias required admin.
-  A real handler/cookie regression reproduced HTTP200 on the alias bypass;
-  both paths now reject the analyst with403. Bad online source URLs return400.
-- **#31, session identifier:** browser response session IDs now use128 random
+  A real handler/cookie regression reproduced HTTP 200 on the alias bypass;
+  both paths now reject the analyst with 403. Bad online source URLs return 400.
+- **#31, session identifier:** browser response session IDs now use 128 random
   bits from Web Crypto instead of `Math.random`. The regression rejects insecure
   randomness. Ephemeral Ed25519 signing and server response authorization remain.
 - **#15, legacy password helper:** repository-wide call inspection found only
@@ -74,18 +74,19 @@ The following alerts were reviewed rather than patched to change correct behavio
 
 ## Memory experiment
 
-The earlier30-minute installed1007-asset soak showed bounded JS heap, DOM and
-listeners but embedder-heap five-minute medians9.42→11.32MB. That observation did
+The earlier 30-minute installed 1007-asset soak showed bounded JS heap, DOM and
+listeners but embedder-heap five-minute medians 9.42→11.32 MB. That observation did
 not establish an application leak.
 
-Checkpoint593cee7 runs three matched isolated installed-Chromium jobs: repeated
+Checkpoint 593cee7 runs three matched isolated installed-Chromium jobs: repeated
 sort/detail rebuilds, idle polling, and the same rebuild workload without the
-long-task observer. Each lasts30minutes at1280×720,4xCPU,150ms latency and
-187500B/s download. All preserve1007fixture assets and at most100mounted rows.
+long-task observer. Each lasts 30 minutes at 1280×720, 4x CPU, 150 ms latency and
+187,500 B/s download. All preserve 1,007 fixture assets and at most 100 mounted rows.
 Start/end heap snapshots and delayed repeated-GC checkpoints distinguish retained
 objects from delayed native collection. Snapshot instrumentation differs from the
 original soak and can itself affect collection; compare the new controls with
-one another before attributing any trend. Results pending at this checkpoint.
+one another before attributing any trend. All three jobs passed in workflow 34419900099. Compact measurements are in
+[1.8.39-memory-controls.json](1.8.39-memory-controls.json).
 
 ## IPv6 test-machine evidence
 
@@ -109,14 +110,134 @@ off on the IPv4 reference LAN. Temporary test files are removed after verificati
 ## Verification checkpoint
 
 Fail-before logs, managed browser output, race/build results and memory artifacts
-are preserved in the private audit output directory. Local browser15behavior/
+are preserved in the private audit output directory. Local browser 15 behavior/
 row-budget checks pass, including literal-text rendering. A harness failure was
 also reproduced: synchronous ST browser commands blocked the fixture HTTP server
 in the same Node process. Asynchronous commands repair the self-contained local
 run without changing application behavior.
 
 Full Go vet/race, native build, Node regressions, version and managed gates pass
-at the recorded checkpoint. Gitleaks reports only the known665795f placeholder;
+at the recorded checkpoint. Gitleaks reports only the known 665795f placeholder;
 real-infrastructure hygiene is clean. The managed service adapter still has no
-remote Go hub deployment hook; rebuild jobe252e5fcd42744ba8182c5f5d8836fc4 failed.
-Canonical Ominull release, final scanning and memory results are pending here.
+remote Go hub deployment hook; rebuild job e252e5fcd42744ba8182c5f5d8836fc4 failed.
+Subsequent canonical release, scanning and memory results follow below.
+
+
+## Published scanning result
+
+At `d91f7c1`, CodeQL workflow 34421098942 completed successfully and canonical
+`st check codeql` returned **zero open alerts**. Of the original 22, **16 are
+fixed**, #6–8/#22 were dismissed as false positives with evidence comments, and
+#23–24 were closed as intentional scanner behavior (`won't fix`). This is triage
+plus remediation, not a claim that all 22 were exploitable defects. No query,
+workflow or security gate was disabled. The raw request URL no longer reaches
+feed options: the handler builds destinations from approved constants.
+
+The alert disposition API was checked against [GitHub's documented update
+endpoint](https://docs.github.com/en/rest/code-scanning/code-scanning#update-a-code-scanning-alert).
+The browser metric is [Chromium's `embedderHeapUsedSize`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-getHeapUsage),
+which measures the embedder's garbage-collected heap; it is not process RSS or
+physical battery use.
+
+
+## Terminal regression gate correction
+
+Security checkpoint 71b3615 passed every CI job in 34420882021. The constant-feed
+checkpoint d91f7c1 failed CI 34421099372 only in the existing terminal idle test:
+its five-second deadline raced the manager's five-second sweep and reported
+failure with the session already closed. The release was stopped during package
+building before deployment; its failure evidence is preserved.
+
+The test now observes real socket-frame receipt, asserts agent output leaves the
+operator idle deadline unchanged, then calls the same production sweep after that
+deadline. It passes 20 race-enabled repetitions in 4.29 seconds; all terminal race
+tests pass in 2.062 seconds. Temporarily restoring the old stdout-renews-deadline
+bug made the revised test fail in 0.016 seconds. Production terminal code was
+restored unchanged. The full canonical release was restarted with no skipped gate.
+
+
+## Intermediate security release
+
+The full canonical release completed **v1.8.39** hub first, then explicit Linux
+and Windows canaries and all six frozen online endpoints, with zero provenance
+issues. Two initially offline endpoints remain queued; their manual follow-up is
+deferred by the user. No release gate was skipped. The earlier stopped package
+build is retained as failure evidence. Terminal-test correction `df8ce38` changes
+no production terminal behavior.
+
+
+Live verification confirmed served JS/CSS hashes, signed-cookie console/status
+HTTP 200 with no key in the cookie GET document, unauthorized topology validator
+HTTP 401, two distinct 100-entry audit pages, and disabled/inactive IPv6 capture.
+The current topology snapshot contained 1,207 nodes / 1,315 edges / 11,337 conversations:
+5,711,975 identity bytes versus 411,852 gzip bytes, followed by 304/zero bytes in
+0.59ms. Its first observed read took 13.18 seconds. The dataset changed since the
+prior release; this is a bounded live observation, not a comparable query-speed
+benchmark or an improvement claim. No topology query changed in this pass.
+
+
+## Native-memory attribution and verified workaround
+
+The three 30-minute controls produced 343 samples without browser errors.
+Warm DOM/listener counts stayed at 5,621/464 with one document. First-to-last
+five-minute JS heap medians were 4.77→4.40 MB (stress), 4.64→4.19 MB (idle),
+and 4.74→4.38 MB (stress without the long-task observer). Native medians rose
+9.51→11.42 MB, 8.68→10.23 MB and 9.41→13.70 MB respectively; the last value
+includes collection spikes and drops to 10.87 MB after the snapshot. These are
+bounded instrumented observations, not process RSS or production percentiles.
+
+Heap retainers identify two different sources:
+
+- Inspector network history retained 5,770/4,602/5,724 additional native
+  `NetworkResourcesData::ResourceData` objects (1.66/1.33/1.65 MB self size).
+  A fresh controlled page receiving 500 fixture requests retained 1,000 objects
+  under two recording sessions; disabling one session released exactly 500.
+  This is browser measurement overhead. Clearing application data would not
+  address it. Causal workflow 34422522252 passed.
+- Chromium's style engine retained functional media-query results during table
+  rebuilds. The controlled pre-fix run 34422763533 counted 16→116 native
+  `MediaQuerySet` objects after 100 renders, then 316 after 100 detail cycles.
+  Plain controls did not reproduce this growth. The browser's default table
+  header/footer print rule uses `if(media(overflow-block: paged): avoid;)`.
+
+The application now supplies the equivalent explicit screen/paged rule for
+`thead` and `tfoot`. On the same Chromium 153.0.8010.12 and fixture workload,
+workflow 34423042642 stayed at **15→15→15** native media-query objects
+([compact comparison](1.8.40-native-memory.json)): zero
+additional retained queries versus 300 before. This is a matched short causal
+experiment; the post-fix workload was not another 30-minute soak. Native heap
+as a whole can still vary with inspector history and garbage collection.
+
+The new behavioral regression failed against the pre-fix browser snapshots
+(`16 -> 116`) and passes on the fix. All jobs in CI 34423009353 passed, including screen
+`break-inside: auto`, print `break-inside: avoid`, all three browser engines,
+responsive accessibility checks and installed PWA lifecycle on Linux/Windows.
+The explicit rule preserves print behavior without discarding application state.
+Chromium's [default table rules](https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/core/html/resources/html.css)
+provide source context; measured browser version and actual retainers establish
+this result, not an assumption about future browser versions.
+
+
+## Final release and remaining limits
+
+The full canonical **v1.8.40** release passed every local gate, deployed the hub
+first, verified Linux/Windows canaries, and converged all six frozen online
+endpoints with zero native provenance issues. Version sites and generated package
+digests are included in this checkpoint. The managed remote-service adapter gap
+remains; actual deployment used the project's canonical release script.
+
+Live verification passed served JS/CSS hash matching, credential-free signed-cookie
+console and diagnostics, unauthorized conditional reads returning 401, two
+distinct 100-entry audit pages, registry freshness, and disabled/inactive IPv6
+monitoring. A cached topology snapshot had 1,223 nodes, 1,331 edges and 11,970
+conversations: 5,990,262 identity bytes versus 427,917 gzip bytes; a conditional
+read returned 304/zero bytes in 0.74 ms. The observed initial read was 4.82 ms
+and was already cached. It cannot be compared with the prior cold read as a
+query-speed improvement. The native-memory change does not alter topology queries.
+
+Task-owned test files were removed from both VMs, fixture servers stopped, and
+the managed headless browser returned to a blank page. Original audit fixes and
+completed topology/attribution/IPv6 implementation remain intact. As explicitly
+requested, manual screen-reader/200% zoom review, interactive public Google
+sign-in, physical battery measurement and follow-up on the two offline agents
+are deferred, not claimed as passed. No shared-LAN IPv6 capability was enabled.

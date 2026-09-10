@@ -1,0 +1,29 @@
+{
+  "browser": "Chromium 153.0.8010.12",
+  "scope": "Isolated fixture; matched short causal experiment, not post-fix 30-minute soak",
+  "before": {
+    "commit": "2678b3605249ad726c912d7d67874df38e38a29a",
+    "workflow": 34422763533,
+    "nativeMediaQuerySets": {
+      "initial": 16,
+      "after100Renders": 116,
+      "after100AdditionalDetailCycles": 316
+    }
+  },
+  "after": {
+    "commit": "fb6a219ade61bb0ec88cbd83742adf900ec9ad6d",
+    "workflow": 34423042642,
+    "nativeMediaQuerySets": {
+      "initial": 15,
+      "after100Renders": 15,
+      "after100AdditionalDetailCycles": 15
+    }
+  },
+  "regression": {
+    "renders": 100,
+    "before": 15,
+    "after": 15,
+    "screen": "auto",
+    "print": "avoid"
+  }
+}

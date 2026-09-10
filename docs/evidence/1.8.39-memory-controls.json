@@ -1,0 +1,317 @@
+{
+  "source": "593cee76fe54631deef87ad0f111e1a38e12b0a2",
+  "workflow": 34419900099,
+  "conditions": {
+    "browser": "Chromium153.0.8010.12",
+    "viewport": [
+      1280,
+      720
+    ],
+    "cpu_slowdown": 4,
+    "network_latency_ms": 150,
+    "download_bytes_per_second": 187500,
+    "isolated_installed_app": true
+  },
+  "runs": [
+    {
+      "mode": "idle",
+      "duration_ms": 1805586,
+      "samples": 117,
+      "errors": [],
+      "all_assets_1007": true,
+      "max_mounted_rows": 100,
+      "five_minute_medians": [
+        {
+          "interval": 1,
+          "js_heap_bytes": 4641394,
+          "embedder_heap_bytes": 8683492,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 2,
+          "js_heap_bytes": 4111136,
+          "embedder_heap_bytes": 8960856,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 3,
+          "js_heap_bytes": 4182306,
+          "embedder_heap_bytes": 9222924,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 4,
+          "js_heap_bytes": 4187556,
+          "embedder_heap_bytes": 9580496,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 5,
+          "js_heap_bytes": 4188216,
+          "embedder_heap_bytes": 9845128,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 6,
+          "js_heap_bytes": 4191544,
+          "embedder_heap_bytes": 10227424,
+          "dom_nodes": 5621,
+          "listeners": 464
+        }
+      ],
+      "post_snapshot_heap": {
+        "usedSize": 4639976,
+        "totalSize": 5566464,
+        "embedderHeapUsedSize": 10641920,
+        "backingStorageSize": 1014761
+      },
+      "largest_native_retainer_deltas": [
+        {
+          "type": "native",
+          "name": "blink::NetworkResourcesData::ResourceData",
+          "before": 41,
+          "after": 4643,
+          "count_delta": 4602,
+          "bytes_delta": 1325376
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQueryFeatureExpNode",
+          "before": 33,
+          "after": 1499,
+          "count_delta": 1466,
+          "bytes_delta": 117280
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuery",
+          "before": 34,
+          "after": 1500,
+          "count_delta": 1466,
+          "bytes_delta": 46912
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuerySet",
+          "before": 37,
+          "after": 1503,
+          "count_delta": 1466,
+          "bytes_delta": 35184
+        },
+        {
+          "type": "native",
+          "name": "blink::HeapVectorBacking<cppgc::internal::BasicMember<const blink::MediaQuery, cppgc::internal::StrongMemberTag, cppgc::internal::DijkstraWriteBarrierPolicy>>",
+          "before": 34,
+          "after": 1500,
+          "count_delta": 1466,
+          "bytes_delta": 35184
+        }
+      ]
+    },
+    {
+      "mode": "stress",
+      "duration_ms": 1815527,
+      "samples": 113,
+      "errors": [],
+      "all_assets_1007": true,
+      "max_mounted_rows": 100,
+      "five_minute_medians": [
+        {
+          "interval": 1,
+          "js_heap_bytes": 4773488,
+          "embedder_heap_bytes": 9508552,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 2,
+          "js_heap_bytes": 4291572,
+          "embedder_heap_bytes": 9805616,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 3,
+          "js_heap_bytes": 4354568,
+          "embedder_heap_bytes": 10157864,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 4,
+          "js_heap_bytes": 4379504,
+          "embedder_heap_bytes": 10533720,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 5,
+          "js_heap_bytes": 4398688,
+          "embedder_heap_bytes": 11121356,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 6,
+          "js_heap_bytes": 4397168,
+          "embedder_heap_bytes": 11420920,
+          "dom_nodes": 5621,
+          "listeners": 464
+        }
+      ],
+      "post_snapshot_heap": {
+        "usedSize": 4821472,
+        "totalSize": 5566464,
+        "embedderHeapUsedSize": 11242224,
+        "backingStorageSize": 1014725
+      },
+      "largest_native_retainer_deltas": [
+        {
+          "type": "native",
+          "name": "blink::NetworkResourcesData::ResourceData",
+          "before": 41,
+          "after": 5811,
+          "count_delta": 5770,
+          "bytes_delta": 1661760
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQueryFeatureExpNode",
+          "before": 32,
+          "after": 2609,
+          "count_delta": 2577,
+          "bytes_delta": 206160
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuery",
+          "before": 33,
+          "after": 2610,
+          "count_delta": 2577,
+          "bytes_delta": 82464
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuerySet",
+          "before": 36,
+          "after": 2613,
+          "count_delta": 2577,
+          "bytes_delta": 61848
+        },
+        {
+          "type": "native",
+          "name": "blink::HeapVectorBacking<cppgc::internal::BasicMember<const blink::MediaQuery, cppgc::internal::StrongMemberTag, cppgc::internal::DijkstraWriteBarrierPolicy>>",
+          "before": 33,
+          "after": 2610,
+          "count_delta": 2577,
+          "bytes_delta": 61848
+        }
+      ]
+    },
+    {
+      "mode": "stress-no-observer",
+      "duration_ms": 1803060,
+      "samples": 113,
+      "errors": [],
+      "all_assets_1007": true,
+      "max_mounted_rows": 100,
+      "five_minute_medians": [
+        {
+          "interval": 1,
+          "js_heap_bytes": 4737268,
+          "embedder_heap_bytes": 9411584,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 2,
+          "js_heap_bytes": 4262668,
+          "embedder_heap_bytes": 9751480,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 3,
+          "js_heap_bytes": 4331044,
+          "embedder_heap_bytes": 10197120,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 4,
+          "js_heap_bytes": 4349536,
+          "embedder_heap_bytes": 10500992,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 5,
+          "js_heap_bytes": 4364544,
+          "embedder_heap_bytes": 11039736,
+          "dom_nodes": 5621,
+          "listeners": 464
+        },
+        {
+          "interval": 6,
+          "js_heap_bytes": 4384166,
+          "embedder_heap_bytes": 13698056,
+          "dom_nodes": 5621,
+          "listeners": 464
+        }
+      ],
+      "post_snapshot_heap": {
+        "usedSize": 4313560,
+        "totalSize": 4780032,
+        "embedderHeapUsedSize": 10870704,
+        "backingStorageSize": 558601
+      },
+      "largest_native_retainer_deltas": [
+        {
+          "type": "native",
+          "name": "blink::NetworkResourcesData::ResourceData",
+          "before": 36,
+          "after": 5760,
+          "count_delta": 5724,
+          "bytes_delta": 1648512
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQueryFeatureExpNode",
+          "before": 32,
+          "after": 2607,
+          "count_delta": 2575,
+          "bytes_delta": 206000
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuery",
+          "before": 33,
+          "after": 2608,
+          "count_delta": 2575,
+          "bytes_delta": 82400
+        },
+        {
+          "type": "native",
+          "name": "blink::HeapVectorBacking<cppgc::internal::BasicMember<const blink::MediaQuery, cppgc::internal::StrongMemberTag, cppgc::internal::DijkstraWriteBarrierPolicy>>",
+          "before": 33,
+          "after": 2608,
+          "count_delta": 2575,
+          "bytes_delta": 61800
+        },
+        {
+          "type": "native",
+          "name": "blink::MediaQuerySet",
+          "before": 36,
+          "after": 2611,
+          "count_delta": 2575,
+          "bytes_delta": 61800
+        }
+      ]
+    }
+  ]
+}
