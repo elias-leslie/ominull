@@ -386,36 +386,48 @@ func TestDetachedSessionIdlesOutOnAgentOutputAlone(t *testing.T) {
 	_ = opWS.Close()
 	h.waitState(sess, StateDetached)
 
-	// Keep talking. This is precisely what used to hold the session open.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 40; i++ {
-			b, _ := json.Marshal(TerminalFrame{Type: FrameStdout, Data: []byte(fmt.Sprintf("tick %d\n", i))})
-			_ = agentWS.SetWriteDeadline(time.Now().Add(time.Second))
-			if err := agentWS.WriteMessage(websocket.TextMessage, b); err != nil {
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
+	// Observe receipt through the real socket pump before checking the deadline.
+	sess.mu.RLock()
+	idleAt, frames := sess.IdleExpiresAt, sess.FrameCount
+	sess.mu.RUnlock()
+	for i := 0; i < 3; i++ {
+		writeFrame(t, agentWS, TerminalFrame{Type: FrameStdout, Data: []byte(fmt.Sprintf("tick %d\n", i))})
+	}
+	received := false
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		sess.mu.RLock()
-		st := sess.State
+		received = sess.FrameCount >= frames+3
 		sess.mu.RUnlock()
-		if st == StateExpired || st == StateClosed {
-			<-done
-			return
+		if received {
+			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	<-done
+	if !received {
+		t.Fatal("agent output was not processed")
+	}
+	sess.mu.RLock()
+	after := sess.IdleExpiresAt
+	sess.mu.RUnlock()
+	if !after.Equal(idleAt) {
+		t.Fatal("agent output extended the operator idle deadline")
+	}
+
+	// The background sweep runs every five seconds. Waiting exactly five
+	// seconds races its tick and previously failed while reporting state closed.
+	// Exercise the same production sweep directly after the unchanged deadline.
+	if remaining := time.Until(idleAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	h.mgr.Sweep()
 	sess.mu.RLock()
 	st := sess.State
 	sess.mu.RUnlock()
-	t.Fatalf("a chatty detached session never idled out (state %s)", st)
+	if st != StateExpired && st != StateClosed {
+		t.Fatalf("expired detached session remains %s", st)
+	}
+
 }
 
 // TestExplicitTerminateClosesAndSeals: terminating is still terminating. The
