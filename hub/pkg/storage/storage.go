@@ -639,6 +639,9 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_tenant ON comm_profiles(tenant_id);
+	-- Each telemetry batch checks destination history. Seek both keys without
+	-- reading every communication profile belonging to the tenant.
+	CREATE INDEX IF NOT EXISTS idx_comm_tenant_destination ON comm_profiles(tenant_id, dst_ip);
 	CREATE INDEX IF NOT EXISTS idx_comm_loc ON comm_profiles(location_id);
 	CREATE INDEX IF NOT EXISTS idx_exclusions_tenant ON exclusions(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_anomaly_time ON anomaly_alerts(timestamp DESC);
@@ -2809,7 +2812,11 @@ func (s *Store) IsFirstSeenDestination(tenantID, dstIP string) bool {
 	defer s.mu.RUnlock()
 
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM comm_profiles WHERE tenant_id = ? AND dst_ip = ?", tenantID, dstIP).Scan(&count)
+	// Preserve the existing zero-or-one-profile decision. Once two profiles
+	// match, counting further history cannot change the result.
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM (
+		SELECT 1 FROM comm_profiles WHERE tenant_id = ? AND dst_ip = ? LIMIT 2
+	)`, tenantID, dstIP).Scan(&count)
 	if err != nil {
 		return false
 	}
