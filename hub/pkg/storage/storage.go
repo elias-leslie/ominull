@@ -385,6 +385,7 @@ type Store struct {
 	analytics analyticsCache
 	traffic   trafficCache
 	learning  learningCache
+	baseline  baselineQueries
 }
 
 func New(dbPath string) (*Store, error) {
@@ -406,6 +407,10 @@ func New(dbPath string) (*Store, error) {
 	if err := s.seedDefaults(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("default seed failed: %w", err)
+	}
+	if err := s.prepareBaselineQueries(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare baseline queries: %w", err)
 	}
 	return s, nil
 }
@@ -3285,8 +3290,9 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 	managedCount := 0
 	unmanagedCount := 0
 	quietCount := 0
+	preparedNetworks := prepareTopologyNetworks(networks)
 	for ip, n := range nodeMap {
-		describeTopologyNetwork(n, networks)
+		describeTopologyNetwork(n, preparedNetworks)
 		n.Quiet = !spoke[ip]
 		if n.Quiet {
 			quietCount++

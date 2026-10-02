@@ -113,12 +113,12 @@ func TestTopologyExplicitVirtualNetworkClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := TopologyNode{IP: "172.20.0.8"}
-	describeTopologyNetwork(&node, nets)
+	describeTopologyNetwork(&node, prepareTopologyNetworks(nets))
 	if node.NetworkKind != "virtual" {
 		t.Fatalf("explicit classification lost: %+v", node)
 	}
 	node = TopologyNode{IP: "172.17.0.8"}
-	describeTopologyNetwork(&node, nets)
+	describeTopologyNetwork(&node, prepareTopologyNetworks(nets))
 	if node.NetworkKind != "" {
 		t.Fatal("private range fabricated virtual classification")
 	}

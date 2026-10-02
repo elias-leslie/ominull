@@ -30,7 +30,8 @@ sudo ominullctl setup-token
 
 The package creates `/opt/ominull/bin/ominull-hub`, `/usr/bin/ominullctl`,
 `/etc/ominull/hub.env`, the package-owned `ominull-hub.service`, and the
-root-only local setup-token file. It owns one service only. The database,
+root-only local setup-token file. It installs the hub service and a separate
+`ominull-response-authority.service` for response authorization. The database,
 device PKI, release artifacts, backups, and operator configuration survive an
 upgrade, remove, reinstall, or hub purge. Purge is never a database delete.
 
@@ -57,7 +58,7 @@ The wizard saves validated package configuration and walks through:
 8. Native Linux/Windows installation, enrollment, heartbeat, and provenance proof.
 
 After saving a changed listener or certificate configuration, restart the one
-package service. The permanent `/status` page runs the same bounded checks and
+hub service. The permanent `/status` page runs the same bounded checks and
 can reopen diagnostics without reopening first-run setup. A configured upgrade
 does not silently create a new setup token or reset setup state.
 
@@ -136,7 +137,8 @@ rotation returns the new secret once, and revocation stops the endpoint.
 ## Package lifecycle and updates
 
 The hub package owns the hub binary, `ominullctl`, embedded web assets, bundled
-signed Linux/Windows endpoint artifacts, and one systemd service. The Linux
+signed Linux/Windows endpoint artifacts, and the hub and response-authority
+systemd services. The Linux
 agent package owns `/opt/ominull/bin/ominulld` and one systemd service. The MSI
 owns `ominulld`, user-mode WFP recovery, the `ominulld` service registration,
 and Windows Installer metadata. Package upgrades preserve enrolled identity;

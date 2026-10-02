@@ -12,6 +12,37 @@ import (
 	"github.com/google/uuid"
 )
 
+const baselinePolicyColumns = "SELECT id, name, scope, scope_value, enabled, created_at, updated_at FROM baseline_policies"
+const baselineRuleColumns = "SELECT r.id, r.policy_id, r.service, r.destination, r.protocol, r.port, r.note, r.created_at FROM baseline_rules r"
+const applicableBaselinePolicies = `WHERE enabled != 0 AND
+	(scope = 'global' OR (scope = 'tenant' AND scope_value = ?) OR
+	 (scope = 'location' AND scope_value = ?) OR (scope = 'endpoint' AND scope_value = ?))`
+
+// Prepared statements retain query plans, never policy results. Reads still see
+// the current database; DB.Close owns the statements' lifetime.
+type baselineQueries struct {
+	endpoint, policies, rules, singlePolicyRules *sql.Stmt
+}
+
+func (s *Store) prepareBaselineQueries() error {
+	for _, query := range []struct {
+		target **sql.Stmt
+		sql    string
+	}{
+		{&s.baseline.endpoint, "SELECT tenant_id, COALESCE(location_id,''), COALESCE(observed_services,''), COALESCE(readiness,'') FROM endpoints WHERE id = ?"},
+		{&s.baseline.policies, baselinePolicyColumns + " " + applicableBaselinePolicies + " ORDER BY rowid"},
+		{&s.baseline.rules, baselineRuleColumns + " WHERE r.policy_id IN (SELECT id FROM baseline_policies " + applicableBaselinePolicies + ") ORDER BY r.service, r.destination, r.rowid"},
+		{&s.baseline.singlePolicyRules, baselineRuleColumns + " WHERE r.policy_id = ? ORDER BY r.service, r.destination, r.rowid"},
+	} {
+		stmt, err := s.db.Prepare(query.sql)
+		if err != nil {
+			return err
+		}
+		*query.target = stmt
+	}
+	return nil
+}
+
 // The baseline isolation policy.
 //
 // Isolation is a default-deny with a small set of permits under it. Until now
@@ -331,21 +362,23 @@ func boolToInt(b bool) int {
 func (s *Store) ListBaselinePolicies() ([]BaselinePolicy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.listBaselinePoliciesLocked("", "")
+	return s.listBaselinePoliciesLocked()
 }
 
 // listBaselinePoliciesLocked is the unlocked body. Every caller already holds
 // the lock: this package's convention is that a method never calls another
 // locking method, because sync.RWMutex is not reentrant and a writer queueing
 // between the two acquisitions deadlocks the whole hub.
-func (s *Store) listBaselinePoliciesLocked(where string, arg string) ([]BaselinePolicy, error) {
-	q := "SELECT id, name, scope, scope_value, enabled, created_at, updated_at FROM baseline_policies"
+func (s *Store) listBaselinePoliciesLocked(scope ...any) ([]BaselinePolicy, error) {
+	// Keep insertion order for equal scope/name policies: the first rule wins
+	// deduplication, including its author and note. A filtered index scan must
+	// not change that provenance.
 	var rows *sql.Rows
 	var err error
-	if where != "" {
-		rows, err = s.db.Query(q+" "+where, arg)
+	if len(scope) == 0 {
+		rows, err = s.db.Query(baselinePolicyColumns + " ORDER BY rowid")
 	} else {
-		rows, err = s.db.Query(q)
+		rows, err = s.baseline.policies.Query(scope...)
 	}
 	if err != nil {
 		return nil, err
@@ -372,7 +405,15 @@ func (s *Store) listBaselinePoliciesLocked(where string, arg string) ([]Baseline
 		return policies, nil
 	}
 
-	rrows, err := s.db.Query("SELECT id, policy_id, service, destination, protocol, port, note, created_at FROM baseline_rules ORDER BY service, destination")
+	var rrows *sql.Rows
+	switch {
+	case len(scope) == 0:
+		rrows, err = s.db.Query(baselineRuleColumns + " ORDER BY r.service, r.destination, r.rowid")
+	case len(policies) == 1:
+		rrows, err = s.baseline.singlePolicyRules.Query(policies[0].ID)
+	default:
+		rrows, err = s.baseline.rules.Query(scope...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -516,9 +557,7 @@ func (s *Store) ResolveBaseline(endpointID string) (BaselineResolution, error) {
 	res := BaselineResolution{EndpointID: endpointID, Rules: []BaselineRule{}, Policies: []string{}, Observed: []ObservedService{}, Uncovered: []ObservedService{}}
 
 	var tenantID, locationID, observed, readiness string
-	err := s.db.QueryRow(
-		"SELECT tenant_id, COALESCE(location_id,''), COALESCE(observed_services,''), COALESCE(readiness,'') FROM endpoints WHERE id = ?",
-		endpointID).Scan(&tenantID, &locationID, &observed, &readiness)
+	err := s.baseline.endpoint.QueryRow(endpointID).Scan(&tenantID, &locationID, &observed, &readiness)
 	if err != nil {
 		return res, err
 	}
@@ -531,7 +570,10 @@ func (s *Store) ResolveBaseline(endpointID string) (BaselineResolution, error) {
 		}
 	}
 
-	policies, err := s.listBaselinePoliciesLocked("", "")
+	// A heartbeat needs only the enabled scopes that apply to this endpoint.
+	// Use the same predicate for policy and rule reads so unrelated estates do
+	// not add deserialization and sorting work to every control response.
+	policies, err := s.listBaselinePoliciesLocked(tenantID, locationID, endpointID)
 	if err != nil {
 		return res, err
 	}

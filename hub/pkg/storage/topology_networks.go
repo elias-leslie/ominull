@@ -78,7 +78,24 @@ func (s *Store) SetTopologyNetworks(networks []TopologyNetwork) error {
 	return s.SetSetting("topology.networks", string(raw))
 }
 
-func describeTopologyNetwork(n *TopologyNode, networks []TopologyNetwork) {
+type topologyNetwork struct {
+	TopologyNetwork
+	prefix netip.Prefix
+}
+
+// prepareTopologyNetworks retains the validated list's longest-prefix order.
+// Each request owns its snapshot, so settings changes are visible on the next
+// read without a shared cache or invalidation path.
+func prepareTopologyNetworks(networks []TopologyNetwork) []topologyNetwork {
+	prepared := make([]topologyNetwork, len(networks))
+	for i, network := range networks {
+		prefix, _ := netip.ParsePrefix(network.CIDR)
+		prepared[i] = topologyNetwork{TopologyNetwork: network, prefix: prefix}
+	}
+	return prepared
+}
+
+func describeTopologyNetwork(n *TopologyNode, networks []topologyNetwork) {
 	n.AddressScope = netaddr.Scope(n.IP)
 	n.EstateMember = n.AssetID != "" || n.Type == "managed"
 	a, err := netaddr.Parse(n.IP)
@@ -87,8 +104,7 @@ func describeTopologyNetwork(n *TopologyNode, networks []TopologyNetwork) {
 		return
 	}
 	for _, network := range networks {
-		p, _ := netip.ParsePrefix(network.CIDR)
-		if p.Contains(a.WithZone("")) {
+		if network.prefix.Contains(a.WithZone("")) {
 			n.EstateMember = true
 			n.NetworkID, n.NetworkLabel = network.CIDR, network.Label
 			n.NetworkKind = network.Kind

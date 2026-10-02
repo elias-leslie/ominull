@@ -427,6 +427,7 @@ func (s *Store) SummariseRouterTalkers(since time.Time, limit int) ([]RouterTalk
 	defer rows.Close()
 
 	byIP := map[string]*RouterTalker{}
+	preparedNetworks := prepareTopologyNetworks(networks)
 	for rows.Next() {
 		var src, dst string
 		var b int64
@@ -437,7 +438,7 @@ func (s *Store) SummariseRouterTalkers(since time.Time, limit int) ([]RouterTalk
 			continue
 		}
 		node := TopologyNode{IP: dst}
-		describeTopologyNetwork(&node, networks)
+		describeTopologyNetwork(&node, preparedNetworks)
 		if node.EstateMember || node.AddressScope == "invalid" {
 			continue
 		}
