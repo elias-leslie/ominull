@@ -94,3 +94,11 @@ held. The old code reaches batch two before the reader; the replacement permits
 the queued read between batches. This establishes bounded mutex ownership for
 these batches, not a production throughput or disk-I/O improvement. No retention
 period or observation-reset operation was changed.
+
+The canonical hub-only v1.8.43 release completed all retained gates. Installed,
+running-process and package-contained binary hashes match the build at
+`070dc3e`; both package services are active. Changed authenticated routes,
+cookie console/status, served asset hashes and anonymous authorization checks
+pass. Raw release, disk-recovery and runtime evidence remains in the private
+operations record. The remote managed-service receipt integration remains a
+task-tracker limitation; native release evidence is not a managed receipt.
