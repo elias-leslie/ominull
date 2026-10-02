@@ -1,11 +1,139 @@
 package storage
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 )
+
+type retentionProbe struct {
+	firstDelete chan struct{}
+	resume      chan struct{}
+	calls       atomic.Int64
+	read        atomic.Bool
+	readBetween atomic.Bool
+}
+
+var retentionProbes sync.Map
+var retentionProbeID atomic.Int64
+
+func init() {
+	sqlite.MustRegisterScalarFunction("test_retention_delete", 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		value, ok := retentionProbes.Load(args[0])
+		if !ok {
+			return nil, fmt.Errorf("missing retention probe")
+		}
+		probe := value.(*retentionProbe)
+		switch probe.calls.Add(1) {
+		case 1:
+			close(probe.firstDelete)
+			<-probe.resume
+		case pruneBatch + 1:
+			probe.readBetween.Store(probe.read.Load())
+		}
+		return nil, nil
+	})
+	sqlite.MustRegisterScalarFunction("test_retention_read", 2, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		value, ok := retentionProbes.Load(args[1])
+		if !ok {
+			return nil, fmt.Errorf("missing retention probe")
+		}
+		value.(*retentionProbe).read.Store(true)
+		return args[0], nil
+	})
+}
+
+func TestRetentionAllowsReadsBetweenBatches(t *testing.T) {
+	store := newTestStore(t)
+	probe := &retentionProbe{firstDelete: make(chan struct{}), resume: make(chan struct{})}
+	id := retentionProbeID.Add(1)
+	retentionProbes.Store(id, probe)
+	defer retentionProbes.Delete(id)
+	var resumeOnce sync.Once
+	resume := func() { resumeOnce.Do(func() { close(probe.resume) }) }
+	defer resume()
+	if err := store.SetSetting("retention-probe", "readable"); err != nil {
+		t.Fatal(err)
+	}
+	// Observe the real GetSetting query while its read lock is still held.
+	// All interception lives in this temporary database, not the Store API.
+	_, err := store.db.Exec(fmt.Sprintf(`ALTER TABLE settings RENAME TO retention_settings;
+		CREATE VIEW settings AS SELECT key, test_retention_read(value, %d) AS value FROM retention_settings;
+		CREATE TRIGGER retention_probe BEFORE DELETE ON events BEGIN SELECT test_retention_delete(%d); END`, id, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.db.Exec(`WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?)
+		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, process_path, process_id)
+		SELECT 'default','e1',?,'linux-socket-v1','PERMIT','out',6,'10.0.0.1','10.0.0.2',1,2,'/bin/x',1 FROM rows`, pruneBatch+7, time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruned := make(chan error, 1)
+	go func() {
+		removed, err := store.PruneOldData(RetentionPolicy{Events: 14 * 24 * time.Hour})
+		if err == nil && removed["events"] != pruneBatch+7 {
+			err = fmt.Errorf("removed %d events, want %d", removed["events"], pruneBatch+7)
+		}
+		pruned <- err
+	}()
+	select {
+	case <-probe.firstDelete:
+	case <-time.After(20 * time.Second): // Same deadlock watchdog as locking_test.go.
+		t.Fatal("retention did not reach its first batch")
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		value, err := store.GetSetting("retention-probe")
+		if err == nil && value != "readable" {
+			err = fmt.Errorf("setting = %q", value)
+		}
+		readDone <- err
+	}()
+	// Queue a real reader behind the first batch before allowing it to finish.
+	// This synchronizes on its blocked state rather than elapsed query time.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		blocked := false
+		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(stack, "storage.(*Store).GetSetting") && strings.Contains(stack, "sync.(*RWMutex).RLock") {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reader did not queue behind the first batch")
+		}
+		runtime.Gosched()
+	}
+	resume()
+	for _, done := range []chan error{pruned, readDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("retention or reader did not finish")
+		}
+	}
+	if !probe.readBetween.Load() {
+		t.Fatal("setting read waited behind more than one retention batch")
+	}
+}
 
 // Nothing in this package ever deleted a telemetry row. The file grew for the
 // life of the deployment and stopped only when the disk did - at which point

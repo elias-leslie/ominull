@@ -50,12 +50,11 @@ func DefaultRetention() RetentionPolicy {
 const pruneBatch = 5000
 
 // PruneOldData deletes rows past their retention and returns how many went, by
-// table. It takes the write lock itself and calls nothing else in this package:
-// the mutex is not reentrant and a method that reaches another locking method
-// deadlocks the whole hub.
+// table. Sweeps remain serialized, while each deletion batch gives ordinary
+// readers and writers another turn at the store lock.
 func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.retention.Lock()
+	defer s.retention.Unlock()
 
 	now := time.Now().UTC()
 	removed := make(map[string]int64)
@@ -85,11 +84,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 			target.table, target.table, target.column, pruneBatch)
 
 		for {
-			res, err := s.db.Exec(stmt, cutoff)
-			if err != nil {
-				return removed, fmt.Errorf("pruning %s: %w", target.table, err)
-			}
-			n, err := res.RowsAffected()
+			n, err := s.pruneBatch(stmt, cutoff)
 			if err != nil {
 				return removed, fmt.Errorf("pruning %s: %w", target.table, err)
 			}
@@ -103,7 +98,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 	// router_flows keys its bucket as epoch seconds rather than a timestamp, so
 	// it cannot ride the loop above and is pruned on its own terms.
 	if policy.RouterFlows > 0 {
-		n, err := s.pruneRouterFlowsLocked(policy.RouterFlows)
+		n, err := s.PruneOldRouterFlows(policy.RouterFlows)
 		if err != nil {
 			return removed, fmt.Errorf("pruning router_flows: %w", err)
 		}
@@ -111,7 +106,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 	}
 
 	if policy.DNSResolutions > 0 {
-		n, err := s.pruneDNSResolutionsLocked(policy.DNSResolutions)
+		n, err := s.PruneOldDNSResolutions(policy.DNSResolutions)
 		if err != nil {
 			return removed, fmt.Errorf("pruning dns_resolutions: %w", err)
 		}
@@ -119,6 +114,16 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 	}
 
 	return removed, nil
+}
+
+func (s *Store) pruneBatch(statement string, cutoff time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, err := s.db.Exec(statement, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // StartRetention prunes once at startup and then on a ticker, and returns a

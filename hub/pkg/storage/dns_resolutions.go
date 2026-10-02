@@ -246,7 +246,6 @@ func (s *Store) PruneOldDNSResolutions(olderThan time.Duration) (int64, error) {
 }
 
 // pruneDNSResolutionsLocked is the body, for callers that already hold the lock.
-// PruneOldData does, and calling the exported form from there would deadlock.
 func (s *Store) pruneDNSResolutionsLocked(olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
 	res, err := s.db.Exec(`DELETE FROM dns_resolutions WHERE last_seen_at < ?`, cutoff)

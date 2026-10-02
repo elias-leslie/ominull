@@ -382,6 +382,7 @@ type AuditEntry struct {
 type Store struct {
 	db        *sql.DB
 	mu        sync.RWMutex
+	retention sync.Mutex
 	analytics analyticsCache
 	traffic   trafficCache
 	learning  learningCache

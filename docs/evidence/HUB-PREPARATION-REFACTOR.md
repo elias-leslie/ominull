@@ -77,4 +77,20 @@ delimiters, control characters and JavaScript line separators while preserving
 the decoded identity. Harmless character and rendered-configuration regression
 tests fail on the old serializer and pass on the replacement. Identity-provider
 verification constrains input control; practical exploitability was not tested.
-The alert remains subject to the fresh CodeQL result, with no dismissal.
+The fresh scan at `c13d8cc` reports zero open alerts; alert 55 is marked fixed,
+with no dismissal.
+
+Production installation exposed another existing availability defect: immediate
+retention held the application mutex across the complete backlog, preventing
+server initialization from reading endpoint state. The storage layer now
+serializes sweeps separately and releases the application mutex after each
+5,000-row deletion batch. Cutoffs, table order, disabled-duration behavior,
+counts and error reporting are retained. Existing router/DNS maintenance retains
+its own locking and deletion behavior.
+
+A fixture-only SQLite trigger pauses the first batch while a real settings
+reader queues. A second fixture function observes that read while its lock is
+held. The old code reaches batch two before the reader; the replacement permits
+the queued read between batches. This establishes bounded mutex ownership for
+these batches, not a production throughput or disk-I/O improvement. No retention
+period or observation-reset operation was changed.
