@@ -1,12 +1,54 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestConsoleScriptStringEncoding(t *testing.T) {
+	for _, value := range []string{
+		"ordinary@example.invalid",
+		"O'Connor <Research & Review>",
+		"quote\" and backslash\\",
+		"line\nreturn\rtab\tcontrol\x00\x1f",
+		"Unicode café \u2028 \u2029",
+	} {
+		encoded := jsStringEscape(value)
+		if strings.ContainsAny(encoded, "<>&\u2028\u2029") {
+			t.Errorf("HTML/script delimiters remain in encoded string %q", encoded)
+		}
+		var decoded string
+		if err := json.Unmarshal([]byte(`"`+encoded+`"`), &decoded); err != nil {
+			t.Fatalf("decode %q: %v", encoded, err)
+		}
+		if decoded != value {
+			t.Errorf("round trip = %q, want %q", decoded, value)
+		}
+	}
+}
+
+func TestConsoleDocumentPreservesEncodedIdentity(t *testing.T) {
+	viewer := accessOperator{Email: "O'Connor <Research & Review>", Role: "auditor"}
+	doc, nonce := consoleDocument("", "1.2.3", viewer)
+	if nonce == "" {
+		t.Fatal("missing script nonce")
+	}
+	match := regexp.MustCompile(`operator: ("(?:[^"\\]|\\.)*")`).FindSubmatch(doc)
+	if len(match) != 2 {
+		t.Fatal("missing operator string in console configuration")
+	}
+	if strings.ContainsAny(string(match[1]), "<>&") {
+		t.Fatal("literal HTML delimiters in inline script identity")
+	}
+	var decoded string
+	if err := json.Unmarshal(match[1], &decoded); err != nil || decoded != viewer.Email {
+		t.Fatalf("operator round trip = %q, err = %v", decoded, err)
+	}
+}
 
 // The operator console is a hand-written IIFE and a hand-written stylesheet
 // with no component tests and no build step, so the two files can disagree

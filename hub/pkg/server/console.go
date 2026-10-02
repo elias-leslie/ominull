@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"html"
 	"io/fs"
 	"mime"
@@ -146,34 +147,12 @@ func newCSPNonce() string {
 	return base64.RawStdEncoding.EncodeToString(raw[:])
 }
 
-// jsStringEscape makes a value safe to drop inside a double-quoted JavaScript
-// string literal in the served document. Admin keys are operator-chosen, so a
-// quote or a backslash in one must not be able to break out of the literal.
+// jsStringEscape returns the contents of a double-quoted JSON string. Marshal
+// also escapes HTML delimiters and JavaScript line separators, so the string
+// remains data when embedded in an HTML script element.
 func jsStringEscape(v string) string {
-	var b strings.Builder
-	for _, r := range v {
-		switch r {
-		case '\\':
-			b.WriteString(`\\`)
-		case '"':
-			b.WriteString(`\"`)
-		case '\'':
-			b.WriteString(`\'`)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '<':
-			b.WriteString(`<`)
-		case '>':
-			b.WriteString(`>`)
-		case '&':
-			b.WriteString(`&`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	encoded, _ := json.Marshal(v) // A string has no unsupported JSON values.
+	return string(encoded[1 : len(encoded)-1])
 }
 
 // consoleGate is the key-entry page shown before the console is unlocked. It

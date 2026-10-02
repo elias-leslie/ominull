@@ -70,3 +70,11 @@ Router counter transition rewrites and name-selection query changes were deferre
 overflow and equal-timestamp selection need their own contracts and measurements.
 Agent collector changes would require native cross-platform and fleet rollout
 verification. This release changes hub implementation only.
+
+Final CodeQL review also found a pre-existing inline-script encoding defect
+(alert 55). The console now uses Go's JSON string encoder, which escapes HTML
+delimiters, control characters and JavaScript line separators while preserving
+the decoded identity. Harmless character and rendered-configuration regression
+tests fail on the old serializer and pass on the replacement. Identity-provider
+verification constrains input control; practical exploitability was not tested.
+The alert remains subject to the fresh CodeQL result, with no dismissal.
