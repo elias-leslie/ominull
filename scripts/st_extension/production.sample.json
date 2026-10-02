@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "target_id": "approved-production-target",
+  "ssh_alias": "approved-ssh-alias",
+  "lxc_id": 100,
+  "hub_base_url": "http://hub.example.invalid:9999",
+  "admin_key_file": "/private/approved/admin.key",
+  "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
+  "local_binary": "build/ominull-hub",
+  "local_authority_binary": "build/ominull-response-authority"
+}
