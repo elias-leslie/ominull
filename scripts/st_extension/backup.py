@@ -36,10 +36,12 @@ assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", backup_id)
 root = pathlib.Path("/var/lib/vz/dump")
 directory = root / ("st-ominull-" + attempt)
 assert root.resolve() == root and root.is_dir()
-def command(*args):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60).stdout
-def api(*args):
-    return json.loads(command("pvesh", *args, "--output-format", "json"))
+def command(*args, timeout=60):
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+def api(*args, timeout=60, worker_result=False):
+    output = command("pvesh", *args, "--output-format", "json", timeout=timeout)
+    # CLI workers run synchronously and tee logs before the final JSON result.
+    return json.loads(output.splitlines()[-1] if worker_result else output)
 def owned():
     assert directory.resolve() == directory and directory.is_dir()
     assert directory.stat().st_uid == os.getuid() and stat.S_IMODE(directory.stat().st_mode) == 0o700
@@ -67,7 +69,8 @@ with (directory / "attempt.json").open("x") as file:
     os.fchmod(file.fileno(), 0o600)
     json.dump(marker, file)
 task = api("create", "/nodes/davion-gem/vzdump", "--vmid", "150", "--mode", "snapshot",
-           "--dumpdir", str(directory), "--tmpdir", "/var/tmp", "--compress", "0", "--remove", "0")
+           "--dumpdir", str(directory), "--tmpdir", "/var/tmp", "--compress", "0", "--remove", "0",
+           timeout=3600, worker_result=True)
 assert isinstance(task, str) and task.startswith("UPID:davion-gem:")
 marker["task"] = task
 (directory / "attempt.json").write_text(json.dumps(marker))
@@ -157,7 +160,8 @@ def remote(config, script, attempt, backup_id):
     command = "python3 -c " + shlex.quote(script) + " " + shlex.quote(attempt) + " " + shlex.quote(backup_id)
     try:
         result = subprocess.run(ssh_argv(config, command), stdin=subprocess.DEVNULL,
-                                capture_output=True, timeout=300, check=False)
+                                capture_output=True, timeout=DEADLINE_SECONDS if script == REMOTE_CREATE else 300,
+                                check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise obs.ObservationError("backup_remote_unavailable") from exc
     obs.require(result.returncode == 0, "backup_remote_failed")

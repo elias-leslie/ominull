@@ -36,6 +36,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('"--tmpdir", "/var/tmp"', bk.REMOTE_CREATE)
         self.assertNotIn('"--stop"', bk.REMOTE_CREATE)
         self.assertNotIn('rmtree', bk.REMOTE_CLEANUP)
+        self.assertIn('timeout=3600, worker_result=True', bk.REMOTE_CREATE)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(bk.sys, "argv", ["fixture", "a" * 32, "bkp-fixture"]):
+            namespace = {}
+            exec(bk.REMOTE_COMMON.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({temporary!r})"), namespace)
+            result = subprocess.CompletedProcess([], 0, stdout='INFO: backup completed\n"UPID:davion-gem:fixture"\n')
+            with patch.object(subprocess, "run", return_value=result) as process:
+                self.assertEqual(namespace["api"]("create", "/nodes/davion-gem/vzdump", timeout=3600, worker_result=True), "UPID:davion-gem:fixture")
+                self.assertEqual(process.call_args.kwargs["timeout"], 3600)
 
     def test_remote_failure_withholds_stderr_and_host(self):
         failed = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"private credential material")
