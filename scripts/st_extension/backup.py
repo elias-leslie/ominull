@@ -67,7 +67,7 @@ with (directory / "attempt.json").open("x") as file:
     os.fchmod(file.fileno(), 0o600)
     json.dump(marker, file)
 task = api("create", "/nodes/davion-gem/vzdump", "--vmid", "150", "--mode", "snapshot",
-           "--dumpdir", str(directory), "--compress", "0", "--remove", "0")
+           "--dumpdir", str(directory), "--tmpdir", "/var/tmp", "--compress", "0", "--remove", "0")
 assert isinstance(task, str) and task.startswith("UPID:davion-gem:")
 marker["task"] = task
 (directory / "attempt.json").write_text(json.dumps(marker))

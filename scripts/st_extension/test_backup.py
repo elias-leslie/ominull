@@ -33,6 +33,7 @@ class ProtocolTests(unittest.TestCase):
             compile(program, "fixed-remote-program", "exec")
         self.assertIn('"--mode", "snapshot"', bk.REMOTE_CREATE)
         self.assertIn('"--compress", "0", "--remove", "0"', bk.REMOTE_CREATE)
+        self.assertIn('"--tmpdir", "/var/tmp"', bk.REMOTE_CREATE)
         self.assertNotIn('"--stop"', bk.REMOTE_CREATE)
         self.assertNotIn('rmtree', bk.REMOTE_CLEANUP)
 
