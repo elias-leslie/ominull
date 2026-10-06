@@ -1,0 +1,29 @@
+{
+  "binding": {
+    "id": "ominull.backup",
+    "owner": "ominull",
+    "namespace": "ominull-backup",
+    "manifest": "extensions/ominull-backup.json",
+    "executable": "scripts/st-ominull-backup",
+    "arguments": [],
+    "environment": [],
+    "grant": {
+      "enabled": true,
+      "effects": ["network", "read-remote", "write-remote", "read-local", "write-local", "credentials", "process"]
+    }
+  },
+  "manifest": {
+    "id": "ominull.backup",
+    "owner": "ominull",
+    "namespace": "ominull-backup",
+    "version": "0.1.0",
+    "st_contract_versions": [1],
+    "summary": "Prepare the protected Ominull LXC150 snapshot archive for managed backup capture.",
+    "effects": ["network", "read-remote", "write-remote", "read-local", "write-local", "credentials", "process"],
+    "help": {"": "Managed source capture invokes prepare_backup contract v1 for ominull-production-state. The owner takes a fixed Proxmox snapshot-mode backup, verifies and atomically publishes the uncompressed archive; failed attempts remain preserved."},
+    "usage": [],
+    "structured_operations": {
+      "prepare_backup": {"request_contract_version": 1, "response_schema_version": 1}
+    }
+  }
+}

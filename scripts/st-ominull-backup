@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Prepare the fixed Ominull production source for the managed ST backup job."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "st_extension"))
+from backup import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -126,7 +126,7 @@ def regular_file(path, private=False):
     return path
 
 
-def load_config(root):
+def load_config(root, *, require_deployment_inputs=True):
     path = regular_file(root / "scripts/st_extension/production.local.json", private=True)
     with path.open("rb") as file:
         raw = file.read(16385)
@@ -153,16 +153,20 @@ def load_config(root):
             and not url.fragment and (port is None or 1 <= port <= 65535)
             and not any(ch.isspace() for ch in config["hub_base_url"]), "config_url")
     require(isinstance(config["admin_key_file"], str), "config_key_path")
-    regular_file(Path(config["admin_key_file"]), private=True)
+    require(Path(config["admin_key_file"]).is_absolute(), "config_key_path")
+    if require_deployment_inputs:
+        regular_file(Path(config["admin_key_file"]), private=True)
     expected = {"local_binary": "build/ominull-hub",
                 "local_authority_binary": "build/ominull-response-authority"}
     for field, value in expected.items():
         require(config[field] == value, "config_binary_path")
-        regular_file(root / value)
+        if require_deployment_inputs:
+            regular_file(root / value)
     require(isinstance(config["hub_package"], str) and re.fullmatch(
         r"dist/ominull-hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb", config["hub_package"]),
         "config_package_path")
-    regular_file(root / config["hub_package"])
+    if require_deployment_inputs:
+        regular_file(root / config["hub_package"])
     return config, hashlib.sha256(raw).hexdigest()
 
 
