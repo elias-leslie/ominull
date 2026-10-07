@@ -1,6 +1,5 @@
 """Fixed LXC150 snapshot preparation; no caller-defined hosts or shell commands."""
 import argparse
-import ctypes
 import json
 import os
 from pathlib import Path
@@ -141,13 +140,23 @@ print(json.dumps({"cleaned":True}))
 def parse_request(raw):
     obs.require(len(raw.encode()) <= 16384, "request_too_large")
     request = obs.parse_json(raw)
-    obs.require(isinstance(request, dict) and set(request) == REQUEST_KEYS, "request_fields")
+    obs.require(isinstance(request, dict) and set(request) in
+                (REQUEST_KEYS, REQUEST_KEYS | {"qualified_previous"}), "request_fields")
     obs.require(type(request["contract_version"]) is int and request["contract_version"] == 1,
                 "request_version")
     obs.require(request["operation"] == "prepare_backup" and request["project"] == "ominull"
                 and request["source_id"] == SOURCE, "request_identity")
     obs.require(isinstance(request["backup_id"], str) and obs.IDENTIFIER.fullmatch(request["backup_id"]),
                 "request_backup_id")
+    qualification = request.get("qualified_previous")
+    if qualification is not None:
+        obs.require(isinstance(qualification, dict) and set(qualification) ==
+                    {"backup_id", "sha256", "snapshot_id", "repository_id"}
+                    and all(isinstance(qualification[key], str) and
+                            obs.IDENTIFIER.fullmatch(qualification[key])
+                            for key in ("backup_id", "snapshot_id", "repository_id"))
+                    and isinstance(qualification["sha256"], str)
+                    and obs.DIGEST.fullmatch(qualification["sha256"]), "request_qualification")
     return request
 
 
@@ -212,43 +221,196 @@ def fetch(config, artifact, destination):
     obs.require(obs.sha256_file(destination) == artifact["sha256"], "backup_fetch_digest")
 
 
-def publish(staging, response):
-    current = DESTINATION / "current"
-    if current.exists() or current.is_symlink():
-        private_directory(current)
-        obs.regular_file(current / "lxc-150.tar", private=True)
-        prior = obs.parse_json(obs.regular_file(current / "manifest.json").read_bytes())
-        obs.require(prior.get("status") == "completed" and prior.get("source_id") == SOURCE
-                    and prior.get("archive_path") == str(current / "lxc-150.tar")
-                    and set(p.name for p in current.iterdir()) == {"lxc-150.tar", "manifest.json"},
-                    "backup_existing_publication")
-    manifest = staging / "manifest.json"
-    with manifest.open("x") as file:
+def _sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _save_json(path, value):
+    temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    with temporary.open("x") as file:
         os.fchmod(file.fileno(), 0o600)
-        json.dump(response, file, sort_keys=True)
+        json.dump(value, file, sort_keys=True)
         file.write("\n")
         file.flush()
         os.fsync(file.fileno())
-    descriptor = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    temporary.replace(path)
+    _sync_directory(path.parent)
+
+
+def _generation(path, *, verify_hash=False):
+    obs.require(path.is_dir() and not path.is_symlink(), "backup_existing_publication")
+    private_directory(path)
+    archive = obs.regular_file(path / "lxc-150.tar", private=True)
+    value = obs.parse_json(obs.regular_file(path / "manifest.json", private=True).read_bytes())
+    current = DESTINATION / "current"
+    obs.require(isinstance(value, dict) and value.get("status") == "completed" and value.get("project") == "ominull"
+                and value.get("source_id") == SOURCE and value.get("target_id") == GUEST
+                and value.get("archive_path") == str(current / "lxc-150.tar")
+                and value.get("manifest_path") == str(current / "manifest.json")
+                and type(value.get("size_bytes")) is int and value["size_bytes"] > 0
+                and isinstance(value.get("sha256"), str) and obs.DIGEST.fullmatch(value["sha256"])
+                and archive.stat().st_size == value["size_bytes"]
+                and set(p.name for p in path.iterdir()) == {"lxc-150.tar", "manifest.json"},
+                "backup_existing_publication")
+    if verify_hash:
+        obs.require(obs.sha256_file(archive) == value["sha256"], "backup_fetch_digest")
+    return value
+
+
+def recover_publication():
+    """Recover ordinary rename boundaries under the existing source lease."""
+    journal = DESTINATION / ".publication.json"
+    if not journal.exists() and not journal.is_symlink():
+        return None
+    state = obs.parse_json(obs.regular_file(journal, private=True).read_bytes())
+    obs.require(isinstance(state, dict) and set(state) == {"staging", "previous", "sha256", "qualified_previous"}
+                and isinstance(state["staging"], str) and isinstance(state["previous"], str)
+                and re.fullmatch(r"\.attempt-[0-9a-f]{32}", state["staging"])
+                and re.fullmatch(r"\.previous-[0-9a-f]{32}", state["previous"]),
+                "backup_publication_journal")
+    staging, previous = DESTINATION / state["staging"], DESTINATION / state["previous"]
+    current = DESTINATION / "current"
     if current.exists():
-        # Linux rename exchange atomically replaces the complete generation.
-        libc = ctypes.CDLL(None, use_errno=True)
-        obs.require(libc.renameat2(-100, os.fsencode(staging), -100, os.fsencode(current), 2) == 0,
-                    "backup_atomic_publication")
+        value = _generation(current)
+        if value["sha256"] == state["sha256"] and not staging.exists():
+            # New generation was already durably installed; retain its predecessor.
+            recovered = value
+        else:
+            obs.require(staging.exists() and not previous.exists(), "backup_publication_ambiguous")
+            _generation(staging)
+            recovered = None
     else:
-        staging.rename(current)
-    descriptor = os.open(DESTINATION, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    # After exchange staging contains only the validated previous publication.
-    if staging.exists():
-        shutil.rmtree(staging)
+        # Interrupted after moving current aside: restore it before any new work.
+        obs.require(staging.exists(), "backup_publication_ambiguous")
+        _generation(staging)
+        if previous.exists():
+            _generation(previous)
+            previous.rename(current)
+            recovered = None
+        else:
+            value = _generation(staging, verify_hash=True)
+            obs.require(value["sha256"] == state["sha256"], "backup_publication_ambiguous")
+            staging.rename(current)
+            recovered = value
+        _sync_directory(DESTINATION)
+    if recovered is not None and state["qualified_previous"] is not None and previous.exists():
+        _schedule_retirement(previous, state["qualified_previous"])
+    journal.rename(DESTINATION / ("publication-recovered-" + uuid.uuid4().hex + ".json"))
+    _sync_directory(DESTINATION)
+    return recovered
+
+
+def _schedule_retirement(previous, qualification):
+    value = _generation(previous)
+    obs.require(value["backup_id"] == qualification["backup_id"]
+                and value["sha256"] == qualification["sha256"], "backup_retirement_qualification")
+    _save_json(DESTINATION / ".retirement.json",
+               {"previous": previous.name, "qualification": qualification, "size_bytes": value["size_bytes"]})
+
+
+def retire_qualified_previous():
+    """Resume removal only from a durable, positively qualified exact generation."""
+    marker = DESTINATION / ".retirement.json"
+    if not marker.exists() and not marker.is_symlink():
+        return
+    state = obs.parse_json(obs.regular_file(marker, private=True).read_bytes())
+    obs.require(isinstance(state, dict) and set(state) == {"previous", "qualification", "size_bytes"}
+                and isinstance(state["previous"], str)
+                and type(state["size_bytes"]) is int and state["size_bytes"] > 0
+                and re.fullmatch(r"\.previous-[0-9a-f]{32}", state["previous"]), "backup_retirement_marker")
+    # Apply the public contract validation also to durable qualification evidence.
+    obs.require(isinstance(state["qualification"], dict), "backup_retirement_marker")
+    parse_request(json.dumps({"contract_version": 1, "operation": "prepare_backup", "project": "ominull",
+                             "source_id": SOURCE, "backup_id": state["qualification"].get("backup_id"),
+                             "qualified_previous": state["qualification"]}))
+    previous = DESTINATION / state["previous"]
+    if previous.exists() or previous.is_symlink():
+        private_directory(previous)
+        obs.require(set(p.name for p in previous.iterdir()) <= {"lxc-150.tar", "manifest.json"},
+                    "backup_retirement_members")
+        manifest, archive = previous / "manifest.json", previous / "lxc-150.tar"
+        if manifest.exists() or manifest.is_symlink():
+            value = obs.parse_json(obs.regular_file(manifest, private=True).read_bytes())
+            obs.require(value["backup_id"] == state["qualification"]["backup_id"]
+                        and value["sha256"] == state["qualification"]["sha256"]
+                        and value["size_bytes"] == state["size_bytes"], "backup_retirement_qualification")
+        else:
+            obs.require(not archive.exists() and not archive.is_symlink(), "backup_retirement_manifest")
+        if archive.exists() or archive.is_symlink():
+            obs.require(obs.regular_file(archive, private=True).stat().st_size == state["size_bytes"],
+                        "backup_retirement_size")
+            archive.unlink()
+            _sync_directory(previous)
+        if manifest.exists():
+            manifest.unlink()
+            _sync_directory(previous)
+        previous.rmdir()
+        _sync_directory(DESTINATION)
+    marker.rename(DESTINATION / ("retirement-completed-" + uuid.uuid4().hex + ".json"))
+    _sync_directory(DESTINATION)
+
+
+def publish(staging, response, qualification=None):
+    obs.require(staging.parent == DESTINATION and re.fullmatch(r"\.attempt-[0-9a-f]{32}", staging.name),
+                "backup_publication_staging")
+    private_directory(staging)
+    current = DESTINATION / "current"
+    if current.exists() or current.is_symlink():
+        prior = _generation(current)
+        if qualification is not None:
+            obs.require(prior["backup_id"] == qualification["backup_id"]
+                        and prior["sha256"] == qualification["sha256"], "backup_retirement_qualification")
+    else:
+        obs.require(qualification is None, "backup_retirement_qualification")
+    obs.require(not (DESTINATION / ".publication.json").exists(), "backup_publication_recovery_required")
+    _save_json(staging / "manifest.json", response)
+    _generation(staging)
+    previous = DESTINATION / (".previous-" + staging.name.removeprefix(".attempt-"))
+    obs.require(not previous.exists() and not previous.is_symlink(), "backup_previous_exists")
+    _save_json(DESTINATION / ".publication.json",
+               {"staging": staging.name, "previous": previous.name, "sha256": response["sha256"],
+                "qualified_previous": qualification})
+    if current.exists():
+        current.rename(previous)
+        _sync_directory(DESTINATION)
+    staging.rename(current)
+    _sync_directory(DESTINATION)
+    if qualification is not None:
+        _schedule_retirement(previous, qualification)
+    (DESTINATION / ".publication.json").unlink()
+    _sync_directory(DESTINATION)
+    retire_qualified_previous()
+    # The previous generation may back a pending capture. Retirement requires
+    # parent qualification; it is never recursively discarded by publication.
+
+
+def _reusable_attempt(config_digest):
+    current = DESTINATION / "current"
+    current_time = _generation(current)["completed_at"] if current.exists() else ""
+    candidates = []
+    for staging in DESTINATION.glob(".attempt-*"):
+        if not re.fullmatch(r"\.attempt-[0-9a-f]{32}", staging.name):
+            continue
+        failure_path = DESTINATION / ("failure-" + staging.name.removeprefix(".attempt-") + ".json")
+        if not failure_path.exists() or not (staging / "manifest.json").exists():
+            continue
+        failure = obs.parse_json(obs.regular_file(failure_path, private=True).read_bytes())
+        if failure.get("error") not in {"backup_atomic_publication", "backup_preparation_failed"} or failure.get("publication_completed") is not False:
+            continue
+        value = _generation(staging)
+        if (value.get("protected_config_sha256") == config_digest
+                and value.get("reused_from_backup_id", value["backup_id"]) == failure.get("backup_id")
+                and value["completed_at"] > current_time):
+            candidates.append((value["completed_at"], staging, value))
+    if not candidates:
+        return None
+    _, staging, value = max(candidates, key=lambda item: (item[0], item[1].name))
+    _generation(staging, verify_hash=True)
+    return staging, value
 
 
 def prepare(request, root):
@@ -256,14 +418,47 @@ def prepare(request, root):
     obs.require(config["lxc_id"] == GUEST, "backup_protected_target")
     require_backup_mount()
     private_directory(DESTINATION)
-    attempt = uuid.uuid4().hex
-    staging = DESTINATION / (".attempt-" + attempt)
-    staging.mkdir(mode=0o700)
+    recovered = recover_publication()
+    retire_qualified_previous()
+    if recovered is not None:
+        _generation(DESTINATION / "current", verify_hash=True)
+        response = {**recovered, "backup_id": request["backup_id"],
+                    "reused_from_backup_id": recovered.get("reused_from_backup_id", recovered["backup_id"]), "capture_fresh": False,
+                    "prepared_at": datetime.now(timezone.utc).isoformat()}
+        _save_json(DESTINATION / "current/manifest.json", response)
+        return response
+    # One retained predecessor is enough to recover an interrupted publication.
+    # Never accumulate generations while parent qualification remains pending.
+    obs.require(not any(DESTINATION.glob(".previous-*")), "backup_previous_qualification_required")
+    qualification = request.get("qualified_previous")
+    if qualification is not None:
+        current = _generation(DESTINATION / "current")
+        obs.require(current["backup_id"] == qualification["backup_id"]
+                    and current["sha256"] == qualification["sha256"], "backup_retirement_qualification")
+    reusable = _reusable_attempt(digest)
+    if not reusable:
+        obs.require(not any(staging.is_symlink() or any(staging.iterdir())
+                            for staging in DESTINATION.glob(".attempt-*") if staging.is_dir() or staging.is_symlink()),
+                    "backup_failed_attempt_requires_review")
+    attempt = reusable[0].name.removeprefix(".attempt-") if reusable else uuid.uuid4().hex
+    staging = reusable[0] if reusable else DESTINATION / (".attempt-" + attempt)
+    if not reusable:
+        staging.mkdir(mode=0o700)
     base = {"schema_version": 1, "project": "ominull", "source_id": SOURCE,
             "backup_id": request["backup_id"], "target_id": GUEST,
             "protected_config_sha256": digest, "backup_mode": "snapshot", "compression": "none"}
     published = False
     try:
+        if reusable:
+            original = reusable[1]
+            response = {**original, "backup_id": request["backup_id"],
+                        "reused_from_backup_id": original.get("reused_from_backup_id", original["backup_id"]), "reused_attempt_id": attempt,
+                        "capture_fresh": False, "prepared_at": datetime.now(timezone.utc).isoformat()}
+            _save_json(DESTINATION / ("reuse-evidence-" + attempt + ".json"), original)
+            publish(staging, response, request.get("qualified_previous"))
+            # Recovery only publishes already verified bytes. Remote retirement
+            # remains an explicitly qualified parent action, not a retry side effect.
+            return response
         job = remote(config, REMOTE_CREATE, attempt, request["backup_id"])
         base["proxmox_task_id"] = job["task"]
         deadline = time.monotonic() + DEADLINE_SECONDS
@@ -291,7 +486,7 @@ def prepare(request, root):
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "required_paths_verified": artifact["required_paths_verified"],
                     "wal_paths_verified": artifact["wal_paths_verified"]}
-        publish(staging, response)
+        publish(staging, response, request.get("qualified_previous"))
         published = True
         # Only our newly generated attempt is removed, after verified publication.
         cleanup = remote(config, REMOTE_CLEANUP, attempt, request["backup_id"])
@@ -303,6 +498,8 @@ def prepare(request, root):
                    "publication_completed": published}
         # Preserve local/remote failed attempt data, never turn stale bytes into success.
         failure_path = DESTINATION / ("failure-" + attempt + ".json")
+        if failure_path.exists() or failure_path.is_symlink():
+            failure_path = DESTINATION / ("failure-" + attempt + "-retry-" + uuid.uuid4().hex + ".json")
         with failure_path.open("x") as file:
             os.fchmod(file.fileno(), 0o600)
             json.dump(failure, file, sort_keys=True)
@@ -322,7 +519,7 @@ def main(argv=None):
         code_root = Path(__file__).resolve().parents[2]
         root = obs.context_root(os.environ.get("ST_EXTENSION_CONTEXT", ""), code_root)
         result = prepare(request, root)
-    except (obs.ObservationError, OSError, ValueError) as exc:
+    except (obs.ObservationError, OSError, ValueError, KeyError, TypeError) as exc:
         error = str(exc) if isinstance(exc, obs.ObservationError) else "backup_input_failed"
         print(json.dumps({"schema_version": 1, "status": "failed", "error": error}, separators=(",", ":")))
         return 2

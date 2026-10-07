@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -18,6 +19,17 @@ REQUEST = {"contract_version": 1, "operation": "prepare_backup", "project": "omi
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_optional_catalogue_qualification_is_strict_and_compatible(self):
+        qualification = {"backup_id": "bkp-old", "sha256": "a" * 64,
+                         "snapshot_id": "restic-point", "repository_id": "repo-fixture"}
+        for value in [None, qualification]:
+            request = {**REQUEST, "qualified_previous": value}
+            self.assertEqual(bk.parse_request(json.dumps(request)), request)
+        for value in [{}, {**qualification, "sha256": "bad"},
+                      {**qualification, "snapshot_id": "../foreign"}]:
+            with self.subTest(value=value), self.assertRaises(obs.ObservationError):
+                bk.parse_request(json.dumps({**REQUEST, "qualified_previous": value}))
+
     def test_fixed_wire_refuses_target_command_and_destination_overrides(self):
         self.assertEqual(bk.parse_request(json.dumps(REQUEST)), REQUEST)
         for extra in [{"host": "foreign"}, {"destination": "/tmp/foreign"}, {"command": "stop"},
@@ -163,7 +175,9 @@ class BackupConfigurationTests(unittest.TestCase):
 
 class PreparationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        # An explicitly assigned native directory lets the same tiny fixtures
+        # verify ordinary rename publication on the owner's NTFS mount.
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get("OMINULL_PUBLICATION_TEST_ROOT"))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.destination = self.root / "external" / bk.SOURCE
@@ -206,9 +220,49 @@ class PreparationTests(unittest.TestCase):
         destination.write_bytes(self.payload)
         destination.chmod(0o600)
 
-    def prepare(self):
+    def prepare(self, request=REQUEST):
         with patch.object(bk, "remote", side_effect=self.remote), patch.object(bk, "fetch", side_effect=self.fetch):
-            return bk.prepare(REQUEST, self.root)
+            return bk.prepare(request, self.root)
+
+    def qualified_request(self, prior):
+        return {**REQUEST, "qualified_previous": {"backup_id": prior["backup_id"],
+                "sha256": prior["sha256"], "snapshot_id": "restic-point", "repository_id": "repo-fixture"}}
+
+    def test_qualified_predecessor_retirement_allows_repeated_fresh_capture(self):
+        prior = self.prepare()
+        for payload in [b"second generation", b"third generation"]:
+            self.payload = payload
+            result = self.prepare(self.qualified_request(prior))
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(Path(result["archive_path"]).read_bytes(), payload)
+            self.assertFalse(list(self.destination.glob(".previous-*")))
+            prior = result
+
+    def test_mismatched_qualification_refused_before_remote_capture(self):
+        prior = self.prepare()
+        request = self.qualified_request(prior)
+        request["qualified_previous"]["sha256"] = "a" * 64
+        self.calls.clear()
+        with self.assertRaises(obs.ObservationError):
+            self.prepare(request)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(bk._generation(self.destination / "current"), prior)
+
+    def test_interrupted_qualified_retirement_resumes_only_exact_owned_files(self):
+        prior = self.prepare()
+        staging, response = self.staged_generation()
+        original = Path.unlink
+        def interrupt(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            if path.name == "lxc-150.tar":
+                raise OSError("interrupted qualified retirement")
+            return result
+        with patch.object(Path, "unlink", interrupt), self.assertRaises(OSError):
+            bk.publish(staging, response, self.qualified_request(prior)["qualified_previous"])
+        self.assertEqual(bk._generation(self.destination / "current"), response)
+        bk.retire_qualified_previous()
+        self.assertFalse(list(self.destination.glob(".previous-*")))
+        self.assertFalse((self.destination / ".retirement.json").exists())
 
     def test_success_manifest_binds_exact_verified_archive_then_cleans_only_attempt(self):
         result = self.prepare()
@@ -231,6 +285,78 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(result["manifest_path"]).read_text()), result)
         self.assertEqual(Path(result["archive_path"]).read_bytes(), self.payload)
         self.assertEqual(list(self.destination.glob(".attempt-*")), [])
+        previous = list(self.destination.glob(".previous-*"))
+        self.assertEqual(len(previous), 1)
+        self.assertEqual(json.loads((previous[0] / "manifest.json").read_text()), prior)
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
+
+    def staged_generation(self, payload=b"replacement fixture"):
+        staging = self.destination / (".attempt-" + "a" * 32)
+        staging.mkdir(mode=0o700)
+        (staging / "lxc-150.tar").write_bytes(payload)
+        (staging / "lxc-150.tar").chmod(0o600)
+        response = {**json.loads((self.destination / "current/manifest.json").read_text()),
+                    "backup_id": "bkp-staged", "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload), "completed_at": "2099-01-01T00:00:00+00:00"}
+        bk._save_json(staging / "manifest.json", response)
+        return staging, response
+
+    def test_interruption_after_each_rename_recovers_without_losing_last_good(self):
+        prior = self.prepare()
+        staging, response = self.staged_generation()
+        current = self.destination / "current"
+        original = Path.rename
+        for boundary in ["current", staging.name]:
+            with self.subTest(boundary=boundary):
+                def interrupt(path, target):
+                    result = original(path, target)
+                    if path.name == boundary:
+                        raise OSError("simulated interrupted publication")
+                    return result
+                with patch.object(Path, "rename", interrupt), self.assertRaises(OSError):
+                    bk.publish(staging, response)
+                recovered = bk.recover_publication()
+                if boundary == "current":
+                    self.assertIsNone(recovered)
+                    self.assertEqual(bk._generation(current), prior)
+                    self.assertTrue(staging.exists())
+                else:
+                    self.assertEqual(recovered, response)
+                    self.assertEqual(bk._generation(current), response)
+                    previous = self.destination / (".previous-" + "a" * 32)
+                    self.assertEqual(bk._generation(previous), prior)
+        self.assertFalse((self.destination / ".publication.json").exists())
+
+    def test_verified_failed_generation_reused_without_remote_capture_or_false_freshness(self):
+        prior = self.prepare()
+        staging, staged = self.staged_generation()
+        failure = {"backup_id": staged["backup_id"], "error": "backup_atomic_publication",
+                   "publication_completed": False}
+        bk._save_json(self.destination / ("failure-" + "a" * 32 + ".json"), failure)
+        self.calls.clear()
+        result = self.prepare()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(result["backup_id"], REQUEST["backup_id"])
+        self.assertEqual(result["reused_from_backup_id"], staged["backup_id"])
+        self.assertEqual(result["completed_at"], staged["completed_at"])
+        self.assertFalse(result["capture_fresh"])
+        self.assertEqual(bk._generation(self.destination / "current"), result)
+        previous = self.destination / (".previous-" + "a" * 32)
+        self.assertEqual(bk._generation(previous), prior)
+        self.assertFalse(staging.exists())
+
+    def test_corrupt_failed_generation_is_refused_before_remote_capture(self):
+        self.prepare()
+        staging, staged = self.staged_generation()
+        bk._save_json(self.destination / ("failure-" + "a" * 32 + ".json"),
+                      {"backup_id": staged["backup_id"], "error": "backup_atomic_publication",
+                       "publication_completed": False})
+        (staging / "lxc-150.tar").write_bytes(b"x" * staged["size_bytes"])
+        self.calls.clear()
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
+        self.assertEqual(self.calls, [])
 
     def test_failure_retains_prior_publication_and_attempt_without_remote_cleanup(self):
         prior = self.prepare()
@@ -283,8 +409,8 @@ class PreparationTests(unittest.TestCase):
         current.mkdir(parents=True, mode=0o700)
         self.destination.chmod(0o700)
         (current / "foreign.txt").write_text("foreign data")
-        result = self.prepare()
-        self.assertEqual(result["status"], "failed")
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
         self.assertEqual((current / "foreign.txt").read_text(), "foreign data")
         self.assertNotIn(bk.REMOTE_CLEANUP, self.calls)
 
