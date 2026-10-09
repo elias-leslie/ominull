@@ -1,0 +1,106 @@
+# Go hub suite plus the stdlib-unittest release and extension scripts.
+# No Python package or frontend owner, so pytest, Biome and TSC have no inputs.
+[native]
+schema_version = 1
+locks = ["hub/go.mod", "hub/go.sum"]
+paths = []
+legacy_tools = ["ruff", "types", "security"]
+
+[native.environment]
+GOMODCACHE = "/home/kasadis/go/pkg/mod"
+GOCACHE = "/tmp/st-ominull-native-go-cache"
+GOPATH = "/tmp/st-ominull-native-gopath"
+GOTOOLCHAIN = "local"
+GOFLAGS = "-mod=readonly"
+
+[native.tools]
+go = "/home/kasadis/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.8.linux-amd64/bin/go"
+python3 = "/usr/bin/python3.12"
+gcc = "/usr/bin/gcc"
+as = "/usr/bin/as"
+ld = "/usr/bin/ld"
+sh = "/usr/bin/sh"
+bash = "/usr/bin/bash"
+git = "/usr/bin/git"
+findmnt = "/usr/bin/findmnt"
+curl = "/usr/bin/curl"
+jq = "/usr/bin/jq"
+sed = "/usr/bin/sed"
+awk = "/usr/bin/awk"
+grep = "/usr/bin/grep"
+cat = "/usr/bin/cat"
+dirname = "/usr/bin/dirname"
+basename = "/usr/bin/basename"
+find = "/usr/bin/find"
+mkdir = "/usr/bin/mkdir"
+mktemp = "/usr/bin/mktemp"
+rm = "/usr/bin/rm"
+cp = "/usr/bin/cp"
+mv = "/usr/bin/mv"
+ln = "/usr/bin/ln"
+ls = "/usr/bin/ls"
+touch = "/usr/bin/touch"
+chmod = "/usr/bin/chmod"
+sleep = "/usr/bin/sleep"
+seq = "/usr/bin/seq"
+tr = "/usr/bin/tr"
+head = "/usr/bin/head"
+tail = "/usr/bin/tail"
+sort = "/usr/bin/sort"
+uniq = "/usr/bin/uniq"
+cut = "/usr/bin/cut"
+wc = "/usr/bin/wc"
+date = "/usr/bin/date"
+env = "/usr/bin/env"
+printf = "/usr/bin/printf"
+tee = "/usr/bin/tee"
+xargs = "/usr/bin/xargs"
+stat = "/usr/bin/stat"
+uname = "/usr/bin/uname"
+sha256sum = "/usr/bin/sha256sum"
+tar = "/usr/bin/tar"
+gzip = "/usr/bin/gzip"
+dpkg-deb = "/usr/bin/dpkg-deb"
+openssl = "/usr/bin/openssl"
+
+[[native.stages]]
+id = "go"
+kind = "test"
+coverage = "full"
+cwd = "hub"
+argv = ["go", "test", "-json", "./..."]
+timeout_seconds = 1800
+[native.stages.evidence]
+format = "go-test-json"
+source = "stdout"
+[native.stages.evidence.not_applicable_tests]
+"ominull/hub/pkg/ipv6guard.TestIsolatedPacketCapture" = "isolated packet capture runs via scripts/test-ipv6-monitor.sh"
+"ominull/hub/pkg/scanner.TestLiveFingerprint" = "opt-in probe of the real network via OMINULL_LIVE_TARGETS"
+"ominull/hub/pkg/scanner.TestIsolatedKernelNeighborDiscovery" = "isolated network namespace fixture only"
+"ominull/hub/pkg/storage.TestTopologyPerformanceFixture" = "opt-in performance fixture"
+"ominull/hub/pkg/server.TestTelemetryPerformanceFeedback" = "opt-in production-shaped performance loop via OMINULL_PERF_TEST"
+
+[[native.stages]]
+id = "release-scripts"
+kind = "test"
+coverage = "full"
+argv = ["python3", "-m", "unittest", "-v", "scripts/test-release-headers.py", "scripts/test-release-convergence.py", "scripts/router/test-address-filter.py"]
+[native.stages.evidence]
+format = "text"
+source = "combined"
+success_pattern = "^OK( \\(.*\\))?$"
+failure_pattern = "^(FAIL|ERROR): "
+executed_pattern = " \\.\\.\\. (ok|FAIL|ERROR)$"
+
+[[native.stages]]
+id = "st-extension"
+kind = "test"
+coverage = "full"
+cwd = "scripts/st_extension"
+argv = ["python3", "-m", "unittest", "-v", "test_backup", "test_observer"]
+[native.stages.evidence]
+format = "text"
+source = "combined"
+success_pattern = "^OK( \\(.*\\))?$"
+failure_pattern = "^(FAIL|ERROR): "
+executed_pattern = " \\.\\.\\. (ok|FAIL|ERROR)$"

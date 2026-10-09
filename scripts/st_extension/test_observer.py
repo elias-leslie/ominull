@@ -262,8 +262,16 @@ class PackageTests(Fixture):
 
     def test_signed_package_local_binaries_and_tamper_failures(self):
         public = self.prepare_package()
+        real_run = obs.run
+
+        # Fixture binaries are not Go executables; build info is mocked, so the
+        # `go version -m` probe must be too while openssl and dpkg-deb stay real.
+        def run_without_go_probe(argv, **kwargs):
+            return b"" if argv[:3] == ["go", "version", "-m"] else real_run(argv, **kwargs)
+
         with patch.object(obs, "pinned_public_key", return_value=public), patch.object(
-            obs, "parse_buildinfo", return_value={"source_commit": COMMIT, "vcs_modified": False}):
+            obs, "parse_buildinfo", return_value={"source_commit": COMMIT, "vcs_modified": False}), patch.object(
+            obs, "run", side_effect=run_without_go_probe):
             evidence = obs.package_evidence(self.root, self.config, COMMIT, self.root)
             self.assertTrue(evidence["package"]["signature_verified"])
             self.assertEqual(set(evidence["binaries"]), {"hub", "authority"})
