@@ -4,7 +4,7 @@
 schema_version = 1
 locks = ["hub/go.mod", "hub/go.sum"]
 paths = []
-legacy_tools = ["ruff", "types", "security"]
+legacy_tools = ["ruff", "types", "security", "govulncheck"]
 
 [native.environment]
 GOMODCACHE = "/home/kasadis/go/pkg/mod"
@@ -14,7 +14,7 @@ GOTOOLCHAIN = "local"
 GOFLAGS = "-mod=readonly"
 
 [native.tools]
-go = "/home/kasadis/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.8.linux-amd64/bin/go"
+go = "/home/kasadis/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.linux-amd64/bin/go"
 python3 = "/usr/bin/python3.12"
 gcc = "/usr/bin/gcc"
 as = "/usr/bin/as"
