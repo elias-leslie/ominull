@@ -41,7 +41,7 @@ class ProtocolTests(unittest.TestCase):
             bk.parse_request('{"contract_version":1,"contract_version":1}')
 
     def test_remote_programs_parse_and_fixed_backup_never_stops_or_prunes(self):
-        for program in [bk.REMOTE_CREATE, bk.REMOTE_STATUS, bk.REMOTE_ARTIFACT, bk.REMOTE_CLEANUP]:
+        for program in [bk.REMOTE_GUEST, bk.REMOTE_CREATE, bk.REMOTE_STATUS, bk.REMOTE_ARTIFACT, bk.REMOTE_CLEANUP]:
             compile(program, "fixed-remote-program", "exec")
         self.assertIn('"--mode", "snapshot"', bk.REMOTE_CREATE)
         self.assertIn('"--compress", "0", "--remove", "0"', bk.REMOTE_CREATE)
@@ -195,11 +195,14 @@ class PreparationTests(unittest.TestCase):
         self.calls = []
         self.task = "UPID:davion-gem:fixture"
         self.failure = None
+        self.guest_status = "running"
 
     def remote(self, config, program, attempt, backup_id):
         self.calls.append(program)
         if self.failure == program:
             raise obs.ObservationError("fixture_failure")
+        if program == bk.REMOTE_GUEST:
+            return {"guest_status": self.guest_status}
         if program == bk.REMOTE_CREATE:
             return {"task": self.task, "used_bytes": len(self.payload)}
         if program == bk.REMOTE_STATUS:
@@ -371,6 +374,26 @@ class PreparationTests(unittest.TestCase):
                 self.assertEqual(json.loads(Path(prior["manifest_path"]).read_text()), prior)
                 self.assertTrue((self.destination / ("failure-" + result["attempt_id"] + ".json")).exists())
                 self.assertTrue((self.destination / (".attempt-" + result["attempt_id"])).exists())
+
+    def test_stopped_guest_skips_without_failure_evidence_or_attempt(self):
+        prior = self.prepare()
+        self.calls.clear()
+        self.guest_status = "stopped"
+        result = self.prepare()
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "guest_stopped")
+        self.assertEqual(result["backup_id"], REQUEST["backup_id"])
+        self.assertEqual(self.calls, [bk.REMOTE_GUEST])
+        self.assertEqual(list(self.destination.glob(".attempt-*")), [])
+        self.assertEqual(list(self.destination.glob("failure-*.json")), [])
+        self.assertEqual(bk._generation(self.destination / "current"), prior)
+
+    def test_unknown_guest_state_refused_before_staging(self):
+        self.guest_status = "paused"
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
+        self.assertEqual(self.calls, [bk.REMOTE_GUEST])
+        self.assertEqual(list(self.destination.glob(".attempt-*")), [])
 
     def test_wrong_protected_guest_refused_before_remote_io(self):
         self.config["lxc_id"] = 151

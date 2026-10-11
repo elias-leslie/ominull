@@ -76,6 +76,12 @@ marker["task"] = task
 print(json.dumps({"task": task, "used_bytes": used}))
 '''
 
+REMOTE_GUEST = REMOTE_COMMON + r'''
+assert command("hostname", "-s").strip() == "davion-gem"
+state = api("get", "/nodes/davion-gem/lxc/150/status/current")
+print(json.dumps({"guest_status": state.get("status")}))
+'''
+
 REMOTE_STATUS = REMOTE_COMMON + r'''
 marker = owned()
 state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
@@ -440,6 +446,14 @@ def prepare(request, root):
         obs.require(not any(staging.is_symlink() or any(staging.iterdir())
                             for staging in DESTINATION.glob(".attempt-*") if staging.is_dir() or staging.is_symlink()),
                     "backup_failed_attempt_requires_review")
+        # The owner powers the guest on and off at will. A stopped guest has
+        # nothing new to capture, so report a skip without failure evidence.
+        guest = remote(config, REMOTE_GUEST, uuid.uuid4().hex, request["backup_id"])
+        if guest.get("guest_status") == "stopped":
+            return {"schema_version": 1, "project": "ominull", "source_id": SOURCE,
+                    "backup_id": request["backup_id"], "target_id": GUEST,
+                    "status": "skipped", "reason": "guest_stopped"}
+        obs.require(guest.get("guest_status") == "running", "backup_guest_state")
     attempt = reusable[0].name.removeprefix(".attempt-") if reusable else uuid.uuid4().hex
     staging = reusable[0] if reusable else DESTINATION / (".attempt-" + attempt)
     if not reusable:
@@ -524,4 +538,4 @@ def main(argv=None):
         print(json.dumps({"schema_version": 1, "status": "failed", "error": error}, separators=(",", ":")))
         return 2
     print(json.dumps(result, separators=(",", ":")))
-    return 0 if result["status"] == "completed" else 1
+    return 0 if result["status"] in {"completed", "skipped"} else 1
