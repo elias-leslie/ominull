@@ -1,0 +1,17 @@
+[project]
+name = "ominull-dev-tools"
+version = "0.1.0"
+description = "Development-only test tooling for Ominull's Python release and ST extension scripts"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/st_extension"]

@@ -1,8 +1,16 @@
 # Go hub suite plus the stdlib-unittest release and extension scripts.
-# No Python package or frontend owner, so pytest, Biome and TSC have no inputs.
+# pytest is a dev-only runner for the extension tests (uv sync --locked --group dev);
+# there is no frontend owner, so Biome and TSC have no inputs.
+[paths]
+pytest = ".venv/bin"
+
+[pytest]
+# pytest-cov is not installed; do not inject --no-cov on focused runs.
+no_cov = false
+
 [native]
 schema_version = 1
-locks = ["hub/go.mod", "hub/go.sum"]
+locks = ["hub/go.mod", "hub/go.sum", "uv.lock"]
 paths = []
 legacy_tools = ["ruff", "types", "security", "govulncheck"]
 
