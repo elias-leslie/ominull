@@ -41,7 +41,7 @@ class ProtocolTests(unittest.TestCase):
             bk.parse_request('{"contract_version":1,"contract_version":1}')
 
     def test_remote_programs_parse_and_fixed_backup_never_stops_or_prunes(self):
-        for program in [bk.REMOTE_GUEST, bk.REMOTE_CREATE, bk.REMOTE_STATUS, bk.REMOTE_ARTIFACT, bk.REMOTE_CLEANUP]:
+        for program in [bk.REMOTE_GUEST, bk.REMOTE_CREATE, bk.REMOTE_STATUS, bk.REMOTE_ARTIFACT, bk.REMOTE_CLEANUP, bk.REMOTE_DISCARD]:
             compile(program, "fixed-remote-program", "exec")
         self.assertIn('"--mode", "snapshot"', bk.REMOTE_CREATE)
         self.assertIn('"--compress", "0", "--remove", "0"', bk.REMOTE_CREATE)
@@ -105,6 +105,36 @@ class RemoteCleanupTests(unittest.TestCase):
                 self.assertEqual(directory.exists(), foreign)
                 if foreign:
                     self.assertTrue(archive.exists())
+
+    def test_failed_attempt_discard_waits_for_its_task_and_refuses_foreign_contents(self):
+        for case in ["stopped", "running", "foreign", "absent"]:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                attempt = "b" * 32
+                directory = root / ("st-ominull-" + attempt)
+                if case != "absent":
+                    directory.mkdir(mode=0o700)
+                    (directory / "attempt.json").write_text(json.dumps({"attempt": attempt, "backup_id": "bkp-old", "guest": 150, "task": "UPID:davion-gem:fixture"}))
+                    (directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar.dat").write_bytes(b"partial")
+                    if case == "foreign":
+                        (directory / "foreign.txt").write_text("preserve")
+                program = bk.REMOTE_DISCARD.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
+
+                def run(args, **kwargs):
+                    if args[0] == "hostname":
+                        return subprocess.CompletedProcess(args, 0, stdout="davion-gem\n")
+                    status = "running" if case == "running" else "stopped"
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"status": status, "exitstatus": "ERROR"}))
+                output = io.StringIO()
+                with patch.object(bk.sys, "argv", ["discard", attempt, "discard"]), patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
+                    if case in {"running", "foreign"}:
+                        with self.assertRaises(AssertionError):
+                            exec(program, {})
+                    else:
+                        exec(program, {})
+                self.assertEqual(directory.exists(), case in {"running", "foreign"})
+                if case in {"stopped", "absent"}:
+                    self.assertEqual(json.loads(output.getvalue()), {"discarded": True})
 
     def test_checkpointed_database_without_wal_and_present_wal_shape(self):
         required = ["var/lib/ominull/ominull.db", "var/lib/ominull/evidence.key",
@@ -196,6 +226,7 @@ class PreparationTests(unittest.TestCase):
         self.task = "UPID:davion-gem:fixture"
         self.failure = None
         self.guest_status = "running"
+        self.discarded = []
 
     def remote(self, config, program, attempt, backup_id):
         self.calls.append(program)
@@ -214,6 +245,9 @@ class PreparationTests(unittest.TestCase):
         if program == bk.REMOTE_CLEANUP:
             self.assertTrue((self.destination / "current/lxc-150.tar").exists())
             return {"cleaned": True}
+        if program == bk.REMOTE_DISCARD:
+            self.discarded.append(attempt)
+            return {"discarded": True}
         self.fail("unexpected remote program")
 
     def fetch(self, config, artifact, destination):
@@ -374,6 +408,63 @@ class PreparationTests(unittest.TestCase):
                 self.assertEqual(json.loads(Path(prior["manifest_path"]).read_text()), prior)
                 self.assertTrue((self.destination / ("failure-" + result["attempt_id"] + ".json")).exists())
                 self.assertTrue((self.destination / (".attempt-" + result["attempt_id"])).exists())
+
+    def test_next_run_discards_unverified_failed_attempt_and_captures(self):
+        prior = self.prepare()
+        for failure in [bk.REMOTE_CREATE, "fetch"]:
+            with self.subTest(failure=failure):
+                self.failure = failure
+                failed = self.prepare()
+                self.assertEqual(failed["status"], "failed")
+                self.failure = None
+                self.payload = failure.encode() if isinstance(failure, str) else b"next"
+                result = self.prepare(self.qualified_request(prior))
+                self.assertEqual(result["status"], "completed")
+                self.assertIn(failed["attempt_id"], self.discarded)
+                self.assertEqual(list(self.destination.glob(".attempt-*")), [])
+                prior = result
+
+    def test_killed_attempt_without_failure_record_is_discarded(self):
+        self.prepare()
+        staging = self.destination / (".attempt-" + "c" * 32)
+        staging.mkdir(mode=0o700)
+        (staging / "lxc-150.tar").write_bytes(b"partial")
+        self.guest_status = "stopped"
+        result = self.prepare()
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(self.discarded, ["c" * 32])
+        self.assertFalse(staging.exists())
+
+    def test_refused_remote_discard_keeps_attempt_and_captures_nothing(self):
+        self.prepare()
+        staging = self.destination / (".attempt-" + "c" * 32)
+        staging.mkdir(mode=0o700)
+        self.failure = bk.REMOTE_DISCARD
+        self.calls.clear()
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
+        self.assertTrue(staging.exists())
+        self.assertNotIn(bk.REMOTE_CREATE, self.calls)
+
+    def test_verified_attempt_is_never_discarded(self):
+        self.prepare()
+        staging, _ = self.staged_generation()
+        with self.assertRaises(obs.ObservationError):
+            self.prepare()
+        self.assertTrue((staging / "lxc-150.tar").exists())
+        self.assertEqual(self.discarded, [])
+
+    def test_evidence_markers_are_bounded(self):
+        self.prepare()
+        for index in range(bk.EVIDENCE_KEEP + 5):
+            marker = self.destination / f"retirement-completed-{index:032x}.json"
+            marker.write_text("{}")
+            os.utime(marker, (index, index))
+        self.guest_status = "stopped"
+        self.prepare()
+        remaining = sorted(path.name for path in self.destination.glob("retirement-completed-*.json"))
+        self.assertEqual(len(remaining), bk.EVIDENCE_KEEP)
+        self.assertNotIn(f"retirement-completed-{0:032x}.json", remaining)
 
     def test_stopped_guest_skips_without_failure_evidence_or_attempt(self):
         prior = self.prepare()

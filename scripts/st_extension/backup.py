@@ -23,6 +23,7 @@ NODE = "davion-gem"
 GUEST = 150
 DEADLINE_SECONDS = 3600
 RESERVE_BYTES = 25 * 1024**3
+EVIDENCE_KEEP = 20  # Newest failure/retirement/recovery markers kept per kind.
 REQUEST_KEYS = {"contract_version", "operation", "project", "source_id", "backup_id"}
 
 # Each attempt has a newly-created private directory and immutable ownership
@@ -140,6 +141,32 @@ for child in children:
     child.unlink()
 directory.rmdir()
 print(json.dumps({"cleaned":True}))
+'''
+
+
+# A failed or killed attempt never produced a published generation. Discard
+# its remote dump once no guest backup task can still be writing it.
+REMOTE_DISCARD = REMOTE_COMMON + r'''
+assert command("hostname", "-s").strip() == "davion-gem"
+if directory.exists() or directory.is_symlink():
+    assert directory.resolve() == directory and directory.is_dir()
+    assert directory.stat().st_uid == os.getuid() and stat.S_IMODE(directory.stat().st_mode) == 0o700
+    marker_path = directory / "attempt.json"
+    marker = json.loads(marker_path.read_text()) if marker_path.is_file() and not marker_path.is_symlink() else {}
+    assert marker.get("attempt", attempt) == attempt and marker.get("guest", 150) == 150
+    if marker.get("task"):
+        state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
+        assert state.get("status") == "stopped", "Attempt task is still running"
+    else:
+        assert not api("get", "/nodes/davion-gem/tasks", "--vmid", "150", "--source", "active"), "A guest backup task is still active"
+    children = list(directory.iterdir())
+    for child in children:
+        assert child.is_file() and not child.is_symlink() and child.stat().st_uid == os.getuid()
+        assert child.name == "attempt.json" or re.fullmatch(r"vzdump-lxc-150-[0-9_\-]+\.(tar(?:\.dat|\.notes)?|log)", child.name)
+    for child in children:
+        child.unlink()
+    directory.rmdir()
+print(json.dumps({"discarded": True}))
 '''
 
 
@@ -419,6 +446,40 @@ def _reusable_attempt(config_digest):
     return staging, value
 
 
+def discard_unverified_attempts(config):
+    """Remove failed attempts that never verified bytes; current/ stays untouched.
+
+    An attempt without manifest.json holds at most a partial, unverified
+    download, so it is never a good copy. Keeping it blocked every later run.
+    """
+    for staging in sorted(DESTINATION.glob(".attempt-*")):
+        if not re.fullmatch(r"\.attempt-[0-9a-f]{32}", staging.name) or staging.is_symlink() or not staging.is_dir():
+            continue
+        if (staging / "manifest.json").exists() or (staging / "manifest.json").is_symlink():
+            continue  # Verified bytes are reused or left for review.
+        children = list(staging.iterdir())
+        obs.require(all(child.name == "lxc-150.tar" and child.is_file() and not child.is_symlink() for child in children),
+                    "backup_attempt_members")
+        obs.require(remote(config, REMOTE_DISCARD, staging.name.removeprefix(".attempt-"), "discard") == {"discarded": True},
+                    "backup_remote_discard")
+        for child in children:
+            child.unlink()
+        staging.rmdir()
+        _sync_directory(DESTINATION)
+
+
+def trim_evidence_markers():
+    """Bound small marker files; each kind keeps its newest entries."""
+    for pattern in ("failure-*.json", "retirement-completed-*.json", "publication-recovered-*.json", "reuse-evidence-*.json"):
+        markers = sorted((path for path in DESTINATION.glob(pattern) if path.is_file() and not path.is_symlink()),
+                         key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in markers[EVIDENCE_KEEP:]:
+            attempt = re.match(r"(?:failure|reuse-evidence)-([0-9a-f]{32})", path.name)
+            if attempt and (DESTINATION / (".attempt-" + attempt.group(1))).exists():
+                continue  # Still describes a retained attempt.
+            path.unlink()
+
+
 def prepare(request, root):
     config, digest = obs.load_config(root, require_deployment_inputs=False)
     obs.require(config["lxc_id"] == GUEST, "backup_protected_target")
@@ -441,6 +502,8 @@ def prepare(request, root):
         current = _generation(DESTINATION / "current")
         obs.require(current["backup_id"] == qualification["backup_id"]
                     and current["sha256"] == qualification["sha256"], "backup_retirement_qualification")
+    discard_unverified_attempts(config)
+    trim_evidence_markers()
     reusable = _reusable_attempt(digest)
     if not reusable:
         obs.require(not any(staging.is_symlink() or any(staging.iterdir())
