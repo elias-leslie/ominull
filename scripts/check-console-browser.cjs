@@ -3,7 +3,10 @@
 const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
 const root=path.resolve(__dirname,'..');
 const execFile=require('node:util').promisify(cp.execFile);
-async function st(args){return (await execFile('st',args,{encoding:'utf8',maxBuffer:1024*1024})).stdout;}
+// The fixture listens on this host's loopback. st browser defaults to a remote
+// browser VM that cannot reach it, so use the local headless profile unless a
+// target was chosen explicitly.
+async function st(args){if(args[0]==='browser'&&!process.env.ST_BROWSER_TARGET)args=['browser','--local-ai',...args.slice(1)];return (await execFile('st',args,{encoding:'utf8',maxBuffer:1024*1024})).stdout;}
 const suite=fs.readFileSync(path.join(root,'hub/pkg/server/web_tests/console-browser.js'),'utf8');
 const performanceSuite=fs.readFileSync(path.join(root,'hub/pkg/server/web_tests/console-performance.js'),'utf8');
 const url='http://127.0.0.1:18764/?demo=true#/assets';
