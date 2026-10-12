@@ -93,7 +93,7 @@ Modern browser security standards require a **Secure Context** (HTTPS with a tru
 
 ### Supported Console Origins
 - **Valid Domain Name Required**: Console origins must use a valid DNS domain name (e.g. `https://hub.lan:8443` or `https://console.example.org`).
-- **IP Address Prohibition**: Under W3C WebAuthn Level 2 (§5.4.3), relying party IDs (RP IDs) cannot be IP addresses (`https://10.0.0.58:8443` fails passkey enrollment with `SecurityError`).
+- **IP Address Prohibition**: Under W3C WebAuthn Level 2 (§5.4.3), relying party IDs (RP IDs) cannot be IP addresses (`https://192.0.2.58:8443` fails passkey enrollment with `SecurityError`).
 - **Hostname Immutability**: Changing the console hostname at a later date invalidates all enrolled WebAuthn passkeys because stored credentials are permanently bound to the RP ID.
 
 ### Certificate Modes

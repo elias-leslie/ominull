@@ -110,7 +110,7 @@ Existing unrelated changes at that checkpoint:
 
 The required private-identifier scan later found a real LAN subnet literal inside the
 pre-existing `hub/cmd/ominullctl/main.go` work. That one literal was replaced with the
-documented `10.0.0.0/24` public stand-in. This is a deliberate hygiene-only overlap; all
+documented `192.0.2.0/24` public stand-in. This is a deliberate hygiene-only overlap; all
 other changes in that file still belong to the pre-existing response-authority work and
 must not be staged with this incident remediation.
 

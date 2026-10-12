@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import shlex
@@ -16,10 +17,11 @@ from datetime import datetime, timezone
 import observer as obs
 
 SOURCE = "ominull-production-state"
-BACKUP_MOUNT = Path("/media/kasadis/Backups")
+# The removable backup volume as udisks mounts it for the invoking user.
+BACKUP_MOUNT = Path("/media") / pwd.getpwuid(os.getuid()).pw_name / "Backups"
 BACKUP_UUID = "068613B88613A769"
 DESTINATION = BACKUP_MOUNT / SOURCE
-NODE = "davion-gem"
+NODE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}\Z")
 GUEST = 150
 DEADLINE_SECONDS = 3600
 RESERVE_BYTES = 25 * 1024**3
@@ -30,9 +32,10 @@ REQUEST_KEYS = {"contract_version", "operation", "project", "source_id", "backup
 # marker. All remote operations are fixed Python programs, not supplied commands.
 REMOTE_COMMON = r'''
 import hashlib, json, os, pathlib, re, shutil, stat, subprocess, sys, tarfile
-attempt, backup_id = sys.argv[1:]
+attempt, backup_id, node = sys.argv[1:]
 assert re.fullmatch(r"[0-9a-f]{32}", attempt)
 assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", backup_id)
+assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}", node)
 root = pathlib.Path("/var/lib/vz/dump")
 directory = root / ("st-ominull-" + attempt)
 assert root.resolve() == root and root.is_dir()
@@ -53,8 +56,8 @@ def owned():
 '''
 
 REMOTE_CREATE = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == "davion-gem"
-config = api("get", "/nodes/davion-gem/lxc/150/config")
+assert command("hostname", "-s").strip() == node
+config = api("get", "/nodes/" + node + "/lxc/150/config")
 assert not any(re.fullmatch(r"mp\d+", k) for k in config), "Additional mount requires review"
 assert config["rootfs"].split(",", 1)[0] == "local-lvm:vm-150-disk-0"
 assert not config.get("lock") and not config.get("snapstate")
@@ -68,30 +71,30 @@ marker = {"attempt": attempt, "backup_id": backup_id, "guest": 150}
 with (directory / "attempt.json").open("x") as file:
     os.fchmod(file.fileno(), 0o600)
     json.dump(marker, file)
-task = api("create", "/nodes/davion-gem/vzdump", "--vmid", "150", "--mode", "snapshot",
+task = api("create", "/nodes/" + node + "/vzdump", "--vmid", "150", "--mode", "snapshot",
            "--dumpdir", str(directory), "--tmpdir", "/var/tmp", "--compress", "0", "--remove", "0",
            timeout=3600, worker_result=True)
-assert isinstance(task, str) and task.startswith("UPID:davion-gem:")
+assert isinstance(task, str) and task.startswith("UPID:" + node + ":")
 marker["task"] = task
 (directory / "attempt.json").write_text(json.dumps(marker))
 print(json.dumps({"task": task, "used_bytes": used}))
 '''
 
 REMOTE_GUEST = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == "davion-gem"
-state = api("get", "/nodes/davion-gem/lxc/150/status/current")
+assert command("hostname", "-s").strip() == node
+state = api("get", "/nodes/" + node + "/lxc/150/status/current")
 print(json.dumps({"guest_status": state.get("status")}))
 '''
 
 REMOTE_STATUS = REMOTE_COMMON + r'''
 marker = owned()
-state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
+state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
 print(json.dumps({k:state.get(k) for k in ["status", "exitstatus"]}))
 '''
 
 REMOTE_ARTIFACT = REMOTE_COMMON + r'''
 marker = owned()
-state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
+state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
 assert state.get("status") == "stopped" and state.get("exitstatus") == "OK"
 archives = [p for p in directory.iterdir() if re.fullmatch(r"vzdump-lxc-150-[0-9_\-]+\.tar", p.name)]
 assert len(archives) == 1
@@ -130,7 +133,7 @@ print(json.dumps({"path":str(archive), "size_bytes":info.st_size, "sha256":diges
 
 REMOTE_CLEANUP = REMOTE_COMMON + r'''
 marker = owned()
-state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
+state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
 assert state.get("status") == "stopped" and state.get("exitstatus") == "OK"
 # Refuse unexpected contents rather than recursively deleting a foreign tree.
 children = list(directory.iterdir())
@@ -147,7 +150,7 @@ print(json.dumps({"cleaned":True}))
 # A failed or killed attempt never produced a published generation. Discard
 # its remote dump once no guest backup task can still be writing it.
 REMOTE_DISCARD = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == "davion-gem"
+assert command("hostname", "-s").strip() == node
 if directory.exists() or directory.is_symlink():
     assert directory.resolve() == directory and directory.is_dir()
     assert directory.stat().st_uid == os.getuid() and stat.S_IMODE(directory.stat().st_mode) == 0o700
@@ -155,10 +158,10 @@ if directory.exists() or directory.is_symlink():
     marker = json.loads(marker_path.read_text()) if marker_path.is_file() and not marker_path.is_symlink() else {}
     assert marker.get("attempt", attempt) == attempt and marker.get("guest", 150) == 150
     if marker.get("task"):
-        state = api("get", "/nodes/davion-gem/tasks/" + marker["task"] + "/status")
+        state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
         assert state.get("status") == "stopped", "Attempt task is still running"
     else:
-        assert not api("get", "/nodes/davion-gem/tasks", "--vmid", "150", "--source", "active"), "A guest backup task is still active"
+        assert not api("get", "/nodes/" + node + "/tasks", "--vmid", "150", "--source", "active"), "A guest backup task is still active"
     children = list(directory.iterdir())
     for child in children:
         assert child.is_file() and not child.is_symlink() and child.stat().st_uid == os.getuid()
@@ -199,7 +202,10 @@ def ssh_argv(config, command):
 
 
 def remote(config, script, attempt, backup_id):
-    command = "python3 -c " + shlex.quote(script) + " " + shlex.quote(attempt) + " " + shlex.quote(backup_id)
+    node = config.get("proxmox_node")
+    obs.require(isinstance(node, str) and NODE_NAME.fullmatch(node), "backup_proxmox_node")
+    command = ("python3 -c " + shlex.quote(script) + " " + shlex.quote(attempt) + " "
+               + shlex.quote(backup_id) + " " + shlex.quote(node))
     try:
         result = subprocess.run(ssh_argv(config, command), stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=DEADLINE_SECONDS if script == REMOTE_CREATE else 300,

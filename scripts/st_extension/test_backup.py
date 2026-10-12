@@ -49,18 +49,18 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn('"--stop"', bk.REMOTE_CREATE)
         self.assertNotIn('rmtree', bk.REMOTE_CLEANUP)
         self.assertIn('timeout=3600, worker_result=True', bk.REMOTE_CREATE)
-        with tempfile.TemporaryDirectory() as temporary, patch.object(bk.sys, "argv", ["fixture", "a" * 32, "bkp-fixture"]):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(bk.sys, "argv", ["fixture", "a" * 32, "bkp-fixture", "pve-fixture"]):
             namespace = {}
             exec(bk.REMOTE_COMMON.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({temporary!r})"), namespace)
-            result = subprocess.CompletedProcess([], 0, stdout='INFO: backup completed\n"UPID:davion-gem:fixture"\n')
+            result = subprocess.CompletedProcess([], 0, stdout='INFO: backup completed\n"UPID:pve-fixture:fixture"\n')
             with patch.object(subprocess, "run", return_value=result) as process:
-                self.assertEqual(namespace["api"]("create", "/nodes/davion-gem/vzdump", timeout=3600, worker_result=True), "UPID:davion-gem:fixture")
+                self.assertEqual(namespace["api"]("create", "/nodes/pve-fixture/vzdump", timeout=3600, worker_result=True), "UPID:pve-fixture:fixture")
                 self.assertEqual(process.call_args.kwargs["timeout"], 3600)
 
     def test_remote_failure_withholds_stderr_and_host(self):
         failed = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"private credential material")
         with patch.object(subprocess, "run", return_value=failed), self.assertRaises(obs.ObservationError) as caught:
-            bk.remote({"ssh_alias": "private-alias"}, "fixed", "a" * 32, "bkp-fixture")
+            bk.remote({"ssh_alias": "private-alias", "proxmox_node": "pve-fixture"}, "fixed", "a" * 32, "bkp-fixture")
         self.assertEqual(str(caught.exception), "backup_remote_failed")
 
     def test_only_exact_mounted_t7_ntfs_is_accepted(self):
@@ -88,7 +88,7 @@ class RemoteCleanupTests(unittest.TestCase):
                 directory = root / ("st-ominull-" + attempt)
                 directory.mkdir(mode=0o700)
                 marker = {"attempt": attempt, "backup_id": "bkp-fixture", "guest": 150,
-                          "task": "UPID:davion-gem:fixture"}
+                          "task": "UPID:pve-fixture:fixture"}
                 (directory / "attempt.json").write_text(json.dumps(marker))
                 archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
                 archive.write_bytes(b"verified fixture")
@@ -96,7 +96,7 @@ class RemoteCleanupTests(unittest.TestCase):
                     (directory / "foreign.txt").write_text("preserve foreign data")
                 program = bk.REMOTE_CLEANUP.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
                 status = subprocess.CompletedProcess([], 0, stdout='{"status":"stopped","exitstatus":"OK"}')
-                with patch.object(bk.sys, "argv", ["cleanup", attempt, "bkp-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(bk.sys, "argv", ["cleanup", attempt, "bkp-fixture", "pve-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(io.StringIO()):
                     if foreign:
                         with self.assertRaises(AssertionError):
                             exec(program, {})
@@ -114,7 +114,7 @@ class RemoteCleanupTests(unittest.TestCase):
                 directory = root / ("st-ominull-" + attempt)
                 if case != "absent":
                     directory.mkdir(mode=0o700)
-                    (directory / "attempt.json").write_text(json.dumps({"attempt": attempt, "backup_id": "bkp-old", "guest": 150, "task": "UPID:davion-gem:fixture"}))
+                    (directory / "attempt.json").write_text(json.dumps({"attempt": attempt, "backup_id": "bkp-old", "guest": 150, "task": "UPID:pve-fixture:fixture"}))
                     (directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar.dat").write_bytes(b"partial")
                     if case == "foreign":
                         (directory / "foreign.txt").write_text("preserve")
@@ -122,11 +122,11 @@ class RemoteCleanupTests(unittest.TestCase):
 
                 def run(args, **kwargs):
                     if args[0] == "hostname":
-                        return subprocess.CompletedProcess(args, 0, stdout="davion-gem\n")
+                        return subprocess.CompletedProcess(args, 0, stdout="pve-fixture\n")
                     status = "running" if case == "running" else "stopped"
                     return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"status": status, "exitstatus": "ERROR"}))
                 output = io.StringIO()
-                with patch.object(bk.sys, "argv", ["discard", attempt, "discard"]), patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
+                with patch.object(bk.sys, "argv", ["discard", attempt, "discard", "pve-fixture"]), patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
                     if case in {"running", "foreign"}:
                         with self.assertRaises(AssertionError):
                             exec(program, {})
@@ -150,7 +150,7 @@ class RemoteCleanupTests(unittest.TestCase):
                 directory = root / ("st-ominull-" + attempt)
                 directory.mkdir(mode=0o700)
                 (directory / "attempt.json").write_text(json.dumps({"attempt": attempt,
-                    "backup_id": "bkp-fixture", "guest": 150, "task": "UPID:davion-gem:fixture"}))
+                    "backup_id": "bkp-fixture", "guest": 150, "task": "UPID:pve-fixture:fixture"}))
                 archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
                 with tarfile.open(archive, "w") as tar:
                     for name in required:
@@ -166,7 +166,7 @@ class RemoteCleanupTests(unittest.TestCase):
                 program = bk.REMOTE_ARTIFACT.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
                 status = subprocess.CompletedProcess([], 0, stdout='{"status":"stopped","exitstatus":"OK"}')
                 output = io.StringIO()
-                with patch.object(bk.sys, "argv", ["artifact", attempt, "bkp-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(output):
+                with patch.object(bk.sys, "argv", ["artifact", attempt, "bkp-fixture", "pve-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(output):
                     if wal == "symlink":
                         with self.assertRaises(AssertionError):
                             exec(program, {})
@@ -195,6 +195,9 @@ class BackupConfigurationTests(unittest.TestCase):
             path.chmod(0o600)
             loaded, digest = obs.load_config(root, require_deployment_inputs=False)
             self.assertEqual(loaded, config)
+            path.write_text(json.dumps({**config, "proxmox_node": "pve-fixture"}))
+            self.assertEqual(obs.load_config(root, require_deployment_inputs=False)[0]["proxmox_node"], "pve-fixture")
+            path.write_text(json.dumps(config))
             self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
             with self.assertRaises(obs.ObservationError):
                 obs.load_config(root)
@@ -214,7 +217,7 @@ class PreparationTests(unittest.TestCase):
         self.patch = patch.object(bk, "DESTINATION", self.destination)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.config = {"ssh_alias": "approved-fixture", "lxc_id": 150}
+        self.config = {"ssh_alias": "approved-fixture", "lxc_id": 150, "proxmox_node": "pve-fixture"}
         self.config_patch = patch.object(obs, "load_config", return_value=(self.config, "a" * 64))
         self.load_config_mock = self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
@@ -223,7 +226,7 @@ class PreparationTests(unittest.TestCase):
         self.addCleanup(self.mount_patch.stop)
         self.payload = b"consistent-uncompressed-archive-fixture"
         self.calls = []
-        self.task = "UPID:davion-gem:fixture"
+        self.task = "UPID:pve-fixture:fixture"
         self.failure = None
         self.guest_status = "running"
         self.discarded = []

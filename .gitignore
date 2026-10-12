@@ -111,3 +111,6 @@ scripts/vm_test_pipeline.py
 
 # Local frontend dependency installation
 web-build/node_modules/
+
+# Development screenshots
+dist/*.png

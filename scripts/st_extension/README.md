@@ -17,6 +17,9 @@ The owner supplies `production.local.json` in the registered project root's
 invoking UID with mode `0600`, and must not be a symlink. The sample contains
 stand-ins only, including illustrative container ID `100`. The credential file
 has the same permission requirements.
+The backup extension also needs `proxmox_node`, the Proxmox node name that hosts
+the container; the remote backup programs refuse to run on any other host. The
+observer accepts the file with or without it.
 The approved credential source has the admin token on line one and tenant token
 on line two; only the admin token is sent. Both lines must contain printable
 tokens without whitespace. A single-token file is also supported. No environment

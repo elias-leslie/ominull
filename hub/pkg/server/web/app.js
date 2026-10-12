@@ -858,7 +858,7 @@
       /* Demo mode has to reach the self-service screen too, or the only way to
          see what a window looks like is to open a real one on a real network. */
       "/api/v1/enrolment/windows": {
-        portal_url: "http://10.0.0.58:9999/install",
+        portal_url: "http://10.0.4.2:9999/install",
         suggested_cidrs: ["10.0.4.0/24"],
         enrollment_ttl: "30m0s",
         windows: [

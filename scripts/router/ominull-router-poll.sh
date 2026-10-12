@@ -24,12 +24,12 @@
 # /etc/ominull-router.conf (chmod 600 - it holds a key):
 # The file is sourced by the shell, so every value is quoted - an unquoted
 # label containing a space runs its second word as a command.
-#   HUB_URL="http://10.0.0.58:9999"
+#   HUB_URL="http://192.0.2.58:9999"
 #   HUB_KEY="<tenant key>"
 #   ROUTER_ID="gl-axt1800"
 #   LABEL="living room"
 #   DNS_LOG="0"
-#   LAN_CIDR=""          # optional override, e.g. 10.0.0.0/24
+#   LAN_CIDR=""          # optional override, e.g. 192.0.2.0/24
 
 # Conntrack emits compressed literals. This is a scope filter, not evidence
 # that a destination belongs to this estate. The hub validates both families
@@ -202,7 +202,7 @@ fingerprint_json() {
 
 # ---- dns -------------------------------------------------------------------
 # Only when the operator turned query logging on. dnsmasq writes lines of the
-# form: "query[A] name.example from 10.0.0.5". Anything else is skipped rather
+# form: "query[A] name.example from 192.0.2.5". Anything else is skipped rather
 # than guessed at.
 : > "$WORK/dns.json"
 if [ "$DNS_LOG" = "1" ]; then

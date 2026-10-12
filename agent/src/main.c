@@ -86,7 +86,9 @@ int main(int argc, char* argv[]) {
 
     AGENT_CONFIG config;
     ZeroMemory(&config, sizeof(config));
-    strcpy(config.hub_url, "https://10.0.0.58:9443");
+    /* No compiled-in hub: enrollment writes hub_url to the package config
+     * file and the service command line carries --hub. */
+    config.hub_url[0] = '\0';
     strcpy(config.api_key, "<provision-via-bootstrap>");
     strcpy(config.ca_path, OMINULL_DEFAULT_CA_PATH);
     strcpy(config.client_pfx_path, OMINULL_DEFAULT_PFX_PATH);
@@ -191,6 +193,10 @@ int main(int argc, char* argv[]) {
     }
 	if (!config.api_key[0] || strcmp(config.api_key, "<provision-via-bootstrap>") == 0) {
 		fprintf(stderr, "[-] No enrolled device credential is configured; refusing to start.\n");
+		return 1;
+	}
+	if (!config.hub_url[0]) {
+		fprintf(stderr, "[-] No hub URL is configured; pass --hub or enrol this endpoint. Refusing to start.\n");
 		return 1;
 	}
 

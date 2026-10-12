@@ -48,7 +48,7 @@ static void test_offer_parser(void) {
         "\"kind\":\"forensic_collection\","
         "\"grant\":{"
         "\"version\":2,\"grant_id\":\"g-win-1\",\"tenant_id\":\"default\","
-        "\"endpoint_id\":\"windows-desktop-t6bg81p\",\"action_kind\":\"forensic_collection\","
+        "\"endpoint_id\":\"windows-desktop-c\",\"action_kind\":\"forensic_collection\","
         "\"action_digest\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\","
         "\"operator_id\":\"secops\",\"response_session_id\":\"sess-win-1\","
         "\"issued_at\":1788350400,\"expires_at\":1788354000,"
@@ -63,7 +63,7 @@ static void test_offer_parser(void) {
     expect("parsed 1 valid windows offer", count == 1, true);
     if (count == 1) {
         expect("job_id matches", strcmp(offers[0].job_id, "win-job-1") == 0, true);
-        expect("grant.endpoint_id matches", strcmp(offers[0].grant.endpoint_id, "windows-desktop-t6bg81p") == 0, true);
+        expect("grant.endpoint_id matches", strcmp(offers[0].grant.endpoint_id, "windows-desktop-c") == 0, true);
     }
 }
 

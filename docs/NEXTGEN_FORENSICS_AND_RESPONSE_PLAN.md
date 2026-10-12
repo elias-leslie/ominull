@@ -559,8 +559,7 @@ they change deployment topology, not data shape, and a seam preserves them.
 
 ## Source of truth and execution rules
 
-Before changing code, read `README.md`, `TESTING.md`, `PLAN.md`, `LICENSE`, and
-the private Ominull operations brief. Inspect current routes, schemas, packages,
+Before changing code, read `README.md`, `TESTING.md`, and `LICENSE`. Inspect current routes, schemas, packages,
 and agent protocol definitions rather than relying on this document alone.
 
 For every task:
@@ -1313,7 +1312,7 @@ there. The practical consequence is unchanged for non-browser clients such as
 listener.
 
 **A trusted-origin pattern already exists on this network; do not rebuild it.**
-Caddy runs on the workstation at `10.0.0.57` (`caddy.service`, "Caddy LAN
+Caddy runs on the workstation at `192.0.2.57` (`caddy.service`, "Caddy LAN
 reverse proxy") serving `*.example.invalid` with a wildcard certificate obtained
 through Let's Encrypt using the Cloudflare DNS-01 challenge and an already
 provisioned `CLOUDFLARE_API_TOKEN`. It already proxies a WebSocket route
@@ -1691,7 +1690,7 @@ Acceptance:
   WebCrypto Ed25519 ActionProof V2 signing, bundle inspector modal (`inspectBundle`) rendering bundle summary
   and all 18 artifact rows with status badges and SHA-256 digests, and legal hold compliance controls (`toggleBundleHold`).
   Verified via pure-C tests on Linux and Windows (Wine), Go Hub integration tests under `-race`, native package builds,
-  and live headless Google Chrome 150 verification on LXC 150 (`10.0.0.58`) and live Linux endpoint (`10.0.0.57`).
+  and live headless Google Chrome 150 verification on LXC 150 (`192.0.2.58`) and live Linux endpoint (`192.0.2.57`).
 
 ## Phase 5: versioned script library and execution
 

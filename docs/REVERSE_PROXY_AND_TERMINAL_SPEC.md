@@ -58,7 +58,7 @@ The following diagnostic matrix specifies the observable symptoms when intermedi
 ```caddyfile
 # Reference Caddyfile for Ominull Console and Terminal Relay
 console.example.invalid {
-    reverse_proxy 10.0.0.58:8443 {
+    reverse_proxy 192.0.2.58:8443 {
         transport http {
             # Trust internal hub CA if self-issued
             tls_trusted_ca_certs /etc/caddy/trusted-ca/ominull-ca.crt
@@ -87,7 +87,7 @@ server {
     ssl_certificate_key /etc/ssl/private/console.key;
 
     location / {
-        proxy_pass https://10.0.0.58:8443;
+        proxy_pass https://192.0.2.58:8443;
         proxy_http_version 1.1;
 
         # WebSocket header preservation

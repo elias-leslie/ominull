@@ -132,7 +132,9 @@ def load_config(root, *, require_deployment_inputs=True):
         raw = file.read(16385)
     require(len(raw) <= 16384, "config_too_large")
     config = parse_json(raw)
-    require(isinstance(config, dict) and set(config) == CONFIG_KEYS, "config_fields")
+    # proxmox_node names the hypervisor node the backup extension snapshots on.
+    require(isinstance(config, dict) and set(config) in (CONFIG_KEYS, CONFIG_KEYS | {"proxmox_node"}),
+            "config_fields")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1,
             "config_version")
     require(type(config["lxc_id"]) is int and config["lxc_id"] > 0, "config_target")

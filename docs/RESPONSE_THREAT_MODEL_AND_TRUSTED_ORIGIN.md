@@ -176,7 +176,7 @@ The installer prompts for the console fully-qualified domain name (FQDN) and con
 
 ### 4.4 WebAuthn Relying Party ID (RP ID) Invariant
 - Under W3C WebAuthn Level 2 (§5.4.3), an `rpId` must be a valid domain name matching the origin's effective domain or a registrable domain suffix.
-- **IP addresses are invalid RP IDs.** An operator navigating to `https://10.0.0.58` cannot register or authenticate a WebAuthn passkey.
+- **IP addresses are invalid RP IDs.** An operator navigating to `https://192.0.2.58` cannot register or authenticate a WebAuthn passkey.
 - **Hostname Immutability Rule:** The installer explicitly warns the operator that changing the console FQDN at a later date invalidates all previously enrolled WebAuthn passkeys and requires re-enrollment.
 
 ---
