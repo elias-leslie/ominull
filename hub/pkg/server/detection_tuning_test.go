@@ -28,6 +28,7 @@ func tuningBody(t *testing.T, srv *Server, method, body string) (int, map[string
 // A hub nobody has tuned still answers with the shipped numbers, so the console
 // never has to guess them.
 func TestAnUntunedHubReportsTheShippedThresholds(t *testing.T) {
+	t.Parallel()
 	srv, _ := setupTestServer(t)
 	code, body := tuningBody(t, srv, http.MethodGet, "")
 	if code != http.StatusOK {
@@ -50,6 +51,7 @@ func TestAnUntunedHubReportsTheShippedThresholds(t *testing.T) {
 
 // The numbers are the operator's, and they survive a round trip.
 func TestASavedThresholdComesBack(t *testing.T) {
+	t.Parallel()
 	srv, _ := setupTestServer(t)
 	code, body := tuningBody(t, srv, http.MethodPost,
 		`{"beacon_score_threshold":0.93,"off_hours_start":23,"off_hours_end":4,"off_hours_zone":"UTC","warmup_hours":48}`)
@@ -72,6 +74,7 @@ func TestASavedThresholdComesBack(t *testing.T) {
 // Anything a form can send, a form will eventually send. A zero sample count
 // would make every pair of packets a beacon.
 func TestNonsenseThresholdsAreClamped(t *testing.T) {
+	t.Parallel()
 	srv, _ := setupTestServer(t)
 	_, body := tuningBody(t, srv, http.MethodPost,
 		`{"beacon_min_samples":0,"beacon_score_threshold":9,"beacon_cooldown_minutes":-5,"warmup_hours":100000}`)
@@ -89,6 +92,7 @@ func TestNonsenseThresholdsAreClamped(t *testing.T) {
 
 // Restoring the shipped numbers has to be one action, not a form to retype.
 func TestTheShippedThresholdsCanBeRestored(t *testing.T) {
+	t.Parallel()
 	srv, _ := setupTestServer(t)
 	tuningBody(t, srv, http.MethodPost, `{"beacon_score_threshold":0.20,"beacon_enabled":false}`)
 	code, body := tuningBody(t, srv, http.MethodDelete, "")

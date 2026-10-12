@@ -51,6 +51,7 @@ func setupTestServer(t *testing.T) (*Server, *storage.Store) {
 }
 
 func TestBootstrapGenerators(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -162,6 +163,7 @@ func TestBootstrapGenerators(t *testing.T) {
 }
 
 func TestRemovedFeatureRoutesReturnNotFoundThroughRealMux(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -193,6 +195,7 @@ func TestRemovedFeatureRoutesReturnNotFoundThroughRealMux(t *testing.T) {
 // connects and an agent holding any other CA is refused rather than quietly
 // talking to whoever answered.
 func TestHubTLSListenerPinsToItsOwnCA(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -258,6 +261,7 @@ func tlsClient(roots *x509.CertPool) *http.Client {
 }
 
 func TestMultiTenantAPIAuth(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -335,6 +339,7 @@ func TestMultiTenantAPIAuth(t *testing.T) {
 }
 
 func TestCompareVersions(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		a, b string
 		want int
@@ -422,6 +427,7 @@ func seedEndpointWithCapability(t *testing.T, store *storage.Store, id, osName, 
 // v1.2.0 changed the Windows one - so matching on it was one release away from
 // misrouting a fleet-wide update.
 func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		capability string
@@ -454,6 +460,7 @@ func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
 // unsigned release has to surface as one clear answer here rather than as a
 // failed install on every endpoint.
 func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -523,6 +530,7 @@ func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
 }
 
 func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -588,6 +596,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 }
 
 func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -669,6 +678,7 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 }
 
 func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -739,6 +749,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 }
 
 func TestEndpointOrderIsStableAcrossHeartbeats(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -798,6 +809,7 @@ func TestEndpointOrderIsStableAcrossHeartbeats(t *testing.T) {
 // That defeats the point of keying on the MAC: the whole reason to do so is
 // that a host keeps its identity when its lease changes.
 func TestTelemetryMACReachesAssetIdentity(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -931,6 +943,7 @@ func postTelemetryAs(t *testing.T, c *http.Client, base, endpointID string, extr
 // certificate closes that gap: holding the key is no longer enough to report as
 // - or read the update descriptor of - a host you are not.
 func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -988,6 +1001,7 @@ func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
 // and letting an endpoint with no certificate through after certificates were
 // made mandatory.
 func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -1023,6 +1037,7 @@ func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
 // way to build one from a file. So the bundle has to carry a PKCS#12 archive,
 // and it has to hold the same identity as the PEM beside it.
 func TestClientBundleCarriesAPKCS12ArchiveForWindows(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -1065,6 +1080,7 @@ func TestClientBundleCarriesAPKCS12ArchiveForWindows(t *testing.T) {
 // the handshake behaviour each one implies, because the difference between them
 // is invisible until an agent that cannot answer meets one.
 func TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -1116,6 +1132,7 @@ func TestClientCertModeDecidesWhetherTheHandshakeAsksAtAll(t *testing.T) {
 // the only way to find out who would fall off the fleet is to turn it on and
 // watch.
 func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	defer srv.Close()
@@ -1164,6 +1181,7 @@ func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
 }
 
 func TestResponseRoutesFailClosedByDefault(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -1264,6 +1282,7 @@ func TestResponseRoutesFailClosedByDefault(t *testing.T) {
 }
 
 func TestPackageNameRejectsPathVersions(t *testing.T) {
+	t.Parallel()
 	for _, version := range []string{"../escape", "1.2.3/../../escape", `1.2.3\escape`, "", "1.2.3?x"} {
 		if got := agentPackageName(version, "deb"); got != "" {
 			t.Errorf("accepted unsafe version %q: %q", version, got)
@@ -1272,6 +1291,7 @@ func TestPackageNameRejectsPathVersions(t *testing.T) {
 }
 
 func TestVulnerabilitySyncBoundaries(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.SetResponseEnabled(true)
@@ -1297,6 +1317,7 @@ func TestVulnerabilitySyncBoundaries(t *testing.T) {
 }
 
 func TestSetupStateRemainsJSONData(t *testing.T) {
+	t.Parallel()
 	sentinel := `</script><script>window.fixtureExecuted=true</script>"` + "\u2028"
 	doc, _ := setupWizardDocument(sentinel, "1.8.38", false)
 	start := strings.Index(string(doc), "var SETUP=") + len("var SETUP=")

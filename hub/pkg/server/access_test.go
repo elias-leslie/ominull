@@ -88,6 +88,7 @@ func validClaims() map[string]interface{} {
 }
 
 func TestAValidAccessAssertionIdentifiesTheOperator(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 
 	op, ok := v.Verify(requestWith(signToken(t, key, "RS256", "kid-1", validClaims())))
@@ -104,6 +105,7 @@ func TestAValidAccessAssertionIdentifiesTheOperator(t *testing.T) {
 // any other application in the team - including one someone adds later with a
 // laxer policy - mints tokens that open this console.
 func TestATokenForAnotherApplicationIsRefused(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 
 	claims := validClaims()
@@ -115,6 +117,7 @@ func TestATokenForAnotherApplicationIsRefused(t *testing.T) {
 }
 
 func TestATokenFromAnotherAccessTeamIsRefused(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 	claims := validClaims()
 	claims["iss"] = "https://another-team.cloudflareaccess.com"
@@ -126,6 +129,7 @@ func TestATokenFromAnotherAccessTeamIsRefused(t *testing.T) {
 // TestAnUnsignedTokenIsRefused. Trusting the algorithm the token names is the
 // classic JWT failure: "none" asks the verifier to skip the signature entirely.
 func TestAnUnsignedTokenIsRefused(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 
 	if _, ok := v.Verify(requestWith(signToken(t, key, "none", "kid-1", validClaims()))); ok {
@@ -137,6 +141,7 @@ func TestAnUnsignedTokenIsRefused(t *testing.T) {
 }
 
 func TestATokenSignedByTheWrongKeyIsRefused(t *testing.T) {
+	t.Parallel()
 	v, _ := testVerifier(t, oneAdmin())
 
 	other, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -149,6 +154,7 @@ func TestATokenSignedByTheWrongKeyIsRefused(t *testing.T) {
 }
 
 func TestAnExpiredTokenIsRefused(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 
 	claims := validClaims()
@@ -163,6 +169,7 @@ func TestAnExpiredTokenIsRefused(t *testing.T) {
 // origin; this list decides who runs the fleet. They are deliberately not the
 // same decision, so widening an Access policy cannot hand out admin on its own.
 func TestAnIdentityNotOnTheOperatorListIsRefused(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, oneAdmin())
 
 	claims := validClaims()
@@ -177,6 +184,7 @@ func TestAnIdentityNotOnTheOperatorListIsRefused(t *testing.T) {
 // LAN with no Cloudflare in front of it, so an unsigned header naming an operator
 // is something any local caller can simply assert.
 func TestThePlaintextIdentityHeaderIsNotTrusted(t *testing.T) {
+	t.Parallel()
 	v, _ := testVerifier(t, oneAdmin())
 
 	r := httptest.NewRequest("GET", "/", nil)
@@ -189,6 +197,7 @@ func TestThePlaintextIdentityHeaderIsNotTrusted(t *testing.T) {
 }
 
 func TestNoAssertionIsRefused(t *testing.T) {
+	t.Parallel()
 	v, _ := testVerifier(t, oneAdmin())
 	if _, ok := v.Verify(requestWith("")); ok {
 		t.Errorf("a request with no assertion was treated as authenticated")
@@ -203,6 +212,7 @@ func TestNoAssertionIsRefused(t *testing.T) {
 // one: a team with no audience to pin accepts tokens minted for any other
 // application in that team.
 func TestAccessNeedsBothHalvesOfItsIdentity(t *testing.T) {
+	t.Parallel()
 	lookup := func(string) (string, bool) { return "admin", true }
 	if _, err := newAccessVerifier(AccessOptions{Team: "t"}, lookup); err == nil {
 		t.Errorf("Access was configured with no audience to pin")
@@ -223,6 +233,7 @@ func TestAccessNeedsBothHalvesOfItsIdentity(t *testing.T) {
 // snapshotted at startup: removing someone at ten in the morning must not leave
 // them running the fleet until the hub is next restarted.
 func TestARevokedOperatorLosesAccessImmediately(t *testing.T) {
+	t.Parallel()
 	ops := oneAdmin()
 	v, key := testVerifier(t, ops)
 
@@ -241,6 +252,7 @@ func TestARevokedOperatorLosesAccessImmediately(t *testing.T) {
 // what someone is allowed to do here, and a claim that did would be a claim the
 // identity provider controls.
 func TestTheRoleComesFromTheListAndNotTheToken(t *testing.T) {
+	t.Parallel()
 	v, key := testVerifier(t, map[string]string{"operator@example.com": "auditor"})
 
 	claims := validClaims()

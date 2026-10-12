@@ -36,6 +36,7 @@ func sessionFor(t *testing.T, srv *Server, email, role string) *http.Cookie {
 // managed headless profile and a disposable hub, never the deployed hub or an
 // operator credential. A distinct loopback address isolates its host cookies.
 func TestExpiredConsoleSessionAndBrowserRecovery(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	token, err := auth.GenerateJWT(auth.Claims{Username: "fixture@example.invalid", Role: auth.RoleAdmin}, srv.adminKey, -time.Hour)
@@ -116,6 +117,7 @@ func TestExpiredConsoleSessionAndBrowserRecovery(t *testing.T) {
 // cut the fleet off the network while holding the role named "reads everything,
 // changes nothing".
 func TestAnAuditorCannotChangeAnything(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -154,6 +156,7 @@ func TestAnAuditorCannotChangeAnything(t *testing.T) {
 // which addresses are worth phishing; an analyst who can write it is an
 // administrator.
 func TestOnlyAnAdministratorSeesTheOperatorList(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -174,6 +177,7 @@ func TestOnlyAnAdministratorSeesTheOperatorList(t *testing.T) {
 // list is empty" but "nobody can open the console to repair the list", which
 // takes a shell on the hub to undo.
 func TestTheLastAdministratorCannotBeRemoved(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -212,6 +216,7 @@ func TestTheLastAdministratorCannotBeRemoved(t *testing.T) {
 // credential that runs the whole fleet - and one that cannot be revoked, only
 // rotated.
 func TestTheConsoleDoesNotHandOutTheAdminKey(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -249,6 +254,7 @@ func TestTheConsoleDoesNotHandOutTheAdminKey(t *testing.T) {
 // any other, and the whole reason to move the list off a file on the hub was to
 // make that change visible.
 func TestAnOperatorGrantIsAudited(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -285,6 +291,7 @@ func TestAnOperatorGrantIsAudited(t *testing.T) {
 // their browser and was not asked to sign in had no way to tell whether Access
 // had just authenticated them or whether they were still on an old session.
 func TestASignInIsRecordedOnceAndNotOnEveryReload(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

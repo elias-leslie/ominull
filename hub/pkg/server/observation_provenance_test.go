@@ -10,6 +10,7 @@ import (
 )
 
 func TestTelemetryRetainsObservationBasisTimingAndCollectorHealth(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	at := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
@@ -64,6 +65,7 @@ func TestTelemetryRetainsObservationBasisTimingAndCollectorHealth(t *testing.T) 
 }
 
 func TestInvalidObservationWindowRejectsBatchBeforeEndpointWrite(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	r := httptest.NewRequest("POST", "/api/v1/events", strings.NewReader(`{"type":"telemetry","endpoint_id":"invalid-observer","events":[{"protocol":17,"observation":{"source":"linux-bpf-udp","byte_basis":"udp_payload","timing":"socket_io","count":1,"first_at":"2026-01-02T00:00:00Z","last_at":"2026-01-01T00:00:00Z"}}]}`))
@@ -80,6 +82,7 @@ func TestInvalidObservationWindowRejectsBatchBeforeEndpointWrite(t *testing.T) {
 }
 
 func TestLegacyTelemetryPreservesPerEventEndpoint(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	r := httptest.NewRequest("POST", "/api/v1/events", strings.NewReader(`[{"endpoint_id":"legacy-observer","protocol":17,"src_ip":"10.0.4.20","dst_ip":"10.0.4.21","bytes_out":5}]`))

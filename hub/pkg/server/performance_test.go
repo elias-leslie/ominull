@@ -22,6 +22,7 @@ const perfSeedRows = 400000
 // latency budget and persisted work. Set OMINULL_PERF_TEST=1 to run it so the
 // ordinary unit suite stays fast.
 func TestTelemetryPerformanceFeedback(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("OMINULL_PERF_TEST") != "1" {
 		t.Skip("set OMINULL_PERF_TEST=1 to run the production-shaped feedback loop")
 	}

@@ -13,6 +13,7 @@ import (
 )
 
 func TestServer_VulnAPI(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -153,6 +154,7 @@ func TestServer_VulnAPI(t *testing.T) {
 }
 
 func TestServer_VulnSnapshotsAndCatalog(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -352,6 +354,7 @@ func TestServer_VulnSnapshotsAndCatalog(t *testing.T) {
 }
 
 func TestServer_VulnMatchingAndPrioritization(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

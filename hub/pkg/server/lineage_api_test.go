@@ -13,6 +13,7 @@ import (
 )
 
 func TestServer_LineageAndHashing_IngestionAndAPI(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "lineage_api_test.db")
 	store, err := storage.New(dbPath)

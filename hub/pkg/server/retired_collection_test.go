@@ -7,6 +7,7 @@ import (
 )
 
 func TestRetiredDNSRoutesAreNotConsolePages(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, path := range []string{"/api/v1/dns/status", "/api/v1/dns/events", "/api/v1/dns/policy", "/api/v1/dns/policy/test"} {

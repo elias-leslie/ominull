@@ -49,6 +49,7 @@ func seedLearningEndpoint(t *testing.T, store *storage.Store, id, role string) {
 // Opening a window is an administrator action, and it says what it covers in
 // words rather than in a UUID.
 func TestOpeningAWindowNamesWhatItCovers(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedLearningEndpoint(t, store, "ep-1", "workstation")
 
@@ -74,6 +75,7 @@ func TestOpeningAWindowNamesWhatItCovers(t *testing.T) {
 // A window nobody may open at will is the whole safety of learning mode: while
 // one is open the fleet stops reporting.
 func TestOnlyAnAdministratorOpensOrClosesAWindow(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedLearningEndpoint(t, store, "ep-1", "workstation")
 
@@ -103,6 +105,7 @@ func TestOnlyAnAdministratorOpensOrClosesAWindow(t *testing.T) {
 // Nothing applies itself, and nothing applies by wildcard: the ids are named,
 // and a proposal that no longer stands is refused rather than guessed at.
 func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedLearningEndpoint(t, store, "ep-1", "workstation")
 	seedLearningEndpoint(t, store, "ep-2", "workstation")
@@ -182,6 +185,7 @@ func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
 // Rented compute is barred from the quiet lists in code. A learning proposal is
 // the other door into those lists, and it has to be barred there too.
 func TestLearningNeverProposesRentedCompute(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedLearningEndpoint(t, store, "ep-1", "workstation")
 	w, err := store.CreateLearningWindow(storage.LearningWindow{

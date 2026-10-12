@@ -38,6 +38,7 @@ func call(srv *Server, handler http.HandlerFunc, method, target, apiKey, body st
 // the routes that act on the whole fleet or hand back other people's
 // credentials.
 func TestTenantKeyCannotReachOperatorRoutes(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -79,6 +80,7 @@ func TestTenantKeyCannotReachOperatorRoutes(t *testing.T) {
 // without asking whose endpoint it was, so a tenant could cut any host in any
 // other tenant off the network - or put a quarantined one back on it.
 func TestIsolationIsScopedToTheOwningTenant(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -129,6 +131,7 @@ func TestIsolationIsScopedToTheOwningTenant(t *testing.T) {
 // command-injection fix. The value stored here is broadcast to every agent and
 // reaches a privileged firewall command on each one.
 func TestMeshQuarantineRejectsAnythingButAnAddress(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -161,6 +164,7 @@ func TestMeshQuarantineRejectsAnythingButAnAddress(t *testing.T) {
 // address before probing anything, so the prefix in a request body decides how
 // much memory the hub is asked for.
 func TestScannerRefusesAnUnboundedSweep(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -178,6 +182,7 @@ func TestScannerRefusesAnUnboundedSweep(t *testing.T) {
 // tells endpoints apart by; a route that mints one for any name on request
 // makes the identity it proves worth nothing.
 func TestCertificateEnrolmentNeedsAuthorisation(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -230,6 +235,7 @@ func TestCertificateEnrolmentNeedsAuthorisation(t *testing.T) {
 // the route cost a caller anything to retry, and a lockout puts a guessing run
 // in the log where it can be seen.
 func TestFailedAuthenticationIsThrottled(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -263,6 +269,7 @@ func TestFailedAuthenticationIsThrottled(t *testing.T) {
 // and only the TLS one can refuse a missing certificate at the handshake. The
 // setting has to mean the same thing on the other port or it means nothing.
 func TestRequiredClientCertsApplyToThePlainListener(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
@@ -292,6 +299,7 @@ func TestRequiredClientCertsApplyToThePlainListener(t *testing.T) {
 // key, so a navigation out of it would carry the referring URL onwards without
 // these headers.
 func TestConsoleGateSetsSecurityHeaders(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -326,6 +334,7 @@ func TestConsoleGateSetsSecurityHeaders(t *testing.T) {
 // redirect to a clean URL and a session cookie, so the key stops being part of
 // the address after exactly one request.
 func TestTheAdminKeyDoesNotSurviveInTheAddressBar(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -375,6 +384,7 @@ func TestTheAdminKeyDoesNotSurviveInTheAddressBar(t *testing.T) {
 // TestTheGateFormPostsRatherThanGets. A GET form puts whatever was typed into
 // the next URL, which is the whole problem the redirect above cleans up after.
 func TestTheGateFormPostsRatherThanGets(t *testing.T) {
+	t.Parallel()
 	gate := string(consoleGate())
 	if !strings.Contains(gate, `method="POST"`) {
 		t.Errorf("the console gate form does not post, so the key would land in the URL")
@@ -397,6 +407,7 @@ func TestTheGateFormPostsRatherThanGets(t *testing.T) {
 // TestAnInstallerIsNeverCached. The bootstrap scripts are generic but still
 // contain install instructions, so nothing on the path may keep a copy.
 func TestAnInstallerIsNeverCached(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -421,6 +432,7 @@ func TestAnInstallerIsNeverCached(t *testing.T) {
 // database write and then broadcast the command to every open socket, so one
 // tenant isolating its own hosts cut off hosts it cannot even see.
 func TestBulkIsolationIsScopedToTheOwningTenant(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -459,6 +471,7 @@ func TestBulkIsolationIsScopedToTheOwningTenant(t *testing.T) {
 // that same source is seen again, and an attacker with a /64 has more addresses
 // than the hub has bytes.
 func TestFailedAuthTrackingIsBounded(t *testing.T) {
+	t.Parallel()
 	throttle := newAuthThrottle()
 	throttle.maxTracked = 64
 	throttle.window = 20 * time.Millisecond
@@ -497,6 +510,7 @@ func TestFailedAuthTrackingIsBounded(t *testing.T) {
 // credential is checked - so a single unauthenticated request could make the
 // hub buffer until it died, taking every endpoint's command channel with it.
 func TestRequestBodiesAreBounded(t *testing.T) {
+	t.Parallel()
 	var read int64
 	handler := limitRequestBodies(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n, err := io.Copy(io.Discard, r.Body)
@@ -551,6 +565,7 @@ func TestRequestBodiesAreBounded(t *testing.T) {
 // is that the cache is keyed by the window actually served, that an
 // unrecognised window does not mint an entry of its own, and that it expires.
 func TestTopologyGraphIsCachedPerWindow(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -618,6 +633,7 @@ func keysOf(m map[string]responseEntry) []string {
 // being enrolled has none yet. That makes the binary directory an anonymous file
 // share unless the route knows what it is meant to serve.
 func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
+	t.Parallel()
 	serve := []string{
 		"ominull-agent_1.6.7_amd64.deb",
 		"ominull-agent_1.6.7_amd64.deb.sig",
@@ -670,6 +686,7 @@ func TestDownloadServesOnlyReleasedArtifacts(t *testing.T) {
 // installer carrying the tenant key and an issued certificate all happened
 // without a trace. The live hub's table held three rows.
 func TestPrivilegedOperationsAreAudited(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.SetAgentHubURL("https://10.0.0.57:9443")
@@ -733,6 +750,7 @@ func TestPrivilegedOperationsAreAudited(t *testing.T) {
 // only because it made a second request for the entire fleet list to read one
 // boolean about itself.
 func TestIsolationReachesTheEndpointOnItsHeartbeat(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

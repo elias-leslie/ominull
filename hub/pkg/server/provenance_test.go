@@ -12,6 +12,7 @@ import (
 )
 
 func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -130,6 +131,7 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 }
 
 func TestNativeProvenanceRoundTripAndStatusGate(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

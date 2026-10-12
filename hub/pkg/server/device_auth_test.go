@@ -28,6 +28,7 @@ func redeemForTest(t *testing.T, srv *Server, code, platform, hostname string) m
 }
 
 func TestDeviceCredentialBindsAgentRoutesAndRevocation(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -81,6 +82,7 @@ func TestDeviceCredentialBindsAgentRoutesAndRevocation(t *testing.T) {
 }
 
 func TestDeviceCredentialCannotReadAnotherEndpointConfiguration(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	_, code, err := store.CreateEnrollmentProfile(storage.EnrollmentProfile{Platform: "linux", TenantID: "default"}, storage.EnrollmentProfileTTL)
@@ -99,6 +101,7 @@ func TestDeviceCredentialCannotReadAnotherEndpointConfiguration(t *testing.T) {
 }
 
 func TestLegacyHeartbeatDeliversAndRetriesUniqueCredentialMigration(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -147,6 +150,7 @@ func TestLegacyHeartbeatDeliversAndRetriesUniqueCredentialMigration(t *testing.T
 }
 
 func TestOperatorCanReadEventsViaAdminAuth(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

@@ -10,6 +10,7 @@ import (
 )
 
 func TestEstateNetworkConfigurationRoute(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	send := func(method, body string) *httptest.ResponseRecorder {
@@ -46,6 +47,7 @@ func TestEstateNetworkConfigurationRoute(t *testing.T) {
 }
 
 func TestContainerNetworkConfigurationRejectsBroadOrPublicExemptions(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, cidr := range []string{"172.16.0.0/8", "192.168.0.0/15", "fd00::/6", "::/0", "2001:db8::/64"} {

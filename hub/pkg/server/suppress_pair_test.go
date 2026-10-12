@@ -49,6 +49,7 @@ func seedFinding(t *testing.T, store *storage.Store, id, process, evidence strin
 // The loop the console did not have: say "expected" on a finding, and the rule
 // that produced it learns the pair.
 func TestMarkingAFindingExpectedWritesThePair(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-1", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
 
@@ -83,6 +84,7 @@ func TestMarkingAFindingExpectedWritesThePair(t *testing.T) {
 // It is barred in the tuning, and it has to be barred at the door as well, or
 // the button becomes the way to write the entry the tuning refuses.
 func TestRentedComputeCannotBeMarkedExpected(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-2", "/usr/bin/python3.13", `{"destination_owner":"Some Cloud (customer)","destination_tenancy":"hosting"}`)
 
@@ -102,6 +104,7 @@ func TestRentedComputeCannotBeMarkedExpected(t *testing.T) {
 // "unknown" is what an agent sends when nothing owns the socket. There is no
 // program there to vouch for.
 func TestAnUnattributedProcessCannotBeMarkedExpected(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-3", "unknown", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
 
@@ -117,6 +120,7 @@ func TestAnUnattributedProcessCannotBeMarkedExpected(t *testing.T) {
 // An address nobody can name is not a counterparty, and silencing one would
 // silence whatever answers on it next.
 func TestAnUnnamedNetworkCannotBeMarkedExpected(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-4", "/usr/bin/curl", `{"attribution_status":"authoritative"}`)
 
@@ -129,6 +133,7 @@ func TestAnUnnamedNetworkCannotBeMarkedExpected(t *testing.T) {
 // Loosening a detector is an administrator's decision, like every other write
 // to the tuning.
 func TestMarkingExpectedIsAnAdministratorAction(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-5", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
 
@@ -147,6 +152,7 @@ func TestMarkingExpectedIsAnAdministratorAction(t *testing.T) {
 
 // Pressing it twice is not an error, and does not write the pair twice.
 func TestMarkingExpectedTwiceIsIdempotent(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	seedFinding(t, store, "f-6", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
 	seedFinding(t, store, "f-7", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)

@@ -15,6 +15,7 @@ import (
 // what makes an upgrade reach the browser: a URL it has never seen cannot come
 // from a cache.
 func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -64,6 +65,7 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 }
 
 func TestConsoleContainsNoUnimplementedShellControls(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

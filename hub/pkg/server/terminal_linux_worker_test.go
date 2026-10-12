@@ -22,6 +22,7 @@ import (
 )
 
 func TestLinuxTerminalWorker_LoopbackWithPty(t *testing.T) {
+	t.Parallel()
 	// 1. Compile C worker helper
 	root, err := filepath.Abs("../../..")
 	if err != nil {

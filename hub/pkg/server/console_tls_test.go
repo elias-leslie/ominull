@@ -25,6 +25,7 @@ import (
 )
 
 func TestServer_ConsoleTLSListener(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -122,6 +123,7 @@ func TestServer_ConsoleTLSListener(t *testing.T) {
 }
 
 func TestServer_ConsoleTLSSources_OperatorSupplied(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -194,6 +196,7 @@ func TestServer_ConsoleTLSSources_OperatorSupplied(t *testing.T) {
 }
 
 func TestServer_ConsoleTLSSources_HubCA_GuidedRootTrust(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -263,6 +266,7 @@ func TestServer_ConsoleTLSSources_HubCA_GuidedRootTrust(t *testing.T) {
 }
 
 func TestServer_ConsoleTLSSources_ACMEDNS01(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -334,6 +338,7 @@ func TestServer_ConsoleTLSSources_ACMEDNS01(t *testing.T) {
 }
 
 func TestServer_SetupApply_PersistsConsoleHostname(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

@@ -15,6 +15,7 @@ import (
 )
 
 func TestOIDCStartAndCallbackUseDiscoveryPKCEAndStableIdentity(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := store.UpsertOperator("operator@example.invalid", "admin", "test"); err != nil {

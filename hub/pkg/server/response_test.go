@@ -59,6 +59,7 @@ func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *respon
 }
 
 func TestServer_ResponseJobFlow(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -268,6 +269,7 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 }
 
 func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
+	t.Parallel()
 	srv, _, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -373,6 +375,7 @@ func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 }
 
 func TestServer_WindowsDiagnosticForensicFlow(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -615,6 +618,7 @@ func TestServer_WindowsDiagnosticForensicFlow(t *testing.T) {
 }
 
 func TestServer_LiveVolatileForensicFlow(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -926,6 +930,7 @@ func TestServer_LiveVolatileForensicFlow(t *testing.T) {
 }
 
 func TestServer_IRStandardForensicFlow(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

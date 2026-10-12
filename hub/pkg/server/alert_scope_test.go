@@ -10,6 +10,7 @@ import (
 )
 
 func TestAlertSearchAppliesBeforePaginationAndToSummary(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, a := range []storage.AnomalyAlert{
@@ -44,6 +45,7 @@ func TestAlertSearchAppliesBeforePaginationAndToSummary(t *testing.T) {
 }
 
 func TestAssetAlertScopeUsesRecordedSourceIdentity(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, a := range []storage.AnomalyAlert{

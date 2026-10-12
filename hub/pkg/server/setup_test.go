@@ -50,6 +50,7 @@ func setupCall(t *testing.T, srv *Server, method, path, body string, cookie *htt
 }
 
 func TestFirstRunSetupConsumesLocalTokenAndUsesCSRFSession(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -132,6 +133,7 @@ func TestFirstRunSetupConsumesLocalTokenAndUsesCSRFSession(t *testing.T) {
 }
 
 func TestSetupTokenIsNotAcceptedFromURL(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	path := filepath.Join(t.TempDir(), "setup.token")

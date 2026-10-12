@@ -21,6 +21,7 @@ import (
 )
 
 func TestServer_TerminalAPI(t *testing.T) {
+	t.Parallel()
 	srv, _, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -207,6 +208,7 @@ func TestServer_TerminalAPI(t *testing.T) {
 }
 
 func TestServer_TerminalWebSocketRelay(t *testing.T) {
+	t.Parallel()
 	srv, _, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -403,6 +405,7 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 }
 
 func TestTerminalSession_DeleteClose(t *testing.T) {
+	t.Parallel()
 	srv, _, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -504,6 +507,7 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 }
 
 func TestServer_TerminalSecurityGates(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

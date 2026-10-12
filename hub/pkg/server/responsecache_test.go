@@ -11,6 +11,7 @@ import (
 )
 
 func TestSnapshotNegotiatesCompressionAndPreservesValidators(t *testing.T) {
+	t.Parallel()
 	var cache responseCache
 	raw := []byte(`{"observations":[` + strings.Repeat(`{"source":"10.0.0.1","target":"2001:db8::1"},`, 10000) + `{}]}`)
 	entry, err := cache.snapshot("fixture", func() ([]byte, error) { return raw, nil })

@@ -9,6 +9,7 @@ import (
 )
 
 func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
@@ -54,6 +55,7 @@ func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
 }
 
 func TestUpdateStatusUsesPublishedBundleAfterPreviousRollout(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
@@ -78,6 +80,7 @@ func TestUpdateStatusUsesPublishedBundleAfterPreviousRollout(t *testing.T) {
 }
 
 func TestUpdateStatusDoesNotCallStaleEndpointOnline(t *testing.T) {
+	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
 	seedEndpointWithCapability(t, db, "stale-agent", "Linux", "1.1.0", "deb")

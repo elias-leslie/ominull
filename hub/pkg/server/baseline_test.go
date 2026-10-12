@@ -60,6 +60,7 @@ func postJSON(t *testing.T, srv *Server, path, body string) *httptest.ResponseRe
 // only 10.0.0.2. Isolating it would leave DNS pointed at an address the floor
 // drops, and the symptom would appear minutes later as "the network is broken".
 func TestIsolateIsRefusedWhenTheBaselineDoesNotCoverWhatTheHostUses(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -97,6 +98,7 @@ func TestIsolateIsRefusedWhenTheBaselineDoesNotCoverWhatTheHostUses(t *testing.T
 // TestIsolateSucceedsOnceTheBaselineCoversTheHost guards the gate from being
 // widened into one that refuses everything.
 func TestIsolateSucceedsOnceTheBaselineCoversTheHost(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -118,6 +120,7 @@ func TestIsolateSucceedsOnceTheBaselineCoversTheHost(t *testing.T) {
 // actively compromised must not be held up by a policy gap or a stale probe. The
 // override exists, and it is a different action in the log.
 func TestForceOverridesTheGateAndIsAudited(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -159,6 +162,7 @@ func TestForceOverridesTheGateAndIsAudited(t *testing.T) {
 // for the length of a rollout. It is recorded as its own action so the state is
 // visible rather than assumed.
 func TestAnEndpointOnAnOlderAgentIsStillIsolated(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -194,6 +198,7 @@ func TestAnEndpointOnAnOlderAgentIsStillIsolated(t *testing.T) {
 // the store stamps the report time itself - there is deliberately no way for a
 // caller, or an endpoint, to claim its answer is fresher than it is.
 func TestAStaleReadinessReportIsRefused(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -224,6 +229,7 @@ func TestAStaleReadinessReportIsRefused(t *testing.T) {
 // not open cannot apply the permits either - so the isolation it is being asked
 // for would be a default-deny with nothing underneath it.
 func TestAnAgentThatCannotEnforceIsNotIsolated(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -247,6 +253,7 @@ func TestAnAgentThatCannotEnforceIsNotIsolated(t *testing.T) {
 // TestAHostWithNoHubLiteralIsNotIsolated. The pinhole is the only way back. An
 // agent that cannot reduce its hub to an address cannot write it.
 func TestAHostWithNoHubLiteralIsNotIsolated(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -268,6 +275,7 @@ func TestAHostWithNoHubLiteralIsNotIsolated(t *testing.T) {
 // reporting nine is how an operator comes to believe a host is contained when it
 // is not - and the tenth is the one the hub predicted it could not get back.
 func TestOneUnreadyHostStopsTheWholeBulkIsolate(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -294,6 +302,7 @@ func TestOneUnreadyHostStopsTheWholeBulkIsolate(t *testing.T) {
 // in front of putting it back. A refusal here would mean a policy mistake could
 // strand a host that is already isolated.
 func TestUnisolateIsNeverGated(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

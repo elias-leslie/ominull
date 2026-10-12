@@ -11,6 +11,7 @@ import (
 )
 
 func TestAuthenticatedTelemetryCanonicalizesBeforeNaming(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "address-test", TenantID: "default", IP: "10.0.4.2", Status: "online"}); err != nil {
@@ -51,6 +52,7 @@ func TestAuthenticatedTelemetryCanonicalizesBeforeNaming(t *testing.T) {
 }
 
 func TestOperatorWritesPreserveIPv6AuditPeer(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := store.UpsertAssetFromScan("10.0.4.2", "", "", "", "", "", "", 0, nil, time.Now().UTC()); err != nil {
@@ -90,6 +92,7 @@ func TestOperatorWritesPreserveIPv6AuditPeer(t *testing.T) {
 }
 
 func TestMalformedTelemetryAddressesRejectBeforeAnyWrite(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "invalid-address-test", TenantID: "default", IP: "10.0.4.2"}); err != nil {

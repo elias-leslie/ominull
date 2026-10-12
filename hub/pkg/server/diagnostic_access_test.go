@@ -107,6 +107,7 @@ func resultFor(t *testing.T, srv *Server, id string) diagnostics.Result {
 // A hub with no Access in front of it must say so plainly rather than reporting
 // a gap.
 func TestAccessCheckIsNotConfiguredWithoutAnAccessApplication(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -119,6 +120,7 @@ func TestAccessCheckIsNotConfiguredWithoutAnAccessApplication(t *testing.T) {
 // Saved but not loaded is a restart away from working and invisible from the
 // operator's side: Access says they signed in, the hub shows them the key prompt.
 func TestAccessCheckFailsWhenConfigurationIsSavedButNoVerifierIsLive(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	saveAccessConfiguration(t, store, "testteam", "aud-for-this-application")
@@ -132,6 +134,7 @@ func TestAccessCheckFailsWhenConfigurationIsSavedButNoVerifierIsLive(t *testing.
 // The distinction the OIDC check already draws: reachable and configured is not
 // the same as ever actually having verified anybody.
 func TestAccessCheckWarnsUntilAnAssertionHasVerified(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	saveAccessConfiguration(t, store, "testteam", "aud-for-this-application")
@@ -164,6 +167,7 @@ func TestAccessCheckWarnsUntilAnAssertionHasVerified(t *testing.T) {
 // Unreachable keys with none cached means nobody can sign in, and the check has
 // to say that rather than report the configuration back.
 func TestAccessCheckFailsWhenTheSigningKeysAreUnreachable(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	saveAccessConfiguration(t, store, "testteam", "aud-for-this-application")
@@ -185,6 +189,7 @@ func TestAccessCheckFailsWhenTheSigningKeysAreUnreachable(t *testing.T) {
 // A cached key set outlives a failed refetch on purpose, so an unreachable
 // Cloudflare is a warning about the next rotation, not a broken console.
 func TestAccessCheckWarnsWhenKeysAreCachedButCloudflareIsUnreachable(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	saveAccessConfiguration(t, store, "testteam", "aud-for-this-application")
@@ -208,6 +213,7 @@ func TestAccessCheckWarnsWhenKeysAreCachedButCloudflareIsUnreachable(t *testing.
 // The marker is what survives a restart, so the check can answer "has Cloudflare
 // ever actually verified anybody" rather than only "is it configured".
 func TestAVerifiedAssertionRecordsTheLastSuccessMarker(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := store.UpsertOperator("operator@example.com", "admin", "test"); err != nil {
@@ -240,6 +246,7 @@ func TestAVerifiedAssertionRecordsTheLastSuccessMarker(t *testing.T) {
 // the console is the operator list's separate answer, and an unlisted signer must
 // not make the Access check read as broken.
 func TestAnAssertionFromAnUnlistedSignerStillRecordsThatAccessWorks(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if err := srv.SetAccess(AccessOptions{Team: "testteam", AUD: "aud-for-this-application"}); err != nil {
@@ -260,6 +267,7 @@ func TestAnAssertionFromAnUnlistedSignerStillRecordsThatAccessWorks(t *testing.T
 
 // Recording on every request would be a database write per page load.
 func TestTheLastSuccessMarkerIsRateLimited(t *testing.T) {
+	t.Parallel()
 	verifier, key := testVerifier(t, oneAdmin())
 	writes := 0
 	verifier.record = func(time.Time) { writes++ }
@@ -279,6 +287,7 @@ func TestTheLastSuccessMarkerIsRateLimited(t *testing.T) {
 // Cloudflare remains optional" on a hub authenticating every console sign-in
 // through Cloudflare Access.
 func TestTheTunnelAdapterRowDoesNotDenyThatAccessIsRunning(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	saveAccessConfiguration(t, store, "testteam", "aud-for-this-application")

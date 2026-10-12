@@ -17,6 +17,7 @@ import (
 // reaching the only host that can withdraw it: the console would go on offering
 // an "unquarantine" button whose order no agent could ever receive.
 func TestTheHubRefusesToQuarantineItself(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -50,6 +51,7 @@ func TestTheHubRefusesToQuarantineItself(t *testing.T) {
 // TestAnOrdinaryPeerIsStillQuarantined guards the check above from being widened
 // into one that refuses everything.
 func TestAnOrdinaryPeerIsStillQuarantined(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 

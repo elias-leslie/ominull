@@ -9,6 +9,7 @@ import (
 )
 
 func TestIPv6ObservationPersistsAndFindingHonorsLearning(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	if _, err := store.CreateLearningWindow(storage.LearningWindow{TenantID: "t-01", ScopeType: storage.LearningScopeTenant, ScopeID: "t-01", StartedBy: "fixture"}); err != nil {
@@ -32,6 +33,7 @@ func TestIPv6ObservationPersistsAndFindingHonorsLearning(t *testing.T) {
 	}
 }
 func TestIPv6MonitorRequiresAdministrator(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, tc := range []struct {

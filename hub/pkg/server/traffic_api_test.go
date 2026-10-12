@@ -12,6 +12,7 @@ import (
 )
 
 func TestTrafficAPIEndpoints(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "traffic_api_test.db")
 	store, err := storage.New(dbPath)

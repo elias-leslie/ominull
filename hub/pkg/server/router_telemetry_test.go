@@ -27,6 +27,7 @@ func postTelemetry(t *testing.T, srv *Server, body string) *httptest.ResponseRec
 
 // One poll carrying all three observation kinds must be folded and counted.
 func TestRouterTelemetryIngestsAllThreeSources(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -67,6 +68,7 @@ func TestRouterTelemetryIngestsAllThreeSources(t *testing.T) {
 // A compromised gateway must not be able to ask the hub what to do next. The
 // reply is a count and nothing else.
 func TestRouterTelemetryReplyCarriesNoInstructions(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -95,6 +97,7 @@ func TestRouterTelemetryReplyCarriesNoInstructions(t *testing.T) {
 // A gateway whose conntrack parser has broken should still be able to tell us
 // who holds which lease. One bad section must not cost the others.
 func TestRouterTelemetrySectionsFoldIndependently(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -122,6 +125,7 @@ func TestRouterTelemetrySectionsFoldIndependently(t *testing.T) {
 
 // The router must name itself, and only POST may write.
 func TestRouterTelemetryRejectsUnnamedAndWrongMethod(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -140,6 +144,7 @@ func TestRouterTelemetryRejectsUnnamedAndWrongMethod(t *testing.T) {
 
 // Ingest is authenticated like every other route.
 func TestRouterTelemetryRequiresAuth(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -154,6 +159,7 @@ func TestRouterTelemetryRequiresAuth(t *testing.T) {
 
 // A body past the cap is refused before it is parsed, not after.
 func TestRouterTelemetryBodyIsCapped(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -179,6 +185,7 @@ func TestRouterTelemetryBodyIsCapped(t *testing.T) {
 // The read side answers the question the ingest exists for, and names the
 // devices the hub already knows.
 func TestRouterTalkersAreRankedAndNamed(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -229,6 +236,7 @@ func TestRouterTalkersAreRankedAndNamed(t *testing.T) {
 
 // Flow reads are filterable, because an unfiltered flow table is not an answer.
 func TestRouterFlowsFilterBySource(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -259,6 +267,7 @@ func TestRouterFlowsFilterBySource(t *testing.T) {
 
 // The payoff: a talker's destinations come back as names, not bare addresses.
 func TestRouterTalkersNameDestinations(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
@@ -288,6 +297,7 @@ func TestRouterTalkersNameDestinations(t *testing.T) {
 
 // Resolutions fold independently, like every other section.
 func TestRouterTelemetryIngestsResolutions(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -315,6 +325,7 @@ func TestRouterTelemetryIngestsResolutions(t *testing.T) {
 // carries the hardware address. Recording one without resolving the vendor
 // left the inventory blank for exactly the devices it exists to cover.
 func TestRouterLeaseNamesTheManufacturer(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -353,6 +364,7 @@ func TestRouterLeaseNamesTheManufacturer(t *testing.T) {
 }
 
 func TestRouterDHCPFingerprintRemainsObservedEvidence(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	w := postTelemetry(t, srv, `{"router_id":"gw","leases":[{"mac":"da:bb:cc:dd:ee:01","ip":"10.0.0.9","dhcp":{"vendor_class":"android-dhcp-14","requested_options":"1,3,6,15,26,28,51,58,59","observed_at":"2026-09-01T12:00:00Z"}}]}`)

@@ -10,6 +10,7 @@ import (
 )
 
 func TestConsoleScriptStringEncoding(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{
 		"ordinary@example.invalid",
 		"O'Connor <Research & Review>",
@@ -32,6 +33,7 @@ func TestConsoleScriptStringEncoding(t *testing.T) {
 }
 
 func TestConsoleDocumentPreservesEncodedIdentity(t *testing.T) {
+	t.Parallel()
 	viewer := accessOperator{Email: "O'Connor <Research & Review>", Role: "auditor"}
 	doc, nonce := consoleDocument("", "1.2.3", viewer)
 	if nonce == "" {
@@ -96,6 +98,7 @@ func sortedMissing(m map[string]bool) []string {
 // defined, because setProperty() is the sanctioned escape hatch under
 // style-src 'self' and those names exist only on the element.
 func TestConsoleCustomPropertiesAreDefined(t *testing.T) {
+	t.Parallel()
 	css := stripComments(consoleSource(t, "app.css"))
 	js := stripComments(consoleSource(t, "app.js"))
 
@@ -130,6 +133,7 @@ func TestConsoleCustomPropertiesAreDefined(t *testing.T) {
 // by concatenation cannot be resolved statically, and guessing would make this
 // noisy enough that somebody would turn it off.
 func TestConsoleClassesHaveRules(t *testing.T) {
+	t.Parallel()
 	css := stripComments(consoleSource(t, "app.css"))
 	js := stripComments(consoleSource(t, "app.js"))
 	html := consoleSource(t, "index.html")
@@ -176,6 +180,7 @@ func TestConsoleClassesHaveRules(t *testing.T) {
 // that was never invalidated. The precache entries must also carry the same
 // ?v= query the document requests, or they cache a URL nobody asks for.
 func TestServiceWorkerCacheTracksVersion(t *testing.T) {
+	t.Parallel()
 	sw := stripComments(consoleSource(t, "sw.js"))
 
 	if !strings.Contains(sw, hubVersionPlaceholder) {
@@ -199,6 +204,7 @@ func TestServiceWorkerCacheTracksVersion(t *testing.T) {
 // replaced on the way out, rather than being shipped to the browser as the
 // literal string "{{HUB_VERSION}}".
 func TestServedConsoleAssetsSubstituteVersion(t *testing.T) {
+	t.Parallel()
 	s := &Server{agentVersion: "9.9.9"}
 	asset, ok := s.consoleAssetFor("sw.js")
 	if !ok {
@@ -224,6 +230,7 @@ func TestServedConsoleAssetsSubstituteVersion(t *testing.T) {
 // index.html stamps the response nonce onto style elements as they are
 // created instead, so the directive can name the nonce and nothing else.
 func TestConsoleCSPHasNoUnsafeInline(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	setConsoleSecurityHeaders(w, "n0nc3")
 	csp := w.Header().Get("Content-Security-Policy")
@@ -253,6 +260,7 @@ func TestConsoleCSPHasNoUnsafeInline(t *testing.T) {
 // TestConsoleStampsStyleNonce proves the shim that makes the above possible is
 // actually in the document, ahead of the vendored xterm bundle that needs it.
 func TestConsoleStampsStyleNonce(t *testing.T) {
+	t.Parallel()
 	html := consoleSource(t, "index.html")
 
 	shim := strings.Index(html, `document.createElement = function (tag)`)
@@ -277,6 +285,7 @@ func TestConsoleStampsStyleNonce(t *testing.T) {
 // glyph and keeps its stripe and its word, which looks like a design choice
 // rather than a bug. g-quarantine had five call sites and no symbol.
 func TestConsoleSpriteReferencesResolve(t *testing.T) {
+	t.Parallel()
 	js := stripComments(consoleSource(t, "app.js"))
 	html := consoleSource(t, "index.html")
 

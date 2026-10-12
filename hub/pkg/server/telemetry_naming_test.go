@@ -11,6 +11,7 @@ import (
 // The agent sends no SNI, so without borrowing the resolver's answer every
 // finding quotes an edge address that will be a different one tomorrow.
 func TestSnapshotNamesDestinationsFromResolver(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
@@ -40,6 +41,7 @@ func TestSnapshotNamesDestinationsFromResolver(t *testing.T) {
 // What the agent itself observed is better evidence than our inference, so a
 // domain the agent reported must never be overwritten.
 func TestSnapshotDoesNotOverwriteAgentDomain(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
@@ -63,6 +65,7 @@ func TestSnapshotDoesNotOverwriteAgentDomain(t *testing.T) {
 
 // A hub with no resolutions at all must behave exactly as before.
 func TestSnapshotWithoutResolutionsIsUnchanged(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	store, err := storage.New(filepath.Join(tmp, "t.db"))
 	if err != nil {

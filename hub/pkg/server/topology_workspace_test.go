@@ -8,6 +8,7 @@ import (
 )
 
 func TestTopologyWorkspaceRequiresOperator(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, path := range []string{"/api/v1/topology/workspace", "/api/v1/topology/views"} {
@@ -28,6 +29,7 @@ func TestTopologyWorkspaceRequiresOperator(t *testing.T) {
 	}
 }
 func TestTopologyRoleGateAcceptsAnalystAndAuditorReads(t *testing.T) {
+	t.Parallel()
 	for _, role := range []string{"admin", "analyst", "auditor"} {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set("X-Role", role)
@@ -39,6 +41,7 @@ func TestTopologyRoleGateAcceptsAnalystAndAuditorReads(t *testing.T) {
 	}
 }
 func TestTopologyAuditorCannotWriteSavedViews(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	r := httptest.NewRequest("PUT", "/", bytes.NewBufferString(`{"id":"one","name":"One","state":{}}`))
@@ -52,6 +55,7 @@ func TestTopologyAuditorCannotWriteSavedViews(t *testing.T) {
 }
 
 func TestTopologySavedViewsUseAuthenticatedOwner(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, email := range []string{"first@example.invalid", "second@example.invalid"} {
@@ -83,6 +87,7 @@ func TestTopologySavedViewsUseAuthenticatedOwner(t *testing.T) {
 }
 
 func TestTopologySnapshotConditionalRead(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	first := httptest.NewRecorder()

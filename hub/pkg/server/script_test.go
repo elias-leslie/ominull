@@ -21,6 +21,7 @@ import (
 )
 
 func TestServer_ScriptsAPI(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -145,6 +146,7 @@ func TestServer_ScriptsAPI(t *testing.T) {
 }
 
 func TestServer_Scripts_TenantIsolation(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -303,6 +305,7 @@ func TestServer_Scripts_TenantIsolation(t *testing.T) {
 }
 
 func TestServer_Scripts_ParameterValidation(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -464,6 +467,7 @@ func TestServer_Scripts_ParameterValidation(t *testing.T) {
 }
 
 func TestServer_Scripts_RetirementAndConstraints(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -605,6 +609,7 @@ func TestServer_Scripts_RetirementAndConstraints(t *testing.T) {
 }
 
 func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -833,6 +838,7 @@ func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
 }
 
 func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
+	t.Parallel()
 	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

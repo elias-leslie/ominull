@@ -19,6 +19,7 @@ import (
 )
 
 func TestServer_EvidenceAPI(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -155,6 +156,7 @@ func TestServer_EvidenceAPI(t *testing.T) {
 }
 
 func TestServer_EvidenceChunkedUploadAPI(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -231,6 +233,7 @@ func TestServer_EvidenceChunkedUploadAPI(t *testing.T) {
 }
 
 func TestServer_EvidenceTenantScoping(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -316,6 +319,7 @@ func TestServer_EvidenceTenantScoping(t *testing.T) {
 }
 
 func TestServer_EvidenceDeviceCredentialScoping(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
@@ -410,6 +414,7 @@ func TestServer_EvidenceDeviceCredentialScoping(t *testing.T) {
 }
 
 func TestServer_EvidencePruneAPI(t *testing.T) {
+	t.Parallel()
 	server, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	handler := server.Handler()
@@ -469,6 +474,7 @@ func TestServer_EvidencePruneAPI(t *testing.T) {
 }
 
 func TestServer_EvidenceItemsQueryAPI(t *testing.T) {
+	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 

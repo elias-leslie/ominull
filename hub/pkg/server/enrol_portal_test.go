@@ -59,6 +59,7 @@ func portalEnrollmentCode(t *testing.T, body string) string {
 // With no window open, the portal must hand out nothing to anyone. This is the
 // default state of the hub, and it is the state that matters most.
 func TestThePortalGivesNothingWithNoWindowOpen(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -77,6 +78,7 @@ func TestThePortalGivesNothingWithNoWindowOpen(t *testing.T) {
 // The happy path, and the shape the whole feature exists for: an administrator
 // opens a window for the LAN, and a machine on it gets its own command.
 func TestAMachineOnAnOpenNetworkGetsItsOwnCommand(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -110,6 +112,7 @@ func TestAMachineOnAnOpenNetworkGetsItsOwnCommand(t *testing.T) {
 
 // A window for one network must not serve the next one over.
 func TestThePortalRefusesAMachineOutsideTheWindow(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -124,6 +127,7 @@ func TestThePortalRefusesAMachineOutsideTheWindow(t *testing.T) {
 // Merely looking at the page must not spend the budget: link previews, scanners
 // and browser prefetch all issue GETs.
 func TestLookingAtThePortalSpendsNothing(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -143,6 +147,7 @@ func TestLookingAtThePortalSpendsNothing(t *testing.T) {
 // A window with a passcode must ask for it, and must not leak the ticket to a
 // caller that guesses wrong.
 func TestAPasscodeWindowAsksBeforeItGives(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -167,6 +172,7 @@ func TestAPasscodeWindowAsksBeforeItGives(t *testing.T) {
 // Revoking has to take effect on the next request, because the reason an
 // operator revokes is that something is wrong right now.
 func TestRevokingAWindowStopsThePortalAtOnce(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -193,6 +199,7 @@ func TestRevokingAWindowStopsThePortalAtOnce(t *testing.T) {
 // Opening a window is an administrative act. A tenant key must not be able to
 // pre-authorise a network to join the fleet.
 func TestOnlyAnAdminMayOpenAWindow(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -208,6 +215,7 @@ func TestOnlyAnAdminMayOpenAWindow(t *testing.T) {
 
 // A window may not be left open indefinitely.
 func TestAWindowMayNotOutliveAWeek(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -220,6 +228,7 @@ func TestAWindowMayNotOutliveAWeek(t *testing.T) {
 // The page carries a live enrollment code, so it must not be cacheable and must
 // not leak its URL onward in a Referer.
 func TestThePortalPageIsNotCacheable(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -240,6 +249,7 @@ func TestThePortalPageIsNotCacheable(t *testing.T) {
 // The portal offers the command for the platform asked for, and the code is
 // bound to it - a Windows code must not redeem as Linux.
 func TestAPortalEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -260,6 +270,7 @@ func TestAPortalEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
 }
 
 func TestTheLANPortalOffersAPlatformCorrectDownload(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.SetAgentHubURL("https://10.0.0.57:9443")
@@ -279,6 +290,7 @@ func TestTheLANPortalOffersAPlatformCorrectDownload(t *testing.T) {
 // The expiry is read by somebody standing at a laptop, not an operator reading
 // logs, so it must not be a Go duration string.
 func TestThePortalSaysHowLongInEnglish(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -296,6 +308,7 @@ func TestThePortalSaysHowLongInEnglish(t *testing.T) {
 // A guess at the operating system is a convenience, never an authorisation: the
 // ticket must be minted for what the visitor picked.
 func TestThePortalGuessesTheOSButObeysThePick(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	openTestWindow(t, srv, `{"cidrs":["10.0.0.0/24"],"hours":4,"max_uses":10}`)

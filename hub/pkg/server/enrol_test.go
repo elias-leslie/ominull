@@ -38,6 +38,7 @@ func renderInstaller(t *testing.T, srv *Server, platform string, oneLiner bool) 
 }
 
 func TestTheConsoleCanRenderAnInstallerWithoutPuttingTheKeyInAURL(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -72,6 +73,7 @@ func TestTheConsoleCanRenderAnInstallerWithoutPuttingTheKeyInAURL(t *testing.T) 
 // so a workstation on that LAN reaches the hub directly and retains its source
 // address for the network authorization check.
 func TestInstallTrafficUsesTheAgentURLAndThePortalUsesTheConsoleURL(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.SetAgentHubURL("https://10.0.0.57:9443")
@@ -102,6 +104,7 @@ func TestInstallTrafficUsesTheAgentURLAndThePortalUsesTheConsoleURL(t *testing.T
 }
 
 func TestReusableProfileCannotPinEveryInstallToOneEndpoint(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -115,6 +118,7 @@ func TestReusableProfileCannotPinEveryInstallToOneEndpoint(t *testing.T) {
 }
 
 func TestAnEnrollmentCodeWorksOnceAndThenStopsWorking(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -149,6 +153,7 @@ func TestAnEnrollmentCodeWorksOnceAndThenStopsWorking(t *testing.T) {
 }
 
 func TestAnEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -178,6 +183,7 @@ func TestAnEnrollmentCodeIsBoundToItsPlatform(t *testing.T) {
 // The generic one-line command is optional. A script request still returns the
 // one-use code needed by the script, but does not add a command containing it.
 func TestNoOneLinerIsRenderedUnlessAskedFor(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -192,6 +198,7 @@ func TestNoOneLinerIsRenderedUnlessAskedFor(t *testing.T) {
 }
 
 func TestRenderingAnInstallerNeedsAnAdministrator(t *testing.T) {
+	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
@@ -210,6 +217,7 @@ func TestRenderingAnInstallerNeedsAnAdministrator(t *testing.T) {
 // installer's unauthenticated fetch with a sign-in page, and the one-line
 // command piped HTML into bash.
 func TestProbeRejectsAnOriginThatIsNotThisHub(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
@@ -258,6 +266,7 @@ func TestProbeRejectsAnOriginThatIsNotThisHub(t *testing.T) {
 // The URL carries a "?", which zsh treats as a glob and refuses when it matches
 // nothing - so an unquoted install command fails outright on the target host.
 func TestOneLinerQuotesTheURL(t *testing.T) {
+	t.Parallel()
 	for _, p := range enrolmentPlatforms() {
 		cmd := p.oneLiner("http://hub.example:9999", "abc123")
 		if !strings.Contains(cmd, "\"http://hub.example:9999/bootstrap") &&
