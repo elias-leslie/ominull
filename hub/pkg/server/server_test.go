@@ -1218,6 +1218,8 @@ func TestResponseRoutesFailClosedByDefault(t *testing.T) {
 		{http.MethodGet, "/api/v1/terminal/sessions", ""},
 		{http.MethodPost, "/api/v1/terminal/sessions/close", `{"session_id":"s-1"}`},
 		{http.MethodPost, "/api/v1/terminal/frames", `{"session_id":"s-1","type":"stdin","data":"dGVzdA=="}`},
+		{http.MethodGet, "/api/v1/terminal/ws/operator?session_id=s-1&token=t", ""},
+		{http.MethodGet, "/api/v1/terminal/ws/agent?session_id=s-1&endpoint_id=ep-1&token=t", ""},
 
 		// 13. Versioned Immutable Script Library & Execution API
 		{http.MethodPost, "/api/v1/scripts", `{"name":"test.sh","interpreter":"/bin/sh","source":"echo 1\n"}`},

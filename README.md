@@ -73,7 +73,7 @@ Open the hub's `/setup` route on the configured console origin and complete the 
 
 The Go hub embeds web assets and SQLite; native Linux/Windows agents report through authenticated REST. Package-managed systemd services, configuration, device PKI, database, and release artifacts have distinct persistence boundaries. Hub purge does not delete retained database/PKI/backup data.
 
-LAN and direct-WAN operation are supported. Native OIDC and Cloudflare console access are optional identity paths; agent transport needs its separate non-interactive route. Router telemetry is an optional passive input and does not put the hub in the network path. See the [project guide](docs/project-guide.md) for setup, identity, package lifecycle, and API detail.
+LAN operation is the supported network mode, with an optional Cloudflare Tunnel for remote console access. Native OIDC and Cloudflare console access are optional identity paths; agent transport needs its separate non-interactive route. Router telemetry is an optional passive input and does not put the hub in the network path. See the [project guide](docs/project-guide.md) for setup, identity, package lifecycle, and API detail.
 
 ## Development and verification
 
@@ -89,6 +89,6 @@ Package lifecycle, signing, canary convergence, and runtime acceptance require t
 - [Project guide](docs/project-guide.md): installation, identity, enrollment, package lifecycle, CLI/API, and release workflow.
 - [Hub setup](docs/SETUP.md), [collection semantics](docs/UDP_OBSERVATION.md), and [topology workspace](docs/TOPOLOGY_WORKSPACE.md).
 - [Agent TLS](docs/AGENT_TLS.md), [self-update](docs/AGENT_SELFUPDATE.md), and [trust fabric](docs/TRUST_FABRIC.md).
-- [Router collection](scripts/router/README.md), [OIDC/ACME](docs/OIDC_ACME.md), [Cloudflare](docs/CLOUDFLARE.md), and [license](LICENSE).
+- [Router collection](scripts/router/README.md), [OIDC](docs/OIDC.md), [Cloudflare](docs/CLOUDFLARE.md), and [license](LICENSE).
 - [Design history](docs/DESIGN_HISTORY.md) and dated verification records in [docs/evidence](docs/evidence), where real host names and addresses are replaced with placeholders.
 - [Security policy](SECURITY.md), including how to report a vulnerability.

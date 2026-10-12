@@ -236,7 +236,7 @@ func (s *Server) checkDNS(ctx context.Context) diagnostics.Result {
 			if cfg.NetworkMode == "lan" {
 				return diag("dns", "Console and agent DNS", diagnostics.Warn, "a configured LAN hostname did not resolve from the hub", host, "verify local DNS or use a reachable LAN address; direct and Cloudflare modes require resolution")
 			}
-			return diag("dns", "Console and agent DNS", diagnostics.Fail, "a configured public hostname did not resolve", host, "publish the A/AAAA/CNAME record before using direct WAN or Cloudflare mode")
+			return diag("dns", "Console and agent DNS", diagnostics.Fail, "a configured public hostname did not resolve", host, "publish the A/AAAA/CNAME record before using Cloudflare mode")
 		}
 		hosts = append(hosts, host)
 	}
@@ -255,7 +255,7 @@ func (s *Server) checkTLS(context.Context) diagnostics.Result {
 	if mode == "" {
 		mode = "self-issued"
 	}
-	if mode == "custom" || mode == "acme" {
+	if mode == "custom" {
 		if strings.TrimSpace(s.tlsOpts.CertFile) == "" || strings.TrimSpace(s.tlsOpts.KeyFile) == "" {
 			return diag("tls", "Server certificate", diagnostics.Fail, mode+" TLS is selected but certificate paths are not active", "", "install the certificate and key, then restart the package-owned service")
 		}
@@ -294,7 +294,7 @@ func (s *Server) tlsCertificateResult(leaf *x509.Certificate, cfg configuration.
 		return diag("tls", "Server certificate", diagnostics.Fail, "server certificate is expired", leaf.NotAfter.UTC().Format(time.RFC3339), "renew or replace the server certificate")
 	}
 	if time.Until(leaf.NotAfter) < 30*24*time.Hour {
-		return diag("tls", "Server certificate", diagnostics.Warn, "server certificate expires within 30 days", leaf.NotAfter.UTC().Format(time.RFC3339), "renew the ACME certificate or replace the operator certificate before expiry")
+		return diag("tls", "Server certificate", diagnostics.Warn, "server certificate expires within 30 days", leaf.NotAfter.UTC().Format(time.RFC3339), "replace the operator certificate before expiry")
 	}
 	hosts := []string{}
 	for _, raw := range []string{cfg.ConsoleURL, cfg.AgentURL} {
@@ -389,7 +389,7 @@ func (s *Server) checkNativeTransport(ctx context.Context) (result diagnostics.R
 		roots, err = x509.SystemCertPool()
 		if err != nil || roots == nil {
 			return diag("native_transport", "Native device transport", diagnostics.Warn,
-				"native client proof is ready; the operator certificate trust store could not be loaded", "system certificate pool unavailable", "verify the operator or ACME certificate with the host trust store")
+				"native client proof is ready; the operator certificate trust store could not be loaded", "system certificate pool unavailable", "verify the operator certificate with the host trust store")
 		}
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{

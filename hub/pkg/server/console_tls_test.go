@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"ominull/hub/pkg/acme"
 	"ominull/hub/pkg/configuration"
 )
 
@@ -262,78 +261,6 @@ func TestServer_ConsoleTLSSources_HubCA_GuidedRootTrust(t *testing.T) {
 	instructions, ok := trustRes["instructions"].(map[string]interface{})
 	if !ok || instructions["linux_debian"] == "" || instructions["macos"] == "" || instructions["windows"] == "" {
 		t.Fatalf("missing per-platform trust instructions in response: %v", trustRes)
-	}
-}
-
-func TestServer_ConsoleTLSSources_ACMEDNS01(t *testing.T) {
-	t.Parallel()
-	srv, _, _, cleanup := setupTestServerWithResponse(t)
-	defer cleanup()
-
-	tmpDir := t.TempDir()
-	certDir := filepath.Join(tmpDir, "certs")
-	_ = os.MkdirAll(certDir, 0700)
-
-	// Pre-create cached ACME certificate in certDir
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(7777),
-		Subject:      pkix.Name{CommonName: "acme.example.invalid"},
-		DNSNames:     []string{"acme.example.invalid"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(90 * 24 * time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, _ := x509.MarshalECPrivateKey(priv)
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	if err := os.WriteFile(filepath.Join(srv.binaryDir, "certs", "console_acme.crt"), certPEM, 0644); err != nil {
-		t.Fatalf("write cert: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(srv.binaryDir, "certs", "console_acme.key"), keyPEM, 0600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
-
-	mockDNS := acme.NewMockDNSProvider()
-	srv.SetConsoleTLS(ConsoleTLSOptions{
-		Listen:          ":8443",
-		Hostname:        "acme.example.invalid",
-		ACMEEnabled:     true,
-		ACMEDomain:      "acme.example.invalid",
-		ACMEDNSProvider: mockDNS,
-	})
-
-	cfg, err := srv.consoleTLSConfig()
-	if err != nil {
-		t.Fatalf("consoleTLSConfig failed for ACME: %v", err)
-	}
-	if len(cfg.Certificates) == 0 {
-		t.Fatalf("expected loaded ACME certificate")
-	}
-	if cfg.ClientAuth != tls.NoClientCert {
-		t.Fatalf("expected ClientAuth=NoClientCert, got %v", cfg.ClientAuth)
-	}
-
-	// Verify status endpoint reflects ACME source
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/console/status", nil)
-	srv.handleConsoleStatus(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /api/v1/console/status, got %d", w.Code)
-	}
-	var res map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("unmarshal status: %v", err)
-	}
-	if res["source"] != "acme" {
-		t.Fatalf("expected source=acme, got %v", res["source"])
 	}
 }
 

@@ -2,8 +2,8 @@
 
 Endpoint telemetry and control use the hub HTTPS listener. Enrollment obtains
 the hub device CA through the approved bootstrap channel for direct self-issued
-deployments. Later requests pin the hub against that CA. Public ACME and
-Cloudflare edge endpoints use the host operating-system public certificate
+deployments. Later requests pin the hub against that CA. Operator-supplied public
+certificates and Cloudflare edge endpoints use the host operating-system public certificate
 trust instead; their agent route still requires the unique device credential,
 and direct native mTLS can add the hub-issued client certificate.
 
@@ -11,8 +11,8 @@ and direct native mTLS can add the hub-issued client certificate.
 
 `--tls-listen` defaults to `:9443`. Without an operator certificate the hub
 serves a leaf signed by its local device CA and includes configured hostnames
-and reachable interface names. An operator may supply a public ACME or custom
-certificate and key through setup.
+and reachable interface names. An operator may supply a public certificate and
+key through setup.
 
 `optional` client-certificate mode verifies a certificate when an agent offers
 one. `required` rejects endpoints without a verified certificate and should be

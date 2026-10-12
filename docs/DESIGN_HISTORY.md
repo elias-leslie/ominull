@@ -33,6 +33,20 @@ inspection for TCP telemetry and iptables/ip6tables for host isolation. Agents
 moved to signed native packages (`.deb` and `.msi`) with enrollment-issued
 per-device credentials in place of SSH deployment.
 
+## Second trim (2026-10-12)
+
+Sized for one hub and a handful of agents. Removed:
+
+- automated ACME DNS-01 certificate issuance (`hub/pkg/acme`) and the
+  direct-WAN network mode. A public certificate is now operator-supplied; saved
+  configurations load as LAN mode with the custom certificate source.
+
+Kept on purpose: the console terminal (now also fail-closed on its WebSocket
+routes when the response subsystem is off), native OIDC, and the Cloudflare
+Tunnel + Access console path. Retention-expired evidence, including terminal
+recordings (30 days), is now pruned hourly instead of only on an explicit API
+call.
+
 ## Measured additions
 
 - **Linux UDP observation (2026-09-07).** eBPF returned as a real collector: an

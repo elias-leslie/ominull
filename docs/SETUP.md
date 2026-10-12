@@ -36,10 +36,10 @@ start, after each save, and on demand:
    device PKI, bundled signed packages, and basic dependency checks.
 2. Local admin and recovery: save the initial operator identity; retain the
    local admin-key and token commands as break-glass access.
-3. Network mode: LAN-only, direct WAN, or optional Cloudflare Tunnel + Access.
+3. Network mode: LAN-only, or optional Cloudflare Tunnel + Access.
    Console and agent URLs are separate fields.
-4. DNS and server TLS: native self-issued certificate, operator-prepared ACME,
-   or operator-supplied certificate and key. The device CA remains separate.
+4. DNS and server TLS: native self-issued certificate, or operator-supplied
+   certificate and key. The device CA remains separate.
 5. Client-certificate proof: keep it optional during migration, then require it
    after every retained agent presents its matching hub-issued certificate.
 6. Human authentication: optional native OIDC and optional Cloudflare Access.
@@ -68,9 +68,9 @@ the external network is down.
 
 ## Network choices
 
-LAN mode needs no public provider. Direct WAN needs operator-controlled DNS,
-public TLS, and upstream forwarding to the configured HTTPS listener. The
-Cloudflare path is documented in [`CLOUDFLARE.md`](CLOUDFLARE.md); the hub only
+LAN mode needs no public provider. The automated-ACME and direct-WAN modes
+were removed; a configuration saved by an older hub loads as LAN mode with an
+operator-supplied certificate. The Cloudflare path is documented in [`CLOUDFLARE.md`](CLOUDFLARE.md); the hub only
 validates and records the choice. It never mutates an external security
 boundary.
 
@@ -79,7 +79,7 @@ with their unique Ominull device credential. A direct native client certificate
 is an additional matching proof when present; its subject must match the
 credential's endpoint.
 
-In Cloudflare or public-ACME mode, native installers use the host operating
+In Cloudflare mode or with an operator-supplied public certificate, native installers use the host operating
 system's public certificate trust for the edge/server certificate. In direct
 self-issued LAN mode, they pin the hub's Ominull CA. Both modes use the
 hub-issued device credential, and direct connections may add the matching
@@ -98,8 +98,7 @@ Modern browser security standards require a **Secure Context** (HTTPS with a tru
 
 ### Certificate Modes
 1. **Source A (Operator-Supplied)**: Supply PEM certificate and private key paths via `OMINULL_CONSOLE_TLS_CERT` and `OMINULL_CONSOLE_TLS_KEY`.
-2. **Source B (Automated ACME DNS-01)**: Enable via `OMINULL_ACME_ENABLED=true`, `OMINULL_ACME_DOMAIN=<domain>`, `OMINULL_ACME_EMAIL=<email>`, `OMINULL_ACME_DNS_PROVIDER=cloudflare`, and `OMINULL_CLOUDFLARE_API_TOKEN=<token>`. Automates Let's Encrypt certificates via DNS-01 challenge with 30-day renewal threshold.
-3. **Source C (Hub CA Leaf with Guided Root Trust)**: The hub issues a leaf certificate signed by its internal Root CA covering the configured `OMINULL_CONSOLE_HOSTNAME`. The root CA certificate is exported and installed in operator client workstations.
+2. **Source B (Hub CA Leaf with Guided Root Trust)**: The hub issues a leaf certificate signed by its internal Root CA covering the configured `OMINULL_CONSOLE_HOSTNAME`. The root CA certificate is exported and installed in operator client workstations.
 
 ### Guided Root Trust Setup
 To trust the Hub CA on operator machines for LAN or disconnected deployments:

@@ -17,7 +17,7 @@ type Options struct {
 	AgentVersion   string
 	EnrollmentCode string
 	// UseSystemCA is true when the hub URL is expected to use a public
-	// certificate, such as an ACME certificate or a Cloudflare edge
+	// certificate, such as an operator-supplied or a Cloudflare edge
 	// certificate. Direct self-issued LAN deployments pin the Ominull CA.
 	UseSystemCA bool
 }

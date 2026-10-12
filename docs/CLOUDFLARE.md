@@ -1,7 +1,6 @@
 # Optional Cloudflare adapter
 
-Ominull does not require Cloudflare. LAN-only and direct-WAN HTTPS remain full
-supported paths. Cloudflare is an optional adapter for the existing Proxmox
+Ominull does not require Cloudflare. LAN-only remains a full supported path. Cloudflare is an optional adapter for the existing Proxmox
 host: the hub stays where it is, and `cloudflared` makes an outbound Tunnel
 connection to Cloudflare. Cloudflare documents the outbound connector and
 public-hostname model in [Cloudflare Tunnel documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
@@ -49,8 +48,8 @@ JWKS; it does not trust an email header. See Cloudflare's
 
 The console and agent hostnames remain separate even when both use the same
 Tunnel connector. The agent route must never inherit a console redirect policy.
-If the provider configuration cannot preserve that split, use direct WAN or
-LAN mode instead.
+If the provider configuration cannot preserve that split, use LAN mode
+instead.
 
 For a Cloudflare agent URL, the bootstrap and native agents validate the public
 edge certificate with the host operating-system trust store. They do not pin

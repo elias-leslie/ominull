@@ -12,14 +12,11 @@ func TestConfigurationRejectsPaidOrUnsafeShapes(t *testing.T) {
 	if err := bad.Validate(); err == nil {
 		t.Fatal("cloudflare configuration accepted an HTTP console URL")
 	}
-	if err := (Config{NetworkMode: "direct", ConsoleURL: "https://u:p@hub.invalid", AgentURL: "https://hub.invalid", TLSMode: "custom"}).Validate(); err == nil {
+	if err := (Config{NetworkMode: "lan", ConsoleURL: "https://u:p@hub.invalid", AgentURL: "https://hub.invalid", TLSMode: "custom"}).Validate(); err == nil {
 		t.Fatal("configuration accepted URL userinfo")
 	}
 	if err := (Config{NetworkMode: "lan", ConsoleURL: "http://hub.local", AgentURL: "http://hub.local", TLSMode: "self-issued"}).Validate(); err == nil {
 		t.Fatal("configuration accepted an HTTP agent URL")
-	}
-	if err := (Config{NetworkMode: "direct", ConsoleURL: "https://console.invalid", AgentURL: "https://agent.invalid", TLSMode: "acme"}).Validate(); err == nil {
-		t.Fatal("ACME mode accepted no certificate and key paths even though the hub does not obtain them")
 	}
 }
 
@@ -59,7 +56,7 @@ func TestClientCertificateModeDefaultsAndValidates(t *testing.T) {
 	}
 }
 
-func TestConsoleHostnameAndACMEValidation(t *testing.T) {
+func TestConsoleHostnameValidation(t *testing.T) {
 	// 1. IP address in ConsoleHostname must be strictly rejected
 	badIP := Config{
 		NetworkMode:     "lan",
@@ -84,7 +81,7 @@ func TestConsoleHostnameAndACMEValidation(t *testing.T) {
 
 	// 3. Valid domain name in ConsoleHostname must be accepted
 	validDomain := Config{
-		NetworkMode:        "direct",
+		NetworkMode:        "lan",
 		ConsoleURL:         "https://omi.example.invalid:8443",
 		AgentURL:           "https://agent.example.invalid:9443",
 		ConsoleHostname:    "omi.example.invalid",
@@ -107,28 +104,30 @@ func TestConsoleHostnameAndACMEValidation(t *testing.T) {
 		t.Fatalf("expected ConsoleHostname normalized to 'hub.lan', got %q", norm.ConsoleHostname)
 	}
 
-	// 5. ACME DNS-01 validation
-	acmeCfg := Config{
-		NetworkMode:     "direct",
-		ConsoleURL:      "https://omi.example.invalid:8443",
-		AgentURL:        "https://agent.example.invalid:9443",
-		ConsoleHostname: "omi.example.invalid",
-		TLSMode:         "acme",
-		ACMEEnabled:     true,
-		ACMEEmail:       "ops@example.invalid",
-	}
-	if err := acmeCfg.Validate(); err != nil {
-		t.Fatalf("valid ACME DNS-01 config rejected: %v", err)
-	}
-
-	env := acmeCfg.Environment("/var/lib/ominull/db", "/etc/ominull/admin.key", "/bin", "/token")
+	env := validDomain.Environment("/var/lib/ominull/db", "/etc/ominull/admin.key", "/bin", "/token")
 	if !strings.Contains(env, "OMINULL_CONSOLE_HOSTNAME=omi.example.invalid\n") {
 		t.Fatalf("missing OMINULL_CONSOLE_HOSTNAME in env: %s", env)
 	}
-	if !strings.Contains(env, "OMINULL_ACME_ENABLED=true\n") {
-		t.Fatalf("missing OMINULL_ACME_ENABLED in env: %s", env)
+}
+
+// Automated ACME and direct-WAN modes were retired. A configuration saved by an
+// older hub must still load: direct reads as lan, and acme reads as custom, which
+// names the certificate files the operator now supplies.
+func TestRetiredModesNormalizeToSupportedOnes(t *testing.T) {
+	legacy := Config{NetworkMode: "direct", TLSMode: "acme", ConsoleURL: "https://omi.example.invalid", AgentURL: "https://agent.example.invalid:9443",
+		TLSCertFile: "/etc/ominull/hub.crt", TLSKeyFile: "/etc/ominull/hub.key"}
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy direct/acme configuration with certificate files rejected: %v", err)
 	}
-	if !strings.Contains(env, "OMINULL_ACME_DOMAIN=omi.example.invalid\n") {
-		t.Fatalf("missing OMINULL_ACME_DOMAIN in env: %s", env)
+	norm := legacy.Normalized()
+	if norm.NetworkMode != "lan" || norm.TLSMode != "custom" {
+		t.Fatalf("legacy modes normalized to %q/%q, want lan/custom", norm.NetworkMode, norm.TLSMode)
+	}
+	if err := (Config{NetworkMode: "direct", TLSMode: "acme", AgentURL: "https://agent.example.invalid"}).Validate(); err == nil {
+		t.Fatal("legacy acme configuration without certificate files was accepted")
+	}
+	env := norm.Environment("db", "admin", "bin", "token")
+	if strings.Contains(env, "ACME") {
+		t.Fatalf("environment still renders ACME settings: %s", env)
 	}
 }

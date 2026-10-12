@@ -21,23 +21,18 @@ const CurrentVersion = 1
 
 type Config struct {
 	Version            int      `json:"version"`
-	NetworkMode        string   `json:"network_mode"` // lan, direct, cloudflare
+	NetworkMode        string   `json:"network_mode"` // lan, cloudflare
 	ConsoleHostname    string   `json:"console_hostname"`
 	ConsoleURL         string   `json:"console_url"`
 	AgentURL           string   `json:"agent_url"`
 	ConsoleTLSListen   string   `json:"console_tls_listen,omitempty"`
 	ConsoleTLSCertFile string   `json:"console_tls_cert_file,omitempty"`
 	ConsoleTLSKeyFile  string   `json:"console_tls_key_file,omitempty"`
-	TLSMode            string   `json:"tls_mode"` // self-issued, acme, custom
+	TLSMode            string   `json:"tls_mode"` // self-issued, custom
 	TLSCertFile        string   `json:"tls_cert_file,omitempty"`
 	TLSKeyFile         string   `json:"tls_key_file,omitempty"`
 	TLSHosts           []string `json:"tls_hosts,omitempty"`
 	ClientCerts        string   `json:"client_certs"` // off, optional, required
-	ACMEEnabled        bool     `json:"acme_enabled,omitempty"`
-	ACMEDomain         string   `json:"acme_domain,omitempty"`
-	ACMEEmail          string   `json:"acme_email,omitempty"`
-	ACMEDirectory      string   `json:"acme_directory,omitempty"`
-	ACMEDNSProvider    string   `json:"acme_dns_provider,omitempty"`
 	OIDCIssuer         string   `json:"oidc_issuer,omitempty"`
 	OIDCClientID       string   `json:"oidc_client_id,omitempty"`
 	OIDCRedirectURL    string   `json:"oidc_redirect_url,omitempty"`
@@ -54,19 +49,13 @@ func (e *ValidationError) Error() string { return strings.Join(e.Problems, "; ")
 
 func (c Config) Validate() error {
 	var problems []string
-	mode := strings.ToLower(strings.TrimSpace(c.NetworkMode))
-	if mode == "" {
-		mode = "lan"
+	mode := normalNetworkMode(c.NetworkMode)
+	if mode != "lan" && mode != "cloudflare" {
+		problems = append(problems, "network_mode must be lan or cloudflare")
 	}
-	if mode != "lan" && mode != "direct" && mode != "cloudflare" {
-		problems = append(problems, "network_mode must be lan, direct, or cloudflare")
-	}
-	tlsMode := strings.ToLower(strings.TrimSpace(c.TLSMode))
-	if tlsMode == "" {
-		tlsMode = "self-issued"
-	}
-	if tlsMode != "self-issued" && tlsMode != "acme" && tlsMode != "custom" {
-		problems = append(problems, "tls_mode must be self-issued, acme, or custom")
+	tlsMode := normalTLSMode(c.TLSMode)
+	if tlsMode != "self-issued" && tlsMode != "custom" {
+		problems = append(problems, "tls_mode must be self-issued or custom")
 	}
 	clientCerts := strings.ToLower(strings.TrimSpace(c.ClientCerts))
 	if clientCerts == "" {
@@ -87,10 +76,8 @@ func (c Config) Validate() error {
 		if name == "agent_url" && u.Scheme != "https" {
 			problems = append(problems, name+" must use https; agent credentials are never sent over HTTP")
 		}
-		if mode == "direct" || mode == "cloudflare" {
-			if u.Scheme != "https" {
-				problems = append(problems, name+" must use https in direct or cloudflare mode")
-			}
+		if mode == "cloudflare" && u.Scheme != "https" {
+			problems = append(problems, name+" must use https in cloudflare mode")
 		}
 	}
 	if strings.TrimSpace(c.ConsoleHostname) != "" {
@@ -113,20 +100,6 @@ func (c Config) Validate() error {
 	if (tlsMode == "custom") && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") &&
 		(strings.TrimSpace(c.ConsoleTLSCertFile) == "" || strings.TrimSpace(c.ConsoleTLSKeyFile) == "") {
 		problems = append(problems, "custom TLS needs both certificate and key paths")
-	}
-	if tlsMode == "acme" && !c.ACMEEnabled && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
-		problems = append(problems, "acme TLS needs both certificate and key paths")
-	}
-	if c.ACMEEnabled {
-		domain := strings.TrimSpace(c.ACMEDomain)
-		if domain == "" {
-			domain = strings.TrimSpace(c.ConsoleHostname)
-		}
-		if domain == "" {
-			problems = append(problems, "acme DNS-01 requires an acme_domain or console_hostname")
-		} else if net.ParseIP(domain) != nil {
-			problems = append(problems, "acme_domain must be a valid DNS domain name, not an IP address")
-		}
 	}
 	if c.OIDCIssuer != "" {
 		u, err := url.Parse(strings.TrimSpace(c.OIDCIssuer))
@@ -163,17 +136,11 @@ func (c Config) Normalized() Config {
 	if c.Version == 0 {
 		c.Version = CurrentVersion
 	}
-	if strings.TrimSpace(c.NetworkMode) == "" {
-		c.NetworkMode = "lan"
-	}
-	if strings.TrimSpace(c.TLSMode) == "" {
-		c.TLSMode = "self-issued"
-	}
 	if strings.TrimSpace(c.ClientCerts) == "" {
 		c.ClientCerts = "optional"
 	}
-	c.NetworkMode = strings.ToLower(strings.TrimSpace(c.NetworkMode))
-	c.TLSMode = strings.ToLower(strings.TrimSpace(c.TLSMode))
+	c.NetworkMode = normalNetworkMode(c.NetworkMode)
+	c.TLSMode = normalTLSMode(c.TLSMode)
 	c.ClientCerts = strings.ToLower(strings.TrimSpace(c.ClientCerts))
 	c.ConsoleHostname = strings.ToLower(strings.TrimSpace(c.ConsoleHostname))
 	c.ConsoleURL = strings.TrimRight(strings.TrimSpace(c.ConsoleURL), "/")
@@ -182,22 +149,34 @@ func (c Config) Normalized() Config {
 			c.ConsoleHostname = strings.ToLower(u.Hostname())
 		}
 	}
-	if c.ACMEEnabled {
-		if strings.TrimSpace(c.ACMEDomain) == "" && c.ConsoleHostname != "" {
-			c.ACMEDomain = c.ConsoleHostname
-		}
-		if strings.TrimSpace(c.ACMEDirectory) == "" {
-			c.ACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
-		}
-		if strings.TrimSpace(c.ACMEDNSProvider) == "" {
-			c.ACMEDNSProvider = "cloudflare"
-		}
-	}
 	c.AgentURL = strings.TrimRight(strings.TrimSpace(c.AgentURL), "/")
 	c.OIDCIssuer = strings.TrimRight(strings.TrimSpace(c.OIDCIssuer), "/")
 	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	sort.Strings(c.TLSHosts)
 	return c
+}
+
+// normalNetworkMode folds the retired direct-WAN mode into lan: both reach the
+// hub without Cloudflare, and lan places no extra constraint on the URLs.
+func normalNetworkMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" || mode == "direct" {
+		return "lan"
+	}
+	return mode
+}
+
+// normalTLSMode folds the retired automated-ACME mode into custom: a saved ACME
+// configuration names certificate files the operator must now supply.
+func normalTLSMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "":
+		return "self-issued"
+	case "acme":
+		return "custom"
+	}
+	return mode
 }
 
 // Environment renders only non-secret service settings. OIDC client secrets,
@@ -238,15 +217,6 @@ func (c Config) Environment(dbPath, adminKeyFile, binaryDir, setupTokenFile stri
 	}
 	if c.ConsoleTLSKeyFile != "" {
 		lines = append(lines, "OMINULL_CONSOLE_TLS_KEY="+c.ConsoleTLSKeyFile)
-	}
-	if c.ACMEEnabled {
-		lines = append(lines,
-			"OMINULL_ACME_ENABLED=true",
-			"OMINULL_ACME_DOMAIN="+c.ACMEDomain,
-			"OMINULL_ACME_EMAIL="+c.ACMEEmail,
-			"OMINULL_ACME_DIRECTORY="+c.ACMEDirectory,
-			"OMINULL_ACME_DNS_PROVIDER="+c.ACMEDNSProvider,
-		)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

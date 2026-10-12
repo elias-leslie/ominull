@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"ominull/hub/pkg/acme"
 	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
@@ -71,6 +70,8 @@ type Server struct {
 	responseAuth responseauth.Client
 	// evidenceStore manages encrypted forensic collections
 	evidenceStore *evidence.Store
+	// stopEvidenceRetention ends the hourly evidence prune started by Start.
+	stopEvidenceRetention chan struct{}
 	// terminalMgr coordinates interactive pseudoterminals and recording
 	terminalMgr *terminal.Manager
 	// scriptsStore manages versioned immutable scripts
@@ -220,7 +221,7 @@ func (s *Server) SetTLS(opts TLSOptions) {
 // ConsoleTLSOptions configures the hub's dedicated HTTPS listener for the operator web console.
 // This listener is separate from the agent TLS listener (:9443):
 // - It never requests or enforces agent client certificates (ClientAuth = NoClientCert).
-// - It presents a browser-trusted certificate (operator-supplied, ACME, or hub CA leaf).
+// - It presents a browser-trusted certificate (operator-supplied or hub CA leaf).
 // - It enforces HSTS to ensure browsers maintain a secure context for WebCrypto and WebAuthn.
 type ConsoleTLSOptions struct {
 	// Listen is the HTTPS bind address for the console (e.g. :8443). Empty disables the listener.
@@ -232,13 +233,6 @@ type ConsoleTLSOptions struct {
 	Hostname string
 	// Extra SANs
 	Hosts []string
-	// ACME automated DNS-01 options
-	ACMEEnabled         bool
-	ACMEDomain          string
-	ACMEEmail           string
-	ACMEDirectory       string
-	ACMECloudflareToken string
-	ACMEDNSProvider     acme.DNSProvider
 }
 
 // SetConsoleTLS installs the dedicated console HTTPS configuration. Call it before Start.
@@ -675,6 +669,10 @@ func (s *Server) Start(addr string) error {
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
 	s.scanner.StartBackground()
+	if s.stopEvidenceRetention == nil {
+		s.stopEvidenceRetention = make(chan struct{})
+		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
+	}
 	if cfg, err := s.store.IPv6GuardConfig(); err != nil {
 		s.ipv6Monitor.PersistenceResult(err)
 	} else if err = s.ipv6Monitor.Configure(cfg); err != nil {
@@ -851,47 +849,7 @@ func (s *Server) consoleTLSConfig() (*tls.Config, error) {
 		return base, nil
 	}
 
-	// Source B: Automated ACME using DNS-01 challenge
-	if s.consoleTLSOpts.ACMEEnabled {
-		domain := s.consoleTLSOpts.ACMEDomain
-		if domain == "" {
-			domain = s.consoleTLSOpts.Hostname
-		}
-		if domain == "" {
-			return nil, fmt.Errorf("acme console certificate requires --acme-domain or --console-hostname")
-		}
-		var dnsProvider acme.DNSProvider = s.consoleTLSOpts.ACMEDNSProvider
-		if dnsProvider == nil && s.consoleTLSOpts.ACMECloudflareToken != "" {
-			dnsProvider = acme.NewCloudflareDNSProvider(s.consoleTLSOpts.ACMECloudflareToken)
-		}
-		if dnsProvider == nil {
-			return nil, fmt.Errorf("acme console certificate requires a configured DNS provider (e.g. Cloudflare API token)")
-		}
-
-		acmeMgr, err := acme.NewManager(acme.Config{
-			DirectoryURL: s.consoleTLSOpts.ACMEDirectory,
-			Email:        s.consoleTLSOpts.ACMEEmail,
-			Domain:       domain,
-			DNSProvider:  dnsProvider,
-			CertDir:      filepath.Join(s.binaryDir, "certs"),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize acme manager: %w", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		cert, err := acmeMgr.Certificate(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to obtain acme certificate: %w", err)
-		}
-		base.Certificates = []tls.Certificate{*cert}
-		log.Printf("[+] Console TLS certificate: automated ACME DNS-01 for %s (expires %s)",
-			domain, cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
-		return base, nil
-	}
-
-	// Source C: Hub-issued CA leaf with guided browser trust
+	// Source B: Hub-issued CA leaf with guided browser trust
 	if s.pki == nil {
 		return nil, fmt.Errorf("the PKI manager failed to initialize; pass --console-tls-cert/--console-tls-key")
 	}
@@ -995,6 +953,10 @@ func (s *Server) Close() error {
 	s.ti.Stop()
 	s.detector.Stop()
 	s.scanner.StopBackground()
+	if s.stopEvidenceRetention != nil {
+		close(s.stopEvidenceRetention)
+		s.stopEvidenceRetention = nil
+	}
 	if s.terminalMgr != nil {
 		_ = s.terminalMgr.Close()
 	}
@@ -1703,14 +1665,13 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentUsesSystemCA selects the trust model that matches the public endpoint.
-// A self-issued LAN hub is pinned to its Ominull CA. ACME, operator-supplied
-// certificates, and Cloudflare edge certificates are validated by the native
+// A self-issued LAN hub is pinned to its Ominull CA. Operator-supplied
+// certificates and Cloudflare edge certificates are validated by the native
 // operating-system trust store instead; the Ominull device CA remains the
 // client-certificate identity proof.
 func (s *Server) agentUsesSystemCA() bool {
 	cfg := s.effectiveConfiguration()
 	return strings.EqualFold(cfg.NetworkMode, "cloudflare") ||
-		strings.EqualFold(cfg.TLSMode, "acme") ||
 		strings.EqualFold(cfg.TLSMode, "custom")
 }
 
@@ -1732,8 +1693,6 @@ func (s *Server) handleConsoleStatus(w http.ResponseWriter, r *http.Request) {
 	source := "hub-ca"
 	if s.consoleTLSOpts.CertFile != "" && s.consoleTLSOpts.KeyFile != "" {
 		source = "operator-supplied"
-	} else if s.consoleTLSOpts.ACMEEnabled {
-		source = "acme"
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"listen":         s.consoleTLSOpts.Listen,
@@ -3563,8 +3522,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/terminal/sessions/attach", s.authMiddleware(s.responseGate(s.handleTerminalSessionAttach)))
 	mux.HandleFunc("/api/v1/terminal/sessions/detach", s.authMiddleware(s.responseGate(s.handleTerminalSessionDetach)))
 	mux.HandleFunc("/api/v1/terminal/frames", s.authMiddleware(s.responseGate(s.handleTerminalFrames)))
-	mux.HandleFunc("/api/v1/terminal/ws/operator", s.handleTerminalWSOperator)
-	mux.HandleFunc("/api/v1/terminal/ws/agent", s.handleTerminalWSAgent)
+	mux.HandleFunc("/api/v1/terminal/ws/operator", s.responseGate(s.handleTerminalWSOperator))
+	mux.HandleFunc("/api/v1/terminal/ws/agent", s.responseGate(s.handleTerminalWSAgent))
 
 	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))

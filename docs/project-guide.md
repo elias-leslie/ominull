@@ -55,8 +55,8 @@ The wizard saves validated package configuration and walks through:
 
 1. Host, package, service, storage, PKI, listener, URL, and dependency checks.
 2. Local administrator identity and recovery.
-3. LAN/direct-WAN/optional-Cloudflare network mode and separate console/agent URLs.
-4. DNS and operator-prepared self-issued, ACME, or custom server certificates.
+3. LAN or optional-Cloudflare network mode and separate console/agent URLs.
+4. DNS and self-issued or operator-supplied server certificates.
 5. Client-certificate proof mode: optional during migration, or required after
    every retained agent is proven.
 6. Optional native OIDC and optional Cloudflare Access console authentication.
@@ -86,7 +86,7 @@ hub in the client network path. See [router collection](../scripts/router/README
 
 ## Network, TLS, and identity
 
-Ominull works fully on a LAN or over direct WAN HTTPS. Cloudflare is an
+Ominull works fully on a LAN. Cloudflare is an
 optional adapter, not a dependency. In Cloudflare mode the operator creates an
 outbound Cloudflare Tunnel route and Access application/policy in the provider
 console. The hub does not change Cloudflare policy, DNS, router forwarding, or
@@ -107,9 +107,9 @@ endpoint named by the device credential. Set client certificates to `required`
 only after every retained endpoint presents one.
 
 Native OIDC uses HTTPS discovery, authorization-code flow, state, nonce, PKCE,
-issuer/audience checks, and stable issuer-plus-subject identity binding. ACME
-certificates are prepared and installed by the operator; Ominull does not alter
-router or DNS state. See [`docs/OIDC_ACME.md`](../docs/OIDC_ACME.md).
+issuer/audience checks, and stable issuer-plus-subject identity binding. Public
+certificates are obtained and installed by the operator; Ominull does not alter
+router or DNS state. See [`docs/OIDC.md`](../docs/OIDC.md).
 
 ## Enroll Linux and Windows agents
 
@@ -236,7 +236,6 @@ Official protocol and provider references:
 - [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 - [Cloudflare Access JWT validation](https://developers.cloudflare.com/cloudflare-one/identity/authorization-cookie/validating-json/)
 - [OpenID Connect Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
-- [ACME RFC 8555](https://www.rfc-editor.org/rfc/rfc8555)
 - [Debian maintainer scripts](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html)
 - [Windows service installation](https://learn.microsoft.com/en-us/windows/win32/services/service-programs)
 
