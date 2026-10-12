@@ -39,7 +39,7 @@ func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *respon
 		t.Fatalf("storage.New failed: %v", err)
 	}
 
-	srv := New(store, "test-admin-key-12345", tempDir, "http://localhost:9999", "1.8.2")
+	srv := newTestServer(t, store, "test-admin-key-12345", tempDir, "http://localhost:9999", "1.8.2")
 	srv.SetResponseEnabled(true)
 
 	authDir := tempDir + "/auth"

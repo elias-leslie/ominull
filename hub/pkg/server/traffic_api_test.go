@@ -20,7 +20,7 @@ func TestTrafficAPIEndpoints(t *testing.T) {
 	}
 	defer store.Close()
 
-	srv := New(store, "mock_admin_token", tmpDir, "http://localhost:9999", "1.8.1")
+	srv := newTestServer(t, store, "mock_admin_token", tmpDir, "http://localhost:9999", "1.8.1")
 
 	now := time.Now().UTC()
 	events := []storage.Event{

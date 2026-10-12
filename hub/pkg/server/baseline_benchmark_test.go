@@ -149,6 +149,6 @@ func setupTestServerBench(b *testing.B) (*Server, *storage.Store) {
 		LastSeenAt:               time.Now().UTC(),
 	})
 
-	srv := New(store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.8.3")
+	srv := newTestServer(b, store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.8.3")
 	return srv, store
 }

@@ -22,7 +22,7 @@ func TestServer_LineageAndHashing_IngestionAndAPI(t *testing.T) {
 	defer store.Close()
 
 	adminKey := "mock_admin_key_lineage"
-	srv := New(store, adminKey, tmpDir, "http://localhost:9999", "1.8.3")
+	srv := newTestServer(t, store, adminKey, tmpDir, "http://localhost:9999", "1.8.3")
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	observed := now.Add(-300 * time.Millisecond)

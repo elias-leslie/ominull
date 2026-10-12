@@ -69,7 +69,7 @@ func TestSnapshotWithoutResolutionsIsUnchanged(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 	defer store.Close()
-	srv := New(store, "mock_admin_token", tmp, "http://127.0.0.1:9999", "1.8.22")
+	srv := newTestServer(t, store, "mock_admin_token", tmp, "http://127.0.0.1:9999", "1.8.22")
 
 	now := time.Now().UTC()
 	events := []storage.Event{

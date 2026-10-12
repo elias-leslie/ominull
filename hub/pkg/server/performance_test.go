@@ -106,7 +106,7 @@ func newPerformanceServer(t *testing.T) (*Server, *storage.Store) {
 			t.Fatalf("seeding performance rows at %d: %v", rows, err)
 		}
 	}
-	return New(store, "mock_admin_token", t.TempDir(), "http://10.0.0.57:9999", "1.7.16"), store
+	return newTestServer(t, store, "mock_admin_token", t.TempDir(), "http://10.0.0.57:9999", "1.7.16"), store
 }
 
 func performanceBatch(n int) []byte {

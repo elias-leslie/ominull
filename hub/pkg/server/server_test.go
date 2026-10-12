@@ -46,7 +46,7 @@ func setupTestServer(t *testing.T) (*Server, *storage.Store) {
 		t.Fatalf("enable test migration mode: %v", err)
 	}
 
-	srv := New(store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.1.0")
+	srv := newTestServer(t, store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.1.0")
 	return srv, store
 }
 

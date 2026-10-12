@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -74,15 +75,33 @@ func saveAccessConfiguration(t *testing.T, store *storage.Store, team, aud strin
 	}
 }
 
+// resultFor runs only the named check, through the same runner and timeout the
+// full diagnostic run uses, after confirming the hub's check list includes it.
+// Running every check costs seconds of DNS, TLS and enrollment probes per test.
 func resultFor(t *testing.T, srv *Server, id string) diagnostics.Result {
 	t.Helper()
-	for _, result := range srv.runDiagnostics(context.Background()) {
-		if result.ID == id {
-			return result
+	check, ok := map[string]diagnostics.Check{
+		"access":     srv.checkAccess,
+		"cloudflare": srv.checkCloudflare,
+	}[id]
+	if !ok {
+		t.Fatalf("resultFor does not know the %q check", id)
+	}
+	listed := false
+	for _, registered := range srv.diagnosticChecks() {
+		if reflect.ValueOf(registered).Pointer() == reflect.ValueOf(check).Pointer() {
+			listed = true
+			break
 		}
 	}
-	t.Fatalf("no diagnostic with id %q; the check list does not cover it", id)
-	return diagnostics.Result{}
+	if !listed {
+		t.Fatalf("the hub's diagnostic list does not include the %q check", id)
+	}
+	results := diagnostics.Runner{Timeout: 8 * time.Second, Limit: 1, Checks: []diagnostics.Check{check}}.Run(context.Background())
+	if len(results) != 1 || results[0].ID != id {
+		t.Fatalf("the %q check reported %+v", id, results)
+	}
+	return results[0]
 }
 
 // A hub with no Access in front of it must say so plainly rather than reporting
