@@ -1,3 +1,6 @@
+/* Several agent headers need GNU extensions (pipe2, SCHED_IDLE, close_range);
+ * defining it before the first libc header is the only place it takes effect. */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -33,6 +36,7 @@
 #include "../include/script_exec_linux.h"
 #include "../include/process_lineage_linux.h"
 #include "../include/software_inventory_linux.h"
+#include "../include/data_inventory_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -1442,8 +1446,8 @@ static size_t HubResponseWrite(char* ptr, size_t size, size_t nmemb, void* userd
 /* RunHubCurl posts one JSON body without forking. libcurl keeps its connection
  * cache on this easy handle, so a three-second heartbeat reuses the TLS
  * connection while each request still gets fresh headers and a bounded body. */
-static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
-                       const char* body, char* out, size_t outCap) {
+static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
+                              const char* body, char* out, size_t outCap, long timeoutMs) {
     if (out && outCap) out[0] = '\0';
     static CURL* curl = NULL;
     if (!curl) {
@@ -1472,7 +1476,7 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HubResponseWrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "OminullAgent/1.0");
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeoutMs);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -1506,6 +1510,11 @@ static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
     }
     curl_slist_free_all(headers);
     return result == CURLE_OK && !response.overflow;
+}
+
+static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
+                       const char* body, char* out, size_t outCap) {
+    return RunHubCurlTimeout(config, url, body, out, outCap, 5000L);
 }
 /* ---------------------------------------------------------------------------
  * Host isolation.
@@ -3013,6 +3022,109 @@ static void SyncSoftwareInventory(const LINUX_AGENT_CONFIG* config) {
     g_LastSoftwareInventorySync = time(NULL);
 }
 
+/* ---------------------------------------------------------------------------
+ * Data inventory.
+ *
+ * The hub decides scope and cadence (a policy fetched hourly; disabled until
+ * the hub has this endpoint's canary paths). The scan runs in a sandboxed,
+ * idle-priority child (data_inventory_linux.h) that can only read; this loop
+ * drains its pipe, posts the metadata document, and commits the resume state
+ * only once the hub has accepted it, so a lost upload is simply redone.
+ * ------------------------------------------------------------------------- */
+
+#define DATA_POLICY_SYNC_INTERVAL_SECS 3600
+#define DATA_INVENTORY_STATE_PATH "/var/lib/ominull/data-inventory.state"
+#define DATA_POLICY_RESPONSE_CAP (512 * 1024)
+
+static DataInvPolicy g_DataPolicy;
+static bool g_DataPolicyLoaded = false;
+static time_t g_LastDataPolicySync = 0;
+static time_t g_LastDataDueCheck = 0;
+static long long g_LastDataAttemptMs = 0;
+static DataInvRun g_DataRun = {.fd = -1};
+
+static void SyncDataPolicy(const LINUX_AGENT_CONFIG* config) {
+    g_LastDataPolicySync = time(NULL);
+    if (!config || !config->hub_url[0]) return;
+    char* resp = (char*)malloc(DATA_POLICY_RESPONSE_CAP);
+    if (!resp) return;
+    char url[sizeof(config->hub_url) + 32];
+    snprintf(url, sizeof(url), "%s/api/v1/data/policy", config->hub_url);
+    char body[160];
+    snprintf(body, sizeof(body), "{\"endpoint_id\":\"%.100s\",\"platform\":\"linux\",\"rules_version\":%d}",
+             config->endpoint_id, DI_RULES_VERSION);
+    if (RunHubCurl(config, url, body, resp, DATA_POLICY_RESPONSE_CAP)) {
+        long status = SplitHubStatus(resp);
+        if (status == 200) {
+            DataInvPolicy p;
+            char why[160];
+            if (DataInv_ParsePolicy(resp, &p, why, sizeof(why))) {
+                g_DataPolicy = p;
+                g_DataPolicyLoaded = true;
+            } else {
+                /* An unreadable policy stops scanning rather than keeping an
+                 * older scope the hub may have narrowed. */
+                g_DataPolicyLoaded = false;
+                fprintf(stderr, "[-] Data inventory policy rejected: %s\n", why);
+            }
+        } else if (status == 404) {
+            g_DataPolicyLoaded = false; /* hub predates data inventory */
+        }
+    }
+    free(resp);
+}
+
+static void FinishDataInventory(const LINUX_AGENT_CONFIG* config) {
+    char* doc = NULL;
+    char* state = NULL;
+    char why[160];
+    if (g_DataRun.overflow) {
+        fprintf(stderr, "[-] Data inventory scan exceeded its output or time limit; nothing sent.\n");
+    } else if (!DataInv_SplitOutput(g_DataRun.buf, g_DataRun.len, &doc, &state, why, sizeof(why))) {
+        fprintf(stderr, "[-] Data inventory scan failed: %s\n", why);
+    } else {
+        char url[sizeof(config->hub_url) + 32];
+        snprintf(url, sizeof(url), "%s/api/v1/data/inventory", config->hub_url);
+        char resp[2048];
+        long status = 0;
+        if (RunHubCurlTimeout(config, url, doc, resp, sizeof(resp), 60000L)) status = SplitHubStatus(resp);
+        if (status == 200) {
+            if (!DataInv_WriteState(DATA_INVENTORY_STATE_PATH, state))
+                fprintf(stderr, "[-] Data inventory state could not be saved; the run repeats.\n");
+            else if (config->verbose)
+                printf("[+] Data inventory sent (%zu bytes).\n", strlen(doc));
+        } else {
+            fprintf(stderr, "[-] Data inventory upload not accepted (HTTP %ld); retrying later.\n", status);
+        }
+    }
+    DataInv_Reset(&g_DataRun);
+}
+
+static void TickDataInventory(const LINUX_AGENT_CONFIG* config) {
+    time_t now = time(NULL);
+    if (g_DataRun.active) {
+        if (DataInv_Drain(&g_DataRun)) FinishDataInventory(config);
+        return;
+    }
+    if (now - g_LastDataPolicySync >= DATA_POLICY_SYNC_INTERVAL_SECS) SyncDataPolicy(config);
+    if (!g_DataPolicyLoaded || !g_DataPolicy.enabled || now - g_LastDataDueCheck < 60) return;
+    g_LastDataDueCheck = now;
+    long long nowMs = DataInv_NowMs();
+    /* A run that failed (upload refused, child killed) waits resume_minutes
+     * before the next attempt instead of rescanning every minute. */
+    if (g_LastDataAttemptMs && nowMs - g_LastDataAttemptMs < (long long)g_DataPolicy.resume_minutes * 60000) return;
+    DataInvState st;
+    char* text = DataInv_ReadSmallFile(DATA_INVENTORY_STATE_PATH, DI_STATE_CAP);
+    if (!text || !DataInv_ParseState(text, &st)) memset(&st, 0, sizeof(st));
+    bool due = DataInv_Due(&g_DataPolicy, &st, nowMs);
+    DataInv_StateFree(&st);
+    free(text);
+    if (!due) return;
+    g_LastDataAttemptMs = nowMs;
+    if (!DataInv_Start(&g_DataRun, &g_DataPolicy, DATA_INVENTORY_STATE_PATH, config->endpoint_id))
+        fprintf(stderr, "[-] Data inventory scan could not start.\n");
+}
+
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);
 	if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
@@ -3205,8 +3317,10 @@ int main(int argc, char* argv[]) {
         if (time(NULL) - g_LastSoftwareInventorySync >= SOFTWARE_INVENTORY_SYNC_INTERVAL_SECS) {
             SyncSoftwareInventory(&config);
         }
+        TickDataInventory(&config);
     }
 
+    DataInv_Abort(&g_DataRun);
     UDPCollectorClose();
     printf("\n[*] Stopping Linux socket collection and shutting down gracefully...\n");
     return 0;

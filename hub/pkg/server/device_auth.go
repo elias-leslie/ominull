@@ -77,6 +77,8 @@ func isAllowedDeviceRoute(method, path string) bool {
 		return true
 	case method == http.MethodPost && path == "/api/v1/evidence/finalize":
 		return true
+	case method == http.MethodPost && (path == "/api/v1/data/policy" || path == "/api/v1/data/inventory"):
+		return true
 	default:
 		return false
 	}

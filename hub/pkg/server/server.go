@@ -3570,5 +3570,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/vulnerabilities/snapshots/", s.authMiddleware(s.responseGate(s.handleVulnerabilitySnapshots)))
 	mux.HandleFunc("/api/v1/vulnerabilities/sync", s.authMiddleware(requireAdmin(s.responseGate(s.handleVulnerabilities))))
 
+	// 15. Data inventory: agent policy and upload (device credential), and the
+	// administrator's scope, canary and read routes.
+	mux.HandleFunc("/api/v1/data/policy", s.deviceOrLegacyMiddleware(s.handleDataPolicy))
+	mux.HandleFunc("/api/v1/data/inventory", s.deviceOrLegacyMiddleware(s.handleDataInventory))
+	mux.HandleFunc("/api/v1/data/policies", s.authMiddleware(requireAdmin(s.handleDataPolicies)))
+	mux.HandleFunc("/api/v1/data/canaries", s.authMiddleware(requireAdmin(s.handleDataCanaries)))
+
 	return mux
 }

@@ -139,6 +139,9 @@ jobs:
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
             -o build/test_der_sig agent/tests/test_der_sig.c
           build/test_der_sig
+          gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
+            -o build/test_data_inventory_linux agent/tests/test_data_inventory_linux.c
+          build/test_data_inventory_linux
 
       - name: Build canonical retained binaries
         run: bash scripts/build.sh

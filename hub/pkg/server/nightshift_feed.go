@@ -453,7 +453,7 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	// string, so v1 stays the default until every reader has moved.
 	switch c := r.URL.Query().Get("contract"); c {
 	case "", "v1":
-	case "v2":
+	case "v2", "v3":
 		v1, _ := json.Marshal(doc)
 		records, truncated, err := s.anomalyRecords(now, min(feedRecordBytes, feedDocumentBytes-len(v1)))
 		if err != nil {
@@ -463,8 +463,19 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 		doc["schema"] = nightshiftSchemaV2
 		doc["anomaly_records"] = records
 		doc["anomaly_records_truncated"] = truncated
+		if c == "v3" {
+			v2, _ := json.Marshal(doc)
+			blocks, cut, err := s.dataInventoryBlocks(now, feedDocumentBytesV3-len(v2)-256)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "the hub could not read its data inventory for Nightshift")
+				return
+			}
+			doc["schema"] = nightshiftSchemaV3
+			doc["data_inventory"] = blocks
+			doc["data_inventory_truncated"] = cut
+		}
 	default:
-		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1 and v2")
+		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1, v2 and v3")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

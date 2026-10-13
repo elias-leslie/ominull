@@ -66,6 +66,10 @@ gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_software_inventor
 ./build/test_software_inventory_linux
 rm -f build/test_software_inventory_linux
 
+gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_data_inventory_linux agent/tests/test_data_inventory_linux.c
+./build/test_data_inventory_linux
+rm -f build/test_data_inventory_linux
+
 echo ""
 echo "[*] 5. Running C response cross-language & canonical encoder tests..."
 gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include -o build/test_response_canonical agent/tests/test_response_canonical.c

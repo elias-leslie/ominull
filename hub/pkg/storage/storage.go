@@ -793,6 +793,9 @@ func (s *Store) initSchema() error {
 	if err := s.initNetworkAttributionSchema(); err != nil {
 		return err
 	}
+	if err := s.initDataInventorySchema(); err != nil {
+		return err
+	}
 	return s.initBaselineSchema()
 }
 
