@@ -38,6 +38,7 @@ jobs:
           python3 scripts/router/test-address-filter.py
           python3 scripts/router/test-dhcp-fingerprint.py
           python3 scripts/router/test-poll-delivery.py
+          python3 scripts/test-proveout-weekly.py
 
   test-topology:
     name: Topology and console (${{ matrix.browser }})

@@ -219,7 +219,7 @@ func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, er
 			CommonName:   hostname,
 		},
 		NotBefore:   time.Now().Add(-10 * time.Minute),
-		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // 1 year
+		NotAfter:    time.Now().Add(ClientCertLifetime),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
@@ -286,6 +286,10 @@ const (
 	serverCertRenewBefore = 30 * 24 * time.Hour
 	serverCertLifetime    = 2 * 365 * 24 * time.Hour
 )
+
+// ClientCertLifetime is how long an agent or router client certificate is
+// valid. The hub reports a router certificate that is close to it.
+const ClientCertLifetime = 365 * 24 * time.Hour
 
 // ServerCertificate returns a TLS leaf signed by the hub CA and valid for every
 // name and address in hosts, loading the stored one when it still fits and

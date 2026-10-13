@@ -42,9 +42,13 @@ type Server struct {
 	detector    *detector.Engine
 	pki         *pki.Manager
 	scanner     *scanner.Scanner
-	adminKey    string
-	binaryDir   string
-	hubURL      string
+	// startScan begins a sweep. Tests replace it so no test ever probes a real
+	// network: an accepted sweep used to go out to whatever the test subnet
+	// routed to, and the hub's own agent reported it as a lateral port sweep.
+	startScan func(subnet string, profile scanner.ScanProfile) (string, error)
+	adminKey  string
+	binaryDir string
+	hubURL    string
 	// Whether hubURL actually serves this hub, and when that was last checked.
 	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
 	publicURLMu      sync.Mutex
@@ -394,6 +398,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		setupTokenPath:  "/var/lib/ominull/setup.token",
 		setupSessions:   map[string]setupSession{},
 	}
+	s.startScan = s.scanner.StartScan
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
 			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
@@ -2960,7 +2965,7 @@ func (s *Server) handleScannerScan(w http.ResponseWriter, r *http.Request) {
 		prof = scanner.ProfileStandard
 	}
 
-	scanID, err := s.scanner.StartScan(req.Subnet, prof)
+	scanID, err := s.startScan(req.Subnet, prof)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3388,6 +3393,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/router/telemetry", s.routerAuth(s.handleRouterTelemetry))
 	mux.HandleFunc("/api/v1/router/identity", s.authMiddleware(s.handleRouterIdentity))
 	mux.HandleFunc("/api/v1/router/clients", s.authMiddleware(s.handleRouterClients))
+	mux.HandleFunc("/api/v1/integrations/nightshift/findings", s.nightshiftFeedAuth(s.handleNightshiftFeed))
+	mux.HandleFunc("/api/v1/integrations/nightshift/key", s.authMiddleware(s.handleNightshiftFeedKey))
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))
 

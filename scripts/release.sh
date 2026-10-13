@@ -67,6 +67,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/router/test-address-filter.py"
     python3 "${ROOT_DIR}/scripts/router/test-dhcp-fingerprint.py"
     python3 "${ROOT_DIR}/scripts/router/test-poll-delivery.py"
+    python3 "${ROOT_DIR}/scripts/test-proveout-weekly.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \

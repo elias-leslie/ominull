@@ -205,12 +205,23 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries and the answers they returned |
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
 | `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
+| `/api/v1/router/clients` | GET | per-client daily traffic from the gateway's own counters |
+| `/api/v1/router/identity` | POST | admin: issue a gateway client certificate; reissuing revokes the previous one |
+| `/api/v1/integrations/nightshift/findings` | GET | summarised findings for Nightshift (`nightshift.findings/v1`), with the feed key or admin |
+| `/api/v1/integrations/nightshift/key` | POST | admin: issue the Nightshift feed key, shown once and kept as a hash; reissuing revokes |
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
 the profile API and returns device identity in the protected response.
+
+The Nightshift feed key opens only the findings route and is read-only. The
+document is Nightshift's contract (an OCSF Detection Finding subset, defined in
+Nightshift's `docs/ingest.md`). It carries counts and states: open anomalies in
+the last 24 hours, server agents quiet for 30 minutes or more, workstation agents
+quiet for over 7 days, router collector freshness, and router certificate expiry.
+Device names appear only in structured fields, never in messages.
 
 See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins,
 saved views and the limits of observed domain/process evidence.

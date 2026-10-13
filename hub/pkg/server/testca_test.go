@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/pki"
+	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 )
 
@@ -76,6 +77,8 @@ func newTestServer(t testing.TB, store *storage.Store, adminKey, binaryDir, hubU
 	t.Helper()
 	seedTestCA(t, binaryDir)
 	srv := New(store, adminKey, binaryDir, hubURL, agentVersion)
+	// A test proves the hub accepts or refuses a sweep; it never runs one.
+	srv.startScan = func(subnet string, _ scanner.ScanProfile) (string, error) { return "test-scan-" + subnet, nil }
 	srv.publicURLMu.Lock()
 	srv.publicURLOK = false
 	srv.publicURLAt = time.Now()
