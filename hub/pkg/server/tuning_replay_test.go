@@ -97,6 +97,9 @@ func TestResolvingFindingsRecordsWhy(t *testing.T) {
 		t.Fatalf("findings were resolved without a reason: %d", w.Code)
 	}
 
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", map[string]any{"ids": []string{"curl-1"}, "reason": "x", "verdict": "fine"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a verdict outside the enum was accepted: %d", w.Code)
+	}
 	w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", map[string]any{"covered": true})
 	var got struct {
 		Resolved int            `json:"resolved"`

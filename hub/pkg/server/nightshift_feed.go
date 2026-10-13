@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -362,11 +363,30 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("agents", []feedFinding{g}, err)
 	rf, err := s.routerFindings(now)
 	add("router", rf, err)
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{
+	doc := map[string]any{
 		"schema":       nightshiftSchema,
 		"source":       nightshiftSource,
 		"generated_at": now.Format(time.RFC3339),
 		"findings":     findings,
-	})
+	}
+	// v2 is asked for, never assumed: a v1 validator rejects any other schema
+	// string, so v1 stays the default until every reader has moved.
+	switch c := r.URL.Query().Get("contract"); c {
+	case "", "v1":
+	case "v2":
+		v1, _ := json.Marshal(doc)
+		records, truncated, err := s.anomalyRecords(now, min(feedRecordBytes, feedDocumentBytes-len(v1)))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "the hub could not read its anomaly records for Nightshift")
+			return
+		}
+		doc["schema"] = nightshiftSchemaV2
+		doc["anomaly_records"] = records
+		doc["anomaly_records_truncated"] = truncated
+	default:
+		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1 and v2")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, doc)
 }

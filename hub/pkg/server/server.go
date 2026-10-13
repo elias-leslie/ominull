@@ -49,9 +49,9 @@ type Server struct {
 	// startSweeps starts the scheduled sweeps of the hub's own subnets, for
 	// the same reason: a test that starts the hub must not start them.
 	startSweeps func()
-	adminKey  string
-	binaryDir string
-	hubURL    string
+	adminKey    string
+	binaryDir   string
+	hubURL      string
 	// Whether hubURL actually serves this hub, and when that was last checked.
 	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
 	publicURLMu      sync.Mutex
@@ -407,6 +407,12 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
 			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
 		}
+		// The isolation is the record that an incident happened, so the
+		// detector's own leaves the same trace an operator's does.
+		_ = s.store.RecordAudit(storage.AuditEntry{
+			ID: uuid.New().String(), Username: "detector", Action: "AUTO_ISOLATE_HOST", Resource: endpointID,
+			Details: reason, Timestamp: time.Now().UTC(),
+		})
 		return nil
 	})
 	s.ipv6Monitor = ipv6guard.New(s.persistIPv6Observations)
@@ -2144,6 +2150,11 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.audit(r, "BULK_ISOLATE", req.Scope+":"+req.Value, fmt.Sprintf("Cut %d endpoint(s) off the network", count))
+	// Each endpoint gets its own record too, written only now that the batch
+	// has succeeded: that is the evidence an incident touched that endpoint.
+	for _, id := range scoped {
+		s.audit(r, "ISOLATE_HOST", id, "Isolated by a bulk isolation of "+req.Scope)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

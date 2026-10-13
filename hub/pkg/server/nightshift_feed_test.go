@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -270,5 +271,205 @@ func TestNightshiftFeedReportsAgentEgressAtItsWorstSeverity(t *testing.T) {
 	add("a2", "AGENT_NEW_DESTINATION", "HIGH")
 	if _, sev := find(); sev != ocsfSevHigh {
 		t.Fatalf("a HIGH new destination surfaced at severity %d", sev)
+	}
+}
+
+func TestNightshiftFeedV2CarriesTypedRecordsWithVerifiedOutcomes(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	week := 7 * 24 * time.Hour
+	n := 0
+	add := func(endpoint, typ string, at time.Time) string {
+		n++
+		id := fmt.Sprintf("r%d", n)
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: endpoint, Hostname: "secret-host",
+			AnomalyType: typ, Severity: "MEDIUM", Title: "reached secret.example.com", Timestamp: at}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	resolve := func(id, verdict, method string) {
+		if _, err := store.ResolveAnomalies("", []string{id}, storage.Resolution{Reason: "test", By: "test", Verdict: verdict, Method: method}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audit := func(action, resource string, at time.Time) {
+		n++
+		if err := store.RecordAudit(storage.AuditEntry{ID: fmt.Sprintf("a%d", n), Action: action, Resource: resource, Timestamp: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// linux-secret-host: off-hours every week for four weeks, judged benign in
+	// the first and still open now - recurrence from a judgement.
+	for i := 3; i >= 0; i-- {
+		id := add("linux-secret-host", "OFF_HOURS_ACTIVITY", now.Add(-time.Duration(i)*week))
+		if i == 3 {
+			resolve(id, storage.VerdictBenign, storage.MethodOperator)
+		}
+	}
+	// linux-unjudged: the same shape with nobody ever judging it.
+	for i := 3; i >= 0; i-- {
+		add("linux-unjudged", "UNUSUAL_PORT", now.Add(-time.Duration(i)*week))
+	}
+	// linux-beacon: a beacon every week, the first closed benign: repetition
+	// of a beacon is never evidence.
+	for i := 3; i >= 0; i-- {
+		id := add("linux-beacon", "C2_BEACONING", now.Add(-time.Duration(i)*week))
+		if i == 3 {
+			resolve(id, storage.VerdictBenign, storage.MethodOperator)
+		}
+	}
+	resolve(add("linux-acked", "NOVEL_DESTINATION", now), storage.VerdictBenign, storage.MethodOperator)
+	resolve(add("linux-auto", "NOVEL_PROCESS_EGRESS", now), storage.VerdictBenign, storage.MethodTuning)
+	resolve(add("linux-bad", "BANDWIDTH_SPIKE", now), storage.VerdictMalicious, storage.MethodOperator)
+	// A plain acknowledgement, alone or in a batch, carries no verdict.
+	if err := store.AcknowledgeAnomaly(add("linux-plain", "NOVEL_COUNTRY", now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeAnomaliesBatch([]string{add("linux-plain", "ENDPOINT_SILENT", now)}); err != nil {
+		t.Fatal(err)
+	}
+	// Acked unread, found malicious later: the verdict still lands.
+	late := add("linux-late-verdict", "THREAT_INTEL_MATCH", now)
+	if err := store.AcknowledgeAnomaly(late); err != nil {
+		t.Fatal(err)
+	}
+	resolve(late, storage.VerdictMalicious, storage.MethodOperator)
+	add("linux-open", "BRAND_NEW_DETECTOR", now)
+	add("linux-isolated", "LATERAL_PORT_SWEEP", now)
+	audit("ISOLATE_HOST", "linux-isolated", now)
+	// Neither a bulk entry nor a pre-attempt guard entry is an isolation.
+	add("linux-tried", "AGENT_NEW_DESTINATION", now)
+	audit("BULK_ISOLATE", "linux-tried", now)
+	audit("ISOLATE_HOST_FORCED", "linux-tried", now)
+	audit("ISOLATE_HOST_UNVERIFIED", "linux-tried", now)
+	// linux-later: judged benign two weeks ago, isolated this week. The
+	// earlier label may have been the start of it, so it is withdrawn.
+	resolve(add("linux-later", "ENDPOINT_RETURNED", now.Add(-2*week)), storage.VerdictBenign, storage.MethodOperator)
+	audit("AUTO_ISOLATE_HOST", "linux-later", now)
+
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v9", "mock_admin_token"); w.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown contract was served: %d", w.Code)
+	}
+	v1 := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
+	if strings.Contains(v1.Body.String(), "anomaly_records") || !strings.Contains(v1.Body.String(), `"nightshift.findings/v1"`) {
+		t.Fatal("the default document must stay v1")
+	}
+	w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v2", "mock_admin_token")
+	var doc struct {
+		Schema  string `json:"schema"`
+		Records []struct {
+			DeviceID      string `json:"device_id"`
+			Kind          string `json:"kind"`
+			Count         int    `json:"count"`
+			FirstSeen     int64  `json:"first_seen"`
+			LastSeen      int64  `json:"last_seen"`
+			Window        string `json:"baseline_window_id"`
+			Outcome       string `json:"outcome"`
+			Verified      bool   `json:"verified"`
+			OutcomeSource string `json:"outcome_source"`
+		} `json:"anomaly_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil || doc.Schema != "nightshift.findings/v2" {
+		t.Fatalf("v2 = %d %v %q", w.Code, err, doc.Schema)
+	}
+	// No hostname, endpoint id or finding text leaves in a record.
+	var raw struct {
+		Records json.RawMessage `json:"anomaly_records"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &raw)
+	for _, leak := range []string{"secret", "linux-", "example.com"} {
+		if strings.Contains(string(raw.Records), leak) {
+			t.Fatalf("records carry %q: %s", leak, raw.Records)
+		}
+	}
+	thisWeek, twoAgo := mustWeek(now), mustWeek(now.Add(-2*week))
+	got := map[string]string{}
+	for _, r := range doc.Records {
+		if r.Window == thisWeek || r.Window == twoAgo {
+			got[r.Window+" "+r.Kind] = fmt.Sprintf("%s/%v/%s", r.Outcome, r.Verified, r.OutcomeSource)
+		}
+		if !strings.HasPrefix(r.DeviceID, "dev_") || r.Count < 1 || r.FirstSeen > r.LastSeen {
+			t.Fatalf("malformed record %+v", r)
+		}
+	}
+	want := map[string]string{
+		"off_hours":             "benign/true/recurrence",
+		"unusual_port":          "unverified/false/",
+		"beaconing":             "unverified/false/",
+		"novel_destination":     "benign/true/acknowledged",
+		"novel_process_egress":  "benign/true/auto_resolved",
+		"bandwidth_spike":       "incident/true/verdict",
+		"threat_intel":          "incident/true/verdict",
+		"novel_country":         "unverified/false/",
+		"endpoint_silent":       "unverified/false/",
+		"other":                 "unverified/false/",
+		"lateral_sweep":         "incident/true/isolation",
+		"agent_new_destination": "unverified/false/",
+	}
+	for k, v := range want {
+		if got[thisWeek+" "+k] != v {
+			t.Errorf("%s this week = %q, want %q", k, got[thisWeek+" "+k], v)
+		}
+	}
+	if g := got[twoAgo+" endpoint_returned"]; g != "unverified/false/" {
+		t.Errorf("a benign label before an isolation = %q, want it withdrawn", g)
+	}
+	// The salt is kept: a second request names every device the same way.
+	again := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v2", "mock_admin_token")
+	var raw2 struct {
+		Records json.RawMessage `json:"anomaly_records"`
+	}
+	_ = json.Unmarshal(again.Body.Bytes(), &raw2)
+	if string(raw2.Records) != string(raw.Records) {
+		t.Fatal("a second request renamed devices or changed records")
+	}
+	// The same device keeps one id across windows and requests.
+	ids := map[string]bool{}
+	for _, r := range doc.Records {
+		if r.Kind == "off_hours" {
+			ids[r.DeviceID] = true
+		}
+	}
+	if len(ids) != 1 {
+		t.Fatalf("one device had %d ids", len(ids))
+	}
+}
+
+func TestBaselineWindowsAreISOWeeksAcrossTheYearBoundary(t *testing.T) {
+	for _, c := range []struct {
+		at, week, start string
+	}{
+		{"2026-01-01T12:00:00Z", "2026-W01", "2025-12-29"},
+		{"2027-01-03T23:59:00Z", "2026-W53", "2026-12-28"},
+		{"2027-01-04T00:00:00Z", "2027-W01", "2027-01-04"},
+		{"2026-10-12T08:00:00+05:00", "2026-W42", "2026-10-12"},
+		{"2026-10-12T03:00:00+05:00", "2026-W41", "2026-10-05"},
+	} {
+		at, _ := time.Parse(time.RFC3339, c.at)
+		w, start := isoWeek(at)
+		if w != c.week || start.Format("2006-01-02") != c.start {
+			t.Errorf("isoWeek(%s) = %s %s, want %s %s", c.at, w, start.Format("2006-01-02"), c.week, c.start)
+		}
+	}
+}
+
+func TestAMalformedDeviceSaltIsNeverReplaced(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	if err := store.SetSetting(feedDeviceSaltSetting, "not-hex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.deviceSalt(); err == nil {
+		t.Fatal("a malformed salt was accepted")
+	}
+	if v, _ := store.GetSetting(feedDeviceSaltSetting); v != "not-hex" {
+		t.Fatalf("the salt was overwritten with %q", v)
+	}
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v2", "mock_admin_token"); w.Code == http.StatusOK {
+		t.Fatal("v2 was served with device ids from a bad salt")
 	}
 }

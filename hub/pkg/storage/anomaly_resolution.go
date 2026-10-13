@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -18,7 +19,39 @@ func (s *Store) initAnomalyResolutionSchema() error {
 		resolved_by TEXT NOT NULL DEFAULT '',
 		resolved_at DATETIME NOT NULL
 	);`)
+	if err != nil {
+		return err
+	}
+	// The reason is prose for people. What a learner may train on is the
+	// structured part: the verdict an operator gave (benign, malicious or
+	// none) and how the finding was closed (by a tuning rule or by hand).
+	for _, col := range []string{"verdict TEXT NOT NULL DEFAULT ''", "method TEXT NOT NULL DEFAULT ''"} {
+		if _, err := s.db.Exec(`ALTER TABLE anomaly_resolutions ADD COLUMN ` + col); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	// Before the columns existed only the tuning path wrote this prefix.
+	_, err = s.db.Exec(`UPDATE anomaly_resolutions SET verdict = ?, method = ? WHERE method = '' AND reason LIKE 'covered by tuning:%'`,
+		VerdictBenign, MethodTuning)
 	return err
+}
+
+// Resolution verdicts and methods.
+const (
+	VerdictBenign    = "benign"
+	VerdictMalicious = "malicious"
+	MethodTuning     = "tuning"   // closed because a saved tuning rule no longer raises it
+	MethodOperator   = "operator" // closed by an administrator naming it
+)
+
+// Resolution is why and how a finding was closed. Verdict is "" when the
+// operator gave none: the finding is closed, but nothing is confirmed.
+type Resolution struct {
+	Reason  string
+	By      string
+	Verdict string
+	Method  string
 }
 
 // MaxReplayAlerts bounds how many findings one replay or bulk resolution reads.
@@ -67,16 +100,21 @@ const resolveChunk = 500
 // transaction. Only findings of tenantID are touched when it is set. It
 // returns how many findings were open and are now resolved; on an error the
 // chunks before it stay resolved and are counted.
-func (s *Store) ResolveAnomalies(tenantID string, ids []string, reason, by string) (int, error) {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
+func (s *Store) ResolveAnomalies(tenantID string, ids []string, res Resolution) (int, error) {
+	res.Reason = strings.TrimSpace(res.Reason)
+	if res.Reason == "" {
 		return 0, errors.New("a resolution needs a reason")
+	}
+	switch res.Verdict {
+	case "", VerdictBenign, VerdictMalicious:
+	default:
+		return 0, fmt.Errorf("verdict %q is not benign or malicious", res.Verdict)
 	}
 	total := 0
 	for len(ids) > 0 {
 		chunk := ids[:min(resolveChunk, len(ids))]
 		ids = ids[len(chunk):]
-		n, err := s.resolveAnomalyChunk(tenantID, chunk, reason, by)
+		n, err := s.resolveAnomalyChunk(tenantID, chunk, res)
 		total += n
 		if err != nil {
 			return total, err
@@ -85,7 +123,7 @@ func (s *Store) ResolveAnomalies(tenantID string, ids []string, reason, by strin
 	return total, nil
 }
 
-func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, reason, by string) (int, error) {
+func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, res Resolution) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -106,11 +144,26 @@ func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, reason, by st
 			return 0, err
 		}
 		if c, _ := r.RowsAffected(); c == 0 {
-			continue
+			// A finding acknowledged earlier can still be given an operator's
+			// verdict: one acked unread and later found malicious must be
+			// labelled malicious. Tuning never overwrites a closed finding.
+			if res.Verdict == "" || res.Method != MethodOperator {
+				continue
+			}
+			q, args := "SELECT 1 FROM anomaly_alerts WHERE id = ? AND acknowledged = 1", []any{id}
+			if tenantID != "" {
+				q += " AND tenant_id = ?"
+				args = append(args, tenantID)
+			}
+			var one int
+			if err := tx.QueryRow(q, args...).Scan(&one); err != nil {
+				continue
+			}
 		}
-		if _, err := tx.Exec(`INSERT INTO anomaly_resolutions (anomaly_id, reason, resolved_by, resolved_at) VALUES (?, ?, ?, ?)
-			ON CONFLICT(anomaly_id) DO UPDATE SET reason = excluded.reason, resolved_by = excluded.resolved_by, resolved_at = excluded.resolved_at`,
-			id, reason, by, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO anomaly_resolutions (anomaly_id, reason, resolved_by, resolved_at, verdict, method) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(anomaly_id) DO UPDATE SET reason = excluded.reason, resolved_by = excluded.resolved_by, resolved_at = excluded.resolved_at,
+			verdict = excluded.verdict, method = excluded.method`,
+			id, res.Reason, res.By, now, res.Verdict, res.Method); err != nil {
 			return 0, err
 		}
 		n++

@@ -273,6 +273,35 @@ the last 24 hours, agent egress findings at their worst severity, server agents 
 quiet for over 7 days, router collector freshness, and router certificate expiry.
 Device names appear only in structured fields, never in messages.
 
+`?contract=v2` serves `nightshift.findings/v2`: the same findings plus
+`anomaly_records`, one per device, kind and ISO week (`baseline_window_id`,
+e.g. `2026-W42`) over the current week and the four before it, newest first,
+cut at 500 records or 160 KiB, less when the v1 part is large, so the
+document stays under 224 KiB (`anomaly_records_truncated`). A record is
+`{device_id, kind, count, first_seen, last_seen, baseline_window_id, outcome,
+verified, outcome_source}`: `device_id` is an HMAC of the endpoint id under a
+hub secret created once (setting `nightshift_device_salt`; a malformed value
+fails the request rather than being replaced), `kind` a fixed enum (`other`
+for a type it does not list), times epoch milliseconds, and no hostname,
+domain or text.
+
+Outcomes come only from structured state. Resolving findings through
+`POST /api/v1/anomalies/resolve` takes `verdict` (`benign`, `malicious`, or
+omitted), also on a finding already acknowledged; the tuning-covered path records `benign` by method `tuning`. A plain
+acknowledgement (single, batch, acknowledge-all, quiet pair) records no
+verdict and verifies nothing. Per window: a `malicious` verdict is
+`incident`/`verdict`; an `ISOLATE_HOST` or `AUTO_ISOLATE_HOST` audit (bulk
+isolation writes one per endpoint after it succeeds; the guard's `_FORCED` and
+`_UNVERIFIED` entries do not count) is `incident`/`isolation`; every finding
+closed by tuning is `benign`/`auto_resolved`; every finding closed by tuning
+or a `benign` verdict is `benign`/`acknowledged`; a kind that is not
+inherently hostile (not beaconing, threat intel, lateral sweep, DNS bypass,
+upload volume or `other`) seen in three earlier windows with no incident, at
+least one of them verified, is `benign`/`recurrence`. A device's benign labels
+before its latest incident are withdrawn, and a capped read marks every record
+unverified. Everything else is `unverified`, which the learner must not train
+on. The default document stays v1.
+
 See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins,
 saved views and the limits of observed domain/process evidence.
 

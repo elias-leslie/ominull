@@ -128,8 +128,11 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 		IDs     []string `json:"ids"`
 		Covered bool     `json:"covered"`
 		Reason  string   `json:"reason"`
-		From    string   `json:"from"`
-		To      string   `json:"to"`
+		// Verdict is what the operator concluded: benign, malicious, or
+		// nothing. Only a verdict makes the outcome a training label.
+		Verdict string `json:"verdict"`
+		From    string `json:"from"`
+		To      string `json:"to"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -154,7 +157,13 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("at most %d findings per request", resolveMaxIDs))
 			return
 		}
-		n, err := s.store.ResolveAnomalies(tenant, req.IDs, reason, by)
+		switch req.Verdict {
+		case "", storage.VerdictBenign, storage.VerdictMalicious:
+		default:
+			writeJSONError(w, http.StatusBadRequest, "verdict is benign, malicious, or omitted")
+			return
+		}
+		n, err := s.store.ResolveAnomalies(tenant, req.IDs, storage.Resolution{Reason: reason, By: by, Verdict: req.Verdict, Method: storage.MethodOperator})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -197,7 +206,7 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 		}
 		sort.Strings(keys)
 		for _, why := range keys {
-			n, err := s.store.ResolveAnomalies(tenant, groups[why], why, by)
+			n, err := s.store.ResolveAnomalies(tenant, groups[why], storage.Resolution{Reason: why, By: by, Verdict: storage.VerdictBenign, Method: storage.MethodTuning})
 			byReason[why] = n
 			if err != nil {
 				s.audit(r, "ANOMALIES_RESOLVED", "anomalies", fmt.Sprintf("resolved %d findings before an error", n))
