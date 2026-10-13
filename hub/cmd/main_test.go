@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // A key file is the alternative to putting the admin credential in the command
@@ -65,5 +66,15 @@ func TestOnlyTheFirstLineIsTheKey(t *testing.T) {
 	}
 	if key != "first-line-key" {
 		t.Fatalf("got %q, want only the first line", key)
+	}
+}
+
+func TestRetentionPolicyKeepsDefaultsForTablesWithoutAFlag(t *testing.T) {
+	p := retentionPolicy(14, 14, 30, 365)
+	if p.RouterFlows <= 0 || p.DNSResolutions <= 0 || p.RouterDaily <= 0 {
+		t.Fatalf("tables without a flag are left unpruned: router flows %v, DNS resolutions %v, router daily %v", p.RouterFlows, p.DNSResolutions, p.RouterDaily)
+	}
+	if p.Events != 14*24*time.Hour || p.AuditLogs != 365*24*time.Hour {
+		t.Fatalf("flag values not applied: events %v audit %v", p.Events, p.AuditLogs)
 	}
 }

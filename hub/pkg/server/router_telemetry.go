@@ -45,6 +45,11 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 		Flows    []storage.RouterFlow    `json:"flows"`
 		DNS      []routerDNSLine         `json:"dns"`
 		Resolved []storage.DNSResolution `json:"resolutions"`
+		// Clients are per-client cumulative byte counters. GLClients is the
+		// raw output of GL.iNet's "ubus call gl-clients list", forwarded
+		// unparsed so the gateway needs no JSON tooling.
+		Clients   []storage.RouterClient `json:"clients"`
+		GLClients json.RawMessage        `json:"gl_clients"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, routerIngestLimit)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "unreadable telemetry: "+err.Error())
@@ -58,6 +63,12 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(routerID) > 64 {
 		routerID = routerID[:64]
+	}
+	// A gateway that authenticated with its own certificate may only report as
+	// itself.
+	if certified := r.Header.Get("X-Router-ID"); certified != "" && certified != routerID {
+		writeJSONError(w, http.StatusForbidden, "this certificate belongs to router "+certified)
+		return
 	}
 
 	now := time.Now().UTC()
@@ -91,12 +102,29 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 		out.ResolutionsAccepted, out.ResolutionsRejected = a, rj
 	}
+	clients := req.Clients
+	if len(req.GLClients) > 0 && string(req.GLClients) != "null" {
+		parsed, err := parseGLClients(req.GLClients)
+		if err != nil {
+			log.Printf("[!] router %s: gl-clients output unreadable: %v", routerID, err)
+			out.ClientsRejected++
+		}
+		clients = append(clients, parsed...)
+	}
+	if len(clients) > 0 {
+		a, rj, err := s.store.RecordRouterClients(routerID, clients, now)
+		if err != nil {
+			log.Printf("[!] router %s: client counter ingest failed: %v", routerID, err)
+		}
+		out.ClientsAccepted, out.ClientsRejected = a, out.ClientsRejected+rj
+	}
 
-	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d names %d/%d",
+	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d names %d/%d clients %d/%d",
 		out.LeasesAccepted, out.LeasesAccepted+out.LeasesRejected,
 		out.FlowsAccepted, out.FlowsAccepted+out.FlowsRejected,
 		out.DNSAccepted, out.DNSAccepted+out.DNSRejected,
-		out.ResolutionsAccepted, out.ResolutionsAccepted+out.ResolutionsRejected)
+		out.ResolutionsAccepted, out.ResolutionsAccepted+out.ResolutionsRejected,
+		out.ClientsAccepted, out.ClientsAccepted+out.ClientsRejected)
 	if err := s.store.TouchRouterSource(routerID, req.Label, summary, now); err != nil {
 		log.Printf("[!] router %s: could not record the source: %v", routerID, err)
 	}
@@ -120,6 +148,24 @@ type routerDNSLine struct {
 // reason - so the gateway's log is the only safe way to learn these names.
 func (s *Server) recordRouterDNS(routerID string, lines []routerDNSLine, now time.Time) (int, int) {
 	accepted, rejected := 0, 0
+	// Per-day, per-client domain counts for the long-lived aggregate.
+	type dayKey struct {
+		day            string
+		client, domain string
+	}
+	daily := map[dayKey]int{}
+	dayTimes := map[string]time.Time{}
+	defer func() {
+		byDay := map[string][]storage.DNSDomainCount{}
+		for k, n := range daily {
+			byDay[k.day] = append(byDay[k.day], storage.DNSDomainCount{ClientIP: k.client, Domain: k.domain, Queries: n})
+		}
+		for day, counts := range byDay {
+			if err := s.store.RecordDNSDomainCounts(routerID, dayTimes[day], counts); err != nil {
+				log.Printf("[!] router %s: DNS daily aggregate failed: %v", routerID, err)
+			}
+		}
+	}()
 	if len(lines) > storage.MaxRouterDNSPerPoll {
 		rejected += len(lines) - storage.MaxRouterDNSPerPoll
 		lines = lines[:storage.MaxRouterDNSPerPoll]
@@ -157,8 +203,57 @@ func (s *Server) recordRouterDNS(routerID string, lines []routerDNSLine, now tim
 			continue
 		}
 		accepted++
+		day := at.UTC().Format("2006-01-02")
+		dayTimes[day] = at
+		daily[dayKey{day, client, domain}]++
 	}
 	return accepted, rejected
+}
+
+// parseGLClients reads GL.iNet's gl-clients list: {"clients": {mac: {...}}}.
+func parseGLClients(raw json.RawMessage) ([]storage.RouterClient, error) {
+	var doc struct {
+		Clients map[string]storage.RouterClient `json:"clients"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	out := make([]storage.RouterClient, 0, len(doc.Clients))
+	for mac, c := range doc.Clients {
+		if c.MAC == "" {
+			c.MAC = mac
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// handleRouterClients returns per-device daily traffic from the gateway's
+// per-client counters.
+func (s *Server) handleRouterClients(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	days := 7
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+			days = n
+		}
+	}
+	limit := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil {
+			limit = n
+		}
+	}
+	since := time.Now().UTC().AddDate(0, 0, -(days - 1))
+	rows, err := s.store.ListRouterClientDays(since, r.URL.Query().Get("mac"), limit)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clients": rows, "days": days})
 }
 
 // handleRouterFlows returns stored flow rollups.

@@ -31,6 +31,14 @@ jobs:
           python3 scripts/test-release-headers.py
           python3 scripts/test-release-convergence.py
 
+      # The gateway runs busybox; the delivery test emulates it.
+      - name: Router collector regression tests
+        run: |
+          command -v busybox >/dev/null || sudo apt-get install -y --no-install-recommends busybox
+          python3 scripts/router/test-address-filter.py
+          python3 scripts/router/test-dhcp-fingerprint.py
+          python3 scripts/router/test-poll-delivery.py
+
   test-topology:
     name: Topology and console (${{ matrix.browser }})
     runs-on: ubuntu-latest

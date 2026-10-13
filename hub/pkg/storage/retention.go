@@ -28,6 +28,9 @@ type RetentionPolicy struct {
 	// A name-to-address binding goes stale quickly on a CDN, so the mapping is
 	// kept for less time than the flows it exists to explain.
 	DNSResolutions time.Duration
+	// RouterDaily covers the per-device daily traffic and DNS aggregates that
+	// baselines are built from, so it outlives the raw rows by months.
+	RouterDaily time.Duration
 }
 
 // DefaultRetention is what a hub uses unless an operator says otherwise.
@@ -39,6 +42,7 @@ func DefaultRetention() RetentionPolicy {
 		AuditLogs:      365 * 24 * time.Hour,
 		RouterFlows:    30 * 24 * time.Hour,
 		DNSResolutions: 14 * 24 * time.Hour,
+		RouterDaily:    RouterDailyRetention,
 	}
 }
 
@@ -111,6 +115,14 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 			return removed, fmt.Errorf("pruning dns_resolutions: %w", err)
 		}
 		removed["dns_resolutions"] = n
+	}
+
+	if policy.RouterDaily > 0 {
+		n, err := s.PruneRouterDaily(policy.RouterDaily)
+		if err != nil {
+			return removed, err
+		}
+		removed["router_daily"] = n
 	}
 
 	return removed, nil

@@ -3385,7 +3385,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/learning/proposals/apply", s.authMiddleware(s.handleApplyLearningProposals))
 
 	// Router telemetry: what the gateway can see that no agent can.
-	mux.HandleFunc("/api/v1/router/telemetry", s.authMiddleware(s.handleRouterTelemetry))
+	mux.HandleFunc("/api/v1/router/telemetry", s.routerAuth(s.handleRouterTelemetry))
+	mux.HandleFunc("/api/v1/router/identity", s.authMiddleware(s.handleRouterIdentity))
+	mux.HandleFunc("/api/v1/router/clients", s.authMiddleware(s.handleRouterClients))
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))
 

@@ -85,6 +85,7 @@ func TestRouterTelemetryReplyCarriesNoInstructions(t *testing.T) {
 		"flows_accepted": true, "flows_rejected": true,
 		"dns_accepted": true, "dns_rejected": true,
 		"resolutions_accepted": true, "resolutions_rejected": true,
+		"clients_accepted": true, "clients_rejected": true,
 		"assets_touched": true,
 	}
 	for k := range raw {

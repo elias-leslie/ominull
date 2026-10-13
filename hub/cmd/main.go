@@ -173,16 +173,12 @@ func main() {
 	// the store's lifetime, and it prunes once immediately: a hub that has been
 	// running without it has the whole backlog to clear, and the disk it is
 	// filling does not necessarily have another hour in it.
-	retention := storage.RetentionPolicy{
-		Events:        time.Duration(*retentionDays) * 24 * time.Hour,
-		CommProfiles:  time.Duration(*commRetentionDays) * 24 * time.Hour,
-		AnomalyAlerts: time.Duration(*alertRetentionDays) * 24 * time.Hour,
-		AuditLogs:     time.Duration(*auditRetentionDays) * 24 * time.Hour,
-	}
+	retention := retentionPolicy(*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays)
 	stopRetention := store.StartRetention(retention, time.Hour)
 	defer stopRetention()
-	log.Printf("[+] Retention: telemetry %dd, communication profiles %dd, alerts %dd, audit %dd (0 = keep everything)",
-		*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays)
+	log.Printf("[+] Retention: telemetry %dd, communication profiles %dd, alerts %dd, audit %dd, router flows %dd, DNS names %dd, router daily %dd (0 = keep everything)",
+		*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays,
+		int(retention.RouterFlows.Hours()/24), int(retention.DNSResolutions.Hours()/24), int(retention.RouterDaily.Hours()/24))
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{
@@ -292,6 +288,19 @@ func main() {
 
 	log.Println("\n[*] Shutting down Ominull Hub gracefully...")
 	srv.Close()
+}
+
+// retentionPolicy starts from the store's defaults and applies the flags that
+// override them. Building the policy from the flags alone left every table
+// without a flag - router flows, DNS resolutions, daily router aggregates - at
+// zero, which means "keep everything", so they were never pruned.
+func retentionPolicy(eventDays, commDays, alertDays, auditDays int) storage.RetentionPolicy {
+	p := storage.DefaultRetention()
+	p.Events = time.Duration(eventDays) * 24 * time.Hour
+	p.CommProfiles = time.Duration(commDays) * 24 * time.Hour
+	p.AnomalyAlerts = time.Duration(alertDays) * 24 * time.Hour
+	p.AuditLogs = time.Duration(auditDays) * 24 * time.Hour
+	return p
 }
 
 func findConfigArg(args []string) string {

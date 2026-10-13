@@ -115,6 +115,8 @@ type RouterIngestResult struct {
 	ResolutionsAccepted int `json:"resolutions_accepted"`
 	ResolutionsRejected int `json:"resolutions_rejected"`
 	AssetsTouched       int `json:"assets_touched"`
+	ClientsAccepted     int `json:"clients_accepted"`
+	ClientsRejected     int `json:"clients_rejected"`
 }
 
 func (s *Store) initRouterSchema() error {
