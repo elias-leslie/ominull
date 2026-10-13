@@ -190,7 +190,7 @@ func TestNightshiftFeedFollowsTheContract(t *testing.T) {
 		t.Fatalf("anomaly summary = %d %q", an.SeverityID, an.Message)
 	}
 	ag := doc.Findings[get("ominull.agents.offline")]
-	if ag.SeverityID != ocsfSevMedium || ag.Message != "1 server agent offline (longest 3 h); 1 workstation agent quiet over 7 days" {
+	if ag.SeverityID != ocsfSevMedium || ag.Message != "1 server agent offline (longest 3 h); 1 workstation agent quiet beyond its allowance" {
 		t.Fatalf("agents = %d %q", ag.SeverityID, ag.Message)
 	}
 	if len(ag.Resources) != 2 || ag.Resources[0].UID != "laptop-gone" || ag.Resources[1].UID != "srv-quiet" {

@@ -68,7 +68,10 @@ type Endpoint struct {
 	// API key. It is what tells an operator whether the fleet is ready for
 	// --client-certs required, which otherwise has to be discovered by turning
 	// it on and seeing who falls off.
-	CertCN             string    `json:"cert_cn"`
+	CertCN string `json:"cert_cn"`
+	// Presence is how often this host is expected to be reporting; see
+	// presence.go. It decides when a quiet agent is worth telling anyone about.
+	Presence           string    `json:"presence"`
 	IsIsolated         bool      `json:"is_isolated"`
 	EvidenceSigningKey string    `json:"evidence_signing_key"`
 	LastSeenAt         time.Time `json:"last_seen_at"`
@@ -184,12 +187,15 @@ type AnomalyAlert struct {
 	// already compromised when its baseline period opened is exactly the host
 	// whose findings must not quietly vanish. It stays out of the open count
 	// and off the default list, and it is one filter away.
-	HeldReason   string    `json:"held_reason,omitempty"`
-	ProcessPath  string    `json:"process_path"`
-	DstIP        string    `json:"dst_ip"`
-	DstPort      uint16    `json:"dst_port"`
-	Timestamp    time.Time `json:"timestamp"`
-	Acknowledged bool      `json:"acknowledged"`
+	HeldReason string `json:"held_reason,omitempty"`
+	// Resolution is why the finding was closed and what the operator
+	// concluded, when it has been resolved. Filled by the alert list only.
+	Resolution   *ResolutionRecord `json:"resolution,omitempty"`
+	ProcessPath  string            `json:"process_path"`
+	DstIP        string            `json:"dst_ip"`
+	DstPort      uint16            `json:"dst_port"`
+	Timestamp    time.Time         `json:"timestamp"`
+	Acknowledged bool              `json:"acknowledged"`
 }
 
 type IOC struct {
@@ -683,6 +689,7 @@ func (s *Store) initSchema() error {
 		// stored here because the agent now reads its isolation state from its
 		// own heartbeat reply.
 		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN presence TEXT DEFAULT 'always_on'",
 		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
@@ -1516,12 +1523,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1537,7 +1544,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence,
 		); err != nil {
 			return nil, err
 		}
@@ -1554,13 +1561,13 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]') FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on') FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -3942,6 +3942,13 @@ input[type="url"] {
   gap: var(--s-2);
 }
 
+.verdict-panel {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-2);
+}
+
+.verdict-panel .field { max-width: 48rem; }
+
 .alert-exp-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

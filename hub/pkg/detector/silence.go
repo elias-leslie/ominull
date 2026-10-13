@@ -84,9 +84,15 @@ func (e *Engine) SweepSilence(now time.Time) {
 		return
 	}
 
-	threshold := time.Duration(cfg.SilenceAfterMinutes) * time.Minute
+	alwaysOn := time.Duration(cfg.SilenceAfterMinutes) * time.Minute
 	for _, endpoint := range endpoints {
 		if !watchableEndpoint(endpoint) {
+			continue
+		}
+		// A lab guest is off between experiments and an intermittent laptop
+		// is shut most evenings: their absences are not findings, or not yet.
+		threshold, watched := endpoint.QuietAllowance(alwaysOn)
+		if !watched {
 			continue
 		}
 		quiet := now.Sub(endpoint.LastSeenAt)
@@ -212,7 +218,7 @@ func endpointName(endpoint storage.Endpoint) string {
 }
 
 func silenceEvidence(endpoint storage.Endpoint, quiet, threshold time.Duration) string {
-	return fmt.Sprintf(`{"last_seen_at":%q,"silent_seconds":%d,"threshold_seconds":%d,"os":%q,"role_tag":%q,"is_isolated":%t}`,
+	return fmt.Sprintf(`{"last_seen_at":%q,"silent_seconds":%d,"threshold_seconds":%d,"os":%q,"role_tag":%q,"presence":%q,"is_isolated":%t}`,
 		endpoint.LastSeenAt.UTC().Format(time.RFC3339), int64(quiet.Seconds()), int64(threshold.Seconds()),
-		endpoint.OS, endpoint.RoleTag, endpoint.IsIsolated)
+		endpoint.OS, endpoint.RoleTag, endpoint.Presence, endpoint.IsIsolated)
 }

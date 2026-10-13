@@ -178,3 +178,47 @@ func (s *Store) AnomalyResolution(id string) (reason, by string, at time.Time, o
 	err := s.db.QueryRow(`SELECT reason, resolved_by, resolved_at FROM anomaly_resolutions WHERE anomaly_id = ?`, id).Scan(&reason, &by, &at)
 	return reason, by, at, err == nil
 }
+
+// ResolutionRecord is a recorded resolution as the console shows it.
+type ResolutionRecord struct {
+	Reason     string    `json:"reason"`
+	By         string    `json:"by"`
+	Verdict    string    `json:"verdict"`
+	Method     string    `json:"method"`
+	ResolvedAt time.Time `json:"resolved_at"`
+}
+
+// AttachResolutions fills Resolution on each finding that has one, in one
+// read: a page of alerts is at most a few hundred ids.
+func (s *Store) AttachResolutions(alerts []AnomalyAlert) error {
+	if len(alerts) == 0 {
+		return nil
+	}
+	ids := make([]any, len(alerts))
+	for i, a := range alerts {
+		ids[i] = a.ID
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT anomaly_id, reason, resolved_by, verdict, method, resolved_at FROM anomaly_resolutions WHERE anomaly_id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := map[string]*ResolutionRecord{}
+	for rows.Next() {
+		var id string
+		var r ResolutionRecord
+		if err := rows.Scan(&id, &r.Reason, &r.By, &r.Verdict, &r.Method, &r.ResolvedAt); err != nil {
+			return err
+		}
+		byID[id] = &r
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range alerts {
+		alerts[i].Resolution = byID[alerts[i].ID]
+	}
+	return nil
+}

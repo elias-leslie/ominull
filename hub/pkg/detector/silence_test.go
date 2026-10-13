@@ -151,3 +151,33 @@ func TestSilenceCanBeSwitchedOff(t *testing.T) {
 		t.Fatalf("the detector fired while switched off: %d findings", len(got))
 	}
 }
+
+// A laptop that is in use but often shut, and a test guest that is off between
+// experiments, go quiet as a matter of course. Reporting each absence buried
+// the server outages this finding exists for.
+func TestPresenceDecidesWhenQuietIsAFinding(t *testing.T) {
+	engine, store := silentEngine(t)
+	now := time.Now().UTC()
+	addEndpoint(t, store, "laptop-recent", now.Add(-10*24*time.Hour))
+	addEndpoint(t, store, "laptop-lost", now.Add(-31*24*time.Hour))
+	addEndpoint(t, store, "lab-guest", now.Add(-90*24*time.Hour))
+	addEndpoint(t, store, "server-down", now.Add(-40*time.Minute))
+	for id, p := range map[string]string{"laptop-recent": storage.PresenceIntermittent, "laptop-lost": storage.PresenceIntermittent, "lab-guest": storage.PresenceLab} {
+		if err := store.SetEndpointPresence(id, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A heartbeat rewrites the endpoint row; it must not reset what the
+	// operator said about the host.
+	addEndpoint(t, store, "laptop-recent", now.Add(-10*24*time.Hour))
+
+	engine.SweepSilence(now)
+
+	got := map[string]bool{}
+	for _, a := range anomaliesOfType(t, store, "ENDPOINT_SILENT") {
+		got[a.EndpointID] = true
+	}
+	if len(got) != 2 || !got["server-down"] || !got["laptop-lost"] {
+		t.Fatalf("silence findings = %v, want the always-on server and the laptop quiet past 30 days", got)
+	}
+}

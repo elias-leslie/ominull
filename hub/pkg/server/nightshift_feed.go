@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/pki"
+	"ominull/hub/pkg/storage"
 )
 
 // Nightshift findings feed.
@@ -244,27 +245,38 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 	var servers, laptops []feedResource
 	var longest time.Duration
 	quiet := map[string]string{}
+	presence := map[string]string{}
 	active := 0
 	for _, ep := range list {
 		if ep.Status == "retired" {
 			continue
 		}
 		active++
+		if ep.Presence != "" && ep.Presence != storage.PresenceAlwaysOn {
+			presence[ep.ID] = ep.Presence
+		}
 		age := now.Sub(ep.LastSeenAt)
 		res := feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID}
+		server := ep.RoleTag == "server"
+		base := feedWorkstationQuiet
+		if server {
+			base = feedServerQuiet
+		}
+		allowance, watched := ep.QuietAllowance(base)
 		switch {
-		case ep.RoleTag == "server" && age >= feedServerQuiet:
+		case !watched || age < allowance:
+			continue
+		case server:
 			servers = append(servers, res)
 			longest = max(longest, age)
-		case ep.RoleTag != "server" && age >= feedWorkstationQuiet:
-			laptops = append(laptops, res)
 		default:
-			continue
+			laptops = append(laptops, res)
 		}
 		quiet[ep.ID] = ep.LastSeenAt.UTC().Format(time.RFC3339)
 	}
-	unmapped := map[string]any{"active_agents": active, "last_seen": quiet,
-		"server_quiet_minutes": int(feedServerQuiet.Minutes()), "workstation_quiet_days": int(feedWorkstationQuiet.Hours() / 24)}
+	unmapped := map[string]any{"active_agents": active, "last_seen": quiet, "presence": presence,
+		"server_quiet_minutes": int(feedServerQuiet.Minutes()), "workstation_quiet_days": int(feedWorkstationQuiet.Hours() / 24),
+		"intermittent_quiet_days": int(storage.IntermittentQuiet.Hours() / 24)}
 	const uid, title = "ominull.agents.offline", "Quiet agents"
 	resources := append(servers, laptops...)
 	sort.Slice(resources, func(i, j int) bool { return resources[i].UID < resources[j].UID })
@@ -272,16 +284,29 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 	case len(servers) > 0:
 		msg := fmt.Sprintf("%s offline (longest %s)", plural(len(servers), "server agent", "server agents"), humanAge(longest))
 		if len(laptops) > 0 {
-			msg += fmt.Sprintf("; %s quiet over 7 days", plural(len(laptops), "workstation agent", "workstation agents"))
+			msg += fmt.Sprintf("; %s", plural(len(laptops), "workstation agent quiet beyond its allowance", "workstation agents quiet beyond their allowance"))
 		}
 		return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg, resources, unmapped), nil
 	case len(laptops) > 0:
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew,
-			fmt.Sprintf("%s quiet over 7 days; every server agent is reporting", plural(len(laptops), "workstation agent", "workstation agents")),
+			fmt.Sprintf("%s; every server agent is reporting", plural(len(laptops), "workstation agent quiet beyond its allowance", "workstation agents quiet beyond their allowance")),
 			resources, unmapped), nil
 	}
-	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-		fmt.Sprintf("All %s reporting", plural(active, "agent is", "agents are")), nil, unmapped), nil
+	msg := fmt.Sprintf("All %s reporting", plural(active, "agent is", "agents are"))
+	if lab := countPresence(presence, storage.PresenceLab); lab > 0 {
+		msg = fmt.Sprintf("Every watched agent is reporting; %s", plural(lab, "lab endpoint is not watched", "lab endpoints are not watched"))
+	}
+	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg, nil, unmapped), nil
+}
+
+func countPresence(presence map[string]string, want string) int {
+	n := 0
+	for _, p := range presence {
+		if p == want {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Server) routerFindings(now time.Time) ([]feedFinding, error) {

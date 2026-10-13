@@ -2856,6 +2856,11 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The verdict an operator gave is shown with the finding, so a closed
+	// alert says whether it was confirmed benign, confirmed real, or neither.
+	if err := s.store.AttachResolutions(anomalies); err != nil {
+		log.Printf("[!] The alert resolutions could not be read: %v", err)
+	}
 
 	if assetID != "" {
 		_, unack, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldExclude, "")
@@ -3443,6 +3448,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/operators/remove", s.authMiddleware(requireAdmin(s.handleOperatorRemove)))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
+	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.handleAgentsUpdate))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))

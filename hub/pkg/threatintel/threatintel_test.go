@@ -2,7 +2,11 @@ package threatintel
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +23,25 @@ func TestThreatIntelManager(t *testing.T) {
 	}
 
 	mgr := New(store)
+	// The feeds are served from a fixture, never fetched: one answers with a
+	// list to parse, the other is unreachable and must fall back to the
+	// built-in baseline. The test used to wait out a live five-second timeout.
+	mgr.httpClient = &http.Client{Transport: feedFixture{
+		"feodotracker.abuse.ch": "# Feodo fixture\n203.0.113.7\n\n203.0.113.8 # trailing note\n",
+	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := mgr.SyncAllFeeds(ctx); err != nil {
 		t.Fatalf("SyncAllFeeds failed: %v", err)
+	}
+	for _, ip := range []string{"203.0.113.7", "203.0.113.8"} {
+		if ioc, found := mgr.CheckThreat(ip); !found || ioc.Source != "feodo" {
+			t.Fatalf("fixture indicator %s = %+v %v, want a feodo match", ip, ioc, found)
+		}
+	}
+	if _, found := mgr.CheckThreat(mgr.getBuiltinEmergingThreatsBaseline()[0].Value); !found {
+		t.Fatal("an unreachable feed did not fall back to its built-in baseline")
 	}
 
 	// Verify indicators loaded into fast lookup cache
@@ -70,4 +88,15 @@ func TestThreatIntelManager(t *testing.T) {
 	if geoLocal.Country != "LOCAL" || geoLocal.ASN != "AS-PRIVATE" {
 		t.Errorf("unexpected GeoIP for private IP: %+v", geoLocal)
 	}
+}
+
+// feedFixture answers feed requests by host; any other host is unreachable.
+type feedFixture map[string]string
+
+func (f feedFixture) RoundTrip(r *http.Request) (*http.Response, error) {
+	body, ok := f[r.URL.Host]
+	if !ok {
+		return nil, errors.New("fixture: feed unreachable")
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}, Request: r}, nil
 }

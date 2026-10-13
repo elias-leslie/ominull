@@ -197,7 +197,8 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
-| `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises |
+| `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason |
+| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `lab` (never alerted when quiet); reason required unless `always_on`; audited |
 | `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint |
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
@@ -270,7 +271,9 @@ The Nightshift feed key opens only the findings route and is read-only. The
 document is Nightshift's contract (an OCSF Detection Finding subset, defined in
 Nightshift's `docs/ingest.md`). It carries counts and states: open anomalies in
 the last 24 hours, agent egress findings at their worst severity, server agents quiet for 30 minutes or more, workstation agents
-quiet for over 7 days, router collector freshness, and router certificate expiry.
+quiet for over 7 days, router collector freshness, and router certificate expiry. An endpoint's presence
+(`/api/v1/endpoints/presence`) changes its allowance: intermittent hosts are reported after 30 days quiet,
+lab hosts never; the hub's own `ENDPOINT_SILENT` finding follows the same presence.
 Device names appear only in structured fields, never in messages.
 
 `?contract=v2` serves `nightshift.findings/v2`: the same findings plus

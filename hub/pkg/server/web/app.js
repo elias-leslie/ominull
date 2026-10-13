@@ -1181,6 +1181,15 @@
     }
     if (base === "/api/v1/learning/windows/close") { return { id: body && body.id, status: "completed" }; }
     if (base === "/api/v1/learning/proposals/apply") { return { applied: arrayOf(body && body.ids), skipped: {} }; }
+    if (base === "/api/v1/anomalies/resolve") {
+      DEMO_CACHE["/api/v1/anomalies"].forEach(function (a) {
+        if (arrayOf(body && body.ids).indexOf(a.id) >= 0) {
+          a.acknowledged = true;
+          a.resolution = { verdict: body.verdict || "", reason: body.reason || "", by: "demo", method: "operator", resolved_at: new Date().toISOString() };
+        }
+      });
+      return { resolved: arrayOf(body && body.ids).length };
+    }
     if (base === "/api/v1/anomalies/acknowledge") {
       DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
       return { status: "acknowledged" };
@@ -3764,7 +3773,7 @@
          refuses the pair if the process is unattributed or the destination is
          rented compute, and says why. */
       var ackAction = READ_ONLY ? h("span", {text:"Read-only"}) : a.acknowledged
-        ? h("span", { cls: "dim-3", text: "Acknowledged" })
+        ? h("span", { cls: "dim-3", text: verdictLabel(a) })
         : h("span", { cls: "row-actions" },
           h("button", {
             cls: "btn mini", type: "button", text: "Acknowledge",
@@ -3831,6 +3840,7 @@
             h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Target Destination" }), h("div", { cls: "alert-exp-val", text: (a.dst_ip || "—") + ":" + (a.dst_port || 0) })),
             h("div", { cls: "alert-exp-box" }, h("div", { cls: "alert-exp-label", text: "Diagnostic Details" }), h("div", { cls: "alert-exp-val", text: a.details || "None" }))),
           evidencePanel(a),
+          verdictPanel(a),
           h("div", { cls: "actions pad-y" },
             h("button", {
               cls: "btn mini btn-crit", type: "button", text: "Isolate Endpoint (" + (a.hostname || a.endpoint_id) + ")",
@@ -3848,7 +3858,7 @@
               on: { click: function (e) { e.stopPropagation(); copyText(a.id); toast("Copied alert ID", "ok"); } }
             })));
 
-        expBox.prepend(h("p", {cls:"why", text:"Acknowledge marks this finding as read. Expected changes detection tuning for this program and counterparty."}));
+        expBox.prepend(h("p", {cls:"why", text:"Acknowledge marks this finding as read. Expected changes detection tuning for this program and counterparty. A verdict records what the finding was."}));
         selectedAlertDetail = h("aside", {cls:"alert-detail", "aria-label":"Selected alert evidence"}, expBox);
       }
     });
@@ -10075,6 +10085,79 @@
      A beacon verdict used to arrive as one sentence of prose, so "score 0.82"
      and "threshold 0.70" were something an operator had to read out of a
      paragraph and compare in their head. The hub has always computed both. */
+  /* The owner's verdict on a finding. Acknowledge says somebody read it;
+     a verdict says what it was, and it is the only answer the hub keeps as a
+     training label (anomaly_resolutions.verdict, method "operator"). Both
+     buttons close the alert through the same resolve path the triage agents
+     use; neither contains the host. A verdict can be given or changed on an
+     acknowledged alert too, so one read in a hurry can still be labelled. */
+  function verdictLabel(a) {
+    var r = a.resolution;
+    if (!r || !r.verdict) return r ? "Resolved" : "Acknowledged";
+    return r.verdict === "malicious" ? "Confirmed real" : "Confirmed benign";
+  }
+
+  function verdictPanel(a) {
+    var r = a.resolution;
+    var current;
+    if (r && r.verdict) {
+      current = (r.verdict === "malicious" ? "Confirmed real" : "Confirmed benign") +
+        (r.method === "tuning" ? " by a tuning rule" : (r.by ? " by " + r.by : "")) +
+        (r.resolved_at ? ", " + stampText(parseTime(r.resolved_at)) : "") + ": " + r.reason;
+    } else if (r) {
+      current = "Resolved without a verdict: " + r.reason;
+    } else {
+      current = a.acknowledged ? "Acknowledged without a verdict." : "No verdict yet.";
+    }
+    var status = h("p", { cls: "why", text: current });
+    if (READ_ONLY || !IS_ADMIN) return h("section", { cls: "verdict-panel stack", "aria-label": "Verdict" }, h("b", { text: "Verdict" }), status);
+
+    state.verdictDrafts = state.verdictDrafts || {};
+    var reasonId = "verdict-reason-" + a.id;
+    var reason = h("input", {
+      id: reasonId, type: "text", maxlength: "500", autocomplete: "off",
+      placeholder: "What you checked and what it turned out to be",
+      on: {
+        click: function (e) { e.stopPropagation(); },
+        input: function (e) { state.verdictDrafts[a.id] = e.target.value; }
+      }
+    });
+    reason.value = state.verdictDrafts[a.id] || "";
+
+    function give(verdict, label) {
+      return h("button", {
+        cls: "btn mini" + (verdict === "malicious" ? " btn-crit" : ""), type: "button", text: label,
+        on: {
+          click: function (e) {
+            e.stopPropagation();
+            var why = (state.verdictDrafts[a.id] || "").trim();
+            if (!why) {
+              toast("Say what you checked before giving a verdict", "warn");
+              reason.focus();
+              return;
+            }
+            request("/api/v1/anomalies/resolve", "POST", { ids: [a.id], verdict: verdict, reason: why })
+              .then(function () {
+                delete state.verdictDrafts[a.id];
+                /* The console holds re-renders while a field has focus. */
+                if (document.activeElement === reason) reason.blur();
+                toast(label + ": alert closed", "ok");
+                refresh();
+              })
+              .catch(function (err) { toast("Verdict not saved: " + err.message, "crit"); });
+          }
+        }
+      });
+    }
+
+    return h("section", { cls: "verdict-panel stack", "aria-label": "Verdict" },
+      h("b", { text: "Verdict" }),
+      status,
+      h("label", { cls: "field", "for": reasonId }, h("span", { text: "Reason" }), reason),
+      h("div", { cls: "actions" }, give("benign", "Confirm benign"), give("malicious", "Confirm real")),
+      h("p", { cls: "dim-3", text: "Either verdict closes the alert and is kept as a label for tuning. Neither isolates the host." }));
+  }
+
   function evidencePanel(a) {
     if (!a.evidence) return null;
     var ev;
