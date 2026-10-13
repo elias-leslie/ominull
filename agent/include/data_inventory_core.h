@@ -390,7 +390,7 @@ static inline uint64_t DataInv_ContentRules(const unsigned char* buf, size_t len
         case '-':
             if (DataInv_MemEq(p, end, "-----BEGIN ")) {
                 const unsigned char* q = p + 11;
-                const unsigned char* stop = q + 40 < end ? q + 40 : end;
+                const unsigned char* stop = end - q > 40 ? q + 40 : end;
                 const unsigned char* hit = NULL;
                 for (const unsigned char* s = q; s + 16 <= stop; s++) {
                     if (memcmp(s, "PRIVATE KEY-----", 16) == 0) { hit = s; break; }
@@ -398,7 +398,7 @@ static inline uint64_t DataInv_ContentRules(const unsigned char* buf, size_t len
                 if (hit) {
                     bool enc = (hit - q >= 10 && memcmp(q, "ENCRYPTED ", 10) == 0);
                     const unsigned char* body = hit + 16;
-                    const unsigned char* look = body + 400 < end ? body + 400 : end;
+                    const unsigned char* look = end - body > 400 ? body + 400 : end;
                     for (const unsigned char* s = body; !enc && s + 9 <= look; s++) {
                         if (memcmp(s, "ENCRYPTED", 9) == 0) enc = true;
                     }
@@ -487,7 +487,7 @@ static inline uint64_t DataInv_ContentRules(const unsigned char* buf, size_t len
         case ':':
             if (DataInv_MemEq(p, end, "://")) {
                 if (DataInv_UrlCredentialsAt(p, end)) r |= DI_BIT(DI_R_URL_CREDENTIALS);
-            } else if (p > buf && p - buf >= 8 && p[1] == 'A' && p + 2 < end && p[2] == 'A') {
+            } else if (p - buf >= 8 && end - p > 2 && p[1] == 'A' && p[2] == 'A') {
                 /* Telegram bot token: 8-10 digits ':' AA + 33 */
                 const unsigned char* d = p;
                 size_t digits = 0;
@@ -576,6 +576,54 @@ static inline void DataInv_PutJSONString(DataInvBuf* b, const char* s) {
                 p++;
             }
         }
+    }
+    DataInv_Put(b, "\"", 1);
+}
+
+/* JSON string of a file path, in the contract's path encoding: '%', C0
+ * controls, DEL, C1 controls (U+0080..U+009F) and bytes that are not valid
+ * UTF-8 are written as %XX of each byte, so every real name gives a printable,
+ * valid string the hub and Nightshift accept, and distinct names stay distinct.
+ * Canary paths are compared in this form (hub dataPathEncode, Nightshift
+ * ingest.encode_data_path). */
+static inline void DataInv_PutJSONPath(DataInvBuf* b, const char* s) {
+    static const char hex[] = "0123456789ABCDEF";
+    DataInv_Put(b, "\"", 1);
+    const unsigned char* p = (const unsigned char*)s;
+    while (*p && b->ok) {
+        unsigned char c = *p;
+        size_t n = 1;
+        bool escape;
+        if (c == '%' || c < 0x20 || c == 0x7f) {
+            escape = true;
+        } else if (c < 0x80) {
+            escape = false;
+        } else {
+            n = 0;
+            if (c >= 0xC2 && c <= 0xDF) n = 2;
+            else if (c >= 0xE0 && c <= 0xEF) n = 3;
+            else if (c >= 0xF0 && c <= 0xF4) n = 4;
+            bool valid = n > 0;
+            for (size_t i = 1; valid && i < n; i++) {
+                if ((p[i] & 0xC0) != 0x80) valid = false;
+            }
+            if (valid && n == 3 && ((c == 0xE0 && p[1] < 0xA0) || (c == 0xED && p[1] >= 0xA0))) valid = false;
+            if (valid && n == 4 && ((c == 0xF0 && p[1] < 0x90) || (c == 0xF4 && p[1] >= 0x90))) valid = false;
+            if (!valid) n = 1;
+            escape = !valid || (n == 2 && c == 0xC2 && p[1] <= 0x9F);
+        }
+        for (size_t i = 0; i < n; i++) {
+            if (escape) {
+                char e[3] = {'%', hex[p[i] >> 4], hex[p[i] & 15]};
+                DataInv_Put(b, e, 3);
+            } else if (p[i] == '"' || p[i] == '\\') {
+                char e[2] = {'\\', (char)p[i]};
+                DataInv_Put(b, e, 2);
+            } else {
+                DataInv_Put(b, (const char*)&p[i], 1);
+            }
+        }
+        p += n;
     }
     DataInv_Put(b, "\"", 1);
 }

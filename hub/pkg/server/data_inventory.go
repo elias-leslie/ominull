@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ominull/hub/pkg/storage"
 )
@@ -43,6 +44,7 @@ const (
 	dataPathMax           = 1023
 	dataMaxStoresAccepted = 20000
 	dataMaxItemsAccepted  = 5000
+	dataClockSlack        = 5 * time.Minute
 )
 
 // dataPolicyDefaults are the hub's built-in values; every layer overrides
@@ -115,21 +117,30 @@ func mergeDataPolicy(base storage.DataPolicy, layer storage.DataPolicy) storage.
 	return base
 }
 
-// dataPathOK mirrors the agent's DataInv_AbsPathOK: absolute, normalised, no
-// control bytes, short enough.
+// dataPathOK is the contract's path rule, shared with Nightshift
+// (ingest.data_path_ok): absolute, normalised, valid UTF-8, no C0, DEL or C1
+// control, short enough. The agent percent-encodes anything else
+// (DataInv_PutJSONPath), so every real file name passes.
 func dataPathOK(p string) bool {
-	if p == "" || len(p) > dataPathMax || p[0] != '/' {
+	if p == "" || len(p) > dataPathMax || p[0] != '/' || !utf8.ValidString(p) {
 		return false
 	}
 	if p != "/" && strings.HasSuffix(p, "/") {
 		return false
 	}
-	for i := 0; i < len(p); i++ {
-		if p[i] < 0x20 || p[i] == 0x7f {
+	for _, r := range p {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return false
 		}
 	}
 	return path.Clean(p) == p
+}
+
+// dataPathEncode is a real path in the agent's reported spelling, for
+// comparing canary paths with reported ones. Canary paths pass dataPathOK, so
+// only '%' changes.
+func dataPathEncode(p string) string {
+	return strings.ReplaceAll(p, "%", "%25")
 }
 
 func rangeErr(name string, v, lo, hi int64) error {
@@ -254,14 +265,28 @@ func renderDataPolicy(p storage.DataPolicy, canaries []string, reason string) st
 	return fmt.Sprintf("%s\nversion %d\n%send\n", dataPolicyHeader, version, body)
 }
 
-// callerEndpoint is the endpoint a device request speaks for: the enrolled
-// identity when a device credential was used, else the body's claim (legacy
-// tenant key, migration mode only).
-func callerEndpoint(r *http.Request, claimed string) (string, bool) {
-	if id := r.Header.Get("X-Device-Endpoint-ID"); id != "" {
-		return id, claimed == "" || claimed == id
+// callerEndpoint is the endpoint a device request speaks for, and answers the
+// request itself when the caller may not speak for it. Only an endpoint's own
+// device credential (with its certificate, when one is presented) qualifies;
+// the legacy tenant key only in migration mode and only inside its tenant. No
+// other role: the policy carries canary paths, and an inventory run can replace
+// the endpoint's stored picture. Operators use the admin routes.
+func (s *Server) callerEndpoint(w http.ResponseWriter, r *http.Request, claimed string) (string, bool) {
+	id := strings.TrimSpace(r.Header.Get("X-Device-Endpoint-ID"))
+	if id == "" {
+		if r.Header.Get("X-Role") != "tenant" || !s.legacyAgentAuthEnabled() {
+			writeJSONError(w, http.StatusForbidden, "only the endpoint's own device credential may use this route")
+			return "", false
+		}
+		id = strings.TrimSpace(claimed)
+	} else if claimed != "" && claimed != id {
+		writeJSONError(w, http.StatusForbidden, "a device may only speak for itself")
+		return "", false
 	}
-	return claimed, claimed != ""
+	if !s.endpointInScope(w, r, id) || !s.endpointIdentityOK(w, r, id) {
+		return "", false
+	}
+	return id, true
 }
 
 // handleDataPolicy serves an agent its scan policy.
@@ -277,9 +302,8 @@ func (s *Server) handleDataPolicy(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unreadable policy request")
 		return
 	}
-	id, ok := callerEndpoint(r, req.EndpointID)
+	id, ok := s.callerEndpoint(w, r, req.EndpointID)
 	if !ok {
-		writeJSONError(w, http.StatusForbidden, "a device may only ask for its own policy")
 		return
 	}
 	ep, err := s.store.GetEndpoint(id)
@@ -329,11 +353,12 @@ type dataInvRun struct {
 }
 
 type dataInvStore struct {
-	Path    string `json:"path"`
-	Root    string `json:"root"`
-	Partial bool   `json:"partial"`
-	Files   int64  `json:"files"`
-	Bytes   int64  `json:"bytes"`
+	Path           string `json:"path"`
+	Root           string `json:"root"`
+	Partial        bool   `json:"partial"`
+	ContentPartial bool   `json:"content_partial"`
+	Files          int64  `json:"files"`
+	Bytes          int64  `json:"bytes"`
 }
 
 type dataInvItem struct {
@@ -375,6 +400,7 @@ func cycleIDOK(c string) bool {
 // underCanary reports a path that is, or is inside, one of the canary paths.
 func underCanary(p string, canaries []string) bool {
 	for _, c := range canaries {
+		c = dataPathEncode(c)
 		if p == c || strings.HasPrefix(p, c+"/") {
 			return true
 		}
@@ -417,6 +443,12 @@ func parseDataInventory(body []byte, endpointID string, canaries []string, now t
 		run.FinishedAt < 0 || len(run.BudgetHit) > 16 {
 		return u, 0, errors.New("run fields out of range")
 	}
+	// Runs are ordered by their start time; one dated ahead of the hub would
+	// make every later real run look stale, so it is refused (the agent's
+	// clock is wrong; it retries after resume_minutes).
+	if limit := now.Add(dataClockSlack).UnixMilli(); run.StartedAt > limit || run.FinishedAt > limit {
+		return u, 0, errors.New("run dated ahead of the hub's clock")
+	}
 	u.Run = storage.DataRun{
 		EndpointID: endpointID, CycleID: run.CycleID, Mode: run.Mode, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		CycleStarted: run.CycleStarted, CycleComplete: run.CycleComplete, BudgetHit: run.BudgetHit,
@@ -447,7 +479,8 @@ func parseDataInventory(body []byte, endpointID string, canaries []string, now t
 			dropped++
 			continue
 		}
-		u.Partial[st.Path] = st.Partial
+		// Not walked to the end, or not all content read: its items only add.
+		u.Partial[st.Path] = st.Partial || st.ContentPartial
 		u.Stores = append(u.Stores, storage.DataStore{Path: st.Path, Doc: raw})
 	}
 	for _, raw := range doc.Items {
@@ -492,9 +525,8 @@ func (s *Server) handleDataInventory(w http.ResponseWriter, r *http.Request) {
 		EndpointID string `json:"endpoint_id"`
 	}
 	_ = json.Unmarshal(body, &head)
-	id, ok := callerEndpoint(r, head.EndpointID)
+	id, ok := s.callerEndpoint(w, r, head.EndpointID)
 	if !ok {
-		writeJSONError(w, http.StatusForbidden, "a device may only report its own data inventory")
 		return
 	}
 	ep, err := s.store.GetEndpoint(id)

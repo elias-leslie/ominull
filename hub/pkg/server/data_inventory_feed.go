@@ -20,6 +20,11 @@ const (
 	feedDataStoresPerHost = 400
 	feedDataItemsPerHost  = 400
 	feedDataMinStoresKept = 25
+	// Nightshift's v3 caps (src/nightshift/ingest.py): blocks per document and
+	// host facts per block. Kept here so a valid hub never sends what the
+	// reader must cut.
+	feedDataMaxBlocks    = 64
+	feedDataMaxHostBytes = 32 << 10
 )
 
 var feedStoreKeys = []string{"path", "root", "shallow", "partial", "files", "dirs", "bytes", "newest_mtime", "oldest_mtime",
@@ -77,7 +82,11 @@ func (s *Server) dataInventoryBlocks(now time.Time, budget int) ([]feedDataBlock
 		for k, v := range pickKeys(snap.LastRun.Summary, feedRunKeys) {
 			scan[k] = v
 		}
-		b := feedDataBlock{EndpointID: id, DeviceID: deviceID(salt, id), Scan: scan, Host: snap.Host,
+		host := snap.Host
+		if len(host) > feedDataMaxHostBytes {
+			host = nil // over the reader's cap: unknown host facts, the block still goes
+		}
+		b := feedDataBlock{EndpointID: id, DeviceID: deviceID(salt, id), Scan: scan, Host: host,
 			Stores: []map[string]json.RawMessage{}, Items: []map[string]json.RawMessage{},
 			StoresTruncated: snap.StoresTruncated, ItemsTruncated: snap.ItemsTruncated}
 		for _, st := range snap.Stores {
@@ -93,10 +102,13 @@ func (s *Server) dataInventoryBlocks(now time.Time, budget int) ([]feedDataBlock
 		blocks = append(blocks, b)
 	}
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i].EndpointID < blocks[j].EndpointID })
+	truncated := false
+	if len(blocks) > feedDataMaxBlocks {
+		blocks, truncated = blocks[:feedDataMaxBlocks], true
+	}
 	// Fit the budget: halve the largest block's store list (items are what a
 	// reader acts on, so they go last) until the whole fits.
 	size := func() int { raw, _ := json.Marshal(blocks); return len(raw) }
-	truncated := false
 	for size() > budget {
 		cut := false
 		big := -1

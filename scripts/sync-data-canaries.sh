@@ -59,6 +59,9 @@ if not want:
     want = match[0]
 if want not in ids:
     sys.exit("endpoint not registered: " + want)
+bad = [str(r.get("name")) for r in can.get("canaries") or [] if r.get("unresolved") or ("unresolved" not in r and not r.get("path") and r.get("host_role"))]
+if bad:
+    sys.exit("canary placements name no file path (fix them in Nightshift first): " + ", ".join(bad))
 paths = set()
 for r in can.get("canaries") or []:
     if r.get("host_role") == "workstation":

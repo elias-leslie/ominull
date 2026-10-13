@@ -671,6 +671,8 @@ typedef struct {
     char path[DI_PATH_CAP * 2];
     dev_t root_dev;
     long root_ftype;
+    char root_src[256]; /* mount source of the root's filesystem (btrfs one-filesystem check) */
+    char* mountinfo;    /* read once, lazily */
 } DataInvWalk;
 
 static inline long long DataInv_NowMs(void) {
@@ -804,9 +806,9 @@ static inline void DataInv_EmitStore(DataInvWalk* w, DataInvStore* s) {
     DataInvBuf* b = w->stores_buf;
     if (w->stores > 0) DataInv_PutS(b, ",");
     DataInv_PutS(b, "{\"path\":");
-    DataInv_PutJSONString(b, s->path);
+    DataInv_PutJSONPath(b, s->path);
     DataInv_PutS(b, ",\"root\":");
-    DataInv_PutJSONString(b, s->root);
+    DataInv_PutJSONPath(b, s->root);
     DataInv_PutS(b, s->shallow ? ",\"shallow\":true" : ",\"shallow\":false");
     DataInv_PutS(b, s->partial ? ",\"partial\":true" : ",\"partial\":false");
     DataInv_PutS(b, s->content_partial ? ",\"content_partial\":true" : ",\"content_partial\":false");
@@ -861,9 +863,9 @@ static inline void DataInv_EmitItem(DataInvWalk* w, DataInvStore* s, const char*
     DataInvBuf* b = w->items_buf;
     if (w->items > 0) DataInv_PutS(b, ",");
     DataInv_PutS(b, "{\"path\":");
-    DataInv_PutJSONString(b, path);
+    DataInv_PutJSONPath(b, path);
     DataInv_PutS(b, ",\"store\":");
-    DataInv_PutJSONString(b, s->path);
+    DataInv_PutJSONPath(b, s->path);
     DataInv_PutS(b, ",\"kind\":");
     DataInv_PutJSONString(b, DataInv_ItemKind(rules));
     DataInv_PutS(b, ",\"rules\":[");
@@ -878,7 +880,8 @@ static inline void DataInv_EmitItem(DataInvWalk* w, DataInvStore* s, const char*
     DataInv_PutF(b, "],\"mode\":%lld", (long long)(st->st_mode & 07777));
     DataInv_PutF(b, ",\"uid\":%lld", (long long)st->st_uid);
     DataInv_PutF(b, ",\"size\":%lld", (long long)st->st_size);
-    DataInv_PutF(b, ",\"mtime\":%lld}", (long long)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000);
+    long long mt = (long long)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000;
+    DataInv_PutF(b, ",\"mtime\":%lld}", mt < 0 ? 0 : mt);
     w->items++;
 }
 
@@ -947,15 +950,19 @@ static inline uint64_t DataInv_FileContent(DataInvWalk* w, DataInvStore* s, int 
     }
     size_t want = text ? (size_t)(st->st_size < w->pol->content_max_bytes ? st->st_size : w->pol->content_max_bytes) : 64;
     if (want == 0) return 0;
+    /* Not read this time (budget, open or memory): the last verdict stands, so
+     * a known secret is never dropped because a run ran out of budget. */
+    const DataInvVerdict* last = DataInv_FindVerdict(w->old, path);
+    uint64_t kept = last ? last->rules : 0;
     if (w->content_bytes + (long long)want > w->pol->content_budget_bytes) {
         w->content_exhausted = true;
         *skipped = true;
-        return 0;
+        return kept;
     }
     int fd = DataInv_OpenChecked(dirfd, name, st, false);
-    if (fd < 0) { s->errors++; w->errors++; *skipped = true; return 0; }
+    if (fd < 0) { s->errors++; w->errors++; *skipped = true; return kept; }
     unsigned char* buf = (unsigned char*)malloc(want + 1);
-    if (!buf) { close(fd); *skipped = true; return 0; }
+    if (!buf) { close(fd); *skipped = true; return kept; }
     size_t got = 0;
     while (got < want) {
         ssize_t n = read(fd, buf + got, want - got);
@@ -1044,13 +1051,75 @@ static inline int DataInv_PushPath(DataInvWalk* w, const char* name) {
 static inline void DataInv_PopPath(DataInvWalk* w, int old_len) { w->path[old_len] = '\0'; }
 
 /* Mount checks for a directory about to be entered. */
+static inline ssize_t DataInv_ReadPath(const char* path, char* buf, size_t cap);
+
+/* The mount source (the " - fstype source" field) of the mount whose
+ * major:minor is dev; false when no mount has it. */
+static inline bool DataInv_MountSourceOf(const char* mi, dev_t dev, char* out, size_t cap) {
+    for (const char* line = mi; line && *line;) {
+        const char* nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        char l[1024];
+        if (len < sizeof(l)) {
+            memcpy(l, line, len);
+            l[len] = '\0';
+            unsigned maj = 0, min = 0;
+            char src[256];
+            const char* sep = strstr(l, " - ");
+            if (sep && sscanf(l, "%*u %*u %u:%u", &maj, &min) == 2 && sscanf(sep + 3, "%*s %255s", src) == 1 &&
+                maj == major(dev) && min == minor(dev)) {
+                snprintf(out, cap, "%s", src);
+                return true;
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return false;
+}
+
+/* The source of the mount a path lies under (longest mount point prefix). */
+static inline void DataInv_RootMountSource(const char* mi, const char* root, char* out, size_t cap) {
+    size_t best = 0;
+    out[0] = '\0';
+    for (const char* line = mi; line && *line;) {
+        const char* nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        char l[1024];
+        if (len < sizeof(l)) {
+            memcpy(l, line, len);
+            l[len] = '\0';
+            char mp[512], src[256];
+            const char* sep = strstr(l, " - ");
+            if (sep && sscanf(l, "%*u %*u %*s %*s %511s", mp) == 1 && sscanf(sep + 3, "%*s %255s", src) == 1 &&
+                DataInv_Under(root, mp) && strlen(mp) >= best) {
+                best = strlen(mp);
+                snprintf(out, cap, "%s", src);
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+}
+
+static inline const char* DataInv_MountInfo(DataInvWalk* w) {
+    if (!w->mountinfo) {
+        w->mountinfo = (char*)malloc(1 << 20);
+        if (w->mountinfo && DataInv_ReadPath("/proc/self/mountinfo", w->mountinfo, 1 << 20) <= 0) w->mountinfo[0] = '\0';
+    }
+    return w->mountinfo ? w->mountinfo : "";
+}
+
 static inline bool DataInv_MayEnter(DataInvWalk* w, int fd, const struct stat* st) {
     struct statfs sf;
     if (fstatfs(fd, &sf) != 0 || !DataInv_LocalFsType((long)sf.f_type)) return false;
-    if (w->pol->one_filesystem && st->st_dev != w->root_dev && !((unsigned long)sf.f_type == 0x9123683EUL &&
-                                                                 (unsigned long)w->root_ftype == 0x9123683EUL))
-        return false;
-    return true;
+    if (!w->pol->one_filesystem || st->st_dev == w->root_dev) return true;
+    /* btrfs gives every subvolume its own st_dev. A subvolume of the root's
+     * filesystem is either not a mount of its own or a mount of the same
+     * source; a different btrfs filesystem mounted below is a mount of another
+     * source, and is not entered. */
+    if ((unsigned long)sf.f_type != 0x9123683EUL || (unsigned long)w->root_ftype != 0x9123683EUL) return false;
+    char src[256];
+    if (!DataInv_MountSourceOf(DataInv_MountInfo(w), st->st_dev, src, sizeof(src))) return true;
+    return w->root_src[0] && !strcmp(src, w->root_src);
 }
 
 static void DataInv_WalkStoreDir(DataInvWalk* w, DataInvStore* s, int fd, int depth, bool store_top);
@@ -1065,8 +1134,9 @@ static inline void DataInv_Entry(DataInvWalk* w, DataInvStore* s, int dirfd, con
     s->bytes += st->st_size;
     w->bytes += st->st_size;
     long long m = (long long)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000;
+    if (m < 0) m = 0; /* dated before 1970 (archives, touch -d): the contract's times are >= 0 */
     if (m > s->newest_ms) s->newest_ms = m;
-    if (s->oldest_ms == 0 || m < s->oldest_ms) s->oldest_ms = m;
+    if (s->files == 1 || m < s->oldest_ms) s->oldest_ms = m;
     if (st->st_mode & S_IROTH) s->world_readable++;
     if (st->st_mode & S_IRGRP) s->group_readable++;
     if (st->st_mode & S_IWOTH) s->world_writable++;
@@ -1411,6 +1481,7 @@ static inline void DataInv_WalkRoots(DataInvWalk* w, long long run_start_ms) {
         }
         w->root_dev = st.st_dev;
         w->root_ftype = (long)sf.f_type;
+        DataInv_RootMountSource(DataInv_MountInfo(w), roots[i], w->root_src, sizeof(w->root_src));
         snprintf(w->path, sizeof(w->path), "%.1023s", roots[i]);
         DataInv_Upper(w, fd, 0, roots[i], run_start_ms);
         close(fd);
@@ -1616,7 +1687,7 @@ static inline void DataInv_HostFacts(DataInvWalk* w, DataInvBuf* b) {
     if (mi && DataInv_ReadPath("/proc/self/mountinfo", mi, 1 << 20) <= 0) mi[0] = '\0';
     for (int i = 0; i < w->pol->nroots; i++) {
         DataInv_PutS(b, i ? ",{\"path\":" : "{\"path\":");
-        DataInv_PutJSONString(b, w->pol->roots[i]);
+        DataInv_PutJSONPath(b, w->pol->roots[i]);
         DataInv_PutS(b, ",\"encryption\":");
         DataInv_PutJSONString(b, mi ? DataInv_RootEncryption(w->pol->roots[i], mi) : "unknown");
         DataInv_PutS(b, "}");
@@ -1811,7 +1882,7 @@ static inline int DataInv_ChildRun(int outfd, const DataInvPolicy* pol, const ch
     DataInv_PutF(&out, ",\"cycle_started_at\":%lld", cycle_started);
     DataInv_PutS(&out, complete ? ",\"cycle_complete\":true" : ",\"cycle_complete\":false");
     DataInv_PutS(&out, ",\"resumed_from\":");
-    if (w->has_cursor) DataInv_PutJSONString(&out, w->cursor);
+    if (w->has_cursor) DataInv_PutJSONPath(&out, w->cursor);
     else DataInv_PutS(&out, "null");
     DataInv_PutS(&out, ",\"budget_hit\":");
     DataInv_PutJSONString(&out, w->stop ? w->stop : (w->content_exhausted ? "content" : "none"));
@@ -1855,6 +1926,7 @@ done:
     if (w) {
         for (size_t i = 0; i < w->nvisited; i++) free(w->visited[i]);
         free(w->visited);
+        free(w->mountinfo);
         free(w);
     }
     free(stores.data);

@@ -1446,35 +1446,27 @@ static size_t HubResponseWrite(char* ptr, size_t size, size_t nmemb, void* userd
 /* RunHubCurl posts one JSON body without forking. libcurl keeps its connection
  * cache on this easy handle, so a three-second heartbeat reuses the TLS
  * connection while each request still gets fresh headers and a bounded body. */
-static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
-                              const char* body, char* out, size_t outCap, long timeoutMs) {
-    if (out && outCap) out[0] = '\0';
-    static CURL* curl = NULL;
-    if (!curl) {
-        curl = curl_easy_init();
-        if (!curl) return false;
-    }
-
+/* Sets every option of one hub POST on curl (headers, TLS, timeouts) and
+ * returns the header list the caller frees after the transfer; NULL on error. */
+static struct curl_slist* SetupHubCurl(CURL* curl, const LINUX_AGENT_CONFIG* config, const char* url,
+                                       const char* body, HUB_RESPONSE_BUFFER* response, long timeoutMs) {
 	char apiHeader[256];
 	const char* headerName = IsDeviceCredentialValue(config->api_key)
 	    ? "X-Ominull-Device-Credential" : "X-API-Key";
 	if (snprintf(apiHeader, sizeof(apiHeader), "%s: %s", headerName, config->api_key) >= (int)sizeof(apiHeader)) {
-		return false;
+		return NULL;
 	}
 	struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
 	headers = curl_slist_append(headers, apiHeader);
-	if (!headers) return false;
+	if (!headers) return NULL;
 
-    HUB_RESPONSE_BUFFER response = {
-        .data = out, .cap = outCap, .len = 0, .overflow = false
-    };
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)(body ? strlen(body) : 0));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HubResponseWrite);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "OminullAgent/1.0");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeoutMs);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
@@ -1499,6 +1491,23 @@ static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
         curl_easy_setopt(curl, CURLOPT_SSLKEY, NULL);
     }
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
+    return headers;
+}
+
+static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
+                              const char* body, char* out, size_t outCap, long timeoutMs) {
+    if (out && outCap) out[0] = '\0';
+    static CURL* curl = NULL;
+    if (!curl) {
+        curl = curl_easy_init();
+        if (!curl) return false;
+    }
+    HUB_RESPONSE_BUFFER response = {
+        .data = out, .cap = outCap, .len = 0, .overflow = false
+    };
+    struct curl_slist* headers = SetupHubCurl(curl, config, url, body, &response, timeoutMs);
+    if (!headers) return false;
 
     CURLcode result = curl_easy_perform(curl);
     long status = 0;
@@ -3074,6 +3083,32 @@ static void SyncDataPolicy(const LINUX_AGENT_CONFIG* config) {
     free(resp);
 }
 
+/* The upload runs on a curl multi handle driven from the main loop, so a
+ * slow or stuck hub never holds up telemetry: each tick moves it on without
+ * blocking. The document and the state it commits are owned copies. */
+static CURLM* g_DataMulti = NULL;
+static CURL* g_DataEasy = NULL;
+static struct curl_slist* g_DataHeaders = NULL;
+static char* g_DataDoc = NULL;
+static char* g_DataState = NULL;
+static char g_DataResp[2048];
+static HUB_RESPONSE_BUFFER g_DataRespBuf;
+/* What DataInv_Due needs from the state file, kept between ticks so an idle
+ * agent does not re-read and parse it every minute; reloaded after a commit. */
+static DataInvState g_DataDueState;
+static bool g_DataDueCached = false;
+
+static void EndDataUpload(void) {
+    if (g_DataMulti && g_DataEasy) curl_multi_remove_handle(g_DataMulti, g_DataEasy);
+    if (g_DataEasy) curl_easy_cleanup(g_DataEasy);
+    g_DataEasy = NULL;
+    curl_slist_free_all(g_DataHeaders);
+    g_DataHeaders = NULL;
+    free(g_DataDoc);
+    free(g_DataState);
+    g_DataDoc = g_DataState = NULL;
+}
+
 static void FinishDataInventory(const LINUX_AGENT_CONFIG* config) {
     char* doc = NULL;
     char* state = NULL;
@@ -3083,25 +3118,56 @@ static void FinishDataInventory(const LINUX_AGENT_CONFIG* config) {
     } else if (!DataInv_SplitOutput(g_DataRun.buf, g_DataRun.len, &doc, &state, why, sizeof(why))) {
         fprintf(stderr, "[-] Data inventory scan failed: %s\n", why);
     } else {
+        g_DataDoc = strdup(doc);
+        g_DataState = strdup(state);
+        if (!g_DataMulti) g_DataMulti = curl_multi_init();
+        g_DataEasy = curl_easy_init();
         char url[sizeof(config->hub_url) + 32];
         snprintf(url, sizeof(url), "%s/api/v1/data/inventory", config->hub_url);
-        char resp[2048];
-        long status = 0;
-        if (RunHubCurlTimeout(config, url, doc, resp, sizeof(resp), 60000L)) status = SplitHubStatus(resp);
-        if (status == 200) {
-            if (!DataInv_WriteState(DATA_INVENTORY_STATE_PATH, state))
-                fprintf(stderr, "[-] Data inventory state could not be saved; the run repeats.\n");
-            else if (config->verbose)
-                printf("[+] Data inventory sent (%zu bytes).\n", strlen(doc));
-        } else {
-            fprintf(stderr, "[-] Data inventory upload not accepted (HTTP %ld); retrying later.\n", status);
+        g_DataResp[0] = '\0';
+        g_DataRespBuf = (HUB_RESPONSE_BUFFER){.data = g_DataResp, .cap = sizeof(g_DataResp), .len = 0, .overflow = false};
+        if (g_DataDoc && g_DataState && g_DataMulti && g_DataEasy &&
+            (g_DataHeaders = SetupHubCurl(g_DataEasy, config, url, g_DataDoc, &g_DataRespBuf, 300000L)) != NULL &&
+            curl_multi_add_handle(g_DataMulti, g_DataEasy) == CURLM_OK) {
+            DataInv_Reset(&g_DataRun);
+            return;
         }
+        fprintf(stderr, "[-] Data inventory upload could not start; retrying later.\n");
+        EndDataUpload();
     }
     DataInv_Reset(&g_DataRun);
 }
 
+/* One non-blocking step of the upload; commits the state on HTTP 200. */
+static void PollDataUpload(const LINUX_AGENT_CONFIG* config) {
+    int running = 0;
+    if (curl_multi_perform(g_DataMulti, &running) != CURLM_OK) running = 0;
+    if (running) return;
+    CURLcode result = CURLE_FAILED_INIT;
+    int left = 0;
+    for (CURLMsg* m; (m = curl_multi_info_read(g_DataMulti, &left)) != NULL;) {
+        if (m->msg == CURLMSG_DONE && m->easy_handle == g_DataEasy) result = m->data.result;
+    }
+    long status = 0;
+    if (result == CURLE_OK && !g_DataRespBuf.overflow) curl_easy_getinfo(g_DataEasy, CURLINFO_RESPONSE_CODE, &status);
+    if (status == 200) {
+        if (!DataInv_WriteState(DATA_INVENTORY_STATE_PATH, g_DataState))
+            fprintf(stderr, "[-] Data inventory state could not be saved; the run repeats.\n");
+        else if (config->verbose)
+            printf("[+] Data inventory sent (%zu bytes).\n", strlen(g_DataDoc));
+        g_DataDueCached = false;
+    } else {
+        fprintf(stderr, "[-] Data inventory upload not accepted (HTTP %ld, curl %d); retrying later.\n", status, (int)result);
+    }
+    EndDataUpload();
+}
+
 static void TickDataInventory(const LINUX_AGENT_CONFIG* config) {
     time_t now = time(NULL);
+    if (g_DataEasy) {
+        PollDataUpload(config);
+        return;
+    }
     if (g_DataRun.active) {
         if (DataInv_Drain(&g_DataRun)) FinishDataInventory(config);
         return;
@@ -3113,14 +3179,24 @@ static void TickDataInventory(const LINUX_AGENT_CONFIG* config) {
     /* A run that failed (upload refused, child killed) waits resume_minutes
      * before the next attempt instead of rescanning every minute. */
     if (g_LastDataAttemptMs && nowMs - g_LastDataAttemptMs < (long long)g_DataPolicy.resume_minutes * 60000) return;
-    DataInvState st;
-    char* text = DataInv_ReadSmallFile(DATA_INVENTORY_STATE_PATH, DI_STATE_CAP);
-    if (!text || !DataInv_ParseState(text, &st)) memset(&st, 0, sizeof(st));
-    bool due = DataInv_Due(&g_DataPolicy, &st, nowMs);
-    DataInv_StateFree(&st);
-    free(text);
-    if (!due) return;
+    if (!g_DataDueCached) {
+        DataInvState st;
+        char* text = DataInv_ReadSmallFile(DATA_INVENTORY_STATE_PATH, DI_STATE_CAP);
+        if (!text || !DataInv_ParseState(text, &st)) memset(&st, 0, sizeof(st));
+        memset(&g_DataDueState, 0, sizeof(g_DataDueState));
+        g_DataDueState.has_cycle = st.has_cycle;
+        g_DataDueState.cycle_policy = st.cycle_policy;
+        g_DataDueState.cycle_rules = st.cycle_rules;
+        g_DataDueState.cycle_done = st.cycle_done;
+        g_DataDueState.last_run = st.last_run;
+        g_DataDueState.last_done = st.last_done;
+        DataInv_StateFree(&st);
+        free(text);
+        g_DataDueCached = true;
+    }
+    if (!DataInv_Due(&g_DataPolicy, &g_DataDueState, nowMs)) return;
     g_LastDataAttemptMs = nowMs;
+    g_DataDueCached = false; /* the run may change the state */
     if (!DataInv_Start(&g_DataRun, &g_DataPolicy, DATA_INVENTORY_STATE_PATH, config->endpoint_id))
         fprintf(stderr, "[-] Data inventory scan could not start.\n");
 }
@@ -3321,6 +3397,8 @@ int main(int argc, char* argv[]) {
     }
 
     DataInv_Abort(&g_DataRun);
+    EndDataUpload();
+    if (g_DataMulti) curl_multi_cleanup(g_DataMulti);
     UDPCollectorClose();
     printf("\n[*] Stopping Linux socket collection and shutting down gracefully...\n");
     return 0;

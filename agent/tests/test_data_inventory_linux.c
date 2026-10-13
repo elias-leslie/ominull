@@ -131,6 +131,11 @@ static void test_json_and_paths(void) {
     CHECK(!DataInv_DecodeStatePath(bad));
     char nul[] = "/x%00";
     CHECK(!DataInv_DecodeStatePath(nul));
+    /* contract path encoding: printable valid UTF-8 kept, the rest %XX */
+    char pb[160];
+    DataInvBuf pj = {pb, sizeof(pb), 0, true};
+    DataInv_PutJSONPath(&pj, "/a b/100%/\x01\x7f/\xc2\x85/\xc2\xa0/\xff/caf\xc3\xa9/\"q\"");
+    CHECK(pj.ok && strcmp(pb, "\"/a b/100%25/%01%7F/%C2%85/\xc2\xa0/%FF/caf\xc3\xa9/\\\"q\\\"\"") == 0);
 }
 
 static void test_policy(void) {
@@ -548,6 +553,42 @@ static void test_sandboxed_scan(void) {
     unlink(state_path);
 }
 
+/* Review 1 #2/#4: a run that runs out of content budget keeps the verdicts of
+ * the files it could not read, and times before 1970 are reported as 0. */
+static void test_budget_keeps_verdicts(void) {
+    char rp[600];
+    snprintf(rp, sizeof(rp), "%s/proj/docs/readme.md", g_root);
+    struct timespec old[2] = {{-315619200, 0}, {-315619200, 0}};
+    CHECK(utimensat(AT_FDCWD, rp, old, 0) == 0);
+    DataInvPolicy p;
+    tree_policy(&p);
+    p.version = 41;
+    char* out = run_inproc(&p, NULL, "00000000000000c1", DataInv_NowMs());
+    char *doc = NULL, *st = NULL, why[128];
+    CHECK(DataInv_SplitOutput(out, strlen(out), &doc, &st, why, sizeof(why)) && doc && st);
+    CHECK(doc && strstr(doc, "proj/app/config.yaml") != NULL);
+    CHECK(doc && strstr(doc, "mtime\":-") == NULL && strstr(doc, "\"oldest_mtime\":0") != NULL);
+    char* state = strdup(st ? st : "");
+    free(out);
+    /* policy change: a full cycle, with no content budget at all */
+    p.version = 42;
+    p.content_budget_bytes = 1;
+    out = run_inproc(&p, state, "00000000000000c2", DataInv_NowMs() + 1000);
+    CHECK(DataInv_SplitOutput(out, strlen(out), &doc, &st, why, sizeof(why)) && doc && st);
+    CHECK(doc && strstr(doc, "\"content_partial\":true") != NULL);
+    CHECK(doc && strstr(doc, "proj/app/config.yaml") != NULL); /* carried, not lost */
+    free(state);
+    state = strdup(st ? st : "");
+    free(out);
+    /* incremental with an ample budget: still there */
+    p.content_budget_bytes = 256 << 20;
+    out = run_inproc(&p, state, "00000000000000c3", DataInv_NowMs() + 2000);
+    CHECK(DataInv_SplitOutput(out, strlen(out), &doc, &st, why, sizeof(why)) && doc);
+    CHECK(doc && strstr(doc, "proj/app/config.yaml") != NULL);
+    free(state);
+    free(out);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_content_rules();
@@ -558,6 +599,7 @@ int main(void) {
     make_tree();
     test_walk();
     test_cursor();
+    test_budget_keeps_verdicts();
     test_sandbox();
     test_sandboxed_scan();
     rm_tree(g_root);

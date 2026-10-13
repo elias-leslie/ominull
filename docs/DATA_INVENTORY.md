@@ -18,10 +18,15 @@ document). The header comment of the Linux file is the reference. In short:
 - Budgets per run (max_files, max_seconds, content_budget_bytes); a resumable cursor saved only after the hub accepted
   the run (HTTP 200); a full cycle every full_every_days, otherwise content is re-read only for changed files.
 - Secret detection runs in the child. A file leaves the host as a rule id, mode, owner, size and mtime; never content,
-  matched text or a hash of it.
+  matched text or a hash of it. A file the run could not read (content budget, open error) keeps its last verdict.
+- Paths are reported in the contract's encoding: `%`, C0/DEL/C1 control bytes and bytes that are not valid UTF-8
+  become `%XX`, so every name is a printable, valid string and distinct names stay distinct. Times before 1970 are
+  reported as 0.
 
 The agent fetches `POST /api/v1/data/policy` hourly (404 or an unparseable policy switches scanning off) and posts a
-run to `POST /api/v1/data/inventory` (device mTLS, 60 s timeout).
+run to `POST /api/v1/data/inventory` without blocking its main loop (a curl multi transfer stepped each second, 300 s
+limit). Both routes accept only the endpoint's own device credential (and its certificate when presented); the
+legacy tenant key only in migration mode and only inside its tenant. No console or admin role can use them.
 
 ## Policy (hub)
 
@@ -43,16 +48,20 @@ Admin endpoints (fleet-wide, not for tenant administrators):
 | `GET /api/v1/data/inventory?endpoint_id=ID` | the latest picture |
 
 `scripts/sync-data-canaries.sh` (with `OMINULL_HUB_URL`, `OMINULL_ADMIN_KEY_FILE`) syncs Nightshift's canaries
-(`nightshift canary paths --json`) to the workstation's endpoint and an empty list to every other endpoint. Run it
-again whenever canaries change or an endpoint is enrolled.
+(`nightshift canary paths --json`) to the workstation's endpoint and an empty list to every other endpoint. It stops,
+sending nothing, when a decoy's placement names no file path. Run it again whenever canaries change or an endpoint is
+enrolled.
 
 ## Hub storage and the Nightshift feed
 
 The hub validates every run (schema `ominull.data-inventory/1`, path and rule formats, counts, at most 20000 stores
-and 5000 items) and drops anything at or under a canary path (audited `DATA_INVENTORY_CANARY_DROPPED`). Items are
-replaced per store; a partial or truncated run only adds; a completed cycle removes stores and items that were not
-seen in it (except under stores left partial). A run older than the last one stored is refused.
+and 5000 items, start time no more than 5 minutes ahead of the hub) and drops anything at or under a canary path
+(compared in the encoded form; audited `DATA_INVENTORY_CANARY_DROPPED`). Items are replaced per store; a store cut
+short (`partial`) or whose content was not all read (`content_partial`), and a run that dropped items for
+`max_items`, only add. A completed cycle removes the stores it did not see, with their items, and (when no items
+were dropped) the items it did not see outside cut-short stores. A run older than the last one stored is
+acknowledged and ignored.
 
 The v3 feed (`?contract=v3`, `hub/pkg/server/data_inventory_feed.go`) adds `data_inventory`: one block per endpoint
-with the scan summary, host facts, at most 400 stores and 400 items, and truncation flags, the whole document fitted
-to 960 KiB. Nightshift's side of the contract is its `docs/ingest.md` (v3).
+with the scan summary, host facts (left out above 32 KiB), at most 400 stores and 400 items, and truncation flags;
+at most 64 blocks, the whole document fitted to 960 KiB. Nightshift's side of the contract is its `docs/ingest.md` (v3).

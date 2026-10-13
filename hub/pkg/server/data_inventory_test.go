@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/auth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -228,5 +229,103 @@ func TestNightshiftFeedV3CarriesBoundedDataInventory(t *testing.T) {
 	}
 	if b.Scan["sandboxed"] != true || b.Scan["last_complete_at"] != float64(1010) {
 		t.Fatalf("scan summary: %v", b.Scan)
+	}
+}
+
+// Review 1 #1: only the endpoint's own device credential speaks for it. An
+// analyst, an administrator or a tenant key outside its tenant gets neither
+// the policy (it names canary paths) nor the inventory route.
+func TestDataDeviceRoutesRefuseOtherCallers(t *testing.T) {
+	t.Parallel()
+	srv, store, key := dataSetup(t)
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "foreign", TenantID: "t2", Hostname: "foreign", Status: "online", LastSeenAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDataCanaries(storage.DataCanaries{EndpointID: "ws", Paths: []string{"/home/u/.aws/credentials"}, SyncedAt: time.Now(), Source: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertOperator("analyst@example.com", "analyst", "test"); err != nil {
+		t.Fatal(err)
+	}
+	wipe := dataDoc("00000000000000e1", time.Now().UnixMilli(), true, nil, nil, "")
+	for _, path := range []string{"/api/v1/data/policy", "/api/v1/data/inventory"} {
+		body := `{"endpoint_id":"ws"}`
+		if path == "/api/v1/data/inventory" {
+			body = wipe
+		}
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.AddCookie(sessionFor(t, srv, "analyst@example.com", auth.RoleAnalyst))
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code == http.StatusOK || strings.Contains(w.Body.String(), ".aws") {
+			t.Fatalf("analyst on %s: %d %s", path, w.Code, w.Body.String())
+		}
+		if w := dataReq(srv, http.MethodPost, path, "X-API-Key", "mock_admin_token", body); w.Code == http.StatusOK {
+			t.Fatalf("admin key on device route %s: %d", path, w.Code)
+		}
+		foreign := strings.Replace(body, `"endpoint_id":"ws"`, `"endpoint_id":"foreign"`, 1)
+		if w := dataReq(srv, http.MethodPost, path, "X-API-Key", "mock_tenant_token", foreign); w.Code == http.StatusOK {
+			t.Fatalf("tenant key outside its tenant on %s: %d", path, w.Code)
+		}
+	}
+	// The device itself still works.
+	if p := policyText(t, srv, key, `{}`); !strings.Contains(p, "\ncanary /home/u/.aws/credentials\n") {
+		t.Fatalf("device policy:\n%s", p)
+	}
+}
+
+// Review 1 #2/#3/#6/#12: budget-cut content keeps its items, a run dated ahead
+// of the hub is refused, a complete cycle prunes stores even when items were
+// dropped, and the path rule matches Nightshift's.
+func TestDataInventoryReviewFixes(t *testing.T) {
+	t.Parallel()
+	srv, store, key := dataSetup(t)
+	if err := store.SetDataCanaries(storage.DataCanaries{EndpointID: "ws", Paths: []string{"/srv/a/50%.env"}, SyncedAt: time.Now(), Source: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	post := func(doc string) *httptest.ResponseRecorder {
+		return dataReq(srv, http.MethodPost, "/api/v1/data/inventory", deviceCredentialHeader, key, doc)
+	}
+	t0 := time.Now().UnixMilli() - 3600_000
+	if w := post(dataDoc("00000000000000f1", t0, true, []string{"/srv/a", "/srv/b"},
+		[][2]string{{"/srv/a/.env", "/srv/a"}, {"/srv/a/50%25.env", "/srv/a"}, {"/srv/b/x.env", "/srv/b"}}, "")); w.Code != http.StatusOK {
+		t.Fatalf("upload 1: %d %s", w.Code, w.Body.String())
+	}
+	snap, _, _ := store.DataSnapshotFor("ws", 100, 100)
+	if len(snap.Items) != 2 {
+		t.Fatalf("encoded canary not dropped: %d items", len(snap.Items))
+	}
+	// A full cycle whose content budget ran out in /srv/a reports no items there.
+	doc := strings.Replace(dataDoc("00000000000000f2", t0+1000, true, []string{"/srv/a", "/srv/b"},
+		[][2]string{{"/srv/b/x.env", "/srv/b"}}, ""), `"path":"/srv/a","root":"/srv","shallow":false,"partial":false`,
+		`"path":"/srv/a","root":"/srv","shallow":false,"partial":false,"content_partial":true`, 1)
+	if w := post(doc); w.Code != http.StatusOK {
+		t.Fatalf("upload 2: %d %s", w.Code, w.Body.String())
+	}
+	snap, _, _ = store.DataSnapshotFor("ws", 100, 100)
+	if len(snap.Items) != 2 {
+		t.Fatalf("content_partial store lost its items: %d", len(snap.Items))
+	}
+	// Items dropped for max_items: stores not seen are still pruned (with their items).
+	doc = strings.Replace(dataDoc("00000000000000f3", t0+2000, true, []string{"/srv/b"}, nil, ""), `"items_dropped":0`, `"items_dropped":5`, 1)
+	if w := post(doc); w.Code != http.StatusOK {
+		t.Fatalf("upload 3: %d %s", w.Code, w.Body.String())
+	}
+	snap, _, _ = store.DataSnapshotFor("ws", 100, 100)
+	if len(snap.Stores) != 1 || len(snap.Items) != 1 || snap.Items[0].Path != "/srv/b/x.env" {
+		t.Fatalf("after truncated complete cycle: stores=%d items=%d", len(snap.Stores), len(snap.Items))
+	}
+	// Dated ahead of the hub: refused, and it cannot freeze later runs.
+	if w := post(dataDoc("00000000000000f4", time.Now().Add(time.Hour).UnixMilli(), true, nil, nil, "")); w.Code != http.StatusBadRequest {
+		t.Fatalf("future run: %d %s", w.Code, w.Body.String())
+	}
+	if w := post(dataDoc("00000000000000f5", t0+3000, true, []string{"/srv/b"}, nil, "")); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "stale") {
+		t.Fatalf("run after the refused future one: %d %s", w.Code, w.Body.String())
+	}
+	for p, want := range map[string]bool{"/srv/a b": true, "/srv/café": true, "/srv/a%C2%85": true,
+		"/srv/a\u0085b": false, "/srv/a\x7fb": false, "/srv/a\xffb": false, "/srv/a\nb": false} {
+		if dataPathOK(p) != want {
+			t.Errorf("dataPathOK(%q) = %v, want %v", p, !want, want)
+		}
 	}
 }

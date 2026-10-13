@@ -352,15 +352,23 @@ func (s *Store) RecordDataRun(u DataRunUpload) error {
 			return err
 		}
 	}
-	if u.Complete && !u.Truncated {
-		// The cycle walked every root: what it did not see is gone.
+	if u.Complete {
+		// The cycle walked every root: a store it did not see is gone, with
+		// its items, even when items were dropped for max_items.
 		if _, err := tx.Exec("DELETE FROM data_stores WHERE endpoint_id = ? AND cycle_id != ?", r.EndpointID, r.CycleID); err != nil {
 			return err
 		}
-		// Items of a store the budget cut short were not all reached; they
-		// stay until a cycle walks that store to the end.
+		if _, err := tx.Exec(`DELETE FROM data_items WHERE endpoint_id = ? AND store NOT IN
+			(SELECT path FROM data_stores WHERE endpoint_id = ?)`, r.EndpointID, r.EndpointID); err != nil {
+			return err
+		}
+	}
+	if u.Complete && !u.Truncated {
+		// Items of a store not walked to the end, or whose content was not
+		// all read, stay until a cycle covers that store fully.
 		if _, err := tx.Exec(`DELETE FROM data_items WHERE endpoint_id = ? AND cycle_id != ? AND store NOT IN
-			(SELECT path FROM data_stores WHERE endpoint_id = ? AND json_extract(doc, '$.partial') = 1)`,
+			(SELECT path FROM data_stores WHERE endpoint_id = ? AND (json_extract(doc, '$.partial') = 1
+			 OR json_extract(doc, '$.content_partial') = 1))`,
 			r.EndpointID, r.CycleID, r.EndpointID); err != nil {
 			return err
 		}
