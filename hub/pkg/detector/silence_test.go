@@ -162,7 +162,7 @@ func TestPresenceDecidesWhenQuietIsAFinding(t *testing.T) {
 	addEndpoint(t, store, "laptop-lost", now.Add(-31*24*time.Hour))
 	addEndpoint(t, store, "lab-guest", now.Add(-90*24*time.Hour))
 	addEndpoint(t, store, "server-down", now.Add(-40*time.Minute))
-	for id, p := range map[string]string{"laptop-recent": storage.PresenceIntermittent, "laptop-lost": storage.PresenceIntermittent, "lab-guest": storage.PresenceLab} {
+	for id, p := range map[string]string{"laptop-recent": storage.PresenceIntermittent, "laptop-lost": storage.PresenceIntermittent, "lab-guest": storage.PresenceParked} {
 		if err := store.SetEndpointPresence(id, p); err != nil {
 			t.Fatal(err)
 		}

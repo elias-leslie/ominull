@@ -17,11 +17,25 @@ var ErrEndpointNotFound = errors.New("endpoint not registered")
 // quiet as a matter of course: reporting every one of those absences buried
 // the server outages the silence alert exists for. The operator says which
 // kind of host each endpoint is, and the quiet allowance follows.
+//
+// Parked was called lab until v1.8.51: "lab" now names an importance tier in
+// Nightshift's asset registry, which owns tiers. The hub still accepts "lab"
+// on the API and stores it as parked; startup rewrites stored values.
 const (
 	PresenceAlwaysOn     = "always_on"
 	PresenceIntermittent = "intermittent"
-	PresenceLab          = "lab"
+	PresenceParked       = "parked"
+	presenceLegacyLab    = "lab"
 )
+
+// NormalizePresence maps the legacy "lab" value to parked; every other value
+// is returned unchanged for ValidPresence to judge.
+func NormalizePresence(p string) string {
+	if p == presenceLegacyLab {
+		return PresenceParked
+	}
+	return p
+}
 
 // IntermittentQuiet is how long an intermittent host may stay quiet before
 // its silence is worth a look: long enough for a holiday, short enough that
@@ -31,18 +45,18 @@ const IntermittentQuiet = 30 * 24 * time.Hour
 // ValidPresence reports a presence value the hub understands.
 func ValidPresence(p string) bool {
 	switch p {
-	case PresenceAlwaysOn, PresenceIntermittent, PresenceLab:
+	case PresenceAlwaysOn, PresenceIntermittent, PresenceParked:
 		return true
 	}
 	return false
 }
 
 // QuietAllowance is how long this endpoint may stay quiet before it is
-// reported, given the allowance an always-on host of its kind gets. A lab
-// endpoint is never reported: it is off unless somebody is testing on it.
+// reported, given the allowance an always-on host of its kind gets. A parked
+// endpoint is never reported: it is off unless somebody is using it.
 func (ep Endpoint) QuietAllowance(alwaysOn time.Duration) (time.Duration, bool) {
 	switch ep.Presence {
-	case PresenceLab:
+	case PresenceParked:
 		return 0, false
 	case PresenceIntermittent:
 		return max(alwaysOn, IntermittentQuiet), true
@@ -52,8 +66,9 @@ func (ep Endpoint) QuietAllowance(alwaysOn time.Duration) (time.Duration, bool) 
 
 // SetEndpointPresence records how often an endpoint is expected to report.
 func (s *Store) SetEndpointPresence(id, presence string) error {
+	presence = NormalizePresence(presence)
 	if !ValidPresence(presence) {
-		return fmt.Errorf("presence is %s, %s or %s", PresenceAlwaysOn, PresenceIntermittent, PresenceLab)
+		return fmt.Errorf("presence is %s, %s or %s", PresenceAlwaysOn, PresenceIntermittent, PresenceParked)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

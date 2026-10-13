@@ -10,8 +10,8 @@ import (
 )
 
 // handleEndpointPresence records how often an endpoint is expected to report:
-// always on, intermittent (a laptop in use but often shut) or lab (a test
-// guest that is off between experiments). Administrator only, and audited,
+// always on, intermittent (a laptop in use but often shut) or parked (a
+// guest that is off unless in use; "lab" is still accepted for parked). Administrator only, and audited,
 // because it decides whether a host going dark is reported at all.
 func (s *Server) handleEndpointPresence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -28,13 +28,14 @@ func (s *Server) handleEndpointPresence(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req.EndpointID = strings.TrimSpace(req.EndpointID)
+	req.Presence = storage.NormalizePresence(req.Presence)
 	reason := strings.TrimSpace(req.Reason)
 	switch {
 	case req.EndpointID == "":
 		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
 		return
 	case !storage.ValidPresence(req.Presence):
-		writeJSONError(w, http.StatusBadRequest, "presence is always_on, intermittent or lab")
+		writeJSONError(w, http.StatusBadRequest, "presence is always_on, intermittent or parked")
 		return
 	case req.Presence != storage.PresenceAlwaysOn && reason == "":
 		writeJSONError(w, http.StatusBadRequest, "say why this host is not always on: a quiet allowance nobody can explain later is one nobody can remove")

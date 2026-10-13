@@ -719,6 +719,10 @@ func (s *Store) initSchema() error {
 			return err
 		}
 	}
+	// Presence "lab" was renamed parked (presence.go); idempotent.
+	if _, err := s.db.Exec("UPDATE endpoints SET presence = 'parked' WHERE presence = 'lab'"); err != nil {
+		return fmt.Errorf("presence rename failed: %w", err)
+	}
 
 	if err := s.initAuditHistorySchema(); err != nil {
 		return err

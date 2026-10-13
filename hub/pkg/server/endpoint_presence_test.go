@@ -82,10 +82,10 @@ func TestNightshiftFeedHonoursPresence(t *testing.T) {
 	if err := store.SetEndpointPresence("laptop", storage.PresenceIntermittent); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetEndpointPresence("guest", storage.PresenceLab); err != nil {
+	if err := store.SetEndpointPresence("guest", storage.PresenceParked); err != nil {
 		t.Fatal(err)
 	}
-	if status, msg, _ := agents(); status != ocsfStatusResolved || !strings.Contains(msg, "1 lab endpoint is not watched") {
+	if status, msg, _ := agents(); status != ocsfStatusResolved || !strings.Contains(msg, "1 parked endpoint is not watched") {
 		t.Fatalf("after presence: %d %q", status, msg)
 	}
 }

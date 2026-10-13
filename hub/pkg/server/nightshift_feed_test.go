@@ -207,6 +207,45 @@ func TestNightshiftFeedFollowsTheContract(t *testing.T) {
 	if hub := doc.Findings[get("ominull.hub")]; hub.StatusID != ocsfStatusResolved {
 		t.Fatalf("hub = %+v", hub)
 	}
+	// The inventory is an observation for Nightshift's asset registry: every
+	// enrolled endpoint (retired ones left out), never a tier.
+	inv := doc.Findings[get("ominull.inventory.endpoints")]
+	rows, _ := inv.Unmapped["endpoints"].([]any)
+	if inv.StatusID != ocsfStatusResolved || inv.Message != "4 endpoints enrolled, 1 reporting now" || len(rows) != 4 {
+		t.Fatalf("inventory = %q %v", inv.Message, inv.Unmapped)
+	}
+	if rows[0] != "laptop-asleep|work-laptop|always_on|workstation|0|offline" || inv.Unmapped["fields"] != "id|host|presence|role|isolated|status" {
+		t.Fatalf("inventory row = %v (the hub reports observations, never a tier)", rows[0])
+	}
+}
+
+func TestLegacyLabPresenceIsParked(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "guest", TenantID: "t-01", Hostname: "guest", RoleTag: "server", Status: "online", LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEndpointPresence("guest", "lab"); err != nil {
+		t.Fatal(err)
+	}
+	w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", issueFeedKey(t, srv))
+	var doc feedDoc
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range doc.Findings {
+		if f.FindingInfo.UID != "ominull.inventory.endpoints" {
+			continue
+		}
+		rows, _ := f.Unmapped["endpoints"].([]any)
+		if len(rows) != 1 || rows[0] != "guest|guest|parked|server|0|online" {
+			t.Fatalf("inventory = %v", f.Unmapped)
+		}
+		return
+	}
+	t.Fatal("no inventory finding")
 }
 
 func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
@@ -230,8 +269,8 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 			t.Fatalf("%s is not resolved on a quiet fleet: %q", f.FindingInfo.UID, f.Message)
 		}
 	}
-	if len(doc.Findings) != 6 {
-		t.Fatalf("findings = %d, want hub, anomalies, agent egress, agents, router collector, router certificate", len(doc.Findings))
+	if len(doc.Findings) != 7 {
+		t.Fatalf("findings = %d, want hub, anomalies, agent egress, agents, inventory, router collector, router certificate", len(doc.Findings))
 	}
 }
 

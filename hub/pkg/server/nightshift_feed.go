@@ -293,10 +293,63 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 			resources, unmapped), nil
 	}
 	msg := fmt.Sprintf("All %s reporting", plural(active, "agent is", "agents are"))
-	if lab := countPresence(presence, storage.PresenceLab); lab > 0 {
-		msg = fmt.Sprintf("Every watched agent is reporting; %s", plural(lab, "lab endpoint is not watched", "lab endpoints are not watched"))
+	if parked := countPresence(presence, storage.PresenceParked); parked > 0 {
+		msg = fmt.Sprintf("Every watched agent is reporting; %s", plural(parked, "parked endpoint is not watched", "parked endpoints are not watched"))
 	}
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg, nil, unmapped), nil
+}
+
+// feedInventoryMax bounds the inventory so it fits Nightshift's 4 KiB details
+// cap (one "id|host|presence|role|isolated|status" line per endpoint, about
+// 80 bytes as Nightshift measures it); feedOnlineWindow is how recently an agent must have reported to count
+// as running now.
+const (
+	feedInventoryMax = 30
+	feedOnlineWindow = 5 * time.Minute
+)
+
+// inventoryFinding reports every enrolled endpoint as the hub observes it:
+// presence, role tag, isolation and whether it reported in the last few
+// minutes. It is an observation for Nightshift's asset registry, which owns
+// importance tiers and reconciles them against this; the hub never reads or
+// sets a tier.
+func (s *Server) inventoryFinding(now time.Time) (feedFinding, error) {
+	list, err := s.store.ListEndpoints("")
+	if err != nil {
+		return feedFinding{}, err
+	}
+	rows := []string{}
+	online, total := 0, 0
+	for _, ep := range list {
+		if ep.Status == "retired" {
+			continue
+		}
+		total++
+		status := "offline"
+		if now.Sub(ep.LastSeenAt) < feedOnlineWindow {
+			status = "online"
+			online++
+		}
+		presence := ep.Presence
+		if presence == "" {
+			presence = storage.PresenceAlwaysOn
+		}
+		iso := "0"
+		if ep.IsIsolated {
+			iso = "1"
+		}
+		field := func(v string) string { return strings.ReplaceAll(v, "|", "/") }
+		rows = append(rows, strings.Join([]string{field(ep.ID), field(ep.Hostname), field(presence), field(ep.RoleTag), iso, status}, "|"))
+	}
+	sort.Strings(rows)
+	truncated := len(rows) > feedInventoryMax
+	if truncated {
+		rows = rows[:feedInventoryMax]
+	}
+	unmapped := map[string]any{"endpoints": rows, "fields": "id|host|presence|role|isolated|status", "total": total, "truncated": truncated}
+	msg := fmt.Sprintf("%s enrolled, %d reporting now", plural(total, "endpoint", "endpoints"), online)
+	return s.feedFinding(now, "ominull.inventory.endpoints", "Endpoint inventory", ocsfSevInformational, ocsfStatusResolved,
+		msg, nil, unmapped), nil
 }
 
 func countPresence(presence map[string]string, want string) int {
@@ -386,6 +439,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("agent_egress", []feedFinding{ae}, err)
 	g, err := s.agentFinding(now)
 	add("agents", []feedFinding{g}, err)
+	inv, err := s.inventoryFinding(now)
+	add("inventory", []feedFinding{inv}, err)
 	rf, err := s.routerFindings(now)
 	add("router", rf, err)
 	doc := map[string]any{
