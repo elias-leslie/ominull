@@ -74,6 +74,9 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		{"dns_events", "timestamp", policy.Events},
 		{"comm_profiles", "last_seen", policy.CommProfiles},
 		{"anomaly_alerts", "timestamp", policy.AnomalyAlerts},
+		// A resolution is never older than its finding, so pruning both on
+		// the same period never leaves a finding without its reason.
+		{"anomaly_resolutions", "resolved_at", policy.AnomalyAlerts},
 		{"audit_logs", "timestamp", policy.AuditLogs},
 	} {
 		if target.keep <= 0 {

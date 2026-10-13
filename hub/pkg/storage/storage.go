@@ -752,6 +752,9 @@ func (s *Store) initSchema() error {
 	if err := s.initDetectionTuningSchema(); err != nil {
 		return err
 	}
+	if err := s.initAnomalyResolutionSchema(); err != nil {
+		return err
+	}
 	if err := s.initLearningSchema(); err != nil {
 		return err
 	}

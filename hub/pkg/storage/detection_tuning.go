@@ -92,6 +92,23 @@ type DetectionTuning struct {
 	// ContainerCIDRs are explicit lateral-movement exemptions, never guessed from private address space.
 	ContainerCIDRs []string `json:"container_cidrs"`
 
+	// KnownWorkloads name the long-running programs whose outbound
+	// conversations are their job, each with the reason it is known.
+	//
+	// An interpreter's base name says almost nothing: on a developer machine
+	// every service, test run and one-off script is "python3.13", so vouching
+	// for "python3.13 to Google" would vouch for all of them, including the
+	// script a prompt-injected agent writes. A workload is the interpreter
+	// together with the program it runs (see detector.WorkloadOf), so a market
+	// data worker or a web-research crawler can be named without naming every
+	// other python on the host. Inline code (-c, -e) is never a workload.
+	//
+	// A known workload silences only the novelty findings: a new destination,
+	// an interpreter reaching out, activity off-hours. Beaconing, upload volume
+	// and threat-intelligence matches still judge it, so a known crawler that
+	// starts sending data out is still reported.
+	KnownWorkloads []KnownWorkload `json:"known_workloads"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -255,6 +272,11 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 		}
 		t.ContainerCIDRs[i] = p.Masked().String()
 	}
+	for _, k := range t.KnownWorkloads {
+		if err := k.validate(); err != nil {
+			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
+		}
+	}
 	blob, err := json.Marshal(t)
 	if err != nil {
 		return t, err
@@ -271,6 +293,18 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 	}
 	t.UpdatedAt = now
 	t.UpdatedBy = by
+	return t, nil
+}
+
+// PrepareDetectionTuning normalises and checks a draft without saving it, so a
+// replay judges exactly what a save would store.
+func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
+	t = t.normalised()
+	for _, k := range t.KnownWorkloads {
+		if err := k.validate(); err != nil {
+			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
+		}
+	}
 	return t, nil
 }
 
@@ -320,6 +354,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.QuietClients = tidyList(t.QuietClients)
 	t.QuietPairs = tidyPairs(t.QuietPairs)
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
+	t.KnownWorkloads = tidyWorkloads(t.KnownWorkloads)
 	return t
 }
 
@@ -474,6 +509,127 @@ func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
 	}
 
 	return t.IsQuietOrg(org) && t.IsQuietClient(procBase)
+}
+
+// KnownWorkload is one program whose outbound conversations are its job.
+//
+// Workload is a pattern over detector.WorkloadOf's output, where "*" stands
+// for any run of characters within one path segment (never a "/"), so a
+// release directory named by its hash can be matched without matching every
+// directory. Owner is a substring of the network owner, or "*" for a program
+// whose destinations are arbitrary by design, such as a web crawler. Reason is
+// required: an exclusion nobody can explain later is one nobody can remove.
+type KnownWorkload struct {
+	Workload string `json:"workload"`
+	Owner    string `json:"owner"`
+	Reason   string `json:"reason"`
+}
+
+// AnyOwner is the Owner of a workload known to reach arbitrary destinations.
+const AnyOwner = "*"
+
+func (k KnownWorkload) validate() error {
+	if strings.Trim(k.Workload, "* ") == "" {
+		return fmt.Errorf("known workload %q names no program", k.Workload)
+	}
+	if k.Owner == "" {
+		return fmt.Errorf("known workload %q needs an owner (a network name, or %q)", k.Workload, AnyOwner)
+	}
+	if strings.TrimSpace(k.Reason) == "" {
+		return fmt.Errorf("known workload %q needs a reason", k.Workload)
+	}
+	if isInlineWorkload(k.Workload) {
+		return fmt.Errorf("known workload %q is inline code, which is never a known program", k.Workload)
+	}
+	return nil
+}
+
+// isInlineWorkload reports a workload that runs code given on its command
+// line. That is what an injected one-liner looks like, so it is never known.
+func isInlineWorkload(w string) bool {
+	return strings.HasSuffix(w, " -c") || strings.HasSuffix(w, " -e")
+}
+
+func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
+	seen := map[string]bool{}
+	out := make([]KnownWorkload, 0, len(in))
+	for _, k := range in {
+		k.Workload = strings.Join(strings.Fields(k.Workload), " ")
+		k.Owner = strings.ToLower(strings.TrimSpace(k.Owner))
+		k.Reason = strings.TrimSpace(k.Reason)
+		key := k.Workload + "@" + k.Owner
+		if k.Workload == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Workload != out[j].Workload {
+			return out[i].Workload < out[j].Workload
+		}
+		return out[i].Owner < out[j].Owner
+	})
+	return out
+}
+
+// matchWorkload matches pattern against workload, "*" spanning any run of
+// characters other than "/".
+func matchWorkload(pattern, workload string) bool {
+	if pattern == "" {
+		return workload == ""
+	}
+	if pattern[0] == '*' {
+		for i := 0; i <= len(workload); i++ {
+			if matchWorkload(pattern[1:], workload[i:]) {
+				return true
+			}
+			if i < len(workload) && workload[i] == '/' {
+				return false
+			}
+		}
+		return false
+	}
+	return workload != "" && pattern[0] == workload[0] && matchWorkload(pattern[1:], workload[1:])
+}
+
+// KnownWorkloadFor returns the entry that makes this conversation expected:
+// this workload, talking to this owner. A named owner never covers rented
+// compute or an unnamed address, for the reason IsVouchedPair gives; only an
+// entry whose owner is AnyOwner does, because its destinations are arbitrary
+// by design.
+func (t DetectionTuning) KnownWorkloadFor(workload, org, tenancy string) (KnownWorkload, bool) {
+	if workload == "" || isInlineWorkload(workload) {
+		return KnownWorkload{}, false
+	}
+	org = strings.ToLower(strings.TrimSpace(org))
+	for _, k := range t.KnownWorkloads {
+		if !matchWorkload(k.Workload, workload) {
+			continue
+		}
+		if k.Owner == AnyOwner {
+			return k, true
+		}
+		if org != "" && strings.TrimSpace(tenancy) != TenancyHosting && strings.Contains(org, k.Owner) {
+			return k, true
+		}
+	}
+	return KnownWorkload{}, false
+}
+
+// KnownService returns any entry naming this workload, whatever its owner. A
+// known service runs around the clock, so the hour it talks is not a finding;
+// who it talks to still is, through KnownWorkloadFor.
+func (t DetectionTuning) KnownService(workload string) (KnownWorkload, bool) {
+	if workload == "" || isInlineWorkload(workload) {
+		return KnownWorkload{}, false
+	}
+	for _, k := range t.KnownWorkloads {
+		if matchWorkload(k.Workload, workload) {
+			return k, true
+		}
+	}
+	return KnownWorkload{}, false
 }
 
 // OffHoursLabel renders the window the way it is shown next to an alert.

@@ -1,0 +1,147 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"ominull/hub/pkg/storage"
+)
+
+func replayRequest(srv *Server, method, path, key string, body any) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("X-API-Key", key)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// seedNpmFindings records n npm findings and one curl finding an hour ago.
+func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
+	t.Helper()
+	at := time.Now().UTC().Add(-time.Hour)
+	ev := func(cmd string) string {
+		return fmt.Sprintf(`{"command_line":%q,"destination_owner":"Cloudflare, Inc.","destination_tenancy":"shared-cdn"}`, cmd)
+	}
+	for i := 0; i < n; i++ {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{
+			ID: fmt.Sprintf("npm-%d", i), TenantID: "default", EndpointID: "e1", AnomalyType: "NOVEL_PROCESS_EGRESS",
+			Severity: "MEDIUM", Title: "npm", ProcessPath: "/opt/node/bin/node", Evidence: ev("npm ci"), Timestamp: at.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CreateAnomalyAlert(storage.AnomalyAlert{
+		ID: "curl-1", TenantID: "default", EndpointID: "e1", AnomalyType: "NOVEL_PROCESS_EGRESS",
+		Severity: "MEDIUM", Title: "curl", ProcessPath: "/usr/bin/curl", Evidence: ev("curl https://x"), Timestamp: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+var npmKnown = []storage.KnownWorkload{{Workload: "node npm *", Owner: "cloudflare", Reason: "npm registry"}}
+
+func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedNpmFindings(t, store, 4)
+
+	w := replayRequest(srv, http.MethodGet, "/api/v1/detection/tuning/replay", "mock_admin_token", nil)
+	var got struct{ Before, After int }
+	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Before != 5 || got.After != 5 {
+		t.Fatalf("saved tuning replay = %d %s", w.Code, w.Body.String())
+	}
+	draft := store.GetDetectionTuning()
+	draft.KnownWorkloads = npmKnown
+	w = replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning/replay", "mock_admin_token", map[string]any{"tuning": draft})
+	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Before != 5 || got.After != 1 {
+		t.Fatalf("draft replay = %d %s", w.Code, w.Body.String())
+	}
+	if len(store.GetDetectionTuning().KnownWorkloads) != 0 {
+		t.Fatal("a replay must not save the draft")
+	}
+	draft.KnownWorkloads = []storage.KnownWorkload{{Workload: "node npm *", Owner: "cloudflare"}}
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning/replay", "mock_admin_token", map[string]any{"tuning": draft}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a draft with an unexplained exclusion was replayed: %d", w.Code)
+	}
+	if w := replayRequest(srv, http.MethodGet, "/api/v1/detection/tuning/replay?from=2026-01-01&to=2026-12-31", "mock_admin_token", nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("a window over the ceiling was accepted: %d", w.Code)
+	}
+}
+
+func TestResolvingFindingsRecordsWhy(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedNpmFindings(t, store, 3)
+	tu := store.GetDetectionTuning()
+	tu.KnownWorkloads = npmKnown
+	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_tenant_token", map[string]any{"covered": true}); w.Code != http.StatusForbidden {
+		t.Fatalf("a tenant key resolved findings in bulk: %d", w.Code)
+	}
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", map[string]any{"ids": []string{"curl-1"}}); w.Code != http.StatusBadRequest {
+		t.Fatalf("findings were resolved without a reason: %d", w.Code)
+	}
+
+	w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", map[string]any{"covered": true})
+	var got struct {
+		Resolved int            `json:"resolved"`
+		ByReason map[string]int `json:"by_reason"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Resolved != 3 {
+		t.Fatalf("covered resolve = %d %s", w.Code, w.Body.String())
+	}
+	if reason, _, _, ok := store.AnomalyResolution("npm-0"); !ok || reason != "covered by tuning: known workload: npm registry" {
+		t.Fatalf("resolution reason = %q %v", reason, ok)
+	}
+	if a, _ := store.GetAnomalyAlert("curl-1"); a.Acknowledged {
+		t.Fatal("a finding the tuning does not cover was resolved")
+	}
+
+	w = replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", map[string]any{"ids": []string{"curl-1"}, "reason": "agent research fetch, triaged"})
+	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Resolved != 1 {
+		t.Fatalf("resolve by id = %d %s", w.Code, w.Body.String())
+	}
+	if a, _ := store.GetAnomalyAlert("curl-1"); !a.Acknowledged {
+		t.Fatal("the named finding was not resolved")
+	}
+}
+
+// The console's tuning sheet posts only the fields it shows; saving it must
+// not erase the known workloads it does not show.
+func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	tu := store.GetDetectionTuning()
+	tu.KnownWorkloads = npmKnown
+	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"off_hours_start": 23}); w.Code != http.StatusOK {
+		t.Fatalf("sheet-shaped save = %d %s", w.Code, w.Body.String())
+	}
+	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 1 || got.OffHoursStart != 23 {
+		t.Fatalf("after a sheet save: %d known workloads, start %d", len(got.KnownWorkloads), got.OffHoursStart)
+	}
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"known_workloads": []any{}}); w.Code != http.StatusOK {
+		t.Fatalf("explicit clear = %d", w.Code)
+	}
+	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 0 {
+		t.Fatal("an explicit empty list should clear the known workloads")
+	}
+}

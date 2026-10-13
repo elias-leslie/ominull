@@ -477,11 +477,23 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// absent. The beacon and volume detectors below ask this instead.
 	isVouched := cfg.IsVouchedPair(procName, geo.Org, geo.Tenancy)
 
+	// A known workload is the finer answer for the novelty detectors: this
+	// program - an interpreter together with what it runs - talking to this
+	// owner is its job. It never reaches the beacon and volume detectors.
+	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
+	_, isKnownConversation := cfg.KnownWorkloadFor(workload, geo.Org, geo.Tenancy)
+	_, isKnownService := cfg.KnownService(workload)
+
 	// Off-hours activity triggers ONLY for interactive shells / script
 	// interpreters, NEVER for standard OS system daemons.
-	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !warming &&
+	//
+	// A known service runs around the clock, so the hour is not news for it.
+	// The key is the counterparty, not the address, for the reason the
+	// first-seen detector below gives: one conversation through a CDN reaches
+	// a new edge address every few minutes, and each one used to be a new HIGH.
+	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !isKnownService && !warming &&
 		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
-		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, ev.DstIP, procName)
+		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, procName, counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			alert := storage.Alert{
 				ID:          uuid.New().String(),
@@ -769,7 +781,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		firstSeen = e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP)
 	}
 	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedDst && !isTrustedSys && firstSeen {
+		!isTrustedDst && !isTrustedSys && !isKnownConversation && firstSeen {
 		// Keyed on the network owner, not the address. A destination is
 		// first-seen exactly once, so a per-address key could never repeat and
 		// the cooldown never suppressed anything - which is how this detector
@@ -973,12 +985,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// first-seen period, and takes its severity from what is actually known
 	// about the destination.
 	if isInteractiveShell && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isVouched && !warming {
-		owner := strings.ToLower(strings.TrimSpace(geo.Org))
-		if owner == "" {
-			owner = "unattributed"
-		}
-		alertKey := fmt.Sprintf("shell:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), owner)
+		!isTrustedSys && !isVouched && !isKnownConversation && !warming {
+		alertKey := fmt.Sprintf("shell:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			// Rented compute and unnamed networks are where an interpreter
 			// reaching out is worth waking someone for. A named vendor or edge
@@ -1015,7 +1023,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    severity,
 				Title:       title,
 				Description: description,
-				Details:     fmt.Sprintf("Interpreter: %s | Target: %s:%d | %s | Command: %s", ev.ProcessPath, ev.DstIP, ev.DstPort, describeOwner(geo), firstLine(ev.CommandLine)),
+				Details:     fmt.Sprintf("Interpreter: %s | Target: %s:%d | %s | Workload: %s | Command: %s", ev.ProcessPath, ev.DstIP, ev.DstPort, describeOwner(geo), workload, firstLine(ev.CommandLine)),
 				ProcessPath: ev.ProcessPath,
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
@@ -1097,6 +1105,15 @@ func isInterpreterOrShell(procName string) bool {
 		}
 	}
 	return false
+}
+
+// counterpartyKey is the network owner a cooldown is keyed on, or
+// "unattributed" when nothing has named it.
+func counterpartyKey(geo threatintel.GeoRecord) string {
+	if owner := strings.ToLower(strings.TrimSpace(geo.Org)); owner != "" {
+		return owner
+	}
+	return "unattributed"
 }
 
 // isVersionSuffix accepts what follows an interpreter's name in a versioned

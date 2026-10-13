@@ -196,6 +196,8 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
+| `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
+| `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises |
 | `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint |
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
@@ -211,6 +213,19 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/integrations/nightshift/key` | POST | admin: issue the Nightshift feed key, shown once and kept as a hash; reissuing revokes |
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
+
+Known workloads (`known_workloads` in the tuning) name a program whose outbound
+conversations are its job, as `{workload, owner, reason}`. A workload is the
+executable name for most programs and, for an interpreter, the interpreter plus
+what it runs (`python3.13 /srv/app/.venv/bin/python -m app.worker`, `node npm
+ci`); `*` in a pattern spans one path segment. Owner is a substring of the
+network owner, which never covers rented compute or an unnamed address, or `*`
+for a program whose destinations are arbitrary by design. A reason is required
+and inline code (`-c`, `-e`) is refused. A known workload silences only the
+novelty findings (new destination, interpreter egress, off-hours); beaconing,
+upload volume and threat-intelligence matches still judge it. Off-hours
+findings fold to one per program and counterparty per first-seen cooldown.
+Check a change with the replay route before saving it.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses

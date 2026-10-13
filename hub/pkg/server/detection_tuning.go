@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -24,12 +25,24 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 		s.writeTuning(w, s.store.GetDetectionTuning())
 
 	case http.MethodPost, http.MethodPut:
-		var req storage.DetectionTuning
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		var req storage.DetectionTuning
+		var present map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_ = json.Unmarshal(raw, &present)
 		before := s.store.GetDetectionTuning()
+		// The console's tuning sheet posts the fields it shows. Known workloads
+		// are not among them, and a save from the sheet must not erase them.
+		if _, ok := present["known_workloads"]; !ok {
+			req.KnownWorkloads = before.KnownWorkloads
+		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
 			by = "admin"
@@ -111,6 +124,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("quiet networks", len(before.QuietOrgs), len(after.QuietOrgs))
 	add("expected clients", len(before.QuietClients), len(after.QuietClients))
 	add("expected pairs", len(before.QuietPairs), len(after.QuietPairs))
+	add("known workloads", len(before.KnownWorkloads), len(after.KnownWorkloads))
 	add("container networks", strings.Join(before.ContainerCIDRs, ","), strings.Join(after.ContainerCIDRs, ","))
 	add("silence threshold (minutes)", before.SilenceAfterMinutes, after.SilenceAfterMinutes)
 	add("silence detection", before.SilenceOn, after.SilenceOn)
