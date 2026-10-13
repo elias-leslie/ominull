@@ -46,6 +46,9 @@ type Server struct {
 	// network: an accepted sweep used to go out to whatever the test subnet
 	// routed to, and the hub's own agent reported it as a lateral port sweep.
 	startScan func(subnet string, profile scanner.ScanProfile) (string, error)
+	// startSweeps starts the scheduled sweeps of the hub's own subnets, for
+	// the same reason: a test that starts the hub must not start them.
+	startSweeps func()
 	adminKey  string
 	binaryDir string
 	hubURL    string
@@ -399,6 +402,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		setupSessions:   map[string]setupSession{},
 	}
 	s.startScan = s.scanner.StartScan
+	s.startSweeps = s.scanner.StartBackground
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
 			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
@@ -673,7 +677,7 @@ func (s *Server) Start(addr string) error {
 	// themselves are updated on.
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
-	s.scanner.StartBackground()
+	s.startSweeps()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
