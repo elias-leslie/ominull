@@ -216,16 +216,51 @@ tenant-scoped. Agent routes use a unique device credential.
 
 Known workloads (`known_workloads` in the tuning) name a program whose outbound
 conversations are its job, as `{workload, owner, reason}`. A workload is the
-executable name for most programs and, for an interpreter, the interpreter plus
-what it runs (`python3.13 /srv/app/.venv/bin/python -m app.worker`, `node npm
-ci`); `*` in a pattern spans one path segment. Owner is a substring of the
-network owner, which never covers rented compute or an unnamed address, or `*`
-for a program whose destinations are arbitrary by design. A reason is required
-and inline code (`-c`, `-e`) is refused. A known workload silences only the
-novelty findings (new destination, interpreter egress, off-hours); beaconing,
-upload volume and threat-intelligence matches still judge it. Off-hours
-findings fold to one per program and counterparty per first-seen cooldown.
-Check a change with the replay route before saving it.
+lower-cased executable path for most programs (`/opt/google/chrome/chrome`)
+and, for an interpreter, the interpreter plus what it runs (`python3.13
+/srv/app/.venv/bin/python -m app.worker`). `*` in a pattern spans part of one
+path segment of one argument, never a `/` or a space; a pattern may not start
+with `*`, and an interpreter pattern must end with the program it runs, spelled
+out: an absolute script path, `-m module` or `-jar file` (a name from argv[0]
+alone, such as `node npm ci`, is refused). Code that is not a named program -
+inline (`-c`, `-e`, `--eval`), from stdin or a `/dev/fd` pipe, preloaded
+(`node -r`, `--import`, `perl -M`, `ruby -r`) - and any option the parser does
+not know make the workload `<interpreter> -c`, which is never known. The
+command line arrives as one string and is split on spaces, so an argument that
+itself contains a space can shift what is read as the program; like the
+command line being the process's own account of itself, that is an accepted
+limit of the identity, not proof. Owner is a substring of the network owner, which never
+covers rented compute or an unnamed address, or `*` for a program whose
+destinations are arbitrary by design. For an installed program `*` covers
+every destination; for an interpreter it stops at rented compute and unnamed
+addresses unless the entry sets `include_rented`, because an interpreter's
+workload is read from its own command line and a process can imitate one. A
+reason is required. A known workload silences only the novelty findings (new
+destination, interpreter egress) and, for an owner-`*` entry, off-hours;
+beaconing, upload volume and threat-intelligence matches still judge it.
+Novelty and off-hours findings fold to one per program and counterparty per
+first-seen cooldown. Check a change with the replay route before saving it:
+`cut` is the best case, and `worst_cut` allows for findings that a silenced
+one kept folded live and that were therefore never recorded (`may_surface`).
+
+Agent egress (`agent_runtimes`, `agent_*` in the tuning) keeps a baseline per
+AI agent runtime on each endpoint, matched by executable (Claude Code's native
+build runs as its version number under `~/.local/share/claude/versions/`). For
+the first `agent_baseline_days` the runtime's destinations are learned; after
+that a registrable domain it has never reached (on a CDN or rented compute,
+the domain together with the network owner, because the hub borrows names
+from the resolver and one address there serves many sites) is
+`AGENT_NEW_DESTINATION`
+(HIGH on rented compute, a bare address, or a first contact over 1 MB), an hour
+of uploads above `max(agent_upload_floor_mb, agent_upload_factor x` its
+14-day 95th-percentile hour`)` is `AGENT_UPLOAD_VOLUME`, and a runtime or an
+interpreter resolving names through public DNS, DoT or DoH is
+`AGENT_DNS_BYPASS`. When each runtime's baseline began is kept apart from its
+destinations and is never pruned, so a runtime idle past retention does not
+learn silently again. Registrable domains follow the whole public suffix list,
+so each tenant of a shared host (`x.a.run.app`) is its own destination. Tools
+an agent spawns are judged as themselves: the hub sees a parent's instance id,
+not its executable.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
@@ -234,7 +269,7 @@ the profile API and returns device identity in the protected response.
 The Nightshift feed key opens only the findings route and is read-only. The
 document is Nightshift's contract (an OCSF Detection Finding subset, defined in
 Nightshift's `docs/ingest.md`). It carries counts and states: open anomalies in
-the last 24 hours, server agents quiet for 30 minutes or more, workstation agents
+the last 24 hours, agent egress findings at their worst severity, server agents quiet for 30 minutes or more, workstation agents
 quiet for over 7 days, router collector freshness, and router certificate expiry.
 Device names appear only in structured fields, never in messages.
 

@@ -109,6 +109,15 @@ type DetectionTuning struct {
 	// starts sending data out is still reported.
 	KnownWorkloads []KnownWorkload `json:"known_workloads"`
 
+	// AgentRuntimes name the AI agent runtimes whose egress is judged against
+	// their own baselines (detector/agent_egress.go): where each has gone
+	// before, and how much it sends in an ordinary hour.
+	AgentEgressOn      bool           `json:"agent_egress_enabled"`
+	AgentRuntimes      []AgentRuntime `json:"agent_runtimes"`
+	AgentBaselineDays  int            `json:"agent_baseline_days"`
+	AgentUploadFloorMB int            `json:"agent_upload_floor_mb"`
+	AgentUploadFactor  int            `json:"agent_upload_factor"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -135,6 +144,12 @@ func defaultDetectionTuning() DetectionTuning {
 		OffHoursEnd:   5,
 		OffHoursZone:  "Local",
 		OffHoursOn:    true,
+
+		AgentEgressOn:      true,
+		AgentRuntimes:      defaultAgentRuntimes(),
+		AgentBaselineDays:  7,
+		AgentUploadFloorMB: 100,
+		AgentUploadFactor:  5,
 
 		BeaconOn:          true,
 		BeaconMinSamples:  12,
@@ -355,6 +370,10 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.QuietPairs = tidyPairs(t.QuietPairs)
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
 	t.KnownWorkloads = tidyWorkloads(t.KnownWorkloads)
+	t.AgentRuntimes = tidyAgentRuntimes(t.AgentRuntimes)
+	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
+	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
+	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)
 	return t
 }
 
@@ -514,26 +533,64 @@ func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
 // KnownWorkload is one program whose outbound conversations are its job.
 //
 // Workload is a pattern over detector.WorkloadOf's output, where "*" stands
-// for any run of characters within one path segment (never a "/"), so a
-// release directory named by its hash can be matched without matching every
-// directory. Owner is a substring of the network owner, or "*" for a program
-// whose destinations are arbitrary by design, such as a web crawler. Reason is
-// required: an exclusion nobody can explain later is one nobody can remove.
+// for any run of characters within one path segment of one argument (never a
+// "/" or a space), so a release directory named by its hash can be matched
+// without matching every directory. Owner is a substring of the network
+// owner, or "*" for a program whose destinations are arbitrary by design,
+// such as a web crawler. Reason is required: an exclusion nobody can explain
+// later is one nobody can remove.
+//
+// IncludeRented widens an interpreter's "*" to rented compute and unnamed
+// addresses, which it otherwise never covers (see KnownWorkloadFor). It is
+// for a program whose job is those destinations - a crawler fetching sites
+// hosted on cloud machines, a worker reading data providers with no
+// registered name - and its reason should say so.
 type KnownWorkload struct {
-	Workload string `json:"workload"`
-	Owner    string `json:"owner"`
-	Reason   string `json:"reason"`
+	Workload      string `json:"workload"`
+	Owner         string `json:"owner"`
+	Reason        string `json:"reason"`
+	IncludeRented bool   `json:"include_rented,omitempty"`
 }
 
 // AnyOwner is the Owner of a workload known to reach arbitrary destinations.
 const AnyOwner = "*"
 
 func (k KnownWorkload) validate() error {
-	if strings.Trim(k.Workload, "* ") == "" {
+	if strings.Trim(k.Workload, "* ") == "" || strings.HasPrefix(k.Workload, "*") {
 		return fmt.Errorf("known workload %q names no program", k.Workload)
+	}
+	// An interpreter is only a known program together with what it runs:
+	// "python3.13 *" would be every python on the host, "python3 -m *" every
+	// module, and "node npm ci" is named only by argv[0], which the process
+	// chooses (exec -a). The program must be a module after -m, a jar after
+	// -jar, or a script by its absolute path, and must be spelled out.
+	if !isPathWorkload(k.Workload) {
+		tokens := strings.Fields(k.Workload)
+		if len(tokens) < 2 {
+			return fmt.Errorf("known workload %q is an interpreter without the program it runs", k.Workload)
+		}
+		prog := tokens[len(tokens)-1]
+		switch flag := ""; {
+		case len(tokens) >= 3 && tokens[len(tokens)-2] == "-m":
+			flag = "-m"
+			if strings.Contains(prog, "*") {
+				return fmt.Errorf("known workload %q: a module after %s is named exactly", k.Workload, flag)
+			}
+		case len(tokens) >= 3 && tokens[len(tokens)-2] == "-jar":
+			if err := literalPath(prog); err != nil {
+				return fmt.Errorf("known workload %q: the jar %v", k.Workload, err)
+			}
+		default:
+			if err := literalPath(prog); err != nil {
+				return fmt.Errorf("known workload %q must end with the program it runs (an absolute script path, -m module or -jar file): the script %v", k.Workload, err)
+			}
+		}
 	}
 	if k.Owner == "" {
 		return fmt.Errorf("known workload %q needs an owner (a network name, or %q)", k.Workload, AnyOwner)
+	}
+	if k.IncludeRented && k.Owner != AnyOwner {
+		return fmt.Errorf("known workload %q: include_rented widens only the owner %q; a named owner never covers rented compute", k.Workload, AnyOwner)
 	}
 	if strings.TrimSpace(k.Reason) == "" {
 		return fmt.Errorf("known workload %q needs a reason", k.Workload)
@@ -545,9 +602,32 @@ func (k KnownWorkload) validate() error {
 }
 
 // isInlineWorkload reports a workload that runs code given on its command
-// line. That is what an injected one-liner looks like, so it is never known.
+// line or on stdin (detector.WorkloadOf spells both "-c"). That is what an
+// injected one-liner looks like, so it is never known.
 func isInlineWorkload(w string) bool {
-	return strings.HasSuffix(w, " -c") || strings.HasSuffix(w, " -e")
+	return strings.HasSuffix(w, " -c") || strings.HasSuffix(w, " -e") || strings.HasSuffix(w, " -")
+}
+
+// literalPath accepts an absolute path whose first directory and file name are
+// spelled out, so a wildcard can stand for a release directory but not for
+// "any script three levels deep".
+func literalPath(p string) error {
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	switch {
+	case !strings.HasPrefix(p, "/"):
+		return fmt.Errorf("%q is not an absolute path", p)
+	case len(segs) < 2 || strings.Contains(segs[0], "*"):
+		return fmt.Errorf("%q does not name its first directory", p)
+	case strings.Trim(segs[len(segs)-1], "*.") == "" || strings.HasPrefix(segs[len(segs)-1], "*"):
+		return fmt.Errorf("%q leaves its file name to a wildcard", p)
+	}
+	return nil
+}
+
+// isPathWorkload reports a workload that is an executable's path rather than
+// an interpreter and what it runs.
+func isPathWorkload(w string) bool {
+	return strings.HasPrefix(w, "/") || (len(w) > 2 && w[1] == ':' && w[2] == '/')
 }
 
 func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
@@ -555,9 +635,12 @@ func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
 	out := make([]KnownWorkload, 0, len(in))
 	for _, k := range in {
 		k.Workload = strings.Join(strings.Fields(k.Workload), " ")
+		if isPathWorkload(k.Workload) {
+			k.Workload = strings.ToLower(k.Workload) // detector.WorkloadOf lower-cases paths
+		}
 		k.Owner = strings.ToLower(strings.TrimSpace(k.Owner))
 		k.Reason = strings.TrimSpace(k.Reason)
-		key := k.Workload + "@" + k.Owner
+		key := fmt.Sprintf("%s@%s@%v", k.Workload, k.Owner, k.IncludeRented)
 		if k.Workload == "" || seen[key] {
 			continue
 		}
@@ -568,13 +651,16 @@ func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
 		if out[i].Workload != out[j].Workload {
 			return out[i].Workload < out[j].Workload
 		}
-		return out[i].Owner < out[j].Owner
+		if out[i].Owner != out[j].Owner {
+			return out[i].Owner < out[j].Owner
+		}
+		return !out[i].IncludeRented && out[j].IncludeRented
 	})
 	return out
 }
 
 // matchWorkload matches pattern against workload, "*" spanning any run of
-// characters other than "/".
+// characters within one path segment of one argument: never a "/" or a space.
 func matchWorkload(pattern, workload string) bool {
 	if pattern == "" {
 		return workload == ""
@@ -584,7 +670,7 @@ func matchWorkload(pattern, workload string) bool {
 			if matchWorkload(pattern[1:], workload[i:]) {
 				return true
 			}
-			if i < len(workload) && workload[i] == '/' {
+			if i < len(workload) && (workload[i] == '/' || workload[i] == ' ') {
 				return false
 			}
 		}
@@ -594,38 +680,55 @@ func matchWorkload(pattern, workload string) bool {
 }
 
 // KnownWorkloadFor returns the entry that makes this conversation expected:
-// this workload, talking to this owner. A named owner never covers rented
-// compute or an unnamed address, for the reason IsVouchedPair gives; only an
-// entry whose owner is AnyOwner does, because its destinations are arbitrary
-// by design.
+// this workload, talking to this owner.
+//
+// A named owner never covers rented compute or an unnamed address, for the
+// reason IsVouchedPair gives. AnyOwner covers them only for an installed
+// program known by its path. An interpreter's workload is read from its own
+// command line, which any process can imitate, so for an interpreter AnyOwner
+// means any named network that is not rented compute - which is where a
+// command-and-control server would be - unless the entry says IncludeRented.
+// Either way only the novelty detectors are silenced: a disguised process
+// that beacons or moves volume is still judged by the detectors that see it.
 func (t DetectionTuning) KnownWorkloadFor(workload, org, tenancy string) (KnownWorkload, bool) {
 	if workload == "" || isInlineWorkload(workload) {
 		return KnownWorkload{}, false
 	}
 	org = strings.ToLower(strings.TrimSpace(org))
+	named := org != "" && strings.TrimSpace(tenancy) != TenancyHosting
 	for _, k := range t.KnownWorkloads {
 		if !matchWorkload(k.Workload, workload) {
 			continue
 		}
-		if k.Owner == AnyOwner {
+		if k.Owner == AnyOwner && k.coversAnywhere(workload, named) {
 			return k, true
 		}
-		if org != "" && strings.TrimSpace(tenancy) != TenancyHosting && strings.Contains(org, k.Owner) {
+		if named && strings.Contains(org, k.Owner) {
 			return k, true
 		}
 	}
 	return KnownWorkload{}, false
 }
 
-// KnownService returns any entry naming this workload, whatever its owner. A
-// known service runs around the clock, so the hour it talks is not a finding;
-// who it talks to still is, through KnownWorkloadFor.
-func (t DetectionTuning) KnownService(workload string) (KnownWorkload, bool) {
+// coversAnywhere is the reach of an AnyOwner entry: every destination for an
+// installed program, named networks only for an interpreter unless the entry
+// says IncludeRented.
+func (k KnownWorkload) coversAnywhere(workload string, named bool) bool {
+	return named || isPathWorkload(workload) || k.IncludeRented
+}
+
+// KnownService returns the entry naming this workload as a service: one known
+// for any owner, judged with the same reach as KnownWorkloadFor. A service
+// runs around the clock, so the hour it talks is not a finding; a build tool
+// known for one registry is not a service, and a build at three in the
+// morning is still news.
+func (t DetectionTuning) KnownService(workload, org, tenancy string) (KnownWorkload, bool) {
 	if workload == "" || isInlineWorkload(workload) {
 		return KnownWorkload{}, false
 	}
+	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
 	for _, k := range t.KnownWorkloads {
-		if matchWorkload(k.Workload, workload) {
+		if k.Owner == AnyOwner && matchWorkload(k.Workload, workload) && k.coversAnywhere(workload, named) {
 			return k, true
 		}
 	}

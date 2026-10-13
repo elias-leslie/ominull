@@ -30,18 +30,28 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		var req storage.DetectionTuning
-		var present map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &req); err != nil {
+		// The console's tuning sheet posts the fields it shows. Known workloads
+		// and agent runtimes are not among them, and a save from the sheet must
+		// not erase them: a list the request leaves out keeps its saved value.
+		// The shadowing pointers decode with the same case-insensitive key
+		// matching as every other field, so "Known_Workloads" is not "absent".
+		var patch struct {
+			storage.DetectionTuning
+			KnownWorkloads *[]storage.KnownWorkload `json:"known_workloads"`
+			AgentRuntimes  *[]storage.AgentRuntime  `json:"agent_runtimes"`
+		}
+		if err := json.Unmarshal(raw, &patch); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		_ = json.Unmarshal(raw, &present)
 		before := s.store.GetDetectionTuning()
-		// The console's tuning sheet posts the fields it shows. Known workloads
-		// are not among them, and a save from the sheet must not erase them.
-		if _, ok := present["known_workloads"]; !ok {
-			req.KnownWorkloads = before.KnownWorkloads
+		req := patch.DetectionTuning
+		req.KnownWorkloads, req.AgentRuntimes = before.KnownWorkloads, before.AgentRuntimes
+		if patch.KnownWorkloads != nil {
+			req.KnownWorkloads = *patch.KnownWorkloads
+		}
+		if patch.AgentRuntimes != nil {
+			req.AgentRuntimes = *patch.AgentRuntimes
 		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
@@ -124,7 +134,54 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("quiet networks", len(before.QuietOrgs), len(after.QuietOrgs))
 	add("expected clients", len(before.QuietClients), len(after.QuietClients))
 	add("expected pairs", len(before.QuietPairs), len(after.QuietPairs))
-	add("known workloads", len(before.KnownWorkloads), len(after.KnownWorkloads))
+	listDelta := func(name string, a, b []string) {
+		had := map[string]bool{}
+		for _, x := range a {
+			had[x] = true
+		}
+		has := map[string]bool{}
+		for _, x := range b {
+			has[x] = true
+		}
+		var added, removed []string
+		for _, x := range b {
+			if !had[x] {
+				added = append(added, "+"+x)
+			}
+		}
+		for _, x := range a {
+			if !has[x] {
+				removed = append(removed, "-"+x)
+			}
+		}
+		if d := append(added, removed...); len(d) > 0 {
+			parts = append(parts, name+" ("+strings.Join(d, " ")+")")
+		}
+	}
+	workloads := func(t storage.DetectionTuning) []string {
+		out := make([]string, 0, len(t.KnownWorkloads))
+		for _, k := range t.KnownWorkloads {
+			w := k.Workload + "@" + k.Owner
+			if k.IncludeRented {
+				w += "+rented"
+			}
+			out = append(out, w)
+		}
+		return out
+	}
+	runtimes := func(t storage.DetectionTuning) []string {
+		out := make([]string, 0, len(t.AgentRuntimes))
+		for _, r := range t.AgentRuntimes {
+			out = append(out, r.Name+"="+r.Path)
+		}
+		return out
+	}
+	listDelta("known workloads", workloads(before), workloads(after))
+	listDelta("agent runtimes", runtimes(before), runtimes(after))
+	add("agent egress enabled", before.AgentEgressOn, after.AgentEgressOn)
+	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)
+	add("agent upload floor", before.AgentUploadFloorMB, after.AgentUploadFloorMB)
+	add("agent upload factor", before.AgentUploadFactor, after.AgentUploadFactor)
 	add("container networks", strings.Join(before.ContainerCIDRs, ","), strings.Join(after.ContainerCIDRs, ","))
 	add("silence threshold (minutes)", before.SilenceAfterMinutes, after.SilenceAfterMinutes)
 	add("silence detection", before.SilenceOn, after.SilenceOn)

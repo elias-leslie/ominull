@@ -34,7 +34,7 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	for i := 0; i < n; i++ {
 		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{
 			ID: fmt.Sprintf("npm-%d", i), TenantID: "default", EndpointID: "e1", AnomalyType: "NOVEL_PROCESS_EGRESS",
-			Severity: "MEDIUM", Title: "npm", ProcessPath: "/opt/node/bin/node", Evidence: ev("npm ci"), Timestamp: at.Add(time.Duration(i) * time.Second),
+			Severity: "MEDIUM", Title: "npm", ProcessPath: "/opt/node/bin/node", Evidence: ev("node /opt/node/lib/npm-cli.js ci"), Timestamp: at.Add(-time.Duration(i) * time.Hour), // outside one another's cooldown
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -48,7 +48,7 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	return at
 }
 
-var npmKnown = []storage.KnownWorkload{{Workload: "node npm *", Owner: "cloudflare", Reason: "npm registry"}}
+var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare", Reason: "npm registry"}}
 
 func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 	t.Parallel()
@@ -70,7 +70,7 @@ func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 	if len(store.GetDetectionTuning().KnownWorkloads) != 0 {
 		t.Fatal("a replay must not save the draft")
 	}
-	draft.KnownWorkloads = []storage.KnownWorkload{{Workload: "node npm *", Owner: "cloudflare"}}
+	draft.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare"}}
 	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning/replay", "mock_admin_token", map[string]any{"tuning": draft}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a draft with an unexplained exclusion was replayed: %d", w.Code)
 	}
@@ -138,7 +138,7 @@ func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
 	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 1 || got.OffHoursStart != 23 {
 		t.Fatalf("after a sheet save: %d known workloads, start %d", len(got.KnownWorkloads), got.OffHoursStart)
 	}
-	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"known_workloads": []any{}}); w.Code != http.StatusOK {
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"Known_Workloads": []any{}}); w.Code != http.StatusOK {
 		t.Fatalf("explicit clear = %d", w.Code)
 	}
 	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 0 {

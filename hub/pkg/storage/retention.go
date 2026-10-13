@@ -78,6 +78,9 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		// the same period never leaves a finding without its reason.
 		{"anomaly_resolutions", "resolved_at", policy.AnomalyAlerts},
 		{"audit_logs", "timestamp", policy.AuditLogs},
+		// A destination a runtime has not reached for the profile period is
+		// forgotten with its profile, and reaching it again is news again.
+		{"agent_egress_destinations", "last_seen", policy.CommProfiles},
 	} {
 		if target.keep <= 0 {
 			continue // 0 disables pruning for this table
@@ -118,6 +121,16 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 			return removed, fmt.Errorf("pruning dns_resolutions: %w", err)
 		}
 		removed["dns_resolutions"] = n
+	}
+
+	// agent_egress_hourly keys its row as an epoch hour; the baseline reads
+	// two weeks of it, and it goes with the profiles it summarises.
+	if policy.CommProfiles > 0 {
+		n, err := s.PruneAgentUploads(policy.CommProfiles)
+		if err != nil {
+			return removed, fmt.Errorf("pruning agent_egress_hourly: %w", err)
+		}
+		removed["agent_egress_hourly"] = n
 	}
 
 	if policy.RouterDaily > 0 {

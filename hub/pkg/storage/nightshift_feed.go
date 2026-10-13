@@ -11,6 +11,8 @@ type AnomalyWindow struct {
 	BySeverity map[string]int `json:"by_severity"`
 	ByType     map[string]int `json:"by_type"`
 	ByHost     map[string]int `json:"by_host"`
+	// HighByType counts the HIGH and CRITICAL findings of each type.
+	HighByType map[string]int `json:"high_by_type"`
 	// Backlog is every open finding regardless of age.
 	Backlog int `json:"backlog"`
 }
@@ -19,7 +21,7 @@ type AnomalyWindow struct {
 func (s *Store) SummariseOpenAnomalies(since time.Time) (AnomalyWindow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := AnomalyWindow{BySeverity: map[string]int{}, ByType: map[string]int{}, ByHost: map[string]int{}}
+	out := AnomalyWindow{BySeverity: map[string]int{}, ByType: map[string]int{}, ByHost: map[string]int{}, HighByType: map[string]int{}}
 	rows, err := s.db.Query(`SELECT severity, anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
 		WHERE acknowledged = 0 AND held_reason = '' AND timestamp >= ?
 		GROUP BY severity, anomaly_type, hostname`, since.UTC())
@@ -37,6 +39,9 @@ func (s *Store) SummariseOpenAnomalies(since time.Time) (AnomalyWindow, error) {
 		out.BySeverity[sev] += n
 		out.ByType[typ] += n
 		out.ByHost[host] += n
+		if sev == "HIGH" || sev == "CRITICAL" {
+			out.HighByType[typ] += n
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return out, err

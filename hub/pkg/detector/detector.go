@@ -188,6 +188,10 @@ func (e *Engine) Start(ctx context.Context) {
 	// point of it - so it starts before the events channel is checked.
 	e.StartSilenceWatch(subCtx)
 	e.startLearningFlush(subCtx.Done())
+	// Events arriving meanwhile are safe: a runtime first seen live starts
+	// learning, and the seed then moves its baseline start back to when the
+	// profiles first saw it (storage.SeedAgentDestinations).
+	go e.SeedAgentBaselines()
 
 	if e.eventsChan == nil {
 		return
@@ -482,7 +486,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// owner is its job. It never reaches the beacon and volume detectors.
 	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
 	_, isKnownConversation := cfg.KnownWorkloadFor(workload, geo.Org, geo.Tenancy)
-	_, isKnownService := cfg.KnownService(workload)
+	_, isKnownService := cfg.KnownService(workload, geo.Org, geo.Tenancy)
+
+	// Agent runtimes are judged against their own baselines, not excluded.
+	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, now)
 
 	// Off-hours activity triggers ONLY for interactive shells / script
 	// interpreters, NEVER for standard OS system daemons.
@@ -493,7 +500,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// a new edge address every few minutes, and each one used to be a new HIGH.
 	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !isKnownService && !warming &&
 		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
-		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, procName, counterpartyKey(geo))
+		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, strings.ToLower(workload), counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			alert := storage.Alert{
 				ID:          uuid.New().String(),

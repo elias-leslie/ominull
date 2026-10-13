@@ -51,6 +51,7 @@ const (
 // OCSF enums used by the feed.
 const (
 	ocsfSevInformational = 1
+	ocsfSevLow           = 2
 	ocsfSevMedium        = 3
 	ocsfSevHigh          = 4
 	ocsfStatusNew        = 1
@@ -199,6 +200,41 @@ func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
 	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
+// agentEgressTypes are the findings of the per-runtime agent egress detector.
+var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS"}
+
+// agentEgressFinding reports what the agent runtimes did that their own
+// baselines did not expect, at the severity of the worst of it: an ordinary
+// new destination is a note, since runtimes gain endpoints with their
+// updates; one on rented compute, an unusual hour of uploads, or a tool
+// resolving names past the router asks for a look.
+func (s *Server) agentEgressFinding(now time.Time) (feedFinding, error) {
+	win, err := s.store.SummariseOpenAnomalies(now.Add(-feedAnomalyWindow))
+	if err != nil {
+		return feedFinding{}, err
+	}
+	counts := map[string]int{}
+	total, high := 0, 0
+	for _, t := range agentEgressTypes {
+		counts[t] = win.ByType[t]
+		total += win.ByType[t]
+		high += win.HighByType[t]
+	}
+	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_type": counts}
+	const uid, title = "ominull.anomalies.agent_egress", "Agent egress"
+	if total == 0 {
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			"Agent runtimes stayed inside their baselines in the last 24 h", nil, unmapped), nil
+	}
+	sev := ocsfSevLow
+	if high > 0 {
+		sev = ocsfSevHigh
+	}
+	msg := fmt.Sprintf("Agent egress in the last 24 h: %d new destinations, %d unusual upload hours, %d resolver bypasses",
+		counts["AGENT_NEW_DESTINATION"], counts["AGENT_UPLOAD_VOLUME"], counts["AGENT_DNS_BYPASS"])
+	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
+}
+
 func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 	list, err := s.store.ListEndpoints("")
 	if err != nil {
@@ -320,6 +356,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := s.anomalyFinding(now)
 	add("anomalies", []feedFinding{a}, err)
+	ae, err := s.agentEgressFinding(now)
+	add("agent_egress", []feedFinding{ae}, err)
 	g, err := s.agentFinding(now)
 	add("agents", []feedFinding{g}, err)
 	rf, err := s.routerFindings(now)

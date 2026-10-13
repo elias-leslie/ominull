@@ -37,8 +37,14 @@ type ReplaySignature struct {
 }
 
 type ReplayResult struct {
-	Before     int               `json:"before"`
-	After      int               `json:"after"`
+	Before int `json:"before"`
+	After  int `json:"after"`
+	// MaySurface bounds what the replay cannot see. A recorded finding the
+	// draft silences no longer starts its detector's cooldown, so a finding
+	// that cooldown folded live - never recorded - could be raised instead:
+	// at most one per silenced cooldown window. After is the floor and
+	// After+MaySurface the ceiling.
+	MaySurface int               `json:"may_surface"`
 	ByType     map[string][2]int `json:"by_type"` // type -> [before, after]
 	Signatures []ReplaySignature `json:"signatures"`
 	Decisions  []ReplayDecision  `json:"-"`
@@ -49,6 +55,8 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Timestamp.Before(sorted[j].Timestamp) })
 	cooldown := time.Duration(t.FirstSeenCooldown) * time.Minute
 	lastOffHours := map[string]time.Time{}
+	lastNovel := map[string]time.Time{}
+	lastSilenced := map[string]time.Time{}
 	res := ReplayResult{ByType: map[string][2]int{}}
 	sigs := map[string]*ReplaySignature{}
 
@@ -58,7 +66,7 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 		d := ReplayDecision{ID: a.ID, Kept: true}
 		switch a.AnomalyType {
 		case "OFF_HOURS_ACTIVITY":
-			if k, ok := t.KnownService(workload); ok {
+			if k, ok := t.KnownService(workload, ev.Owner, ev.Tenancy); ok {
 				d = ReplayDecision{ID: a.ID, Reason: "known service, runs around the clock: " + k.Reason}
 				break
 			}
@@ -66,16 +74,43 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 			if owner == "" {
 				owner = "unattributed"
 			}
-			key := a.EndpointID + "|" + processBase(a.ProcessPath) + "|" + owner
+			key := a.EndpointID + "|" + strings.ToLower(workload) + "|" + owner
 			if last, ok := lastOffHours[key]; ok && a.Timestamp.Sub(last) < cooldown {
 				d = ReplayDecision{ID: a.ID, Reason: fmt.Sprintf("folded: one off-hours finding per program and counterparty per %d min", t.FirstSeenCooldown)}
 				break
 			}
 			lastOffHours[key] = a.Timestamp
 		case "NOVEL_PROCESS_EGRESS", "NOVEL_DESTINATION":
+			// The detectors' own cooldown keys (detector.go): an interpreter
+			// per owner, first-seen per owner across the tenant, or per
+			// endpoint when the owner is unnamed. A recorded finding inside a
+			// longer cooldown than the one that raised it would not be raised.
+			owner := strings.ToLower(strings.TrimSpace(ev.Owner))
+			key := "firstseen|" + a.TenantID + "|" + owner
+			if a.AnomalyType == "NOVEL_PROCESS_EGRESS" {
+				key = "shell|" + a.EndpointID + "|" + processBase(a.ProcessPath) + "|" + firstNonEmpty(owner, "unattributed")
+			} else if owner == "" {
+				key = "firstseen|" + a.TenantID + "|unattributed|" + a.EndpointID
+			}
 			if k, ok := t.KnownWorkloadFor(workload, ev.Owner, ev.Tenancy); ok {
 				d = ReplayDecision{ID: a.ID, Reason: "known workload: " + k.Reason}
+				armed := false
+				for _, m := range []map[string]time.Time{lastNovel, lastSilenced} {
+					if last, ok := m[key]; ok && a.Timestamp.Sub(last) < cooldown {
+						armed = true
+					}
+				}
+				if !armed {
+					res.MaySurface++
+					lastSilenced[key] = a.Timestamp
+				}
+				break
 			}
+			if last, ok := lastNovel[key]; ok && a.Timestamp.Sub(last) < cooldown {
+				d = ReplayDecision{ID: a.ID, Reason: fmt.Sprintf("folded: the same program and counterparty within the %d min first-seen cooldown", t.FirstSeenCooldown)}
+				break
+			}
+			lastNovel[key] = a.Timestamp
 		}
 		res.Decisions = append(res.Decisions, d)
 

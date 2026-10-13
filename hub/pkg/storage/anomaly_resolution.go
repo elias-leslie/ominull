@@ -59,14 +59,33 @@ func (s *Store) ListAnomalyAlertsBetween(tenantID string, from, to time.Time, op
 	return out, rows.Err()
 }
 
-// ResolveAnomalies acknowledges findings and records why, in one transaction.
-// Only findings of tenantID are touched when it is set. It returns how many
-// findings were open and are now resolved.
+// resolveChunk bounds one resolution transaction, so a bulk close never holds
+// the store's lock long enough to stall ingest.
+const resolveChunk = 500
+
+// ResolveAnomalies acknowledges findings and records why, a few hundred per
+// transaction. Only findings of tenantID are touched when it is set. It
+// returns how many findings were open and are now resolved; on an error the
+// chunks before it stay resolved and are counted.
 func (s *Store) ResolveAnomalies(tenantID string, ids []string, reason, by string) (int, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return 0, errors.New("a resolution needs a reason")
 	}
+	total := 0
+	for len(ids) > 0 {
+		chunk := ids[:min(resolveChunk, len(ids))]
+		ids = ids[len(chunk):]
+		n, err := s.resolveAnomalyChunk(tenantID, chunk, reason, by)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, reason, by string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()

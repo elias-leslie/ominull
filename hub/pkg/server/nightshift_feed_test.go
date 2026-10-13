@@ -229,7 +229,46 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 			t.Fatalf("%s is not resolved on a quiet fleet: %q", f.FindingInfo.UID, f.Message)
 		}
 	}
-	if len(doc.Findings) != 5 {
-		t.Fatalf("findings = %d, want hub, anomalies, agents, router collector, router certificate", len(doc.Findings))
+	if len(doc.Findings) != 6 {
+		t.Fatalf("findings = %d, want hub, anomalies, agent egress, agents, router collector, router certificate", len(doc.Findings))
+	}
+}
+
+func TestNightshiftFeedReportsAgentEgressAtItsWorstSeverity(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	find := func() (status, severity int) {
+		t.Helper()
+		var doc feedDoc
+		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range doc.Findings {
+			if f.FindingInfo.UID == "ominull.anomalies.agent_egress" {
+				return f.StatusID, f.SeverityID
+			}
+		}
+		t.Fatal("no agent egress finding in the feed")
+		return 0, 0
+	}
+	add := func(id, typ, sev string) {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "e", Hostname: "dev",
+			AnomalyType: typ, Severity: sev, Title: typ, Timestamp: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st, _ := find(); st != ocsfStatusResolved {
+		t.Fatalf("no agent findings should be resolved, got %d", st)
+	}
+	add("a1", "AGENT_NEW_DESTINATION", "MEDIUM")
+	if st, sev := find(); st != ocsfStatusNew || sev != ocsfSevLow {
+		t.Fatalf("an ordinary new destination = status %d severity %d", st, sev)
+	}
+	add("a2", "AGENT_NEW_DESTINATION", "HIGH")
+	if _, sev := find(); sev != ocsfSevHigh {
+		t.Fatalf("a HIGH new destination surfaced at severity %d", sev)
 	}
 }

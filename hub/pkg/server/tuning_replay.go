@@ -98,13 +98,16 @@ func (s *Server) handleTuningReplay(w http.ResponseWriter, r *http.Request) {
 	if len(sigs) > replayTopSignature {
 		sigs = sigs[:replayTopSignature]
 	}
-	cut := 0.0
+	// cut is the best case and worst_cut the worst: see ReplayResult.MaySurface.
+	cut, worst := 0.0, 0.0
 	if res.Before > 0 {
 		cut = float64(res.Before-res.After) / float64(res.Before)
+		worst = max(0, float64(res.Before-res.After-res.MaySurface)/float64(res.Before))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from": from, "to": to,
 		"before": res.Before, "after": res.After, "cut": cut,
+		"may_surface": res.MaySurface, "worst_cut": worst,
 		"by_type":    res.ByType,
 		"signatures": sigs,
 		"truncated":  len(alerts) >= storage.MaxReplayAlerts,
@@ -136,6 +139,7 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 	by := s.operatorFromRequest(r)
 	reason := strings.TrimSpace(req.Reason)
 	byReason := map[string]int{}
+	truncated := false
 
 	switch {
 	case req.Covered == (len(req.IDs) > 0):
@@ -170,6 +174,7 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		truncated = len(alerts) >= storage.MaxReplayAlerts
 		open := map[string]bool{}
 		for _, a := range alerts {
 			if !a.Acknowledged {
@@ -193,11 +198,12 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 		sort.Strings(keys)
 		for _, why := range keys {
 			n, err := s.store.ResolveAnomalies(tenant, groups[why], why, by)
+			byReason[why] = n
 			if err != nil {
+				s.audit(r, "ANOMALIES_RESOLVED", "anomalies", fmt.Sprintf("resolved %d findings before an error", n))
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			byReason[why] = n
 		}
 	}
 	total := 0
@@ -205,5 +211,5 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 		total += n
 	}
 	s.audit(r, "ANOMALIES_RESOLVED", "anomalies", fmt.Sprintf("resolved %d findings under %d reasons", total, len(byReason)))
-	writeJSON(w, http.StatusOK, map[string]any{"resolved": total, "by_reason": byReason})
+	writeJSON(w, http.StatusOK, map[string]any{"resolved": total, "by_reason": byReason, "truncated": truncated})
 }
