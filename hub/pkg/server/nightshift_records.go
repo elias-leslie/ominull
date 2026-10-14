@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"ominull/hub/pkg/storage"
 )
 
-// Typed anomaly records (nightshift.findings/v2).
+// Typed anomaly records (nightshift.findings/v2; v4 adds each record's tier).
 //
 // v2 is the v1 document plus anomaly_records: one record per device, kind and
 // baseline window, so Nightshift's learner can see how each kind of finding
@@ -103,10 +105,13 @@ type anomalyRecord struct {
 	Outcome          string `json:"outcome"`
 	Verified         bool   `json:"verified"`
 	OutcomeSource    string `json:"outcome_source,omitempty"`
+	// Tier (v4 only) is "hunt" when every finding in the record is a hunt
+	// lead, else "page": a mixed window is judged as the paging one.
+	Tier string `json:"tier,omitempty"`
 
-	endpoint                        string
-	open, tuning, benign, malicious int
-	windowStart                     time.Time
+	endpoint                              string
+	open, tuning, benign, malicious, hunt int
+	windowStart                           time.Time
 }
 
 // isoWeek names the baseline window containing t and returns its start.
@@ -149,8 +154,8 @@ func deviceID(salt []byte, endpointID string) string {
 
 // anomalyRecords builds the v2 records, newest window first. It reports
 // whether the list was cut, by count, by size (budget bytes of JSON) or
-// because the read was capped.
-func (s *Server) anomalyRecords(now time.Time, budget int) ([]anomalyRecord, bool, error) {
+// because the read was capped. withTier adds the v4 tier to each record.
+func (s *Server) anomalyRecords(now time.Time, budget int, withTier bool) ([]anomalyRecord, bool, error) {
 	_, thisWeek := isoWeek(now)
 	since := thisWeek.AddDate(0, 0, -7*(feedRecordWeeks-1))
 	// Recurrence looks further back than the records shown.
@@ -199,6 +204,7 @@ func (s *Server) anomalyRecords(now time.Time, budget int) ([]anomalyRecord, boo
 		r.tuning += d.Tuning
 		r.benign += d.Benign
 		r.malicious += d.Malicious
+		r.hunt += d.Hunt
 		if d.Malicious > 0 {
 			incident[d.EndpointID+"|"+wk] = true
 		}
@@ -250,6 +256,12 @@ func (s *Server) anomalyRecords(now time.Time, budget int) ([]anomalyRecord, boo
 		// A window the capped read may have cut short has wrong counts.
 		if readCut && r.Verified {
 			r.Outcome, r.Verified, r.OutcomeSource = outcomeUnverified, false, ""
+		}
+		if withTier {
+			r.Tier = storage.TierPage
+			if r.hunt == r.Count {
+				r.Tier = storage.TierHunt
+			}
 		}
 		out = append(out, *r)
 	}

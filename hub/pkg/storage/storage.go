@@ -180,8 +180,8 @@ type AnomalyAlert struct {
 	// finding raised before this column existed.
 	Technique string `json:"technique,omitempty"`
 	// HeldReason is why this finding is recorded but is not being shown as
-	// open. Today the only value is "learning": the endpoint was inside a
-	// learning window when the detector spoke.
+	// open: "learning", the endpoint was inside a learning window when the
+	// detector spoke, or "hunt", a behavioural hunt lead (anomaly_tier.go).
 	//
 	// A held finding is kept rather than dropped, because a host that was
 	// already compromised when its baseline period opened is exactly the host
@@ -2103,6 +2103,7 @@ const (
 	// HeldExclude is the default view: what is actually being raised.
 	HeldExclude = ""
 	// HeldOnly is the Held tab - findings a learning window is sitting on.
+	// Hunt leads have their own view (HeldHuntOnly).
 	HeldOnly = "held"
 	// HeldAny is every finding the detectors wrote, held or not.
 	HeldAny = "all"
@@ -2130,13 +2131,7 @@ func (s *Store) queryAnomalyAlerts(tenantID string, limit, offset int, unackOnly
 	whereClause := " WHERE 1=1"
 	var args []interface{}
 
-	switch held {
-	case HeldOnly:
-		whereClause += " AND held_reason != ''"
-	case HeldAny:
-	default:
-		whereClause += " AND held_reason = ''"
-	}
+	whereClause += heldClause(held)
 	if tenantID != "" {
 		whereClause += " AND tenant_id = ?"
 		args = append(args, tenantID)
@@ -2234,13 +2229,7 @@ func (s *Store) SummarizeAnomalyAlerts(tenantID string, unackOnly bool, anomalyT
 	// operator is reading the Held tab, a summary of everything except the held
 	// findings would disagree with every row on the page.
 	where := " WHERE 1=1"
-	switch held {
-	case HeldOnly:
-		where += " AND held_reason != ''"
-	case HeldAny:
-	default:
-		where += " AND held_reason = ''"
-	}
+	where += heldClause(held)
 	var args []interface{}
 	if tenantID != "" {
 		where += " AND tenant_id = ?"

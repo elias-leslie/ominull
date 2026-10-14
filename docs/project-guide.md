@@ -244,6 +244,27 @@ first-seen cooldown. Check a change with the replay route before saving it:
 `cut` is the best case, and `worst_cut` allows for findings that a silenced
 one kept folded live and that were therefore never recorded (`may_surface`).
 
+Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
+Paging comes only from deterministic detectors: canary and decoy hits, silence
+and return against presence, sweeps, threat intelligence, beaconing, volume,
+sensitive ports and the agent egress rules. The behavioural detectors
+(`NOVEL_DESTINATION`, `NOVEL_PROCESS_EGRESS`, `OFF_HOURS_ACTIVITY`) write hunt
+leads: stored in full with `held_reason` `hunt` and `tier` in the evidence, out
+of every open count, the default alert list and the Nightshift summary, shown
+under HUNT LEADS (`GET /api/v1/anomalies?held=hunt`, `hunt_total`) and bounded
+by the anomaly retention. On agent-heavy endpoints (tuning
+`agent_heavy_endpoints` by endpoint id, `agent_heavy_roles` by role tag; a
+console save keeps both lists) a lead is also muted to LOW, the detector's
+severity kept as `detector_severity`. The subnet sweep's new-device findings
+(`alert-disc-*`) share the `NOVEL_DESTINATION` type and keep paging. Findings
+recorded before the tiers were moved once at startup (setting
+`anomaly_hunt_tier_backfill_v1`). The replay route reports `paging`: before
+(every kept finding not held by learning) and after (kept findings of paging
+detectors), by type and by host. The detectors' code stays until labelled drills
+compare both tiers. The Nightshift feed carries the leads as
+`ominull.anomalies.hunt` (always informational) and, on `?contract=v4`, a `tier`
+on every anomaly record (`hunt` when every finding in it is a lead).
+
 Agent egress (`agent_runtimes`, `agent_*` in the tuning) keeps a baseline per
 AI agent runtime on each endpoint, matched by executable (Claude Code's native
 build runs as its version number under `~/.local/share/claude/versions/`). For

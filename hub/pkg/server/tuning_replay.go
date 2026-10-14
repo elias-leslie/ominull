@@ -109,6 +109,7 @@ func (s *Server) handleTuningReplay(w http.ResponseWriter, r *http.Request) {
 		"before": res.Before, "after": res.After, "cut": cut,
 		"may_surface": res.MaySurface, "worst_cut": worst,
 		"by_type":    res.ByType,
+		"paging":     res.Paging,
 		"signatures": sigs,
 		"truncated":  len(alerts) >= storage.MaxReplayAlerts,
 	})

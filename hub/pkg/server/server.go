@@ -2837,6 +2837,9 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		held = storage.HeldOnly
 	case storage.HeldAny:
 		held = storage.HeldAny
+	case storage.HeldHuntOnly:
+		// Hunt leads: behavioural findings kept for hunting, never alerts.
+		held = storage.HeldHuntOnly
 	}
 
 	assetID := r.URL.Query().Get("asset_id")
@@ -2865,7 +2868,8 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	if assetID != "" {
 		_, unack, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldExclude, "")
 		_, heldCount, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldOnly, "")
-		writeJSON(w, 200, map[string]any{"alerts": anomalies, "total": total, "unacknowledged_total": unack, "held_total": heldCount, "breakdown": []storage.AnomalyAlertGroup{}, "scope": "recorded_source_asset", "coverage": "Only findings with recorded source identity; older unattributed findings are excluded"})
+		_, huntCount, _ := s.store.QueryAssetAnomalyAlerts(tenantID, assetID, 1, 0, true, "", "", storage.HeldHuntOnly, "")
+		writeJSON(w, 200, map[string]any{"alerts": anomalies, "total": total, "unacknowledged_total": unack, "held_total": heldCount, "hunt_total": huntCount, "breakdown": []storage.AnomalyAlertGroup{}, "scope": "recorded_source_asset", "coverage": "Only findings with recorded source identity; older unattributed findings are excluded"})
 		return
 	}
 
@@ -2875,6 +2879,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	// quiet console is never quiet because something is hiding findings without
 	// saying so.
 	_, heldTotal, _ := s.store.QueryAnomalyAlerts(tenantID, 1, 0, true, "", "", "", storage.HeldOnly)
+	_, huntTotal, _ := s.store.QueryAnomalyAlerts(tenantID, 1, 0, true, "", "", "", storage.HeldHuntOnly)
 
 	// The per-host breakdown is computed over the whole matching set. The
 	// console used to derive it from the page it had just been handed, so the
@@ -2897,6 +2902,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		"total":                total,
 		"unacknowledged_total": unackTotal,
 		"held_total":           heldTotal,
+		"hunt_total":           huntTotal,
 		"breakdown":            breakdown,
 		"limit":                limit,
 		"offset":               offset,

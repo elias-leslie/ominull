@@ -188,6 +188,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// point of it - so it starts before the events channel is checked.
 	e.StartSilenceWatch(subCtx)
 	e.startLearningFlush(subCtx.Done())
+	go e.backfillHuntTier()
 	// Events arriving meanwhile are safe: a runtime first seen live starts
 	// learning, and the seed then moves its baseline start back to when the
 	// profiles first saw it (storage.SeedAgentDestinations).
@@ -251,6 +252,7 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 		}
 	}
 
+	applyTier(&anomaly, ep, e.settings())
 	if anomaly.HeldReason == "" {
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning

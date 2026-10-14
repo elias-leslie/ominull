@@ -474,7 +474,7 @@
     scanStatus: null,
     scanPoll: null,
 
-    alertsFilter: { page: 1, limit: 50, severity: "", type: "", endpoint_id: "", unacknowledged_only: true, search: "", held: false },
+    alertsFilter: { page: 1, limit: 50, severity: "", type: "", endpoint_id: "", unacknowledged_only: true, search: "", held: false, hunt: false },
     alertsData: null,
     selectedAlerts: {},
     expandedAlertId: "",
@@ -3600,6 +3600,28 @@
       on: {
         click: function () {
           af.held = !af.held;
+          if (af.held) af.hunt = false;
+          af.page = 1;
+          refresh();
+        }
+      }
+    }) : null;
+
+    /* Hunt leads are the behavioural detectors' findings: first-seen
+       destinations, interpreters reaching out, off-hours activity. They are
+       kept for hunting and triage and never raised as alerts, because on a
+       host where agents work they describe the agents' ordinary day. */
+    var huntTotal = Number(state.huntAlertsTotal) || 0;
+    var huntBtn = (huntTotal > 0 || af.hunt) ? h("button", {
+      cls: "btn mini" + (af.hunt ? " btn-primary" : ""),
+      type: "button",
+      "aria-pressed": af.hunt ? "true" : "false",
+      title: "Behavioural findings kept as hunt leads. They are not alerts and are not counted as open work.",
+      text: af.hunt ? "HUNT LEADS" : "HUNT LEADS: " + huntTotal,
+      on: {
+        click: function () {
+          af.hunt = !af.hunt;
+          if (af.hunt) af.held = false;
           af.page = 1;
           refresh();
         }
@@ -3718,7 +3740,7 @@
 
     if (READ_ONLY) [bulkAckBtn, ackAllBtn, clearResolvedBtn].forEach(function (button) { button.disabled = true; button.title = "Read-only access"; });
     var filterBar = h("div", { cls: "traffic-filter-bar" },
-      h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, sevBtns),
+      h("div", { cls: "traffic-filter-group", role: "group", "aria-label": "Alert filters" }, unackBtn, heldBtn, huntBtn, sevBtns),
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
 
     if (af.asset_id || af.endpoint_id) filterBar.appendChild(h("div", { cls: "uf uf-g2" },
@@ -3819,7 +3841,8 @@
         h("td", {}, h("span", { cls: "st", "data-state": (a.severity || "LOW").toLowerCase() === "critical" ? "crit" : (a.severity === "HIGH" ? "warn" : "idle"), text: a.severity || "LOW" })),
         h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") }),
           a.technique ? h("span", { cls: "dim-3", text: " " + a.technique }) : null,
-          a.held_reason ? h("span", { cls: "dim-3", title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null),
+          a.held_reason === "hunt" ? h("span", { cls: "dim-3", title: "Behavioural hunt lead, not an alert", text: " \u00b7 hunt lead" })
+            : a.held_reason ? h("span", { cls: "dim-3", title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null),
         h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
@@ -10929,6 +10952,7 @@
        and a console that never showed them would be quiet for a reason the
        operator could not see. */
     if (af.held) aParams += "&held=true";
+    else if (af.hunt) aParams += "&held=hunt";
 
     return aParams;
   }
@@ -10991,6 +11015,7 @@
           state.anomalies = d.alerts;
           state.unackAlertsTotal = Number(d.unacknowledged_total) || 0;
           state.heldAlertsTotal = Number(d.held_total) || 0;
+          state.huntAlertsTotal = Number(d.hunt_total) || 0;
         } else {
           var page = arrayOf(d);
           state.anomalies = page;

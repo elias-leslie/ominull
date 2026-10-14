@@ -48,6 +48,20 @@ type ReplayResult struct {
 	ByType     map[string][2]int `json:"by_type"` // type -> [before, after]
 	Signatures []ReplaySignature `json:"signatures"`
 	Decisions  []ReplayDecision  `json:"-"`
+	// Paging compares what reached the open alert list before detection
+	// tiers (every finding the tuning keeps, learning-held ones aside) with
+	// what pages now (the kept findings of paging detectors). It is judged
+	// from the detector type, so findings recorded before the tiers count.
+	Paging ReplayPaging `json:"paging"`
+}
+
+// ReplayPaging is paging volume before and after the detection tiers.
+type ReplayPaging struct {
+	Before int               `json:"before"`
+	After  int               `json:"after"`
+	Hunt   int               `json:"hunt"` // kept findings that are now hunt leads
+	ByType map[string][2]int `json:"by_type"`
+	ByHost map[string][2]int `json:"by_host"`
 }
 
 func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResult {
@@ -57,7 +71,7 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 	lastOffHours := map[string]time.Time{}
 	lastNovel := map[string]time.Time{}
 	lastSilenced := map[string]time.Time{}
-	res := ReplayResult{ByType: map[string][2]int{}}
+	res := ReplayResult{ByType: map[string][2]int{}, Paging: ReplayPaging{ByType: map[string][2]int{}, ByHost: map[string][2]int{}}}
 	sigs := map[string]*ReplaySignature{}
 
 	for _, a := range sorted {
@@ -132,6 +146,20 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 			s.After++
 			bt[1]++
 			res.After++
+			if a.HeldReason != storage.HeldLearning {
+				pt, ph := res.Paging.ByType[a.AnomalyType], res.Paging.ByHost[host]
+				pt[0]++
+				ph[0]++
+				res.Paging.Before++
+				if tierOfFinding(a) == storage.TierPage {
+					pt[1]++
+					ph[1]++
+					res.Paging.After++
+				} else {
+					res.Paging.Hunt++
+				}
+				res.Paging.ByType[a.AnomalyType], res.Paging.ByHost[host] = pt, ph
+			}
 		} else {
 			if s.Silenced == nil {
 				s.Silenced = map[string]int{}

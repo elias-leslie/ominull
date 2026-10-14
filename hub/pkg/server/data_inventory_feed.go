@@ -15,7 +15,9 @@ import (
 // one. Blocks are cut to fit the document cap, and say so.
 
 const (
-	nightshiftSchemaV3    = "nightshift.findings/v3"
+	nightshiftSchemaV3 = "nightshift.findings/v3"
+	// v4 is v3 plus each anomaly record's detection tier (nightshift_records.go).
+	nightshiftSchemaV4    = "nightshift.findings/v4"
 	feedDocumentBytesV3   = 960 << 10
 	feedDataStoresPerHost = 400
 	feedDataItemsPerHost  = 400

@@ -184,7 +184,7 @@ func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
 		return feedFinding{}, err
 	}
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_severity": win.BySeverity,
-		"by_type": win.ByType, "by_host": win.ByHost, "backlog": win.Backlog}
+		"by_type": win.ByType, "by_host": win.ByHost, "backlog": win.Backlog, "tier": storage.TierPage}
 	const uid, title = "ominull.anomalies.summary", "Open anomalies"
 	if win.Total == 0 {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
@@ -200,6 +200,27 @@ func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
 	msg := fmt.Sprintf("%s in the last 24 h (%d critical, %d high); %d open in the backlog",
 		plural(win.Total, "new open anomaly", "new open anomalies"), crit, high, win.Backlog)
 	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
+}
+
+// huntFinding reports the hunt leads: the behavioural detectors' findings,
+// which are kept for hunting and triage and never raised as alerts
+// (storage/anomaly_tier.go). It is always informational, whatever the leads
+// say, so it can sit on the board without ever asking for anyone.
+func (s *Server) huntFinding(now time.Time) (feedFinding, error) {
+	win, err := s.store.SummariseHuntLeads(now.Add(-feedAnomalyWindow))
+	if err != nil {
+		return feedFinding{}, err
+	}
+	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "tier": storage.TierHunt,
+		"by_type": win.ByType, "by_host": win.ByHost, "muted_agent_heavy": win.Muted}
+	const uid, title = "ominull.anomalies.hunt", "Hunt leads"
+	if win.Total == 0 {
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			"No hunt leads in the last 24 h", nil, unmapped), nil
+	}
+	msg := fmt.Sprintf("%s in the last 24 h (behavioural, not alerts; %d muted on agent-heavy hosts)",
+		plural(win.Total, "hunt lead", "hunt leads"), win.Muted)
+	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
 // agentEgressTypes are the findings of the per-runtime agent egress detector.
@@ -435,6 +456,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := s.anomalyFinding(now)
 	add("anomalies", []feedFinding{a}, err)
+	hl, err := s.huntFinding(now)
+	add("hunt_leads", []feedFinding{hl}, err)
 	ae, err := s.agentEgressFinding(now)
 	add("agent_egress", []feedFinding{ae}, err)
 	g, err := s.agentFinding(now)
@@ -453,9 +476,9 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	// string, so v1 stays the default until every reader has moved.
 	switch c := r.URL.Query().Get("contract"); c {
 	case "", "v1":
-	case "v2", "v3":
+	case "v2", "v3", "v4":
 		v1, _ := json.Marshal(doc)
-		records, truncated, err := s.anomalyRecords(now, min(feedRecordBytes, feedDocumentBytes-len(v1)))
+		records, truncated, err := s.anomalyRecords(now, min(feedRecordBytes, feedDocumentBytes-len(v1)), c == "v4")
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "the hub could not read its anomaly records for Nightshift")
 			return
@@ -463,7 +486,7 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 		doc["schema"] = nightshiftSchemaV2
 		doc["anomaly_records"] = records
 		doc["anomaly_records_truncated"] = truncated
-		if c == "v3" {
+		if c == "v3" || c == "v4" {
 			v2, _ := json.Marshal(doc)
 			blocks, cut, err := s.dataInventoryBlocks(now, feedDocumentBytesV3-len(v2)-256)
 			if err != nil {
@@ -474,8 +497,11 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 			doc["data_inventory"] = blocks
 			doc["data_inventory_truncated"] = cut
 		}
+		if c == "v4" {
+			doc["schema"] = nightshiftSchemaV4
+		}
 	default:
-		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1, v2 and v3")
+		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1, v2, v3 and v4")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

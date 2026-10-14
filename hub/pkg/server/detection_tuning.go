@@ -30,15 +30,17 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// The console's tuning sheet posts the fields it shows. Known workloads
-		// and agent runtimes are not among them, and a save from the sheet must
+		// The console's tuning sheet posts the fields it shows. Known workloads,
+		// agent runtimes and the agent-heavy lists are not among them, and a save from the sheet must
 		// not erase them: a list the request leaves out keeps its saved value.
 		// The shadowing pointers decode with the same case-insensitive key
 		// matching as every other field, so "Known_Workloads" is not "absent".
 		var patch struct {
 			storage.DetectionTuning
-			KnownWorkloads *[]storage.KnownWorkload `json:"known_workloads"`
-			AgentRuntimes  *[]storage.AgentRuntime  `json:"agent_runtimes"`
+			KnownWorkloads      *[]storage.KnownWorkload `json:"known_workloads"`
+			AgentRuntimes       *[]storage.AgentRuntime  `json:"agent_runtimes"`
+			AgentHeavyEndpoints *[]string                `json:"agent_heavy_endpoints"`
+			AgentHeavyRoles     *[]string                `json:"agent_heavy_roles"`
 		}
 		if err := json.Unmarshal(raw, &patch); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -52,6 +54,13 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 		}
 		if patch.AgentRuntimes != nil {
 			req.AgentRuntimes = *patch.AgentRuntimes
+		}
+		req.AgentHeavyEndpoints, req.AgentHeavyRoles = before.AgentHeavyEndpoints, before.AgentHeavyRoles
+		if patch.AgentHeavyEndpoints != nil {
+			req.AgentHeavyEndpoints = *patch.AgentHeavyEndpoints
+		}
+		if patch.AgentHeavyRoles != nil {
+			req.AgentHeavyRoles = *patch.AgentHeavyRoles
 		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
@@ -178,6 +187,8 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	}
 	listDelta("known workloads", workloads(before), workloads(after))
 	listDelta("agent runtimes", runtimes(before), runtimes(after))
+	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
+	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
 	add("agent egress enabled", before.AgentEgressOn, after.AgentEgressOn)
 	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)
 	add("agent upload floor", before.AgentUploadFloorMB, after.AgentUploadFloorMB)

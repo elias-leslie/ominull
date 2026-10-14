@@ -17,6 +17,7 @@ type AnomalyOutcomeDay struct {
 	Tuning      int // closed by a tuning rule
 	Benign      int // closed by an operator with the verdict benign
 	Malicious   int // closed by an operator with the verdict malicious
+	Hunt        int // hunt leads (anomaly_tier.go) among Count
 }
 
 // IsolationActions are the audit actions written only once an endpoint has
@@ -35,7 +36,9 @@ type IsolationEvent struct {
 // ListAnomalyOutcomeDays returns findings raised since `since`, counted per
 // endpoint, type and day, newest day first, at most limit groups; truncated
 // says the limit cut older days off. Findings held by a learning window are
-// left out: nobody was shown them, so they have no outcome.
+// left out: nobody was shown them, so they have no outcome. Hunt leads are
+// counted, and Hunt says how many: they were findings before the tiers
+// existed, and the learner still reads them.
 func (s *Store) ListAnomalyOutcomeDays(since time.Time, limit int) (days []AnomalyOutcomeDay, truncated bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -43,12 +46,13 @@ func (s *Store) ListAnomalyOutcomeDays(since time.Time, limit int) (days []Anoma
 			SUM(CASE WHEN a.acknowledged = 0 THEN 1 ELSE 0 END),
 			SUM(CASE WHEN a.acknowledged = 1 AND r.method = ? THEN 1 ELSE 0 END),
 			SUM(CASE WHEN a.acknowledged = 1 AND r.method <> ? AND r.verdict = ? THEN 1 ELSE 0 END),
-			SUM(CASE WHEN r.verdict = ? THEN 1 ELSE 0 END)
+			SUM(CASE WHEN r.verdict = ? THEN 1 ELSE 0 END),
+			SUM(CASE WHEN a.held_reason = ? THEN 1 ELSE 0 END)
 		FROM anomaly_alerts a LEFT JOIN anomaly_resolutions r ON r.anomaly_id = a.id
-		WHERE a.timestamp >= ? AND a.held_reason = ''
+		WHERE a.timestamp >= ? AND a.held_reason IN ('', ?)
 		GROUP BY a.endpoint_id, a.anomaly_type, substr(a.timestamp, 1, 10)
 		ORDER BY MAX(a.timestamp) DESC LIMIT ?`,
-		MethodTuning, MethodTuning, VerdictBenign, VerdictMalicious, since.UTC(), limit+1)
+		MethodTuning, MethodTuning, VerdictBenign, VerdictMalicious, HeldHunt, since.UTC(), HeldHunt, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -56,7 +60,7 @@ func (s *Store) ListAnomalyOutcomeDays(since time.Time, limit int) (days []Anoma
 	for rows.Next() {
 		var d AnomalyOutcomeDay
 		var first, last any
-		if err := rows.Scan(&d.EndpointID, &d.AnomalyType, &first, &last, &d.Count, &d.Open, &d.Tuning, &d.Benign, &d.Malicious); err != nil {
+		if err := rows.Scan(&d.EndpointID, &d.AnomalyType, &first, &last, &d.Count, &d.Open, &d.Tuning, &d.Benign, &d.Malicious, &d.Hunt); err != nil {
 			return nil, false, err
 		}
 		d.First, d.Last = scanTime(first), scanTime(last)

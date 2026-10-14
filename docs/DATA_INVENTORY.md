@@ -62,6 +62,6 @@ short (`partial`) or whose content was not all read (`content_partial`), and a r
 were dropped) the items it did not see outside cut-short stores. A run older than the last one stored is
 acknowledged and ignored.
 
-The v3 feed (`?contract=v3`, `hub/pkg/server/data_inventory_feed.go`) adds `data_inventory`: one block per endpoint
+The v3 feed (`?contract=v3`, and v4, which adds each anomaly record's `tier`; `hub/pkg/server/data_inventory_feed.go`) adds `data_inventory`: one block per endpoint
 with the scan summary, host facts (left out above 32 KiB), at most 400 stores and 400 items, and truncation flags;
 at most 64 blocks, the whole document fitted to 960 KiB. Nightshift's side of the contract is its `docs/ingest.md` (v3).

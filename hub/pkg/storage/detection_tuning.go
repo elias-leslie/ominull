@@ -118,6 +118,14 @@ type DetectionTuning struct {
 	AgentUploadFloorMB int            `json:"agent_upload_floor_mb"`
 	AgentUploadFactor  int            `json:"agent_upload_factor"`
 
+	// AgentHeavyEndpoints and AgentHeavyRoles name the endpoints (by id) and
+	// role tags where AI agents run programs and open connections all day.
+	// The behavioural detectors are hunt leads everywhere (anomaly_tier.go);
+	// on these endpoints they are also muted to LOW, because there they
+	// describe the agents' ordinary work.
+	AgentHeavyEndpoints []string `json:"agent_heavy_endpoints"`
+	AgentHeavyRoles     []string `json:"agent_heavy_roles"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -370,6 +378,8 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.QuietPairs = tidyPairs(t.QuietPairs)
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
 	t.KnownWorkloads = tidyWorkloads(t.KnownWorkloads)
+	t.AgentHeavyEndpoints = tidyList(t.AgentHeavyEndpoints)
+	t.AgentHeavyRoles = tidyList(t.AgentHeavyRoles)
 	t.AgentRuntimes = tidyAgentRuntimes(t.AgentRuntimes)
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
