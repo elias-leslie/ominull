@@ -42,22 +42,24 @@ type Endpoint struct {
 	// {"programs":[...]}}). The hub acts on it rather than on the OS name, so a
 	// new platform needs no hub change. Empty means the agent predates it.
 	ResponseCapabilities string `json:"response_capabilities,omitempty"`
-	// ResponseProfile is the operator's setting ("monitor" or empty) and
-	// MonitorOnly the hub's verdict from it, the role and the capabilities
-	// (response_profile.go). A monitor-only endpoint is never isolated.
-	ResponseProfile   string `json:"response_profile,omitempty"`
-	MonitorOnly       bool   `json:"monitor_only"`
-	ID                string `json:"id"`
-	TenantID          string `json:"tenant_id"`
-	LocationID        string `json:"location_id"`
-	LocationName      string `json:"location_name"`
-	Hostname          string `json:"hostname"`
-	OS                string `json:"os"`
-	IP                string `json:"ip"`
-	MAC               string `json:"mac"`
-	RoleTag           string `json:"role_tag"`
-	InstalledSoftware string `json:"installed_software"`
-	DriverVersion     string `json:"driver_version"`
+	// ResponseProfile is the operator's setting ("monitor" or empty),
+	// MonitorOnly the hub's verdict from it and ResponseProfileRev the
+	// setting's revision (response_profile.go). A monitor-only endpoint is
+	// never isolated.
+	ResponseProfile    string `json:"response_profile,omitempty"`
+	MonitorOnly        bool   `json:"monitor_only"`
+	ResponseProfileRev int64  `json:"response_profile_rev"`
+	ID                 string `json:"id"`
+	TenantID           string `json:"tenant_id"`
+	LocationID         string `json:"location_id"`
+	LocationName       string `json:"location_name"`
+	Hostname           string `json:"hostname"`
+	OS                 string `json:"os"`
+	IP                 string `json:"ip"`
+	MAC                string `json:"mac"`
+	RoleTag            string `json:"role_tag"`
+	InstalledSoftware  string `json:"installed_software"`
+	DriverVersion      string `json:"driver_version"`
 	// UpdateCapability is the package format this endpoint can install for
 	// itself: "deb", "msi", or empty. The agent reports it, because
 	// the OS string is a display label and not a contract - matching on it is
@@ -655,6 +657,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN collector_health TEXT DEFAULT '[]'",
 		"ALTER TABLE endpoints ADD COLUMN response_capabilities TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN response_profile TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN response_profile_rev INTEGER DEFAULT 0",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
@@ -1180,9 +1183,7 @@ func (s *Store) GetEndpointIsolation(id string) (bool, []string, error) {
 
 	var isoInt int
 	var allow string
-	// A monitor-only endpoint is never told to isolate, even if a row from
-	// before it became monitor-only still says so.
-	err := s.db.QueryRow("SELECT CASE WHEN "+monitorOnlySQL+" THEN 0 ELSE is_isolated END, COALESCE(isolation_allow_ips, '') FROM endpoints WHERE id = ?", id).Scan(&isoInt, &allow)
+	err := s.db.QueryRow("SELECT is_isolated, COALESCE(isolation_allow_ips, '') FROM endpoints WHERE id = ?", id).Scan(&isoInt, &allow)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1432,7 +1433,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly, &ep.ResponseProfileRev,
 		); err != nil {
 			return nil, err
 		}
@@ -1455,7 +1456,7 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly, &ep.ResponseProfileRev,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

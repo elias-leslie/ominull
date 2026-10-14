@@ -2179,13 +2179,28 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
+		// One row per host: a host made monitor-only since the split above is
+		// left out and named; any other failure stops the run, and the hosts
+		// already isolated are audited and named, never left unreported.
+		var done []string
 		for _, id := range scoped {
-			if err := s.store.SetEndpointIsolation(id, true, allowIPs); err != nil { // monitor-only were split off above
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+			err := s.store.SetEndpointIsolation(id, true, allowIPs)
+			switch {
+			case errors.Is(err, storage.ErrMonitorOnly):
+				excluded = append(excluded, id)
+				continue
+			case err != nil:
+				for _, d := range done {
+					s.audit(r, "ISOLATE_HOST", d, "Isolated by a bulk isolation of "+req.Scope+" that stopped part way")
+				}
+				s.audit(r, "BULK_ISOLATE_PARTIAL", req.Scope+":"+req.Value, fmt.Sprintf("Stopped after %d endpoint(s): %v", len(done), err))
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error(), "isolated": done})
 				return
 			}
+			done = append(done, id)
 			count++
 		}
+		scoped = done
 	} else {
 		var err error
 		count, err = s.store.SetBulkIsolation(tenantID, req.Scope, req.Value, true, allowIPs)

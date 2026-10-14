@@ -128,12 +128,13 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		var b struct {
 			EndpointID string `json:"endpoint_id"`
 			Reason     string `json:"reason"`
+			Revision   *int64 `json:"revision"`
 		}
-		if err := decodeJSON(p.Body, &b); err != nil || n != 1 || b.EndpointID != targets[0] {
-			return "", "", errors.New("allow-isolation body names a different endpoint")
+		if err := decodeJSON(p.Body, &b); err != nil || n != 1 || b.EndpointID != targets[0] || b.Revision == nil {
+			return "", "", errors.New("allow-isolation body names a different endpoint or no revision")
 		}
-		return spec.action, fmt.Sprintf("Lift monitor-only on %s: it may be isolated at host level again (reason given: %s)",
-			targets[0], cleanText(b.Reason, 120)), nil
+		return spec.action, fmt.Sprintf("Lift monitor-only (setting %d) on %s: it may be isolated at host level again (reason given: %s)",
+			*b.Revision, targets[0], cleanText(b.Reason, 120)), nil
 	case "/api/v1/agents/update":
 		var b struct {
 			Version string `json:"version"`

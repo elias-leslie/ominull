@@ -16,8 +16,9 @@ import (
 // isolated at host level, because host isolation leaves FORWARD open; its
 // guests are contained one by one on the hypervisor's per-guest firewall.
 // Making an endpoint monitor-only only narrows what the hub may do, so an
-// administrator can set it directly; lifting it is a capability raise and
-// takes an owner approval like any isolation change.
+// administrator can set it directly (never while it is isolated: that would
+// release the isolation without the owner). Lifting it is a capability raise
+// and takes an owner approval for the exact revision the owner was shown.
 
 // guestContainmentHint tells an operator where guest containment lives. The
 // executor that runs it holds the hypervisor's management access; the hub
@@ -64,6 +65,7 @@ func (s *Server) splitMonitorOnly(w http.ResponseWriter, ids []string) (allowed,
 type responseProfileRequest struct {
 	EndpointID string `json:"endpoint_id"`
 	Reason     string `json:"reason"`
+	Revision   *int64 `json:"revision,omitempty"` // allow-isolation: the setting's revision being lifted
 }
 
 func decodeResponseProfile(w http.ResponseWriter, body []byte) (responseProfileRequest, bool) {
@@ -100,20 +102,30 @@ func (s *Server) handleMonitorOnly(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.endpointInScope(w, r, req.EndpointID) {
 		return
 	}
-	if err := s.store.SetEndpointResponseProfile(req.EndpointID, storage.ResponseProfileMonitor); err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, storage.ErrEndpointNotFound) {
-			status = http.StatusNotFound
-		}
-		writeJSONError(w, status, err.Error())
+	rev, err := s.store.SetEndpointMonitorOnly(req.EndpointID)
+	if err != nil {
+		writeProfileError(w, err)
 		return
 	}
 	s.audit(r, "ENDPOINT_MONITOR_ONLY_SET", req.EndpointID, "Host isolation refused from now on: "+req.Reason)
-	writeJSON(w, http.StatusOK, map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": storage.ResponseProfileMonitor, "monitor_only": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": storage.ResponseProfileMonitor,
+		"monitor_only": true, "response_profile_rev": rev})
+}
+
+func writeProfileError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, storage.ErrEndpointNotFound):
+		writeJSONError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, storage.ErrIsolated), errors.Is(err, storage.ErrProfileChanged):
+		writeJSONError(w, http.StatusConflict, err.Error())
+	default:
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 // resolveAllowIsolation describes lifting the operator's monitor-only setting
-// for the owner's approval.
+// for the owner's approval. The body names the setting's current revision, and
+// the approval covers that body, so it cannot lift a later setting.
 func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
 	if r.Header.Get("X-Role") != "admin" {
 		writeJSONError(w, http.StatusForbidden, "admin role required")
@@ -123,13 +135,28 @@ func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, b
 	if !ok || !s.endpointInScope(w, r, req.EndpointID) {
 		return nil, false
 	}
+	ep, err := s.store.GetEndpoint(req.EndpointID)
+	switch {
+	case err != nil:
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	case ep == nil:
+		writeJSONError(w, http.StatusNotFound, "endpoint not found")
+		return nil, false
+	case !ep.MonitorOnly:
+		writeJSONError(w, http.StatusConflict, "endpoint is not monitor-only")
+		return nil, false
+	case req.Revision == nil || *req.Revision != ep.ResponseProfileRev:
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error": "name the setting's current revision", "response_profile_rev": ep.ResponseProfileRev})
+		return nil, false
+	}
 	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Allow host isolation",
 		Summary: "Let " + s.endpointLabels([]string{req.EndpointID}) + " be isolated at host level again", Targets: []string{req.EndpointID}}, true
 }
 
 // handleAllowIsolation clears the operator's monitor-only setting (owner
-// approved). A hypervisor role or an agent that cannot isolate keeps the
-// endpoint monitor-only; the reply says so.
+// approved), only at the revision the approval names.
 func (s *Server) handleAllowIsolation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -145,22 +172,20 @@ func (s *Server) handleAllowIsolation(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "the approval covers a different endpoint")
 		return
 	}
+	if req.Revision == nil {
+		writeJSONError(w, http.StatusBadRequest, "revision is required")
+		return
+	}
 	if !s.endpointInScope(w, r, req.EndpointID) {
 		return
 	}
-	if err := s.store.SetEndpointResponseProfile(req.EndpointID, ""); err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, storage.ErrEndpointNotFound) {
-			status = http.StatusNotFound
-		}
-		writeJSONError(w, status, err.Error())
+	rev, err := s.store.LiftMonitorOnly(req.EndpointID, *req.Revision)
+	if err != nil {
+		writeProfileError(w, err)
 		return
 	}
-	s.audit(r, "ENDPOINT_MONITOR_ONLY_LIFTED", req.EndpointID, "Operator monitor-only setting lifted: "+strings.TrimSpace(req.Reason))
-	out := map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": "", "monitor_only": false}
-	if ep, err := s.store.GetEndpoint(req.EndpointID); err == nil && ep != nil && ep.MonitorOnly {
-		out["monitor_only"] = true
-		out["still_monitor_only"] = fmt.Sprintf("still monitor-only: %s", ep.MonitorOnlyReason())
-	}
-	writeJSON(w, http.StatusOK, out)
+	s.audit(r, "ENDPOINT_MONITOR_ONLY_LIFTED", req.EndpointID, fmt.Sprintf("Operator monitor-only setting (revision %d) lifted: %s",
+		*req.Revision, strings.TrimSpace(req.Reason)))
+	writeJSON(w, http.StatusOK, map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": "", "monitor_only": false,
+		"response_profile_rev": rev})
 }
