@@ -41,6 +41,7 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			AgentRuntimes       *[]storage.AgentRuntime  `json:"agent_runtimes"`
 			AgentHeavyEndpoints *[]string                `json:"agent_heavy_endpoints"`
 			AgentHeavyRoles     *[]string                `json:"agent_heavy_roles"`
+			AgentHeavyObserved  *bool                    `json:"agent_heavy_observed"`
 		}
 		if err := json.Unmarshal(raw, &patch); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -61,6 +62,10 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 		}
 		if patch.AgentHeavyRoles != nil {
 			req.AgentHeavyRoles = *patch.AgentHeavyRoles
+		}
+		req.AgentHeavyObserved = before.AgentHeavyObserved
+		if patch.AgentHeavyObserved != nil {
+			req.AgentHeavyObserved = *patch.AgentHeavyObserved
 		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
@@ -189,6 +194,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	listDelta("agent runtimes", runtimes(before), runtimes(after))
 	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
 	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
+	add("agent-heavy when a runtime is seen", before.AgentHeavyObserved, after.AgentHeavyObserved)
 	add("agent egress enabled", before.AgentEgressOn, after.AgentEgressOn)
 	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)
 	add("agent upload floor", before.AgentUploadFloorMB, after.AgentUploadFloorMB)

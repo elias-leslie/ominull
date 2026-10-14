@@ -253,8 +253,10 @@ leads: stored in full with `held_reason` `hunt` and `tier` in the evidence, out
 of every open count, the default alert list and the Nightshift summary, shown
 under HUNT LEADS (`GET /api/v1/anomalies?held=hunt`, `hunt_total`) and bounded
 by the anomaly retention. On agent-heavy endpoints (tuning
-`agent_heavy_endpoints` by endpoint id, `agent_heavy_roles` by role tag; a
-console save keeps both lists) a lead is also muted to LOW, the detector's
+`agent_heavy_endpoints` by endpoint id, `agent_heavy_roles` by role tag, and,
+with `agent_heavy_observed` (default on), any endpoint whose own telemetry has
+shown an agent runtime; never the operating system; a console save keeps all
+three) a lead is also muted to LOW, the detector's
 severity kept as `detector_severity`. The subnet sweep's new-device findings
 (`alert-disc-*`) share the `NOVEL_DESTINATION` type and keep paging. Findings
 recorded before the tiers were moved once at startup (setting

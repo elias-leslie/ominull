@@ -125,6 +125,9 @@ type DetectionTuning struct {
 	// describe the agents' ordinary work.
 	AgentHeavyEndpoints []string `json:"agent_heavy_endpoints"`
 	AgentHeavyRoles     []string `json:"agent_heavy_roles"`
+	// AgentHeavyObserved also counts an endpoint as agent-heavy once its own
+	// telemetry has shown one of the agent runtimes (agent_runtimes).
+	AgentHeavyObserved bool `json:"agent_heavy_observed"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
@@ -154,6 +157,7 @@ func defaultDetectionTuning() DetectionTuning {
 		OffHoursOn:    true,
 
 		AgentEgressOn:      true,
+		AgentHeavyObserved: true,
 		AgentRuntimes:      defaultAgentRuntimes(),
 		AgentBaselineDays:  7,
 		AgentUploadFloorMB: 100,

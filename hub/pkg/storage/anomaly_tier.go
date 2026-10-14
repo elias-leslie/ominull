@@ -60,7 +60,9 @@ func heldClause(held string) string {
 
 // IsAgentHeavy reports whether the tuning names this endpoint, by id or by
 // role tag, as one where agents run programs and open connections as a matter
-// of course.
+// of course. The detector also counts an endpoint whose telemetry has shown an
+// agent runtime when AgentHeavyObserved is on. The operating system is never
+// consulted.
 func (t DetectionTuning) IsAgentHeavy(ep Endpoint) bool {
 	id := strings.ToLower(strings.TrimSpace(ep.ID))
 	role := strings.ToLower(strings.TrimSpace(ep.RoleTag))
@@ -75,6 +77,17 @@ func (t DetectionTuning) IsAgentHeavy(ep Endpoint) bool {
 		}
 	}
 	return false
+}
+
+// RunsAgentRuntimes reports whether the endpoint's own telemetry has shown a
+// configured AI agent runtime (agent_egress_runtimes): the capability the
+// agent reports, whatever its operating system.
+func (s *Store) RunsAgentRuntimes(tenantID, endpointID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var one int
+	return s.db.QueryRow(`SELECT 1 FROM agent_egress_runtimes WHERE tenant_id = ? AND endpoint_id = ? LIMIT 1`,
+		tenantID, endpointID).Scan(&one) == nil
 }
 
 const huntBackfillSetting = "anomaly_hunt_tier_backfill_v1"

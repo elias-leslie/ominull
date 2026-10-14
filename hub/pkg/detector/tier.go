@@ -51,9 +51,11 @@ func HuntTypes() []string {
 }
 
 // applyTier stamps a hunt lead: held as a hunt lead, the tier in its evidence,
-// and on an agent-heavy endpoint its severity lowered to LOW with the
+// and on an agent-heavy endpoint (named in the tuning by id or role, or
+// observed running an agent runtime; never judged by operating system) its
+// severity lowered to LOW with the
 // detector's own severity kept beside it.
-func applyTier(a *storage.AnomalyAlert, ep storage.Endpoint, cfg storage.DetectionTuning) {
+func applyTier(a *storage.AnomalyAlert, ep storage.Endpoint, cfg storage.DetectionTuning, runsAgents func() bool) {
 	if TierFor(a.AnomalyType) != storage.TierHunt {
 		return
 	}
@@ -65,7 +67,7 @@ func applyTier(a *storage.AnomalyAlert, ep storage.Endpoint, cfg storage.Detecti
 	if fields != nil {
 		fields["tier"] = storage.TierHunt
 	}
-	if cfg.IsAgentHeavy(ep) {
+	if cfg.IsAgentHeavy(ep) || (cfg.AgentHeavyObserved && runsAgents != nil && runsAgents()) {
 		if fields != nil {
 			fields["detector_severity"] = a.Severity
 			fields["muted"] = storage.MutedAgentHeavy

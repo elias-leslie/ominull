@@ -132,6 +132,7 @@ func TestTuningSaveKeepsAgentHeavyLists(t *testing.T) {
 	cfg := store.GetDetectionTuning()
 	cfg.AgentHeavyEndpoints = []string{"Linux-WS"}
 	cfg.AgentHeavyRoles = []string{"agent-host"}
+	cfg.AgentHeavyObserved = false
 	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestTuningSaveKeepsAgentHeavyLists(t *testing.T) {
 		t.Fatalf("save = %d %v", code, body)
 	}
 	got := store.GetDetectionTuning()
-	if len(got.AgentHeavyEndpoints) != 1 || got.AgentHeavyEndpoints[0] != "linux-ws" || len(got.AgentHeavyRoles) != 1 {
+	if len(got.AgentHeavyEndpoints) != 1 || got.AgentHeavyEndpoints[0] != "linux-ws" || len(got.AgentHeavyRoles) != 1 || got.AgentHeavyObserved {
 		t.Fatalf("agent-heavy lists after a partial save = %v %v", got.AgentHeavyEndpoints, got.AgentHeavyRoles)
 	}
 	if !got.IsAgentHeavy(storage.Endpoint{ID: "linux-ws"}) || !got.IsAgentHeavy(storage.Endpoint{ID: "x", RoleTag: "Agent-Host"}) ||

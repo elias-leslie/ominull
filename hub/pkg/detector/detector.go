@@ -252,7 +252,7 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 		}
 	}
 
-	applyTier(&anomaly, ep, e.settings())
+	applyTier(&anomaly, ep, e.settings(), func() bool { return e.store.RunsAgentRuntimes(anomaly.TenantID, anomaly.EndpointID) })
 	if anomaly.HeldReason == "" {
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning

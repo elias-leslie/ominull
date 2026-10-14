@@ -20,6 +20,7 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 	}{
 		{"stable host", false, "HIGH", false},
 		{"agent-heavy host", true, "LOW", true},
+		{"agent runtime observed", false, "LOW", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine, store := noiseEngine(t)
@@ -31,6 +32,11 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 				}
 			}
 			now := time.Now().UTC()
+			if tc.name == "agent runtime observed" {
+				if _, _, err := store.ObserveAgentDestination("default", "linux-41", "claude-code", "api.example", 10, now); err != nil {
+					t.Fatal(err)
+				}
+			}
 			engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-41", Timestamp: now,
 				Action: "PERMIT", Direction: "OUTBOUND", DstIP: "159.65.0.9", DstPort: 8443, BytesOut: 800,
 				ProcessPath: "/usr/bin/python3.13"})
