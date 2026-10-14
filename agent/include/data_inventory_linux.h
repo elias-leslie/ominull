@@ -2075,8 +2075,9 @@ static inline bool DataInv_Drain(DataInvRun* run) {
         if (n == 0) {
             close(run->fd);
             run->fd = -1;
-            /* SIGCHLD may be ignored (auto-reap); waitpid then fails, which is fine. */
-            (void)waitpid(run->pid, NULL, WNOHANG);
+            /* The child closed its end: it has exited or is about to (a
+             * killed child closes it by dying). Reap it so no zombie stays. */
+            while (waitpid(run->pid, NULL, 0) < 0 && errno == EINTR) { }
             run->pid = 0; /* gone: never signal a reused pid */
             return true;
         }

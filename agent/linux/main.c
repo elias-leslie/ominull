@@ -2759,26 +2759,35 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 continue;
             }
 
-            // Spawn worker in dedicated process
-            pid_t worker_pid = fork();
-            if (worker_pid == 0) {
-                // Child worker process: close inherited file descriptors
-                for (int fd = 3; fd < 1024; fd++) {
-                    close(fd);
+            // Spawn the worker detached (double fork): the session outlives
+            // this heartbeat, and init reaps it. The daemon itself keeps the
+            // default SIGCHLD so every waitpid it does gets a real status.
+            pid_t mid_pid = fork();
+            if (mid_pid == 0) {
+                pid_t worker_pid = fork();
+                if (worker_pid == 0) {
+                    // Worker: close inherited file descriptors
+                    for (int fd = 3; fd < 1024; fd++) {
+                        close(fd);
+                    }
+                    int exit_code = Terminal_RunLinuxWorker(
+                        config->hub_url,
+                        HubUsesTLS(config),
+                        config->ca_path,
+                        config->pin_hub_ca,
+                        config->client_cert_path,
+                        config->client_key_path,
+                        config->endpoint_id,
+                        params.session_id,
+                        params.connect_token,
+                        params.program
+                    );
+                    _exit(exit_code == 0 ? 0 : 1);
                 }
-                int exit_code = Terminal_RunLinuxWorker(
-                    config->hub_url,
-                    HubUsesTLS(config),
-                    config->ca_path,
-                    config->pin_hub_ca,
-                    config->client_cert_path,
-                    config->client_key_path,
-                    config->endpoint_id,
-                    params.session_id,
-                    params.connect_token,
-                    params.program
-                );
-                _exit(exit_code == 0 ? 0 : 1);
+                _exit(worker_pid < 0 ? 1 : 0);
+            }
+            if (mid_pid > 0) {
+                while (waitpid(mid_pid, NULL, 0) < 0 && errno == EINTR) { }
             }
         } else if (strcmp(offer->kind, "script_exec") == 0) {
             ScriptExecParams params;
@@ -3355,8 +3364,12 @@ int main(int argc, char* argv[]) {
     /* The heartbeat writes its body into a child's stdin. A child that exits
      * first would otherwise take the daemon down with a SIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
-    /* Auto-reap terminated worker child processes so no zombies accumulate. */
-    signal(SIGCHLD, SIG_IGN);
+    /* SIGCHLD stays at its default. Ignoring it auto-reaped children, which
+     * also made every waitpid() fail with ECHILD: RunTool returned -1 for each
+     * iptables call, so the isolation readiness probe always reported
+     * "iptables would not list the OUTPUT chain (exit -1)" and pclose/system
+     * statuses were lost. Every child is reaped by whoever forks it; the
+     * terminal worker is double-forked so init reaps it. */
 
     mkdir("/var/lib/ominull", 0755);
     uint8_t ep_pub[32];
