@@ -107,6 +107,27 @@
    assert(document.querySelector('.sheet textarea').value==='fe80::1 02:00:00:00:00:01','Cancel lost monitoring draft');
   }finally{a.closeAllSheets();window.fetch=original;a.state.demo=true;}
  });
+ await check('gated action waits for owner approval and retries with the approval id', async () => {
+  const original=window.fetch;a.state.demo=false;const calls=[];
+  const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
+  let decide;const decided=new Promise(r=>decide=r);
+  window.fetch=async(url,opts={})=>{const u=String(url);const hdr=new Headers(opts.headers||{});calls.push({u,method:opts.method||'GET',approval:hdr.get('X-Approval-ID'),body:opts.body});
+   if(u.startsWith('/api/v1/approvals')){await decided;return json({id:'ap1',state:'approved',summary:'Isolate fixture-host',expires_at:new Date(Date.now()+60000).toISOString()});}
+   if(hdr.get('X-Approval-ID')==='ap1')return json({ok:true});
+   return json({approval_id:'ap1',state:'pending',summary:'Isolate fixture-host',expires_at:new Date(Date.now()+300000).toISOString()},202);};
+  try {
+   const done=a.ownerApproved('/api/v1/endpoints/isolate-bulk',{scope:'ids',ids:['e1']},{label:'Isolate fixture-host'});
+   await wait();await wait();
+   const panel=document.querySelector('.approval-wait');
+   assert(panel&&panel.getAttribute('data-state')==='pending','No pending approval panel');
+   assert(panel.textContent.includes('Approve on your phone'),'Pending panel does not say where to approve');
+   decide();const result=await done;
+   const posts=calls.filter(c=>c.method==='POST');
+   assert(posts.length===2&&!posts[0].approval&&posts[1].approval==='ap1','Retry did not carry X-Approval-ID');
+   assert(posts[0].body===posts[1].body&&JSON.parse(posts[1].body).scope==='ids','Retry body changed or lost scope');
+   assert(result&&result.ok,'Approved result not returned');
+  } finally {window.fetch=original;a.state.demo=true;document.querySelectorAll('.approvals').forEach(n=>n.remove());}
+ });
  a.state.section='assets';a.render();
  return results;
 })()

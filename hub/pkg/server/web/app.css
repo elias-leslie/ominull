@@ -121,6 +121,7 @@
   --z-menu: 70;
   --z-palette: 80;
   --z-fab: 85;
+  --z-approval: 88;
   --z-toast: 90;
 
   /* Aliases for the names the post-core sections were written against. These
@@ -3551,23 +3552,25 @@ input[type="url"] {
   width: 100%;
 }
 
-/* 16-color ANSI Palette for xterm DOM renderer */
-.terminal-container .xterm span[class*="xterm-fg-0"], .terminal-container .xterm .xterm-fg-0 { color: var(--term-ansi-0) !important; }
-.terminal-container .xterm span[class*="xterm-fg-1"], .terminal-container .xterm .xterm-fg-1 { color: var(--term-ansi-1) !important; }
-.terminal-container .xterm span[class*="xterm-fg-2"], .terminal-container .xterm .xterm-fg-2 { color: var(--term-ansi-2) !important; }
-.terminal-container .xterm span[class*="xterm-fg-3"], .terminal-container .xterm .xterm-fg-3 { color: var(--term-ansi-3) !important; }
-.terminal-container .xterm span[class*="xterm-fg-4"], .terminal-container .xterm .xterm-fg-4 { color: var(--term-ansi-4) !important; }
-.terminal-container .xterm span[class*="xterm-fg-5"], .terminal-container .xterm .xterm-fg-5 { color: var(--term-ansi-5) !important; }
-.terminal-container .xterm span[class*="xterm-fg-6"], .terminal-container .xterm .xterm-fg-6 { color: var(--term-ansi-6) !important; }
-.terminal-container .xterm span[class*="xterm-fg-7"], .terminal-container .xterm .xterm-fg-7 { color: var(--term-ansi-7) !important; }
-.terminal-container .xterm span[class*="xterm-fg-8"], .terminal-container .xterm .xterm-fg-8 { color: var(--term-ansi-8) !important; }
-.terminal-container .xterm span[class*="xterm-fg-9"], .terminal-container .xterm .xterm-fg-9 { color: var(--term-ansi-9) !important; }
-.terminal-container .xterm span[class*="xterm-fg-10"], .terminal-container .xterm .xterm-fg-10 { color: var(--term-ansi-10) !important; }
-.terminal-container .xterm span[class*="xterm-fg-11"], .terminal-container .xterm .xterm-fg-11 { color: var(--term-ansi-11) !important; }
-.terminal-container .xterm span[class*="xterm-fg-12"], .terminal-container .xterm .xterm-fg-12 { color: var(--term-ansi-12) !important; }
-.terminal-container .xterm span[class*="xterm-fg-13"], .terminal-container .xterm .xterm-fg-13 { color: var(--term-ansi-13) !important; }
-.terminal-container .xterm span[class*="xterm-fg-14"], .terminal-container .xterm .xterm-fg-14 { color: var(--term-ansi-14) !important; }
-.terminal-container .xterm span[class*="xterm-fg-15"], .terminal-container .xterm .xterm-fg-15 { color: var(--term-ansi-15) !important; }
+/* 16-color ANSI palette for the xterm DOM renderer. Exact classes only: a
+   [class*="xterm-fg-2"] match also caught xterm-fg-208 and painted every
+   256-colour cell from 10 up with one of the first sixteen. */
+.terminal-container .xterm .xterm-fg-0 { color: var(--term-ansi-0) !important; }
+.terminal-container .xterm .xterm-fg-1 { color: var(--term-ansi-1) !important; }
+.terminal-container .xterm .xterm-fg-2 { color: var(--term-ansi-2) !important; }
+.terminal-container .xterm .xterm-fg-3 { color: var(--term-ansi-3) !important; }
+.terminal-container .xterm .xterm-fg-4 { color: var(--term-ansi-4) !important; }
+.terminal-container .xterm .xterm-fg-5 { color: var(--term-ansi-5) !important; }
+.terminal-container .xterm .xterm-fg-6 { color: var(--term-ansi-6) !important; }
+.terminal-container .xterm .xterm-fg-7 { color: var(--term-ansi-7) !important; }
+.terminal-container .xterm .xterm-fg-8 { color: var(--term-ansi-8) !important; }
+.terminal-container .xterm .xterm-fg-9 { color: var(--term-ansi-9) !important; }
+.terminal-container .xterm .xterm-fg-10 { color: var(--term-ansi-10) !important; }
+.terminal-container .xterm .xterm-fg-11 { color: var(--term-ansi-11) !important; }
+.terminal-container .xterm .xterm-fg-12 { color: var(--term-ansi-12) !important; }
+.terminal-container .xterm .xterm-fg-13 { color: var(--term-ansi-13) !important; }
+.terminal-container .xterm .xterm-fg-14 { color: var(--term-ansi-14) !important; }
+.terminal-container .xterm .xterm-fg-15 { color: var(--term-ansi-15) !important; }
 .terminal-container .xterm span[class*="xterm-bold"], .terminal-container .xterm .xterm-bold { font-weight: bold; }
 .terminal-container .xterm span[class*="xterm-dim"], .terminal-container .xterm .xterm-dim { opacity: 0.6; }
 
@@ -4841,4 +4844,241 @@ tfoot {
   tfoot {
     break-inside: avoid;
   }
+}
+
+/* ------------------------------------------------------ owner approval */
+
+/* Waiting for the owner's phone. Above sheets and the terminal (an approval
+   is often what the open sheet is waiting on), below toasts. */
+.approvals {
+  position: fixed;
+  top: var(--s-3);
+  right: var(--s-3);
+  z-index: var(--z-approval);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: min(380px, calc(100vw - 2 * var(--s-3)));
+}
+
+.approval-wait {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: var(--r-b);
+  padding: var(--s-2) var(--s-3);
+  box-shadow: var(--overlay);
+  color: var(--ink-2);
+  font-size: var(--t-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.approval-wait[data-state="approved"], .approval-wait[data-state="done"] { border-left-color: var(--ok); }
+.approval-wait[data-state="denied"], .approval-wait[data-state="failed"], .approval-wait[data-state="consumed"], .approval-wait[data-state="gone"] { border-left-color: var(--crit); }
+.approval-wait[data-state="expired"], .approval-wait[data-state="cancelled"] { border-left-color: var(--warn); }
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+}
+
+.approval-head .fill { flex: 1; }
+.approval-label { color: var(--ink); overflow-wrap: anywhere; }
+.approval-time { font-variant-numeric: tabular-nums; }
+.approval-actions { display: flex; justify-content: flex-end; }
+
+@media (max-width: 600px) {
+  .approvals { left: 8px; right: 8px; top: 8px; width: auto; }
+}
+
+/* ---------------------------------------------------- terminal workspace */
+
+.term-tabbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px var(--s-2);
+  background: var(--term-chrome);
+  border-bottom: 1px solid var(--term-line);
+  flex: none;
+  min-width: 0;
+}
+
+.term-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+  scrollbar-width: thin;
+}
+
+.term-tab-wrap {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--term-line);
+  border-radius: var(--r-b);
+  background: var(--term-bg);
+  flex: none;
+}
+
+.term-tab-wrap[data-selected="true"] {
+  border-color: var(--info);
+  background: var(--raised);
+}
+
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-2);
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.term-tab-x {
+  background: none;
+  border: 0;
+  color: var(--ink-3);
+  padding: 4px 6px;
+  cursor: pointer;
+  display: inline-flex;
+}
+
+.term-tab-x:hover, .term-tab-x:focus-visible { color: var(--ink); }
+
+.term-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  flex: none;
+}
+
+.term-tab[data-state="ok"] .term-dot { background: var(--ok); }
+.term-tab[data-state="warn"] .term-dot { background: var(--warn); }
+.term-tab[data-state="info"] .term-dot { background: var(--info); }
+.term-tab[data-state="crit"] .term-dot { background: var(--crit); }
+
+.term-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.term-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.term-pane[hidden] { display: none; }
+
+.term-reconnect {
+  flex: none;
+  padding: 6px var(--s-3);
+  background: color-mix(in srgb, var(--warn) 16%, var(--term-chrome));
+  border-bottom: 1px solid var(--term-line);
+  color: var(--ink);
+  font-size: var(--t-2);
+}
+
+.term-reconnect[hidden] { display: none; }
+
+/* The keys a phone keyboard lacks. Shown on touch screens and narrow
+   windows; a desktop keyboard has them already. */
+.term-keys {
+  display: none;
+  gap: 4px;
+  padding: 4px 6px;
+  overflow-x: auto;
+  background: var(--term-chrome);
+  border-top: 1px solid var(--term-line);
+  flex: none;
+  scrollbar-width: none;
+}
+
+.term-key {
+  flex: none;
+  min-width: 40px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--r-b);
+  background: var(--term-bg);
+  color: var(--ink);
+  font-family: var(--f-mono);
+  font-size: 14px;
+  touch-action: manipulation;
+}
+
+.term-key[aria-pressed="true"] {
+  background: var(--info);
+  border-color: var(--info);
+  color: var(--ground);
+}
+
+.term-font-lbl {
+  min-width: 34px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.term-running {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.term-paste-area {
+  width: 100%;
+  font-family: var(--f-mono);
+}
+
+.terminal-container {
+  /* Swipe and pinch are handled in app.js on the stage. */
+  touch-action: none;
+}
+
+@media (pointer: coarse), (max-width: 820px) {
+  .term-keys { display: flex; }
+}
+
+/* A phone: the terminal takes the whole visual viewport, which shrinks when
+   the keyboard opens, so the prompt stays above the keys. */
+@media (max-width: 700px) {
+  .sheet-terminal {
+    top: var(--term-vvt, 0px);
+    left: 0;
+    transform: none;
+    width: 100vw;
+    height: var(--term-vvh, 100dvh);
+    max-height: none;
+    border-radius: 0;
+    border: 0;
+  }
+  .sheet-terminal .sheet-head { padding: 4px var(--s-2); }
+  .sheet-terminal .sheet-foot { padding: 4px 6px; }
+  .terminal-meta-bar { padding: 4px var(--s-2); gap: 6px; }
+  .terminal-meta-right, .term-prog { display: none; }
+  .terminal-container { padding: 4px 6px; }
+  .terminal-foot-actions { gap: 6px; flex-wrap: nowrap; overflow-x: auto; }
+  /* Room for End session on a 360px screen; pinch still sets the size. */
+  .term-act-clear, .term-font-lbl { display: none; }
+  .terminal-actions-group { gap: 4px; flex: none; }
 }

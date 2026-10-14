@@ -1,0 +1,11 @@
+Vendored terminal emulator files from the npm registry. All are unmodified except xterm.css,
+which carries a local appendix after the upstream file: the 16-colour ANSI palette and bold/dim
+rules for the DOM renderer, matched on exact classes so 256-colour cells (xterm-fg-16..255) keep
+the colour xterm computes.
+
+xterm.js, xterm.css    @xterm/xterm 6.0.0             MIT, LICENSE.xterm.txt
+addon-fit.js           @xterm/addon-fit 0.11.0        MIT, LICENSE.xterm.txt
+addon-unicode11.js     @xterm/addon-unicode11 0.9.0   MIT, LICENSE.xterm-addon-unicode11.txt
+  tarball   https://registry.npmjs.org/@xterm/addon-unicode11/-/addon-unicode11-0.9.0.tgz
+  integrity sha512-FxDnYcyuXhNl+XSqGZL/t0U9eiNb/q3EWT5rYkQT/zuig8Gz/VagnQANKHdDWFM2lTMk9ly0EFQxxxtZUoRetw==
+  file      package/lib/addon-unicode11.js (released with @xterm/xterm 6.0.0, 2025-12-22)

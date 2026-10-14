@@ -609,6 +609,262 @@
     return Array.isArray(v) ? v : [];
   }
 
+  /* ---------------------------------------------------- owner approval */
+
+  /* approval-core:start
+     Isolation, release, mesh quarantine, agent updates and terminal shells
+     wait for the owner. The hub answers the first POST with 202 and an
+     approval id, the owner approves on their phone with one passkey tap, and
+     the identical body is sent again with X-Approval-ID. The hub checks the
+     body against what was approved, so nothing here can widen it. This block
+     has no DOM in it: web_tests/approval-flow.test.cjs runs it in a VM. */
+  var APPROVAL_POLL_WAIT_S = 12;
+  var APPROVAL_TEXT = {
+    denied: "Denied on your phone. Nothing was changed.",
+    expired: "The approval request expired before it was approved. Nothing was changed.",
+    consumed: "That approval was already used. Request it again.",
+    cancelled: "Stopped waiting. The request on your phone expires on its own; approving it now does nothing.",
+    gone: "The hub no longer knows this approval request. Nothing was changed."
+  };
+
+  function approvalError(st, info) {
+    var e = new Error(APPROVAL_TEXT[st] || ("Approval " + st + ". Nothing was changed."));
+    e.approvalState = st;
+    e.approval = info;
+    e.handled = true;
+    return e;
+  }
+
+  /* deps.post(headers) -> Promise<{status, body}>; deps.poll(id) ->
+     Promise<{state, expires_at}>; deps.sleep(ms) -> Promise; deps.now();
+     deps.cancelled() -> bool; deps.onState(info). Resolves with the success
+     body, rejects with the hub's error or an approvalError. Never re-posts a
+     denied, expired or used approval. */
+  function approvalFlow(deps) {
+    return deps.post({}).then(function (first) {
+      var b = first && first.body;
+      if (!first || first.status !== 202 || !b || !b.approval_id) return b;
+      var info = { id: String(b.approval_id), state: "pending", summary: b.summary || "", expires_at: b.expires_at || "" };
+      deps.onState(info);
+      var failures = 0;
+      function setState(next) {
+        if (next !== info.state) { info.state = next; deps.onState(info); }
+      }
+      function step() {
+        if (deps.cancelled()) { setState("cancelled"); return Promise.reject(approvalError("cancelled", info)); }
+        var exp = Date.parse(info.expires_at);
+        if (exp && deps.now() > exp + 2000) { setState("expired"); return Promise.reject(approvalError("expired", info)); }
+        var started = deps.now();
+        return deps.poll(info.id).then(function (st) {
+          failures = 0;
+          if (deps.cancelled()) { setState("cancelled"); return Promise.reject(approvalError("cancelled", info)); }
+          if (st && st.expires_at) info.expires_at = st.expires_at;
+          var next = (st && st.state) || "pending";
+          if (next === "approved") {
+            setState("approved");
+            return deps.post({ "X-Approval-ID": info.id }).then(function (res) {
+              if (res && res.status === 202) { setState("consumed"); throw approvalError("consumed", info); }
+              setState("done");
+              return res && res.body;
+            });
+          }
+          if (next !== "pending") { setState(next); return Promise.reject(approvalError(next, info)); }
+          var spent = deps.now() - started;
+          return (spent < 1500 ? deps.sleep(1500 - spent) : Promise.resolve()).then(step);
+        }, function (err) {
+          if (err && (err.status === 404 || err.status === 410)) { setState("gone"); throw approvalError("gone", info); }
+          if (err && err.status === 403) throw err;
+          failures++;
+          return deps.sleep(Math.min(5000, 500 * Math.pow(2, failures))).then(step);
+        });
+      }
+      return step();
+    });
+  }
+
+  /* Bytes for the extra key row. appCursor is DECCKM (vim, less, htop):
+     arrows are ESC O x there and ESC [ x elsewhere; with Ctrl they carry the
+     xterm modifier ;5. */
+  var TERM_KEYS = {
+    esc: "\x1b", tab: "\t", up: "A", down: "B", right: "C", left: "D",
+    home: "\x1b[H", end: "\x1b[F", pgup: "\x1b[5~", pgdn: "\x1b[6~",
+    pipe: "|", tilde: "~", slash: "/", dash: "-"
+  };
+  function termKeyBytes(name, ctrl, appCursor) {
+    var v = TERM_KEYS[name];
+    if (v === undefined) return "";
+    if (v.length === 1 && /[ABCD]/.test(v)) {
+      if (ctrl) return "\x1b[1;5" + v;
+      return (appCursor ? "\x1bO" : "\x1b[") + v;
+    }
+    if (ctrl && v.length === 1) return termCtrlChar(v) || v;
+    return v;
+  }
+  /* What a sticky Ctrl does to the next typed character: letters and
+     @ [ \ ] ^ _ map to C0 controls, space and 2 to NUL, ? to DEL. Anything
+     else goes through unchanged. */
+  function termCtrlChar(ch) {
+    if (!ch || ch.length !== 1) return "";
+    var c = ch.charCodeAt(0);
+    if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
+    if (c >= 64 && c <= 95) return String.fromCharCode(c - 64);
+    if (ch === " " || ch === "2") return "\x00";
+    if (ch === "?") return "\x7f";
+    return "";
+  }
+  /* approval-core:end */
+
+  /* The approval request rides plain fetch rather than request(): a poll is
+     not fleet state, must not repaint the page, and must see the 202. */
+  function rawRequest(path, method, body, extraHeaders) {
+    var headers = { "Content-Type": "application/json" };
+    if (API_KEY) headers["X-API-Key"] = API_KEY;
+    Object.keys(extraHeaders || {}).forEach(function (k) { headers[k] = extraHeaders[k]; });
+    var controller = new AbortController();
+    var deadline = setTimeout(function () { controller.abort(); }, (APPROVAL_POLL_WAIT_S + 8) * 1000);
+    var opts = { method: method || "GET", headers: headers, credentials: "same-origin", signal: controller.signal };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(apiURL(path), opts).then(function (res) {
+      return res.text().then(function (t) {
+        var parsed = null;
+        try { parsed = t ? JSON.parse(t) : null; } catch (e) { parsed = null; }
+        if (!res.ok) {
+          var msg = (parsed && parsed.error) || (t || "").slice(0, 200) || "HTTP " + res.status;
+          var err = new Error(msg);
+          err.status = res.status;
+          err.body = parsed;
+          throw err;
+        }
+        return { status: res.status, body: parsed };
+      });
+    }, function (error) {
+      if (error && error.name === "AbortError") error = new Error("Request timed out");
+      throw error;
+    }).finally(function () { clearTimeout(deadline); });
+  }
+
+  /* Demo approvals: pending for DEMO_APPROVAL_MS, then approved, so the
+     waiting state can be seen and screenshotted without a phone. */
+  var DEMO_APPROVAL_MS = 4000;
+  var demoApprovals = {};
+  function demoApprovalPost(path, body, headers) {
+    var id = headers["X-Approval-ID"];
+    if (!id) {
+      id = "demo-" + Math.random().toString(16).slice(2, 10);
+      demoApprovals[id] = { created: Date.now(), state: "pending", expires_at: new Date(Date.now() + 5 * 60000).toISOString() };
+      return Promise.resolve({ status: 202, body: { approval_id: id, state: "pending", expires_at: demoApprovals[id].expires_at, summary: "Demo approval for " + path } });
+    }
+    var a = demoApprovals[id];
+    if (!a || a.state !== "approved") return Promise.reject(Object.assign(new Error("approval is not valid"), { status: 403 }));
+    a.state = "consumed";
+    return demoResponse(path, "POST", body).then(function (v) { return { status: 200, body: v }; });
+  }
+  function demoApprovalPoll(id) {
+    var a = demoApprovals[id];
+    if (!a) return Promise.reject(Object.assign(new Error("not found"), { status: 404 }));
+    if (a.state === "pending" && !state.demoApprovalHold && Date.now() - a.created > DEMO_APPROVAL_MS) a.state = "approved";
+    return new Promise(function (r) { setTimeout(function () { r({ id: id, state: a.state, expires_at: a.expires_at }); }, 300); });
+  }
+
+  /* Pending approvals wake together when the console comes back to the
+     foreground: the owner just tapped Approve on this same phone. */
+  var approvalWakers = [];
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") approvalWakers.slice().forEach(function (w) { w(); });
+  });
+
+  function approvalCountdown(expiresAt) {
+    var ms = Date.parse(expiresAt) - Date.now();
+    if (!(ms > 0)) return "expiring";
+    var s = Math.round(ms / 1000);
+    return "expires in " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  /* The one way the console sends a gated action. opts.label names the
+     action for the waiting panel; opts.onPending runs once when the hub says
+     the owner has to approve (callers close their confirmation sheet there). */
+  function ownerApproved(path, body, opts) {
+    opts = opts || {};
+    if (READ_ONLY) return Promise.reject(Object.assign(new Error("Read-only access"), { status: 403 }));
+    var cancelled = false;
+    var panel = null, stateEl = null, timeEl = null, ticker = null, wake = null;
+    var info0 = null;
+    function render(info) {
+      if (!panel) {
+        if (opts.onPending) { try { opts.onPending(info); } catch (e) {} }
+        stateEl = h("p", { cls: "approval-state" });
+        timeEl = h("span", { cls: "approval-time dim-2" });
+        var stopBtn = h("button", { cls: "btn mini", type: "button", text: "Stop waiting", on: { click: function () {
+          cancelled = true; if (wake) wake();
+        } } });
+        panel = h("div", { cls: "approval-wait", role: "status", "aria-live": "polite" },
+          h("div", { cls: "approval-head" }, icon("i-lock", true), h("b", { text: "Approve on your phone" }), h("span", { cls: "fill" }), timeEl),
+          h("p", { cls: "approval-label", text: opts.label || info.summary || path }),
+          stateEl,
+          h("div", { cls: "approval-actions" }, stopBtn));
+        panel._stop = stopBtn;
+        var host = $("approvals") || document.body.appendChild(h("div", { id: "approvals", cls: "approvals" }));
+        host.appendChild(panel);
+        ticker = setInterval(function () { if (info0 && info0.state === "pending") timeEl.textContent = approvalCountdown(info0.expires_at); }, 1000);
+      }
+      info0 = info;
+      panel.setAttribute("data-state", info.state);
+      if (info.state === "pending") {
+        stateEl.textContent = "Sent to your phone. Open the notification and confirm with your passkey.";
+        timeEl.textContent = approvalCountdown(info.expires_at);
+      } else if (info.state === "approved") {
+        stateEl.textContent = "Approved. Sending the request.";
+        timeEl.textContent = "";
+      } else if (info.state === "done") {
+        stateEl.textContent = "Approved and done.";
+      } else {
+        stateEl.textContent = APPROVAL_TEXT[info.state] || info.state;
+        timeEl.textContent = "";
+      }
+    }
+    function finish(delay) {
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      approvalWakers = approvalWakers.filter(function (w) { return w !== wakeAll; });
+      if (!panel) return;
+      var p = panel;
+      if (p._stop) {
+        p._stop.textContent = "Dismiss";
+        p._stop.onclick = null;
+        p._stop.addEventListener("click", function () { if (p.parentNode) p.parentNode.removeChild(p); });
+      }
+      setTimeout(function () { if (p.parentNode) p.parentNode.removeChild(p); }, delay);
+    }
+    var sleeping = null;
+    function wakeAll() { if (sleeping) { var s = sleeping; sleeping = null; s(); } }
+    wake = wakeAll;
+    approvalWakers.push(wakeAll);
+    var deps = {
+      post: function (headers) {
+        return state.demo ? demoApprovalPost(path, body, headers) : rawRequest(path, "POST", body, headers);
+      },
+      poll: function (id) {
+        return state.demo ? demoApprovalPoll(id) : rawRequest("/api/v1/approvals?id=" + encodeURIComponent(id) + "&wait=" + APPROVAL_POLL_WAIT_S).then(function (r) { return r.body; });
+      },
+      sleep: function (ms) { return new Promise(function (r) { var t = setTimeout(function () { sleeping = null; r(); }, ms); sleeping = function () { clearTimeout(t); r(); }; }); },
+      now: function () { return Date.now(); },
+      cancelled: function () { return cancelled; },
+      onState: render
+    };
+    return approvalFlow(deps).then(function (v) {
+      finish(1500);
+      Object.keys(resources).forEach(function (key) { resources[key].updated = 0; });
+      return v;
+    }, function (e) {
+      finish(e && e.approvalState === "cancelled" ? 2500 : 12000);
+      if (panel && e && !e.approvalState) {
+        panel.setAttribute("data-state", "failed");
+        stateEl.textContent = e.message || "The hub refused the request.";
+        e.handled = true;
+      }
+      throw e;
+    });
+  }
+
   /* ------------------------------------------------------- demo fixtures */
 
   /* Demo mode seeds a synthetic fleet so the console can be exercised and
@@ -970,7 +1226,7 @@
     return new Promise(function (resolve) {
       setTimeout(function () {
         if (method && method !== "GET") {
-          resolve(demoMutate(base, body));
+          resolve(demoMutate(base, body, path, method));
           return;
         }
         if (base === "/api/v1/baseline/endpoint") {
@@ -978,6 +1234,14 @@
           return;
         }
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
+        if (base === "/api/v1/terminal/sessions") {
+          var tid = (/[?&]id=([^&]+)/.exec(path) || [])[1];
+          var list = DEMO_TERMINALS;
+          if (tid) { var one = list.filter(function (t) { return t.session_id === decodeURIComponent(tid); })[0]; resolve(one || {}); return; }
+          resolve({ sessions: list });
+          return;
+        }
+        if (base === "/api/v1/terminal/frames") { resolve({ frames: [] }); return; }
         /* Learning mode reads answer empty in the demo console: the section
            renders and explains itself rather than throwing on a hub that is
            not there. */
@@ -1144,7 +1408,34 @@
     return out;
   }
 
-  function demoMutate(base, body) {
+  /* Demo terminal sessions. The relay itself is DemoTermSocket. */
+  var DEMO_TERMINALS = [];
+  function demoTerminal(base, body, path, method) {
+    var now = new Date();
+    if (base === "/api/v1/terminal/sessions" && method === "DELETE") {
+      var did = decodeURIComponent((/[?&]id=([^&]+)/.exec(path || "") || [])[1] || "");
+      DEMO_TERMINALS.forEach(function (t) { if (t.session_id === did) { t.state = "closed"; t.closed_at = now.toISOString(); t.close_reason = "operator_closed"; } });
+      return { status: "closed" };
+    }
+    if (base === "/api/v1/terminal/sessions") {
+      var t = {
+        session_id: "demo" + Math.random().toString(16).slice(2, 10) + "-0000-4000-8000-000000000000",
+        endpoint_id: body && body.endpoint_id, program: (body && body.program) || "/bin/bash",
+        state: "active", operator_id: OPERATOR || "admin", created_at: now.toISOString(), started_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 3600000).toISOString(), idle_expires_at: new Date(now.getTime() + 900000).toISOString(),
+        recording_bytes: 0, max_recording_bytes: 10485760, recording_state: "recording", frame_count: 0
+      };
+      DEMO_TERMINALS.push(t);
+      return t;
+    }
+    if (base === "/api/v1/terminal/sessions/attach") {
+      return DEMO_TERMINALS.filter(function (x) { return x.session_id === (body && body.session_id); })[0] || {};
+    }
+    return null;
+  }
+
+  function demoMutate(base, body, path, method) {
+    if (base.indexOf("/api/v1/terminal/") === 0) return demoTerminal(base, body, path, method);
     var eps = DEMO_CACHE["/api/v1/endpoints"];
     var setIso = function (id, on) {
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
@@ -1163,8 +1454,8 @@
     }
     if (base === "/api/v1/endpoints/isolate") { setIso(body && body.endpoint_id, true); return { status: "isolated" }; }
     if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
-    if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
-    if (base === "/api/v1/endpoints/unisolate-bulk") { arrayOf(body && body.endpoint_ids).forEach(function (id) { setIso(id, false); }); return { status: "released" }; }
+    if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && (body.ids || body.endpoint_ids)).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
+    if (base === "/api/v1/endpoints/unisolate-bulk") { arrayOf(body && (body.ids || body.endpoint_ids)).forEach(function (id) { setIso(id, false); }); return { status: "released" }; }
     if (base === "/api/v1/detection/tuning/suppress") {
       var silenced = (DEMO_CACHE["/api/v1/anomalies"] || []).filter(function (a) { return a.id === (body && body.id); })[0];
       DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
@@ -1289,9 +1580,9 @@
     /* A live terminal recolours with everything else. The data-theme attribute
        is already on <html> at this point, so the tokens read here are the new
        theme's. */
-    if (liveTerminal) {
-      try { liveTerminal.options.theme = terminalTheme(); } catch (e) {}
-    }
+    if (termWs) termWs.panes.forEach(function (p) {
+      if (p.term) { try { p.term.options.theme = terminalTheme(); } catch (e) {} }
+    });
   }
 
   /* xterm cannot read CSS custom properties, so its palette has to be handed
@@ -1912,9 +2203,9 @@
       menu.appendChild(h("div", { cls: "sep" }));
       menu.appendChild(h("div", { cls: "lbl", text: "Agent Operations" }));
       menu.appendChild(menuItem("Upgrade agent to v" + targetVer, "i-refresh", null, function () {
-        request("/api/v1/agents/update", "POST", { endpoint_ids: [asset.endpoint.id], version: targetVer })
+        ownerApproved("/api/v1/agents/update", { endpoint_ids: [asset.endpoint.id], version: targetVer }, { label: "Upgrade the agent on " + asset.name + " to v" + targetVer })
           .then(function () { toast("Upgrade to v" + targetVer + " queued for " + asset.name, "ok"); refresh(); })
-          .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
+          .catch(function (e) { if (e && e.handled) return; toast("Upgrade failed: " + e.message, "crit"); });
       }, { disabled: !IS_ADMIN, why: isOutdated ? "Queue upgrade to v" + targetVer : "Already running latest v" + targetVer }));
 
       menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
@@ -1938,21 +2229,22 @@
       /* The icon was i-unlock, which this same menu uses for "Release host" -
          two unrelated actions with one glyph. i-terminal is its own symbol
          now (index.html). */
-      var liveShell = liveTerminalFor(asset.endpoint);
-      if (liveShell) {
+      var liveShells = liveTerminalsFor(asset.endpoint);
+      liveShells.forEach(function (liveShell) {
         var elapsed = parseTime(liveShell.started_at || liveShell.created_at);
         var elapsedLabel = elapsed ? " \u00b7 " + ago(elapsed) : "";
         menu.appendChild(menuItem(
-          "Reattach Terminal (" + (liveShell.program || "shell") + elapsedLabel + ")",
+          "Reattach terminal (" + String(liveShell.program || "shell").split(/[\\/]/).pop() + elapsedLabel + ")",
           "i-terminal", null, function () { reattachTerminal(liveShell); }));
-        menu.appendChild(menuItem("Terminate Active Terminal", "i-close", null, function () {
+      });
+      menu.appendChild(menuItem("Open a terminal\u2026", "i-terminal", null, function () {
+        launchTerminalShell(asset);
+      }, { disabled: liveShells.length >= TERM_ENDPOINT_CAP, why: liveShells.length >= TERM_ENDPOINT_CAP ? TERM_ENDPOINT_CAP + " terminals already open on this host" : "Asks for approval on your phone" }));
+      liveShells.forEach(function (liveShell) {
+        menu.appendChild(menuItem("End terminal (" + String(liveShell.program || "shell").split(/[\\/]/).pop() + ", " + String(liveShell.session_id).slice(0, 6) + ")", "i-close", null, function () {
           terminateTerminalSession(liveShell, asset.name || asset.ip);
         }, { danger: true }));
-      } else {
-        menu.appendChild(menuItem("Launch Terminal Shell\u2026", "i-terminal", null, function () {
-          launchTerminalShell(asset);
-        }));
-      }
+      });
       menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
         launchForensicsSheet(asset);
       }));
@@ -2010,21 +2302,25 @@
        is before the cut, not while standing in front of the machine. Releasing
        needs no such screen: it only ever gives access back. */
     if (on) { confirmIsolate(asset); return; }
-    request("/api/v1/endpoints/unisolate", "POST", { endpoint_id: asset.endpoint.id }).then(function () {
+    ownerApproved("/api/v1/endpoints/unisolate", { endpoint_id: asset.endpoint.id }, { label: "Release " + asset.name + " from isolation" }).then(function () {
       toast("Released " + asset.name, "ok");
       refresh();
-    }).catch(function (e) { toast("Release failed: " + e.message, "crit"); });
+    }).catch(function (e) { if (e && e.handled) return; toast("Release failed: " + e.message, "crit"); });
   }
 
   function doIsolate(asset, force) {
     var body = { endpoint_id: asset.endpoint.id, allow_ips: [] };
     if (force) body.force = true;
-    request("/api/v1/endpoints/isolate", "POST", body).then(function () {
-      closeSheet();
+    var sheetClosed = false;
+    ownerApproved("/api/v1/endpoints/isolate", body, {
+      label: "Isolate " + asset.name + (force ? " (readiness overridden)" : ""),
+      onPending: function () { sheetClosed = true; closeSheet(); }
+    }).then(function () {
+      if (!sheetClosed) closeSheet();
       toast("Isolated " + asset.name + (force ? " \u2014 readiness overridden" : ""), "crit");
       delete state.baselineByEndpoint[asset.endpoint.id];
       refresh();
-    }).catch(function (e) { toast("Isolation failed: " + e.message, "crit"); });
+    }).catch(function (e) { if (e && e.handled) return; toast("Isolation failed: " + e.message, "crit"); });
   }
 
   function confirmIsolate(asset) {
@@ -2201,10 +2497,10 @@
       body.subnet = asset.subnet || "";
       body.reason = "Operator action from the console";
     }
-    request(path, "POST", body).then(function () {
+    ownerApproved(path, body, { label: (on ? "Quarantine " : "Release ") + asset.ip + (on ? " at the mesh" : " from mesh quarantine") }).then(function () {
       toast((on ? "Mesh-quarantined " : "Released from mesh: ") + asset.ip, on ? "crit" : "ok");
       refresh();
-    }).catch(function (e) { toast("Mesh action failed: " + e.message, "crit"); });
+    }).catch(function (e) { if (e && e.handled) return; toast("Mesh action failed: " + e.message, "crit"); });
   }
 
   function rescan(asset) {
@@ -2279,11 +2575,18 @@
   function sendBulkIsolate(ids, on) {
     var path = on ? "/api/v1/endpoints/isolate-bulk" : "/api/v1/endpoints/unisolate-bulk";
     var send = function (force) {
-      var body = { endpoint_ids: ids };
+      /* scope "ids" is what makes this the selection. The hub reads `ids`;
+         this sent `endpoint_ids`, which the hub ignored, and an absent scope
+         defaults to "all": isolating three selected hosts isolated the fleet. */
+      var body = { scope: "ids", ids: ids };
       if (on) { body.allow_ips = []; }
       if (force) body.force = true;
-      return request(path, "POST", body).then(function () {
-        closeSheet();
+      var sheetClosed = false;
+      return ownerApproved(path, body, {
+        label: (on ? "Isolate " : "Release ") + ids.length + " host" + (ids.length === 1 ? "" : "s"),
+        onPending: function () { sheetClosed = true; closeSheet(); }
+      }).then(function () {
+        if (!sheetClosed) closeSheet();
         toast((on ? "Isolated " : "Released ") + ids.length + " host" + (ids.length === 1 ? "" : "s"), on ? "crit" : "ok");
         state.baselineByEndpoint = {};
         refresh();
@@ -2293,6 +2596,7 @@
       /* The gate refuses the whole batch on one unready host, and says which.
          A toast would leave the operator guessing which of forty it was. */
       if (e.status === 409 && e.body) { openBulkBlockedSheet(ids, e.body, send); return; }
+      if (e && e.handled) return;
       toast("Bulk action failed: " + e.message, "crit");
     });
   }
@@ -2315,7 +2619,7 @@
         cls: "btn btn-crit", type: "button", text: "Isolate anyway",
         on: {
           click: function () {
-            send(true).catch(function (e2) { toast("Bulk action failed: " + e2.message, "crit"); });
+            send(true).catch(function (e2) { if (e2 && e2.handled) return; toast("Bulk action failed: " + e2.message, "crit"); });
           }
         }
       })
@@ -2336,13 +2640,13 @@
   }
 
   function sendAgentUpdates() {
-    request("/api/v1/agents/update", "POST", { all: true }).then(function (res) {
+    ownerApproved("/api/v1/agents/update", { all: true }, { label: "Update every agent in the fleet" }).then(function (res) {
       var n = arrayOf(res && res.scheduled).length;
       var u = arrayOf(res && res.unsupported).length;
       toast("Queued " + n + " self-update" + (n === 1 ? "" : "s") +
         (u ? "; " + u + " need native package enrollment" : ""), n ? "ok" : "warn");
       refresh();
-    }).catch(function (e) { toast("Update push failed: " + e.message, "crit"); });
+    }).catch(function (e) { if (e && e.handled) return; toast("Update push failed: " + e.message, "crit"); });
   }
 
   /* ---------------------------------------------------------- assets view */
@@ -2579,55 +2883,56 @@
     if (!state.terminalAvailable || !asset.endpoint) return null;
     var ep = asset.endpoint;
     var host = asset.name || asset.ip || ep.id;
-    var t = liveTerminalFor(ep);
+    var live = liveTerminalsFor(ep);
+    var launch = live.length < TERM_ENDPOINT_CAP ? h("button", {
+      cls: "mini", type: "button", text: live.length ? "Open another terminal" : "Open a terminal",
+      title: "Asks for approval on your phone",
+      on: { click: function (e) { e.stopPropagation(); launchTerminalShell(asset); } }
+    }) : null;
 
-    if (!t) {
+    if (!live.length) {
       /* No session: one quiet line, not a banner. An absent shell is not news. */
       return h("div", { cls: "term-banner", "data-state": "none" },
         h("span", { cls: "dim-3", text: "No terminal session on this host." }),
         h("span", { cls: "fill" }),
-        h("button", {
-          cls: "mini", type: "button", text: "Launch Terminal Shell",
-          on: { click: function (e) { e.stopPropagation(); launchTerminalShell(asset); } }
+        launch);
+    }
+
+    var identity = terminalIdentity(ep.os);
+    var rows = live.map(function (t, i) {
+      var mine = !t.operator_id || t.operator_id === OPERATOR;
+      var started = parseTime(t.started_at || t.created_at);
+      var tone, word;
+      if (t.state === "detached") { tone = "warn"; word = "Detached, still running"; }
+      else if (t.state === "waiting" || t.state === "connecting") { tone = "info"; word = "Waiting for agent"; }
+      else if (mine) { tone = "ok"; word = "Live, attached"; }
+      else { tone = "warn"; word = "Live, held by another operator"; }
+      var facts = h("div", { cls: "term-banner-facts" },
+        chip(tone, word),
+        h("span", { cls: "ip", text: t.program || (identity === "LocalSystem" ? "powershell.exe" : "/bin/bash") }),
+        chip("idle", identity),
+        h("span", { cls: "dim-2", text: t.operator_id || "unknown operator" }),
+        started ? stamp(started) : null);
+      var acts = h("div", { cls: "term-banner-acts" });
+      /* Another operator's live session is theirs to drive; an administrator
+         can still end it, because a root shell left open is exactly what this
+         has to be able to resolve. */
+      if (mine || t.state === "detached") {
+        acts.appendChild(h("button", {
+          cls: "btn mini", type: "button", text: "Reattach",
+          on: { click: function (e) { e.stopPropagation(); reattachTerminal(t); } }
         }));
-    }
-
-    var isWindows = String(ep.os || "").indexOf("Windows") !== -1;
-    var identity = isWindows ? "LocalSystem" : "root";
-    var mine = !t.operator_id || t.operator_id === OPERATOR;
-    var started = parseTime(t.started_at || t.created_at);
-
-    var tone, word;
-    if (t.state === "detached") { tone = "warn"; word = "Detached \u2014 running in background"; }
-    else if (t.state === "waiting" || t.state === "connecting") { tone = "info"; word = "Waiting for agent"; }
-    else if (mine) { tone = "ok"; word = "Live \u2014 attached"; }
-    else { tone = "warn"; word = "Live \u2014 held by another operator"; }
-
-    var facts = h("div", { cls: "term-banner-facts" },
-      chip(tone, word),
-      h("span", { cls: "ip", text: t.program || (isWindows ? "powershell.exe" : "/bin/bash") }),
-      chip("idle", identity),
-      h("span", { cls: "dim-2", text: t.operator_id || "unknown operator" }),
-      started ? stamp(started) : null);
-
-    var acts = h("div", { cls: "term-banner-acts" });
-    /* Another operator's live session is theirs to drive; an administrator can
-       still end it, because "somebody left a root shell open and went home" is
-       exactly the situation this has to be able to resolve. */
-    if (mine || t.state === "detached") {
-      acts.appendChild(h("button", {
-        cls: "btn mini", type: "button", text: "Reattach Console",
-        on: { click: function (e) { e.stopPropagation(); reattachTerminal(t); } }
-      }));
-    }
-    if (mine || IS_ADMIN) {
-      acts.appendChild(h("button", {
-        cls: "btn mini", type: "button", "data-danger": "true", text: "Terminate Session",
-        on: { click: function (e) { e.stopPropagation(); terminateTerminalSession(t, host); } }
-      }));
-    }
-
-    return h("div", { cls: "term-banner", "data-state": tone }, facts, h("span", { cls: "fill" }), acts);
+      }
+      if (mine || IS_ADMIN) {
+        acts.appendChild(h("button", {
+          cls: "btn mini", type: "button", "data-danger": "true", text: "End session",
+          on: { click: function (e) { e.stopPropagation(); terminateTerminalSession(t, host); } }
+        }));
+      }
+      if (i === live.length - 1 && launch) acts.appendChild(launch);
+      return h("div", { cls: "term-banner", "data-state": tone }, facts, h("span", { cls: "fill" }), acts);
+    });
+    return rows.length === 1 ? rows[0] : h("div", { cls: "stack-s" }, rows);
   }
 
   /* A glyph on the collapsed row, so an open shell is visible while scanning
@@ -2956,9 +3261,9 @@
           on: {
             click: function () {
               var epIds = agentedSelected.map(function (a) { return a.endpoint.id; });
-              request("/api/v1/agents/update", "POST", { endpoint_ids: epIds, version: targetVer })
+              ownerApproved("/api/v1/agents/update", { endpoint_ids: epIds, version: targetVer }, { label: "Upgrade " + epIds.length + " agent(s) to v" + targetVer })
                 .then(function () { toast("Queued v" + targetVer + " upgrade for " + epIds.length + " agent(s)", "ok"); refresh(); })
-                .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
+                .catch(function (e) { if (e && e.handled) return; toast("Upgrade failed: " + e.message, "crit"); });
             }
           }
         }));
@@ -6278,9 +6583,9 @@
             cls: "mini", type: "button", text: "Release",
             on: {
               click: function () {
-                request("/api/v1/mesh/unquarantine", "POST", { target_ip: p.target_ip })
+                ownerApproved("/api/v1/mesh/unquarantine", { target_ip: p.target_ip }, { label: "Release " + p.target_ip + " from mesh quarantine" })
                   .then(function () { toast("Released " + p.target_ip + " from the mesh", "ok"); refresh(); })
-                  .catch(function (e) { toast("Release failed: " + e.message, "crit"); });
+                  .catch(function (e) { if (e && e.handled) return; toast("Release failed: " + e.message, "crit"); });
               }
             }
           })
@@ -6965,130 +7270,174 @@
     setTimeout(function () { codeInput.focus(); }, 100);
   }
 
+  /* ------------------------------------------------------------ terminal */
+
+  /* The hub's caps: three live shells per host, eight per tenant. Detached
+     sessions count; they are still running. */
+  var TERM_ENDPOINT_CAP = 3;
+  var TERM_TENANT_CAP = 8;
+
+  function terminalSessionIsLive(t) {
+    return !!t && (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting");
+  }
+
+  function liveTerminalsFor(ep) {
+    if (!ep || !ep.id) return [];
+    return arrayOf(state.terminalSessions).filter(function (t) { return t && t.endpoint_id === ep.id && terminalSessionIsLive(t); });
+  }
+
+  function liveTerminalFor(ep) {
+    return liveTerminalsFor(ep)[0] || null;
+  }
+
+  function liveTerminalCount() {
+    return arrayOf(state.terminalSessions).filter(terminalSessionIsLive).length;
+  }
+
+  /* What the agent says its PTY backend offers ({"terminal":{"programs":[]}}
+     inside response_capabilities). null when the agent does not report it
+     (older agents); the hub then falls back to the platform default. */
+  function terminalPrograms(ep) {
+    var raw = ep && ep.response_capabilities;
+    if (!raw) return null;
+    var caps = raw;
+    if (typeof raw === "string") { try { caps = JSON.parse(raw); } catch (e) { return null; } }
+    if (!caps || typeof caps !== "object") return null;
+    return arrayOf(caps.terminal && caps.terminal.programs).filter(function (p) { return typeof p === "string" && p; });
+  }
+
+  function terminalIdentity(os) {
+    return String(os || "").toLowerCase().indexOf("windows") >= 0 ? "LocalSystem" : "root";
+  }
+
+  /* Opening a shell asks the owner. The request goes to the hub, the hub asks
+     the owner's phone, and the shell starts only after one passkey tap. No
+     response unlock and no browser proof: the approval is the authorization,
+     and it names this host and this program. */
   function launchTerminalShell(asset) {
     if (!asset || !asset.endpoint) {
-      toast("Cannot open terminal: host does not have an enrolled agent.", "crit");
+      toast("Cannot open a terminal: this host has no enrolled agent.", "crit");
       return;
     }
-
-    if (!state.responseSession || !ephemeralResponseKey) {
-      openUnlockResponseSheet(function () {
-        launchTerminalShell(asset);
-      });
-      return;
-    }
-
     var ep = asset.endpoint;
-    var isWindows = (ep.os || "").toLowerCase().indexOf("windows") >= 0;
+    var host = asset.name || asset.ip || ep.id;
+    if (liveTerminalsFor(ep).length >= TERM_ENDPOINT_CAP) {
+      toast(host + " already has " + TERM_ENDPOINT_CAP + " live terminals, the most a host can hold. Reattach one or end one first.", "warn");
+      return;
+    }
+    if (liveTerminalCount() >= TERM_TENANT_CAP) {
+      toast("This tenant already has " + TERM_TENANT_CAP + " live terminals, the most it can hold. End one first.", "warn");
+      return;
+    }
+    var isWindows = terminalIdentity(ep.os) === "LocalSystem";
+    var identity = terminalIdentity(ep.os);
 
+    var offered = terminalPrograms(ep);
+    if (offered && !offered.length) {
+      toast(host + " reports no terminal support.", "warn");
+      return;
+    }
     var progSel = h("select", { id: "shell-prog-select" });
-    if (isWindows) {
+    if (offered) {
+      offered.forEach(function (prog) { progSel.appendChild(h("option", { value: prog, text: prog })); });
+    } else if (isWindows) {
       progSel.appendChild(h("option", { value: "powershell.exe", text: "powershell.exe (Windows PowerShell)" }));
-      progSel.appendChild(h("option", { value: "cmd.exe", text: "cmd.exe (Windows Command Prompt)" }));
-      progSel.appendChild(h("option", { value: "pwsh.exe", text: "pwsh.exe (PowerShell Core, if installed)" }));
+      progSel.appendChild(h("option", { value: "cmd.exe", text: "cmd.exe (Command Prompt)" }));
+      progSel.appendChild(h("option", { value: "pwsh.exe", text: "pwsh.exe (PowerShell 7, if installed)" }));
     } else {
-      progSel.appendChild(h("option", { value: "/bin/bash", text: "/bin/bash (Interactive Shell)" }));
-      progSel.appendChild(h("option", { value: "/bin/sh", text: "/bin/sh (POSIX Shell)" }));
+      progSel.appendChild(h("option", { value: "/bin/bash", text: "/bin/bash" }));
+      progSel.appendChild(h("option", { value: "/bin/sh", text: "/bin/sh" }));
     }
 
     var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
-
+    var launchSheet = null;
     var launchBtn = h("button", {
       cls: "btn btn-primary",
       type: "button",
-      text: "Launch Terminal Shell",
+      text: "Ask for approval",
       on: {
         click: function () {
           var prog = progSel.value;
           launchBtn.disabled = true;
-          launchBtn.textContent = "Signing Proof & Dispatching\u2026";
+          launchBtn.textContent = "Sending to your phone\u2026";
           errBox.setAttribute("hidden", "");
-
-          var payload = { program: prog };
-          var payloadStr = JSON.stringify(payload);
-
-          digestSHA256(payloadStr)
-            .then(function (digestHex) {
-              return signActionProof("terminal_session", digestHex, [ep.id])
-                .then(function (proof) {
-                  return request("/api/v1/terminal/sessions", "POST", {
-                    endpoint_id: ep.id,
-                    program: prog,
-                    session_id: state.responseSession.session_id,
-                    action_digest: digestHex,
-                    proof: proof
-                  });
-                });
-            })
-            .then(function (sessionSummary) {
-              closeSheet();
-              toast("Terminal shell session created (" + sessionSummary.session_id.slice(0, 8) + "\u2026). Connecting emulator.", "ok");
-              /* Stay where the operator is. This forced `go("response")`,
-                 and go() closes the sheet, the route panel and the drawer -
-                 so launching a shell from an asset's route panel silently
-                 destroyed the panel they were working in. The emulator is a
-                 sheet; it does not need a section behind it. */
-              openTerminalEmulator(sessionSummary);
-            })
-            .catch(function (err) {
+          ownerApproved("/api/v1/terminal/sessions", { endpoint_id: ep.id, program: prog }, {
+            label: "Open " + prog + " as " + identity + " on " + host,
+            onPending: function () { if (sheetEl === launchSheet) closeSheet(); }
+          }).then(function (summary) {
+            if (sheetEl === launchSheet) closeSheet();
+            if (!summary || !summary.session_id) { toast("The hub did not return a session.", "crit"); return; }
+            openTerminalEmulator(summary);
+          }).catch(function (err) {
+            if (sheetEl === launchSheet) {
               launchBtn.disabled = false;
-              launchBtn.textContent = "Launch Terminal Shell";
-              errBox.textContent = err.message || "Failed to launch terminal shell.";
-              errBox.removeAttribute("hidden");
-            });
+              launchBtn.textContent = "Ask for approval";
+              if (!err || !err.handled) {
+                errBox.textContent = (err && err.message) || "The hub refused the terminal.";
+                errBox.removeAttribute("hidden");
+              }
+            } else if (!err || !err.handled) {
+              toast("Terminal refused: " + ((err && err.message) || "unknown error"), "crit");
+            }
+          });
         }
       }
     });
 
     var body = h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: "Target Host: " }), h("b", { text: asset.name || asset.ip }),
-        h("span", { cls: "dim-2", text: " \u00b7 Endpoint ID: " }), h("span", { cls: "ip", text: ep.id })
-      ),
+        h("span", { cls: "dim-2", text: "Host: " }), h("b", { text: host }),
+        h("span", { cls: "dim-2", text: " \u00b7 " }), h("span", { cls: "ip", text: ep.id })),
       h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: "Platform: " }), h("b", { text: ep.os || "Linux" }),
-        h("span", { cls: "dim-2", text: " \u00b7 Privilege Identity: " }), h("b", { cls: "st", "data-state": "crit", text: isWindows ? "LocalSystem" : "root" })
-      ),
-      h("p", { cls: "pending", text: "Terminal sessions run with full host supervisor identity. Your browser will sign a typed ActionProof V2 bound specifically to this endpoint and program choice. All input, output, and resize frames are encrypted and audited." }),
+        h("span", { cls: "dim-2", text: (ep.os || "Linux") + " \u00b7 runs as " }),
+        h("b", { cls: "st", "data-state": "crit", text: identity })),
+      h("p", { cls: "pending", text: "Your phone gets an approval request. Confirm it with your passkey and the shell opens here. Everything typed and shown is recorded and sealed into evidence when the session ends." }),
       h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "shell-prog-select", text: "Select Executable Allowlist Program:" }),
-        progSel
-      ),
-      errBox
-    );
+        h("label", { "for": "shell-prog-select", text: "Program" }),
+        progSel),
+      errBox);
 
     var foot = [
       h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
       launchBtn
     ];
-
-    openSheet("Launch Remote Pseudoterminal", body, foot);
+    openSheet("Open a terminal", body, foot, null, { stack: !!termWs });
+    launchSheet = sheetEl;
   }
 
   function openLaunchEndpointShellPicker() {
     var managed = (state.assets || []).filter(function (a) { return a.endpoint; });
     if (!managed.length) {
-      toast("No agent-managed endpoints online.", "warn");
+      toast("No hosts with an agent.", "warn");
       return;
     }
-
     var sel = h("select", { id: "shell-target-picker" });
     managed.forEach(function (a) {
-      sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ") - " + a.endpoint.id }));
+      var n = liveTerminalsFor(a.endpoint).length;
+      sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ")" + (n ? " \u00b7 " + n + " open" : "") }));
     });
-
+    var running = arrayOf(state.terminalSessions).filter(function (t) {
+      return terminalSessionIsLive(t) && !(termWs && termWs.paneFor(t.session_id));
+    });
+    var runningList = running.length ? h("div", { cls: "stack-s" },
+      h("b", { text: "Running, not open here" }),
+      h("div", { cls: "term-running" }, running.map(function (t) {
+        var a = assetForEndpoint(t.endpoint_id);
+        return h("button", {
+          cls: "btn mini", type: "button",
+          text: "Reattach " + ((a && (a.name || a.ip)) || t.endpoint_id) + " \u00b7 " + String(t.program || "shell").split(/[\\/]/).pop() + " \u00b7 " + t.state,
+          on: { click: function () { closeSheet(); reattachTerminal(t); } }
+        });
+      }))) : null;
     var body = h("div", { cls: "card-body stack" },
-      h("p", { cls: "pending", text: "Select an enrolled endpoint to open an interactive remote pseudoterminal session:" }),
+      runningList,
       h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "shell-target-picker", text: "Target Endpoint:" }),
-        sel
-      )
-    );
-
+        h("label", { "for": "shell-target-picker", text: "New terminal on" }),
+        sel));
     var foot = [
       h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
       h("button", {
-        cls: "btn btn-primary", type: "button", text: "Next \u2192",
+        cls: "btn btn-primary", type: "button", text: "Next",
         on: {
           click: function () {
             var asset = state.assetByKey[sel.value];
@@ -7098,70 +7447,25 @@
         }
       })
     ];
-
-    openSheet("Select Target Endpoint for Shell", body, foot);
+    openSheet("Terminal", body, foot, null, { stack: !!termWs });
   }
 
-  /* The one live-session lookup, and the one reattach path. The Response page
-     row, the Assets banner and the Assets context menu all route through
-     reattachTerminal so there is a single implementation of "come back to a
-     shell" rather than three that drift. */
-  /* Set by an open terminal sheet so the fleet poll can hand it the hub's own
-     view of its session. Cleared when the sheet closes. */
-  var terminalMetaSubscriber = null;
-  var terminalMetaSessionID = "";
-
-  function liveTerminalFor(ep) {
-    if (!ep || !ep.id) return null;
-    var sessions = arrayOf(state.terminalSessions);
-    for (var i = 0; i < sessions.length; i++) {
-      var t = sessions[i];
-      if (!t || t.endpoint_id !== ep.id) continue;
-      if (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting") return t;
-    }
-    return null;
-  }
-
-  function terminalSessionIsLive(t) {
-    return !!t && (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting");
-  }
-
-  /* Reattaching needs a live response session but no fresh TOTP proof: the
-     ActionProof V2 on creation authorised *spawning* a root shell, and coming
-     back to one this operator already spawned is not a second privileged
-     action. A lapsed response session falls through to the unlock sheet with
-     a resume callback, the pattern launchTerminalShell already uses. */
+  /* The one reattach path. Coming back to a running shell is not a second
+     privileged action: the hub checks the caller and rotates the token. */
   function reattachTerminal(sessionSummary) {
     if (!sessionSummary || !sessionSummary.session_id) return;
     if (!terminalSessionIsLive(sessionSummary)) {
-      toast("That session is no longer live \u2014 nothing to reattach to.", "warn");
+      toast("That session has ended. Nothing to reattach to.", "warn");
       return;
     }
-    if (!state.responseSession || !ephemeralResponseKey) {
-      openUnlockResponseSheet(function () { reattachTerminal(sessionSummary); });
-      return;
-    }
-    request("/api/v1/terminal/sessions/attach", "POST", { session_id: sessionSummary.session_id })
-      .then(function (sum) {
-        openTerminalEmulator(sum || sessionSummary, true);
-      })
-      .catch(function (e) {
-        toast("Reattach refused: " + e.message, "crit");
-        refresh();
-      });
+    /* The pane attaches inside the connect queue, so its token is the one
+       its socket carries. A refusal shows in the pane. */
+    openTerminalEmulator(sessionSummary, true);
   }
 
-  /* How the agent actually ends the session, per platform. Both sentences said
-     "SIGTERM and then SIGKILL", which is the Linux path only: the Windows agent
-     holds the shell and everything it started in a job object and ends the lot
-     with TerminateJobObject. Naming the wrong mechanism in a confirmation is
-     the same defect as naming the wrong blast radius - an operator reads it to
-     decide whether to press the button. */
+  /* How the agent ends the session, per platform: the Windows agent holds the
+     shell in a job object, the Linux agent signals the process group. */
   function terminateMechanism(program) {
-    /* The program is what the session was launched with and it is on every
-       summary the hub serves; the session summary carries no OS field, so
-       reaching for one would have read undefined and quietly picked the Linux
-       sentence for every host. */
     return /\.exe$|^pwsh$|^powershell$|^cmd$/i.test(String(program || ""))
       ? "ended together through the job object the agent holds them in"
       : "killed with SIGTERM and then SIGKILL";
@@ -7170,547 +7474,797 @@
   function terminateTerminalSession(sessionSummary, hostLabel) {
     if (!sessionSummary || !sessionSummary.session_id) return;
     var host = hostLabel || sessionSummary.endpoint_id || "this host";
-    var act = function () { closeTerminalSession(sessionSummary.session_id); };
-    if (!state.responseSession || !ephemeralResponseKey) {
-      openUnlockResponseSheet(function () { terminateTerminalSession(sessionSummary, hostLabel); });
-      return;
-    }
     confirmSheet({
-      title: "Terminate terminal session",
+      title: "End terminal session",
       consequence: "Every process started by that shell on " + host + " is " +
-        terminateMechanism(sessionSummary && sessionSummary.program) +
-        ". Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
+        terminateMechanism(sessionSummary.program) +
+        ". Unsaved work in editors on that host is lost. The recording is sealed into evidence and the session cannot be resumed.",
       detail: (sessionSummary.program || "shell") + " \u00b7 session " + String(sessionSummary.session_id).slice(0, 8) + "\u2026",
-      confirmLabel: "Terminate session",
-      onConfirm: act
+      confirmLabel: "End session",
+      stack: !!termWs,
+      onConfirm: function () {
+        var pane = termWs && termWs.paneFor(sessionSummary.session_id);
+        if (pane) pane.terminate();
+        else closeTerminalSession(sessionSummary.session_id);
+      }
     });
   }
 
   function closeTerminalSession(sessionId) {
-    request("/api/v1/terminal/sessions?id=" + encodeURIComponent(sessionId), "DELETE")
+    return request("/api/v1/terminal/sessions?id=" + encodeURIComponent(sessionId), "DELETE")
       .then(function () {
-        toast("Terminal session closed.", "ok");
+        toast("Terminal session ended.", "ok");
         refresh();
       })
       .catch(function (e) {
-        toast("Failed to close terminal session: " + e.message, "crit");
+        toast("Could not end the terminal session: " + e.message, "crit");
       });
   }
 
-  /* xterm's own scrollback, and the cap on how much recording is replayed
-     into it: writing more than the buffer holds costs time and shows the same
-     last N lines. */
+  /* xterm's scrollback, and how much recording a reattach replays. */
   var TERM_SCROLLBACK = 5000;
-  /* Six attempts over ~12s of backoff. Enough for a Wi-Fi blip or a proxy
-     recycling; short enough that a session that is genuinely gone stops being
-     retried and says so. */
-  var TERM_MAX_RECONNECT = 6;
+  var TERM_REPLAY_BYTES = 262144;
+  /* A stdin frame carries at most 4 KiB. Agents before 1.8.53 read one
+     8 KiB WebSocket frame at a time and end the session on a larger one, so a
+     big paste goes out as several frames. */
+  var TERM_STDIN_CHUNK = 4096;
+  /* Input typed while the relay reconnects is kept, up to this much. */
+  var TERM_INPUT_QUEUE = 65536;
+  /* Reconnect backoff tops out here and never gives up while the hub still
+     has the session: the hub keeps a detached shell for its idle window (15
+     minutes), which is the window a phone has to come back in. */
+  var TERM_RECONNECT_MAX_MS = 5000;
+  var TERM_FONT_KEY = "ominull.terminal.fontSize";
+  var TERM_FONT_MIN = 8, TERM_FONT_MAX = 28;
+
+  function termFontSize() {
+    var v = 0;
+    try { v = parseInt(localStorage.getItem(TERM_FONT_KEY), 10); } catch (e) {}
+    if (v >= TERM_FONT_MIN && v <= TERM_FONT_MAX) return v;
+    return window.innerWidth < 600 ? 12 : 13;
+  }
+
+  function b64FromBytes(bytes) {
+    var bin = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+
+  function bytesFromB64(b64) {
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  /* The WebSocket upgrade carries the connect token in one HttpOnly cookie,
+     shared by every session on this origin. Attach-then-connect runs one at a
+     time so two panes reconnecting together do not swap tokens. */
+  var termConnectChain = Promise.resolve();
+  function termSerial(fn) {
+    var next = termConnectChain.then(fn, fn);
+    termConnectChain = next.catch(function () {});
+    return next;
+  }
+
+  /* Demo mode has no agent. This stands in for the relay socket with a tiny
+     line-echo shell, so the terminal view can be exercised and screenshotted. */
+  function DemoTermSocket(session) {
+    var self = this;
+    self.readyState = 0;
+    var line = "";
+    var prompt = "\x1b[32mdemo@" + (session.endpoint_id || "host") + "\x1b[0m:\x1b[34m~\x1b[0m$ ";
+    function out(text) {
+      var bytes = new TextEncoder().encode(text);
+      setTimeout(function () {
+        if (self.readyState === 1 && self.onmessage) self.onmessage({ data: JSON.stringify({ type: "stdout", timestamp: new Date().toISOString(), data: b64FromBytes(bytes) }) });
+      }, 5);
+    }
+    setTimeout(function () {
+      self.readyState = 1;
+      if (self.onopen) self.onopen();
+      var banner = "Demo shell. Nothing here reaches a host.\r\n" +
+        "\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m " +
+        "\x1b[31mred\x1b[0m \x1b[33myellow\x1b[0m \x1b[38;5;208m256-colour\x1b[0m \x1b[38;2;120;200;255mtruecolor\x1b[0m\r\n" +
+        "Unicode: \u00e9 \u03bb \u4e2d\u6587 \u2714 \u2588\u2593\u2592\u2591 \ud83d\udd12\r\n";
+      out(banner + prompt);
+    }, 60);
+    self.send = function (raw) {
+      var f = JSON.parse(raw);
+      self.sent = (self.sent || 0) + 1;
+      self.lastFrame = f;
+      if (f.type !== "stdin") return;
+      var text = new TextDecoder().decode(bytesFromB64(f.data));
+      self.stdinText = (self.stdinText || "") + text;
+      var echo = "";
+      for (var i = 0; i < text.length; i++) {
+        var ch = text[i];
+        if (ch === "\r") { echo += "\r\n" + (line.trim() ? line.trim() + ": demo shell, command not run\r\n" : "") + prompt; line = ""; }
+        else if (ch === "\x7f") { if (line) { line = line.slice(0, -1); echo += "\b \b"; } }
+        else if (ch === "\x03") { echo += "^C\r\n" + prompt; line = ""; }
+        else if (ch === "\x1b") { var m = /^\x1b(\[[0-9;]*[A-Za-z~]|O[A-D])/.exec(text.slice(i)); if (m) i += m[0].length - 1; }
+        else if (ch >= " ") { line += ch; echo += ch; }
+      }
+      if (echo) out(echo);
+    };
+    self.close = function () {
+      if (self.readyState === 3) return;
+      self.readyState = 3;
+      if (self.onclose) setTimeout(function () { self.onclose({ code: 1000 }); }, 0);
+    };
+  }
+
+  /* The terminal workspace: one sheet, one tab per open session. Every pane
+     keeps its own socket, so switching tabs is instant and a shell in a
+     background tab keeps streaming. Closing the sheet detaches them all; the
+     shells keep running on their hosts. */
+  var termWs = null;
 
   function openTerminalEmulator(session, reattaching) {
     if (!session || !session.session_id) return;
     if (!window.Terminal || !window.FitAddon) {
-      toast("Loading remote terminal…");
-      loadFeature("terminal", ["vendor/xterm.js", "vendor/addon-fit.js"]).then(function () { openTerminalEmulator(session, reattaching); }).catch(function (e) { toast(e.message, "crit"); });
+      toast("Loading the terminal\u2026");
+      loadFeature("terminal", ["vendor/xterm.js", "vendor/addon-fit.js"])
+        .then(function () { return loadFeature("terminal-unicode", ["vendor/addon-unicode11.js"]).catch(function () {}); })
+        .then(function () { openTerminalEmulator(session, reattaching); })
+        .catch(function (e) { toast(e.message, "crit"); });
       return;
     }
+    if (!termWs) createTermWorkspace();
+    else {
+      var guard = 0;
+      while (sheetEl && sheetEl !== termWs.sheet && guard++ < 8) closeSheet();
+    }
+    if (!termWs) return;
+    var existing = termWs.paneFor(session.session_id);
+    if (existing) {
+      termWs.activate(existing);
+      if (reattaching) existing.reconnectNow();
+      return;
+    }
+    var pane = createTerminalPane(session, !!reattaching);
+    termWs.panes.push(pane);
+    termWs.stage.appendChild(pane.el);
+    termWs.activate(pane);
+    pane.start();
+  }
 
+  function createTermWorkspace() {
+    var ws = { panes: [], active: null, ctrlArmed: false };
+    termWs = ws;
+    ws.paneFor = function (id) {
+      for (var i = 0; i < ws.panes.length; i++) if (ws.panes[i].session.session_id === id) return ws.panes[i];
+      return null;
+    };
+
+    var tabs = h("div", { cls: "term-tabs", role: "tablist", "aria-label": "Open terminals" });
+    var newBtn = h("button", { cls: "btn mini term-new", type: "button", text: "+ New", title: "Open or reattach another terminal",
+      on: { click: function () { openLaunchEndpointShellPicker(); } } });
+    var tabBar = h("div", { cls: "term-tabbar" }, tabs, newBtn);
+    var stage = h("div", { cls: "term-stage" });
+    ws.stage = stage;
+
+    function renderTabs() {
+      clear(tabs);
+      ws.panes.forEach(function (p) {
+        var selected = p === ws.active;
+        var tab = h("button", {
+          cls: "term-tab", type: "button", role: "tab", "aria-selected": selected ? "true" : "false",
+          "data-state": p.tone(), title: p.longLabel(),
+          on: { click: function () { ws.activate(p); } }
+        }, h("i", { cls: "term-dot", "aria-hidden": "true" }), h("span", { text: p.shortLabel() }));
+        var x = h("button", { cls: "term-tab-x", type: "button", "aria-label": "Detach " + p.shortLabel(), title: "Detach this viewer. The shell keeps running.",
+          on: { click: function (e) { e.stopPropagation(); ws.detachPane(p); } } }, icon("i-close", true));
+        tabs.appendChild(h("span", { cls: "term-tab-wrap", "data-selected": selected ? "true" : "false" }, tab, x));
+      });
+    }
+    ws.renderTabs = renderTabs;
+
+    ws.activate = function (p) {
+      ws.active = p;
+      ws.panes.forEach(function (q) { q.el.hidden = q !== p; });
+      renderTabs();
+      p.shown();
+      setTimeout(function () { p.focus(); }, 0);
+    };
+
+    ws.detachPane = function (p) {
+      p.dispose(false);
+      ws.panes = ws.panes.filter(function (q) { return q !== p; });
+      if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
+      if (!p.ended) toast("Detached. " + p.shortLabel() + " keeps running; reattach from + New or the host row.", "ok");
+      if (!ws.panes.length) { closeSheet(); refresh(); return; }
+      ws.activate(ws.panes[ws.panes.length - 1]);
+    };
+
+    /* The extra key row: the keys a phone keyboard does not have. Buttons
+       keep focus in xterm's textarea (pointerdown is cancelled) so the soft
+       keyboard stays up. Ctrl is sticky: it applies to the next key, from
+       this row or the keyboard. */
+    var ctrlBtn = null;
+    function setCtrl(on) {
+      ws.ctrlArmed = on;
+      if (ctrlBtn) ctrlBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    ws.setCtrl = setCtrl;
+    function keyBtn(label, name, title) {
+      var b = h("button", { cls: "term-key", type: "button", text: label, title: title || label, "data-key": name });
+      b.addEventListener("pointerdown", function (e) { e.preventDefault(); });
+      b.addEventListener("click", function () {
+        var p = ws.active;
+        if (!p) return;
+        if (name === "ctrl") { setCtrl(!ws.ctrlArmed); p.focus(); return; }
+        if (name === "paste") { p.pasteFromClipboard(); return; }
+        var bytes = termKeyBytes(name, ws.ctrlArmed, p.appCursor());
+        setCtrl(false);
+        if (bytes) p.input(bytes);
+        p.focus();
+      });
+      return b;
+    }
+    ctrlBtn = keyBtn("Ctrl", "ctrl", "Ctrl: applies to the next key");
+    ctrlBtn.setAttribute("aria-pressed", "false");
+    var keyRow = h("div", { cls: "term-keys", role: "toolbar", "aria-label": "Extra keys" },
+      ctrlBtn, keyBtn("Esc", "esc"), keyBtn("Tab", "tab"),
+      keyBtn("\u2190", "left", "Left"), keyBtn("\u2193", "down", "Down"), keyBtn("\u2191", "up", "Up"), keyBtn("\u2192", "right", "Right"),
+      keyBtn("|", "pipe"), keyBtn("~", "tilde"), keyBtn("/", "slash"), keyBtn("-", "dash"),
+      keyBtn("Home", "home"), keyBtn("End", "end"), keyBtn("PgUp", "pgup", "Page up"), keyBtn("PgDn", "pgdn", "Page down"),
+      keyBtn("Paste", "paste", "Paste from the clipboard"));
+
+    function setFont(n) {
+      n = Math.max(TERM_FONT_MIN, Math.min(TERM_FONT_MAX, Math.round(n)));
+      try { localStorage.setItem(TERM_FONT_KEY, String(n)); } catch (e) {}
+      ws.panes.forEach(function (p) { p.setFont(n); });
+      fontLbl.textContent = n + "px";
+    }
+    ws.setFont = setFont;
+    var fontLbl = h("span", { cls: "term-font-lbl dim-2", text: termFontSize() + "px", "aria-live": "polite" });
+    function act(label, title, fn, cls) {
+      var b = h("button", { cls: "btn mini" + (cls ? " " + cls : ""), type: "button", text: label, title: title });
+      b.addEventListener("pointerdown", function (e) { if (e.pointerType !== "mouse") e.preventDefault(); });
+      b.addEventListener("click", fn);
+      return b;
+    }
+    var foot = [
+      h("div", { cls: "terminal-foot-actions" },
+        h("div", { cls: "terminal-actions-group" },
+          act("Ctrl+C", "Send interrupt", function () { if (ws.active) { ws.active.input("\x03"); ws.active.focus(); } }),
+          act("Ctrl+D", "Send end of input", function () { if (ws.active) { ws.active.input("\x04"); ws.active.focus(); } }),
+          act("Clear", "Clear this screen (the shell is not told)", function () { if (ws.active) ws.active.clearScreen(); }, "term-act-clear"),
+          act("A\u2212", "Smaller text", function () { setFont(termFontSize() - 1); }),
+          fontLbl,
+          act("A+", "Larger text", function () { setFont(termFontSize() + 1); })),
+        h("div", { cls: "terminal-actions-group" },
+          act("Detach", "Close this viewer and leave the shell running", function () { if (ws.active) ws.detachPane(ws.active); }, "btn-primary"),
+          act("End session", "End the shell on the host and seal the recording", function () {
+            if (ws.active) terminateTerminalSession(ws.active.session, ws.active.hostName);
+          }, "btn-crit")))
+    ];
+
+    var body = h("div", { cls: "sheet-terminal-wrapper" }, tabBar, stage, keyRow);
+    openSheet("Terminal", body, foot, "sheet-terminal", { initialFocus: false });
+    ws.sheet = sheetEl;
+
+    /* Pinch adjusts the font size, two fingers anywhere on the terminal. One
+       finger scrolls the scrollback: xterm 6 has no touch scrolling of its own. */
+    var pinch = null, swipe = null;
+    stage.addEventListener("touchstart", function (e) {
+      if (e.touches.length === 2) {
+        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+        pinch = { d: d, size: termFontSize() };
+        swipe = null;
+      } else if (e.touches.length === 1 && ws.active) {
+        swipe = { y: e.touches[0].clientY, rest: 0 };
+      }
+    }, { passive: true });
+    stage.addEventListener("touchmove", function (e) {
+      if (pinch && e.touches.length === 2) {
+        e.preventDefault();
+        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+        var n = Math.round(pinch.size * d / pinch.d);
+        if (n !== termFontSize()) setFont(n);
+        return;
+      }
+      if (!swipe || e.touches.length !== 1 || !ws.active) return;
+      e.preventDefault();
+      var t = ws.active.term, y = e.touches[0].clientY;
+      var cell = t.element ? t.element.clientHeight / t.rows : 16;
+      swipe.rest += swipe.y - y;
+      swipe.y = y;
+      var lines = Math.trunc(swipe.rest / Math.max(cell, 1));
+      if (lines) { swipe.rest -= lines * cell; t.scrollLines(lines); }
+    }, { passive: false });
+    stage.addEventListener("touchend", function (e) {
+      if (e.touches.length < 2) pinch = null;
+      if (!e.touches.length) swipe = null;
+    }, { passive: true });
+
+    /* The phone keyboard shrinks the visual viewport, not the layout one. The
+       sheet follows the visual viewport so the prompt stays above the keys. */
+    var vv = window.visualViewport;
+    function syncViewport() {
+      if (!vv || !ws.sheet) return;
+      ws.sheet.style.setProperty("--term-vvh", Math.round(vv.height) + "px");
+      ws.sheet.style.setProperty("--term-vvt", Math.round(vv.offsetTop) + "px");
+    }
+    syncViewport();
+    if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
+    function onOrientation() { setTimeout(function () { syncViewport(); if (ws.active) ws.active.fitSoon(); }, 150); }
+    window.addEventListener("orientationchange", onOrientation);
+
+    /* A phone that slept or changed networks: the relay may look open and be
+       dead. Coming back after a while, or getting the network back, replaces
+       the socket at once instead of waiting for the backoff. */
+    var hiddenAt = 0;
+    function onVisibility() {
+      if (document.visibilityState === "hidden") { hiddenAt = Date.now(); return; }
+      var away = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      ws.panes.forEach(function (p) { p.resume(away > 30000); });
+    }
+    function onOnline() { ws.panes.forEach(function (p) { p.resume(true); }); }
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", onOnline);
+
+    sheetEl._isTerminal = true;
+    sheetEl._cleanup = function () {
+      if (vv) { vv.removeEventListener("resize", syncViewport); vv.removeEventListener("scroll", syncViewport); }
+      window.removeEventListener("orientationchange", onOrientation);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
+      ws.panes.forEach(function (p) { p.dispose(false); });
+      ws.panes = [];
+      if (liveTerminal) liveTerminal = null;
+      if (termWs === ws) termWs = null;
+    };
+    sheetEl._restoreFocus = function () { if (ws.active) { ws.active.fitSoon(); ws.active.focus(); } };
+    sheetEl._confirmClose = function () {
+      var running = ws.panes.filter(function (p) { return !p.ended; }).length;
+      if (running) toast("Detached " + running + " terminal" + (running === 1 ? "" : "s") + ". The shells keep running; reattach from + New or the host row.", "ok");
+      return true;
+    };
+  }
+
+  function createTerminalPane(session, reattaching) {
+    var p = { session: session, ended: false };
     var epId = session.endpoint_id || "unknown";
     var asset = assetForEndpoint(epId);
     var hostName = asset ? (asset.name || asset.ip || epId) : epId;
-    var epOs = (asset && asset.endpoint && asset.endpoint.os) || "Linux";
-    var isWindows = epOs.indexOf("Windows") !== -1;
-    var identity = isWindows ? "LocalSystem" : "root";
-    var prog = session.program || (isWindows ? "powershell.exe" : "/bin/bash");
+    var identity = terminalIdentity(asset && asset.endpoint && asset.endpoint.os);
+    var prog = session.program || (identity === "LocalSystem" ? "powershell.exe" : "/bin/bash");
+    var progShort = String(prog).split(/[\\/]/).pop();
+    p.hostName = hostName;
+    p.shortLabel = function () { return hostName + " \u00b7 " + progShort; };
+    p.longLabel = function () { return prog + " as " + identity + " on " + hostName + " (" + epId + "), session " + String(session.session_id).slice(0, 8); };
 
-    var activeSessionsCount = (state.terminalSessions || []).filter(function (s) {
-      return s.state === "active" || s.state === "connecting" || s.state === "waiting";
-    }).length;
-
-    // Terminal Emulator & WebSocket State
-    var term = null;
-    var fitAddon = null;
-    var ws = null;
-    var resizeObserver = null;
+    var term = null, fitAddon = null, sock = null, resizeObserver = null;
+    var leaving = false, reconnectAttempt = 0, reconnectTimer = null, connecting = false;
     var frameCount = session.frame_count || 0;
-    var encLabel = session.encryption || (session.bundle_id ? "AES-256-GCM Evidence" : "AES-256-GCM");
-    var termContainer = h("div", { cls: "terminal-container", id: "active-terminal-container" });
+    var lastDims = "";
+    var status = { tone: session.state === "active" ? "ok" : "info", text: session.state === "detached" ? "Detached" : "Connecting" };
 
-    // Status elements
-    /* setChip rewrites this in place as the relay connects, drops, retries and
-       reattaches. Without a live region none of that is announced, and the
-       terminal is the one place where "it stopped working" has to be heard. */
-    var statusBadge = chip(session.state === "active" ? "ok" : "warn",
-      session.state === "active" ? "Agent Connected" : "Connecting to Relay\u2026");
+    var statusBadge = chip(status.tone, status.text);
     statusBadge.setAttribute("role", "status");
     statusBadge.setAttribute("aria-live", "polite");
-    var frameCountEl = h("span", { cls: "dim-2" });
-    /* recording_bytes and max_recording_bytes ride on every poll and were both
-       unused, so the cap announced itself only by appearing mid-scrollback as
-       "[Recording limit reached]". Saying how much of it is spent, while it is
-       being spent, is the difference between a surprise and a deadline. */
-    var recordedBytes = Number(session && session.recording_bytes) || 0;
-    var recordedCap = Number(session && session.max_recording_bytes) || 0;
-    var recordingBounded = !!(session && session.recording_state === "bounded");
-    /* Only the hub knows how many bytes it recorded. Counting them on this end
-       instead - adding each frame's length as it arrived off the socket - read
-       "13.9 MB of 10.0 MB recorded" on a live session, because a viewer sees
-       three things the recording does not: the scrollback replayed to it on
-       every reattach, the frames the hub declined to record once the cap was
-       reached, and the JSON envelope around each one. A number about evidence
-       retention that drifts past its own limit is worse than one that only
-       moves when the five-second poll lands. */
-    var updateFrames = function (sum) {
+    function setStatus(tone, text) {
+      status = { tone: tone, text: text };
+      setChip(statusBadge, tone, text);
+      if (termWs) termWs.renderTabs();
+    }
+    p.tone = function () { return status.tone; };
+
+    var recordedBytes = Number(session.recording_bytes) || 0;
+    var recordedCap = Number(session.max_recording_bytes) || 0;
+    var recordingBounded = session.recording_state === "bounded";
+    var frameCountEl = h("span", { cls: "dim-2 term-recording" });
+    function updateFrames(sum) {
       if (sum) {
         if (sum.recording_bytes !== undefined) recordedBytes = Number(sum.recording_bytes) || 0;
         if (sum.max_recording_bytes) recordedCap = Number(sum.max_recording_bytes) || 0;
         if (sum.recording_state === "bounded") recordingBounded = true;
       }
-      var text = "Frames: " + frameCount + " (" + encLabel + ")";
-      if (recordingBounded) {
-        /* The session is still live and still audited; it is the *recording*
-           that stopped. An operator who is about to do something they will
-           later need to prove has to be told which of those two it is. */
-        text += " \u00b7 recording stopped at " + bytes(recordedCap || recordedBytes);
-      } else if (recordedCap > 0) {
-        text += " \u00b7 " + bytes(Math.min(recordedBytes, recordedCap)) + " of " + bytes(recordedCap) + " recorded";
-      } else if (recordedBytes > 0) {
-        text += " \u00b7 " + bytes(recordedBytes) + " recorded";
-      }
+      var text = "Recorded";
+      if (recordingBounded) text = "Recording stopped at " + bytes(recordedCap || recordedBytes);
+      else if (recordedCap > 0) text += " " + bytes(Math.min(recordedBytes, recordedCap)) + " of " + bytes(recordedCap);
+      else if (recordedBytes > 0) text += " " + bytes(recordedBytes);
       frameCountEl.textContent = text;
-      frameCountEl.setAttribute("data-near-cap",
-        recordingBounded || (recordedCap > 0 && recordedBytes / recordedCap >= 0.9) ? "true" : "false");
+      frameCountEl.setAttribute("data-near-cap", recordingBounded || (recordedCap > 0 && recordedBytes / recordedCap >= 0.9) ? "true" : "false");
       frameCountEl.setAttribute("title", recordingBounded
-        ? "The recording reached its " + bytes(recordedCap || recordedBytes) + " cap and stopped. The session is still live and still audited, but nothing from here on is sealed into evidence."
-        : recordedCap > 0
-          ? "The session recording is sealed into evidence. Output past " + bytes(recordedCap) + " is not recorded."
-          : "No recording cap reported by the hub.");
-    };
+        ? "The recording reached its cap and stopped. The session is still live and audited, but output from here on is not sealed into evidence."
+        : "Input, output and window size changes are sealed into evidence when the session ends. " + frameCount + " frames this view.");
+    }
     updateFrames(session);
-    /* The summary rides the five-second fleet poll that Assets already runs,
-       so the figure moves on its own while the operator watches it. */
-    terminalMetaSubscriber = function (sum) { updateFrames(sum); };
-    terminalMetaSessionID = (session && session.session_id) || "";
-    /* The hub sends expires_at and idle_expires_at on every poll. This was a
-       hardcoded "Duration: 60m · Idle: 15m", which is a promise the console
-       cannot keep - it is whatever --terminal-max-duration and
-       --terminal-idle-timeout say on the hub, and the string would have lied
-       the moment either changed. */
-    var limitsEl = h("span", { cls: "dim-3" });
-    var updateLimits = function (sum) {
+    var limitsEl = h("span", { cls: "dim-3 term-limits" });
+    function updateLimits(sum) {
       var expires = parseTime(sum && sum.expires_at);
       var idle = parseTime(sum && sum.idle_expires_at);
       var parts = [];
-      parts.push(expires ? "Ends " + stampText(expires) : "Ends \u2014");
-      parts.push(idle ? "Idle out " + stampText(idle) : "Idle out \u2014");
-      parts.push("Tenant slots: " + activeSessionsCount + "/4");
+      if (expires) parts.push("Ends " + stampText(expires));
+      if (idle) parts.push("Idle out " + stampText(idle));
+      parts.push(liveTerminalCount() + " of " + TERM_TENANT_CAP + " open");
       limitsEl.textContent = parts.join(" \u00b7 ");
       limitsEl.setAttribute("title",
-        (expires ? "Maximum duration reached at " + expires.toString() : "No maximum duration reported") + "\n" +
+        (expires ? "The session ends at " + expires.toString() : "No maximum duration reported") + "\n" +
         (idle ? "Idle timeout at " + idle.toString() + " unless you type" : "No idle deadline reported"));
-    };
+    }
     updateLimits(session);
+    p.meta = function (sum) {
+      if (!sum) return;
+      p.session = session = sum;
+      updateFrames(sum);
+      updateLimits(sum);
+      if (!terminalSessionIsLive(sum) && !p.ended) ended(sum.state);
+    };
 
-    var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
-      h("div", { cls: "spin" }),
-      h("b", { text: "Establishing Encrypted Terminal Relay\u2026" }),
-      h("span", { cls: "dim-2", text: "Waiting for agent on " + hostName + " (" + epId + ") to connect via loopback WSS." }),
-      h("span", { cls: "dim-3", text: "Terminal supervisor process will spawn as " + identity + " with " + prog })
-    );
-    termContainer.appendChild(overlayMsg);
-
-    // Meta bar
     var metaBar = h("div", { cls: "terminal-meta-bar" },
       h("div", { cls: "terminal-meta-left" },
         statusBadge,
-        h("span", { cls: "dim", text: "Endpoint: " }), h("b", { text: hostName }),
-        h("span", { cls: "dim-2", text: "(" + epId + ")" }),
+        h("b", { text: hostName }),
         chip("idle", identity),
-        h("span", { cls: "ip", text: prog })
-      ),
-      h("div", { cls: "terminal-meta-right" },
-        frameCountEl,
-        limitsEl
-      )
-    );
+        h("span", { cls: "ip term-prog", text: prog })),
+      h("div", { cls: "terminal-meta-right" }, frameCountEl, limitsEl));
 
-    /* Set while the operator is deliberately leaving, so ws.onclose knows the
-       difference between "I detached" and "the network dropped" - the first
-       is done, the second gets a reconnect. */
-    var leaving = false;
-    var terminated = false;
-    var reconnectAttempt = 0;
-    var reconnectTimer = null;
+    var banner = h("div", { cls: "term-reconnect", role: "status", hidden: true });
+    var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
+      h("div", { cls: "spin" }),
+      h("b", { text: "Waiting for the agent on " + hostName }),
+      h("span", { cls: "dim-2", text: prog + " starts as " + identity + " when the agent connects." }));
+    var container = h("div", { cls: "terminal-container" }, overlayMsg);
+    p.el = h("div", { cls: "term-pane", role: "tabpanel", "aria-label": p.longLabel() }, metaBar, banner, container);
 
-    function cleanup() {
+    function showBanner(text) {
+      if (text) { banner.textContent = text; banner.hidden = false; }
+      else banner.hidden = true;
+    }
+
+    function ended(stateWord) {
+      if (p.ended) return;
+      p.ended = true;
       leaving = true;
-      /* The poll outlives this sheet; leaving the closure subscribed would
-         keep writing into a detached element for the life of the page. */
-      terminalMetaSubscriber = null;
-      terminalMetaSessionID = "";
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if (resizeObserver) {
-        try { resizeObserver.disconnect(); } catch (e) {}
-        resizeObserver = null;
+      setStatus("idle", "Ended");
+      showBanner("This session has ended" + (stateWord ? " (" + stateWord + ")" : "") + ". Its recording is sealed into evidence.");
+      if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
+    }
+
+    // ----------------------------------------------------------- input
+    var queue = [];
+    var queued = 0;
+    var flushPending = false;
+    var dropWarned = false;
+    function flush() {
+      flushPending = false;
+      if (!queue.length || !sock || sock.readyState !== 1) return;
+      var all = new Uint8Array(queued);
+      var o = 0;
+      queue.forEach(function (b) { all.set(b, o); o += b.length; });
+      queue = []; queued = 0;
+      for (var i = 0; i < all.length; i += TERM_STDIN_CHUNK) {
+        sock.send(JSON.stringify({ type: "stdin", data: b64FromBytes(all.subarray(i, i + TERM_STDIN_CHUNK)) }));
       }
-      if (ws) {
+    }
+    function scheduleFlush() {
+      if (flushPending) return;
+      flushPending = true;
+      /* Keystrokes typed within one frame leave as one stdin frame. The
+         timeout covers a hidden tab, where animation frames stop. */
+      var done = false;
+      var run = function () { if (!done) { done = true; flush(); } };
+      if (window.requestAnimationFrame) requestAnimationFrame(run);
+      setTimeout(run, 16);
+    }
+    p.input = function (data) {
+      if (p.ended || !data) return;
+      var b = new TextEncoder().encode(data);
+      if (queued + b.length > TERM_INPUT_QUEUE) {
+        if (!dropWarned) { dropWarned = true; toast("Typing faster than the relay can reconnect; input past 64 KiB was dropped.", "warn"); }
+        return;
+      }
+      queue.push(b); queued += b.length;
+      scheduleFlush();
+    };
+    p.appCursor = function () {
+      try { return !!(term && term.modes && term.modes.applicationCursorKeysMode); } catch (e) { return false; }
+    };
+    p.paste = function (text) { if (term && text) { term.paste(text); term.focus(); } };
+    p.pasteFromClipboard = function () {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(function (t) { p.paste(t); }, function () { pasteSheet(); });
+      } else pasteSheet();
+    };
+    function pasteSheet() {
+      var area = h("textarea", { cls: "term-paste-area", rows: "6", "aria-label": "Text to paste", spellcheck: "false", autocomplete: "off" });
+      openSheet("Paste into the terminal", h("div", { cls: "stack" },
+        h("p", { cls: "pending", text: "This browser did not allow reading the clipboard. Paste the text here." }), area), [
+        h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
+        h("button", { cls: "btn btn-primary", type: "button", text: "Paste", on: { click: function () { var t = area.value; closeSheet(); p.paste(t); } } })
+      ], null, { stack: true, guardDirty: false, initialFocus: area });
+    }
+    p.clearScreen = function () { if (term) { term.clear(); term.focus(); } };
+    p.focus = function () { if (term && !p.el.hidden) { try { term.focus(); } catch (e) {} } };
+
+    // ---------------------------------------------------------- output
+    var replaying = false;
+    var liveBuffer = [];
+    var lastReplayTs = 0;
+    function writeFrame(f) {
+      if (!f || !f.data || !term) return;
+      term.write(bytesFromB64(f.data));
+    }
+    function frameTs(f) {
+      var t = f && f.timestamp;
+      if (typeof t === "number") return t;
+      var v = Date.parse(t || "");
+      return isNaN(v) ? 0 : v;
+    }
+    function flushLive() {
+      replaying = false;
+      while (liveBuffer.length) {
+        var f = liveBuffer.shift();
+        /* Output that reached both the recording and this socket is written
+           once. */
+        if (lastReplayTs && frameTs(f) && frameTs(f) <= lastReplayTs) continue;
+        writeFrame(f);
+      }
+    }
+    function replayTail() {
+      replaying = true;
+      liveBuffer = [];
+      var id = encodeURIComponent(session.session_id);
+      var get = state.demo ? Promise.resolve({ frames: [] })
+        : request("/api/v1/terminal/frames?id=" + id + "&session_id=" + id + "&tail_bytes=" + TERM_REPLAY_BYTES);
+      return get.then(function (d) {
+        var frames = arrayOf(d && d.frames).filter(function (f) { return f && f.type === "stdout"; });
+        /* Nothing recorded to show: keep what is on screen. */
+        if (!term || !frames.length) return;
+        term.reset();
+        lastReplayTs = 0;
+        var total = 0, start = frames.length;
+        while (start > 0 && total < TERM_REPLAY_BYTES) { start--; total += (frames[start].data || "").length * 3 / 4; }
+        if (start > 0) term.write("\x1b[2m[earlier output not replayed]\x1b[0m\r\n");
+        for (var i = start; i < frames.length; i++) { writeFrame(frames[i]); lastReplayTs = Math.max(lastReplayTs, frameTs(frames[i])); }
+        if (frames.length && overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
+      }).catch(function () { /* replay is a convenience; live output still works */ })
+        .then(flushLive);
+    }
+
+    // ---------------------------------------------------------- socket
+    function sendResize(force) {
+      if (!term || !sock || sock.readyState !== 1) return;
+      var dims = term.rows + "x" + term.cols;
+      if (!force && dims === lastDims) return;
+      lastDims = dims;
+      sock.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+    }
+    var fitTimer = null;
+    p.fitSoon = function () {
+      if (fitTimer) clearTimeout(fitTimer);
+      fitTimer = setTimeout(function () {
+        fitTimer = null;
+        if (!fitAddon || p.el.hidden || !p.el.isConnected) return;
+        try { fitAddon.fit(); } catch (e) {}
+        sendResize(false);
+      }, 100);
+    };
+
+    function connect(isReconnect) {
+      if (leaving || p.ended) return Promise.resolve();
+      connecting = true;
+      return termSerial(function () {
+        var attach = isReconnect && !state.demo
+          ? request("/api/v1/terminal/sessions/attach", "POST", { session_id: session.session_id }).then(function (sum) {
+            if (sum) { p.session = session = sum; updateLimits(sum); updateFrames(sum); }
+          })
+          : Promise.resolve();
+        return attach.then(function () {
+          if (leaving || p.ended) return;
+          return new Promise(function (settle) {
+            /* A socket that neither opens nor closes must not hold the queue. */
+            setTimeout(settle, 10000);
+            var wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+            var url = wsProto + "//" + window.location.host + "/api/v1/terminal/ws/operator?session_id=" + encodeURIComponent(session.session_id);
+            var s;
+            try { s = state.demo ? new DemoTermSocket(session) : new WebSocket(url); }
+            catch (e) { settle(); throw e; }
+            sock = s;
+            p.sock = s;
+            s.onopen = function () {
+              settle();
+              if (sock !== s) return;
+              connecting = false;
+              reconnectAttempt = 0;
+              showBanner("");
+              setStatus("info", "Attached");
+              lastDims = "";
+              sendResize(true);
+              if (isReconnect || session.state === "detached" || (session.frame_count || 0) > 0) replayTail();
+              flush();
+            };
+            s.onmessage = function (event) {
+              if (sock !== s) return;
+              var f;
+              try { f = JSON.parse(event.data); } catch (e) { return; }
+              frameCount++;
+              if (f.type === "stdout") {
+                if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
+                if (status.text !== "Live") setStatus("ok", "Live");
+                if (replaying) liveBuffer.push(f);
+                else writeFrame(f);
+              } else if (f.type === "bounded") {
+                recordingBounded = true;
+                updateFrames(null);
+                term.write("\r\n\x1b[33m[Recording limit reached; the session continues unrecorded]\x1b[0m\r\n");
+              } else if (f.type === "close") {
+                ended("closed by the host");
+                term.write("\r\n\r\n[The shell on " + hostName + " has exited]\r\n");
+              }
+            };
+            s.onerror = function () { if (!leaving && sock === s) setStatus("crit", "Relay error"); };
+            s.onclose = function () {
+              settle();
+              if (sock !== s) return;
+              sock = null;
+              connecting = false;
+              if (leaving || p.ended) return;
+              scheduleReconnect();
+            };
+          });
+        });
+      }).catch(function (err) {
+        connecting = false;
+        if (leaving || p.ended) return;
+        checkAlive(err);
+      });
+    }
+
+    /* A refused reattach is either "the hub still holds the old socket" (a
+       phone that slept: it lets go within a minute) or "the session is gone".
+       Ask the hub which before giving up. */
+    function checkAlive(err) {
+      if (state.demo) { scheduleReconnect(); return; }
+      request("/api/v1/terminal/sessions?id=" + encodeURIComponent(session.session_id)).then(function (sum) {
+        if (sum && sum.session_id && !terminalSessionIsLive(sum)) { p.meta(sum); return; }
+        scheduleReconnect(err);
+      }, function (e2) {
+        if (e2 && (e2.status === 404 || e2.status === 403)) { ended("no longer on the hub"); return; }
+        scheduleReconnect(err);
+      });
+    }
+
+    function scheduleReconnect(err) {
+      if (leaving || p.ended || reconnectTimer) return;
+      reconnectAttempt++;
+      var delay = Math.min(TERM_RECONNECT_MAX_MS, 400 * Math.pow(2, reconnectAttempt - 1));
+      setStatus("warn", "Reconnecting");
+      showBanner("Reconnecting" + (reconnectAttempt > 1 ? " (attempt " + reconnectAttempt + ")" : "") +
+        ". The shell keeps running on " + hostName + " and waits up to 15 minutes for you to come back." +
+        (err && err.message ? " Last answer: " + err.message : ""));
+      reconnectTimer = setTimeout(function () { reconnectTimer = null; connect(true); }, delay);
+    }
+
+    p.reconnectNow = function () {
+      if (leaving || p.ended) return;
+      if (sock && sock.readyState === 1) return;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (connecting) return;
+      reconnectAttempt = 0;
+      connect(true);
+    };
+    p.resume = function (replace) {
+      if (leaving || p.ended) return;
+      if (sock && sock.readyState === 1) {
+        if (!replace) return;
+        /* Closing cleanly lets the hub detach this socket at once, so the
+           reattach that follows is not refused for holding the old one. */
+        var s = sock;
+        sock = null;
+        try { s.onclose = null; s.close(); } catch (e) {}
+      }
+      p.reconnectNow();
+    };
+
+    p.start = function () {
+      term = new window.Terminal({
+        cursorBlink: true,
+        cursorStyle: "block",
+        /* A pty already sends CR LF. Converting bare LF would break full-screen
+           programs that move the cursor down with it. */
+        convertEol: false,
+        fontFamily: cssVar("--f-mono", "ui-monospace, Menlo, Consolas, monospace"),
+        fontSize: termFontSize(),
+        lineHeight: 1.2,
+        allowTransparency: false,
+        theme: terminalTheme(),
+        allowProposedApi: false,
+        scrollback: TERM_SCROLLBACK,
+        macOptionIsMeta: true,
+        rightClickSelectsWord: true
+      });
+      p.term = term;
+      liveTerminal = term;
+      if (window.FitAddon && window.FitAddon.FitAddon) {
+        fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+      }
+      /* Unicode 11 widths (emoji, CJK) need xterm's proposed unicode API for
+         one registration call. It is switched on for that call only. */
+      if (window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon) {
         try {
-          ws.onclose = null;
-          ws.onerror = null;
-          ws.onmessage = null;
-          /* No close frame. Closing the socket is now a detach on the hub
-             side: the process tree keeps running and the session moves to
-             `detached`. Sending {type:"close"} is the explicit terminate and
-             belongs only to the Terminate button. */
-          ws.close();
+          term.options.allowProposedApi = true;
+          term.loadAddon(new window.Unicode11Addon.Unicode11Addon());
+          term.unicode.activeVersion = "11";
         } catch (e) {}
-        ws = null;
+        try { term.options.allowProposedApi = false; } catch (e) {}
+      }
+      term.open(container);
+      /* Ctrl+Shift+C copies the selection and Ctrl+Shift+V pastes, as in a
+         desktop terminal. Plain Ctrl+C stays the shell's interrupt. */
+      term.attachCustomKeyEventHandler(function (e) {
+        if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
+        var k = String(e.key || "").toLowerCase();
+        if (k === "c") {
+          var sel = term.getSelection();
+          if (sel && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(sel).catch(function () {});
+          e.preventDefault();
+          return false;
+        }
+        if (k === "v") { e.preventDefault(); p.pasteFromClipboard(); return false; }
+        return true;
+      });
+      var selTimer = null;
+      term.onSelectionChange(function () {
+        if (selTimer) clearTimeout(selTimer);
+        selTimer = setTimeout(function () {
+          var sel = term && term.getSelection();
+          if (sel && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(sel).catch(function () {});
+        }, 200);
+      });
+      term.onData(function (data) {
+        if (termWs && termWs.ctrlArmed && data.length === 1) {
+          data = termCtrlChar(data) || data;
+          termWs.setCtrl(false);
+        }
+        p.input(data);
+      });
+      term.onBinary(function (data) { p.input(data); });
+      container.addEventListener("click", function () { p.focus(); });
+      if (window.ResizeObserver) {
+        resizeObserver = new ResizeObserver(function () { p.fitSoon(); });
+        resizeObserver.observe(container);
+      }
+      try { if (fitAddon) fitAddon.fit(); } catch (e) {}
+      connect(!!reattaching);
+    };
+    p.shown = function () { p.fitSoon(); };
+    p.setFont = function (n) { if (term) { term.options.fontSize = n; p.fitSoon(); } };
+
+    p.terminate = function () {
+      if (sock && sock.readyState === 1) {
+        try { sock.send(JSON.stringify({ type: "close" })); } catch (e) {}
+      }
+      ended("ended from this console");
+      closeTerminalSession(session.session_id);
+    };
+
+    p.dispose = function () {
+      leaving = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (fitTimer) { clearTimeout(fitTimer); fitTimer = null; }
+      if (resizeObserver) { try { resizeObserver.disconnect(); } catch (e) {} resizeObserver = null; }
+      if (sock) {
+        var s = sock;
+        sock = null;
+        /* No close frame: closing the socket is a detach on the hub. The
+           close frame is End session only. */
+        try { s.onclose = null; s.onerror = null; s.onmessage = null; s.close(); } catch (e) {}
       }
       if (term) {
+        if (liveTerminal === term) liveTerminal = null;
         try { term.dispose(); } catch (e) {}
         term = null;
       }
-      if (liveTerminal) liveTerminal = null;
-    }
-
-    // Foot controls
-    var sendCtrlCBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Ctrl+C",
-      title: "Send Interrupt (SIGINT)",
-      on: {
-        click: function () {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "stdin", data: btoa("\x03") }));
-          }
-          if (term) term.focus();
-        }
-      }
-    });
-
-    var sendCtrlDBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Ctrl+D",
-      title: "Send EOF",
-      on: {
-        click: function () {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "stdin", data: btoa("\x04") }));
-          }
-          if (term) term.focus();
-        }
-      }
-    });
-
-    var clearBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Clear",
-      title: "Clear Terminal Screen",
-      on: {
-        click: function () {
-          if (term) term.clear();
-        }
-      }
-    });
-
-    var terminateNow = function () {
-      terminated = true;
-      leaving = true;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "close" }));
-      }
-      closeTerminalSession(session.session_id);
-      closeSheet();
     };
-
-    var closeSessBtn = h("button", {
-      cls: "btn btn-crit",
-      type: "button",
-      /* Renamed from "Close Session". "Close" is what the ✕ does to a window;
-         this kills a process tree on a live host. */
-      text: "Terminate Session",
-      title: "Kill the remote shell session and seal the recording",
-      on: {
-        click: function () {
-          /* This was the file's only window.confirm(), in a console with a
-             purpose-built sheet system - and it named no host and stated no
-             consequence beyond one line of browser chrome. */
-          confirmSheet({
-            title: "Terminate terminal session",
-            consequence: "Every process started by that shell on " + hostName + " (" + epId + ") is " +
-              terminateMechanism(prog || session.program) +
-              ". Unsaved work in editors on that host is lost, and the session recording is sealed into evidence and cannot be resumed.",
-            detail: prog + " running as " + identity + " \u00b7 session " + session.session_id.slice(0, 8) + "\u2026",
-            confirmLabel: "Terminate session",
-            stack: true,
-            onConfirm: terminateNow
-          });
-        }
-      }
-    });
-
-    var detachBtn = h("button", {
-      cls: "btn btn-primary",
-      type: "button",
-      text: "Detach Viewer",
-      title: "Close this viewer and leave the remote session running",
-      on: {
-        click: function () {
-          /* This used to be `closeSheet(); refresh();` - and closeSheet ran
-             the cleanup that closed the WebSocket, which the hub answered by
-             closing the whole relay, which sent the agent a close frame,
-             which made the agent SIGTERM/SIGKILL the remote shell session.
-             The button labelled "Detach Viewer", whose tooltip said it would
-             not terminate the session, terminated the session. It works now
-             because the hub treats an operator socket closing as a detach. */
-          leaving = true;
-          closeSheet();
-          toast("Session detached \u2014 still running on " + hostName + ". Reattach from the asset row.", "ok");
-          refresh();
-        }
-      }
-    });
-
-    var foot = [
-      h("div", { cls: "terminal-foot-actions" },
-        h("div", { cls: "terminal-actions-group" },
-          sendCtrlCBtn,
-          sendCtrlDBtn,
-          clearBtn
-        ),
-        h("div", { cls: "terminal-actions-group" },
-          detachBtn,
-          closeSessBtn
-        )
-      )
-    ];
-
-    var body = h("div", { cls: "sheet-terminal-wrapper" },
-      metaBar,
-      termContainer
-    );
-
-    openSheet("Pseudoterminal \u2014 " + hostName + " (" + session.session_id.slice(0, 8) + "\u2026)", body, foot, "sheet-terminal",
-      { initialFocus: false });
-    if (sheetEl) {
-      sheetEl._cleanup = cleanup;
-      sheetEl._isTerminal = true;
-      /* A stray click on the scrim used to kill a root shell. It detaches
-         now, so the question is only whether they meant to leave - and the
-         answer is stated rather than implied. */
-      sheetEl._confirmClose = function () {
-        if (terminated || !ws || ws.readyState !== WebSocket.OPEN) return true;
-        leaving = true;
-        toast("Session detached \u2014 still running on " + hostName + ". Reattach from the asset row.", "ok");
-        return true;
-      };
-    }
-
-    // Check if xterm is available
-    if (!window.Terminal) {
-      overlayMsg.innerHTML = "";
-      overlayMsg.appendChild(h("div", { cls: "st-banner", "data-state": "crit", text: "Vendored Terminal Emulator Unavailable" }));
-      overlayMsg.appendChild(h("p", { text: "The xterm.js terminal engine could not be loaded from /vendor/xterm.js." }));
-      return;
-    }
-
-    // Initialize xterm with full 16-color ANSI palette and opaque background
-    term = new window.Terminal({
-      cursorBlink: true,
-      cursorStyle: "block",
-      convertEol: true,
-      /* JetBrains Mono, Fira Code and Cascadia were requested and none of them
-         ship with the hub - an airgapped fleet has no CDN to fetch them from,
-         so this fell all the way through to Menlo/Consolas. IBM Plex Mono is
-         the face the console actually bundles, and --f-mono names it. */
-      fontFamily: cssVar("--f-mono", "ui-monospace, Menlo, Consolas, monospace"),
-      fontSize: 13,
-      lineHeight: 1.25,
-      letterSpacing: 0.5,
-      allowTransparency: false,
-      theme: terminalTheme(),
-      allowProposedApi: false,
-      scrollback: TERM_SCROLLBACK
-    });
-    liveTerminal = term;
-
-    if (window.FitAddon && window.FitAddon.FitAddon) {
-      fitAddon = new window.FitAddon.FitAddon();
-      term.loadAddon(fitAddon);
-    }
-
-    term.open(termContainer);
-    if (fitAddon) {
-      try { fitAddon.fit(); } catch (e) {}
-    }
-    term.focus();
-
-    // ------------------------------------------------- scrollback replay
-    //
-    // Reattaching to a session that has been running without a viewer means
-    // the output produced meanwhile is in the recording and not on this
-    // screen. GET /api/v1/terminal/frames answers with the *live* in-memory
-    // frames for an unsealed session, so no new backend was needed for this.
-    //
-    // Live frames that arrive while the replay is still being fetched are
-    // buffered, not written: interleaving them would put the last second of
-    // output in the middle of the last ten minutes of it.
-    var replaying = false;
-    var liveBuffer = [];
-
-    function writeFrameData(b64) {
-      if (!b64 || !term) return;
-      var bin = atob(b64);
-      var bytes = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      term.write(bytes);
-    }
-
-    function flushLiveBuffer() {
-      replaying = false;
-      while (liveBuffer.length) writeFrameData(liveBuffer.shift());
-    }
-
-    function replayScrollback() {
-      replaying = true;
-      return request("/api/v1/terminal/frames?session_id=" + encodeURIComponent(session.session_id))
-        .then(function (d) {
-          var frames = arrayOf(d && d.frames).filter(function (f) { return f && f.type === "stdout"; });
-          if (!frames.length) return;
-          /* Bounded by xterm's own scrollback: replaying 10 MiB of recording
-             into a 5000-line buffer costs the time and shows the last 5000
-             lines either way. */
-          var tail = frames.length > TERM_SCROLLBACK ? frames.slice(frames.length - TERM_SCROLLBACK) : frames;
-          if (tail.length < frames.length) {
-            term.write("\r\n\x1b[2m\u2500\u2500 earlier output trimmed (" + (frames.length - tail.length) + " frames) \u2500\u2500\x1b[0m\r\n");
-          }
-          tail.forEach(function (f) { writeFrameData(f.data); });
-          term.write("\r\n\x1b[2m\u2500\u2500 replayed " + tail.length + " frame(s) \u00b7 live from here \u2500\u2500\x1b[0m\r\n");
-        })
-        .catch(function () { /* replay is a convenience; live I/O still works */ })
-        .then(flushLiveBuffer);
-    }
-
-    // ------------------------------------------------------- the socket
-    var wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    var wsUrl = wsProto + "//" + window.location.host + "/api/v1/terminal/ws/operator?session_id=" + encodeURIComponent(session.session_id);
-
-    function connect(isReconnect) {
-      try {
-        ws = new WebSocket(wsUrl);
-      } catch (e) {
-        setChip(statusBadge, "crit", "Connection failed");
-        term.write("\r\n[Failed to open WebSocket: " + e.message + "]\r\n");
-        return;
-      }
-
-      ws.onopen = function () {
-        reconnectAttempt = 0;
-        setChip(statusBadge, "info", "Attached \u00b7 awaiting agent");
-        ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
-        if (isReconnect || session.state === "detached" || (session.frame_count || 0) > 0) {
-          replayScrollback();
-        }
-      };
-
-      ws.onmessage = function (event) {
-        try {
-          var frame = JSON.parse(event.data);
-          frameCount++;
-          updateFrames(null);
-
-          if (frame.type === "stdout") {
-            if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
-            setChip(statusBadge, "ok", "Attached (Live)");
-            if (replaying) liveBuffer.push(frame.data);
-            else writeFrameData(frame.data);
-          } else if (frame.type === "bounded") {
-            setChip(statusBadge, "warn", "Recording bounded");
-            /* Through updateFrames, not by writing the element directly: the
-               next frame off the socket rebuilt this line and erased it. */
-            recordingBounded = true;
-            updateFrames(null);
-            term.write("\r\n\x1b[33m[Session recording bounded: 10MB limit reached]\x1b[0m\r\n");
-          } else if (frame.type === "close") {
-            terminated = true;
-            leaving = true;
-            setChip(statusBadge, "idle", "Terminated");
-            term.write("\r\n\r\n[Remote session terminated by agent]\r\n");
-          }
-        } catch (e) {
-          console.error("Failed to parse incoming terminal frame:", e);
-        }
-      };
-
-      ws.onerror = function () {
-        if (!leaving) setChip(statusBadge, "crit", "Relay error");
-      };
-
-      ws.onclose = function (e) {
-        if (leaving || terminated) {
-          setChip(statusBadge, "idle", terminated ? "Terminated" : "Detached (running in background)");
-          return;
-        }
-        /* Not a deliberate detach: a Wi-Fi blip, a proxy timeout, a laptop
-           lid. The hub has moved the session to `detached` and the shell is
-           still there, so come back rather than stranding the operator on a
-           dead rectangle. Bounded, because a session that is genuinely gone
-           must stop being retried. */
-        if (reconnectAttempt >= TERM_MAX_RECONNECT) {
-          setChip(statusBadge, "crit", "Disconnected (code " + e.code + ")");
-          term.write("\r\n[Terminal relay disconnected and could not be reattached. Reattach from the asset row.]\r\n");
-          return;
-        }
-        reconnectAttempt++;
-        var delay = Math.min(8000, 400 * Math.pow(2, reconnectAttempt - 1));
-        setChip(statusBadge, "warn", "Reconnecting\u2026 (" + reconnectAttempt + "/" + TERM_MAX_RECONNECT + ")");
-        reconnectTimer = setTimeout(function () {
-          reconnectTimer = null;
-          if (leaving || terminated) return;
-          /* The connect token is single-attach, so a reconnect has to mint a
-             fresh one. That POST also re-sets the HttpOnly cookie the
-             WebSocket upgrade carries. */
-          request("/api/v1/terminal/sessions/attach", "POST", { session_id: session.session_id })
-            .then(function (sum) {
-              if (sum) { session = sum; updateLimits(sum); updateFrames(sum); }
-              if (!leaving && !terminated) connect(true);
-            })
-            .catch(function (err) {
-              setChip(statusBadge, "crit", "Reattach refused");
-              term.write("\r\n[Reattach refused: " + (err && err.message ? err.message : "unknown") + "]\r\n");
-            });
-        }, delay);
-      };
-    }
-
-    connect(!!reattaching);
-
-    // Terminal keyboard input
-    term.onData(function (data) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        var bytes = new TextEncoder().encode(data);
-        var bin = "";
-        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        ws.send(JSON.stringify({ type: "stdin", data: btoa(bin) }));
-      }
-    });
-
-    // Resize handling
-    if (window.ResizeObserver) {
-      resizeObserver = new ResizeObserver(function () {
-        if (fitAddon) {
-          try {
-            fitAddon.fit();
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
-            }
-          } catch (e) {}
-        }
-      });
-      resizeObserver.observe(termContainer);
-    }
+    return p;
   }
 
   function renderResponse() {
@@ -7735,7 +8289,7 @@
         h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
       ),
       isUnlocked
-        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections, interactive pseudoterminals, and execute immutable scripts under signed ActionProof V2. An ephemeral browser key signed with TOTP is active in memory." })
+        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections and run immutable scripts under signed ActionProof V2. An ephemeral browser key signed with TOTP is active in memory. Terminals do not use this unlock; each one is approved on your phone." })
         : h("p", { cls: "pending", text: "Autonomous threat nullification, script execution, and endpoint response actions require ephemeral operator proof signed by an authenticated response session. Unlock with TOTP/Passkey to issue commands." }),
       h("div", { cls: "form-row" }, authActions)
     ));
@@ -7775,8 +8329,8 @@
                 /* One reattach implementation, shared with the Assets banner
                    and the context menu, so the token rotation and the replay
                    cannot drift between three copies. */
-                h("button", { cls: "btn mini", type: "button", text: ts.state === "detached" ? "Reattach" : "Open Console", on: { click: function () { reattachTerminal(ts); } } }),
-                h("button", { cls: "btn mini", "data-danger": "true", type: "button", text: "Terminate", on: { click: function () { terminateTerminalSession(ts, ts.endpoint_id); } } })
+                h("button", { cls: "btn mini", type: "button", text: ts.state === "detached" ? "Reattach" : "Open", on: { click: function () { reattachTerminal(ts); } } }),
+                h("button", { cls: "btn mini", "data-danger": "true", type: "button", text: "End session", on: { click: function () { terminateTerminalSession(ts, ts.endpoint_id); } } })
               ]
             : h("span", { cls: "dim-3", text: ts.close_reason || "closed" })
         )
@@ -7787,7 +8341,7 @@
       h("button", {
         cls: "btn btn-primary",
         type: "button",
-        text: "Launch Endpoint Shell",
+        text: "Open a terminal",
         on: {
           click: function () {
             openLaunchEndpointShellPicker();
@@ -7797,7 +8351,7 @@
     );
 
     var termCard = card("Remote terminals",
-      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Recording", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No active terminal sessions. Click 'Launch Endpoint Shell' to open a session." }),
+      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Recording", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No terminal sessions. Open a terminal to request one; your phone asks you to approve it." }),
       [termCardHead]
     );
 
@@ -11058,17 +11612,15 @@
        could not be told that a root shell was open on a host in front of them
        - the data existed and was simply not asked for unless they happened to
        be on the right page. It is cheap (one row per live session, capped at
-       four per tenant) and it is what the Assets banner reads. */
+       eight per tenant) and it is what the Assets banner reads. */
     jobs.push(request("/api/v1/terminal/sessions")
       .then(function (d) {
         state.terminalSessions = arrayOf(d && d.sessions || d);
         state.terminalAvailable = true;
-        if (terminalMetaSubscriber && terminalMetaSessionID) {
-          for (var ti = 0; ti < state.terminalSessions.length; ti++) {
-            var ts = state.terminalSessions[ti];
-            if (ts && ts.session_id === terminalMetaSessionID) { terminalMetaSubscriber(ts); break; }
-          }
-        }
+        if (termWs) state.terminalSessions.forEach(function (ts) {
+          var pane = ts && termWs.paneFor(ts.session_id);
+          if (pane) pane.meta(ts);
+        });
       })
       .catch(function (e) {
         if (e.status === 404 || e.status === 403) state.terminalAvailable = false;
