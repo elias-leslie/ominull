@@ -29,8 +29,9 @@ def status(online=("required",), offline=("sleeping",), outdated=(), issues=()):
 
 
 class ReleaseConvergence(unittest.TestCase):
-    def release(self, responses, *, canary="", wait=True):
+    def release(self, responses, *, canary="", wait=True, approval=False):
         requests = []
+        approvals = []
         snapshots = copy.deepcopy(responses)
 
         class Handler(BaseHTTPRequestHandler):
@@ -38,6 +39,12 @@ class ReleaseConvergence(unittest.TestCase):
                 pass
 
             def do_GET(self):
+                if self.path.startswith("/api/v1/approvals?"):
+                    approvals.append(self.path)
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"id": "ap-1", "state": "approved"}).encode())
+                    return
                 requests.append(("GET", self.path))
                 response = snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
                 self.send_response(200)
@@ -46,6 +53,13 @@ class ReleaseConvergence(unittest.TestCase):
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if approval and self.headers.get("X-Approval-ID") != "ap-1":
+                    approvals.append("held")
+                    self.send_response(202)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"approval_id": "ap-1", "state": "pending", "action": "Update agents",
+                                                 "summary": "x", "expires_at": "soon"}).encode())
+                    return
                 requests.append(("POST", body))
                 self.send_response(200)
                 self.end_headers()
@@ -57,7 +71,8 @@ class ReleaseConvergence(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         source = Path(__file__).with_name("release.sh").read_text()
-        script = "set -euo pipefail\nVERSION=1.2.0\nOMINULL_ADMIN_KEY=synthetic-fixture\n"
+        script = f"set -euo pipefail\nROOT_DIR={shlex.quote(str(Path(__file__).resolve().parent.parent))}\n"
+        script += "VERSION=1.2.0\nOMINULL_ADMIN_KEY=synthetic-fixture\n"
         script += f"HUB_URL=http://127.0.0.1:{server.server_port}\nCANARY_IDS={shlex.quote(canary)}\nWAIT_FOR_AGENTS={int(wait)}\n"
         script += "sleep() { :; }\nseq() { printf '1\\n2\\n3\\n'; }\n"
         script += source[source.index("hdr() {"):]
@@ -67,7 +82,16 @@ class ReleaseConvergence(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+        self.approvals = approvals
         return result, requests
+
+    def test_agent_update_waits_for_the_owner_then_resubmits_once(self):
+        result, requests = self.release([status(outdated=("required",)), status()], approval=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Owner approval needed", result.stderr)
+        self.assertEqual(self.approvals[0], "held")
+        self.assertTrue(self.approvals[1].startswith("/api/v1/approvals?wait=20&id=ap-1"))
+        self.assertEqual([r for r in requests if r[0] == "POST"], [("POST", {"all": True, "version": VERSION})])
 
     def test_offline_pending_does_not_block_online_convergence(self):
         result, requests = self.release([

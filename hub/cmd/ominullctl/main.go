@@ -198,11 +198,57 @@ func parseGlobalFlags(args []string) (CLIConfig, []string) {
 }
 
 func (c *APIClient) doRequest(method, endpoint string, body interface{}) ([]byte, error) {
+	raw, _, err := c.doRequestWith(method, endpoint, body, nil)
+	return raw, err
+}
+
+// ownerApproved sends a request the hub holds for the owner's phone approval.
+// A 202 names the approval; this waits for the owner's decision, then sends
+// the same request again with X-Approval-ID, which the hub accepts once.
+func (c *APIClient) ownerApproved(method, endpoint string, body interface{}) ([]byte, error) {
+	raw, status, err := c.doRequestWith(method, endpoint, body, nil)
+	if err != nil || status != http.StatusAccepted {
+		return raw, err
+	}
+	var pending struct {
+		ID        string `json:"approval_id"`
+		Action    string `json:"action"`
+		Summary   string `json:"summary"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if json.Unmarshal(raw, &pending) != nil || pending.ID == "" {
+		return raw, nil
+	}
+	fmt.Fprintf(os.Stderr, "[*] Owner approval needed: %s - %s\n    Approve on the phone (approval %s, expires %s).\n",
+		pending.Action, pending.Summary, pending.ID, pending.ExpiresAt)
+	deadline := time.Now().Add(16 * time.Minute)
+	for time.Now().Before(deadline) {
+		st, _, err := c.doRequestWith(http.MethodGet, "/api/v1/approvals?wait=10&id="+url.QueryEscape(pending.ID), nil, nil)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		var v struct {
+			State string `json:"state"`
+		}
+		_ = json.Unmarshal(st, &v)
+		switch v.State {
+		case "approved":
+			raw, _, err = c.doRequestWith(method, endpoint, body, map[string]string{"X-Approval-ID": pending.ID})
+			return raw, err
+		case "denied", "expired", "consumed":
+			return nil, fmt.Errorf("owner approval %s was %s", pending.ID, v.State)
+		}
+	}
+	return nil, fmt.Errorf("no owner decision on approval %s", pending.ID)
+}
+
+func (c *APIClient) doRequestWith(method, endpoint string, body interface{}, headers map[string]string) ([]byte, int, error) {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		reqBody = bytes.NewReader(b)
 	}
@@ -210,7 +256,10 @@ func (c *APIClient) doRequest(method, endpoint string, body interface{}) ([]byte
 	fullURL := strings.TrimRight(c.cfg.HubURL, "/") + endpoint
 	req, err := http.NewRequest(method, fullURL, reqBody)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	if c.cfg.APIKey != "" {
@@ -223,20 +272,20 @@ func (c *APIClient) doRequest(method, endpoint string, body interface{}) ([]byte
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+		return nil, resp.StatusCode, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
 	}
 
-	return respBytes, nil
+	return respBytes, resp.StatusCode, nil
 }
 
 func (c *APIClient) printOutput(data interface{}, humanFunc func()) {
@@ -427,7 +476,7 @@ func (c *APIClient) cmdMesh(args []string) error {
 		if len(args) > 3 {
 			reason = args[3]
 		}
-		raw, err := c.doRequest(http.MethodPost, "/api/v1/mesh/quarantine", map[string]string{
+		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/mesh/quarantine", map[string]string{
 			"target_ip":  tip,
 			"target_mac": tmac,
 			"reason":     reason,
@@ -446,7 +495,7 @@ func (c *APIClient) cmdMesh(args []string) error {
 			return fmt.Errorf("usage: ominullctl mesh release <ip>")
 		}
 		tip := args[1]
-		raw, err := c.doRequest(http.MethodPost, "/api/v1/mesh/unquarantine", map[string]string{
+		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/mesh/unquarantine", map[string]string{
 			"target_ip": tip,
 		})
 		if err != nil {
@@ -492,7 +541,7 @@ func (c *APIClient) cmdAgents(args []string) error {
 		} else {
 			body = map[string]interface{}{"endpoint_ids": []string{target}, "version": ver}
 		}
-		raw, err := c.doRequest(http.MethodPost, "/api/v1/agents/update", body)
+		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/agents/update", body)
 		if err != nil {
 			return err
 		}

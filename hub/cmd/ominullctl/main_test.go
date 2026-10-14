@@ -627,3 +627,40 @@ func TestOminullctl_ScriptsCommands(t *testing.T) {
 		t.Fatalf("cmdScripts retire without id expected error")
 	}
 }
+
+func TestOminullctl_WaitsForTheOwnersApproval(t *testing.T) {
+	mux := http.NewServeMux()
+	var sends []string
+	mux.HandleFunc("/api/v1/agents/update", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := r.Header.Get("X-Approval-ID")
+		sends = append(sends, id)
+		if id == "" {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"approval_id":"ap-1","state":"pending","action":"Update agents","summary":"1 host"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"published"}`))
+	})
+	polls := 0
+	mux.HandleFunc("/api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		state := "pending"
+		if polls > 1 {
+			state = "approved"
+		}
+		if r.URL.Query().Get("id") != "ap-1" {
+			t.Errorf("polled the wrong approval: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"id":"ap-1","state":"` + state + `"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newAPIClient(CLIConfig{HubURL: server.URL, APIKey: "test"})
+	if err := client.cmdAgents([]string{"update", "ep-1", "1.2.3"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) != 2 || sends[0] != "" || sends[1] != "ap-1" || polls != 2 {
+		t.Fatalf("sends %v polls %d", sends, polls)
+	}
+}

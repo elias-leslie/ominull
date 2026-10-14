@@ -152,6 +152,8 @@ api() {
 }
 
 
+. "${ROOT_DIR}/scripts/owner-approval.sh"
+
 target_json() {
     jq -cn --arg ids "${1}" '$ids | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))'
 }
@@ -164,7 +166,9 @@ queue() {
     else
         body="$(jq -cn --arg version "${VERSION}" '{all:true,version:$version}')"
     fi
-    api POST /api/v1/agents/update "${body}"
+    # The hub holds an agent update for the owner's phone approval (202), then
+    # accepts the same body once with X-Approval-ID.
+    owner_approved "${HUB_URL}" OMINULL_ADMIN_KEY /api/v1/agents/update "${body}"
 }
 
 validate_status() {

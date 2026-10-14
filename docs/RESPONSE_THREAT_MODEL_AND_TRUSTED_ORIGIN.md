@@ -58,6 +58,13 @@ Ominull separates operational concerns into three independent, non-interchangeab
   - The main hub process, administrative API keys, database records, and cross-tenant operators never have access to the raw signing key.
   - Endpoints verify grants against pinned tenant response public keys before executing any action.
 
+### 2.4 Owner approval for disruptive actions (phone passkey)
+- **Scope:** Isolate and release (single and bulk), agent update, mesh quarantine and release, and opening a terminal session. Routine reads and policy routes stay on scoped credentials; the detector's automatic isolation stays in-process and needs no approval.
+- **Flow:** The hub answers such a request with `202 {approval_id, action, summary, targets, expires_at}`. The authority records the approval (in memory; a restart fails closed) and signs a statement with the tenant response key. The signed bytes are the line OMINULL-OWNER-APPROVAL-V1, a newline, then the statement JSON (v, id, tenant, requester, kind, action, summary, targets, digest, created, expires). A relay with its own key (`/api/v1/integrations/nightshift/approvals`, no admin fallback) carries the statement to one external approval origin that verifies the signature, shows only the signed fields and asks the owner's passkey to sign `sha256(challenge_hex ":" decision)`, where `challenge = sha256(prefix || statement)`. The relay posts the decision and raw assertion back; **the authority verifies the assertion itself** (exact origin, RP ID hash, user presence and verification, counter, ES256) against approvers pinned on the authority host (`-approvers`, `{"approvers":[{id,label,rp_id,origin,credential_id,x,y}]}`). The requester then resends the same request with `X-Approval-ID`; the authority signs grants once, only if kind, payload digest and the resolved target set match exactly, within 10 minutes of the approval.
+- **Why one external origin:** the owner already approves privileged host actions with one phone passkey on one origin. A second passkey store and a second approval page would split what the owner has to trust; the authority still verifies every assertion, so the origin cannot approve on its own and a relay that mislabels a request fails the signature.
+- **Without a pinned approver** every gated action answers 503; nothing falls back to API keys or console sessions.
+- **Capabilities, not OS names:** agents report `response_capabilities {isolate, collect, terminal:{programs}}`. The hub chooses terminal programs from that list and never branches on the OS string, so a new platform (macOS) only reports its own capabilities; each PTY backend (forkpty, ConPTY) sits behind the same terminal protocol.
+
 ---
 
 ## 3. Response Threat Model
@@ -88,6 +95,7 @@ Ominull separates operational concerns into three independent, non-interchangeab
 - **Mitigation:**
   - Static API keys are strictly restricted to fleet ingestion, status diagnostics, and inventory queries.
   - The Response Authority rejects static API keys. Grants can only be signed when presented with a valid, non-expired `ActionProof` originating from a live human response session.
+  - Disruptive actions (section 2.4) additionally need the owner's passkey approval, verified by the authority; an admin key or a console session alone only creates a pending approval.
 
 #### Threat 3: Hub Process Compromise (`ominull-hub`)
 - **Threat:** An attacker discovers an RCE vulnerability in the Go hub web daemon.

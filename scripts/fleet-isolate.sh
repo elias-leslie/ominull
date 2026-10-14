@@ -1,5 +1,9 @@
 #!/bin/bash
+# Isolate every endpoint. The hub holds this for the owner's phone approval.
+set -euo pipefail
 HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
-API_KEY="${OMINULL_API_KEY:?export OMINULL_API_KEY with the hub admin key}"
+: "${OMINULL_API_KEY:?export OMINULL_API_KEY with the hub admin key}"
+# shellcheck source=scripts/owner-approval.sh
+. "$(dirname "${BASH_SOURCE[0]}")/owner-approval.sh"
 echo "[!] ACTIVATING EMERGENCY FLEET-WIDE NETWORK QUARANTINE..."
-curl -s -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -d '{"scope":"all"}' "$HUB_URL/api/v1/endpoints/isolate-bulk" | jq .
+owner_approved "${HUB_URL}" OMINULL_API_KEY /api/v1/endpoints/isolate-bulk '{"scope":"all"}' | jq .
