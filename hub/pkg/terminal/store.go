@@ -92,14 +92,14 @@ func (m *Manager) insertDurableSession(s *TerminalSession) error {
 	INSERT INTO terminal_sessions (
 		session_id, tenant_id, endpoint_id, operator_id, program,
 		state, token_hash, created_at, expires_at, idle_expires_at,
-		grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		grant_json, bundle_id, evidence_item_id, recording_state, recording_bytes, frame_count, operator_token_hash
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err := m.db.Exec(
 		query,
 		s.SessionID, s.TenantID, s.EndpointID, s.OperatorID, s.Program,
 		string(s.State), s.TokenHash, s.CreatedAt, s.ExpiresAt, s.IdleExpiresAt,
-		string(grantJSON), s.BundleID, s.EvidenceItemID, s.RecordingState, s.RecordingBytes, s.FrameCount,
+		string(grantJSON), s.BundleID, s.EvidenceItemID, s.RecordingState, s.RecordingBytes, s.FrameCount, s.OperatorTokenHash,
 	)
 	return err
 }

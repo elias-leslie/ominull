@@ -1534,8 +1534,12 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	granted := grantedTargets(r)
 	var scheduled, unsupported []map[string]string
 	for _, ep := range endpoints {
+		if granted != nil && !contains(granted, ep.ID) {
+			continue // only what the owner approved, even for "all"
+		}
 		if !req.All && !contains(req.EndpointIDs, ep.ID) {
 			continue
 		}
@@ -2091,6 +2095,9 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if ids := grantedTargets(r); ids != nil {
+		req.Scope, req.Value, req.IDs = "ids", "", ids
+	}
 
 	if msg := bulkScopeProblem(req.Scope, req.IDs); msg != "" {
 		writeJSONError(w, http.StatusBadRequest, msg)
@@ -2191,6 +2198,9 @@ func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if ids := grantedTargets(r); ids != nil {
+		req.Scope, req.Value, req.IDs = "ids", "", ids
 	}
 
 	if msg := bulkScopeProblem(req.Scope, req.IDs); msg != "" {

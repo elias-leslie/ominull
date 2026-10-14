@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
 
 	// 4. Operator attaches via WebSocket
 	u, _ := url.Parse(ts.URL)
-	opWSURL := fmt.Sprintf("ws://%s/api/v1/terminal/ws/operator?session_id=%s&token=%s", u.Host, session.SessionID, session.ConnectToken)
+	opWSURL := fmt.Sprintf("ws://%s/api/v1/terminal/ws/operator?session_id=%s&token=%s", u.Host, session.SessionID, session.OperatorToken)
 
 	opWS, _, err := websocket.DefaultDialer.Dial(opWSURL, nil)
 	if err != nil {

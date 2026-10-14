@@ -111,16 +111,38 @@ func TestTerminalRelay_AuthenticatedLoopback(t *testing.T) {
 		t.Fatalf("expected 401 Unauthorized for mismatched endpoint, got %d", resp.StatusCode)
 	}
 
-	// 5. Connect Operator with valid credentials
-	validOpQuery := url.Values{
+	// 5. The agent's token never opens the operator side.
+	agentTokOpQuery := url.Values{
 		"session_id": []string{sess.SessionID},
 		"token":      []string{token},
+	}
+	_, resp, err = websocket.DefaultDialer.Dial(wsURL("/api/v1/terminal/ws/operator", agentTokOpQuery), nil)
+	if err == nil {
+		t.Fatalf("expected the agent token to be refused on the operator side")
+	}
+	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for agent token on operator side, got %d", resp.StatusCode)
+	}
+
+	// Connect Operator with its own one-use token
+	if sess.OperatorToken == "" || sess.OperatorToken == token {
+		t.Fatalf("expected a separate operator token")
+	}
+	validOpQuery := url.Values{
+		"session_id": []string{sess.SessionID},
+		"token":      []string{sess.OperatorToken},
 	}
 	opWS, _, err := websocket.DefaultDialer.Dial(wsURL("/api/v1/terminal/ws/operator", validOpQuery), nil)
 	if err != nil {
 		t.Fatalf("operator websocket dial failed: %v", err)
 	}
 	defer opWS.Close()
+	sess.mu.RLock()
+	consumed := sess.OperatorTokenHash == ""
+	sess.mu.RUnlock()
+	if !consumed {
+		t.Fatalf("expected the operator token to be consumed by the attach")
+	}
 
 	// 6. Connect Agent with valid credentials
 	validAgentQuery := url.Values{
@@ -261,7 +283,7 @@ func TestTerminalRelay_ForbiddenFrameTypes(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/operator", func(w http.ResponseWriter, r *http.Request) {
-		_ = mgr.AttachOperator(w, r, sess.SessionID, sess.ConnectToken)
+		_ = mgr.AttachOperator(w, r, sess.SessionID, sess.OperatorToken)
 	})
 	mux.HandleFunc("/agent", func(w http.ResponseWriter, r *http.Request) {
 		_ = mgr.AttachAgent(w, r, sess.SessionID, endpointID, sess.ConnectToken)
@@ -296,5 +318,48 @@ func TestTerminalRelay_ForbiddenFrameTypes(t *testing.T) {
 	_, _, err = opWS.ReadMessage()
 	if err == nil {
 		t.Fatalf("expected operator connection to be closed after sending forbidden frame type")
+	}
+}
+
+// A peer that stops reading must not let the other direction queue without
+// bound: the gate holds at MaxQueueBytes (one oversized frame may pass when
+// the queue is empty) and the sender waits instead.
+func TestByteGateBoundsQueuedBytes(t *testing.T) {
+	var g byteGate
+	done := make(chan struct{})
+	frame := int64(200 * 1024)
+	got := make(chan int, 1)
+	go func() {
+		n := 0
+		for g.acquire(frame, done, nil, nil) {
+			n++
+		}
+		got <- n
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if q := g.queued(); q > MaxQueueBytes {
+		t.Fatalf("queued %d bytes, over MaxQueueBytes", q)
+	}
+	if q := g.queued(); q != 5*frame {
+		t.Fatalf("expected the slow peer to hold the sender at 5 frames, queued %d", q)
+	}
+	g.release(frame) // the slow peer drains one frame
+	time.Sleep(50 * time.Millisecond)
+	if q := g.queued(); q != 5*frame {
+		t.Fatalf("after one drain, expected 5 frames again, queued %d", q)
+	}
+	close(done)
+	select {
+	case n := <-got:
+		if n != 6 {
+			t.Fatalf("expected 6 acquisitions, got %d", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sender did not stop when the relay closed")
+	}
+
+	var big byteGate
+	if !big.acquire(MaxMessageSize+1, done, nil, nil) {
+		t.Fatal("an oversized frame must pass an empty queue")
 	}
 }

@@ -109,7 +109,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		// Set one-use HttpOnly attach cookie for the operator browser on this origin
 		http.SetCookie(w, &http.Cookie{
 			Name:     terminalCookieName(session.SessionID),
-			Value:    session.ConnectToken,
+			Value:    session.OperatorToken,
 			Path:     "/api/v1/terminal/ws/",
 			HttpOnly: true,
 			Secure:   true,
@@ -125,7 +125,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		// approved) has no cookie jar on that path, so it gets the token
 		// once in the body and presents it as X-Terminal-Token.
 		if r.Header.Get("X-Auth-Method") == "api-key" {
-			out["connect_token"] = session.ConnectToken
+			out["connect_token"] = session.OperatorToken
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

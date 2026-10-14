@@ -27,11 +27,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -71,7 +73,9 @@ const (
 )
 
 // DefaultApproversPath is where root pins the owner's approver keys.
-const DefaultApproversPath = "/etc/ominull/response-approvers.json"
+// The directory is root:ominull-authority 0750 (the hub package creates it);
+// the file is root-owned and not group/world-writable.
+const DefaultApproversPath = "/etc/ominull-response-authority/approvers.json"
 
 // ApprovalStatement is exactly what the owner is shown and what the
 // authority signs. Its JSON encoding (struct field order) is the signed form.
@@ -143,6 +147,7 @@ type ApprovalAnswer struct {
 type ApprovalConsumeRequest struct {
 	ID         string              `json:"id"`
 	TenantID   string              `json:"tenant_id"`
+	Requester  string              `json:"requester"`
 	Kind       response.ActionKind `json:"kind"`
 	Digest     string              `json:"digest"`
 	Targets    []string            `json:"targets"`
@@ -211,11 +216,29 @@ func (a *Authority) SetApproversPath(path string) {
 }
 
 func (b *approvalBook) loadApprovers() ([]Approver, error) {
-	raw, err := os.ReadFile(b.approvers)
+	b.mu.Lock()
+	path := b.approvers
+	b.mu.Unlock()
+	f0, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNoApprovers
 		}
+		return nil, fmt.Errorf("read approvers: %w", err)
+	}
+	defer f0.Close()
+	info, err := f0.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("read approvers: %w", err)
+	}
+	// Whoever can write this file can approve: only root (or, in tests, the
+	// authority's own user) may own it, and nobody else may write it.
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || !ok || (st.Uid != 0 && int(st.Uid) != os.Geteuid()) || info.Size() > 64*1024 {
+		return nil, errors.New("approver file must be a root-owned regular file, not group or world writable")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f0, 64*1024))
+	if err != nil {
 		return nil, fmt.Errorf("read approvers: %w", err)
 	}
 	var f approverFile
@@ -291,6 +314,11 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	if len(in.Payload) == 0 || len(in.Payload) > approvalMaxPayload || !json.Valid(in.Payload) {
 		return nil, errors.New("approval payload must be valid JSON up to 16 KiB")
 	}
+	requester := cleanText(in.Requester, 80)
+	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := a.approvalsReady(); err != nil {
 		return nil, err
 	}
@@ -328,17 +356,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		V:         1,
 		ID:        hex.EncodeToString(idBytes),
 		TenantID:  in.TenantID,
-		Requester: cleanText(in.Requester, 80),
+		Requester: requester,
 		Kind:      string(in.Kind),
-		Action:    cleanText(in.Action, 60),
-		Summary:   cleanText(in.Summary, approvalMaxSummary),
+		Action:    action,
+		Summary:   cleanText(summary, approvalMaxSummary),
 		Targets:   targets,
 		Digest:    hex.EncodeToString(digest[:]),
 		Created:   now.Unix(),
 		Expires:   now.Add(ttl).Unix(),
-	}
-	if stmt.Action == "" {
-		stmt.Action = string(in.Kind)
 	}
 	stmtJSON, err := json.Marshal(stmt)
 	if err != nil {
@@ -646,7 +671,8 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 		return nil, ErrApprovalNotUsable
 	}
 	targets := sortedUnique(req.Targets)
-	if r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") {
+	if r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") ||
+		cleanText(req.Requester, 80) != r.stmt.Requester {
 		b.mu.Unlock()
 		a.auditApproval(req.TenantID, "", "approval_consume_refused", string(req.Kind), strings.Join(targets, ","), req.ID, "denied", "action differs from the approved one")
 		return nil, ErrApprovalMismatch

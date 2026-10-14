@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(ts.URL)
-	op, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/api/v1/terminal/ws/operator?session_id=%s&token=%s", u.Host, sess.SessionID, sess.ConnectToken), nil)
+	op, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/api/v1/terminal/ws/operator?session_id=%s&token=%s", u.Host, sess.SessionID, sess.OperatorToken), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

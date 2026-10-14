@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ominull/hub/pkg/response"
@@ -37,10 +38,20 @@ func newApprovalAuthority(t *testing.T) (*responseauth.Authority, *approvaltest.
 }
 
 func isolateRequest() *responseauth.ApprovalRequestInput {
+	return isolateRequestFor("ep-1")
+}
+
+// isolateRequestFor builds the payload the hub sends: route, body, targets.
+func isolateRequestFor(targets ...string) *responseauth.ApprovalRequestInput {
+	route, body := "/api/v1/endpoints/isolate-bulk", map[string]interface{}{"scope": "ids", "ids": targets}
+	if len(targets) == 1 {
+		route, body = "/api/v1/endpoints/isolate", map[string]interface{}{"endpoint_id": targets[0]}
+	}
+	payload, _ := json.Marshal(map[string]interface{}{"route": route, "body": body, "targets": targets})
 	return &responseauth.ApprovalRequestInput{
 		TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation,
-		Action: "Isolate host", Summary: "Isolate lab-vm", Targets: []string{"ep-1"},
-		Payload: json.RawMessage(`{"route":"/api/v1/endpoints/isolate","body":{"endpoint_id":"ep-1"}}`),
+		Action: "Isolate host", Summary: "Isolate lab-vm", Targets: targets,
+		Payload: payload,
 	}
 }
 
@@ -76,7 +87,7 @@ func TestApprovalStatementIsSignedAndChallengeDerived(t *testing.T) {
 		t.Fatal("challenge is not sha256(prefix || statement)")
 	}
 	var parsed responseauth.ApprovalStatement
-	if err := json.Unmarshal(stmt, &parsed); err != nil || parsed.ID != v.ID || parsed.Summary != "Isolate lab-vm" {
+	if err := json.Unmarshal(stmt, &parsed); err != nil || parsed.ID != v.ID || parsed.Summary != "Cut 1 host(s) off the network: ep-1" || parsed.Action != "Isolate host" {
 		t.Fatalf("statement does not carry the shown fields: %+v %v", parsed, err)
 	}
 }
@@ -88,7 +99,7 @@ func TestApprovalApproveConsumeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consume := &responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Kind: in.Kind, Digest: digestOf(in.Payload), Targets: []string{"ep-1"}}
+	consume := &responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin", Kind: in.Kind, Digest: digestOf(in.Payload), Targets: []string{"ep-1"}}
 	if _, err := auth.ConsumeApproval(consume); !errors.Is(err, responseauth.ErrApprovalNotUsable) {
 		t.Fatalf("pending approval consumed: %v", err)
 	}
@@ -143,8 +154,7 @@ func TestApprovalAssertionChecks(t *testing.T) {
 	}
 	for name, mk := range cases {
 		t.Run(name, func(t *testing.T) {
-			in := isolateRequest()
-			in.Targets = []string{"ep-" + name}
+			in := isolateRequestFor("ep-" + name)
 			v, err := auth.RequestApproval(in)
 			if err != nil {
 				t.Fatal(err)
@@ -166,14 +176,14 @@ func sha256hex(s string) string { h := sha256.Sum256([]byte(s)); return hex.Enco
 
 func TestApprovalConsumeMustMatch(t *testing.T) {
 	auth, ap := newApprovalAuthority(t)
-	in := isolateRequest()
-	in.Targets = []string{"ep-1", "ep-2"}
+	in := isolateRequestFor("ep-1", "ep-2")
 	v, _ := auth.RequestApproval(in)
 	if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
 		t.Fatal(err)
 	}
-	good := responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Kind: in.Kind, Digest: digestOf(in.Payload), Targets: []string{"ep-2", "ep-1"}}
-	bad := []responseauth.ApprovalConsumeRequest{good, good, good, good}
+	good := responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin", Kind: in.Kind, Digest: digestOf(in.Payload), Targets: []string{"ep-2", "ep-1"}}
+	bad := []responseauth.ApprovalConsumeRequest{good, good, good, good, good}
+	bad[4].Requester = "someone-else"
 	bad[0].Kind = response.ActionKindTerminalSession
 	bad[1].Digest = sha256hex("other")
 	bad[2].Targets = []string{"ep-1"}
@@ -193,8 +203,7 @@ func TestApprovalDenyAndRateLimit(t *testing.T) {
 	auth, ap := newApprovalAuthority(t)
 	var ids []string
 	for i := 0; i < 3; i++ {
-		in := isolateRequest()
-		in.Targets = []string{"ep-" + string(rune('a'+i))}
+		in := isolateRequestFor("ep-" + string(rune('a'+i)))
 		v, err := auth.RequestApproval(in)
 		if err != nil {
 			t.Fatal(err)
@@ -226,5 +235,75 @@ func TestTerminalGrantNeedsOwnerApproval(t *testing.T) {
 	_, err := auth.SignGrant(&responseauth.SignGrantRequest{TenantID: "default", ActionKind: response.ActionKindTerminalSession, Proof: &responseauth.ActionProof{}})
 	if err == nil {
 		t.Fatal("terminal grant signed without an owner approval")
+	}
+}
+
+func TestApproverFileMustNotBeWritableByOthers(t *testing.T) {
+	auth, _ := newApprovalAuthority(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvers.json")
+	if err := approvaltest.WriteFile(path, approvaltest.New("x", testRP, testOrigin)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	auth.SetApproversPath(path)
+	if _, err := auth.RequestApproval(isolateRequest()); err == nil || !strings.Contains(err.Error(), "not group or world writable") {
+		t.Fatalf("a group-writable approver file was trusted: %v", err)
+	}
+	link := filepath.Join(dir, "link.json")
+	_ = os.Chmod(path, 0o644)
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	auth.SetApproversPath(link)
+	if _, err := auth.RequestApproval(isolateRequest()); err == nil {
+		t.Fatal("a symlinked approver file was trusted")
+	}
+}
+
+// The owner sees the authority's words, derived from the digested payload:
+// hub prose is ignored, and a route that does not match the kind is refused.
+func TestApprovalWordsComeFromThePayload(t *testing.T) {
+	auth, _ := newApprovalAuthority(t)
+	in := isolateRequestFor("ep-1")
+	in.Action, in.Summary = "Release isolation", "harmless"
+	v, err := auth.RequestApproval(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Action != "Isolate host" || strings.Contains(v.Summary, "harmless") {
+		t.Fatalf("hub prose reached the owner: %q / %q", v.Action, v.Summary)
+	}
+
+	refused := map[string]*responseauth.ApprovalRequestInput{}
+	r := isolateRequestFor("ep-1")
+	r.Kind = responseauth.ActionKindMesh
+	refused["kind differs from route"] = r
+	r = isolateRequestFor("ep-1")
+	r.Payload = json.RawMessage(`{"route":"/api/v1/endpoints/delete","body":{},"targets":["ep-1"]}`)
+	refused["unknown route"] = r
+	r = isolateRequestFor("ep-1")
+	r.Payload = json.RawMessage(`{"route":"/api/v1/endpoints/isolate","body":{"endpoint_id":"ep-9"},"targets":["ep-1"]}`)
+	refused["body names another endpoint"] = r
+	r = isolateRequestFor("ep-1")
+	r.Targets = []string{"ep-2"}
+	refused["payload targets differ"] = r
+	r = isolateRequestFor("ep-1")
+	r.Kind = responseauth.ActionKindAgentUpdate
+	r.Payload = json.RawMessage(`{"route":"/api/v1/agents/update","body":{"all":true},"targets":["ep-1"]}`)
+	refused["update without version"] = r
+	for name, in := range refused {
+		if _, err := auth.RequestApproval(in); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+
+	term := &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
+		Targets: []string{"ep-1"}, Payload: json.RawMessage(`{"program":"/bin/bash"}`)}
+	v, err = auth.RequestApproval(term)
+	if err != nil || v.Action != "Open terminal" || !strings.Contains(v.Summary, "/bin/bash on ep-1") {
+		t.Fatalf("terminal words: %+v %v", v, err)
 	}
 }

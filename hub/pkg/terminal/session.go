@@ -85,14 +85,11 @@ type TerminalSession struct {
 	State        SessionState `json:"state"`
 	ConnectToken string       `json:"-"`
 	TokenHash    string       `json:"-"`
-	// OperatorTokenHash is the operator's half of the connect credential,
-	// rotated on every attach so a captured token is useless after one use.
-	// The agent keeps validating against TokenHash: rotating a single shared
-	// token would lock out an agent that had not connected yet, and the
-	// window for that is real - an operator can attach and detach before the
-	// endpoint has seen the offer in its heartbeat. Empty means "not yet
-	// rotated", and TokenHash answers for both, which is what makes sessions
-	// created by an older hub still attachable.
+	// OperatorTokenHash is the operator's own connect credential, minted at
+	// creation apart from the agent's token, consumed by the attach it opens
+	// and rotated by /sessions/attach for the next one. The agent validates
+	// against TokenHash only. Empty means "no operator token outstanding":
+	// the agent's token never answers for the operator side.
 	OperatorTokenHash string                  `json:"-"`
 	OperatorToken     string                  `json:"-"`
 	CreatedAt         time.Time               `json:"created_at"`
@@ -305,6 +302,10 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 	if token == "" {
 		token = uuid.New().String()
 	}
+	// The operator gets its own one-use token. The agent's token travels to
+	// the endpoint (and in the agent's WebSocket URL); it never opens the
+	// operator side.
+	opToken := uuid.New().String()
 
 	maxRec := m.maxRecordingBytes
 	if maxRec <= 0 {
@@ -320,6 +321,8 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 		State:             StateWaiting,
 		ConnectToken:      token,
 		TokenHash:         HashToken(token),
+		OperatorToken:     opToken,
+		OperatorTokenHash: HashToken(opToken),
 		CreatedAt:         now,
 		ExpiresAt:         now.Add(m.maxDuration),
 		IdleExpiresAt:     now.Add(m.idleTimeout),

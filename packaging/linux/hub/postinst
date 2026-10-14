@@ -67,6 +67,14 @@ install -d -m 0700 /var/lib/ominull-response-authority
 chown -R ominull-authority:ominull-authority /var/lib/ominull-response-authority 2>/dev/null || true
 chmod 0700 /var/lib/ominull-response-authority
 
+# Owner approvers (public passkey keys) pinned by root: the authority reads them,
+# nothing but root writes them. The file itself is installed by the operator;
+# without it every owner-approved action answers 503.
+[ -L /etc/ominull-response-authority ] && { echo "ominull: refusing symlinked /etc/ominull-response-authority" >&2; exit 1; }
+install -d -m 0750 /etc/ominull-response-authority
+chown root:ominull-authority /etc/ominull-response-authority 2>/dev/null || true
+chmod 0750 /etc/ominull-response-authority
+
 # Authority socket directory (group traversal for ominull-authority group members)
 install -d -m 0750 /run/ominull-response-authority
 chown ominull-authority:ominull-authority /run/ominull-response-authority 2>/dev/null || true

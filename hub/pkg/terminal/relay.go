@@ -21,7 +21,11 @@ const (
 	// agents' own limit): a pasted script arrives as one stdin frame.
 	MaxMessageSize = 1024 * 1024
 
-	// MaxQueueBytes is the maximum buffered queue per direction (1 MiB).
+	// MaxOperatorMessageSize bounds one frame from the operator's browser.
+	MaxOperatorMessageSize = 256 * 1024
+
+	// MaxQueueBytes is the maximum buffered queue per direction (1 MiB),
+	// enforced by byteGate.
 	MaxQueueBytes = 1024 * 1024
 
 	// WriteWait is the maximum time to wait for a frame write.
@@ -49,19 +53,19 @@ var upgrader = websocket.Upgrader{
 // PairedRelay coordinates full-duplex bidirectional frame streaming between
 // the operator's browser and the remote endpoint agent.
 type PairedRelay struct {
-	mu           sync.Mutex
-	sess         *TerminalSession
-	mgr          *Manager
-	opConn       *websocket.Conn
-	agentConn    *websocket.Conn
-	opToAgent    chan TerminalFrame
-	agentToOp    chan TerminalFrame
-	opQueueBytes atomic.Int64
-	agQueueBytes atomic.Int64
-	done         chan struct{}
-	closeOnce    sync.Once
-	ctx          context.Context
-	cancel       context.CancelFunc
+	mu        sync.Mutex
+	sess      *TerminalSession
+	mgr       *Manager
+	opConn    *websocket.Conn
+	agentConn *websocket.Conn
+	opToAgent chan TerminalFrame
+	agentToOp chan TerminalFrame
+	opQueue   byteGate // bytes queued operator -> agent
+	agQueue   byteGate // bytes queued agent -> operator
+	done      chan struct{}
+	closeOnce sync.Once
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// detached is read by agentReadPump on every frame. While it is set the
 	// pump records to the session recording and does not enqueue: with no
@@ -215,7 +219,7 @@ func (pr *PairedRelay) detachAttachment(owner chan struct{}, reason string) {
 		}
 		break
 	}
-	pr.agQueueBytes.Store(0)
+	pr.agQueue.reset()
 
 	now := time.Now().UTC()
 	pr.sess.mu.Lock()
@@ -255,9 +259,18 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 		return errors.New("terminal session not found")
 	}
 
-	if !sess.ValidateOperatorToken(rawToken) {
+	sess.mu.Lock()
+	// Check and consume in one step: the token opens exactly one attachment,
+	// so a copy captured anywhere is useless once the real viewer is in.
+	if rawToken == "" || sess.OperatorTokenHash == "" ||
+		subtle.ConstantTimeCompare([]byte(HashToken(rawToken)), []byte(sess.OperatorTokenHash)) != 1 {
+		sess.mu.Unlock()
 		return errors.New("invalid or expired terminal connect token")
 	}
+	sess.OperatorTokenHash = ""
+	sess.OperatorToken = ""
+	sess.mu.Unlock()
+	_ = m.updateDurableOperatorToken(sess.SessionID, "")
 
 	sess.mu.Lock()
 	// StateDetached is attachable - that is the whole point of it. The
@@ -423,7 +436,10 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 	// not undo them.
 	defer pr.detachAttachment(stop, "operator_disconnected")
 
-	conn.SetReadLimit(MaxMessageSize)
+	// The console sends stdin in 4 KiB frames; 256 KiB leaves room for any
+	// other client's paste without letting one operator frame take the
+	// whole queue.
+	conn.SetReadLimit(MaxOperatorMessageSize)
 	_ = conn.SetReadDeadline(time.Now().Add(PongWait))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(PongWait))
@@ -466,12 +482,17 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 
 		// A full queue blocks this read (TCP backpressure to the browser)
 		// rather than ending the session: a big paste is not an attack.
-		pr.opQueueBytes.Add(int64(len(frame.Data) + 64))
+		n := frameCost(frame)
+		if !pr.opQueue.acquire(n, pr.done, stop, nil) {
+			return
+		}
 		select {
 		case pr.opToAgent <- frame:
 		case <-pr.done:
+			pr.opQueue.release(n)
 			return
 		case <-stop:
+			pr.opQueue.release(n)
 			return
 		}
 	}
@@ -564,7 +585,7 @@ func (pr *PairedRelay) operatorWritePump(conn *websocket.Conn, stop chan struct{
 				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			pr.agQueueBytes.Add(-int64(len(frame.Data) + 64))
+			pr.agQueue.release(frameCost(frame))
 
 			data, err := json.Marshal(frame)
 			if err != nil {
@@ -603,7 +624,7 @@ func (pr *PairedRelay) agentWritePump(conn *websocket.Conn) {
 				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			pr.opQueueBytes.Add(-int64(len(frame.Data) + 64))
+			pr.opQueue.release(frameCost(frame))
 
 			data, err := json.Marshal(frame)
 			if err != nil {
@@ -632,18 +653,15 @@ func (s *TerminalSession) ValidateToken(raw string) bool {
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(s.TokenHash)) == 1
 }
 
-// ValidateOperatorToken checks the operator's half of the connect credential.
-// Until the first rotation there is no operator-specific hash and the session's
-// original token answers for both sides, which is what keeps a session created
-// by an older hub attachable across the upgrade.
+// ValidateOperatorToken checks the operator's one-use connect token. The
+// agent's token never answers here; a session with no operator token
+// outstanding (consumed, or created by an older hub) is reattached through
+// /sessions/attach, which mints a new one.
 func (s *TerminalSession) ValidateOperatorToken(raw string) bool {
 	s.mu.RLock()
 	opHash := s.OperatorTokenHash
 	s.mu.RUnlock()
-	if opHash == "" {
-		return s.ValidateToken(raw)
-	}
-	if raw == "" {
+	if opHash == "" || raw == "" {
 		return false
 	}
 	h := sha256.Sum256([]byte(raw))
@@ -660,11 +678,17 @@ func HashToken(raw string) string {
 // enqueueForOperator hands one agent frame to the operator writer, waiting
 // while the queue is full. It returns false when the relay is closing.
 func (pr *PairedRelay) enqueueForOperator(frame TerminalFrame) bool {
+	n := frameCost(frame)
+	// Waiting for room gives up when the operator detaches: detached output
+	// is already in the recording.
+	if !pr.agQueue.acquire(n, pr.done, nil, pr.detached.Load) {
+		return !pr.isDone()
+	}
 	select {
 	case pr.agentToOp <- frame:
-		pr.agQueueBytes.Add(int64(len(frame.Data) + 64))
 		return true
 	case <-pr.done:
+		pr.agQueue.release(n)
 		return false
 	default:
 	}
@@ -673,14 +697,103 @@ func (pr *PairedRelay) enqueueForOperator(frame TerminalFrame) bool {
 	for {
 		select {
 		case pr.agentToOp <- frame:
-			pr.agQueueBytes.Add(int64(len(frame.Data) + 64))
 			return true
 		case <-pr.done:
+			pr.agQueue.release(n)
 			return false
 		case <-t.C:
 			if pr.detached.Load() {
+				pr.agQueue.release(n)
 				return true
 			}
 		}
 	}
+}
+
+func (pr *PairedRelay) isDone() bool {
+	select {
+	case <-pr.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// frameCost is what one queued frame counts against MaxQueueBytes.
+func frameCost(f TerminalFrame) int64 { return int64(len(f.Data) + 64) }
+
+// byteGate bounds the bytes queued in one relay direction to MaxQueueBytes.
+// A sender waits for room instead of failing: the wait is backpressure to the
+// peer's TCP stream. One frame bigger than the bound still passes when the
+// queue is empty, so a frame up to MaxMessageSize can never wedge the relay.
+type byteGate struct {
+	mu   sync.Mutex
+	used int64
+	room chan struct{}
+}
+
+// acquire reserves n bytes, waiting while the queue is full. It returns false
+// when done or stop closes, or when giveUp (checked every 100 ms) says so.
+func (g *byteGate) acquire(n int64, done, stop <-chan struct{}, giveUp func() bool) bool {
+	var tick <-chan time.Time
+	if giveUp != nil {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		tick = t.C
+	}
+	for {
+		g.mu.Lock()
+		if g.used == 0 || g.used+n <= MaxQueueBytes {
+			g.used += n
+			g.mu.Unlock()
+			return true
+		}
+		if g.room == nil {
+			g.room = make(chan struct{})
+		}
+		room := g.room
+		g.mu.Unlock()
+		select {
+		case <-room:
+		case <-done:
+			return false
+		case <-stop:
+			return false
+		case <-tick:
+			if giveUp() {
+				return false
+			}
+		}
+	}
+}
+
+func (g *byteGate) release(n int64) {
+	g.mu.Lock()
+	g.used -= n
+	if g.used < 0 {
+		g.used = 0
+	}
+	g.signalLocked()
+	g.mu.Unlock()
+}
+
+func (g *byteGate) reset() {
+	g.mu.Lock()
+	g.used = 0
+	g.signalLocked()
+	g.mu.Unlock()
+}
+
+func (g *byteGate) signalLocked() {
+	if g.room != nil {
+		close(g.room)
+		g.room = nil
+	}
+}
+
+// queued reports the bytes currently reserved (tests).
+func (g *byteGate) queued() int64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.used
 }

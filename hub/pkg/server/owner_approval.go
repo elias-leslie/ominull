@@ -46,6 +46,22 @@ func approvalGrants(r *http.Request) []*response.EndpointGrant {
 	return g
 }
 
+// grantedTargets is the endpoint set the owner approved for this request, or
+// nil when the request carried no grants (the in-hub automatic paths). A
+// handler that resolves its targets from a scope uses this instead, so a
+// fleet that changed between approval and use cannot widen the action.
+func grantedTargets(r *http.Request) []string {
+	g := approvalGrants(r)
+	if len(g) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(g))
+	for _, x := range g {
+		out = append(out, x.EndpointID)
+	}
+	return out
+}
+
 // approvalPlan is what one gated request would do, worked out before any
 // approval is asked for, and again when it is used.
 type approvalPlan struct {
@@ -54,6 +70,7 @@ type approvalPlan struct {
 	Summary string
 	Targets []string
 	Payload []byte // the digested action; nil means route + canonical body + targets
+	Body    []byte // replaces the request body (digested and handed on) when set
 }
 
 // approvalResolver validates a request and describes it. It writes its own
@@ -135,6 +152,13 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		if !ok {
 			return
 		}
+		if plan.Body != nil {
+			body = plan.Body
+			if canon, err = canonicalJSON(body); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "resolved body: "+err.Error())
+				return
+			}
+		}
 		plan.Targets = sortedTargets(plan.Targets)
 		if len(plan.Targets) == 0 {
 			writeJSONError(w, http.StatusBadRequest, "this request names no endpoint to act on")
@@ -183,7 +207,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		}
 		sum := sha256.Sum256(payload)
 		grants, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{
-			ID: id, TenantID: tenantID, Kind: plan.Kind, Digest: hex.EncodeToString(sum[:]), Targets: plan.Targets,
+			ID: id, TenantID: tenantID, Requester: requester, Kind: plan.Kind, Digest: hex.EncodeToString(sum[:]), Targets: plan.Targets,
 		})
 		if err != nil {
 			s.audit(r, "OWNER_APPROVAL_REFUSED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s with approval %s: %v", plan.Action, id, err))
@@ -354,8 +378,18 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		return nil, false
 	}
 	version := strings.TrimSpace(req.Version)
+	var newBody []byte
 	if version == "" {
+		// The version the owner approves is the one installed: resolve it
+		// now and carry it in the digested body, so a desired-version change
+		// between approval and use refuses the approval instead.
 		version = s.desiredAgentVersion()
+		var m map[string]interface{}
+		if err := json.Unmarshal(body, &m); err != nil || m == nil {
+			m = map[string]interface{}{}
+		}
+		m["version"] = version
+		newBody, _ = json.Marshal(m)
 	}
 	targets := req.EndpointIDs
 	if req.All {
@@ -376,7 +410,7 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		scope = "the whole fleet (" + scope + ")"
 	}
 	return &approvalPlan{Kind: responseauth.ActionKindAgentUpdate, Action: "Update agents",
-		Summary: "Install agent " + version + " on " + scope, Targets: targets}, true
+		Summary: "Install agent " + version + " on " + scope, Targets: targets, Body: newBody}, true
 }
 
 func (s *Server) resolveMesh(quarantine bool) approvalResolver {

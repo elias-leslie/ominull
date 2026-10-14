@@ -253,7 +253,17 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	defer opWS.Close()
 
 	// 4. Connect Agent using token and endpoint_id
+	// The operator's token is not the agent's: it was consumed by the
+	// operator attach and never opens the agent side.
 	agQuery := url.Values{"session_id": []string{sessionID}, "endpoint_id": []string{endpointID}, "token": []string{token}}
+	if _, _, err := websocket.DefaultDialer.Dial(toWS("/api/v1/terminal/ws/agent", agQuery), nil); err == nil {
+		t.Fatalf("expected the operator token to be refused on the agent side")
+	}
+	liveSess, err := srv.terminalMgr.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	agQuery.Set("token", liveSess.ConnectToken)
 	agWS, _, err := websocket.DefaultDialer.Dial(toWS("/api/v1/terminal/ws/agent", agQuery), nil)
 	if err != nil {
 		t.Fatalf("agent dial failed: %v", err)
