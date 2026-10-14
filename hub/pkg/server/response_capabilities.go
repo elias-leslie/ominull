@@ -13,13 +13,15 @@ type responseCapabilities struct {
 	Isolate          bool     `json:"isolate"`
 	Collect          bool     `json:"collect"`
 	TerminalPrograms []string `json:"-"`
+	NoResponseKey    bool     `json:"-"` // the agent pins no tenant response key, so it drops every grant
 	reported         bool
 }
 
 type wireCapabilities struct {
-	Isolate  bool `json:"isolate"`
-	Collect  bool `json:"collect"`
-	Terminal *struct {
+	Isolate     bool  `json:"isolate"`
+	Collect     bool  `json:"collect"`
+	ResponseKey *bool `json:"response_key,omitempty"`
+	Terminal    *struct {
 		Programs []string `json:"programs"`
 	} `json:"terminal,omitempty"`
 }
@@ -29,7 +31,8 @@ func parseResponseCapabilities(raw string) responseCapabilities {
 	if strings.TrimSpace(raw) == "" || json.Unmarshal([]byte(raw), &w) != nil {
 		return responseCapabilities{}
 	}
-	out := responseCapabilities{Isolate: w.Isolate, Collect: w.Collect, reported: true}
+	out := responseCapabilities{Isolate: w.Isolate, Collect: w.Collect, reported: true,
+		NoResponseKey: w.ResponseKey != nil && !*w.ResponseKey}
 	if w.Terminal != nil {
 		for _, p := range w.Terminal.Programs {
 			p = strings.TrimSpace(p)
@@ -52,6 +55,10 @@ func normalizeResponseCapabilities(raw json.RawMessage) string {
 		return ""
 	}
 	w := wireCapabilities{Isolate: c.Isolate, Collect: c.Collect}
+	if c.NoResponseKey {
+		f := false
+		w.ResponseKey = &f
+	}
 	if c.TerminalPrograms != nil {
 		w.Terminal = &struct {
 			Programs []string `json:"programs"`

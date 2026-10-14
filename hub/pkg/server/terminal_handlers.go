@@ -560,6 +560,10 @@ func (s *Server) terminalProgram(w http.ResponseWriter, endpointID, program stri
 	}
 	caps := parseResponseCapabilities(ep.ResponseCapabilities)
 	if caps.reported {
+		if caps.NoResponseKey {
+			writeJSONError(w, http.StatusConflict, "this endpoint has no tenant response key pinned, so it drops every signed grant and a terminal would never open; pin the key on the endpoint first")
+			return "", nil, false
+		}
 		if len(caps.TerminalPrograms) == 0 {
 			writeJSONError(w, http.StatusConflict, "this endpoint reports no terminal capability")
 			return "", nil, false

@@ -2886,9 +2886,10 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                  "\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\","
                  "\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_"
                  "identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\","
-                 "\"evidence_signing_key\":\"%s\",\"response_capabilities\":" OMINULL_CAPS_LINUX ",\"events\":[",
+                 "\"evidence_signing_key\":\"%s\",\"response_capabilities\":%s,\"events\":[",
                  header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
-                 header[8], header[9], header[10], header[11], header[12]);
+                 header[8], header[9], header[10], header[11], header[12],
+                 access(OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH, R_OK) == 0 ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY);
 
     for (size_t i = 0; i < flowCount; i++) {
         const LINUX_FLOW_EVENT* f = &flows[i];
