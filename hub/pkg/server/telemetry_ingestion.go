@@ -69,6 +69,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		MAC:                      batch.MAC,
 		DriverVersion:            batch.DriverVersion,
 		UpdateCapability:         batch.UpdateCapability,
+		ResponseCapabilities:     normalizeResponseCapabilities(batch.ResponseCapabilities),
 		InstallType:              batch.InstallType,
 		PackageIdentifier:        batch.PackageIdentifier,
 		RegisteredPackageVersion: batch.RegisteredPackageVersion,

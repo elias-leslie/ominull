@@ -17,6 +17,7 @@ func main() {
 	socketPath := flag.String("socket", envOr("OMINULL_AUTH_SOCKET", "/run/ominull-response-authority/authority.sock"), "Unix domain socket path")
 	stateDir := flag.String("state-dir", envOr("OMINULL_AUTH_STATE_DIR", "/var/lib/ominull-response-authority"), "Authority state directory")
 	partition := flag.String("partition", envOr("OMINULL_AUTH_PARTITION", "portable-local"), "Signer partition name")
+	approvers := flag.String("approvers", envOr("OMINULL_AUTH_APPROVERS", responseauth.DefaultApproversPath), "Root-pinned owner approver keys (JSON)")
 	flag.Parse()
 
 	if err := os.MkdirAll(filepath.Dir(*socketPath), 0755); err != nil {
@@ -29,6 +30,7 @@ func main() {
 	auth, err := responseauth.NewAuthority(responseauth.Config{
 		StateDir:        *stateDir,
 		SignerPartition: *partition,
+		ApproversPath:   *approvers,
 	})
 	if err != nil {
 		log.Fatalf("failed to initialize response authority: %v", err)

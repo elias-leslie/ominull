@@ -33,61 +33,44 @@ func TestStore_CapsEnforcement(t *testing.T) {
 	tenantID := "tenant-caps-test"
 	opID := "admin-caps"
 	program := "/bin/bash"
-
-	// 1. Endpoint cap: max 1 per endpoint
-	ep1 := "ep-1"
-	s1, err := mgr.CreateSession(tenantID, ep1, opID, program, newTestGrant(tenantID, ep1, opID))
-	if err != nil {
-		t.Fatalf("CreateSession s1 failed: %v", err)
-	}
-	if s1 == nil {
-		t.Fatalf("expected non-nil session s1")
+	create := func(ep string) (*TerminalSession, error) {
+		return mgr.CreateSession(tenantID, ep, opID, program, newTestGrant(tenantID, ep, opID))
 	}
 
-	_, err = mgr.CreateSession(tenantID, ep1, opID, program, newTestGrant(tenantID, ep1, opID))
-	if err == nil || !strings.Contains(err.Error(), "max 1 active terminal session allowed per endpoint") {
+	// 1. Endpoint cap: several shells on one endpoint, up to MaxSessionsPerEndpoint.
+	var first *TerminalSession
+	for i := 0; i < MaxSessionsPerEndpoint; i++ {
+		s, err := create("ep-1")
+		if err != nil {
+			t.Fatalf("session %d on ep-1: %v", i+1, err)
+		}
+		if first == nil {
+			first = s
+		}
+	}
+	if _, err := create("ep-1"); err == nil || !strings.Contains(err.Error(), "per endpoint") {
 		t.Fatalf("expected endpoint cap rejection, got: %v", err)
 	}
 
-	// 2. Tenant cap: max 4 per tenant
-	ep2 := "ep-2"
-	s2, err := mgr.CreateSession(tenantID, ep2, opID, program, newTestGrant(tenantID, ep2, opID))
-	if err != nil {
-		t.Fatalf("CreateSession s2 failed: %v", err)
+	// 2. Tenant cap across endpoints.
+	n := MaxSessionsPerEndpoint
+	for i := 2; n < MaxSessionsPerTenant; i++ {
+		if _, err := create(fmt.Sprintf("ep-%d", i)); err != nil {
+			t.Fatalf("session %d: %v", n+1, err)
+		}
+		n++
 	}
-
-	ep3 := "ep-3"
-	s3, err := mgr.CreateSession(tenantID, ep3, opID, program, newTestGrant(tenantID, ep3, opID))
-	if err != nil {
-		t.Fatalf("CreateSession s3 failed: %v", err)
-	}
-
-	ep4 := "ep-4"
-	s4, err := mgr.CreateSession(tenantID, ep4, opID, program, newTestGrant(tenantID, ep4, opID))
-	if err != nil {
-		t.Fatalf("CreateSession s4 failed: %v", err)
-	}
-
-	// 5th session in same tenant across distinct endpoint should be rejected
-	ep5 := "ep-5"
-	_, err = mgr.CreateSession(tenantID, ep5, opID, program, newTestGrant(tenantID, ep5, opID))
-	if err == nil || !strings.Contains(err.Error(), "max 4 active terminal sessions allowed per tenant") {
+	if _, err := create("ep-extra"); err == nil || !strings.Contains(err.Error(), "per tenant") {
 		t.Fatalf("expected tenant cap rejection, got: %v", err)
 	}
 
-	// Close s1 -> now tenant count is 3 -> creating session on ep5 should succeed
-	if err := mgr.CloseSession(s1.SessionID, "test_close"); err != nil {
-		t.Fatalf("CloseSession s1 failed: %v", err)
+	// Closing one frees a slot.
+	if err := mgr.CloseSession(first.SessionID, "test_close"); err != nil {
+		t.Fatalf("CloseSession: %v", err)
 	}
-
-	s5, err := mgr.CreateSession(tenantID, ep5, opID, program, newTestGrant(tenantID, ep5, opID))
-	if err != nil {
-		t.Fatalf("expected ep5 session creation to succeed after s1 closed, got: %v", err)
+	if _, err := create("ep-extra"); err != nil {
+		t.Fatalf("expected a session after one closed, got: %v", err)
 	}
-	_ = s2
-	_ = s3
-	_ = s4
-	_ = s5
 }
 
 func TestStore_DurablePersistenceAndTokenPrivacy(t *testing.T) {

@@ -43,10 +43,16 @@ func TestTerminalManager_SessionLifecycle(t *testing.T) {
 		t.Fatalf("unexpected initial session state: %+v", sess)
 	}
 
-	// 2. Reject duplicate concurrent session on same endpoint
-	_, err = mgr.CreateSession(tenantID, endpointID, opID, program, grant)
-	if err == nil {
-		t.Fatalf("expected duplicate session creation to fail")
+	// 2. Concurrent sessions on one endpoint stop at the cap
+	for i := 1; i < MaxSessionsPerEndpoint; i++ {
+		extra, err := mgr.CreateSession(tenantID, endpointID, opID, program, grant)
+		if err != nil {
+			t.Fatalf("concurrent session %d: %v", i+1, err)
+		}
+		defer func(id string) { _ = mgr.CloseSession(id, "test") }(extra.SessionID)
+	}
+	if _, err = mgr.CreateSession(tenantID, endpointID, opID, program, grant); err == nil {
+		t.Fatalf("expected session creation past the per-endpoint cap to fail")
 	}
 
 	// 3. Record Stdin/Stdout frames

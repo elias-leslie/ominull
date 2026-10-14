@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	// MaxMessageSize is the maximum frame size in bytes (64 KiB).
-	MaxMessageSize = 64 * 1024
+	// MaxMessageSize is the maximum WebSocket message in bytes (1 MiB, the
+	// agents' own limit): a pasted script arrives as one stdin frame.
+	MaxMessageSize = 1024 * 1024
 
 	// MaxQueueBytes is the maximum buffered queue per direction (1 MiB).
 	MaxQueueBytes = 1024 * 1024
@@ -36,6 +37,10 @@ const (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
+	// permessage-deflate when the client offers it (browsers do; the agents
+	// do not). Terminal output is text and JSON+base64 framed, so it shrinks
+	// several-fold, which matters on a phone over the tunnel.
+	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Origin enforcement is handled at the HTTP layer
 	},
@@ -80,7 +85,10 @@ func newPairedRelay(sess *TerminalSession, mgr *Manager) *PairedRelay {
 		sess:      sess,
 		mgr:       mgr,
 		opToAgent: make(chan TerminalFrame, 64),
-		agentToOp: make(chan TerminalFrame, 64),
+		// Small on purpose: this is what stands between a flood and the
+		// operator's Ctrl-C. A full queue now pauses the agent read (TCP
+		// backpressure to the pty) instead of ending the session.
+		agentToOp: make(chan TerminalFrame, 16),
 		done:      make(chan struct{}),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -160,11 +168,22 @@ func (pr *PairedRelay) isClosed() bool {
 // call it from a defer that also runs after a protocol violation has called
 // Close.
 func (pr *PairedRelay) DetachOperator(reason string) {
+	pr.detachAttachment(nil, reason)
+}
+
+// detachAttachment detaches only if `owner` is still the current attachment
+// (nil = whichever is current). A pump of an attachment that was already
+// superseded must not detach the operator who replaced it.
+func (pr *PairedRelay) detachAttachment(owner chan struct{}, reason string) {
 	if pr.isClosed() {
 		return
 	}
 
 	pr.mu.Lock()
+	if owner != nil && pr.opStop != owner {
+		pr.mu.Unlock()
+		return
+	}
 	opWS := pr.opConn
 	stop := pr.opStop
 	pr.opConn = nil
@@ -242,12 +261,24 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 
 	sess.mu.Lock()
 	// StateDetached is attachable - that is the whole point of it. The
-	// terminal states stay refused, and so does a second concurrent operator:
-	// two browsers writing into one pty interleave keystrokes and the
-	// recording stops being a record of what one person did.
+	// terminal states stay refused. Two browsers never write into one pty at
+	// once (interleaved keystrokes would stop the recording being a record of
+	// what one person did), but a fresh attach with a freshly rotated token
+	// takes over from the old socket: a phone that slept or changed networks
+	// leaves a half-open socket the hub would otherwise hold for a minute.
 	if sess.State == StateClosed || sess.State == StateFailed || sess.State == StateExpired {
 		sess.mu.Unlock()
 		return fmt.Errorf("session is in terminal state: %s", sess.State)
+	}
+	if sess.OperatorConnected && sess.relay != nil {
+		old := sess.relay
+		sess.mu.Unlock()
+		old.DetachOperator("superseded_by_reattach")
+		sess.mu.Lock()
+		if sess.State == StateClosed || sess.State == StateFailed || sess.State == StateExpired {
+			sess.mu.Unlock()
+			return fmt.Errorf("session is in terminal state: %s", sess.State)
+		}
 	}
 	if sess.OperatorConnected {
 		sess.mu.Unlock()
@@ -287,6 +318,9 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 	_ = m.updateDurableIdle(sess.SessionID, idleAt)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
+	if err == nil {
+		_ = conn.SetCompressionLevel(1) // fastest: latency over ratio
+	}
 	if err != nil {
 		sess.mu.Lock()
 		sess.OperatorConnected = false
@@ -387,7 +421,7 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 	// Protocol violations below still call Close before returning, and
 	// DetachOperator is a no-op once the relay is closed, so this defer does
 	// not undo them.
-	defer pr.DetachOperator("operator_disconnected")
+	defer pr.detachAttachment(stop, "operator_disconnected")
 
 	conn.SetReadLimit(MaxMessageSize)
 	_ = conn.SetReadDeadline(time.Now().Add(PongWait))
@@ -430,16 +464,14 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 		// Audit record operator frame (stdin, resize)
 		_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 
-		// Enforce bounded queue (1 MiB cap)
-		frameSize := int64(len(frame.Data) + 64)
-		if pr.opQueueBytes.Add(frameSize) > MaxQueueBytes {
-			pr.Close("operator_queue_overflow")
-			return
-		}
-
+		// A full queue blocks this read (TCP backpressure to the browser)
+		// rather than ending the session: a big paste is not an attack.
+		pr.opQueueBytes.Add(int64(len(frame.Data) + 64))
 		select {
 		case pr.opToAgent <- frame:
 		case <-pr.done:
+			return
+		case <-stop:
 			return
 		}
 	}
@@ -499,16 +531,10 @@ func (pr *PairedRelay) agentReadPump(conn *websocket.Conn) {
 			continue
 		}
 
-		// Enforce bounded queue (1 MiB cap)
-		frameSize := int64(len(frame.Data) + 64)
-		if pr.agQueueBytes.Add(frameSize) > MaxQueueBytes {
-			pr.Close("agent_queue_overflow")
-			return
-		}
-
-		select {
-		case pr.agentToOp <- frame:
-		case <-pr.done:
+		// A slow viewer (a phone over the tunnel) pauses the agent read
+		// instead of losing the session. The wait gives up as soon as the
+		// operator detaches: detached output is already in the recording.
+		if !pr.enqueueForOperator(frame) {
 			return
 		}
 	}
@@ -521,7 +547,7 @@ func (pr *PairedRelay) operatorWritePump(conn *websocket.Conn, stop chan struct{
 		ticker.Stop()
 		// Same hazard as the read pump: this write pump failing is one
 		// operator's socket failing, not a reason to kill their shell.
-		pr.DetachOperator("operator_write_pump_exit")
+		pr.detachAttachment(stop, "operator_write_pump_exit")
 	}()
 
 	for {
@@ -544,6 +570,8 @@ func (pr *PairedRelay) operatorWritePump(conn *websocket.Conn, stop chan struct{
 			if err != nil {
 				return
 			}
+			// Deflating a one-keystroke echo costs more than it saves.
+			conn.EnableWriteCompression(len(data) > 512)
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				return
 			}
@@ -627,4 +655,32 @@ func (s *TerminalSession) ValidateOperatorToken(raw string) bool {
 func HashToken(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
+}
+
+// enqueueForOperator hands one agent frame to the operator writer, waiting
+// while the queue is full. It returns false when the relay is closing.
+func (pr *PairedRelay) enqueueForOperator(frame TerminalFrame) bool {
+	select {
+	case pr.agentToOp <- frame:
+		pr.agQueueBytes.Add(int64(len(frame.Data) + 64))
+		return true
+	case <-pr.done:
+		return false
+	default:
+	}
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case pr.agentToOp <- frame:
+			pr.agQueueBytes.Add(int64(len(frame.Data) + 64))
+			return true
+		case <-pr.done:
+			return false
+		case <-t.C:
+			if pr.detached.Load() {
+				return true
+			}
+		}
+	}
 }

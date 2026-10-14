@@ -2,9 +2,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	hubauth "ominull/hub/pkg/auth"
-	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -30,41 +25,9 @@ func TestServer_TerminalAPI(t *testing.T) {
 	endpointID := "ep-shell-node-1"
 	opID := "admin"
 
-	// 1. Setup tenant key and response session
-	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-shell-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
-
-	// 2. Operator requests terminal session with signed browser proof
-	payload := response.TerminalSessionPayload{
-		Program: "/bin/bash",
-	}
-	actionDigest, _ := response.ComputeActionDigest(payload)
-
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindTerminalSession,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "554433221100",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
-	createBody, _ := json.Marshal(map[string]interface{}{
-		"endpoint_id":   endpointID,
-		"program":       "/bin/bash",
-		"session_id":    session.SessionID,
-		"action_digest": actionDigest,
-		"proof":         proof,
-	})
+	_ = auth
+	seedTerminalEndpoint(t, srv, tenantID, endpointID)
+	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/bash"})
 
 	jwtToken, err := hubauth.GenerateJWT(hubauth.Claims{
 		Username: opID,
@@ -75,22 +38,33 @@ func TestServer_TerminalAPI(t *testing.T) {
 		t.Fatalf("GenerateJWT failed: %v", err)
 	}
 
-	// Verify static API key is rejected
+	// The static API key alone only asks: it gets an approval, not a shell.
 	reqAPIKey := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
 	reqAPIKey.Header.Set("X-API-Key", "test-admin-key-12345")
 	reqAPIKey.Header.Set("Content-Type", "application/json")
 	wAPIKey := httptest.NewRecorder()
 	handler.ServeHTTP(wAPIKey, reqAPIKey)
-	if wAPIKey.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden for static API key on create terminal session, got %d", wAPIKey.Code)
+	if wAPIKey.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (owner approval requested) for static API key, got %d: %s", wAPIKey.Code, wAPIKey.Body.String())
+	}
+	if srv.terminalMgr.ListSessions(tenantID) != nil && len(srv.terminalMgr.ListSessions(tenantID)) != 0 {
+		t.Fatal("a session exists before the owner approved")
+	}
+	// A made-up approval id is refused.
+	reqForged := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
+	reqForged.Header.Set("Authorization", "Bearer "+jwtToken)
+	reqForged.Header.Set(approvalHeader, "00000000000000000000000000000000")
+	wForged := httptest.NewRecorder()
+	handler.ServeHTTP(wForged, reqForged)
+	if wForged.Code != http.StatusForbidden {
+		t.Fatalf("forged approval id answered %d, want 403", wForged.Code)
 	}
 
-	// Authorized operator create request
+	// Authorized operator create request, approved by the owner
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	w := serveApproved(t, srv, handler, req, string(createBody))
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create terminal session returned %d: %s", w.Code, w.Body.String())
@@ -219,38 +193,9 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	endpointID := "ep-shell-relay-test"
 	opID := "admin"
 
-	// 1. Setup tenant key and response session
-	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-relay-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
-
-	// 2. Operator requests terminal session with signed browser proof
-	payload := response.TerminalSessionPayload{Program: "/bin/bash"}
-	actionDigest, _ := response.ComputeActionDigest(payload)
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindTerminalSession,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "998877665544",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
-	createBody, _ := json.Marshal(map[string]interface{}{
-		"endpoint_id":   endpointID,
-		"program":       "/bin/bash",
-		"session_id":    session.SessionID,
-		"action_digest": actionDigest,
-		"proof":         proof,
-	})
+	_ = auth
+	seedTerminalEndpoint(t, srv, tenantID, endpointID)
+	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/bash"})
 
 	jwtToken, _ := hubauth.GenerateJWT(hubauth.Claims{
 		Username: opID,
@@ -258,15 +203,8 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 		TenantID: tenantID,
 	}, "test-admin-key-12345", time.Hour)
 
-	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/terminal/sessions", bytes.NewReader(createBody))
-	postReq.Header.Set("Authorization", "Bearer "+jwtToken)
-	postReq.Header.Set("Content-Type", "application/json")
-
 	client := &http.Client{}
-	resp, err := client.Do(postReq)
-	if err != nil {
-		t.Fatalf("POST /api/v1/terminal/sessions failed: %v", err)
-	}
+	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -284,13 +222,13 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	// Verify HttpOnly attach cookie was delivered
 	var attachCookie *http.Cookie
 	for _, c := range resp.Cookies() {
-		if c.Name == "ominull_terminal_token" {
+		if c.Name == terminalCookieName(sessionID) {
 			attachCookie = c
 			break
 		}
 	}
 	if attachCookie == nil || attachCookie.Value == "" {
-		t.Fatalf("expected ominull_terminal_token cookie to be set on response")
+		t.Fatalf("expected the per-session attach cookie to be set on response")
 	}
 	if !attachCookie.HttpOnly {
 		t.Fatalf("expected attach cookie to have HttpOnly=true")
@@ -416,39 +354,9 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 	tenantID := "default"
 	operatorID := "admin"
 
-	// 1. Setup response authority session
-	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, operatorID)
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, operatorID, "browser-del", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
-
-	payload := response.TerminalSessionPayload{Program: "/bin/sh"}
-	actionDigest, _ := response.ComputeActionDigest(payload)
-
-	proof := &responseauth.ActionProof{
-		Version:         2,
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindTerminalSession,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "12345678123456781234567812345678",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
-	createBody, _ := json.Marshal(map[string]interface{}{
-		"endpoint_id":   endpointID,
-		"program":       "/bin/sh",
-		"session_id":    session.SessionID,
-		"action_digest": actionDigest,
-		"proof":         proof,
-	})
+	_ = auth
+	seedTerminalEndpoint(t, srv, tenantID, endpointID)
+	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/sh"})
 
 	jwtToken, _ := hubauth.GenerateJWT(hubauth.Claims{
 		Username: operatorID,
@@ -456,15 +364,8 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 		TenantID: tenantID,
 	}, "test-admin-key-12345", time.Hour)
 
-	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/terminal/sessions", bytes.NewReader(createBody))
-	postReq.Header.Set("Authorization", "Bearer "+jwtToken)
-	postReq.Header.Set("Content-Type", "application/json")
-
 	client := &http.Client{}
-	resp, err := client.Do(postReq)
-	if err != nil {
-		t.Fatalf("create failed: %v", err)
-	}
+	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
 	defer resp.Body.Close()
 
 	var bodyMap map[string]interface{}
@@ -519,29 +420,8 @@ func TestServer_TerminalSecurityGates(t *testing.T) {
 	tenantB := "tenant-beta"
 	endpointID := "ep-sec-node-1"
 
-	_, _, _ = auth.GetOrCreateTenantKey(tenantA)
-	_, _, _ = auth.GetOrCreateTenantKey(tenantB)
-	secretA, _ := auth.EnrollTOTP(tenantA, "adminA")
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	codeA, _ := responseauth.GenerateTOTPCode(secretA, time.Now())
-	sessA, err := auth.UnlockSessionWithTOTP(tenantA, "adminA", "b-sess-a", hex.EncodeToString(pubA), codeA)
-	if err != nil {
-		t.Fatalf("unlock session A failed: %v", err)
-	}
-
-	payload := response.TerminalSessionPayload{Program: "/bin/sh"}
-	digestA, _ := response.ComputeActionDigest(payload)
-	proofA := &responseauth.ActionProof{
-		Version:         2,
-		SessionID:       sessA.SessionID,
-		TenantID:        tenantA,
-		ActionKind:      response.ActionKindTerminalSession,
-		ActionDigest:    digestA,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "secgateproofnonce12345678901234",
-	}
-	proofA.Signature = hex.EncodeToString(ed25519.Sign(privA, proofA.CanonicalBytes()))
+	_ = auth
+	seedTerminalEndpoint(t, srv, tenantA, endpointID)
 
 	jwtAdminA, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "adminA", Role: hubauth.RoleAdmin, TenantID: tenantA}, "test-admin-key-12345", time.Hour)
 	jwtAdminB, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "adminB", Role: hubauth.RoleAdmin, TenantID: tenantB}, "test-admin-key-12345", time.Hour)
@@ -559,19 +439,10 @@ func TestServer_TerminalSecurityGates(t *testing.T) {
 	resp.Body.Close()
 
 	// 2. Create Session under Tenant A
-	createBody, _ := json.Marshal(map[string]interface{}{
-		"endpoint_id":   endpointID,
-		"program":       "/bin/sh",
-		"session_id":    sessA.SessionID,
-		"action_digest": digestA,
-		"proof":         proofA,
-	})
-	reqCreate, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/terminal/sessions", bytes.NewReader(createBody))
-	reqCreate.Header.Set("Authorization", "Bearer "+jwtAdminA)
-	reqCreate.Header.Set("Content-Type", "application/json")
-	resp, err = client.Do(reqCreate)
-	if err != nil || resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create session A failed: %v (code %d)", err, resp.StatusCode)
+	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/sh"})
+	resp = doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtAdminA) })
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create session A failed: code %d", resp.StatusCode)
 	}
 	var createdMap map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&createdMap)

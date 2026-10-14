@@ -319,3 +319,12 @@ func (m *Manager) updateDurableIdle(sessionID string, idleExpiresAt time.Time) e
 	)
 	return err
 }
+
+// updateRecordingProgress persists the counters RecordFrame keeps in memory.
+func (m *Manager) updateRecordingProgress(sessionID, recordingState string, recordingBytes int64, frameCount int, idleExpiresAt time.Time) error {
+	_, err := m.db.Exec(
+		`UPDATE terminal_sessions SET recording_state = ?, recording_bytes = ?, frame_count = ?, idle_expires_at = ? WHERE session_id = ?;`,
+		recordingState, recordingBytes, frameCount, idleExpiresAt, sessionID,
+	)
+	return err
+}

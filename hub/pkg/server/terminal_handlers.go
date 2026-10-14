@@ -1,15 +1,13 @@
 package server
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -68,73 +66,31 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method == http.MethodPost {
-		if r.Header.Get("X-Auth-Method") == "api-key" {
-			writeJSONError(w, http.StatusForbidden, "static API keys cannot create terminal sessions; response authorization required")
-			return
-		}
-
+		// ownerApproved (resolveTerminal) has already checked the request,
+		// asked the owner and spent the approval; the grant it produced is
+		// the only authority this session runs under.
 		var req struct {
-			EndpointID   string                    `json:"endpoint_id"`
-			Program      string                    `json:"program"` // /bin/sh, /bin/bash, powershell.exe, cmd.exe
-			SessionID    string                    `json:"session_id"`
-			ActionDigest string                    `json:"action_digest"`
-			Proof        *responseauth.ActionProof `json:"proof"`
+			EndpointID string `json:"endpoint_id"`
+			Program    string `json:"program"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
-
-		if req.EndpointID == "" {
-			writeJSONError(w, http.StatusBadRequest, "missing endpoint_id")
+		program, _, ok := s.terminalProgram(w, req.EndpointID, req.Program)
+		if !ok {
 			return
 		}
-		if req.Program == "" {
-			req.Program = "/bin/bash"
-		}
-
+		req.Program = program
 		operatorID := s.operatorFromRequest(r)
-
-		payload := response.TerminalSessionPayload{
-			Program: req.Program,
+		var grant *response.EndpointGrant
+		for _, g := range approvalGrants(r) {
+			if g.EndpointID == req.EndpointID && g.ActionKind == response.ActionKindTerminalSession {
+				grant = g
+			}
 		}
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to marshal terminal payload: "+err.Error())
-			return
-		}
-		computedDigest := sha256.Sum256(payloadBytes)
-		computedDigestHex := hex.EncodeToString(computedDigest[:])
-
-		if req.ActionDigest != "" && !strings.EqualFold(req.ActionDigest, computedDigestHex) {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("action digest mismatch: client supplied %s but recomputed payload digest is %s", req.ActionDigest, computedDigestHex))
-			return
-		}
-		if req.Proof != nil && req.Proof.ActionDigest != "" && !strings.EqualFold(req.Proof.ActionDigest, computedDigestHex) {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("proof action digest mismatch: proof binds to %s but recomputed payload digest is %s", req.Proof.ActionDigest, computedDigestHex))
-			return
-		}
-
-		if s.responseAuth == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
-			return
-		}
-
-		// Validate proof and sign EndpointGrant
-		grant, err := s.responseAuth.SignGrant(r.Context(), &responseauth.SignGrantRequest{
-			TenantID:      tenantID,
-			OperatorID:    operatorID,
-			SessionID:     req.SessionID,
-			EndpointID:    req.EndpointID,
-			ActionKind:    response.ActionKindTerminalSession,
-			ActionDigest:  computedDigestHex,
-			ActionPayload: json.RawMessage(payloadBytes),
-			TTLSeconds:    300,
-			Proof:         req.Proof,
-		})
-		if err != nil {
-			writeJSONError(w, http.StatusForbidden, "response authority denied shell grant: "+err.Error())
+		if grant == nil {
+			writeJSONError(w, http.StatusForbidden, "a terminal session needs an owner approval")
 			return
 		}
 
@@ -152,7 +108,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 
 		// Set one-use HttpOnly attach cookie for the operator browser on this origin
 		http.SetCookie(w, &http.Cookie{
-			Name:     "ominull_terminal_token",
+			Name:     terminalCookieName(session.SessionID),
 			Value:    session.ConnectToken,
 			Path:     "/api/v1/terminal/ws/",
 			HttpOnly: true,
@@ -161,11 +117,19 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 			MaxAge:   300,
 		})
 
-		s.audit(r, "TERMINAL_SESSION_CREATED", session.SessionID, fmt.Sprintf("Created shell session for %s with program %s", req.EndpointID, req.Program))
+		s.audit(r, "TERMINAL_SESSION_CREATED", session.SessionID, fmt.Sprintf("Created shell session for %s with program %s under grant %s", req.EndpointID, req.Program, grant.GrantID))
 
+		out := session.Summary()
+		// A console browser gets the token only as the HttpOnly cookie above.
+		// A non-browser caller (an agent with the admin key, after the owner
+		// approved) has no cookie jar on that path, so it gets the token
+		// once in the body and presents it as X-Terminal-Token.
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			out["connect_token"] = session.ConnectToken
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(session.Summary())
+		_ = json.NewEncoder(w).Encode(out)
 		return
 	}
 
@@ -229,7 +193,9 @@ func (s *Server) handleTerminalWSOperator(w http.ResponseWriter, r *http.Request
 		token = r.Header.Get("X-Terminal-Token")
 	}
 	if token == "" {
-		if cookie, err := r.Cookie("ominull_terminal_token"); err == nil {
+		if cookie, err := r.Cookie(terminalCookieName(sessionID)); err == nil {
+			token = cookie.Value
+		} else if cookie, err := r.Cookie("ominull_terminal_token"); err == nil {
 			token = cookie.Value
 		}
 	}
@@ -398,6 +364,12 @@ func (s *Server) handleTerminalFrames(w http.ResponseWriter, r *http.Request) {
 		if frames == nil {
 			frames = []terminal.TerminalFrame{}
 		}
+		// ?tail_bytes=N: only the newest stdout frames covering the last N
+		// bytes - what a reattaching viewer needs to repaint, instead of the
+		// whole recording on every phone wake-up.
+		if n, err := strconv.Atoi(r.URL.Query().Get("tail_bytes")); err == nil && n > 0 {
+			frames = tailStdout(frames, n)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -468,6 +440,12 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
 		return
 	}
+	// The owner approved a shell for one person. Another operator in the same
+	// tenant does not inherit it by reattaching.
+	if sess.OperatorID != s.operatorFromRequest(r) {
+		writeJSONError(w, http.StatusForbidden, "only the operator who opened this terminal can reattach to it")
+		return
+	}
 	if !sess.IsLive() {
 		writeJSONError(w, http.StatusConflict, "session is no longer live and cannot be attached")
 		return
@@ -485,7 +463,7 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 	// because it is consumed immediately - the previous 300s window was the
 	// only thing making it look like a long-lived credential.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "ominull_terminal_token",
+		Name:     terminalCookieName(req.SessionID),
 		Value:    token,
 		Path:     "/api/v1/terminal/ws/",
 		HttpOnly: true,
@@ -558,4 +536,116 @@ func (s *Server) handleTerminalSessionDetach(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sess.Summary())
+}
+
+// terminalProgram picks and checks the program for a session. The hub goes by
+// what the endpoint reports it can run (response capabilities), never by its
+// OS name: Linux forkpty, Windows ConPTY and a later macOS backend all sit
+// behind the same protocol. An agent that reports nothing (older releases)
+// keeps the old behaviour: the caller's program, /bin/bash by default, and the
+// agent's own allowlist decides.
+func (s *Server) terminalProgram(w http.ResponseWriter, endpointID, program string) (string, []string, bool) {
+	if strings.TrimSpace(endpointID) == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing endpoint_id")
+		return "", nil, false
+	}
+	ep, err := s.store.GetEndpoint(endpointID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return "", nil, false
+	}
+	if ep == nil {
+		writeJSONError(w, http.StatusNotFound, "no such endpoint")
+		return "", nil, false
+	}
+	caps := parseResponseCapabilities(ep.ResponseCapabilities)
+	if caps.reported {
+		if len(caps.TerminalPrograms) == 0 {
+			writeJSONError(w, http.StatusConflict, "this endpoint reports no terminal capability")
+			return "", nil, false
+		}
+		if program == "" {
+			return caps.TerminalPrograms[0], caps.TerminalPrograms, true
+		}
+		for _, p := range caps.TerminalPrograms {
+			if p == program {
+				return program, caps.TerminalPrograms, true
+			}
+		}
+		writeJSONError(w, http.StatusBadRequest, "program not offered by this endpoint; it offers: "+strings.Join(caps.TerminalPrograms, ", "))
+		return "", nil, false
+	}
+	if program == "" {
+		program = "/bin/bash"
+	}
+	return program, nil, true
+}
+
+// resolveTerminal describes a terminal request for the owner's approval. The
+// digested payload is exactly the grant payload the agent verifies.
+func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+	role := r.Header.Get("X-Role")
+	if role != "admin" && role != "operator" {
+		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to open a terminal")
+		return nil, false
+	}
+	var req struct {
+		EndpointID string `json:"endpoint_id"`
+		Program    string `json:"program"`
+	}
+	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
+		return nil, false
+	}
+	program, _, ok := s.terminalProgram(w, req.EndpointID, req.Program)
+	if !ok {
+		return nil, false
+	}
+	payload, err := json.Marshal(response.TerminalSessionPayload{Program: program})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	return &approvalPlan{
+		Kind: response.ActionKindTerminalSession, Action: "Open terminal",
+		Summary: "Interactive " + program + " on " + s.endpointLabels([]string{req.EndpointID}) + ", recorded, for " + s.operatorFromRequest(r),
+		Targets: []string{req.EndpointID}, Payload: payload,
+	}, true
+}
+
+// tailStdout keeps the newest stdout frames whose data adds up to at most n
+// bytes (at least one frame when any exists), oldest first.
+func tailStdout(frames []terminal.TerminalFrame, n int) []terminal.TerminalFrame {
+	total := 0
+	start := len(frames)
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].Type != terminal.FrameStdout {
+			continue
+		}
+		if total+len(frames[i].Data) > n && start < len(frames) {
+			break
+		}
+		total += len(frames[i].Data)
+		start = i
+	}
+	out := make([]terminal.TerminalFrame, 0, len(frames)-start)
+	for _, f := range frames[start:] {
+		if f.Type == terminal.FrameStdout {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// terminalCookieName gives every session its own attach cookie, so a browser
+// can open several terminals at once without one start overwriting the token
+// another tab is about to use.
+func terminalCookieName(sessionID string) string {
+	var b strings.Builder
+	b.WriteString("ominull_terminal_token_")
+	for _, c := range sessionID {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }

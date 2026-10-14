@@ -45,6 +45,7 @@ func NewServer(auth *Authority, socketPath string) (*Server, error) {
 	mux.HandleFunc("/v1/auth/webauthn/login/verify", s.handleWebAuthnLoginVerify)
 	mux.HandleFunc("/v1/auth/status", s.handleStatus)
 	mux.HandleFunc("/v1/auth/audit", s.handleAudit)
+	s.registerApprovalRoutes(mux)
 
 	s.httpServer = &http.Server{
 		Handler:      mux,

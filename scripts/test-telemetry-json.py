@@ -23,6 +23,9 @@ try:
     assert len(bodies) == 1, f'expected one batch, received {len(bodies)}'
     data = json.loads(bodies[0])
     assert len(data['events']) == 64
+    caps = data['response_capabilities']
+    assert caps['isolate'] is True and caps['collect'] is True, caps
+    assert caps['terminal']['programs'][0] == '/bin/bash', caps
     assert data['events'][0]['process_path'][4] == '\n'
     assert data['role'] == 'role\"with\ncontrols'
     assert len(data['events'][0]['process_path']) == 511

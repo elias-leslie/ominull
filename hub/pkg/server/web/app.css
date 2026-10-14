@@ -4890,6 +4890,9 @@ tfoot {
 .approval-label { color: var(--ink); overflow-wrap: anywhere; }
 .approval-time { font-variant-numeric: tabular-nums; }
 .approval-actions { display: flex; justify-content: flex-end; }
+.approval-state { margin: 0; overflow-wrap: anywhere; }
+.term-new { white-space: nowrap; }
+.term-recording, .term-limits { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 @media (max-width: 600px) {
   .approvals { left: 8px; right: 8px; top: 8px; width: auto; }

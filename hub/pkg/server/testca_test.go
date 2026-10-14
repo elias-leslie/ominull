@@ -84,5 +84,6 @@ func newTestServer(t testing.TB, store *storage.Store, adminKey, binaryDir, hubU
 	srv.publicURLOK = false
 	srv.publicURLAt = time.Now()
 	srv.publicURLMu.Unlock()
+	installTestOwner(t, srv, binaryDir)
 	return srv
 }

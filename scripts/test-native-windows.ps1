@@ -10,6 +10,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Windows serializer fixture failed: $LASTEXITCODE"
 }
 $Batch = ($JsonOutput -join "`n") | ConvertFrom-Json
+$Caps = $Batch.response_capabilities
+if (-not $Caps.isolate -or -not $Caps.collect -or $Caps.terminal.programs[0] -ne 'cmd.exe') {
+    throw "Expected response capabilities with cmd.exe first, got $($Caps | ConvertTo-Json -Compress)"
+}
 if ($Batch.events.Count -ne 64) {
     throw "Expected 64 serialized events, got $($Batch.events.Count)"
 }

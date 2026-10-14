@@ -50,9 +50,7 @@ func postJSON(t *testing.T, srv *Server, path, body string) *httptest.ResponseRe
 	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	return w
+	return serveApproved(t, srv, srv.Handler(), req, body)
 }
 
 // TestIsolateIsRefusedWhenTheBaselineDoesNotCoverWhatTheHostUses is the whole

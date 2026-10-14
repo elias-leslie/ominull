@@ -41,8 +41,7 @@ func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
 	}
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(`{"endpoint_ids":["canary"],"version":"1.2.0"}`))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
+	w := serveApproved(t, s, s.Handler(), r, `{"endpoint_ids":["canary"],"version":"1.2.0"}`)
 	if w.Code != 200 {
 		t.Fatalf("queue: %d %s", w.Code, w.Body.String())
 	}

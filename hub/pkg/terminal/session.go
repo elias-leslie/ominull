@@ -105,13 +105,17 @@ type TerminalSession struct {
 	AgentConnected    bool                    `json:"agent_connected"`
 	Grant             *response.EndpointGrant `json:"grant,omitempty"`
 	Frames            []TerminalFrame         `json:"-"`
-	BundleID          string                  `json:"bundle_id,omitempty"`
-	EvidenceItemID    string                  `json:"evidence_item_id,omitempty"`
-	RecordingState    string                  `json:"recording_state,omitempty"` // "recording", "sealed", "bounded"
-	RecordingBytes    int64                   `json:"recording_bytes"`
-	MaxRecordingBytes int64                   `json:"max_recording_bytes,omitempty"`
-	FrameCount        int                     `json:"frame_count"`
-	relay             *PairedRelay            `json:"-"`
+	// dirty marks recording counters and the idle deadline as changed since
+	// they were last written. RecordFrame runs on every keystroke and every
+	// output chunk, so it only marks; the sweeper writes them in one UPDATE.
+	dirty             bool
+	BundleID          string       `json:"bundle_id,omitempty"`
+	EvidenceItemID    string       `json:"evidence_item_id,omitempty"`
+	RecordingState    string       `json:"recording_state,omitempty"` // "recording", "sealed", "bounded"
+	RecordingBytes    int64        `json:"recording_bytes"`
+	MaxRecordingBytes int64        `json:"max_recording_bytes,omitempty"`
+	FrameCount        int          `json:"frame_count"`
+	relay             *PairedRelay `json:"-"`
 }
 
 // Manager manages active terminal sessions, persistence, and pairing.
@@ -128,6 +132,13 @@ type Manager struct {
 	sweeperDone       chan struct{}
 	stopSweeperOnce   sync.Once
 }
+
+// Session caps. Several shells on one endpoint (an editor, a log tail, a
+// build) are normal use; the tenant cap bounds the hub's relay load.
+const (
+	MaxSessionsPerEndpoint = 3
+	MaxSessionsPerTenant   = 8
+)
 
 // NewManager creates a new Terminal Session Manager backed by SQLite.
 func NewManager(db *sql.DB, evidStore *evidence.Store, maxDuration, idleTimeout time.Duration) *Manager {
@@ -188,6 +199,8 @@ func (m *Manager) Close() error {
 	for _, relay := range relaysToClose {
 		relay.Close("manager_closed")
 	}
+	// Persist any progress the sweeper had not written yet.
+	m.flushDirty()
 	return nil
 }
 
@@ -225,6 +238,7 @@ func (m *Manager) startSweeper(interval time.Duration) {
 
 // Sweep checks for and expires sessions exceeding timeouts.
 func (m *Manager) Sweep() {
+	m.flushDirty()
 	now := time.Now().UTC()
 	m.mu.Lock()
 	expired, err := m.sweepExpiredSessions(now, m.connectTimeout)
@@ -272,17 +286,17 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 
 	now := time.Now().UTC()
 
-	// 1. Enforce caps via SQLite store:
-	// - 1 active session per endpoint
-	// - 4 active sessions per tenant
+	// 1. Enforce caps via SQLite store. Detached sessions hold their slot.
+	// A failed count refuses: a cap that cannot be checked is not a cap.
 	activeTenant, activeEndpoint, err := m.countActiveSessions(tenantID, endpointID, now)
-	if err == nil {
-		if activeTenant >= 4 {
-			return nil, fmt.Errorf("active terminal session limit reached: max 4 active terminal sessions allowed per tenant (%s)", tenantID)
-		}
-		if activeEndpoint >= 1 {
-			return nil, fmt.Errorf("active terminal session already exists: max 1 active terminal session allowed per endpoint (%s)", endpointID)
-		}
+	if err != nil {
+		return nil, fmt.Errorf("terminal session caps could not be checked: %w", err)
+	}
+	if activeTenant >= MaxSessionsPerTenant {
+		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per tenant (%s)", MaxSessionsPerTenant, tenantID)
+	}
+	if activeEndpoint >= MaxSessionsPerEndpoint {
+		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per endpoint (%s)", MaxSessionsPerEndpoint, endpointID)
 	}
 
 	if sessionID == "" {
@@ -429,9 +443,9 @@ func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
 		sess.IdleExpiresAt = now.Add(m.idleTimeout)
 	}
 
-	// Update idle expiration and recording metadata in database
-	_ = m.updateDurableState(sessionID, sess.State, sess.StartedAt, sess.ClosedAt, sess.CloseReason, sess.OperatorConnected, sess.AgentConnected)
-	_ = m.updateRecordingMetadata(sessionID, sess.BundleID, sess.EvidenceItemID, sess.RecordingState, sess.RecordingBytes, sess.FrameCount)
+	// Counters and the idle deadline reach SQLite on the next sweep (5 s)
+	// or at close, not here: this is the per-frame hot path.
+	sess.dirty = true
 	return nil
 }
 
@@ -700,10 +714,10 @@ func (m *Manager) RotateOperatorToken(sessionID string) (string, error) {
 		sess.mu.Unlock()
 		return "", fmt.Errorf("session is in terminal state: %s", st)
 	}
-	if sess.OperatorConnected {
-		sess.mu.Unlock()
-		return "", errors.New("operator already connected to session")
-	}
+	// A connected operator does not block rotation: the new token is how a
+	// viewer whose old socket is half-open (phone asleep, network switch)
+	// takes the session back. AttachOperator then supersedes the old socket.
+	// Who may rotate is the caller's check (the session's own operator).
 	sess.OperatorToken = token
 	sess.OperatorTokenHash = hash
 	sess.mu.Unlock()
@@ -744,4 +758,30 @@ func (s *TerminalSession) IsLive() bool {
 		return true
 	}
 	return false
+}
+
+// flushDirty writes the recording counters and idle deadline of every session
+// RecordFrame touched since the last flush. One UPDATE per active session per
+// sweep replaces two per frame.
+func (m *Manager) flushDirty() {
+	type row struct {
+		id, state string
+		bytes     int64
+		frames    int
+		idle      time.Time
+	}
+	var rows []row
+	m.mu.Lock()
+	for id, sess := range m.sessions {
+		sess.mu.Lock()
+		if sess.dirty {
+			sess.dirty = false
+			rows = append(rows, row{id, sess.RecordingState, sess.RecordingBytes, sess.FrameCount, sess.IdleExpiresAt})
+		}
+		sess.mu.Unlock()
+	}
+	m.mu.Unlock()
+	for _, r := range rows {
+		_ = m.updateRecordingProgress(r.id, r.state, r.bytes, r.frames, r.idle)
+	}
 }

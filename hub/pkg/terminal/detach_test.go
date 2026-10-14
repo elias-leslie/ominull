@@ -354,6 +354,11 @@ func TestDetachedSessionHoldsThePerEndpointCap(t *testing.T) {
 	_ = opWS.Close()
 	h.waitState(sess, StateDetached)
 
+	for i := 1; i < MaxSessionsPerEndpoint; i++ {
+		if _, err := h.mgr.CreateSession("tenant-alpha", "linux-agent-cap", "operator-bob", "/bin/bash", nil); err != nil {
+			t.Fatalf("session %d beside a detached one: %v", i+1, err)
+		}
+	}
 	_, err := h.mgr.CreateSession("tenant-alpha", "linux-agent-cap", "operator-bob", "/bin/bash", nil)
 	if err == nil {
 		t.Fatalf("a second session was created while one was detached on the same endpoint")
@@ -480,5 +485,113 @@ func TestExplicitTerminateClosesAndSeals(t *testing.T) {
 	// And it cannot be attached to again.
 	if _, err := h.mgr.RotateOperatorToken(sess.SessionID); err == nil {
 		t.Fatalf("a closed session accepted a token rotation")
+	}
+}
+
+// TestReattachTakesOverAHalfOpenSocket: a phone that slept or changed networks
+// leaves its old socket open as far as the hub knows. A fresh attach with a
+// rotated token takes the session over, the old socket's late exit does not
+// detach the new viewer, and I/O flows to the new one.
+func TestReattachTakesOverAHalfOpenSocket(t *testing.T) {
+	h := newDetachHarness(t, 15*time.Minute)
+	sess := h.createSession("tenant-alpha", "linux-agent-takeover")
+	agentWS := h.dialAgent(sess)
+	defer agentWS.Close()
+	oldWS := h.attachOperator(sess)
+	h.waitState(sess, StateActive)
+
+	newWS := h.attachOperator(sess) // old socket still open
+	defer newWS.Close()
+	h.waitState(sess, StateActive)
+	_ = oldWS.Close() // its pumps exit now, after the takeover
+	time.Sleep(200 * time.Millisecond)
+	h.waitState(sess, StateActive)
+
+	writeFrame(t, agentWS, TerminalFrame{Type: FrameStdout, Data: []byte("to-the-new-viewer")})
+	_ = newWS.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		_, raw, err := newWS.ReadMessage()
+		if err != nil {
+			t.Fatalf("new viewer got nothing: %v", err)
+		}
+		var f TerminalFrame
+		_ = json.Unmarshal(raw, &f)
+		if string(f.Data) == "to-the-new-viewer" {
+			break
+		}
+	}
+}
+
+// TestASlowViewerPausesTheShellInsteadOfEndingIt: output the viewer cannot
+// take yet must not close the session (it used to at 1 MiB queued).
+func TestASlowViewerPausesTheShellInsteadOfEndingIt(t *testing.T) {
+	h := newDetachHarness(t, 15*time.Minute)
+	sess := h.createSession("tenant-alpha", "linux-agent-slow")
+	agentWS := h.dialAgent(sess)
+	defer agentWS.Close()
+	opWS := h.attachOperator(sess)
+	defer opWS.Close()
+	h.waitState(sess, StateActive)
+
+	chunk := make([]byte, 32*1024)
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 96; i++ { // 3 MiB, viewer not reading
+			b, _ := json.Marshal(TerminalFrame{Type: FrameStdout, Data: chunk})
+			_ = agentWS.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := agentWS.WriteMessage(websocket.TextMessage, b); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	time.Sleep(500 * time.Millisecond)
+	sess.mu.RLock()
+	st := sess.State
+	sess.mu.RUnlock()
+	if st != StateActive {
+		t.Fatalf("session state %s while the viewer lagged", st)
+	}
+	// Now drain; every byte arrives and the writer finishes.
+	got := 0
+	_ = opWS.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for got < 96*len(chunk) {
+		_, raw, err := opWS.ReadMessage()
+		if err != nil {
+			t.Fatalf("after %d bytes: %v", got, err)
+		}
+		var f TerminalFrame
+		_ = json.Unmarshal(raw, &f)
+		got += len(f.Data)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("agent writes: %v", err)
+	}
+}
+
+// TestTypingKeepsTheSessionAlive: the idle deadline the sweeper reads from
+// SQLite must follow keystrokes (it is flushed by the sweep, not per frame).
+func TestTypingKeepsTheSessionAlive(t *testing.T) {
+	h := newDetachHarness(t, 400*time.Millisecond)
+	sess := h.createSession("tenant-alpha", "linux-agent-typing")
+	agentWS := h.dialAgent(sess)
+	defer agentWS.Close()
+	opWS := h.attachOperator(sess)
+	defer opWS.Close()
+	h.waitState(sess, StateActive)
+	for i := 0; i < 8; i++ {
+		writeFrame(t, opWS, TerminalFrame{Type: FrameStdin, Data: []byte("k")})
+		time.Sleep(150 * time.Millisecond)
+		h.mgr.Sweep()
+	}
+	sess.mu.RLock()
+	st := sess.State
+	sess.mu.RUnlock()
+	if st != StateActive {
+		t.Fatalf("an operator typing for 1.2 s with a 0.4 s idle timeout was expired: %s", st)
 	}
 }

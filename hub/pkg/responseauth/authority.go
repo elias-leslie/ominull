@@ -25,6 +25,7 @@ type Config struct {
 	SignerPartition   string        // e.g. "portable-local" or "hsm-partition-1"
 	DefaultSessionTTL time.Duration // e.g. 8h
 	DefaultIdleTTL    time.Duration // e.g. 30m
+	ApproversPath     string        // root-pinned owner approver keys; default DefaultApproversPath
 }
 
 // AuthenticatorRecord stores enrolled credentials (TOTP, WebAuthn) for an operator.
@@ -50,6 +51,7 @@ type Authority struct {
 	tenantKeys map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
 	masterKey  []byte                        // 32-byte master key for encrypting secrets at rest
 	webauthn   *WebAuthnManager              // WebAuthn registration and assertion coordinator
+	approvals  *approvalBook                 // owner approvals (push + passkey tap)
 	startedAt  time.Time
 }
 
@@ -121,6 +123,7 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 			},
 		}),
 		startedAt: time.Now(),
+		approvals: newApprovalBook(cfg.ApproversPath),
 	}
 
 	// 1. Load keys from durable store
@@ -813,9 +816,13 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 		return nil, fmt.Errorf("action kind %q not permitted by response session", req.ActionKind)
 	}
 
-	// Action kind verification
+	// Action kind verification. A terminal session is not signed from a
+	// response session: each one takes its own owner approval (push + passkey
+	// tap), see ConsumeApproval.
 	switch req.ActionKind {
-	case response.ActionKindForensicCollect, response.ActionKindScriptExec, response.ActionKindTerminalSession:
+	case response.ActionKindTerminalSession:
+		return nil, errors.New("terminal sessions need an owner approval, not a response session")
+	case response.ActionKindForensicCollect, response.ActionKindScriptExec:
 		// valid
 	default:
 		return nil, fmt.Errorf("unrecognized or unsupported action kind: %q", req.ActionKind)
@@ -1131,7 +1138,10 @@ func (a *Authority) Status(tenantID string) ResponseAuthorityStatus {
 		}
 	}
 
+	approvers, approverNote := a.ApproverStatus()
 	return ResponseAuthorityStatus{
+		OwnerApprovers:      approvers,
+		OwnerApproverNote:   approverNote,
 		Healthy:             true,
 		SignerPartition:     a.cfg.SignerPartition,
 		TenantKeyID:         keyID,
