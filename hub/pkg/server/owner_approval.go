@@ -279,7 +279,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 		AllowIPs   []string `json:"allow_ips"`
 		Force      bool     `json:"force"`
 	}
-	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
+	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseMonitorOnly(w, req.EndpointID) {
 		return nil, false
 	}
 	summary := "Cut " + s.endpointLabels([]string{req.EndpointID}) + " off the network"
@@ -356,8 +356,21 @@ func (s *Server) resolveBulkIsolation(isolate bool) approvalResolver {
 			return nil, false
 		}
 		if isolate {
-			return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate hosts",
-				Summary: fmt.Sprintf("Cut %d host(s) off the network: %s", len(targets), s.endpointLabels(targets)), Targets: targets}, true
+			// Monitor-only endpoints (hypervisors) are left out of the
+			// approval, so the grants never name them.
+			allowed, monitor, ok := s.splitMonitorOnly(w, targets)
+			if !ok {
+				return nil, false
+			}
+			if len(allowed) == 0 && len(monitor) > 0 {
+				writeMonitorOnly(w, monitor, "")
+				return nil, false
+			}
+			summary := fmt.Sprintf("Cut %d host(s) off the network: %s", len(allowed), s.endpointLabels(allowed))
+			if len(monitor) > 0 {
+				summary += fmt.Sprintf(" (%d monitor-only host(s) left out: %s)", len(monitor), s.endpointLabels(monitor))
+			}
+			return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate hosts", Summary: summary, Targets: allowed}, true
 		}
 		return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Release isolation",
 			Summary: fmt.Sprintf("Return %d host(s) to the network: %s", len(targets), s.endpointLabels(targets)), Targets: targets}, true

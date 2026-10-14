@@ -30,13 +30,14 @@ type routeSpec struct {
 }
 
 var approvalRoutes = map[string]routeSpec{
-	"/api/v1/endpoints/isolate":        {ActionKindIsolation, "Isolate host"},
-	"/api/v1/endpoints/unisolate":      {ActionKindIsolation, "Release isolation"},
-	"/api/v1/endpoints/isolate-bulk":   {ActionKindIsolation, "Isolate hosts"},
-	"/api/v1/endpoints/unisolate-bulk": {ActionKindIsolation, "Release isolation"},
-	"/api/v1/agents/update":            {ActionKindAgentUpdate, "Update agents"},
-	"/api/v1/mesh/quarantine":          {ActionKindMesh, "Quarantine address"},
-	"/api/v1/mesh/unquarantine":        {ActionKindMesh, "Lift quarantine"},
+	"/api/v1/endpoints/isolate":         {ActionKindIsolation, "Isolate host"},
+	"/api/v1/endpoints/unisolate":       {ActionKindIsolation, "Release isolation"},
+	"/api/v1/endpoints/isolate-bulk":    {ActionKindIsolation, "Isolate hosts"},
+	"/api/v1/endpoints/unisolate-bulk":  {ActionKindIsolation, "Release isolation"},
+	"/api/v1/endpoints/allow-isolation": {ActionKindIsolation, "Allow host isolation"},
+	"/api/v1/agents/update":             {ActionKindAgentUpdate, "Update agents"},
+	"/api/v1/mesh/quarantine":           {ActionKindMesh, "Quarantine address"},
+	"/api/v1/mesh/unquarantine":         {ActionKindMesh, "Lift quarantine"},
 }
 
 func decodeJSON(raw []byte, v interface{}) error {
@@ -123,6 +124,16 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 			return "", "", errors.New("release body names a different endpoint")
 		}
 		return spec.action, fmt.Sprintf("Return %d host(s) to the network: %s", n, list), nil
+	case "/api/v1/endpoints/allow-isolation":
+		var b struct {
+			EndpointID string `json:"endpoint_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := decodeJSON(p.Body, &b); err != nil || n != 1 || b.EndpointID != targets[0] {
+			return "", "", errors.New("allow-isolation body names a different endpoint")
+		}
+		return spec.action, fmt.Sprintf("Lift monitor-only on %s: it may be isolated at host level again (reason given: %s)",
+			targets[0], cleanText(b.Reason, 120)), nil
 	case "/api/v1/agents/update":
 		var b struct {
 			Version string `json:"version"`

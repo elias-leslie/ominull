@@ -409,6 +409,14 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	s.startSweeps = s.scanner.StartBackground
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
+			if errors.Is(err, storage.ErrMonitorOnly) {
+				// A hypervisor is never isolated, not even automatically; the
+				// detector's finding stands and asks for guest containment.
+				_ = s.store.RecordAudit(storage.AuditEntry{
+					ID: uuid.New().String(), Username: "detector", Action: "AUTO_ISOLATE_REFUSED", Resource: endpointID,
+					Details: "monitor-only endpoint: " + reason, Timestamp: time.Now().UTC(),
+				})
+			}
 			return fmt.Errorf("persist detector isolation for %s (%s): %w", endpointID, reason, err)
 		}
 		// The isolation is the record that an incident happened, so the
@@ -1997,7 +2005,7 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.endpointInScope(w, r, req.EndpointID) {
+	if !s.endpointInScope(w, r, req.EndpointID) || s.refuseMonitorOnly(w, req.EndpointID) {
 		return
 	}
 	if !s.guardIsolation(w, r, req.EndpointID, req.Force) {
@@ -2016,6 +2024,10 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.SetEndpointIsolation(req.EndpointID, true, allowIPs); err != nil {
+		if errors.Is(err, storage.ErrMonitorOnly) {
+			writeMonitorOnly(w, []string{req.EndpointID}, "")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -2095,7 +2107,15 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The approval left monitor-only hosts out of the grants; name the ones
+	// the requested scope covered, so the reply says what was not contained.
+	var excluded []string
 	if ids := grantedTargets(r); ids != nil {
+		if asked, err := s.store.BulkIsolationTargets(tenantID, req.Scope, req.Value); err == nil && req.Scope != "ids" {
+			_, excluded, _ = s.store.SplitMonitorOnly(asked)
+		} else if req.Scope == "ids" {
+			_, excluded, _ = s.store.SplitMonitorOnly(req.IDs)
+		}
 		req.Scope, req.Value, req.IDs = "ids", "", ids
 	}
 
@@ -2134,6 +2154,20 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Monitor-only endpoints are never part of a bulk isolation; the reply
+	// names them, so nobody believes a hypervisor was contained.
+	scoped, monitor, ok := s.splitMonitorOnly(w, scoped)
+	if !ok {
+		return
+	}
+	if len(scoped) == 0 && len(monitor) > 0 {
+		writeMonitorOnly(w, monitor, "")
+		return
+	}
+	if len(monitor) > 0 {
+		excluded = monitor
+	}
+
 	// One refusal stops the whole batch. Isolating nine of ten and reporting
 	// nine is how an operator comes to believe a host is contained when it is
 	// not - and the tenth is the one the hub predicted it could not get back.
@@ -2146,7 +2180,7 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 	var count int64
 	if req.Scope == "ids" && len(req.IDs) > 0 {
 		for _, id := range scoped {
-			if err := s.store.SetEndpointIsolation(id, true, allowIPs); err != nil {
+			if err := s.store.SetEndpointIsolation(id, true, allowIPs); err != nil { // monitor-only were split off above
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -2170,12 +2204,16 @@ func (s *Server) handleBulkIsolate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	out := map[string]interface{}{
 		"status":             "isolated",
 		"affected_endpoints": count,
 		"scope":              req.Scope,
 		"value":              req.Value,
-	})
+	}
+	if len(excluded) > 0 {
+		out["excluded_monitor_only"] = excluded
+	}
+	json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleBulkUnisolate(w http.ResponseWriter, r *http.Request) {
@@ -3478,6 +3516,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
 	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
+	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
+	mux.HandleFunc("/api/v1/endpoints/allow-isolation", s.authMiddleware(s.ownerApproved(s.resolveAllowIsolation, s.handleAllowIsolation)))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.ownerApproved(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))

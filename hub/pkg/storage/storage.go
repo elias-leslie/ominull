@@ -42,17 +42,22 @@ type Endpoint struct {
 	// {"programs":[...]}}). The hub acts on it rather than on the OS name, so a
 	// new platform needs no hub change. Empty means the agent predates it.
 	ResponseCapabilities string `json:"response_capabilities,omitempty"`
-	ID                   string `json:"id"`
-	TenantID             string `json:"tenant_id"`
-	LocationID           string `json:"location_id"`
-	LocationName         string `json:"location_name"`
-	Hostname             string `json:"hostname"`
-	OS                   string `json:"os"`
-	IP                   string `json:"ip"`
-	MAC                  string `json:"mac"`
-	RoleTag              string `json:"role_tag"`
-	InstalledSoftware    string `json:"installed_software"`
-	DriverVersion        string `json:"driver_version"`
+	// ResponseProfile is the operator's setting ("monitor" or empty) and
+	// MonitorOnly the hub's verdict from it, the role and the capabilities
+	// (response_profile.go). A monitor-only endpoint is never isolated.
+	ResponseProfile   string `json:"response_profile,omitempty"`
+	MonitorOnly       bool   `json:"monitor_only"`
+	ID                string `json:"id"`
+	TenantID          string `json:"tenant_id"`
+	LocationID        string `json:"location_id"`
+	LocationName      string `json:"location_name"`
+	Hostname          string `json:"hostname"`
+	OS                string `json:"os"`
+	IP                string `json:"ip"`
+	MAC               string `json:"mac"`
+	RoleTag           string `json:"role_tag"`
+	InstalledSoftware string `json:"installed_software"`
+	DriverVersion     string `json:"driver_version"`
 	// UpdateCapability is the package format this endpoint can install for
 	// itself: "deb", "msi", or empty. The agent reports it, because
 	// the OS string is a display label and not a contract - matching on it is
@@ -649,6 +654,7 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE endpoints ADD COLUMN presence TEXT DEFAULT 'always_on'",
 		"ALTER TABLE endpoints ADD COLUMN collector_health TEXT DEFAULT '[]'",
 		"ALTER TABLE endpoints ADD COLUMN response_capabilities TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN response_profile TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
@@ -1058,13 +1064,10 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	val := 0
-	allow := ""
-	if isIsolated {
-		val = 1
-		allow = strings.Join(allowIPs, ",")
+	if isIsolated { // a monitor-only endpoint is refused here, whoever asks (response_profile.go)
+		return s.isolateOneLocked(id, strings.Join(allowIPs, ","))
 	}
-	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ? WHERE id = ?", val, allow, id)
+	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = 0, isolation_allow_ips = '' WHERE id = ?", id)
 	return err
 }
 
@@ -1177,7 +1180,9 @@ func (s *Store) GetEndpointIsolation(id string) (bool, []string, error) {
 
 	var isoInt int
 	var allow string
-	err := s.db.QueryRow("SELECT is_isolated, COALESCE(isolation_allow_ips, '') FROM endpoints WHERE id = ?", id).Scan(&isoInt, &allow)
+	// A monitor-only endpoint is never told to isolate, even if a row from
+	// before it became monitor-only still says so.
+	err := s.db.QueryRow("SELECT CASE WHEN "+monitorOnlySQL+" THEN 0 ELSE is_isolated END, COALESCE(isolation_allow_ips, '') FROM endpoints WHERE id = ?", id).Scan(&isoInt, &allow)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1202,6 +1207,13 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 	}
 
 	where, whereArgs := bulkIsolationWhere(tenantID, scope, value)
+	if isIsolated { // monitor-only endpoints are never part of a bulk isolation
+		if where == "" {
+			where = " WHERE NOT " + monitorOnlySQL
+		} else {
+			where += " AND NOT " + monitorOnlySQL
+		}
+	}
 	args := append([]interface{}{val, allow}, whereArgs...)
 
 	res, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ?"+where, args...)
@@ -1399,12 +1411,12 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 	)
 	if tenantID != "" {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, '') FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, ''), "+endpointProfileColumns+" FROM endpoints WHERE tenant_id = ? ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 			tenantID,
 		)
 	} else {
 		rows, err = s.db.Query(
-			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, '') FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
+			"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, ''), " + endpointProfileColumns + " FROM endpoints ORDER BY hostname COLLATE NOCASE ASC, id ASC",
 		)
 	}
 	if err != nil {
@@ -1420,7 +1432,7 @@ func (s *Store) ListEndpoints(tenantID string) ([]Endpoint, error) {
 			&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 			&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 			&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities,
+			&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly,
 		); err != nil {
 			return nil, err
 		}
@@ -1437,13 +1449,13 @@ func (s *Store) GetEndpoint(id string) (*Endpoint, error) {
 	var ep Endpoint
 	var isoInt int
 	err := s.db.QueryRow(
-		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, '') FROM endpoints WHERE id = ? OR hostname = ?",
+		"SELECT id, tenant_id, location_id, location_name, hostname, os, ip, mac, role_tag, installed_software, driver_version, update_capability, COALESCE(install_type, ''), COALESCE(package_identifier, ''), COALESCE(registered_package_version, ''), COALESCE(provenance_status, 'unknown'), status, COALESCE(cert_cn, ''), is_isolated, last_seen_at, created_at, COALESCE(evidence_signing_key, ''), COALESCE(collector_health, '[]'), COALESCE(presence, 'always_on'), COALESCE(response_capabilities, ''), "+endpointProfileColumns+" FROM endpoints WHERE id = ? OR hostname = ?",
 		id, id,
 	).Scan(
 		&ep.ID, &ep.TenantID, &ep.LocationID, &ep.LocationName, &ep.Hostname, &ep.OS, &ep.IP, &ep.MAC,
 		&ep.RoleTag, &ep.InstalledSoftware, &ep.DriverVersion, &ep.UpdateCapability,
 		&ep.InstallType, &ep.PackageIdentifier, &ep.RegisteredPackageVersion, &ep.ProvenanceStatus,
-		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities,
+		&ep.Status, &ep.CertCN, &isoInt, &ep.LastSeenAt, &ep.CreatedAt, &ep.EvidenceSigningKey, &ep.CollectorHealth, &ep.Presence, &ep.ResponseCapabilities, &ep.ResponseProfile, &ep.MonitorOnly,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
