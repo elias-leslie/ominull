@@ -3435,6 +3435,7 @@ func (s *Server) routes() *http.ServeMux {
 	// Router telemetry: what the gateway can see that no agent can.
 	mux.HandleFunc("/api/v1/router/telemetry", s.routerAuth(s.handleRouterTelemetry))
 	mux.HandleFunc("/api/v1/router/identity", s.authMiddleware(s.handleRouterIdentity))
+	mux.HandleFunc("/api/v1/storage/report", s.authMiddleware(s.handleStorageReport))
 	mux.HandleFunc("/api/v1/router/clients", s.authMiddleware(s.handleRouterClients))
 	mux.HandleFunc("/api/v1/integrations/nightshift/findings", s.nightshiftFeedAuth(s.handleNightshiftFeed))
 	mux.HandleFunc("/api/v1/integrations/nightshift/key", s.authMiddleware(s.handleNightshiftFeedKey))
