@@ -153,6 +153,47 @@ static void test_job_object_containment() {
     CloseHandle(hJob);
 }
 
+
+typedef struct { HANDLE h; unsigned char* buf; size_t want; size_t got; } PipeReader;
+
+static DWORD WINAPI pipe_reader(LPVOID p) {
+    PipeReader* r = (PipeReader*)p;
+    while (r->got < r->want) {
+        DWORD n = 0;
+        if (!ReadFile(r->h, r->buf + r->got, (DWORD)(r->want - r->got), &n, NULL) || n == 0) break;
+        r->got += n;
+    }
+    return 0;
+}
+
+static void test_large_stdin_message_windows() {
+    printf("[*] Testing Windows stdin message handling (256 KiB, field order)...\n");
+    HANDLE rd = NULL, wr = NULL;
+    expect("create pipe", CreatePipe(&rd, &wr, NULL, 4096));
+    const size_t n = 256 * 1024;
+    unsigned char* paste = (unsigned char*)malloc(n);
+    for (size_t i = 0; i < n; i++) paste[i] = (unsigned char)(i * 13 + 1);
+    size_t cap = TermB64_EncodedLen(n) + 64;
+    char* json = (char*)malloc(cap);
+    int jl = sprintf(json, "{ \"data\" : \"");
+    jl += (int)TermB64_Encode(paste, n, json + jl, cap - jl);
+    jl += sprintf(json + jl, "\", \"timestamp\":\"x\", \"type\":\"stdin\" }");
+    PipeReader r = { rd, (unsigned char*)malloc(n), n, 0 };
+    HANDLE th = CreateThread(NULL, 0, pipe_reader, &r, 0, NULL);
+    expect("stdin message accepted", Terminal_WinHandleMessage(json, (size_t)jl, wr, NULL));
+    WaitForSingleObject(th, 10000);
+    CloseHandle(th);
+    expect("all 256 KiB reached the console input", r.got == n && memcmp(r.buf, paste, n) == 0);
+    expect("resize without console is harmless", Terminal_WinHandleMessage("{\"rows\":40,\"type\":\"resize\",\"cols\":120}", 37, wr, NULL));
+    expect("close ends the session", !Terminal_WinHandleMessage("{\"type\":\"close\"}", 16, wr, NULL));
+    expect("unknown frames ignored", Terminal_WinHandleMessage("{\"type\":\"bogus\"}", 16, wr, NULL));
+    free(paste);
+    free(json);
+    free(r.buf);
+    CloseHandle(rd);
+    CloseHandle(wr);
+}
+
 int main() {
     printf("=== Starting Windows Terminal Worker Tests (Slice 3B.2) ===\n");
     test_allowlist_windows();
@@ -160,6 +201,7 @@ int main() {
     test_base64_windows();
     test_conpty_lifecycle();
     test_job_object_containment();
+    test_large_stdin_message_windows();
 
     if (failures == 0) {
         printf("=== All Windows Terminal Worker Tests Passed Successfully! ===\n");

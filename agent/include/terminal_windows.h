@@ -35,8 +35,11 @@
 #include <string.h>
 
 #include "agent.h"
+#include "terminal_frame.h"
 
 #define WIN_TERMINAL_MAX_FRAME_SIZE 65536
+#define WIN_TERMINAL_MAX_MESSAGE 1048576   /* largest reassembled incoming message */
+#define WIN_TERMINAL_STDOUT_CHUNK 32768    /* console bytes per stdout message */
 
 /* ---------------------------------------------------------------------------
  * Executable Allowlist Validation
@@ -108,53 +111,9 @@ typedef struct {
 static inline bool Terminal_ParsePayloadWindows(const char* json, TerminalSessionParamsWin* out) {
     if (!json || !out) return false;
     memset(out, 0, sizeof(*out));
-
-    // Bounded search for session_id
-    const char* s_id = strstr(json, "\"session_id\"");
-    if (s_id) {
-        const char* val = strchr(s_id, ':');
-        if (val) {
-            val++;
-            while (*val == ' ' || *val == '\t' || *val == '"') val++;
-            size_t len = 0;
-            while (val[len] && val[len] != '"' && val[len] != ',' && val[len] != '}' && len < sizeof(out->session_id) - 1) {
-                out->session_id[len] = val[len];
-                len++;
-            }
-            out->session_id[len] = '\0';
-        }
-    }
-
-    // Bounded search for program
-    const char* s_pr = strstr(json, "\"program\"");
-    if (s_pr) {
-        const char* val = strchr(s_pr, ':');
-        if (val) {
-            val++;
-            while (*val == ' ' || *val == '\t' || *val == '"') val++;
-            size_t len = 0;
-            while (val[len] && val[len] != '"' && val[len] != ',' && val[len] != '}' && len < sizeof(out->program) - 1) {
-                out->program[len] = val[len];
-                len++;
-            }
-            out->program[len] = '\0';
-        }
-    }
-
-    // Bounded search for connect_token
-    const char* s_tok = strstr(json, "\"connect_token\"");
-    if (s_tok) {
-        const char* val = strchr(s_tok, ':');
-        if (val) {
-            val++;
-            while (*val == ' ' || *val == '\t' || *val == '"') val++;
-            size_t len = 0;
-            while (val[len] && val[len] != '"' && val[len] != ',' && val[len] != '}' && len < sizeof(out->connect_token) - 1) {
-                out->connect_token[len] = val[len];
-                len++;
-            }
-            out->connect_token[len] = '\0';
-        }
+    if (!TermPayload_Parse(json, out->session_id, sizeof(out->session_id), out->program, sizeof(out->program),
+                           out->connect_token, sizeof(out->connect_token))) {
+        return false;
     }
 
     if (out->session_id[0] == '\0' || out->connect_token[0] == '\0') {
@@ -172,57 +131,12 @@ static inline bool Terminal_ParsePayloadWindows(const char* json, TerminalSessio
  * Base64 Encoding & Decoding for Windows
  * ------------------------------------------------------------------------- */
 
-static const char b64_table_win[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 static inline size_t Terminal_Base64EncodeWin(const unsigned char* in, size_t in_len, char* out, size_t out_max) {
-    size_t out_len = 4 * ((in_len + 2) / 3);
-    if (out_len + 1 > out_max) return 0;
-
-    size_t i = 0, j = 0;
-    while (i < in_len) {
-        size_t rem = in_len - i;
-        uint32_t oct_a = in[i++];
-        uint32_t oct_b = (rem > 1) ? in[i++] : 0;
-        uint32_t oct_c = (rem > 2) ? in[i++] : 0;
-        uint32_t triple = (oct_a << 16) | (oct_b << 8) | oct_c;
-
-        out[j++] = b64_table_win[(triple >> 18) & 0x3F];
-        out[j++] = b64_table_win[(triple >> 12) & 0x3F];
-        out[j++] = (rem > 1) ? b64_table_win[(triple >> 6) & 0x3F] : '=';
-        out[j++] = (rem > 2) ? b64_table_win[triple & 0x3F] : '=';
-    }
-    out[j] = '\0';
-    return j;
-}
-
-static inline int b64_val_win(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
+    return TermB64_Encode(in, in_len, out, out_max);
 }
 
 static inline size_t Terminal_Base64DecodeWin(const char* in, size_t in_len, unsigned char* out, size_t out_max) {
-    size_t i = 0, j = 0;
-    while (i < in_len && j < out_max) {
-        while (i < in_len && (in[i] == ' ' || in[i] == '\r' || in[i] == '\n' || in[i] == '\t')) i++;
-        if (i >= in_len) break;
-
-        int a = b64_val_win(in[i++]);
-        int b = (i < in_len) ? b64_val_win(in[i++]) : -1;
-        int c = (i < in_len) ? b64_val_win(in[i++]) : -1;
-        int d = (i < in_len) ? b64_val_win(in[i++]) : -1;
-
-        if (a < 0 || b < 0) break;
-        uint32_t triple = (a << 18) | (b << 12) | ((c < 0 ? 0 : c) << 6) | (d < 0 ? 0 : d);
-
-        out[j++] = (triple >> 16) & 0xFF;
-        if (c >= 0 && j < out_max) out[j++] = (triple >> 8) & 0xFF;
-        if (d >= 0 && j < out_max) out[j++] = triple & 0xFF;
-    }
-    return j;
+    return TermB64_Decode(in, in_len, out, out_max);
 }
 
 /* ---------------------------------------------------------------------------
@@ -237,31 +151,91 @@ typedef struct {
 
 static inline DWORD WINAPI Terminal_StdoutThreadProc(LPVOID lpParam) {
     TerminalWinStdoutThreadCtx* ctx = (TerminalWinStdoutThreadCtx*)lpParam;
-    unsigned char raw_buf[4096];
+    static const char pre[] = "{\"type\":\"stdout\",\"data\":\"";
+    const size_t pl = sizeof(pre) - 1;
+    const size_t frame_cap = TermB64_EncodedLen(WIN_TERMINAL_STDOUT_CHUNK) + pl + 8;
+    unsigned char* raw_buf = (unsigned char*)malloc(WIN_TERMINAL_STDOUT_CHUNK);
+    char* frame_json = (char*)malloc(frame_cap);
+    if (!raw_buf || !frame_json) {
+        free(raw_buf);
+        free(frame_json);
+        ctx->running = false;
+        return 0;
+    }
+    memcpy(frame_json, pre, pl);
 
     while (ctx->running) {
         DWORD bytesRead = 0;
-        if (!ReadFile(ctx->hPipeOutRead, raw_buf, sizeof(raw_buf), &bytesRead, NULL) || bytesRead == 0) {
+        /* ReadFile returns what the pipe holds now, up to the chunk: output is
+         * coalesced under load and still sent at once when the console is idle. */
+        if (!ReadFile(ctx->hPipeOutRead, raw_buf, WIN_TERMINAL_STDOUT_CHUNK, &bytesRead, NULL) || bytesRead == 0) {
             break;
         }
-
-        char b64[8192];
-        size_t b64_len = Terminal_Base64EncodeWin(raw_buf, bytesRead, b64, sizeof(b64));
-        if (b64_len > 0) {
-            char frame_json[9000];
-            int jlen = snprintf(frame_json, sizeof(frame_json),
-                "{\"type\":\"stdout\",\"data\":\"%s\"}", b64);
-            if (jlen > 0) {
-                DWORD err = WinHttpWebSocketSend(ctx->hWS, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                                 frame_json, (DWORD)jlen);
-                if (err != ERROR_SUCCESS) {
-                    break;
-                }
-            }
+        size_t b64_len = TermB64_Encode(raw_buf, bytesRead, frame_json + pl, frame_cap - pl - 3);
+        if (b64_len == 0) break;
+        frame_json[pl + b64_len] = '"';
+        frame_json[pl + b64_len + 1] = '}';
+        DWORD err = WinHttpWebSocketSend(ctx->hWS, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                         frame_json, (DWORD)(pl + b64_len + 2));
+        if (err != ERROR_SUCCESS) {
+            break;
         }
     }
+    free(raw_buf);
+    free(frame_json);
     ctx->running = false;
     return 0;
+}
+
+/* Grows *buf to hold need bytes, up to WIN_TERMINAL_MAX_MESSAGE + 1. */
+static inline bool Terminal_WinReserve(unsigned char** buf, size_t* cap, size_t need) {
+    if (need > WIN_TERMINAL_MAX_MESSAGE + 1) return false;
+    if (need <= *cap) return true;
+    size_t ncap = *cap ? *cap : 16384;
+    while (ncap < need) ncap *= 2;
+    if (ncap > WIN_TERMINAL_MAX_MESSAGE + 1) ncap = WIN_TERMINAL_MAX_MESSAGE + 1;
+    unsigned char* nb = (unsigned char*)realloc(*buf, ncap);
+    if (!nb) return false;
+    *buf = nb;
+    *cap = ncap;
+    return true;
+}
+
+/* Writes the whole buffer to the console input pipe. */
+static inline bool Terminal_WinWriteAll(HANDLE h, const unsigned char* p, size_t n) {
+    while (n > 0) {
+        DWORD chunk = n > 65536 ? 65536 : (DWORD)n;
+        DWORD written = 0;
+        if (!WriteFile(h, p, chunk, &written, NULL) || written == 0) return false;
+        p += written;
+        n -= written;
+    }
+    return true;
+}
+
+/* Applies one complete incoming message. Returns false when the session should end. */
+static inline bool Terminal_WinHandleMessage(const char* json, size_t len, HANDLE hPipeInWrite, HPCON hPC) {
+    TermInFrame f;
+    if (!TermFrame_Parse(json, len, &f)) return true;
+    if (strcmp(f.type, "stdin") == 0) {
+        if (f.data_len == 0) return true;
+        size_t cap = f.data_len / 4 * 3 + 3;
+        unsigned char* dec = (unsigned char*)malloc(cap);
+        if (!dec) return false;
+        size_t n = TermB64_Decode(f.data, f.data_len, dec, cap);
+        bool ok = (n == 0) || Terminal_WinWriteAll(hPipeInWrite, dec, n);
+        free(dec);
+        return ok;
+    }
+    if (strcmp(f.type, "resize") == 0) {
+        if (hPC && f.rows > 0 && f.rows <= 500 && f.cols > 0 && f.cols <= 500) {
+            COORD newSize = {(SHORT)f.cols, (SHORT)f.rows};
+            ResizePseudoConsole(hPC, newSize);
+        }
+        return true;
+    }
+    if (strcmp(f.type, "close") == 0) return false;
+    return true;
 }
 
 static inline int Terminal_RunWindowsWorker(
@@ -554,65 +528,38 @@ static inline int Terminal_RunWindowsWorker(
     };
     HANDLE hStdoutThread = CreateThread(NULL, 0, Terminal_StdoutThreadProc, &stdoutCtx, 0, NULL);
 
-    // 7. Stdin & Control loop
-    unsigned char wsBuf[8192];
+    // 7. Stdin & Control loop: fragments are reassembled into whole messages (up to 1 MiB) before parsing.
+    unsigned char* msg = NULL;
+    size_t msg_len = 0, msg_cap = 0;
     while (stdoutCtx.running) {
+        if (msg_len >= WIN_TERMINAL_MAX_MESSAGE) break; /* message over the cap */
+        size_t need = msg_len + 16384 + 1;
+        if (need > WIN_TERMINAL_MAX_MESSAGE + 1) need = WIN_TERMINAL_MAX_MESSAGE + 1;
+        if (!Terminal_WinReserve(&msg, &msg_cap, need)) break;
         DWORD bytesRead = 0;
         WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType;
-        DWORD err = WinHttpWebSocketReceive(hWS, wsBuf, sizeof(wsBuf) - 1, &bytesRead, &bufferType);
-        if (err != ERROR_SUCCESS || bytesRead == 0) {
+        DWORD room = (DWORD)(msg_cap - 1 - msg_len);
+        DWORD err = WinHttpWebSocketReceive(hWS, msg + msg_len, room, &bytesRead, &bufferType);
+        if (err != ERROR_SUCCESS) {
             break;
         }
-
         if (bufferType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
             break;
         }
-
-        if (bufferType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
-            bufferType == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) {
-            wsBuf[bytesRead] = '\0';
-            const char* f_json = (const char*)wsBuf;
-
-            if (strstr(f_json, "\"type\":\"stdin\"") || strstr(f_json, "\"type\": \"stdin\"")) {
-                const char* d_pos = strstr(f_json, "\"data\"");
-                if (d_pos) {
-                    const char* col = strchr(d_pos, ':');
-                    if (col) {
-                        col++;
-                        while (*col == ' ' || *col == '\t' || *col == '"') col++;
-                        size_t dlen = 0;
-                        while (col[dlen] && col[dlen] != '"' && col[dlen] != '}' && col[dlen] != ',') dlen++;
-                        if (dlen > 0) {
-                            unsigned char dec[4096];
-                            size_t declen = Terminal_Base64DecodeWin(col, dlen, dec, sizeof(dec));
-                            if (declen > 0) {
-                                DWORD written = 0;
-                                WriteFile(hPipeInWrite, dec, (DWORD)declen, &written, NULL);
-                            }
-                        }
-                    }
-                }
-            } else if (strstr(f_json, "\"type\":\"resize\"") || strstr(f_json, "\"type\": \"resize\"")) {
-                int rows = 0, cols = 0;
-                const char* r_pos = strstr(f_json, "\"rows\"");
-                if (r_pos) {
-                    const char* r_val = strchr(r_pos, ':');
-                    if (r_val) rows = atoi(r_val + 1);
-                }
-                const char* c_pos = strstr(f_json, "\"cols\"");
-                if (c_pos) {
-                    const char* c_val = strchr(c_pos, ':');
-                    if (c_val) cols = atoi(c_val + 1);
-                }
-                if (rows > 0 && rows <= 500 && cols > 0 && cols <= 500) {
-                    COORD newSize = {(SHORT)cols, (SHORT)rows};
-                    ResizePseudoConsole(hPC, newSize);
-                }
-            } else if (strstr(f_json, "\"type\":\"close\"") || strstr(f_json, "\"type\": \"close\"")) {
-                break;
-            }
+        msg_len += bytesRead;
+        if (bufferType == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE ||
+            bufferType == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE) {
+            continue;
         }
+        bool keep = true;
+        if (bufferType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            msg[msg_len] = '\0';
+            keep = Terminal_WinHandleMessage((const char*)msg, msg_len, hPipeInWrite, hPC);
+        }
+        msg_len = 0;
+        if (!keep) break;
     }
+    free(msg);
 
     stdoutCtx.running = false;
 
