@@ -466,6 +466,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("inventory", []feedFinding{inv}, err)
 	rf, err := s.routerFindings(now)
 	add("router", rf, err)
+	sf, err := s.storageFinding(now)
+	add("storage", sf, err)
 	doc := map[string]any{
 		"schema":       nightshiftSchema,
 		"source":       nightshiftSource,

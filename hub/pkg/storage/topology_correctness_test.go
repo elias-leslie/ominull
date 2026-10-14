@@ -2,9 +2,16 @@ package storage
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
+
+// renamedEventsColumn rebuilds the events view with one column renamed, so a
+// query that depends on it fails the way a missing column does.
+func renamedEventsColumn(from, to string) string {
+	return "DROP TRIGGER trg_events_view_insert; DROP VIEW events; " + strings.Replace(eventsViewSQL, from, to, 1)
+}
 
 func TestTopologyLocalAddressesAreNotExternalThreats(t *testing.T) {
 	s := newTestStore(t)
@@ -162,6 +169,9 @@ func TestEventWritesCanonicalizeAddressesBeforeProjection(t *testing.T) {
 	if err := s.InsertEvent(ev); err != nil {
 		t.Fatal(err)
 	}
+	// A second, distinct flow (another port): the same flow twice in one
+	// minute would be one aggregate row.
+	ev.DstPort = 8443
 	if err := s.InsertEventsBatch([]Event{ev}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +304,7 @@ func TestTrafficDomainRankingUsesFilteredFlowEvidence(t *testing.T) {
 
 func TestTrafficOverviewRejectsUnavailableDistribution(t *testing.T) {
 	s := newTestStore(t)
-	if _, err := s.DB().Exec(`ALTER TABLE events RENAME COLUMN protocol TO unavailable_protocol`); err != nil {
+	if _, err := s.DB().Exec(renamedEventsColumn("f.protocol AS protocol,", "f.protocol AS unavailable_protocol,")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.QueryTrafficOverview(TrafficFilter{}); err == nil {
@@ -304,7 +314,7 @@ func TestTrafficOverviewRejectsUnavailableDistribution(t *testing.T) {
 
 func TestTrafficOverviewRejectsUnavailableRanking(t *testing.T) {
 	s := newTestStore(t)
-	if _, err := s.DB().Exec(`ALTER TABLE events RENAME COLUMN process_path TO unavailable_process_path`); err != nil {
+	if _, err := s.DB().Exec(renamedEventsColumn("i.path AS process_path,", "i.path AS unavailable_process_path,")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.QueryTrafficOverview(TrafficFilter{}); err == nil {

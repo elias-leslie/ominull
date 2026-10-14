@@ -60,7 +60,7 @@ func main() {
 	consoleHostname := flag.String("console-hostname", envOr("OMINULL_CONSOLE_HOSTNAME", ""), "Canonical DNS hostname for the operator console (required for WebAuthn RP ID)")
 	retentionDays := flag.Int("retention-days", envInt("OMINULL_RETENTION_DAYS", 14), "Days of raw flow telemetry to keep (0 disables pruning)")
 	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 14), "Days of aggregated communication profiles to keep (0 disables pruning)")
-	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 30), "Days of alerts to keep (0 disables pruning)")
+	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 90), "Days of alerts to keep (0 disables pruning)")
 	auditRetentionDays := flag.Int("audit-retention-days", envInt("OMINULL_AUDIT_RETENTION_DAYS", 365), "Days of audit log to keep (0 disables pruning)")
 	accessTeam := flag.String("access-team", envOr("OMINULL_ACCESS_TEAM", ""), "Cloudflare Access team name")
 	accessAUD := flag.String("access-aud", envOr("OMINULL_ACCESS_AUD", ""), "Cloudflare Access application audience")
@@ -176,9 +176,10 @@ func main() {
 	retention := retentionPolicy(*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays)
 	stopRetention := store.StartRetention(retention, time.Hour)
 	defer stopRetention()
-	log.Printf("[+] Retention: telemetry %dd, communication profiles %dd, alerts %dd, audit %dd, router flows %dd, DNS names %dd, router daily %dd (0 = keep everything)",
+	log.Printf("[+] Retention: telemetry %dd, communication profiles %dd, alerts %dd, audit %dd, router flows %dd, DNS names %dd, router daily %dd, flow rollups %dd, anomaly counts %dd (0 = keep everything)",
 		*retentionDays, *commRetentionDays, *alertRetentionDays, *auditRetentionDays,
-		int(retention.RouterFlows.Hours()/24), int(retention.DNSResolutions.Hours()/24), int(retention.RouterDaily.Hours()/24))
+		int(retention.RouterFlows.Hours()/24), int(retention.DNSResolutions.Hours()/24), int(retention.RouterDaily.Hours()/24),
+		int(retention.FlowRollups.Hours()/24), int(retention.AnomalyCounts.Hours()/24))
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetTLS(server.TLSOptions{

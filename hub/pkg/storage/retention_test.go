@@ -67,7 +67,7 @@ func TestRetentionAllowsReadsBetweenBatches(t *testing.T) {
 	// All interception lives in this temporary database, not the Store API.
 	_, err := store.db.Exec(fmt.Sprintf(`ALTER TABLE settings RENAME TO retention_settings;
 		CREATE VIEW settings AS SELECT key, test_retention_read(value, %d) AS value FROM retention_settings;
-		CREATE TRIGGER retention_probe BEFORE DELETE ON events BEGIN SELECT test_retention_delete(%d); END`, id, id))
+		CREATE TRIGGER retention_probe BEFORE DELETE ON flows BEGIN SELECT test_retention_delete(%d); END`, id, id))
 	if err != nil {
 		t.Fatal(err)
 	}

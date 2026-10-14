@@ -381,11 +381,11 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 
 	totalsQuery := fmt.Sprintf(`
 			SELECT
-				COUNT(*),
-				COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(samples), 0),
+				COALESCE(SUM(measured_samples), 0),
 				COALESCE(SUM(bytes_in), 0),
 				COALESCE(SUM(bytes_out), 0),
-				COALESCE(SUM(CASE WHEN action = 'BLOCK' THEN 1 ELSE 0 END), 0)
+				COALESCE(SUM(CASE WHEN action = 'BLOCK' THEN samples ELSE 0 END), 0)
 			FROM events
 			%s
 		`, whereClause)
@@ -495,8 +495,8 @@ func (s *Store) buildTrendBuckets(whereClause string, args []interface{}, start,
 			CAST(strftime('%%s', substr(timestamp, 1, 19) || 'Z') AS INTEGER) / %d * %d as bucket_sec,
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
-			COUNT(*),
-			COALESCE(SUM(CASE WHEN action = 'BLOCK' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(samples), 0),
+			COALESCE(SUM(CASE WHEN action = 'BLOCK' THEN samples ELSE 0 END), 0)
 		FROM events
 		%s
 		GROUP BY bucket_sec
@@ -562,7 +562,7 @@ func (s *Store) queryDistributions(whereClause string, args []interface{}, total
 		{"CASE WHEN action = '' THEN 'Unknown' ELSE action END", &dist.Actions},
 		{"CASE WHEN direction = '' THEN 'Unknown' ELSE direction END", &dist.Directions},
 	} {
-		query := "SELECT " + group.expression + " AS label, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0) FROM events " + whereClause + " GROUP BY label ORDER BY COUNT(*) DESC"
+		query := "SELECT " + group.expression + " AS label, COALESCE(SUM(samples), 0), COALESCE(SUM(bytes_in + bytes_out), 0) FROM events " + whereClause + " GROUP BY label ORDER BY COALESCE(SUM(samples), 0) DESC"
 		rows, err := s.db.Query(query, args...)
 		if err != nil {
 			return dist, err
@@ -604,14 +604,14 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 		SELECT
 			endpoint_id,
 			endpoint_id as label,
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s
 		GROUP BY endpoint_id
-		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
+		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COALESCE(SUM(samples), 0) DESC
 		LIMIT 8
 	`, whereClause)
 	rankings.TopEndpoints, err = s.scanRankings(epQuery, args)
@@ -627,14 +627,14 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 				WHEN process_path = '' OR process_path = '.' OR process_path = '/' THEN 'kernel/system'
 				ELSE replace(replace(process_path, '\', '/'), rtrim(replace(process_path, '\', '/'), replace(replace(process_path, '\', '/'), '/', '')), '')
 			END as proc_name,
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s
 		GROUP BY proc_name
-		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
+		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COALESCE(SUM(samples), 0) DESC
 		LIMIT 8
 	`, whereClause)
 	rankings.TopProcesses, err = s.scanRankings(procQuery, args)
@@ -647,14 +647,14 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 		SELECT
 			dst_ip,
 			dst_ip,
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s
 		GROUP BY dst_ip
-		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COUNT(*) DESC
+		ORDER BY COALESCE(SUM(bytes_in + bytes_out), 0) DESC, COALESCE(SUM(samples), 0) DESC
 		LIMIT 8
 	`, whereClause)
 	rankings.TopDestinations, err = s.scanRankings(dstQuery, args)
@@ -664,8 +664,8 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 
 	// Domain rankings describe these flows, not unrelated resolver queries.
 	domQuery := fmt.Sprintf(`
-  SELECT domain, domain, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
-  FROM events %s AND domain != '' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 8
+  SELECT domain, domain, COALESCE(SUM(samples), 0), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(bytes_in + bytes_out), 0)
+  FROM events %s AND domain != '' GROUP BY domain ORDER BY COALESCE(SUM(samples), 0) DESC LIMIT 8
  `, whereClause)
 	rankings.TopDomains, err = s.scanRankings(domQuery, args)
 	if err != nil {
@@ -677,14 +677,14 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 		SELECT
 			country,
 			country,
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s AND country != ''
 		GROUP BY country
-		ORDER BY COUNT(*) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
+		ORDER BY COALESCE(SUM(samples), 0) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
 		LIMIT 8
 	`, whereClause)
 	rankings.TopCountries, err = s.scanRankings(ctryQuery, args)
@@ -697,14 +697,14 @@ func (s *Store) queryRankings(whereClause string, args []interface{}) (TrafficRa
 		SELECT
 			CAST(dst_port AS TEXT),
 			CAST(dst_port AS TEXT),
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in), 0),
 			COALESCE(SUM(bytes_out), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s AND dst_port > 0
 		GROUP BY dst_port
-		ORDER BY COUNT(*) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
+		ORDER BY COALESCE(SUM(samples), 0) DESC, COALESCE(SUM(bytes_in + bytes_out), 0) DESC
 		LIMIT 8
 	`, whereClause)
 	rankings.TopPorts, err = s.scanRankings(portQuery, args)
@@ -753,7 +753,7 @@ func (s *Store) queryHeatmap(whereClause string, args []interface{}, isUnfiltere
 		SELECT
 			CAST(strftime('%%w', substr(timestamp, 1, 19) || 'Z') AS INTEGER) as dow,
 			CAST(strftime('%%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) as hod,
-			COUNT(*),
+			COALESCE(SUM(samples), 0),
 			COALESCE(SUM(bytes_in + bytes_out), 0)
 		FROM events
 		%s
@@ -813,7 +813,7 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 	// 2. Fetch page (limit + 1 to check next page)
 	query := fmt.Sprintf(`
 		SELECT
-			rowid,
+			id,
 			tenant_id,
 			timestamp,
 			endpoint_id,
@@ -840,7 +840,7 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			observed_at, COALESCE(observation_json, '{}'), process_id
 		FROM events
 		%s
-		ORDER BY timestamp DESC, rowid DESC
+		ORDER BY timestamp DESC, id DESC
 		LIMIT ? OFFSET ?
 	`, whereClause)
 
@@ -976,7 +976,7 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 
 	query := `
 		SELECT
-			rowid,
+			id,
 			tenant_id,
 			timestamp,
 			endpoint_id,
@@ -1002,7 +1002,7 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 			COALESCE(attribution_status, ''),
 			observed_at, COALESCE(observation_json, '{}'), process_id
 		FROM events
-		WHERE rowid = ?
+		WHERE id = ?
 	`
 	var (
 		tID         string

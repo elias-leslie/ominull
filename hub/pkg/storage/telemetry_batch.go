@@ -76,6 +76,12 @@ func communicationValues(ev Event, hostname, locationID string) []interface{} {
 	if locationID == "" {
 		locationID = "loc-home"
 	}
+	// A loopback conversation is profiled by its service port: the server
+	// side of it reports the client's ephemeral port as the destination, and
+	// one profile per ephemeral port was 80% of this table.
+	if IsLocalFlow(ev) {
+		ev.DstPort = servicePort(ev.SrcPort, ev.DstPort)
+	}
 	profileKey := fmt.Sprintf("%q|%q|%q|%d|%q|%d", ev.EndpointID, cleanPath, ev.DstIP, ev.DstPort, direction, ev.Protocol)
 	profileID := fmt.Sprintf("v2:%x", sha256.Sum256([]byte(profileKey)))
 	return []interface{}{
@@ -170,21 +176,14 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	started := time.Now()
+	defer recordIngest(started, len(events))
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin telemetry batch: %w", err)
 	}
 	defer tx.Rollback()
-
-	eventStmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("prepare telemetry events: %w", err)
-	}
-	defer eventStmt.Close()
 
 	commStmt, err := tx.Prepare(`
 		INSERT INTO comm_profiles (id, tenant_id, location_id, endpoint_id, hostname, process_name, process_path, dst_ip, dst_port, protocol, direction, country, first_seen, last_seen, event_count, total_bytes_in, total_bytes_out, is_baseline, domain)
@@ -201,39 +200,21 @@ func (s *Store) IngestTelemetryBatch(events []Event, hostname, locationID string
 	}
 	defer commStmt.Close()
 
-	tenantIDs := make(map[string]struct{}, 1)
 	for _, ev := range events {
 		ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
 		ev.Timestamp = ev.Timestamp.UTC()
-		country := ev.Country
-		if country == "" {
-			country = CountryUnknown
-		}
-		var obsVal interface{}
-		if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
-			obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
-		}
-		if _, err := eventStmt.Exec(
-			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
-			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, country,
-			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
-		); err != nil {
-			return fmt.Errorf("insert telemetry event: %w", err)
-		}
 		if _, err := commStmt.Exec(communicationValues(ev, hostname, locationID)...); err != nil {
 			return fmt.Errorf("insert telemetry communication profile: %w", err)
 		}
-
-		tenantID := ev.TenantID
-		if tenantID == "" {
-			tenantID = "default"
-		}
-		tenantIDs[tenantID] = struct{}{}
+	}
+	flows, err := s.writeFlows(tx, events, true)
+	if err != nil {
+		return fmt.Errorf("insert telemetry flows: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit telemetry batch: %w", err)
 	}
+	flows.commit()
 	return nil
 }

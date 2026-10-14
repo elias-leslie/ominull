@@ -398,6 +398,13 @@ type Store struct {
 	traffic   trafficCache
 	learning  learningCache
 	baseline  baselineQueries
+	// flowWriter caches flow dictionary ids and open minute aggregates
+	// (flows.go); guarded by mu.
+	flowWriter *flowWriter
+	// coldDir overrides where cold segments go (cold.go).
+	coldDir string
+	// dataReport is the last computed data size report (datasize.go).
+	dataReport dataReportCache
 }
 
 func New(dbPath string) (*Store, error) {
@@ -504,36 +511,7 @@ func (s *Store) initSchema() error {
 		completed_at DATETIME
 	);
 
-	CREATE TABLE IF NOT EXISTS events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-		endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
-		timestamp DATETIME NOT NULL,
-		layer TEXT NOT NULL,
-		action TEXT NOT NULL,
-		direction TEXT NOT NULL,
-		protocol INTEGER NOT NULL,
-		src_ip TEXT NOT NULL,
-		dst_ip TEXT NOT NULL,
-		src_port INTEGER NOT NULL,
-		dst_port INTEGER NOT NULL,
-		bytes_in INTEGER NOT NULL DEFAULT 0,
-		bytes_out INTEGER NOT NULL DEFAULT 0,
-		country TEXT NOT NULL DEFAULT "US",
-		process_path TEXT NOT NULL,
-		process_id INTEGER NOT NULL,
-		domain TEXT DEFAULT '',
-		sni TEXT DEFAULT '',
-		process_instance_id TEXT DEFAULT '',
-		parent_pid INTEGER NOT NULL DEFAULT 0,
-		parent_process_instance_id TEXT DEFAULT '',
-		command_line TEXT DEFAULT '',
-		user_identity TEXT DEFAULT '',
-		executable_sha256 TEXT DEFAULT '',
-		attribution_status TEXT DEFAULT '',
-		observed_at DATETIME,
-		observation_json TEXT DEFAULT '{}'
-	);
+	-- Endpoint flows live in flows.go (flows, dictionaries, events view).
 
 	CREATE TABLE IF NOT EXISTS comm_profiles (
 		id TEXT PRIMARY KEY,
@@ -626,32 +604,6 @@ func (s *Store) initSchema() error {
 		created_at DATETIME NOT NULL
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, timestamp DESC);
-	CREATE INDEX IF NOT EXISTS idx_events_endpoint_time ON events(endpoint_id, timestamp DESC);
-	-- timestamp on its own. The two composite indexes above lead on a scope
-	-- column, so an operator query - which has no tenant filter - could not use
-	-- either one and every time-bounded read fell back to a full scan: the
-	-- bandwidth timeline and both halves of the diurnal profile were each
-	-- re-reading the whole events table to answer a question about one day.
-	CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp);
-	-- These dimensions are read-only projections of the event table. Keeping
-	-- their measured columns in the index lets the analytics summary walk a
-	-- narrow covering index instead of the 574 MB production table. The tenant
-	-- column leads the companion indexes so scoped callers retain an indexed
-	-- prefix; the global callers still get a covering scan.
-	CREATE INDEX IF NOT EXISTS idx_events_analytics_country ON events(tenant_id, country, action, bytes_in, bytes_out);
-	CREATE INDEX IF NOT EXISTS idx_events_analytics_process ON events(tenant_id, process_path);
-	-- The operator dashboard has a deliberate all-tenant view. A second
-	-- covering order avoids making that view scan a tenant-prefixed index and
-	-- keeps the cold global projection below its latency budget.
-	CREATE INDEX IF NOT EXISTS idx_events_analytics_country_global ON events(country, action, bytes_in, bytes_out);
-	CREATE INDEX IF NOT EXISTS idx_events_analytics_process_global ON events(process_path);
-	-- Time-window cards group on parsed UTC hour and topology dimensions. Keep
-	-- those projected columns beside the timestamp so cold reads stay covering
-	-- instead of evaluating string date functions over the event table.
-	CREATE INDEX IF NOT EXISTS idx_events_time_hour ON events(timestamp, CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER));
-	CREATE INDEX IF NOT EXISTS idx_events_tenant_time_hour ON events(tenant_id, timestamp, CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER));
-	CREATE INDEX IF NOT EXISTS idx_events_topology_time ON events(timestamp, src_ip, dst_ip, protocol, dst_port, action, bytes_in, bytes_out);
 	CREATE INDEX IF NOT EXISTS idx_endpoints_tenant ON endpoints(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_locations_tenant ON locations(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_comm_endpoint ON comm_profiles(endpoint_id);
@@ -695,24 +647,6 @@ func (s *Store) initSchema() error {
 		// own heartbeat reply.
 		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN presence TEXT DEFAULT 'always_on'",
-		"ALTER TABLE events ADD COLUMN bytes_in INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE events ADD COLUMN bytes_out INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE events ADD COLUMN country TEXT NOT NULL DEFAULT 'US'",
-		"ALTER TABLE events ADD COLUMN city TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN asn TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN org TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE events ADD COLUMN domain TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN sni TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN process_instance_id TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN parent_pid INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE events ADD COLUMN parent_process_instance_id TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN command_line TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN user_identity TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN executable_sha256 TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN attribution_status TEXT DEFAULT ''",
-		"ALTER TABLE events ADD COLUMN observed_at DATETIME",
-		"ALTER TABLE events ADD COLUMN observation_json TEXT DEFAULT '{}'",
 		"ALTER TABLE endpoints ADD COLUMN collector_health TEXT DEFAULT '[]'",
 		"ALTER TABLE endpoints ADD COLUMN response_capabilities TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN evidence TEXT DEFAULT ''",
@@ -790,6 +724,9 @@ func (s *Store) initSchema() error {
 	if err := s.initRollupCubesSchema(); err != nil {
 		return err
 	}
+	if err := s.initFlowSchema(); err != nil {
+		return err
+	}
 	if err := s.initDNSSchema(); err != nil {
 		return err
 	}
@@ -822,83 +759,9 @@ func (s *Store) initRollupCubesSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_bw_buckets_time ON bandwidth_buckets(hour_bucket);
 	CREATE INDEX IF NOT EXISTS idx_bw_buckets_tenant_time ON bandwidth_buckets(tenant_id, hour_bucket);
 
-	CREATE TABLE IF NOT EXISTS topology_edges_cube (
-		tenant_id TEXT NOT NULL,
-		day_bucket TEXT NOT NULL,
-		src_ip TEXT NOT NULL,
-		dst_ip TEXT NOT NULL,
-		protocol INTEGER NOT NULL,
-		dst_port INTEGER NOT NULL,
-		action TEXT NOT NULL DEFAULT 'PERMIT',
-		total_bytes INTEGER NOT NULL DEFAULT 0,
-		flow_count INTEGER NOT NULL DEFAULT 0,
-		measured_flows INTEGER NOT NULL DEFAULT 0,
-		last_seen_at DATETIME NOT NULL,
-		PRIMARY KEY (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action)
-	);
-	CREATE INDEX IF NOT EXISTS idx_topo_cube_day ON topology_edges_cube(day_bucket);
-	CREATE INDEX IF NOT EXISTS idx_topo_cube_tenant_day ON topology_edges_cube(tenant_id, day_bucket);
-
-	CREATE TRIGGER IF NOT EXISTS trg_events_rollups AFTER INSERT ON events
-	BEGIN
-		INSERT INTO bandwidth_buckets (tenant_id, hour_bucket, country, direction, bytes_in, bytes_out, flow_count, block_count, measured_count)
-		VALUES (
-			NEW.tenant_id,
-			strftime('%Y-%m-%dT%H:00:00Z', substr(NEW.timestamp, 1, 19) || 'Z'),
-			CASE WHEN NEW.country = '' THEN 'UNKNOWN' ELSE NEW.country END,
-			CASE WHEN NEW.direction = '' THEN 'OUTBOUND' ELSE NEW.direction END,
-			NEW.bytes_in,
-			NEW.bytes_out,
-			1,
-			CASE WHEN NEW.action = 'BLOCK' THEN 1 ELSE 0 END,
-			CASE WHEN NEW.bytes_in + NEW.bytes_out > 0 THEN 1 ELSE 0 END
-		)
-		ON CONFLICT(tenant_id, hour_bucket, country, direction) DO UPDATE SET
-			bytes_in = bandwidth_buckets.bytes_in + excluded.bytes_in,
-			bytes_out = bandwidth_buckets.bytes_out + excluded.bytes_out,
-			flow_count = bandwidth_buckets.flow_count + 1,
-			block_count = bandwidth_buckets.block_count + excluded.block_count,
-			measured_count = bandwidth_buckets.measured_count + excluded.measured_count;
-
-		INSERT INTO topology_edges_cube (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action, total_bytes, flow_count, measured_flows, last_seen_at)
-		VALUES (
-			NEW.tenant_id,
-			strftime('%Y-%m-%d', substr(NEW.timestamp, 1, 19) || 'Z'),
-			NEW.src_ip,
-			NEW.dst_ip,
-			NEW.protocol,
-			NEW.dst_port,
-			CASE WHEN NEW.action = '' THEN 'PERMIT' ELSE NEW.action END,
-			NEW.bytes_in + NEW.bytes_out,
-			1,
-			CASE WHEN NEW.bytes_in + NEW.bytes_out > 0 THEN 1 ELSE 0 END,
-			NEW.timestamp
-		)
-		ON CONFLICT(tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action) DO UPDATE SET
-			total_bytes = topology_edges_cube.total_bytes + excluded.total_bytes,
-			flow_count = topology_edges_cube.flow_count + 1,
-			measured_flows = topology_edges_cube.measured_flows + excluded.measured_flows,
-			last_seen_at = MAX(topology_edges_cube.last_seen_at, excluded.last_seen_at);
-	END;
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
-	}
-
-	// One-time rollup backfill if cubes are empty but events exist
-	var bwCount int64
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM bandwidth_buckets").Scan(&bwCount); err == nil && bwCount == 0 {
-		var evCount int64
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&evCount); err == nil && evCount > 0 {
-			_, _ = s.db.Exec(`
-				INSERT OR IGNORE INTO bandwidth_buckets (tenant_id, hour_bucket, country, direction, bytes_in, bytes_out, flow_count, block_count, measured_count)
-				SELECT tenant_id, strftime('%Y-%m-%dT%H:00:00Z', substr(timestamp, 1, 19) || 'Z'), country, direction,
-				       COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), COUNT(*),
-				       COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0),
-				       COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0)
-				FROM events GROUP BY tenant_id, strftime('%Y-%m-%dT%H:00:00Z', substr(timestamp, 1, 19) || 'Z'), country, direction
-			`)
-		}
 	}
 
 	// The grace release already emptied this unused copy. Retire only an
@@ -925,23 +788,6 @@ func (s *Store) initRollupCubesSchema() error {
 		}
 		if err := tx.Commit(); err != nil {
 			return err
-		}
-	}
-
-	var topoCount int64
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM topology_edges_cube").Scan(&topoCount); err == nil && topoCount == 0 {
-		var evCount int64
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&evCount); err == nil && evCount > 0 {
-			_, _ = s.db.Exec(`
-				INSERT OR IGNORE INTO topology_edges_cube (tenant_id, day_bucket, src_ip, dst_ip, protocol, dst_port, action, total_bytes, flow_count, measured_flows, last_seen_at)
-				SELECT tenant_id, strftime('%Y-%m-%d', substr(timestamp, 1, 19) || 'Z'), src_ip, dst_ip, protocol, dst_port, action,
-				       COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
-				       COALESCE(SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), 0),
-				       MAX(timestamp)
-				FROM events
-				WHERE src_ip != '127.0.0.1' AND dst_ip != '127.0.0.1' AND src_ip != '' AND dst_ip != ''
-				GROUP BY tenant_id, strftime('%Y-%m-%d', substr(timestamp, 1, 19) || 'Z'), src_ip, dst_ip, protocol, dst_port, action
-			`)
 		}
 	}
 
@@ -1301,8 +1147,12 @@ func (s *Store) DeleteDisposableEndpoint(id string) error {
 			return rollback(err)
 		}
 	}
+	if err := deleteEndpointFlows(tx, id); err != nil {
+		return rollback(err)
+	}
+	// Cached dictionary ids for this endpoint are gone with it.
+	defer s.resetFlowCaches()
 	for _, query := range []string{
-		"DELETE FROM events WHERE endpoint_id = ?",
 		"DELETE FROM anomaly_alerts WHERE endpoint_id = ?",
 		"DELETE FROM comm_profiles WHERE endpoint_id = ?",
 		"DELETE FROM enrollment_tokens WHERE endpoint_id = ?",
@@ -1701,82 +1551,15 @@ func (s *Store) GetHierarchy(tenantID string) ([]HierarchyClient, error) {
 	return result, nil
 }
 
+// InsertEvent stores one flow sample. Nothing is invented: a flow without
+// byte counts stays at zero, an unlocated one is UNKNOWN, never "US".
 func (s *Store) InsertEvent(ev Event) error {
-	ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
-	ev.Timestamp = ev.Timestamp.UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Nothing is invented here either. This path used to store a flow whose
-	// agent reported no byte counts as 1420 in and 512 out, and an unlocated
-	// flow as "US" - the same two substitutions InsertEventsBatch carried, and
-	// the same reason they are gone: a console that shows an invented number is
-	// worse than one that shows none, because the invented one is acted on.
-	// Only the batch path is live today, so leaving these here left the
-	// fabrication one caller away from coming back.
-	if ev.Country == "" {
-		ev.Country = CountryUnknown
-	}
-
-	var obsVal interface{}
-	if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
-		obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
-	}
-
-	_, err := s.db.Exec(
-		"INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country, ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-		ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
-	)
-	return err
+	return s.insertFlows([]Event{ev})
 }
 
+// InsertEventsBatch stores flow samples in one transaction (flows.go).
 func (s *Store) InsertEventsBatch(events []Event) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`
-		INSERT INTO events (tenant_id, endpoint_id, timestamp, layer, action, direction, protocol, src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, country, process_path, process_id, domain, sni, process_instance_id, parent_pid, parent_process_instance_id, command_line, user_identity, executable_sha256, attribution_status, observed_at, observation_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, ev := range events {
-		ev.SrcIP, ev.DstIP = canonicalAddress(ev.SrcIP), canonicalAddress(ev.DstIP)
-		ev.Timestamp = ev.Timestamp.UTC()
-		if ev.TenantID == "" {
-			ev.TenantID = "default"
-		}
-		if ev.Country == "" {
-			ev.Country = CountryUnknown
-		}
-		var obsVal interface{}
-		if ev.ObservedAt != nil && !ev.ObservedAt.IsZero() {
-			obsVal = ev.ObservedAt.UTC().Format(time.RFC3339Nano)
-		}
-		if _, err := stmt.Exec(
-			ev.TenantID, ev.EndpointID, ev.Timestamp, ev.Layer, ev.Action, ev.Direction, ev.Protocol,
-			ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.BytesIn, ev.BytesOut, ev.Country,
-			ev.ProcessPath, ev.ProcessID, ev.Domain, ev.SNI,
-			ev.ProcessInstanceID, ev.ParentPID, ev.ParentProcessInstanceID, ev.CommandLine, ev.UserIdentity, ev.ExecutableSHA256, ev.AttributionStatus, obsVal, ev.Observation,
-		); err != nil {
-			return fmt.Errorf("insert event batch: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit event batch: %w", err)
-	}
-	return nil
+	return s.insertFlows(events)
 }
 
 func (s *Store) ListEvents(tenantID string, limit int) ([]Event, error) {
@@ -2728,7 +2511,7 @@ func (s *Store) analyticsSummaryUncached(tenantID string) (*AnalyticsSummary, er
 	// what selects the window.
 	timelineQuery := `SELECT CAST(strftime('%s', substr(timestamp, 1, 19) || 'Z') AS INTEGER) / ? AS bucket,
 		COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
-		COALESCE(SUM(CASE WHEN action='BLOCK' THEN 1 ELSE 0 END), 0)
+		COALESCE(SUM(CASE WHEN action='BLOCK' THEN samples ELSE 0 END), 0)
 		FROM events WHERE timestamp >= ?`
 	timelineArgs := []interface{}{bucketMinutes * 60, windowStart}
 	if tenantID != "" {
@@ -2906,7 +2689,7 @@ func (s *Store) diurnalProfilesLocked(tenantID string) (map[int]int64, map[int]i
 	// Include observations within partial boundary hours, not rounded hourly totals.
 	hourly := func(from, to time.Time) (map[int]int64, error) {
 		out := make(map[int]int64)
-		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COUNT(*)
+		query := `SELECT CAST(strftime('%H', substr(timestamp, 1, 19) || 'Z') AS INTEGER) AS hr, COALESCE(SUM(samples), 0)
    FROM events WHERE timestamp >= ? AND timestamp < ?`
 		args := []interface{}{from.UTC(), to.UTC()}
 		if tenantID != "" {
@@ -3205,14 +2988,14 @@ func (s *Store) topologyGraphBetween(cutoff, to time.Time, timeWindow time.Durat
 		}
 	}
 
-	query := `SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COUNT(*),
- SUM(CASE WHEN bytes_in + bytes_out > 0 THEN 1 ELSE 0 END), MAX(timestamp)
+	query := `SELECT src_ip, dst_ip, protocol, dst_port, action, COALESCE(SUM(bytes_in + bytes_out), 0), COALESCE(SUM(samples), 0),
+ SUM(measured_samples), MAX(timestamp)
  FROM events WHERE timestamp >= ? AND timestamp <= ? GROUP BY src_ip, dst_ip, protocol, dst_port, action`
 	if conversations != nil {
 		// Workspace evidence and edges share one grouping pass. Edge totals are
 		// folded below across process/domain groups by the same graph builder.
-		query = `SELECT src_ip,dst_ip,protocol,dst_port,action,COALESCE(SUM(bytes_in+bytes_out),0),COUNT(*),
- SUM(CASE WHEN bytes_in+bytes_out>0 THEN 1 ELSE 0 END),MAX(timestamp),endpoint_id,process_path,
+		query = `SELECT src_ip,dst_ip,protocol,dst_port,action,COALESCE(SUM(bytes_in+bytes_out),0),COALESCE(SUM(samples),0),
+ SUM(measured_samples),MAX(timestamp),endpoint_id,process_path,
  COALESCE(NULLIF(sni,''),domain,''),CASE WHEN sni<>'' THEN 'TLS SNI' WHEN domain<>'' THEN 'reported domain' ELSE '' END,MIN(timestamp)
  FROM events WHERE timestamp>=? AND timestamp<=?
  GROUP BY src_ip,dst_ip,protocol,dst_port,action,endpoint_id,process_path,COALESCE(NULLIF(sni,''),domain,''),

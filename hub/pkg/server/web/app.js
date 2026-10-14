@@ -6810,7 +6810,36 @@
         h("button", { cls: "btn", type: "button", text: "Export this page (JSON)", on: {click: function () { downloadText("ominull-audit-page.json", JSON.stringify({exported_at:new Date().toISOString(), scope:"current authorized page", filter:auditHistory.filter, entries:state.audit},null,2)); }} })),
       h("p", {text: "Page " + (auditHistory.previous.length+1) + " · " + state.audit.length + " entries · up to 100 per page. Older pages retain the original snapshot. Time sorting applies to this page."}),
       Object.values(auditHistory.filter).some(Boolean) ? h("p", {text: "Filters: " + Object.keys(auditHistory.filter).filter(function (key) {return auditHistory.filter[key];}).map(function (key) {return key + " = " + auditHistory.filter[key];}).join(" · ")}) : null,
-      card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows))));
+      card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows)),
+      dataPerEndpointCard()));
+  }
+
+  /* What the hub keeps, per endpoint-day and per router-client-day, against
+     its retention budgets (GET /api/v1/storage/report, rebuilt hourly by the
+     retention sweep). */
+  function dataPerEndpointCard() {
+    var d = state.storageReport;
+    var body = h("div", { cls: "card-body stack" });
+    if (d === undefined) body.appendChild(h("div", { cls: "empty", role: "status", text: "Loading the storage report\u2026" }));
+    else if (d && d.error) body.appendChild(h("div", { cls: "empty", role: "status", text: d.status === 403 ? "Only a hub operator can see the storage report." : "Could not read the storage report: " + d.error }));
+    else if (!d || d.pending || !d.report) body.appendChild(h("div", { cls: "empty", role: "status", text: "Not measured yet: the hub builds this report after its first retention sweep." }));
+    else {
+      var r = d.report, mb = function (v, places) { return (Number(v) || 0).toFixed(places === undefined ? 2 : places) + " MB"; };
+      if (r.over_budget && r.over_budget.length) body.appendChild(h("p", { cls: "note note-warn", role: "alert", text: "Over budget: " + r.over_budget.join(" \u00b7 ") }));
+      if (r.migration && r.migration.pending) body.appendChild(h("p", { cls: "note", text: "Moving the old flow table into the compact layout; sizes settle when it finishes." }));
+      body.appendChild(h("p", { text: "Busiest endpoint " + mb(r.hot_busy_mb_per_day) + "/day (budget " + r.budgets.hot_busy_mb_per_day + ") \u00b7 typical " + mb(r.hot_typical_mb_per_day) + "/day (budget " + r.budgets.hot_typical_mb_per_day + ") \u00b7 retained " + mb(r.retained_mb_per_endpoint_day, 3) + " per endpoint-day (budget " + r.budgets.retained_mb_per_endpoint_day + ") \u00b7 router " + mb(r.router_mb_per_client_day, 3) + " per client-day (budget " + r.budgets.router_mb_per_client_day + ")" }));
+      body.appendChild(h("p", { cls: "dim", text: "Database " + bytes(r.db_bytes) + " \u00b7 growing " + mb(r.db_growth_mb_per_day, 1) + "/day \u00b7 hub memory " + bytes(r.hub_rss_bytes) + " \u00b7 " + r.flow_indexes + " flow indexes \u00b7 " + r.cold_segments + " cold files (" + bytes(r.cold_bytes) + ") \u00b7 measured " + new Date(r.generated_at).toLocaleString() }));
+      var unit = function (t) { return t.scope === "router" ? " per client-day" : t.scope === "endpoint" ? " per endpoint-day" : ""; };
+      body.appendChild(simpleTable(["Data", "Kept", "Size", "Per day, all sources", "Per unit-day"], (r.types || []).map(function (t) {
+        return [t.label, t.tier === "retained" ? "Retained" : "Hot", bytes((t.bytes || 0) + (t.index_bytes || 0)),
+          t.window_days ? mb(t.mb_per_day) : "\u2014", t.unit_days ? mb(t.mb_per_unit_day, 3) + unit(t) : "\u2014"];
+      }), { key: "storage-types" }));
+      if ((r.endpoints || []).length) body.appendChild(simpleTable(["Endpoint", "Days measured", "Flow rows per day", "Hot MB per day"], r.endpoints.map(function (e) {
+        return [h("span", { cls: "ip", text: e.endpoint_id }), String(e.days), String(Math.round(e.rows_per_day)), mb(e.mb_per_day)];
+      }), { key: "storage-endpoints" }));
+      if ((r.projections || []).length) body.appendChild(h("p", { cls: "dim", text: "Projected at today's rates: " + r.projections.filter(function (p) { return p.endpoints >= 25 && (p.days === 30 || p.days === 90); }).map(function (p) { return p.endpoints + " endpoints \u00d7 " + p.days + " days \u2248 " + (Number(p.gb) || 0).toFixed(1) + " GB"; }).join(" \u00b7 ") }));
+    }
+    return card("Data per endpoint", body);
   }
 
 
@@ -11642,6 +11671,7 @@
       var auditScopeQuery = auditQuery();
       jobs.push(request("/api/v1/audit/logs" + auditScopeQuery).then(function (d) { if (auditScopeQuery !== auditQuery()) return; state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
+      jobs.push(request("/api/v1/storage/report").then(function (d) { state.storageReport = d || null; }).catch(function (e) { state.storageReport = { error: e.message || "request failed", status: e.status }; }));
     }
     if (state.section === "traffic") {
       var qs = trafficQuery();

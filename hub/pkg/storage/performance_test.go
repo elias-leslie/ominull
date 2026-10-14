@@ -24,7 +24,7 @@ func TestInsertEventsBatchPropagatesStatementFailure(t *testing.T) {
 	}
 	if _, err := store.db.Exec(`
 		CREATE TRIGGER reject_batch_failure_event
-		BEFORE INSERT ON events
+		BEFORE INSERT ON flows
 		WHEN NEW.dst_ip = '198.51.100.254'
 		BEGIN
 			SELECT RAISE(ABORT, 'rejected test event');
