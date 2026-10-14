@@ -104,12 +104,13 @@ Ominull separates operational concerns into three independent, non-interchangeab
   - **Privilege Separation:** The hub runs under an unprivileged `ominull` service identity. It cannot read the private response signing keys stored in `/var/lib/ominull-response-authority/keys/` (owned by `ominull-authority:ominull-authority`, mode `0700`).
   - **Socket Enforcement:** Communication with the authority occurs strictly over a local Unix domain socket with credential passing (`SO_PEERCRED`).
   - **Digest Recomputation:** The authority requires typed action payloads, independently recomputes the canonical SHA-256 action digest, and verifies that the operator's proof explicitly binds to that exact tenant, action kind, and target endpoint set. The hub cannot ask the authority to sign an arbitrary pre-computed digest.
+  - **Residual risk (open):** this protects grant-verified actions (terminal, collection, scripts). Isolation, release, agent update and mesh quarantine reach agents as hub state, not grants, so hub code execution can still change them without the owner (see 2.4; agents verifying grants for these is tracked separately). Agent updates are still limited to releases signed with the release key.
 
 #### Threat 4: Root / Hypervisor Host Compromise
 - **Threat:** An adversary gains `root` on the LXC container (LXC 150) or physical hypervisor.
 - **Mitigation & Boundary Statement:**
   - Software cannot defend itself against a compromised kernel or hypervisor under which it executes. If root inside the container is compromised, the authority daemon's memory and keys can be inspected.
-  - **Defensive Posture:** The threat model explicitly distinguishes between *hub-process compromise* (which Ominull's architecture completely neutralizes) and *hypervisor/root host compromise* (which requires hypervisor-level isolation, hardware HSMs, or remote signer nodes).
+  - **Defensive Posture:** The threat model explicitly distinguishes between *hub-process compromise* (which Ominull's architecture contains for grant-verified actions, with the residual risk listed under Threat 3) and *hypervisor/root host compromise* (which requires hypervisor-level isolation, hardware HSMs, or remote signer nodes).
   - To mitigate host risk in high-assurance environments, Ominull supports deploying `ominull-response-authority` on a physically separate signer host or air-gapped hardware appliance.
 
 #### Threat 5: Response Signer Key Compromise & Key Rotation

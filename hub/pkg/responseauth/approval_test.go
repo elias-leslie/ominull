@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"ominull/hub/pkg/response"
@@ -305,5 +308,26 @@ func TestApprovalWordsComeFromThePayload(t *testing.T) {
 	v, err = auth.RequestApproval(term)
 	if err != nil || v.Action != "Open terminal" || !strings.Contains(v.Summary, "/bin/bash on ep-1") {
 		t.Fatalf("terminal words: %+v %v", v, err)
+	}
+}
+
+// Concurrent requests must not all pass the caps on the same stale counts.
+func TestApprovalCapsHoldUnderConcurrency(t *testing.T) {
+	auth, _ := newApprovalAuthority(t)
+	const n = 40
+	var wg sync.WaitGroup
+	var ok atomic.Int32
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := auth.RequestApproval(isolateRequestFor(fmt.Sprintf("ep-%d", i))); err == nil {
+				ok.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := ok.Load(); got != 3 {
+		t.Fatalf("%d concurrent requests passed the pending cap of 3", got)
 	}
 }

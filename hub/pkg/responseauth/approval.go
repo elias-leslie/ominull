@@ -191,8 +191,16 @@ type approvalBook struct {
 	mu        sync.Mutex
 	items     map[string]*approvalRecord
 	created   map[string][]time.Time // tenant -> creation times in the last hour
+	reserved  map[string]int         // tenant -> requests between the cap check and insertion
 	counters  map[string]uint32      // approver id -> last sign count
 	approvers string                 // path of the pinned approver file
+}
+
+func (b *approvalBook) unreserveLocked(tenant string) {
+	b.reserved[tenant]--
+	if b.reserved[tenant] <= 0 {
+		delete(b.reserved, tenant)
+	}
 }
 
 func newApprovalBook(path string) *approvalBook {
@@ -202,6 +210,7 @@ func newApprovalBook(path string) *approvalBook {
 	return &approvalBook{
 		items:     map[string]*approvalRecord{},
 		created:   map[string][]time.Time{},
+		reserved:  map[string]int{},
 		counters:  map[string]uint32{},
 		approvers: path,
 	}
@@ -341,12 +350,26 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		}
 	}
 	recent := b.created[in.TenantID]
+	pending += b.reserved[in.TenantID]
 	if pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour {
 		b.mu.Unlock()
 		a.auditApproval(in.TenantID, in.Requester, "approval_refused", string(in.Kind), "", "", "denied", ErrApprovalRateLimit.Error())
 		return nil, ErrApprovalRateLimit
 	}
+	// Take both slots now, under the same lock as the check: concurrent
+	// callers must not all pass on the same stale counts. The hourly slot is
+	// spent even if signing fails below; the pending slot is handed back.
+	b.created[in.TenantID] = append(recent, now)
+	b.reserved[in.TenantID]++
 	b.mu.Unlock()
+	inserted := false
+	defer func() {
+		if !inserted {
+			b.mu.Lock()
+			b.unreserveLocked(in.TenantID)
+			b.mu.Unlock()
+		}
+	}()
 
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
@@ -400,7 +423,8 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	b.mu.Lock()
 	b.items[stmt.ID] = rec
-	b.created[in.TenantID] = append(b.created[in.TenantID], now)
+	b.unreserveLocked(in.TenantID)
+	inserted = true
 	view := rec.view
 	b.mu.Unlock()
 	a.auditApproval(in.TenantID, in.Requester, "approval_requested", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success", stmt.Action+": "+stmt.Summary)
