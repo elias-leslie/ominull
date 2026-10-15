@@ -574,8 +574,11 @@ func (s *Store) CancelJob(tenantID, jobID, requestedBy string) error {
 		return nil // already terminal
 	}
 
+	// A job no agent has taken yet (queued, or offered without an ack) is
+	// withdrawn outright: the agent's ack is refused, and agents run a job only
+	// after the hub accepts its ack. A taken job can only be asked to stop.
 	targetState := StateCancelRequested
-	if currentState == string(StateQueued) {
+	if currentState == string(StateQueued) || currentState == string(StateOffered) {
 		targetState = StateCancelled
 	}
 

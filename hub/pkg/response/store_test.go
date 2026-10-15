@@ -167,3 +167,41 @@ func TestStore_JobLifecycleAndTransitions(t *testing.T) {
 		t.Fatalf("expected job2 to be in cancelled state")
 	}
 }
+
+// TestStore_CancelOfferedJob: a job offered to an agent that has not acked it
+// is withdrawn outright, and the agent's late ack is refused. Cancelling it
+// used to fail (offered -> cancel_requested is not a transition).
+func TestStore_CancelOfferedJob(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	grant := &EndpointGrant{
+		Version: GrantVersion, GrantID: "grant-offered", TenantID: "t", EndpointID: "ep",
+		ActionKind: ActionKindScriptExec, OperatorID: "op", IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+	}
+	job, err := store.CreateJob("t", "ep", ActionKindScriptExec, "op", grant, "{}", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers, err := store.OfferPendingJobs("t", "ep", 4, time.Minute)
+	if err != nil || len(offers) != 1 {
+		t.Fatalf("offer: %v %d", err, len(offers))
+	}
+	if err := store.CancelJob("t", job.ID, "op"); err != nil {
+		t.Fatalf("cancelling an offered job: %v", err)
+	}
+	got, err := store.GetJob("t", job.ID)
+	if err != nil || got.State != StateCancelled {
+		t.Fatalf("state after cancel: %v %v, want cancelled", got.State, err)
+	}
+	if err := store.AcknowledgeJob("t", "ep", job.ID, offers[0].LeaseID, true, ""); err == nil {
+		t.Error("the agent's ack of a withdrawn job was accepted")
+	}
+}

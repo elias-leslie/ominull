@@ -2703,6 +2703,14 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
         if (!RunHubCurl(config, ack_url, ack_body, ack_resp, sizeof(ack_resp))) {
             continue;
         }
+        // curl succeeds on any HTTP answer. A refused ack (the job was
+        // cancelled, or this lease expired and the job went to another offer)
+        // means the job is not ours to run.
+        long ack_status = SplitHubStatus(ack_resp);
+        if (ack_status < 200 || ack_status >= 300) {
+            fprintf(stderr, "[!] Hub refused the ack for job %s (HTTP %ld); not running it\n", offer->job_id, ack_status);
+            continue;
+        }
 
         // 4. Action Dispatcher: Check if action kind is recognized and supported
         if (strcmp(offer->kind, "forensic_collection") == 0) {
