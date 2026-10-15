@@ -68,11 +68,14 @@ func TestTrafficWindowTotalsRankingsAndDistributionsAgree(t *testing.T) {
 func TestTopologyWindowDoesNotIncludeEarlierDailyTotals(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now().UTC()
+	if since := now.Sub(now.Truncate(24 * time.Hour)); since < 2*time.Second {
+		// Just past midnight there is no earlier same-day fixture: wait for
+		// one rather than skip (a skipped required test fails acceptance).
+		time.Sleep(2*time.Second - since)
+		now = time.Now().UTC()
+	}
 	dayStart := now.Truncate(24 * time.Hour)
 	window := now.Sub(dayStart) / 2
-	if window < time.Second {
-		t.Skip("midnight boundary has no earlier same-day fixture")
-	}
 	for _, ev := range []Event{
 		{TenantID: "default", EndpointID: "test-host", Timestamp: dayStart, SrcIP: "10.0.4.2", DstIP: "198.51.100.9", Protocol: 6, Action: "PERMIT", BytesOut: 1000},
 		{TenantID: "default", EndpointID: "test-host", Timestamp: now, SrcIP: "10.0.4.2", DstIP: "198.51.100.9", Protocol: 6, Action: "PERMIT", BytesOut: 10},
@@ -354,11 +357,14 @@ func TestEventTimeZonesDoNotChangeWindowMembership(t *testing.T) {
 func TestDiurnalProfileIncludesPartialBoundaryHour(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now().UTC()
+	if left := now.Truncate(time.Hour).Add(time.Hour).Sub(now); left < time.Second {
+		// The partial hour needs a second of room: wait into the next hour
+		// rather than skip.
+		time.Sleep(left + 10*time.Millisecond)
+		now = time.Now().UTC()
+	}
 	from := now.Add(-24 * time.Hour)
 	remaining := from.Truncate(time.Hour).Add(time.Hour).Sub(from)
-	if remaining < time.Second {
-		t.Skip("boundary fixture needs at least a second inside the partial hour")
-	}
 	at := from.Add(remaining / 2)
 	if err := s.InsertEvent(Event{TenantID: "default", EndpointID: "test-host", Timestamp: at, SrcIP: "10.0.4.2", DstIP: "2001:db8::9", Protocol: 6}); err != nil {
 		t.Fatal(err)
