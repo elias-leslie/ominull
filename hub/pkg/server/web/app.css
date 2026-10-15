@@ -409,6 +409,11 @@ a {
   display: none;
 }
 
+/* Pages the hub renders itself are plain links in the rail. */
+a.rail-btn {
+  text-decoration: none;
+}
+
 .rail-btn:hover {
   background: var(--raised);
   color: var(--ink);

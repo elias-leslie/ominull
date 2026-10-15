@@ -1,0 +1,167 @@
+/* Server-rendered console pages. Tokens and shared parts (.btn, .st, .card)
+ * come from app.css; this file only lays a page out. Same scale rules. */
+
+body.page {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  font-size: var(--t-4);
+  margin: 0;
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+}
+
+.page-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.page-top h1 {
+  font-family: var(--f-cond);
+  font-size: var(--t-5);
+  font-weight: 600;
+  margin: 0;
+}
+
+.page-back {
+  color: var(--brand);
+  text-decoration: none;
+  font-size: var(--t-3);
+}
+
+.page-back:hover,
+.page-back:focus-visible {
+  text-decoration: underline;
+}
+
+.page-who {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: var(--t-3);
+}
+
+.page-main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--s-4);
+}
+
+.page-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.page-filter label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--t-2);
+  color: var(--ink-2);
+}
+
+.page-filter select {
+  min-width: 12em;
+  max-width: 100%;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-4);
+}
+
+.page-note {
+  color: var(--ink-2);
+  font-size: var(--t-3);
+  margin: 0 0 var(--s-4);
+}
+
+.page-problem {
+  color: var(--crit);
+  font-size: var(--t-3);
+  margin: 0 0 var(--s-3);
+}
+
+.tl-day h2 {
+  font-family: var(--f-cond);
+  font-size: var(--t-2);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: var(--s-5) 0 var(--s-2);
+}
+
+.tl {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: var(--panel);
+}
+
+.tl-item {
+  display: grid;
+  grid-template-columns: 3.5em 8.5em minmax(0, 1fr);
+  gap: var(--s-3);
+  align-items: baseline;
+  padding: var(--s-2) var(--s-3);
+  border-top: 1px solid var(--line);
+}
+
+.tl-item:first-child {
+  border-top: 0;
+}
+
+.tl-item time {
+  font-family: var(--f-mono);
+  font-size: var(--t-3);
+  color: var(--ink-2);
+}
+
+.tl-what p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tl-title {
+  font-size: var(--t-4);
+}
+
+.tl-meta {
+  font-size: var(--t-3);
+  color: var(--ink-2);
+}
+
+.tl-meta a {
+  color: var(--brand);
+}
+
+.tl-detail {
+  font-size: var(--t-3);
+  color: var(--ink-3);
+}
+
+@media (max-width: 600px) {
+  .tl-item {
+    grid-template-columns: 3.5em minmax(0, 1fr);
+  }
+  .tl-item .tl-what {
+    grid-column: 1 / -1;
+  }
+  .page-filter label,
+  .page-filter select {
+    width: 100%;
+  }
+}

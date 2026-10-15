@@ -1,0 +1,31 @@
+{{define "content"}}{{with .Body}}
+<form class="page-filter" method="get" action="/console/timeline">
+  <label>Host
+    <select name="endpoint">{{range .Hosts}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  </label>
+  <label>When
+    <select name="range">{{range .Ranges}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  </label>
+  <button class="btn btn-primary" type="submit">Show</button>
+</form>
+{{range .Problems}}<p class="page-problem" role="alert">{{.}}</p>{{end}}
+<p class="page-note">{{if .Count}}{{.Count}} events for {{.HostName}}, {{.RangeName}}. Times in {{.Zone}}.{{if .Truncated}} Only the newest are shown; pick one host or a shorter window to see the rest.{{end}}{{else}}Nothing recorded for {{.HostName}} in the {{.RangeName}}.{{end}}</p>
+{{range .Days}}
+<section class="tl-day">
+  <h2>{{.Label}}</h2>
+  <ol class="tl">
+  {{range .Items}}
+    <li class="tl-item">
+      <time datetime="{{.At.UTC.Format "2006-01-02T15:04:05Z07:00"}}">{{.Clock}}</time>
+      <span class="st" data-state="{{.Tone}}">{{.Kind}}</span>
+      <div class="tl-what">
+        <p class="tl-title">{{.Title}}</p>
+        <p class="tl-meta">{{if .Host}}<a href="/console/timeline?endpoint={{.HostID}}">{{.Host}}</a>{{end}}{{if and .Host .Who}} · {{end}}{{.Who}}</p>
+        {{if .Detail}}<p class="tl-detail">{{.Detail}}</p>{{end}}
+      </div>
+    </li>
+  {{end}}
+  </ol>
+</section>
+{{end}}
+{{end}}{{end}}

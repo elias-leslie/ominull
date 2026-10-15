@@ -2198,6 +2198,9 @@
         state.topoSelected = asset.ip;
         go("topology");
       }));
+      menu.appendChild(menuItem("Timeline", "i-audit", null, function () {
+        location.href = "/console/timeline?endpoint=" + encodeURIComponent(asset.endpoint.id);
+      }));
       menu.appendChild(menuItem("Copy IP address", "i-copy", "y", function () { copyAddress(asset); }));
 
       menu.appendChild(h("div", { cls: "sep" }));
@@ -11411,7 +11414,7 @@
       } catch (e) { /* not every focusable element has a selection */ }
     }
 
-    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn[data-section]"), function (b) {
       b.setAttribute("aria-current", b.getAttribute("data-section") === state.section ? "true" : "false");
     });
   }
@@ -11741,7 +11744,7 @@
 
     if (IS_ADMIN) $("rail-access").removeAttribute("hidden");
 
-    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn"), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll(".rail-btn[data-section]"), function (b) {
       b.addEventListener("click", function () { go(b.getAttribute("data-section")); });
     });
 

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="ash">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · OmniNull</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#14161a">
+<link rel="stylesheet" href="/app.css?v={{.Version}}">
+<link rel="stylesheet" href="/pages.css?v={{.Version}}">
+{{block "head" .}}{{end}}
+<script nonce="{{.Nonce}}">
+(function () {
+  var t = "ash";
+  try {
+    var v = localStorage.getItem("ominull.theme");
+    if (v === "graphite" || v === "bunker" || v === "ash" || v === "phosphor") t = v;
+  } catch (e) { /* keep the default */ }
+  document.documentElement.setAttribute("data-theme", t);
+})();
+</script>
+</head>
+<body class="page">
+<header class="page-top">
+  <a class="page-back" href="/#/{{.Back}}">&larr; Console</a>
+  <h1>{{.Title}}</h1>
+  <span class="page-who">{{.Operator}}{{if .Role}} · {{.Role}}{{end}}</span>
+</header>
+<main class="page-main" id="main">
+{{template "content" .}}
+</main>
+{{if .Script}}<script src="/{{.Script}}?v={{.Version}}" defer></script>{{end}}
+</body>
+</html>
