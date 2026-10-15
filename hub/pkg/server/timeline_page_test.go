@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/storage"
 )
 
@@ -87,5 +88,42 @@ func TestTimelinePage(t *testing.T) {
 	}
 	if body := get("?endpoint=gone", true).Body.String(); !strings.Contains(body, "not enrolled any more") {
 		t.Error("an unknown host is not reported")
+	}
+}
+
+// A terminal's audit entries name the session, not the host. The timeline
+// puts them under the host, and leaves out the reopen that every page load of
+// a terminal writes.
+func TestTimelineTerminalEntries(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-web", TenantID: "default", Hostname: "web-01", IP: "10.0.0.11"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	grant := &response.EndpointGrant{Version: response.GrantVersion, GrantID: "g1", TenantID: "default", EndpointID: "ep-web",
+		ActionKind: response.ActionKindTerminalSession, OperatorID: "admin", IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}
+	sess, err := srv.terminalMgr.CreateSession("default", "ep-web", "admin", "/bin/bash", grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, action := range []string{"TERMINAL_SESSION_CREATED", "TERMINAL_SESSION_REATTACHED", "TERMINAL_SESSION_DETACHED", "TERMINAL_SESSION_CLOSED"} {
+		if err := store.RecordAudit(storage.AuditEntry{ID: "t-" + action, TenantID: "default", Username: "admin", Action: action, Resource: sess.SessionID,
+			Details: "grant g1 session " + sess.SessionID, Timestamp: now.Add(time.Duration(i-10) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := srv.buildTimeline("ep-web", "24h", now)
+	var titles []string
+	for _, d := range body.Days {
+		for _, it := range d.Items {
+			titles = append(titles, it.Title)
+			if it.Host != "web-01" || it.Detail != "" {
+				t.Errorf("%q: host %q detail %q", it.Title, it.Host, it.Detail)
+			}
+		}
+	}
+	if strings.Join(titles, "|") != "Ended a terminal|Opened a terminal" {
+		t.Errorf("terminal entries %q", titles)
 	}
 }

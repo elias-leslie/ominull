@@ -682,36 +682,6 @@
     });
   }
 
-  /* Bytes for the extra key row. appCursor is DECCKM (vim, less, htop):
-     arrows are ESC O x there and ESC [ x elsewhere; with Ctrl they carry the
-     xterm modifier ;5. */
-  var TERM_KEYS = {
-    esc: "\x1b", tab: "\t", up: "A", down: "B", right: "C", left: "D",
-    home: "\x1b[H", end: "\x1b[F", pgup: "\x1b[5~", pgdn: "\x1b[6~",
-    pipe: "|", tilde: "~", slash: "/", dash: "-"
-  };
-  function termKeyBytes(name, ctrl, appCursor) {
-    var v = TERM_KEYS[name];
-    if (v === undefined) return "";
-    if (v.length === 1 && /[ABCD]/.test(v)) {
-      if (ctrl) return "\x1b[1;5" + v;
-      return (appCursor ? "\x1bO" : "\x1b[") + v;
-    }
-    if (ctrl && v.length === 1) return termCtrlChar(v) || v;
-    return v;
-  }
-  /* What a sticky Ctrl does to the next typed character: letters and
-     @ [ \ ] ^ _ map to C0 controls, space and 2 to NUL, ? to DEL. Anything
-     else goes through unchanged. */
-  function termCtrlChar(ch) {
-    if (!ch || ch.length !== 1) return "";
-    var c = ch.charCodeAt(0);
-    if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
-    if (c >= 64 && c <= 95) return String.fromCharCode(c - 64);
-    if (ch === " " || ch === "2") return "\x00";
-    if (ch === "?") return "\x7f";
-    return "";
-  }
   /* approval-core:end */
 
   /* The approval request rides plain fetch rather than request(): a poll is
@@ -1234,14 +1204,8 @@
           return;
         }
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
-        if (base === "/api/v1/terminal/sessions") {
-          var tid = (/[?&]id=([^&]+)/.exec(path) || [])[1];
-          var list = DEMO_TERMINALS;
-          if (tid) { var one = list.filter(function (t) { return t.session_id === decodeURIComponent(tid); })[0]; resolve(one || {}); return; }
-          resolve({ sessions: list });
-          return;
-        }
-        if (base === "/api/v1/terminal/frames") { resolve({ frames: [] }); return; }
+        /* Terminals live on the terminal page, which demo mode does not serve. */
+        if (base === "/api/v1/terminal/sessions") { resolve({ sessions: [] }); return; }
         /* Learning mode reads answer empty in the demo console: the section
            renders and explains itself rather than throwing on a hub that is
            not there. */
@@ -1408,34 +1372,7 @@
     return out;
   }
 
-  /* Demo terminal sessions. The relay itself is DemoTermSocket. */
-  var DEMO_TERMINALS = [];
-  function demoTerminal(base, body, path, method) {
-    var now = new Date();
-    if (base === "/api/v1/terminal/sessions" && method === "DELETE") {
-      var did = decodeURIComponent((/[?&]id=([^&]+)/.exec(path || "") || [])[1] || "");
-      DEMO_TERMINALS.forEach(function (t) { if (t.session_id === did) { t.state = "closed"; t.closed_at = now.toISOString(); t.close_reason = "operator_closed"; } });
-      return { status: "closed" };
-    }
-    if (base === "/api/v1/terminal/sessions") {
-      var t = {
-        session_id: "demo" + Math.random().toString(16).slice(2, 10) + "-0000-4000-8000-000000000000",
-        endpoint_id: body && body.endpoint_id, program: (body && body.program) || "/bin/bash",
-        state: "active", operator_id: OPERATOR || "admin", created_at: now.toISOString(), started_at: now.toISOString(),
-        expires_at: new Date(now.getTime() + 3600000).toISOString(), idle_expires_at: new Date(now.getTime() + 900000).toISOString(),
-        recording_bytes: 0, max_recording_bytes: 10485760, recording_state: "recording", frame_count: 0
-      };
-      DEMO_TERMINALS.push(t);
-      return t;
-    }
-    if (base === "/api/v1/terminal/sessions/attach") {
-      return DEMO_TERMINALS.filter(function (x) { return x.session_id === (body && body.session_id); })[0] || {};
-    }
-    return null;
-  }
-
   function demoMutate(base, body, path, method) {
-    if (base.indexOf("/api/v1/terminal/") === 0) return demoTerminal(base, body, path, method);
     var eps = DEMO_CACHE["/api/v1/endpoints"];
     var setIso = function (id, on) {
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
@@ -1576,70 +1513,7 @@
     state.theme = name;
     document.documentElement.setAttribute("data-theme", name);
     if (persist) writeStore("ominull.theme", name);
-
-    /* A live terminal recolours with everything else. The data-theme attribute
-       is already on <html> at this point, so the tokens read here are the new
-       theme's. */
-    if (termWs) termWs.panes.forEach(function (p) {
-      if (p.term) { try { p.term.options.theme = terminalTheme(); } catch (e) {} }
-    });
   }
-
-  /* xterm cannot read CSS custom properties, so its palette has to be handed
-     to it as literal colours. It was a hardcoded GitHub-dark set maintained in
-     two places that had to be kept in sync by hand - here and 25 !important
-     rules in app.css - and it ignored all four of the console's themes, so a
-     Phosphor operator got a blue-black rectangle in the middle of a green
-     console. These read the real tokens off the document, so there is one
-     source of truth and a theme switch can re-derive them.
-
-     ANSI 0-15 are not tokens and should not be: the console's own palette is
-     four hues reserved for asset state, while a shell needs sixteen
-     distinguishable colours for other people's programs. They are derived
-     from the console's semantic tokens where one exists and are fixed,
-     theme-independent values otherwise. */
-  function cssVar(name, fallback) {
-    var v = getComputedStyle(document.documentElement).getPropertyValue(name);
-    v = (v || "").trim();
-    return v || fallback;
-  }
-
-  /* xterm's palette. Every colour comes from a --term-* token in app.css, so
-   * the emulator, the .terminal-container fallback rules and the four themes
-   * are one definition instead of three that drifted. applyTheme re-derives
-   * this for a live terminal, so switching theme with a shell open recolours
-   * it in place rather than leaving a blue-black rectangle behind. */
-  function terminalTheme() {
-    function ansi(n, fallback) { return cssVar("--term-ansi-" + n, fallback); }
-    var bg = cssVar("--term-bg", "#14161A");
-    var fg = cssVar("--term-fg", "#DADDE3");
-    return {
-      background: bg,
-      foreground: fg,
-      cursor: cssVar("--brand", "#8FA9E8"),
-      cursorAccent: bg,
-      selectionBackground: cssVar("--raised", "#22262E"),
-      black: ansi(0, "#2C313A"),
-      red: ansi(1, "#CD7670"),
-      green: ansi(2, "#73B87D"),
-      yellow: ansi(3, "#E6BE6D"),
-      blue: ansi(4, "#689BDB"),
-      magenta: ansi(5, "#BC8CFF"),
-      cyan: ansi(6, "#39C5CF"),
-      white: ansi(7, "#949BA8"),
-      brightBlack: ansi(8, "#878E9B"),
-      brightRed: ansi(9, "#D35A55"),
-      brightGreen: ansi(10, "#8FD48F"),
-      brightYellow: ansi(11, "#F0CE84"),
-      brightBlue: ansi(12, "#8FA9E8"),
-      brightMagenta: ansi(13, "#D2A8FF"),
-      brightCyan: ansi(14, "#6FDDE4"),
-      brightWhite: ansi(15, "#DADDE3")
-    };
-  }
-
-  /* The live terminal, if one is open. applyTheme re-colours it in place. */
-  var liveTerminal = null;
 
   /* ------------------------------------------------------- asset merging */
 
@@ -5170,8 +5044,7 @@
   }
 
   /* Detaches the current sheet's DOM without running its cleanup, so it can be
-     put back when the sheet stacked on top of it closes. A live terminal keeps
-     its socket and its xterm instance while a picker sits over it. */
+     put back when the sheet stacked on top of it closes. */
   function suspendSheet() {
     if (!sheetEl) return null;
     var frame = { el: sheetEl, scrim: sheetScrim, opener: sheetEl._opener, trap: sheetEl._trap };
@@ -7252,10 +7125,9 @@
 
   /* ------------------------------------------------------------ terminal */
 
-  /* The hub's caps: three live shells per host, eight per tenant. Detached
-     sessions count; they are still running. */
+  /* The hub's cap: three live shells per host. Detached sessions count;
+     they are still running. */
   var TERM_ENDPOINT_CAP = 3;
-  var TERM_TENANT_CAP = 8;
 
   function terminalSessionIsLive(t) {
     return !!t && (t.state === "active" || t.state === "detached" || t.state === "connecting" || t.state === "waiting");
@@ -7270,177 +7142,28 @@
     return liveTerminalsFor(ep)[0] || null;
   }
 
-  function liveTerminalCount() {
-    return arrayOf(state.terminalSessions).filter(terminalSessionIsLive).length;
-  }
-
-  /* What the agent says its PTY backend offers ({"terminal":{"programs":[]}}
-     inside response_capabilities). null when the agent does not report it
-     (older agents); the hub then falls back to the platform default. */
-  function terminalPrograms(ep) {
-    var raw = ep && ep.response_capabilities;
-    if (!raw) return null;
-    var caps = raw;
-    if (typeof raw === "string") { try { caps = JSON.parse(raw); } catch (e) { return null; } }
-    if (!caps || typeof caps !== "object") return null;
-    return arrayOf(caps.terminal && caps.terminal.programs).filter(function (p) { return typeof p === "string" && p; });
-  }
-
   function terminalIdentity(os) {
     return String(os || "").toLowerCase().indexOf("windows") >= 0 ? "LocalSystem" : "root";
   }
 
-  /* Opening a shell asks the owner. The request goes to the hub, the hub asks
-     the owner's phone, and the shell starts only after one passkey tap. No
-     response unlock and no browser proof: the approval is the authorization,
-     and it names this host and this program. */
+  /* The terminal is its own page (/console/terminal, server-rendered with
+     web/terminal.js). Opening one asks the owner's phone there; reattaching
+     is a link to the session. */
+  function terminalPage(query) {
+    location.assign("/console/terminal" + (query ? "?" + query : ""));
+  }
+
   function launchTerminalShell(asset) {
-    if (!asset || !asset.endpoint) {
-      toast("Cannot open a terminal: this host has no enrolled agent.", "crit");
-      return;
-    }
-    var ep = asset.endpoint;
-    var host = asset.name || asset.ip || ep.id;
-    if (liveTerminalsFor(ep).length >= TERM_ENDPOINT_CAP) {
-      toast(host + " already has " + TERM_ENDPOINT_CAP + " live terminals, the most a host can hold. Reattach one or end one first.", "warn");
-      return;
-    }
-    if (liveTerminalCount() >= TERM_TENANT_CAP) {
-      toast("This tenant already has " + TERM_TENANT_CAP + " live terminals, the most it can hold. End one first.", "warn");
-      return;
-    }
-    var isWindows = terminalIdentity(ep.os) === "LocalSystem";
-    var identity = terminalIdentity(ep.os);
-
-    var offered = terminalPrograms(ep);
-    if (offered && !offered.length) {
-      toast(host + " reports no terminal support.", "warn");
-      return;
-    }
-    var progSel = h("select", { id: "shell-prog-select" });
-    if (offered) {
-      offered.forEach(function (prog) { progSel.appendChild(h("option", { value: prog, text: prog })); });
-    } else if (isWindows) {
-      progSel.appendChild(h("option", { value: "powershell.exe", text: "powershell.exe (Windows PowerShell)" }));
-      progSel.appendChild(h("option", { value: "cmd.exe", text: "cmd.exe (Command Prompt)" }));
-      progSel.appendChild(h("option", { value: "pwsh.exe", text: "pwsh.exe (PowerShell 7, if installed)" }));
-    } else {
-      progSel.appendChild(h("option", { value: "/bin/bash", text: "/bin/bash" }));
-      progSel.appendChild(h("option", { value: "/bin/sh", text: "/bin/sh" }));
-    }
-
-    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
-    var launchSheet = null;
-    var launchBtn = h("button", {
-      cls: "btn btn-primary",
-      type: "button",
-      text: "Ask for approval",
-      on: {
-        click: function () {
-          var prog = progSel.value;
-          launchBtn.disabled = true;
-          launchBtn.textContent = "Sending to your phone\u2026";
-          errBox.setAttribute("hidden", "");
-          ownerApproved("/api/v1/terminal/sessions", { endpoint_id: ep.id, program: prog }, {
-            label: "Open " + prog + " as " + identity + " on " + host,
-            onPending: function () { if (sheetEl === launchSheet) closeSheet(); }
-          }).then(function (summary) {
-            if (sheetEl === launchSheet) closeSheet();
-            if (!summary || !summary.session_id) { toast("The hub did not return a session.", "crit"); return; }
-            openTerminalEmulator(summary);
-          }).catch(function (err) {
-            if (sheetEl === launchSheet) {
-              launchBtn.disabled = false;
-              launchBtn.textContent = "Ask for approval";
-              if (!err || !err.handled) {
-                errBox.textContent = (err && err.message) || "The hub refused the terminal.";
-                errBox.removeAttribute("hidden");
-              }
-            } else if (!err || !err.handled) {
-              toast("Terminal refused: " + ((err && err.message) || "unknown error"), "crit");
-            }
-          });
-        }
-      }
-    });
-
-    var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: "Host: " }), h("b", { text: host }),
-        h("span", { cls: "dim-2", text: " \u00b7 " }), h("span", { cls: "ip", text: ep.id })),
-      h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: (ep.os || "Linux") + " \u00b7 runs as " }),
-        h("b", { cls: "st", "data-state": "crit", text: identity })),
-      h("p", { cls: "pending", text: "Your phone gets an approval request. Confirm it with your passkey and the shell opens here. Everything typed and shown is recorded and sealed into evidence when the session ends." }),
-      h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "shell-prog-select", text: "Program" }),
-        progSel),
-      errBox);
-
-    var foot = [
-      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
-      launchBtn
-    ];
-    openSheet("Open a terminal", body, foot, null, { stack: !!termWs });
-    launchSheet = sheetEl;
+    terminalPage(asset && asset.endpoint ? "endpoint=" + encodeURIComponent(asset.endpoint.id) : "");
   }
 
   function openLaunchEndpointShellPicker() {
-    var managed = (state.assets || []).filter(function (a) { return a.endpoint; });
-    if (!managed.length) {
-      toast("No hosts with an agent.", "warn");
-      return;
-    }
-    var sel = h("select", { id: "shell-target-picker" });
-    managed.forEach(function (a) {
-      var n = liveTerminalsFor(a.endpoint).length;
-      sel.appendChild(h("option", { value: a.key, text: (a.name || a.ip) + " (" + (a.endpoint.os || "Linux") + ")" + (n ? " \u00b7 " + n + " open" : "") }));
-    });
-    var running = arrayOf(state.terminalSessions).filter(function (t) {
-      return terminalSessionIsLive(t) && !(termWs && termWs.paneFor(t.session_id));
-    });
-    var runningList = running.length ? h("div", { cls: "stack-s" },
-      h("b", { text: "Running, not open here" }),
-      h("div", { cls: "term-running" }, running.map(function (t) {
-        var a = assetForEndpoint(t.endpoint_id);
-        return h("button", {
-          cls: "btn mini", type: "button",
-          text: "Reattach " + ((a && (a.name || a.ip)) || t.endpoint_id) + " \u00b7 " + String(t.program || "shell").split(/[\\/]/).pop() + " \u00b7 " + t.state,
-          on: { click: function () { closeSheet(); reattachTerminal(t); } }
-        });
-      }))) : null;
-    var body = h("div", { cls: "card-body stack" },
-      runningList,
-      h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "shell-target-picker", text: "New terminal on" }),
-        sel));
-    var foot = [
-      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
-      h("button", {
-        cls: "btn btn-primary", type: "button", text: "Next",
-        on: {
-          click: function () {
-            var asset = state.assetByKey[sel.value];
-            closeSheet();
-            if (asset) launchTerminalShell(asset);
-          }
-        }
-      })
-    ];
-    openSheet("Terminal", body, foot, null, { stack: !!termWs });
+    terminalPage("");
   }
 
-  /* The one reattach path. Coming back to a running shell is not a second
-     privileged action: the hub checks the caller and rotates the token. */
   function reattachTerminal(sessionSummary) {
     if (!sessionSummary || !sessionSummary.session_id) return;
-    if (!terminalSessionIsLive(sessionSummary)) {
-      toast("That session has ended. Nothing to reattach to.", "warn");
-      return;
-    }
-    /* The pane attaches inside the connect queue, so its token is the one
-       its socket carries. A refusal shows in the pane. */
-    openTerminalEmulator(sessionSummary, true);
+    terminalPage("session=" + encodeURIComponent(sessionSummary.session_id));
   }
 
   /* How the agent ends the session, per platform: the Windows agent holds the
@@ -7461,12 +7184,7 @@
         ". Unsaved work in editors on that host is lost. The recording is sealed into evidence and the session cannot be resumed.",
       detail: (sessionSummary.program || "shell") + " \u00b7 session " + String(sessionSummary.session_id).slice(0, 8) + "\u2026",
       confirmLabel: "End session",
-      stack: !!termWs,
-      onConfirm: function () {
-        var pane = termWs && termWs.paneFor(sessionSummary.session_id);
-        if (pane) pane.terminate();
-        else closeTerminalSession(sessionSummary.session_id);
-      }
+      onConfirm: function () { closeTerminalSession(sessionSummary.session_id); }
     });
   }
 
@@ -7479,772 +7197,6 @@
       .catch(function (e) {
         toast("Could not end the terminal session: " + e.message, "crit");
       });
-  }
-
-  /* xterm's scrollback, and how much recording a reattach replays. */
-  var TERM_SCROLLBACK = 5000;
-  var TERM_REPLAY_BYTES = 262144;
-  /* A stdin frame carries at most 4 KiB. Agents before 1.8.53 read one
-     8 KiB WebSocket frame at a time and end the session on a larger one, so a
-     big paste goes out as several frames. */
-  var TERM_STDIN_CHUNK = 4096;
-  /* Input typed while the relay reconnects is kept, up to this much. */
-  var TERM_INPUT_QUEUE = 65536;
-  /* Reconnect backoff tops out here and never gives up while the hub still
-     has the session: the hub keeps a detached shell for its idle window (15
-     minutes), which is the window a phone has to come back in. */
-  var TERM_RECONNECT_MAX_MS = 5000;
-  var TERM_FONT_KEY = "ominull.terminal.fontSize";
-  var TERM_FONT_MIN = 8, TERM_FONT_MAX = 28;
-
-  function termFontSize() {
-    var v = 0;
-    try { v = parseInt(localStorage.getItem(TERM_FONT_KEY), 10); } catch (e) {}
-    if (v >= TERM_FONT_MIN && v <= TERM_FONT_MAX) return v;
-    return window.innerWidth < 600 ? 12 : 13;
-  }
-
-  function b64FromBytes(bytes) {
-    var bin = "";
-    for (var i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-    return btoa(bin);
-  }
-
-  function bytesFromB64(b64) {
-    var bin = atob(b64);
-    var out = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-
-  /* The WebSocket upgrade carries the connect token in one HttpOnly cookie,
-     shared by every session on this origin. Attach-then-connect runs one at a
-     time so two panes reconnecting together do not swap tokens. */
-  var termConnectChain = Promise.resolve();
-  function termSerial(fn) {
-    var next = termConnectChain.then(fn, fn);
-    termConnectChain = next.catch(function () {});
-    return next;
-  }
-
-  /* Demo mode has no agent. This stands in for the relay socket with a tiny
-     line-echo shell, so the terminal view can be exercised and screenshotted. */
-  function DemoTermSocket(session) {
-    var self = this;
-    self.readyState = 0;
-    var line = "";
-    var prompt = "\x1b[32mdemo@" + (session.endpoint_id || "host") + "\x1b[0m:\x1b[34m~\x1b[0m$ ";
-    function out(text) {
-      var bytes = new TextEncoder().encode(text);
-      setTimeout(function () {
-        if (self.readyState === 1 && self.onmessage) self.onmessage({ data: JSON.stringify({ type: "stdout", timestamp: new Date().toISOString(), data: b64FromBytes(bytes) }) });
-      }, 5);
-    }
-    setTimeout(function () {
-      self.readyState = 1;
-      if (self.onopen) self.onopen();
-      var banner = "Demo shell. Nothing here reaches a host.\r\n" +
-        "\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m " +
-        "\x1b[31mred\x1b[0m \x1b[33myellow\x1b[0m \x1b[38;5;208m256-colour\x1b[0m \x1b[38;2;120;200;255mtruecolor\x1b[0m\r\n" +
-        "Unicode: \u00e9 \u03bb \u4e2d\u6587 \u2714 \u2588\u2593\u2592\u2591 \ud83d\udd12\r\n";
-      out(banner + prompt);
-    }, 60);
-    self.send = function (raw) {
-      var f = JSON.parse(raw);
-      self.sent = (self.sent || 0) + 1;
-      self.lastFrame = f;
-      if (f.type !== "stdin") return;
-      var text = new TextDecoder().decode(bytesFromB64(f.data));
-      self.stdinText = (self.stdinText || "") + text;
-      var echo = "";
-      for (var i = 0; i < text.length; i++) {
-        var ch = text[i];
-        if (ch === "\r") { echo += "\r\n" + (line.trim() ? line.trim() + ": demo shell, command not run\r\n" : "") + prompt; line = ""; }
-        else if (ch === "\x7f") { if (line) { line = line.slice(0, -1); echo += "\b \b"; } }
-        else if (ch === "\x03") { echo += "^C\r\n" + prompt; line = ""; }
-        else if (ch === "\x1b") { var m = /^\x1b(\[[0-9;]*[A-Za-z~]|O[A-D])/.exec(text.slice(i)); if (m) i += m[0].length - 1; }
-        else if (ch >= " ") { line += ch; echo += ch; }
-      }
-      if (echo) out(echo);
-    };
-    self.close = function () {
-      if (self.readyState === 3) return;
-      self.readyState = 3;
-      if (self.onclose) setTimeout(function () { self.onclose({ code: 1000 }); }, 0);
-    };
-  }
-
-  /* The terminal workspace: one sheet, one tab per open session. Every pane
-     keeps its own socket, so switching tabs is instant and a shell in a
-     background tab keeps streaming. Closing the sheet detaches them all; the
-     shells keep running on their hosts. */
-  var termWs = null;
-
-  function openTerminalEmulator(session, reattaching) {
-    if (!session || !session.session_id) return;
-    if (!window.Terminal || !window.FitAddon) {
-      toast("Loading the terminal\u2026");
-      loadFeature("terminal", ["vendor/xterm.js", "vendor/addon-fit.js"])
-        .then(function () { return loadFeature("terminal-unicode", ["vendor/addon-unicode11.js"]).catch(function () {}); })
-        .then(function () { openTerminalEmulator(session, reattaching); })
-        .catch(function (e) { toast(e.message, "crit"); });
-      return;
-    }
-    if (!termWs) createTermWorkspace();
-    else {
-      var guard = 0;
-      while (sheetEl && sheetEl !== termWs.sheet && guard++ < 8) closeSheet();
-    }
-    if (!termWs) return;
-    var existing = termWs.paneFor(session.session_id);
-    if (existing) {
-      termWs.activate(existing);
-      if (reattaching) existing.reconnectNow();
-      return;
-    }
-    var pane = createTerminalPane(session, !!reattaching);
-    termWs.panes.push(pane);
-    termWs.stage.appendChild(pane.el);
-    termWs.activate(pane);
-    pane.start();
-  }
-
-  function createTermWorkspace() {
-    var ws = { panes: [], active: null, ctrlArmed: false };
-    termWs = ws;
-    ws.paneFor = function (id) {
-      for (var i = 0; i < ws.panes.length; i++) if (ws.panes[i].session.session_id === id) return ws.panes[i];
-      return null;
-    };
-
-    var tabs = h("div", { cls: "term-tabs", role: "tablist", "aria-label": "Open terminals" });
-    var newBtn = h("button", { cls: "btn mini term-new", type: "button", text: "+ New", title: "Open or reattach another terminal",
-      on: { click: function () { openLaunchEndpointShellPicker(); } } });
-    var tabBar = h("div", { cls: "term-tabbar" }, tabs, newBtn);
-    var stage = h("div", { cls: "term-stage" });
-    ws.stage = stage;
-
-    function renderTabs() {
-      clear(tabs);
-      ws.panes.forEach(function (p) {
-        var selected = p === ws.active;
-        var tab = h("button", {
-          cls: "term-tab", type: "button", role: "tab", "aria-selected": selected ? "true" : "false",
-          "data-state": p.tone(), title: p.longLabel(),
-          on: { click: function () { ws.activate(p); } }
-        }, h("i", { cls: "term-dot", "aria-hidden": "true" }), h("span", { text: p.shortLabel() }));
-        var x = h("button", { cls: "term-tab-x", type: "button", "aria-label": "Detach " + p.shortLabel(), title: "Detach this viewer. The shell keeps running.",
-          on: { click: function (e) { e.stopPropagation(); ws.detachPane(p); } } }, icon("i-close", true));
-        tabs.appendChild(h("span", { cls: "term-tab-wrap", "data-selected": selected ? "true" : "false" }, tab, x));
-      });
-    }
-    ws.renderTabs = renderTabs;
-
-    ws.activate = function (p) {
-      ws.active = p;
-      ws.panes.forEach(function (q) { q.el.hidden = q !== p; });
-      renderTabs();
-      p.shown();
-      setTimeout(function () { p.focus(); }, 0);
-    };
-
-    ws.detachPane = function (p) {
-      p.dispose(false);
-      ws.panes = ws.panes.filter(function (q) { return q !== p; });
-      if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
-      if (!p.ended) toast("Detached. " + p.shortLabel() + " keeps running; reattach from + New or the host row.", "ok");
-      if (!ws.panes.length) { closeSheet(); refresh(); return; }
-      ws.activate(ws.panes[ws.panes.length - 1]);
-    };
-
-    /* The extra key row: the keys a phone keyboard does not have. Buttons
-       keep focus in xterm's textarea (pointerdown is cancelled) so the soft
-       keyboard stays up. Ctrl is sticky: it applies to the next key, from
-       this row or the keyboard. */
-    var ctrlBtn = null;
-    function setCtrl(on) {
-      ws.ctrlArmed = on;
-      if (ctrlBtn) ctrlBtn.setAttribute("aria-pressed", on ? "true" : "false");
-    }
-    ws.setCtrl = setCtrl;
-    function keyBtn(label, name, title) {
-      var b = h("button", { cls: "term-key", type: "button", text: label, title: title || label, "data-key": name });
-      b.addEventListener("pointerdown", function (e) { e.preventDefault(); });
-      b.addEventListener("click", function () {
-        var p = ws.active;
-        if (!p) return;
-        if (name === "ctrl") { setCtrl(!ws.ctrlArmed); p.focus(); return; }
-        if (name === "paste") { p.pasteFromClipboard(); return; }
-        var bytes = termKeyBytes(name, ws.ctrlArmed, p.appCursor());
-        setCtrl(false);
-        if (bytes) p.input(bytes);
-        p.focus();
-      });
-      return b;
-    }
-    ctrlBtn = keyBtn("Ctrl", "ctrl", "Ctrl: applies to the next key");
-    ctrlBtn.setAttribute("aria-pressed", "false");
-    var keyRow = h("div", { cls: "term-keys", role: "toolbar", "aria-label": "Extra keys" },
-      ctrlBtn, keyBtn("Esc", "esc"), keyBtn("Tab", "tab"),
-      keyBtn("\u2190", "left", "Left"), keyBtn("\u2193", "down", "Down"), keyBtn("\u2191", "up", "Up"), keyBtn("\u2192", "right", "Right"),
-      keyBtn("|", "pipe"), keyBtn("~", "tilde"), keyBtn("/", "slash"), keyBtn("-", "dash"),
-      keyBtn("Home", "home"), keyBtn("End", "end"), keyBtn("PgUp", "pgup", "Page up"), keyBtn("PgDn", "pgdn", "Page down"),
-      keyBtn("Paste", "paste", "Paste from the clipboard"));
-
-    function setFont(n) {
-      n = Math.max(TERM_FONT_MIN, Math.min(TERM_FONT_MAX, Math.round(n)));
-      try { localStorage.setItem(TERM_FONT_KEY, String(n)); } catch (e) {}
-      ws.panes.forEach(function (p) { p.setFont(n); });
-      fontLbl.textContent = n + "px";
-    }
-    ws.setFont = setFont;
-    var fontLbl = h("span", { cls: "term-font-lbl dim-2", text: termFontSize() + "px", "aria-live": "polite" });
-    function act(label, title, fn, cls) {
-      var b = h("button", { cls: "btn mini" + (cls ? " " + cls : ""), type: "button", text: label, title: title });
-      b.addEventListener("pointerdown", function (e) { if (e.pointerType !== "mouse") e.preventDefault(); });
-      b.addEventListener("click", fn);
-      return b;
-    }
-    var foot = [
-      h("div", { cls: "terminal-foot-actions" },
-        h("div", { cls: "terminal-actions-group" },
-          act("Ctrl+C", "Send interrupt", function () { if (ws.active) { ws.active.input("\x03"); ws.active.focus(); } }),
-          act("Ctrl+D", "Send end of input", function () { if (ws.active) { ws.active.input("\x04"); ws.active.focus(); } }),
-          act("Clear", "Clear this screen (the shell is not told)", function () { if (ws.active) ws.active.clearScreen(); }, "term-act-clear"),
-          act("A\u2212", "Smaller text", function () { setFont(termFontSize() - 1); }),
-          fontLbl,
-          act("A+", "Larger text", function () { setFont(termFontSize() + 1); })),
-        h("div", { cls: "terminal-actions-group" },
-          act("Detach", "Close this viewer and leave the shell running", function () { if (ws.active) ws.detachPane(ws.active); }, "btn-primary"),
-          act("End session", "End the shell on the host and seal the recording", function () {
-            if (ws.active) terminateTerminalSession(ws.active.session, ws.active.hostName);
-          }, "btn-crit")))
-    ];
-
-    var body = h("div", { cls: "sheet-terminal-wrapper" }, tabBar, stage, keyRow);
-    openSheet("Terminal", body, foot, "sheet-terminal", { initialFocus: false });
-    ws.sheet = sheetEl;
-
-    /* Pinch adjusts the font size, two fingers anywhere on the terminal. One
-       finger scrolls the scrollback: xterm 6 has no touch scrolling of its own. */
-    var pinch = null, swipe = null;
-    stage.addEventListener("touchstart", function (e) {
-      if (e.touches.length === 2) {
-        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-        pinch = { d: d, size: termFontSize() };
-        swipe = null;
-      } else if (e.touches.length === 1 && ws.active) {
-        swipe = { y: e.touches[0].clientY, rest: 0 };
-      }
-    }, { passive: true });
-    stage.addEventListener("touchmove", function (e) {
-      if (pinch && e.touches.length === 2) {
-        e.preventDefault();
-        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-        var n = Math.round(pinch.size * d / pinch.d);
-        if (n !== termFontSize()) setFont(n);
-        return;
-      }
-      if (!swipe || e.touches.length !== 1 || !ws.active) return;
-      e.preventDefault();
-      var t = ws.active.term, y = e.touches[0].clientY;
-      var cell = t.element ? t.element.clientHeight / t.rows : 16;
-      swipe.rest += swipe.y - y;
-      swipe.y = y;
-      var lines = Math.trunc(swipe.rest / Math.max(cell, 1));
-      if (lines) { swipe.rest -= lines * cell; t.scrollLines(lines); }
-    }, { passive: false });
-    stage.addEventListener("touchend", function (e) {
-      if (e.touches.length < 2) pinch = null;
-      if (!e.touches.length) swipe = null;
-    }, { passive: true });
-
-    /* The phone keyboard shrinks the visual viewport, not the layout one. The
-       sheet follows the visual viewport so the prompt stays above the keys. */
-    var vv = window.visualViewport;
-    function syncViewport() {
-      if (!vv || !ws.sheet) return;
-      ws.sheet.style.setProperty("--term-vvh", Math.round(vv.height) + "px");
-      ws.sheet.style.setProperty("--term-vvt", Math.round(vv.offsetTop) + "px");
-    }
-    syncViewport();
-    if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
-    function onOrientation() { setTimeout(function () { syncViewport(); if (ws.active) ws.active.fitSoon(); }, 150); }
-    window.addEventListener("orientationchange", onOrientation);
-
-    /* A phone that slept or changed networks: the relay may look open and be
-       dead. Coming back after a while, or getting the network back, replaces
-       the socket at once instead of waiting for the backoff. */
-    var hiddenAt = 0;
-    function onVisibility() {
-      if (document.visibilityState === "hidden") { hiddenAt = Date.now(); return; }
-      var away = hiddenAt ? Date.now() - hiddenAt : 0;
-      hiddenAt = 0;
-      ws.panes.forEach(function (p) { p.resume(away > 30000); });
-    }
-    function onOnline() { ws.panes.forEach(function (p) { p.resume(true); }); }
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("online", onOnline);
-
-    sheetEl._isTerminal = true;
-    sheetEl._cleanup = function () {
-      if (vv) { vv.removeEventListener("resize", syncViewport); vv.removeEventListener("scroll", syncViewport); }
-      window.removeEventListener("orientationchange", onOrientation);
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("online", onOnline);
-      ws.panes.forEach(function (p) { p.dispose(false); });
-      ws.panes = [];
-      if (liveTerminal) liveTerminal = null;
-      if (termWs === ws) termWs = null;
-    };
-    sheetEl._restoreFocus = function () { if (ws.active) { ws.active.fitSoon(); ws.active.focus(); } };
-    sheetEl._confirmClose = function () {
-      var running = ws.panes.filter(function (p) { return !p.ended; }).length;
-      if (running) toast("Detached " + running + " terminal" + (running === 1 ? "" : "s") + ". The shells keep running; reattach from + New or the host row.", "ok");
-      return true;
-    };
-  }
-
-  function createTerminalPane(session, reattaching) {
-    var p = { session: session, ended: false };
-    var epId = session.endpoint_id || "unknown";
-    var asset = assetForEndpoint(epId);
-    var hostName = asset ? (asset.name || asset.ip || epId) : epId;
-    var identity = terminalIdentity(asset && asset.endpoint && asset.endpoint.os);
-    var prog = session.program || (identity === "LocalSystem" ? "powershell.exe" : "/bin/bash");
-    var progShort = String(prog).split(/[\\/]/).pop();
-    p.hostName = hostName;
-    p.shortLabel = function () { return hostName + " \u00b7 " + progShort; };
-    p.longLabel = function () { return prog + " as " + identity + " on " + hostName + " (" + epId + "), session " + String(session.session_id).slice(0, 8); };
-
-    var term = null, fitAddon = null, sock = null, resizeObserver = null;
-    var leaving = false, reconnectAttempt = 0, reconnectTimer = null, connecting = false;
-    var frameCount = session.frame_count || 0;
-    var lastDims = "";
-    var status = { tone: session.state === "active" ? "ok" : "info", text: session.state === "detached" ? "Detached" : "Connecting" };
-
-    var statusBadge = chip(status.tone, status.text);
-    statusBadge.setAttribute("role", "status");
-    statusBadge.setAttribute("aria-live", "polite");
-    function setStatus(tone, text) {
-      status = { tone: tone, text: text };
-      setChip(statusBadge, tone, text);
-      if (termWs) termWs.renderTabs();
-    }
-    p.tone = function () { return status.tone; };
-
-    var recordedBytes = Number(session.recording_bytes) || 0;
-    var recordedCap = Number(session.max_recording_bytes) || 0;
-    var recordingBounded = session.recording_state === "bounded";
-    var frameCountEl = h("span", { cls: "dim-2 term-recording" });
-    function updateFrames(sum) {
-      if (sum) {
-        if (sum.recording_bytes !== undefined) recordedBytes = Number(sum.recording_bytes) || 0;
-        if (sum.max_recording_bytes) recordedCap = Number(sum.max_recording_bytes) || 0;
-        if (sum.recording_state === "bounded") recordingBounded = true;
-      }
-      var text = "Recorded";
-      if (recordingBounded) text = "Recording stopped at " + bytes(recordedCap || recordedBytes);
-      else if (recordedCap > 0) text += " " + bytes(Math.min(recordedBytes, recordedCap)) + " of " + bytes(recordedCap);
-      else if (recordedBytes > 0) text += " " + bytes(recordedBytes);
-      frameCountEl.textContent = text;
-      frameCountEl.setAttribute("data-near-cap", recordingBounded || (recordedCap > 0 && recordedBytes / recordedCap >= 0.9) ? "true" : "false");
-      frameCountEl.setAttribute("title", recordingBounded
-        ? "The recording reached its cap and stopped. The session is still live and audited, but output from here on is not sealed into evidence."
-        : "Input, output and window size changes are sealed into evidence when the session ends. " + frameCount + " frames this view.");
-    }
-    updateFrames(session);
-    var limitsEl = h("span", { cls: "dim-3 term-limits" });
-    function updateLimits(sum) {
-      var expires = parseTime(sum && sum.expires_at);
-      var idle = parseTime(sum && sum.idle_expires_at);
-      var parts = [];
-      if (expires) parts.push("Ends " + stampText(expires));
-      if (idle) parts.push("Idle out " + stampText(idle));
-      parts.push(liveTerminalCount() + " of " + TERM_TENANT_CAP + " open");
-      limitsEl.textContent = parts.join(" \u00b7 ");
-      limitsEl.setAttribute("title",
-        (expires ? "The session ends at " + expires.toString() : "No maximum duration reported") + "\n" +
-        (idle ? "Idle timeout at " + idle.toString() + " unless you type" : "No idle deadline reported"));
-    }
-    updateLimits(session);
-    p.meta = function (sum) {
-      if (!sum) return;
-      p.session = session = sum;
-      updateFrames(sum);
-      updateLimits(sum);
-      if (!terminalSessionIsLive(sum) && !p.ended) ended(sum.state);
-    };
-
-    var metaBar = h("div", { cls: "terminal-meta-bar" },
-      h("div", { cls: "terminal-meta-left" },
-        statusBadge,
-        h("b", { text: hostName }),
-        chip("idle", identity),
-        h("span", { cls: "ip term-prog", text: prog })),
-      h("div", { cls: "terminal-meta-right" }, frameCountEl, limitsEl));
-
-    var banner = h("div", { cls: "term-reconnect", role: "status", hidden: true });
-    var overlayMsg = h("div", { cls: "terminal-overlay-msg" },
-      h("div", { cls: "spin" }),
-      h("b", { text: "Waiting for the agent on " + hostName }),
-      h("span", { cls: "dim-2", text: prog + " starts as " + identity + " when the agent connects." }));
-    var container = h("div", { cls: "terminal-container" }, overlayMsg);
-    p.el = h("div", { cls: "term-pane", role: "tabpanel", "aria-label": p.longLabel() }, metaBar, banner, container);
-
-    function showBanner(text) {
-      if (text) { banner.textContent = text; banner.hidden = false; }
-      else banner.hidden = true;
-    }
-
-    function ended(stateWord) {
-      if (p.ended) return;
-      p.ended = true;
-      leaving = true;
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      setStatus("idle", "Ended");
-      showBanner("This session has ended" + (stateWord ? " (" + stateWord + ")" : "") + ". Its recording is sealed into evidence.");
-      if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
-    }
-
-    // ----------------------------------------------------------- input
-    var queue = [];
-    var queued = 0;
-    var flushPending = false;
-    var dropWarned = false;
-    function flush() {
-      flushPending = false;
-      if (!queue.length || !sock || sock.readyState !== 1) return;
-      var all = new Uint8Array(queued);
-      var o = 0;
-      queue.forEach(function (b) { all.set(b, o); o += b.length; });
-      queue = []; queued = 0;
-      for (var i = 0; i < all.length; i += TERM_STDIN_CHUNK) {
-        sock.send(JSON.stringify({ type: "stdin", data: b64FromBytes(all.subarray(i, i + TERM_STDIN_CHUNK)) }));
-      }
-    }
-    function scheduleFlush() {
-      if (flushPending) return;
-      flushPending = true;
-      /* Keystrokes typed within one frame leave as one stdin frame. The
-         timeout covers a hidden tab, where animation frames stop. */
-      var done = false;
-      var run = function () { if (!done) { done = true; flush(); } };
-      if (window.requestAnimationFrame) requestAnimationFrame(run);
-      setTimeout(run, 16);
-    }
-    p.input = function (data) {
-      if (p.ended || !data) return;
-      var b = new TextEncoder().encode(data);
-      if (queued + b.length > TERM_INPUT_QUEUE) {
-        if (!dropWarned) { dropWarned = true; toast("Typing faster than the relay can reconnect; input past 64 KiB was dropped.", "warn"); }
-        return;
-      }
-      queue.push(b); queued += b.length;
-      scheduleFlush();
-    };
-    p.appCursor = function () {
-      try { return !!(term && term.modes && term.modes.applicationCursorKeysMode); } catch (e) { return false; }
-    };
-    p.paste = function (text) { if (term && text) { term.paste(text); term.focus(); } };
-    p.pasteFromClipboard = function () {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        navigator.clipboard.readText().then(function (t) { p.paste(t); }, function () { pasteSheet(); });
-      } else pasteSheet();
-    };
-    function pasteSheet() {
-      var area = h("textarea", { cls: "term-paste-area", rows: "6", "aria-label": "Text to paste", spellcheck: "false", autocomplete: "off" });
-      openSheet("Paste into the terminal", h("div", { cls: "stack" },
-        h("p", { cls: "pending", text: "This browser did not allow reading the clipboard. Paste the text here." }), area), [
-        h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
-        h("button", { cls: "btn btn-primary", type: "button", text: "Paste", on: { click: function () { var t = area.value; closeSheet(); p.paste(t); } } })
-      ], null, { stack: true, guardDirty: false, initialFocus: area });
-    }
-    p.clearScreen = function () { if (term) { term.clear(); term.focus(); } };
-    p.focus = function () { if (term && !p.el.hidden) { try { term.focus(); } catch (e) {} } };
-
-    // ---------------------------------------------------------- output
-    var replaying = false;
-    var liveBuffer = [];
-    var lastReplayTs = 0;
-    function writeFrame(f) {
-      if (!f || !f.data || !term) return;
-      term.write(bytesFromB64(f.data));
-    }
-    function frameTs(f) {
-      var t = f && f.timestamp;
-      if (typeof t === "number") return t;
-      var v = Date.parse(t || "");
-      return isNaN(v) ? 0 : v;
-    }
-    function flushLive() {
-      replaying = false;
-      while (liveBuffer.length) {
-        var f = liveBuffer.shift();
-        /* Output that reached both the recording and this socket is written
-           once. */
-        if (lastReplayTs && frameTs(f) && frameTs(f) <= lastReplayTs) continue;
-        writeFrame(f);
-      }
-    }
-    function replayTail() {
-      replaying = true;
-      liveBuffer = [];
-      var id = encodeURIComponent(session.session_id);
-      var get = state.demo ? Promise.resolve({ frames: [] })
-        : request("/api/v1/terminal/frames?id=" + id + "&session_id=" + id + "&tail_bytes=" + TERM_REPLAY_BYTES);
-      return get.then(function (d) {
-        var frames = arrayOf(d && d.frames).filter(function (f) { return f && f.type === "stdout"; });
-        /* Nothing recorded to show: keep what is on screen. */
-        if (!term || !frames.length) return;
-        term.reset();
-        lastReplayTs = 0;
-        var total = 0, start = frames.length;
-        while (start > 0 && total < TERM_REPLAY_BYTES) { start--; total += (frames[start].data || "").length * 3 / 4; }
-        if (start > 0) term.write("\x1b[2m[earlier output not replayed]\x1b[0m\r\n");
-        for (var i = start; i < frames.length; i++) { writeFrame(frames[i]); lastReplayTs = Math.max(lastReplayTs, frameTs(frames[i])); }
-        if (frames.length && overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
-      }).catch(function () { /* replay is a convenience; live output still works */ })
-        .then(flushLive);
-    }
-
-    // ---------------------------------------------------------- socket
-    function sendResize(force) {
-      if (!term || !sock || sock.readyState !== 1) return;
-      var dims = term.rows + "x" + term.cols;
-      if (!force && dims === lastDims) return;
-      lastDims = dims;
-      sock.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
-    }
-    var fitTimer = null;
-    p.fitSoon = function () {
-      if (fitTimer) clearTimeout(fitTimer);
-      fitTimer = setTimeout(function () {
-        fitTimer = null;
-        if (!fitAddon || p.el.hidden || !p.el.isConnected) return;
-        try { fitAddon.fit(); } catch (e) {}
-        sendResize(false);
-      }, 100);
-    };
-
-    function connect(isReconnect) {
-      if (leaving || p.ended) return Promise.resolve();
-      connecting = true;
-      return termSerial(function () {
-        var attach = isReconnect && !state.demo
-          ? request("/api/v1/terminal/sessions/attach", "POST", { session_id: session.session_id }).then(function (sum) {
-            if (sum) { p.session = session = sum; updateLimits(sum); updateFrames(sum); }
-          })
-          : Promise.resolve();
-        return attach.then(function () {
-          if (leaving || p.ended) return;
-          return new Promise(function (settle) {
-            /* A socket that neither opens nor closes must not hold the queue. */
-            setTimeout(settle, 10000);
-            var wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-            var url = wsProto + "//" + window.location.host + "/api/v1/terminal/ws/operator?session_id=" + encodeURIComponent(session.session_id);
-            var s;
-            try { s = state.demo ? new DemoTermSocket(session) : new WebSocket(url); }
-            catch (e) { settle(); throw e; }
-            sock = s;
-            p.sock = s;
-            s.onopen = function () {
-              settle();
-              if (sock !== s) return;
-              connecting = false;
-              reconnectAttempt = 0;
-              showBanner("");
-              setStatus("info", "Attached");
-              lastDims = "";
-              sendResize(true);
-              if (isReconnect || session.state === "detached" || (session.frame_count || 0) > 0) replayTail();
-              flush();
-            };
-            s.onmessage = function (event) {
-              if (sock !== s) return;
-              var f;
-              try { f = JSON.parse(event.data); } catch (e) { return; }
-              frameCount++;
-              if (f.type === "stdout") {
-                if (overlayMsg.parentNode) overlayMsg.parentNode.removeChild(overlayMsg);
-                if (status.text !== "Live") setStatus("ok", "Live");
-                if (replaying) liveBuffer.push(f);
-                else writeFrame(f);
-              } else if (f.type === "bounded") {
-                recordingBounded = true;
-                updateFrames(null);
-                term.write("\r\n\x1b[33m[Recording limit reached; the session continues unrecorded]\x1b[0m\r\n");
-              } else if (f.type === "close") {
-                ended("closed by the host");
-                term.write("\r\n\r\n[The shell on " + hostName + " has exited]\r\n");
-              }
-            };
-            s.onerror = function () { if (!leaving && sock === s) setStatus("crit", "Relay error"); };
-            s.onclose = function () {
-              settle();
-              if (sock !== s) return;
-              sock = null;
-              connecting = false;
-              if (leaving || p.ended) return;
-              scheduleReconnect();
-            };
-          });
-        });
-      }).catch(function (err) {
-        connecting = false;
-        if (leaving || p.ended) return;
-        checkAlive(err);
-      });
-    }
-
-    /* A refused reattach is either "the hub still holds the old socket" (a
-       phone that slept: it lets go within a minute) or "the session is gone".
-       Ask the hub which before giving up. */
-    function checkAlive(err) {
-      if (state.demo) { scheduleReconnect(); return; }
-      request("/api/v1/terminal/sessions?id=" + encodeURIComponent(session.session_id)).then(function (sum) {
-        if (sum && sum.session_id && !terminalSessionIsLive(sum)) { p.meta(sum); return; }
-        scheduleReconnect(err);
-      }, function (e2) {
-        if (e2 && (e2.status === 404 || e2.status === 403)) { ended("no longer on the hub"); return; }
-        scheduleReconnect(err);
-      });
-    }
-
-    function scheduleReconnect(err) {
-      if (leaving || p.ended || reconnectTimer) return;
-      reconnectAttempt++;
-      var delay = Math.min(TERM_RECONNECT_MAX_MS, 400 * Math.pow(2, reconnectAttempt - 1));
-      setStatus("warn", "Reconnecting");
-      showBanner("Reconnecting" + (reconnectAttempt > 1 ? " (attempt " + reconnectAttempt + ")" : "") +
-        ". The shell keeps running on " + hostName + " and waits up to 15 minutes for you to come back." +
-        (err && err.message ? " Last answer: " + err.message : ""));
-      reconnectTimer = setTimeout(function () { reconnectTimer = null; connect(true); }, delay);
-    }
-
-    p.reconnectNow = function () {
-      if (leaving || p.ended) return;
-      if (sock && sock.readyState === 1) return;
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if (connecting) return;
-      reconnectAttempt = 0;
-      connect(true);
-    };
-    p.resume = function (replace) {
-      if (leaving || p.ended) return;
-      if (sock && sock.readyState === 1) {
-        if (!replace) return;
-        /* Closing cleanly lets the hub detach this socket at once, so the
-           reattach that follows is not refused for holding the old one. */
-        var s = sock;
-        sock = null;
-        try { s.onclose = null; s.close(); } catch (e) {}
-      }
-      p.reconnectNow();
-    };
-
-    p.start = function () {
-      term = new window.Terminal({
-        cursorBlink: true,
-        cursorStyle: "block",
-        /* A pty already sends CR LF. Converting bare LF would break full-screen
-           programs that move the cursor down with it. */
-        convertEol: false,
-        fontFamily: cssVar("--f-mono", "ui-monospace, Menlo, Consolas, monospace"),
-        fontSize: termFontSize(),
-        lineHeight: 1.2,
-        allowTransparency: false,
-        theme: terminalTheme(),
-        allowProposedApi: false,
-        scrollback: TERM_SCROLLBACK,
-        macOptionIsMeta: true,
-        rightClickSelectsWord: true
-      });
-      p.term = term;
-      liveTerminal = term;
-      if (window.FitAddon && window.FitAddon.FitAddon) {
-        fitAddon = new window.FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-      }
-      /* Unicode 11 widths (emoji, CJK) need xterm's proposed unicode API for
-         one registration call. It is switched on for that call only. */
-      if (window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon) {
-        try {
-          term.options.allowProposedApi = true;
-          term.loadAddon(new window.Unicode11Addon.Unicode11Addon());
-          term.unicode.activeVersion = "11";
-        } catch (e) {}
-        try { term.options.allowProposedApi = false; } catch (e) {}
-      }
-      term.open(container);
-      /* Ctrl+Shift+C copies the selection and Ctrl+Shift+V pastes, as in a
-         desktop terminal. Plain Ctrl+C stays the shell's interrupt. */
-      term.attachCustomKeyEventHandler(function (e) {
-        if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
-        var k = String(e.key || "").toLowerCase();
-        if (k === "c") {
-          var sel = term.getSelection();
-          if (sel && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(sel).catch(function () {});
-          e.preventDefault();
-          return false;
-        }
-        if (k === "v") { e.preventDefault(); p.pasteFromClipboard(); return false; }
-        return true;
-      });
-      var selTimer = null;
-      term.onSelectionChange(function () {
-        if (selTimer) clearTimeout(selTimer);
-        selTimer = setTimeout(function () {
-          var sel = term && term.getSelection();
-          if (sel && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(sel).catch(function () {});
-        }, 200);
-      });
-      term.onData(function (data) {
-        if (termWs && termWs.ctrlArmed && data.length === 1) {
-          data = termCtrlChar(data) || data;
-          termWs.setCtrl(false);
-        }
-        p.input(data);
-      });
-      term.onBinary(function (data) { p.input(data); });
-      container.addEventListener("click", function () { p.focus(); });
-      if (window.ResizeObserver) {
-        resizeObserver = new ResizeObserver(function () { p.fitSoon(); });
-        resizeObserver.observe(container);
-      }
-      try { if (fitAddon) fitAddon.fit(); } catch (e) {}
-      connect(!!reattaching);
-    };
-    p.shown = function () { p.fitSoon(); };
-    p.setFont = function (n) { if (term) { term.options.fontSize = n; p.fitSoon(); } };
-
-    p.terminate = function () {
-      if (sock && sock.readyState === 1) {
-        try { sock.send(JSON.stringify({ type: "close" })); } catch (e) {}
-      }
-      ended("ended from this console");
-      closeTerminalSession(session.session_id);
-    };
-
-    p.dispose = function () {
-      leaving = true;
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if (fitTimer) { clearTimeout(fitTimer); fitTimer = null; }
-      if (resizeObserver) { try { resizeObserver.disconnect(); } catch (e) {} resizeObserver = null; }
-      if (sock) {
-        var s = sock;
-        sock = null;
-        /* No close frame: closing the socket is a detach on the hub. The
-           close frame is End session only. */
-        try { s.onclose = null; s.onerror = null; s.onmessage = null; s.close(); } catch (e) {}
-      }
-      if (term) {
-        if (liveTerminal === term) liveTerminal = null;
-        try { term.dispose(); } catch (e) {}
-        term = null;
-      }
-    };
-    return p;
   }
 
   function renderResponse() {
@@ -11099,32 +10051,15 @@
     return tag === "input" || tag === "textarea" || tag === "select" || t.isContentEditable;
   }
 
-  /* Is the terminal sheet open and holding focus? Both branches below run
-     *before* the typingInField guard, which is why they used to fire while a
-     shell had focus: Escape closed the sheet - and closing the sheet used to
-     kill the process, so pressing Escape inside vim killed vim and everything
-     under it - and Ctrl+K opened the command palette instead of reaching
-     readline's kill-line. Single-letter shortcuts were already safe: xterm
-     focuses a hidden <textarea> and typingInField catches it. */
-  function terminalHasFocus() {
-    return !!(sheetEl && sheetEl._isTerminal && sheetEl.contains(document.activeElement));
-  }
-
   document.addEventListener("keydown", function (e) {
-    var inTerminal = terminalHasFocus();
-
     var mod = IS_MAC ? e.metaKey : e.ctrlKey;
     if (mod && (e.key === "k" || e.key === "K")) {
-      if (inTerminal) return; // kill-line belongs to the shell
       e.preventDefault();
       openPalette();
       return;
     }
 
     if (e.key === "Escape") {
-      /* Escape belongs to whatever is running in the shell. Dismiss the
-         terminal with the header ✕ or Detach Viewer. */
-      if (inTerminal) return;
       if (paletteEl) { restoreFocus(closePalette()); return; }
       if (sheetEl) { requestCloseSheet(); return; }
       if (ctxMenu) { closeCtx(); return; }
@@ -11429,8 +10364,8 @@
 
   function guardNavigation(proceed) {
     var frames = sheetStack.map(function (f) { return f.el; }).concat(sheetEl || []);
-    if (frames.some(function (el) { return el._dirty || el._isTerminal; })) {
-      confirmSheet({ title: "Leave this work?", consequence: "Unsaved forms will be discarded and terminal viewers detached. Running sessions remain available in Response.", confirmLabel: "Leave", stack: true, onConfirm: function () { closeAllSheets(); proceed(); } });
+    if (frames.some(function (el) { return el._dirty; })) {
+      confirmSheet({ title: "Leave this work?", consequence: "Unsaved forms will be discarded.", confirmLabel: "Leave", stack: true, onConfirm: function () { closeAllSheets(); proceed(); } });
       return false;
     }
     proceed();
@@ -11597,10 +10532,6 @@
       .then(function (d) {
         state.terminalSessions = arrayOf(d && d.sessions || d);
         state.terminalAvailable = true;
-        if (termWs) state.terminalSessions.forEach(function (ts) {
-          var pane = ts && termWs.paneFor(ts.session_id);
-          if (pane) pane.meta(ts);
-        });
       })
       .catch(function (e) {
         if (e.status === 404 || e.status === 403) state.terminalAvailable = false;
@@ -11674,9 +10605,8 @@
       /* Do not rebuild the view out from under someone who is typing or has
          text selected - but do keep saying that the data behind it is moving.
          The old guard returned here with no indication at all, so a console
-         with an open terminal (xterm focuses a hidden <textarea>, which this
-         sees as an input) froze silently for as long as the shell was open
-         and looked like a hub that had stopped answering. */
+         with a focused field froze silently and looked like a hub that had
+         stopped answering. */
       var sel = window.getSelection ? window.getSelection() : null;
       var hasActiveTextSelection = sel && !sel.isCollapsed && sel.toString().length > 0;
       var ae = document.activeElement;
@@ -11831,7 +10761,7 @@
     });
 
     window.addEventListener("beforeunload", function (event) {
-      if ([sheetEl].concat(sheetStack.map(function (frame) { return frame.el; })).some(function (el) { return el && (el._dirty || el._isTerminal); })) { event.preventDefault(); event.returnValue = ""; }
+      if ([sheetEl].concat(sheetStack.map(function (frame) { return frame.el; })).some(function (el) { return el && el._dirty; })) { event.preventDefault(); event.returnValue = ""; }
     });
     document.body.dataset.density = readStore("ominull-density", "comfortable") === "compact" ? "compact" : "comfortable";
     document.body.classList.toggle("nav-expanded", readStore("ominull-nav-expanded", "false") === "true");

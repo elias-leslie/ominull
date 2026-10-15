@@ -159,7 +159,7 @@ func setConsoleSecurityHeaders(w http.ResponseWriter, scriptNonce string) {
 	// stylesheet of ours - every rule the console owns is in app.css - but for
 	// xterm.js, whose renderer builds its stylesheet at runtime with
 	// document.createElement("style"). xterm has no nonce option in any
-	// released version, so index.html stamps this nonce onto style elements as
+	// released version, so pages/terminal.tmpl stamps this nonce onto style elements as
 	// they are created and they are admitted individually.
 	//
 	// This replaced 'unsafe-inline', which admitted every inline style on the

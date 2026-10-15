@@ -1,0 +1,132 @@
+{{define "head"}}{{if and .Body.View .Body.View.Summary}}
+<link rel="stylesheet" href="/vendor/xterm.css?v={{.Version}}">
+<script nonce="{{.Nonce}}">
+/* xterm builds its stylesheet with document.createElement("style") and has no
+   nonce option; stamping this response's nonce onto style elements as they
+   are created keeps style-src free of 'unsafe-inline' (see security.go). */
+(function () {
+  var nonce = "{{.Nonce}}";
+  var create = document.createElement;
+  document.createElement = function (tag) {
+    var el = create.apply(document, arguments);
+    if (String(tag).toLowerCase() === "style") {
+      try { el.setAttribute("nonce", nonce); el.nonce = nonce; } catch (e) { /* not fatal */ }
+    }
+    return el;
+  };
+})();
+</script>
+<script src="/vendor/xterm.js?v={{.Version}}" defer></script>
+<script src="/vendor/addon-fit.js?v={{.Version}}" defer></script>
+<script src="/vendor/addon-unicode11.js?v={{.Version}}" defer></script>
+{{end}}{{end}}
+
+{{define "content"}}{{with .Body}}
+{{if .Off}}
+<p class="page-problem" role="alert">Remote response is turned off on this hub, so it cannot open terminals.</p>
+{{else if .View}}{{with .View}}
+{{if $.Body.Gone}}
+<p class="page-note">{{$.Body.Gone}}</p>
+<p><a class="btn" href="/console/terminal">All terminals</a>{{if .HostID}} <a class="btn" href="/console/timeline?endpoint={{.HostID}}">{{.Host}} timeline</a>{{end}}</p>
+{{else}}
+<section class="term-page" id="term" data-session="{{.Summary}}" data-host="{{.Host}}" data-identity="{{.Identity}}" data-fresh="{{if .Fresh}}1{{end}}">
+  <div class="terminal-meta-bar">
+    <div class="terminal-meta-left">
+      <span class="st" data-state="info" id="term-status" role="status" aria-live="polite">Connecting</span>
+      <b>{{.Host}}</b>
+      <span class="st" data-state="idle">{{.Identity}}</span>
+      <span class="ip term-prog">{{.Program}}</span>
+    </div>
+    <div class="terminal-meta-right"><span class="dim-2 term-recording" id="term-recording"></span> <span class="dim-3 term-limits" id="term-limits"></span></div>
+  </div>
+  <div class="term-reconnect" id="term-banner" role="status" hidden></div>
+  <div class="terminal-container" id="term-screen">
+    <div class="terminal-overlay-msg"><b>Waiting for the agent on {{.Host}}</b><span class="dim-2">{{.Program}} starts as {{.Identity}} when the agent connects.</span></div>
+  </div>
+  <div class="term-keys" role="toolbar" aria-label="Extra keys">
+    <button class="term-key" type="button" data-key="ctrl" aria-pressed="false" title="Ctrl: applies to the next key">Ctrl</button>
+    <button class="term-key" type="button" data-key="esc">Esc</button>
+    <button class="term-key" type="button" data-key="tab">Tab</button>
+    <button class="term-key" type="button" data-key="left" title="Left">&larr;</button>
+    <button class="term-key" type="button" data-key="down" title="Down">&darr;</button>
+    <button class="term-key" type="button" data-key="up" title="Up">&uarr;</button>
+    <button class="term-key" type="button" data-key="right" title="Right">&rarr;</button>
+    <button class="term-key" type="button" data-key="pipe">|</button>
+    <button class="term-key" type="button" data-key="tilde">~</button>
+    <button class="term-key" type="button" data-key="slash">/</button>
+    <button class="term-key" type="button" data-key="dash">-</button>
+    <button class="term-key" type="button" data-key="home">Home</button>
+    <button class="term-key" type="button" data-key="end">End</button>
+    <button class="term-key" type="button" data-key="pgup" title="Page up">PgUp</button>
+    <button class="term-key" type="button" data-key="pgdn" title="Page down">PgDn</button>
+    <button class="term-key" type="button" data-key="paste" title="Paste from the clipboard">Paste</button>
+  </div>
+  <div class="terminal-foot-actions">
+    <div class="terminal-actions-group">
+      <button class="btn mini" type="button" data-act="ctrl-c" title="Send interrupt">Ctrl+C</button>
+      <button class="btn mini" type="button" data-act="ctrl-d" title="Send end of input">Ctrl+D</button>
+      <button class="btn mini" type="button" data-act="clear" title="Clear this screen (the shell is not told)">Clear</button>
+      <button class="btn mini" type="button" data-act="smaller" title="Smaller text">A&minus;</button>
+      <span class="dim-2" id="term-font" aria-live="polite"></span>
+      <button class="btn mini" type="button" data-act="larger" title="Larger text">A+</button>
+    </div>
+    <div class="terminal-actions-group">
+      <a class="btn mini btn-primary" href="/console/terminal" data-act="detach" title="Leave this page; the shell keeps running">Detach</a>
+      <button class="btn mini btn-crit" type="button" data-act="end" title="End the shell on the host and seal the recording">End session</button>
+    </div>
+  </div>
+  <div class="term-confirm" id="term-confirm" role="alertdialog" aria-labelledby="term-confirm-title" hidden>
+    <p id="term-confirm-title"><b>End this terminal?</b></p>
+    <p>Every process the shell started on {{.Host}} stops. Unsaved work in editors there is lost. The recording is sealed into evidence and the session cannot be resumed.</p>
+    <button class="btn" type="button" data-act="end-cancel">Keep it running</button>
+    <button class="btn btn-crit" type="button" data-act="end-confirm">End session</button>
+  </div>
+</section>
+{{end}}
+{{end}}{{else}}
+
+<section class="card page-card">
+  <h3>Running terminals<span class="fill"></span><span class="dim-3">{{.LiveCount}} running · {{.TenantCap}} max</span></h3>
+  {{if .Sessions}}
+  <ul class="term-list">
+  {{range .Sessions}}
+    <li>
+      <div class="term-list-what"><b>{{.Host}}</b> <span class="ip">{{.Program}}</span>
+        <span class="st" data-state="{{.Tone}}">{{.Label}}</span>
+        <span class="dim-3">started {{.Started}}</span></div>
+      {{if $.Body.CanOpen}}<a class="btn mini btn-primary" href="/console/terminal?session={{.ID}}">Open</a>{{end}}
+    </li>
+  {{end}}
+  </ul>
+  {{else}}<p class="card-body dim-2">No terminal is running.</p>{{end}}
+  {{if not .CanOpen}}<p class="card-body dim-2">Your role can see terminals but can't open or join them.</p>{{end}}
+</section>
+
+{{if .CanOpen}}
+<section class="card page-card">
+  <h3>Open a terminal</h3>
+  <form class="card-body page-form" id="term-open" method="get" action="/console/terminal">
+    {{if .Hosts}}
+    <label>Host
+      <select name="endpoint" id="term-host">
+      {{range .Hosts}}<option value="{{.ID}}" data-programs="{{.Programs}}" data-identity="{{.Identity}}" data-problem="{{.Problem}}" data-name="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}} ({{.OS}}){{if .Live}} · {{.Live}} open{{end}}</option>{{end}}
+      </select>
+    </label>
+    <label>Program
+      <select name="program" id="term-program"></select>
+    </label>
+    <p class="dim-2" id="term-runs-as"></p>
+    <p class="page-note">Your phone gets an approval request. Confirm it with your passkey and the shell opens here. Everything typed and shown is recorded and sealed into evidence when the session ends. Up to {{.HostCap}} terminals per host and {{.TenantCap}} in all.</p>
+    <p class="page-problem" id="term-open-problem" role="alert" hidden></p>
+    <button class="btn btn-primary" type="submit" id="term-open-btn">Ask for approval</button>
+    <div class="approval-wait" id="term-approval" role="status" aria-live="polite" hidden>
+      <div class="approval-head"><b>Approve on your phone</b><span class="fill"></span><span class="approval-time dim-2" id="term-approval-time"></span></div>
+      <p class="approval-state" id="term-approval-state"></p>
+      <div class="approval-actions"><button class="btn mini" type="button" id="term-approval-stop">Stop waiting</button></div>
+    </div>
+    {{else}}<p class="dim-2">No host has an enrolled agent.</p>{{end}}
+  </form>
+</section>
+{{end}}
+{{end}}
+{{end}}{{end}}

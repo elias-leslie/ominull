@@ -230,7 +230,7 @@ func TestServedConsoleAssetsSubstituteVersion(t *testing.T) {
 // served under. style-src was widened to 'unsafe-inline' to stop xterm's
 // runtime stylesheet being refused, which admitted every inline style on the
 // page - including one arriving in injected markup - to fix one library.
-// index.html stamps the response nonce onto style elements as they are
+// The terminal page stamps the response nonce onto style elements as they are
 // created instead, so the directive can name the nonce and nothing else.
 func TestConsoleCSPHasNoUnsafeInline(t *testing.T) {
 	t.Parallel()
@@ -261,24 +261,24 @@ func TestConsoleCSPHasNoUnsafeInline(t *testing.T) {
 }
 
 // TestConsoleStampsStyleNonce proves the shim that makes the above possible is
-// actually in the document, ahead of the vendored xterm bundle that needs it.
+// in the terminal page, ahead of the vendored xterm bundle that needs it.
 func TestConsoleStampsStyleNonce(t *testing.T) {
 	t.Parallel()
-	html := consoleSource(t, "index.html")
-
+	raw, err := pageFS.ReadFile("pages/terminal.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(raw)
 	shim := strings.Index(html, `document.createElement = function (tag)`)
 	if shim < 0 {
-		t.Fatal("index.html does not stamp a nonce onto runtime-created style elements")
+		t.Fatal("the terminal page does not stamp a nonce onto runtime-created style elements")
 	}
-	xterm := strings.Index(html, "app.js?v=")
-	if xterm < 0 {
-		t.Fatal("index.html does not load the feature loader")
+	xterm := strings.Index(html, "vendor/xterm.js")
+	if xterm < 0 || shim > xterm {
+		t.Error("the style-nonce shim must run before xterm loads")
 	}
-	if shim > xterm {
-		t.Error("the style-nonce shim must run before the feature loader")
-	}
-	if !strings.Contains(html[shim-800:shim], cspNoncePlaceholder) {
-		t.Error("the shim must read the serve-time nonce placeholder")
+	if !strings.Contains(html[:shim], `var nonce = "{{.Nonce}}"`) {
+		t.Error("the shim must read the response nonce")
 	}
 }
 

@@ -165,3 +165,177 @@ body.page {
     width: 100%;
   }
 }
+
+/* ------------------------------------------------------------ cards, forms */
+
+.page-card {
+  margin-bottom: var(--s-4);
+}
+
+.page-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  align-items: flex-start;
+}
+
+.page-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--t-2);
+  color: var(--ink-2);
+  width: min(28em, 100%);
+}
+
+.page-form select {
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-4);
+}
+
+.page-form p {
+  margin: 0;
+}
+
+.page-form .approval-wait {
+  position: static;
+  width: min(28em, 100%);
+}
+
+.term-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.term-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-top: 1px solid var(--line);
+}
+
+.term-list li:first-child {
+  border-top: 0;
+}
+
+.term-list-what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------ one terminal */
+
+/* The session view fills the visual viewport, which shrinks when a phone's
+   keyboard opens; terminal.js keeps --term-vvh and --term-vvt in step. */
+body.page.term-mode {
+  position: fixed;
+  inset-inline: 0;
+  top: var(--term-vvt, 0px);
+  height: var(--term-vvh, 100dvh);
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+body.term-mode .page-main {
+  flex: 1;
+  min-height: 0;
+  max-width: none;
+  width: 100%;
+  padding: 0;
+  display: flex;
+}
+
+.term-page {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+  position: relative;
+}
+
+.term-page .terminal-foot-actions {
+  flex: none;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  background: var(--term-chrome);
+  border-top: 1px solid var(--term-line);
+  width: auto;
+}
+
+.term-page .terminal-actions-group {
+  flex-wrap: wrap;
+}
+
+body.page a.btn {
+  text-decoration: none;
+}
+
+body.page .btn[disabled] {
+  color: var(--ink-3);
+  border-color: var(--line);
+}
+
+.term-confirm {
+  position: absolute;
+  inset-inline: var(--s-3);
+  bottom: var(--s-6);
+  max-width: 32em;
+  margin-inline: auto;
+  padding: var(--s-3) var(--s-4);
+  background: var(--panel);
+  border: 1px solid var(--crit);
+  border-radius: var(--r-b);
+  box-shadow: var(--overlay);
+}
+
+.term-confirm p {
+  margin: 0 0 var(--s-2);
+}
+
+.term-confirm[hidden] {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  /* When the shell will be cut off matters most on a phone; the recording
+     size can wait for a wider screen. */
+  .term-page .terminal-meta-right {
+    display: flex;
+  }
+  .term-page .term-recording {
+    display: none;
+  }
+  /* The key row scrolls; a thin bar says there are more keys. */
+  .term-page .term-keys {
+    scrollbar-width: thin;
+  }
+  .term-page .terminal-foot-actions .btn {
+    min-height: 36px;
+  }
+}
+
+@media (max-width: 600px) {
+  body.term-mode .page-top {
+    padding: var(--s-1) var(--s-3);
+  }
+  body.term-mode .page-who {
+    display: none;
+  }
+}

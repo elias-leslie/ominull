@@ -3475,44 +3475,6 @@ input[type="url"] {
   display: block;
 }
 
-/* ------------------------------------------------------------- Terminal Window & Emulator */
-.sheet-terminal {
-  width: min(1180px, calc(100vw - 24px));
-  height: min(780px, calc(100vh - 24px));
-  background: var(--term-bg) !important;
-  border: 1px solid var(--term-line);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.94), 0 0 0 1px rgba(255, 255, 255, 0.08);
-}
-
-.sheet-terminal .sheet-head {
-  background: var(--term-chrome);
-  border-bottom: 1px solid var(--term-line);
-}
-
-.sheet-terminal .sheet-body {
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  background: var(--term-bg) !important;
-}
-
-.sheet-terminal .sheet-foot {
-  background: var(--term-chrome);
-  border-top: 1px solid var(--term-line);
-}
-
-.sheet-terminal-wrapper {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  height: 100%;
-  background: var(--term-bg) !important;
-}
-
 .terminal-meta-bar {
   display: flex;
   align-items: center;
@@ -4404,8 +4366,6 @@ input[type="url"] {
   overflow-y: auto;
 }
 
-
-
 /* ------------------------------------------ primitives the slice era assumed
  *
  * These four class names were used across Response, Terminal, Scripts and
@@ -4610,7 +4570,6 @@ input[type="url"] {
   outline-offset: 2px;
 }
 
-
 /* Terminal presence in Assets
  *
  * A shell running as root on a host is a fact about that host, so it is stated
@@ -4696,7 +4655,6 @@ input[type="url"] {
 .term-glyph[data-state="ok"] { color: var(--ok); }
 .term-glyph[data-state="warn"] { color: var(--warn); }
 .term-glyph[data-state="info"] { color: var(--info); }
-
 
 /* --------------------------------------------- layout hooks that were named
  *
@@ -4896,106 +4854,12 @@ tfoot {
 .approval-time { font-variant-numeric: tabular-nums; }
 .approval-actions { display: flex; justify-content: flex-end; }
 .approval-state { margin: 0; overflow-wrap: anywhere; }
-.term-new { white-space: nowrap; }
+
 .term-recording, .term-limits { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 @media (max-width: 600px) {
   .approvals { left: 8px; right: 8px; top: 8px; width: auto; }
 }
-
-/* ---------------------------------------------------- terminal workspace */
-
-.term-tabbar {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  padding: 4px var(--s-2);
-  background: var(--term-chrome);
-  border-bottom: 1px solid var(--term-line);
-  flex: none;
-  min-width: 0;
-}
-
-.term-tabs {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  flex: 1;
-  min-width: 0;
-  scrollbar-width: thin;
-}
-
-.term-tab-wrap {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--term-line);
-  border-radius: var(--r-b);
-  background: var(--term-bg);
-  flex: none;
-}
-
-.term-tab-wrap[data-selected="true"] {
-  border-color: var(--info);
-  background: var(--raised);
-}
-
-.term-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: none;
-  border: 0;
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--t-2);
-  cursor: pointer;
-  white-space: nowrap;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.term-tab-x {
-  background: none;
-  border: 0;
-  color: var(--ink-3);
-  padding: 4px 6px;
-  cursor: pointer;
-  display: inline-flex;
-}
-
-.term-tab-x:hover, .term-tab-x:focus-visible { color: var(--ink); }
-
-.term-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ink-3);
-  flex: none;
-}
-
-.term-tab[data-state="ok"] .term-dot { background: var(--ok); }
-.term-tab[data-state="warn"] .term-dot { background: var(--warn); }
-.term-tab[data-state="info"] .term-dot { background: var(--info); }
-.term-tab[data-state="crit"] .term-dot { background: var(--crit); }
-
-.term-stage {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-.term-pane {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.term-pane[hidden] { display: none; }
 
 .term-reconnect {
   flex: none;
@@ -5041,23 +4905,6 @@ tfoot {
   color: var(--ground);
 }
 
-.term-font-lbl {
-  min-width: 34px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.term-running {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.term-paste-area {
-  width: 100%;
-  font-family: var(--f-mono);
-}
-
 .terminal-container {
   /* Swipe and pinch are handled in app.js on the stage. */
   touch-action: none;
@@ -5070,23 +4917,10 @@ tfoot {
 /* A phone: the terminal takes the whole visual viewport, which shrinks when
    the keyboard opens, so the prompt stays above the keys. */
 @media (max-width: 700px) {
-  .sheet-terminal {
-    top: var(--term-vvt, 0px);
-    left: 0;
-    transform: none;
-    width: 100vw;
-    height: var(--term-vvh, 100dvh);
-    max-height: none;
-    border-radius: 0;
-    border: 0;
-  }
-  .sheet-terminal .sheet-head { padding: 4px var(--s-2); }
-  .sheet-terminal .sheet-foot { padding: 4px 6px; }
   .terminal-meta-bar { padding: 4px var(--s-2); gap: 6px; }
   .terminal-meta-right, .term-prog { display: none; }
   .terminal-container { padding: 4px 6px; }
   .terminal-foot-actions { gap: 6px; flex-wrap: nowrap; overflow-x: auto; }
-  /* Room for End session on a 360px screen; pinch still sets the size. */
-  .term-act-clear, .term-font-lbl { display: none; }
+
   .terminal-actions-group { gap: 4px; flex: none; }
 }

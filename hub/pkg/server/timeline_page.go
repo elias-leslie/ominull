@@ -93,7 +93,9 @@ func (s *Server) buildTimeline(endpointID, rangeValue string, now time.Time) tim
 	if err != nil {
 		body.Problems = append(body.Problems, "The host list could not be read: "+err.Error())
 	}
-	sort.Slice(endpoints, func(i, j int) bool { return strings.ToLower(endpoints[i].Hostname) < strings.ToLower(endpoints[j].Hostname) })
+	sort.Slice(endpoints, func(i, j int) bool {
+		return strings.ToLower(endpoints[i].Hostname) < strings.ToLower(endpoints[j].Hostname)
+	})
 	names := map[string]string{}
 	var host *storage.Endpoint
 	body.Hosts = append(body.Hosts, timelineOption{Value: "", Label: "All hosts", Selected: endpointID == ""})
@@ -139,11 +141,20 @@ func (s *Server) buildTimeline(endpointID, rangeValue string, now time.Time) tim
 		body.Truncated = true
 	}
 	related := s.timelineRelatedIDs(host)
+	sessionHost := map[string]string{}
+	if s.terminalMgr != nil {
+		for _, ts := range s.terminalMgr.ListSessions("default") {
+			sessionHost[ts.SessionID] = ts.EndpointID
+		}
+	}
 	for _, e := range page.Entries {
+		if timelineSkips[e.Action] {
+			continue
+		}
 		if host != nil && !auditConcerns(e, host.ID, related) {
 			continue
 		}
-		items = append(items, auditTimelineItem(e, names))
+		items = append(items, auditTimelineItem(e, names, sessionHost))
 	}
 
 	sort.SliceStable(items, func(i, j int) bool { return items[i].At.After(items[j].At) })
@@ -237,6 +248,19 @@ func alertTimelineItem(a storage.AnomalyAlert, names map[string]string) timeline
 	return it
 }
 
+// timelineSkips are audit actions too routine to show: a phone reopening a
+// terminal page writes one on every load.
+var timelineSkips = map[string]bool{
+	"TERMINAL_SESSION_DETACHED":   true,
+	"TERMINAL_SESSION_REATTACHED": true,
+}
+
+// auditTitles names the actions whose generic title would read badly.
+var auditTitles = map[string]string{
+	"TERMINAL_SESSION_CREATED": "Opened a terminal",
+	"TERMINAL_SESSION_CLOSED":  "Ended a terminal",
+}
+
 // auditKinds groups audit actions by what an operator would call them.
 var auditKinds = []struct{ prefix, kind, tone string }{
 	{"AUTO_ISOLATE", "Containment", "crit"},
@@ -252,16 +276,25 @@ var auditKinds = []struct{ prefix, kind, tone string }{
 	{"CONSOLE_SIGNIN", "Sign-in", "idle"},
 }
 
-func auditTimelineItem(e storage.AuditEntry, names map[string]string) timelineItem {
+func auditTimelineItem(e storage.AuditEntry, names, sessionHost map[string]string) timelineItem {
 	it := timelineItem{At: e.Timestamp, Kind: "Change", Tone: "idle", Title: auditTitle(e.Action), Who: e.Username, Detail: e.Details}
+	if title, ok := auditTitles[e.Action]; ok {
+		// Their details name the session and grant ids, not anything a
+		// reader acts on; the host link says where.
+		it.Title, it.Detail = title, ""
+	}
 	for _, k := range auditKinds {
 		if strings.HasPrefix(e.Action, k.prefix) {
 			it.Kind, it.Tone = k.kind, k.tone
 			break
 		}
 	}
-	if name, ok := names[e.Resource]; ok {
-		it.Host, it.HostID = name, e.Resource
+	resource := e.Resource
+	if ep, ok := sessionHost[resource]; ok {
+		resource = ep
+	}
+	if name, ok := names[resource]; ok {
+		it.Host, it.HostID = name, resource
 	}
 	return it
 }

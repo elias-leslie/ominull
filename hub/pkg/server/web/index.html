@@ -14,46 +14,10 @@
 <meta name="apple-mobile-web-app-title" content="Ominull">
 <link rel="stylesheet" href="app.css?v={{HUB_VERSION}}">
 <link rel="stylesheet" href="topology.css?v={{HUB_VERSION}}">
-<link rel="stylesheet" href="vendor/xterm.css?v={{HUB_VERSION}}">
 <script nonce="{{CSP_NONCE}}">
 /* Serve-time substitution. The hub replaces these two tokens before it writes
    the document; they are template placeholders, never checked-in values. */
 window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "{{OPERATOR}}", role: "{{OPERATOR_ROLE}}" };
-</script>
-<script nonce="{{CSP_NONCE}}">
-/* Let xterm.js keep working under style-src 'self'.
- *
- * The console shipped with style-src 'unsafe-inline' for one reason: xterm's
- * renderer builds its own stylesheet at runtime with
- * document.createElement("style"), in four places, and a <style> element with
- * no nonce is refused silently under a strict policy - the terminal renders
- * as unstyled text with no console error that names the cause.
- *
- * xterm has no nonce option. ITerminalOptions has forty-one properties and
- * none of them is nonce or anything CSP-related, in any released version, so
- * there is no build to upgrade to; the long-standing upstream request for one
- * (xtermjs/xterm.js#4445) is still open. Stamping the document's own nonce
- * onto style elements as they are created is the standard workaround - it is
- * what webpack's __webpack_nonce__ and Angular's CSP_NONCE do.
- *
- * This is strictly narrower than 'unsafe-inline'. A <style> block that
- * arrives in injected markup is parsed without a nonce and is still refused;
- * only an element created by script that already passed script-src can carry
- * one. Element .style property writes are CSSOM and were never governed by
- * style-src, so h()'s `vars` prop is unaffected either way.
- */
-(function () {
-  var nonce = "{{CSP_NONCE}}";
-  if (!nonce) return;
-  var create = document.createElement;
-  document.createElement = function (tag) {
-    var el = create.apply(document, arguments);
-    if (String(tag).toLowerCase() === "style") {
-      try { el.setAttribute("nonce", nonce); el.nonce = nonce; } catch (e) { /* not fatal */ }
-    }
-    return el;
-  };
-})();
 </script>
 <script nonce="{{CSP_NONCE}}">
 /* Apply the stored theme before first paint so the console never flashes Ash
