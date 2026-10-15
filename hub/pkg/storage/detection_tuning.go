@@ -129,6 +129,18 @@ type DetectionTuning struct {
 	// telemetry has shown one of the agent runtimes (agent_runtimes).
 	AgentHeavyObserved bool `json:"agent_heavy_observed"`
 
+	// AdminFanoutSources, AdminFanoutTargets and AdminFanoutMax describe the
+	// routine administration that the lateral sweep detector does not page
+	// on: ssh from one of these endpoints (by id), to port 22 only, on hosts
+	// that are all inventoried (an enrolled endpoint's address, or inside
+	// AdminFanoutTargets: managed hosts without an agent such as the gateway),
+	// at most AdminFanoutMax of them in the window. Anything else - another
+	// source, another port, one unknown host, more hosts - is judged as
+	// before. Empty sources switch the rule off (detector/admin_fanout.go).
+	AdminFanoutSources []string `json:"admin_fanout_sources"`
+	AdminFanoutTargets []string `json:"admin_fanout_targets"`
+	AdminFanoutMax     int      `json:"admin_fanout_max_hosts"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -304,6 +316,11 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
 		}
 	}
+	targets, err := validAdminTargets(t.AdminFanoutTargets)
+	if err != nil {
+		return t, err
+	}
+	t.AdminFanoutTargets = targets
 	blob, err := json.Marshal(t)
 	if err != nil {
 		return t, err
@@ -332,6 +349,11 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
 		}
 	}
+	targets, err := validAdminTargets(t.AdminFanoutTargets)
+	if err != nil {
+		return t, err
+	}
+	t.AdminFanoutTargets = targets
 	return t, nil
 }
 
@@ -388,7 +410,74 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
 	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)
+	t.AdminFanoutSources = tidyList(t.AdminFanoutSources)
+	t.AdminFanoutTargets = tidyList(t.AdminFanoutTargets)
+	t.AdminFanoutMax = clampInt(t.AdminFanoutMax, 2, 20, AdminFanoutMaxDefault)
 	return t
+}
+
+// AdminFanoutMaxDefault is how many inventoried hosts one admin fan-out may
+// reach in the sweep window before it pages anyway.
+const AdminFanoutMaxDefault = 8
+
+// validAdminTargets turns each admin fan-out target into a masked prefix (a
+// bare address becomes a host prefix). Private space only: a public address
+// is never "our own managed host".
+func validAdminTargets(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			if a, aerr := netip.ParseAddr(raw); aerr == nil {
+				p, err = a.Prefix(a.BitLen())
+			}
+		}
+		if err != nil || !privatePrefix(p) {
+			return nil, fmt.Errorf("%w: admin fan-out target %q must be an address or network inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, raw)
+		}
+		out = append(out, p.Masked().String())
+	}
+	return tidyList(out), nil
+}
+
+func privatePrefix(p netip.Prefix) bool {
+	if !p.IsValid() || p.Addr().Is4In6() {
+		return false
+	}
+	for _, space := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"} {
+		private := netip.MustParsePrefix(space)
+		if p.Bits() >= private.Bits() && private.Contains(p.Masked().Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAdminFanoutSource says whether an endpoint's routine ssh fan-out is
+// judged by the admin rule.
+func (t DetectionTuning) IsAdminFanoutSource(endpointID string) bool {
+	id := strings.ToLower(strings.TrimSpace(endpointID))
+	for _, s := range t.AdminFanoutSources {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAdminFanoutTarget says whether an address lies inside a configured
+// managed-host prefix.
+func (t DetectionTuning) IsAdminFanoutTarget(raw string) bool {
+	a, err := netaddr.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for _, cidr := range t.AdminFanoutTargets {
+		if p, err := netip.ParsePrefix(cidr); err == nil && p.Contains(a.WithZone("")) {
+			return true
+		}
+	}
+	return false
 }
 
 func tidyList(in []string) []string {

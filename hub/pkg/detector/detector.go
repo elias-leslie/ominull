@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"path/filepath"
 	"strings"
@@ -100,14 +101,16 @@ type Engine struct {
 	eventsChan     <-chan storage.Event
 	mu             sync.Mutex
 	learnMu        sync.Mutex
-	learnBuf       map[learnKey]*learnCount        // learning observations not yet written
-	portHistory    map[string][]portAccess         // endpointID -> accesses
-	bwTracker      *windowCache[*bandwidthStats]   // bounded endpoint/process histories
-	beaconTracker  *windowCache[*beaconWindow]     // bounded endpoint/peer/process histories
-	lateralTargets map[string]map[string]time.Time // endpointID -> targetIP -> timestamp
-	alertCooldown  map[string]time.Time            // alertKey -> last triggered time
-	unattributed   map[string]*unattributedRun     // endpointID -> destinations we could not name
-	silence        *silenceWatch                   // endpoints already reported as gone quiet
+	learnBuf       map[learnKey]*learnCount           // learning observations not yet written
+	portHistory    map[string][]portAccess            // endpointID -> accesses
+	bwTracker      *windowCache[*bandwidthStats]      // bounded endpoint/process histories
+	beaconTracker  *windowCache[*beaconWindow]        // bounded endpoint/peer/process histories
+	lateralTargets map[string]map[string]*sweepTarget // endpointID:process -> targetIP -> last seen and ports
+	inventory      map[string]map[string]bool         // tenant -> enrolled endpoint addresses (admin_fanout.go)
+	inventoryAt    map[string]time.Time
+	alertCooldown  map[string]time.Time        // alertKey -> last triggered time
+	unattributed   map[string]*unattributedRun // endpointID -> destinations we could not name
+	silence        *silenceWatch               // endpoints already reported as gone quiet
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
@@ -173,7 +176,9 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 		portHistory:    make(map[string][]portAccess),
 		bwTracker:      newWindowCache[*bandwidthStats](8192),
 		beaconTracker:  newWindowCache[*beaconWindow](8192),
-		lateralTargets: make(map[string]map[string]time.Time),
+		lateralTargets: make(map[string]map[string]*sweepTarget),
+		inventory:      make(map[string]map[string]bool),
+		inventoryAt:    make(map[string]time.Time),
 		alertCooldown:  make(map[string]time.Time),
 		unattributed:   make(map[string]*unattributedRun),
 		silence:        newSilenceWatch(),
@@ -915,20 +920,32 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		targetMap, exists := e.lateralTargets[lateralKey]
 		if !exists {
-			targetMap = make(map[string]time.Time)
+			targetMap = make(map[string]*sweepTarget)
 			e.lateralTargets[lateralKey] = targetMap
 		}
 		// Clean targets older than 60 seconds
 		for ip, t := range targetMap {
-			if now.Sub(t) > 60*time.Second {
+			if now.Sub(t.at) > 60*time.Second {
 				delete(targetMap, ip)
 			}
 		}
-		targetMap[ev.DstIP] = now
+		target := targetMap[ev.DstIP]
+		if target == nil {
+			target = &sweepTarget{ports: map[uint16]bool{}}
+			targetMap[ev.DstIP] = target
+		}
+		target.at = now
+		target.ports[ev.DstPort] = true
 		distinctTargets := len(targetMap)
+		window := make(map[string]*sweepTarget, len(targetMap))
+		for ip, t := range targetMap {
+			window[ip] = &sweepTarget{at: t.at, ports: maps.Clone(t.ports)}
+		}
 		e.mu.Unlock()
 
-		isOffHours := now.Hour() >= 22 || now.Hour() <= 5
+		// Off-hours is the operator's window in the operator's zone (the
+		// tuning), as for every other detector. This used to be 22-05 UTC,
+		// which is early evening in the Americas.
 		isWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
 		// Thresholds:
@@ -944,9 +961,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			threshold = 10
 		}
 
+		routine, why := false, ""
 		if distinctTargets >= threshold {
+			routine, why = adminFanout(cfg, endpoint, procKey, window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
+			if routine {
+				log.Printf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
+			}
+		}
+		if distinctTargets >= threshold && !routine {
 			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
 			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
+				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why})
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -968,6 +993,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					Title:       alert.Title,
 					Description: alert.Description,
 					Details:     fmt.Sprintf("Internal Fan-Out: %d unique hosts | Window: 60s | Process: %s | Off-Hours: %t", distinctTargets, ev.ProcessPath, isOffHours),
+					Evidence:    string(sweepEvidence),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,

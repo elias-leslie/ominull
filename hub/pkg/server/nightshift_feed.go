@@ -56,6 +56,7 @@ const (
 	ocsfSevLow           = 2
 	ocsfSevMedium        = 3
 	ocsfSevHigh          = 4
+	ocsfSevCritical      = 5
 	ocsfStatusNew        = 1
 	ocsfStatusResolved   = 4
 )
@@ -178,10 +179,13 @@ func humanAge(d time.Duration) string {
 	}
 }
 
-func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
+func (s *Server) anomalyFinding(now time.Time, detail bool) (feedFinding, error) {
 	win, err := s.store.SummariseOpenAnomalies(now.Add(-feedAnomalyWindow))
 	if err != nil {
 		return feedFinding{}, err
+	}
+	if detail {
+		return s.anomalyDetailFinding(now, win)
 	}
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_severity": win.BySeverity,
 		"by_type": win.ByType, "by_host": win.ByHost, "backlog": win.Backlog, "tier": storage.TierPage}
@@ -199,6 +203,41 @@ func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
 	}
 	msg := fmt.Sprintf("%s in the last 24 h (%d critical, %d high); %d open in the backlog",
 		plural(win.Total, "new open anomaly", "new open anomalies"), crit, high, win.Backlog)
+	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
+}
+
+// anomalyDetailFinding is the v4 summary: the newest paging alerts, each
+// described (nightshift_alerts.go), at the severity of the worst of them.
+func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) (feedFinding, error) {
+	const uid, title = "ominull.anomalies.summary", "Open alerts"
+	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_severity": win.BySeverity,
+		"by_type": win.ByType, "by_host": win.ByHost, "tier": storage.TierPage, "severity_basis": "alert"}
+	if win.Total == 0 {
+		unmapped["alerts"] = []feedAlert{}
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			"No new alerts in the last 24 h", nil, unmapped), nil
+	}
+	list, err := s.store.NewOpenAlerts(now.Add(-feedAnomalyWindow), feedAlertMax)
+	if err != nil {
+		return feedFinding{}, err
+	}
+	tuning := s.store.GetDetectionTuning()
+	alerts := make([]feedAlert, 0, len(list))
+	sev := ocsfSevInformational
+	for _, a := range list {
+		alerts = append(alerts, describeAlert(a, tuning))
+		sev = max(sev, alertSeverity(a.Severity))
+	}
+	alerts = fitAlerts(alerts)
+	more := max(0, win.Total-len(alerts))
+	unmapped["alerts"], unmapped["more"] = alerts, more
+	msg := plural(win.Total, "new alert", "new alerts") + " in the last 24 h"
+	if len(alerts) > 0 {
+		msg = alerts[0].What
+		if more+len(alerts) > 1 {
+			msg += fmt.Sprintf(" (+%d more)", more+len(alerts)-1)
+		}
+	}
 	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
@@ -454,7 +493,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		findings = append(findings, f...)
 	}
-	a, err := s.anomalyFinding(now)
+	contract := r.URL.Query().Get("contract")
+	a, err := s.anomalyFinding(now, contract == "v4")
 	add("anomalies", []feedFinding{a}, err)
 	hl, err := s.huntFinding(now)
 	add("hunt_leads", []feedFinding{hl}, err)
@@ -476,7 +516,7 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	// v2 is asked for, never assumed: a v1 validator rejects any other schema
 	// string, so v1 stays the default until every reader has moved.
-	switch c := r.URL.Query().Get("contract"); c {
+	switch c := contract; c {
 	case "", "v1":
 	case "v2", "v3", "v4":
 		v1, _ := json.Marshal(doc)

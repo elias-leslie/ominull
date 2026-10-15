@@ -50,6 +50,33 @@ func (s *Store) SummariseOpenAnomalies(since time.Time) (AnomalyWindow, error) {
 	return out, err
 }
 
+// NewOpenAlerts returns the open paging findings raised since a point in
+// time (not acknowledged, not held), worst severity first and newest first
+// within it, at most limit of them. The Nightshift feed describes each one.
+func (s *Store) NewOpenAlerts(since time.Time, limit int) ([]AnomalyAlert, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT id, tenant_id, endpoint_id, hostname, anomaly_type, severity, title, description,
+		COALESCE(evidence, ''), process_path, dst_ip, dst_port, timestamp FROM anomaly_alerts
+		WHERE acknowledged = 0 AND held_reason = '' AND timestamp >= ?
+		ORDER BY CASE severity WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END DESC,
+			timestamp DESC LIMIT ?`, since.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AnomalyAlert
+	for rows.Next() {
+		var a AnomalyAlert
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.EndpointID, &a.Hostname, &a.AnomalyType, &a.Severity, &a.Title,
+			&a.Description, &a.Evidence, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // RouterSource is one gateway that has reported telemetry.
 type RouterSource struct {
 	ID         string    `json:"id"`

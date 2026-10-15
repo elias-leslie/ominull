@@ -42,6 +42,9 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			AgentHeavyEndpoints *[]string                `json:"agent_heavy_endpoints"`
 			AgentHeavyRoles     *[]string                `json:"agent_heavy_roles"`
 			AgentHeavyObserved  *bool                    `json:"agent_heavy_observed"`
+			AdminFanoutSources  *[]string                `json:"admin_fanout_sources"`
+			AdminFanoutTargets  *[]string                `json:"admin_fanout_targets"`
+			AdminFanoutMax      *int                     `json:"admin_fanout_max_hosts"`
 		}
 		if err := json.Unmarshal(raw, &patch); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -66,6 +69,16 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 		req.AgentHeavyObserved = before.AgentHeavyObserved
 		if patch.AgentHeavyObserved != nil {
 			req.AgentHeavyObserved = *patch.AgentHeavyObserved
+		}
+		req.AdminFanoutSources, req.AdminFanoutTargets, req.AdminFanoutMax = before.AdminFanoutSources, before.AdminFanoutTargets, before.AdminFanoutMax
+		if patch.AdminFanoutSources != nil {
+			req.AdminFanoutSources = *patch.AdminFanoutSources
+		}
+		if patch.AdminFanoutTargets != nil {
+			req.AdminFanoutTargets = *patch.AdminFanoutTargets
+		}
+		if patch.AdminFanoutMax != nil {
+			req.AdminFanoutMax = *patch.AdminFanoutMax
 		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
@@ -195,6 +208,9 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
 	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
 	add("agent-heavy when a runtime is seen", before.AgentHeavyObserved, after.AgentHeavyObserved)
+	listDelta("admin fan-out sources", before.AdminFanoutSources, after.AdminFanoutSources)
+	listDelta("admin fan-out targets", before.AdminFanoutTargets, after.AdminFanoutTargets)
+	add("admin fan-out host limit", before.AdminFanoutMax, after.AdminFanoutMax)
 	add("agent egress enabled", before.AgentEgressOn, after.AgentEgressOn)
 	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)
 	add("agent upload floor", before.AgentUploadFloorMB, after.AgentUploadFloorMB)
