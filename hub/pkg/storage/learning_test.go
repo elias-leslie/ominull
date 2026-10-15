@@ -177,13 +177,19 @@ func TestProposalsCarryTheirCorroboration(t *testing.T) {
 	obs := []LearningObservation{}
 	for _, ep := range []string{"ep-1", "ep-2", "ep-3"} {
 		obs = append(obs,
-			LearningObservation{WindowID: w.ID, EndpointID: ep, Kind: LearnPair, Key: "backup-agent@acme storage", Count: 400, FirstSeen: now, LastSeen: now},
-			LearningObservation{WindowID: w.ID, EndpointID: ep, Kind: LearnProcess, Key: "backup-agent", Count: 400, FirstSeen: now, LastSeen: now},
+			LearningObservation{WindowID: w.ID, EndpointID: ep, Kind: LearnPair, Key: "/opt/backup/backup-agent@acme storage", Count: 400, FirstSeen: now, LastSeen: now},
+			LearningObservation{WindowID: w.ID, EndpointID: ep, Kind: LearnProcess, Key: "/opt/backup/backup-agent", Count: 400, FirstSeen: now, LastSeen: now},
 		)
 	}
 	obs = append(obs,
-		LearningObservation{WindowID: w.ID, EndpointID: "ep-1", Kind: LearnPair, Key: "oddity@somebody else", Count: 3, FirstSeen: now, LastSeen: now},
-		LearningObservation{WindowID: w.ID, EndpointID: "ep-1", Kind: LearnProcess, Key: "oddity", Count: 3, FirstSeen: now, LastSeen: now},
+		LearningObservation{WindowID: w.ID, EndpointID: "ep-1", Kind: LearnPair, Key: "/opt/oddity/oddity@somebody else", Count: 3, FirstSeen: now, LastSeen: now},
+		LearningObservation{WindowID: w.ID, EndpointID: "ep-1", Kind: LearnProcess, Key: "/opt/oddity/oddity", Count: 3, FirstSeen: now, LastSeen: now},
+	)
+	// Observed before programs were named by path: a base name the tuning
+	// would refuse is never offered.
+	obs = append(obs,
+		LearningObservation{WindowID: w.ID, EndpointID: "ep-2", Kind: LearnPair, Key: "backup-agent@as15169", Count: 400, FirstSeen: now, LastSeen: now},
+		LearningObservation{WindowID: w.ID, EndpointID: "ep-2", Kind: LearnProcess, Key: "backup-agent", Count: 400, FirstSeen: now, LastSeen: now},
 	)
 	if err := store.RecordLearningObservations(obs); err != nil {
 		t.Fatalf("recording observations: %v", err)
@@ -197,9 +203,9 @@ func TestProposalsCarryTheirCorroboration(t *testing.T) {
 	var wide, narrow *LearningProposal
 	for i := range proposals {
 		switch proposals[i].Subject {
-		case "backup-agent@acme storage":
+		case "/opt/backup/backup-agent@acme storage":
 			wide = &proposals[i]
-		case "oddity@somebody else":
+		case "/opt/oddity/oddity@somebody else":
 			narrow = &proposals[i]
 		}
 	}
@@ -218,12 +224,15 @@ func TestProposalsCarryTheirCorroboration(t *testing.T) {
 	if !(wide.Corroboration > narrow.Corroboration) {
 		t.Fatalf("one machine argued as strongly as three: %.2f against %.2f", narrow.Corroboration, wide.Corroboration)
 	}
-	if proposals[0].Subject != "backup-agent@acme storage" {
+	if proposals[0].Subject != "/opt/backup/backup-agent@acme storage" {
 		t.Fatalf("the best-argued proposal is not first: %s", proposals[0].Subject)
 	}
 	// A pair whose counterparty nobody named must never become a proposal, and
 	// the accumulator must not invent one.
 	for _, p := range proposals {
+		if !strings.HasPrefix(p.Subject, "/") && p.Kind != ProposeOffHours {
+			t.Fatalf("a program named only by its name was proposed: %s", p.Subject)
+		}
 		if strings.Contains(p.Subject, "@unattributed") {
 			t.Fatalf("an unnamed network was proposed for silence: %s", p.Subject)
 		}

@@ -2,7 +2,10 @@ package threatintel
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,9 +49,14 @@ const (
 
 // netFeed is one published source of ranges.
 type netFeed struct {
-	name  string
-	url   string
-	parse func(io.Reader) ([]NetworkPrefix, error)
+	name string
+	url  string
+	// sha256, when set, is the exact body the feed must serve. The MISP lists
+	// are pinned this way: their tenancy decides what counts as rented
+	// compute, which nothing is ever vouched for, so a change to them is a
+	// reviewed release, not whatever the branch says today.
+	sha256 string
+	parse  func(io.Reader) ([]NetworkPrefix, error)
 }
 
 // Hetzner is deliberately absent: its warning list is 167,000 single addresses,
@@ -61,26 +69,42 @@ func networkFeeds() []netFeed {
 		{name: "google-cloud", url: "https://www.gstatic.com/ipranges/cloud.json", parse: parseGoogleRanges(TenancyHosting, "Google Cloud (customer range)", "AS396982")},
 		{name: "cloudflare-v4", url: "https://www.cloudflare.com/ips-v4/", parse: parsePlainPrefixList("Cloudflare, Inc.", "AS13335", "US", "United States", TenancySharedCDN)},
 		{name: "cloudflare-v6", url: "https://www.cloudflare.com/ips-v6/", parse: parsePlainPrefixList("Cloudflare, Inc.", "AS13335", "US", "United States", TenancySharedCDN)},
-		{name: "misp-akamai", url: mispList("akamai"), parse: parseMISPWarninglist("Akamai Technologies", "AS20940", TenancySharedCDN)},
-		{name: "misp-fastly", url: mispList("fastly"), parse: parseMISPWarninglist("Fastly, Inc.", "AS54113", TenancySharedCDN)},
-		{name: "misp-office365", url: mispList("microsoft-office365-ip"), parse: parseMISPWarninglist("Microsoft 365", "AS8075", TenancyVendor)},
-		{name: "misp-microsoft-azure", url: mispList("microsoft-azure"), parse: parseMISPWarninglist("Microsoft Azure (customer range)", "AS8075", TenancyHosting)},
-		{name: "misp-apple", url: mispList("apple"), parse: parseMISPWarninglist("Apple Inc.", "AS714", TenancyVendor)},
+		{name: "misp-akamai", url: mispList("akamai"), sha256: "3deda04ec9bcdf94e3db6c66753498e2123c8069cbf05e9c695284a806ac747c",
+			parse: parseMISPWarninglist("Akamai Technologies", "AS20940", TenancySharedCDN)},
+		{name: "misp-fastly", url: mispList("fastly"), sha256: "ed627918d38dee6e4ba6818f3d8adcf34452b40aebacab6426759b318c255dda",
+			parse: parseMISPWarninglist("Fastly, Inc.", "AS54113", TenancySharedCDN)},
+		{name: "misp-office365", url: mispList("microsoft-office365-ip"), sha256: "71f552cfe9d5833a65e4166febf4cd2997aadfc1f847f20235b04977a0d40427",
+			parse: parseMISPWarninglist("Microsoft 365", "AS8075", TenancyVendor)},
+		{name: "misp-microsoft-azure", url: mispList("microsoft-azure"), sha256: "9650277152d16ed92ebaa04d35f7b74baeb08928025b372d7c56f45ff8438ea5",
+			parse: parseMISPWarninglist("Microsoft Azure (customer range)", "AS8075", TenancyHosting)},
+		{name: "misp-apple", url: mispList("apple"), sha256: "b5c9d5900451d626c06ea51bef7114474034813dc2214f1a58b0eceb80c4b22b",
+			parse: parseMISPWarninglist("Apple Inc.", "AS714", TenancyVendor)},
 		{name: "github", url: "https://api.github.com/meta", parse: parseGitHubMeta},
-		{name: "misp-digitalocean", url: mispList("digitalocean"), parse: parseMISPWarninglist("DigitalOcean, LLC", "AS14061", TenancyHosting)},
-		{name: "misp-linode", url: mispList("linode"), parse: parseMISPWarninglist("Linode, LLC", "AS63949", TenancyHosting)},
-		{name: "misp-vultr", url: mispList("vultr"), parse: parseMISPWarninglist("Vultr Holdings", "AS20473", TenancyHosting)},
-		{name: "misp-ovh", url: mispList("ovh-cluster"), parse: parseMISPWarninglist("OVH SAS", "AS16276", TenancyHosting)},
-		{name: "misp-oracle-cloud", url: mispList("oracle-oci"), parse: parseMISPWarninglist("Oracle Cloud (customer range)", "AS31898", TenancyHosting)},
-		{name: "misp-zscaler", url: mispList("zscaler"), parse: parseMISPWarninglist("Zscaler, Inc.", "AS22616", TenancyVendor)},
-		{name: "misp-cdn77", url: mispList("cdn77"), parse: parseMISPWarninglist("CDN77", "AS60068", TenancySharedCDN)},
+		{name: "misp-digitalocean", url: mispList("digitalocean"), sha256: "02bda2eaf5df0fb2125529411c978b7688401ff05d9343cdc27b8ba04cf069c4",
+			parse: parseMISPWarninglist("DigitalOcean, LLC", "AS14061", TenancyHosting)},
+		{name: "misp-linode", url: mispList("linode"), sha256: "f2302338f0f934fb883f33c32998e9956db285f4a9f7c4d7a72795158806d540",
+			parse: parseMISPWarninglist("Linode, LLC", "AS63949", TenancyHosting)},
+		{name: "misp-vultr", url: mispList("vultr"), sha256: "547956b1133e799971fb5d02c7fc55d73d8c69a7c8003a9b6bd9b35e85211729",
+			parse: parseMISPWarninglist("Vultr Holdings", "AS20473", TenancyHosting)},
+		{name: "misp-ovh", url: mispList("ovh-cluster"), sha256: "76fdeab794fd6f292c712b905025d453e62e9144b288a7f707804a99bbf83d96",
+			parse: parseMISPWarninglist("OVH SAS", "AS16276", TenancyHosting)},
+		{name: "misp-oracle-cloud", url: mispList("oracle-oci"), sha256: "d44d99c5c815faad27f372bfe4d2cd4a9fd5790e8ad58388083fa41d0f35890e",
+			parse: parseMISPWarninglist("Oracle Cloud (customer range)", "AS31898", TenancyHosting)},
+		{name: "misp-zscaler", url: mispList("zscaler"), sha256: "ab649fba163f960dc389ccddd6c74c295696fdb031070da198ef0e6e80da2db9",
+			parse: parseMISPWarninglist("Zscaler, Inc.", "AS22616", TenancyVendor)},
+		{name: "misp-cdn77", url: mispList("cdn77"), sha256: "f1703ec83caae4cc5d2f260a4edf9052259ed1e45dbf62cc9e9ea5b26999b0fb",
+			parse: parseMISPWarninglist("CDN77", "AS60068", TenancySharedCDN)},
 	}
 }
+
+// mispCommit pins the MISP collection. To move it, take a newer commit, hash
+// each list.json at that commit, and update the sha256 next to each feed.
+const mispCommit = "fe7651f9f9723fda977cc90d07a2cdcb535909aa" // 2026-10-15
 
 // mispList addresses one warning list in the MISP collection, which is CC0 and
 // carries the same vendor ranges every other tool consumes.
 func mispList(name string) string {
-	return "https://raw.githubusercontent.com/MISP/misp-warninglists/main/lists/" + name + "/list.json"
+	return "https://raw.githubusercontent.com/MISP/misp-warninglists/" + mispCommit + "/lists/" + name + "/list.json"
 }
 
 // SyncNetworkAttribution fetches every feed, merges what came back with the
@@ -148,7 +172,18 @@ func fetchFeed(ctx context.Context, client *http.Client, feed netFeed) ([]Networ
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	entries, err := feed.parse(io.LimitReader(resp.Body, feedByteLimit))
+	body := io.LimitReader(resp.Body, feedByteLimit)
+	if feed.sha256 != "" {
+		raw, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != feed.sha256 {
+			return nil, fmt.Errorf("body does not match the pinned sha256 %s", feed.sha256)
+		}
+		body = bytes.NewReader(raw)
+	}
+	entries, err := feed.parse(body)
 	if err != nil {
 		return nil, err
 	}

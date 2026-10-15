@@ -121,7 +121,7 @@ func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
 	for _, ep := range []string{"ep-1", "ep-2"} {
 		obs = append(obs, storage.LearningObservation{
 			WindowID: w.ID, EndpointID: ep, Kind: storage.LearnPair,
-			Key: "backup-agent@acme vendor", Count: 200, FirstSeen: now, LastSeen: now,
+			Key: "/opt/acme/backup-agent@as64500", Count: 200, FirstSeen: now, LastSeen: now,
 		})
 	}
 	if err := store.RecordLearningObservations(obs); err != nil {
@@ -138,7 +138,7 @@ func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
 	}
 	first, _ := list[0].(map[string]interface{})
 	id, _ := first["id"].(string)
-	if first["subject"] != "backup-agent@acme vendor" {
+	if first["subject"] != "/opt/acme/backup-agent@as64500" {
 		t.Fatalf("the proposal names the wrong thing: %v", first)
 	}
 	if first["corroboration"] == nil || first["evidence"] == nil {
@@ -154,7 +154,7 @@ func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
 	if applied, _ := body["applied"].([]interface{}); len(applied) != 0 {
 		t.Fatalf("an unproposed id was applied: %v", applied)
 	}
-	if store.GetDetectionTuning().IsVouchedPair("backup-agent", "acme vendor", "vendor") {
+	if store.GetDetectionTuning().IsVouchedPair("/opt/acme/backup-agent", "", "AS64500", "Acme Vendor", "vendor") {
 		t.Fatal("the tuning changed without the proposal being named")
 	}
 
@@ -168,10 +168,10 @@ func TestProposalsApplyOnlyWhenNamed(t *testing.T) {
 		t.Fatalf("the named proposal was not applied: %v", body)
 	}
 	tuning := store.GetDetectionTuning()
-	if !tuning.IsVouchedPair("backup-agent", "acme vendor", "vendor") {
+	if !tuning.IsVouchedPair("/opt/acme/backup-agent", "", "AS64500", "Acme Vendor", "vendor") {
 		t.Fatal("the applied proposal did not reach the tuning")
 	}
-	if tuning.IsVouchedPair("curl", "acme vendor", "vendor") {
+	if tuning.IsVouchedPair("/usr/bin/curl", "", "AS64500", "Acme Vendor", "vendor") {
 		t.Fatal("applying a pair silenced the whole network")
 	}
 
@@ -197,7 +197,7 @@ func TestLearningNeverProposesRentedCompute(t *testing.T) {
 	now := time.Now().UTC()
 	if err := store.RecordLearningObservations([]storage.LearningObservation{{
 		WindowID: w.ID, EndpointID: "ep-1", Kind: storage.LearnPair,
-		Key: "python3.13@rented cloud, listed by github", Count: 900, FirstSeen: now, LastSeen: now,
+		Key: "/usr/bin/python3.13@rented cloud, listed by github", Count: 900, FirstSeen: now, LastSeen: now,
 	}}); err != nil {
 		t.Fatalf("recording: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestLearningNeverProposesRentedCompute(t *testing.T) {
 	}
 	// Even if such an observation reaches the table, the tuning refuses to
 	// enforce the pair - hosting is barred in code, on both doors.
-	if store.GetDetectionTuning().IsVouchedPair("python3.13", "rented cloud, listed by github", storage.TenancyHosting) {
+	if store.GetDetectionTuning().IsVouchedPair("/usr/bin/python3.13", "", "AS36459", "Rented cloud, listed by GitHub", storage.TenancyHosting) {
 		t.Fatal("a learning proposal vouched for rented compute")
 	}
 }

@@ -2,6 +2,8 @@ package threatintel
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -264,5 +266,47 @@ func TestGitHubsRentedRunnerRangesAreNotAttributedToGitHub(t *testing.T) {
 func TestAGitHubMetaDocumentWithNoRangesIsAnError(t *testing.T) {
 	if _, err := parseGitHubMeta(strings.NewReader(`{"ssh_keys":["ssh-ed25519 AAAA"]}`)); err == nil {
 		t.Fatal("expected a document with no ranges to be refused rather than swapped in empty")
+	}
+}
+
+// The MISP lists decide which ranges are rented compute, and rented compute is
+// never vouched for. Each is fetched from one reviewed commit and must hash to
+// the value recorded with it, so neither a new commit on the branch nor a
+// tampered mirror can move a range out of "hosting".
+func TestTheMISPListsArePinnedToACommitAndHash(t *testing.T) {
+	seen := 0
+	for _, feed := range networkFeeds() {
+		if !strings.HasPrefix(feed.name, "misp-") {
+			continue
+		}
+		seen++
+		if !strings.Contains(feed.url, "/misp-warninglists/"+mispCommit+"/lists/") || len(mispCommit) != 40 {
+			t.Errorf("%s is not fetched from the pinned commit: %s", feed.name, feed.url)
+		}
+		if len(feed.sha256) != 64 {
+			t.Errorf("%s has no pinned sha256", feed.name)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no MISP feeds found")
+	}
+}
+
+func TestAFeedThatDoesNotMatchItsPinIsRefused(t *testing.T) {
+	list := `{"name":"x","type":"cidr","list":["192.0.2.0/24"]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(list))
+	}))
+	defer srv.Close()
+
+	parse := parseMISPWarninglist("Example", "AS64496", TenancyHosting)
+	sum := sha256.Sum256([]byte(list))
+	pinned := netFeed{name: "misp-x", url: srv.URL, sha256: hex.EncodeToString(sum[:]), parse: parse}
+	if entries, err := fetchFeed(context.Background(), srv.Client(), pinned); err != nil || len(entries) != 1 {
+		t.Fatalf("the pinned body was refused: %v %v", entries, err)
+	}
+	pinned.sha256 = strings.Repeat("0", 64)
+	if entries, err := fetchFeed(context.Background(), srv.Client(), pinned); err == nil {
+		t.Fatalf("a body that does not match its pin was accepted: %v", entries)
 	}
 }

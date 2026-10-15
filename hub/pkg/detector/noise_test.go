@@ -416,7 +416,7 @@ func TestAnInterpreterBeaconingThroughAVouchedNetworkIsStillAFinding(t *testing.
 
 func TestABrowserTalkingToTheSameVouchedNetworkIsNotAFinding(t *testing.T) {
 	engine, store := noiseEngine(t)
-	beaconEvents(engine, "linux-21", "104.16.0.1", "/usr/bin/chrome", time.Now().UTC().Add(-2*time.Hour))
+	beaconEvents(engine, "linux-21", "104.16.0.1", "/opt/google/chrome/chrome", time.Now().UTC().Add(-2*time.Hour))
 
 	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 0 {
 		t.Fatalf("an ordinary browser keepalive to a vouched network raised %d alerts: %q", len(got), got[0].Title)
@@ -437,7 +437,7 @@ func TestABrowserTalkingToRentedComputeIsNotVouchedFor(t *testing.T) {
 		{"shared edge", storage.TenancySharedCDN, true},
 		{"rented compute", storage.TenancyHosting, false},
 	} {
-		got := tuning.IsVouchedPair("chrome", "Amazon Web Services", tc.tenancy)
+		got := tuning.IsVouchedPair("/opt/google/chrome/chrome", "", "AS16509", "Amazon Web Services", tc.tenancy)
 		if got != tc.want {
 			t.Fatalf("%s: IsVouchedPair returned %v, want %v", tc.name, got, tc.want)
 		}
@@ -446,26 +446,27 @@ func TestABrowserTalkingToRentedComputeIsNotVouchedFor(t *testing.T) {
 
 func TestAnExplicitPairVouchesForThatConversationAndNoOther(t *testing.T) {
 	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"backup-agent@backblaze"}
+	tuning.QuietPairs = []string{"/opt/backup/backup-agent@backblaze, inc."}
 	tuning = mustSaveTuning(t, tuning)
 
-	if !tuning.IsVouchedPair("backup-agent", "Backblaze, Inc.", storage.TenancyVendor) {
+	if !tuning.IsVouchedPair("/opt/backup/backup-agent", "", "", "Backblaze, Inc.", storage.TenancyVendor) {
 		t.Fatal("the pair the operator named was not honoured")
 	}
-	if tuning.IsVouchedPair("python3", "Backblaze, Inc.", storage.TenancyVendor) {
+	if tuning.IsVouchedPair("/usr/bin/python3", "", "", "Backblaze, Inc.", storage.TenancyVendor) ||
+		tuning.IsVouchedPair("/tmp/backup-agent", "", "", "Backblaze, Inc.", storage.TenancyVendor) {
 		t.Fatal("a pair vouched for every process reaching that owner")
 	}
-	if tuning.IsVouchedPair("backup-agent", "Cloudflare, Inc.", storage.TenancyVendor) {
+	if tuning.IsVouchedPair("/opt/backup/backup-agent", "", "AS13335", "Cloudflare, Inc.", storage.TenancyVendor) {
 		t.Fatal("a pair vouched for its process reaching any owner")
 	}
 }
 
 func TestAMalformedPairIsDiscardedRatherThanWidened(t *testing.T) {
 	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"chrome", "@google", "curl@", "  ", "curl@github"}
+	tuning.QuietPairs = []string{"chrome", "@google", "curl@", "  ", "/usr/bin/curl@as36459"}
 	tuning = mustSaveTuning(t, tuning)
 
-	if len(tuning.QuietPairs) != 1 || tuning.QuietPairs[0] != "curl@github" {
+	if len(tuning.QuietPairs) != 1 || tuning.QuietPairs[0] != "/usr/bin/curl@as36459" {
 		t.Fatalf("expected only the complete pair to survive, got %q", tuning.QuietPairs)
 	}
 }
@@ -735,7 +736,7 @@ func TestAVouchedInterpreterPairIsNotReported(t *testing.T) {
 	engine, store := noiseEngine(t)
 
 	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"python3.13@akamai"}
+	tuning.QuietPairs = []string{"/usr/bin/python3.13@as20940"}
 	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
 		t.Fatalf("saving tuning: %v", err)
 	}
@@ -774,18 +775,44 @@ func TestOneBeaconingConversationIsOneFindingPerCounterparty(t *testing.T) {
 	}
 }
 
-// A browser keeps sessions open to whatever the user is looking at, including
-// sites hosted on rented compute. Five Google Cloud addresses in a minute were
-// five beacon findings and five ordinary web sessions.
+// A browser keeps sessions open to whatever the user is looking at. On a named
+// network that is not rented compute that is not a beacon finding, even where
+// the network is not on the quiet list.
 func TestABrowserIsNotABeaconOnANetworkThatResolves(t *testing.T) {
 	engine, store := noiseEngine(t)
 	now := time.Now().UTC().Add(-2 * time.Hour)
 
-	// 159.65.0.0/16 is DigitalOcean in the built-in table: resolved, and rented.
-	beaconEvents(engine, "linux-51", "159.65.0.20", "/opt/google/chrome/chrome", now)
+	// 9.9.9.0/24 is Quad9 in the built-in table: resolved, not rented, not quiet.
+	beaconEvents(engine, "linux-51", "9.9.9.20", "/opt/google/chrome/chrome", now)
 
 	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 0 {
 		t.Fatalf("an ordinary browser session raised %d beacon findings: %q", len(got), got[0].Title)
+	}
+}
+
+// Rented compute is where an extension or an injected page would call home,
+// and "the browser" was only ever a program: a regular conversation from it to
+// a rented machine is a beacon finding again.
+func TestABrowserBeaconingToRentedComputeIsAFinding(t *testing.T) {
+	engine, store := noiseEngine(t)
+	// 159.65.0.0/16 is DigitalOcean in the built-in table: resolved, and rented.
+	beaconEvents(engine, "linux-52", "159.65.0.20", "/opt/google/chrome/chrome", time.Now().UTC().Add(-2*time.Hour))
+
+	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 1 {
+		t.Fatalf("a browser beaconing to rented compute raised %d findings, want 1", len(got))
+	}
+}
+
+// An implant named after a quiet client or a quiet process, run from a
+// directory anyone can write, is judged like any other program.
+func TestAnImplantNamedLikeAQuietProgramIsStillABeacon(t *testing.T) {
+	for i, path := range []string{"/tmp/chrome", "/tmp/svchost.exe", `C:\Users\Public\svchost.exe`, "/home/user/.local/bin/claude", "/tmp/go-build123/b001/x.test"} {
+		engine, store := noiseEngine(t)
+		// 104.16.0.1 is Cloudflare, which the shipped tuning vouches for.
+		beaconEvents(engine, fmt.Sprintf("linux-6%d", i), "104.16.0.1", path, time.Now().UTC().Add(-2*time.Hour))
+		if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 1 {
+			t.Errorf("%s beaconing to a vouched network raised %d findings, want 1", path, len(got))
+		}
 	}
 }
 
@@ -809,5 +836,51 @@ func TestABrowserBeaconingToAnUnnamedNetworkIsStillReported(t *testing.T) {
 
 	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) == 0 {
 		t.Fatal("a browser beaconing to an unattributable network raised nothing")
+	}
+}
+
+// Amazon is a quiet network by its AS number, and rented compute inside that
+// AS is not: "amazon" as a fragment of a name used to silence first-seen for
+// every EC2 machine. Google's own range stays quiet.
+func TestFirstSeenToRentedComputeInsideAQuietASIsReported(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	// 54.0.0.0/8 is Amazon in the built-in table, rented until a feed says otherwise.
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-70", Timestamp: now,
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "54.1.2.3", DstPort: 443, BytesOut: 200, ProcessPath: "/usr/bin/curl",
+	})
+	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
+		t.Fatalf("first contact with rented compute in a quiet AS raised %d findings, want 1", len(got))
+	}
+	engine.Evaluate(storage.Event{
+		TenantID: "default", EndpointID: "linux-70", Timestamp: now.Add(time.Second),
+		Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "8.8.8.8", DstPort: 443, BytesOut: 200, ProcessPath: "/usr/bin/curl",
+	})
+	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
+		t.Fatalf("Google's own range is no longer quiet: %d findings", len(got))
+	}
+}
+
+// Build-cache test binaries ("go-build", ".test") and programs named like
+// infrastructure are judged by the sweep detector unless they run from the
+// path the infrastructure is installed at: any program can be given either
+// name from a directory anyone can write.
+func TestASweepFromATestBinaryOrAnInfrastructureNameIsReported(t *testing.T) {
+	for i, path := range []string{"/tmp/go-build123/b001/server.test", "/tmp/dnsmasq", "/home/user/dockerd"} {
+		engine, store := noiseEngine(t)
+		now := time.Now().UTC()
+		for port := 0; port < 35; port++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: fmt.Sprintf("linux-8%d", i), Timestamp: now.Add(time.Duration(port) * 100 * time.Millisecond),
+				Action: "PERMIT", Direction: "OUTBOUND",
+				DstIP: "203.0.113.9", DstPort: uint16(2000 + port), BytesOut: 60, ProcessPath: path,
+			})
+		}
+		if got := anomaliesOfType(t, store, "PORT_SCAN_RECON"); len(got) != 1 {
+			t.Errorf("%s sweeping 35 ports raised %d findings, want 1", path, len(got))
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"sort"
 	"strings"
@@ -68,8 +69,10 @@ type DetectionTuning struct {
 	WarmupHours int `json:"warmup_hours"`
 
 	// QuietProcesses and QuietOrgs are the operator's own answers to "this is
-	// normal here". Matched on the process base name and on a substring of the
-	// resolved network owner.
+	// normal here". A process is named by its installed path (see
+	// MatchesQuietPath), never its base name: malware called svchost.exe in a
+	// temp directory is not svchost. A network is named by its AS number, and
+	// rented compute inside that AS is never quiet (IsQuietOrg).
 	QuietProcesses []string `json:"quiet_processes"`
 	QuietOrgs      []string `json:"quiet_orgs"`
 
@@ -85,8 +88,9 @@ type DetectionTuning struct {
 	// the finding.
 	QuietClients []string `json:"quiet_clients"`
 
-	// QuietPairs are one-off exceptions, written "process@owner" - the shape
-	// the console's Expected button and the learning proposals produce.
+	// QuietPairs are one-off exceptions, written "path@owner" - the shape the
+	// console's Expected button and the learning proposals produce. The owner
+	// is an AS number or the network's exact name (OwnerMatches).
 	QuietPairs []string `json:"quiet_pairs"`
 
 	// ContainerCIDRs are explicit lateral-movement exemptions, never guessed from private address space.
@@ -201,55 +205,70 @@ func defaultDetectionTuning() DetectionTuning {
 }
 
 // defaultQuietProcesses is a starting point, not a security boundary. Every
-// name here is an operating system component whose whole job is to talk to its
+// entry here is an operating system component whose whole job is to talk to its
 // vendor on a timer; leaving them in makes the detector describe the platform
 // rather than the intruder. They are listed in the console and can be removed.
+//
+// Each is the path the component is installed at, in directories only an
+// administrator can write. The base names these replaced were the first thing
+// an implant would call itself.
 func defaultQuietProcesses() []string {
 	return []string{
 		// Windows
-		"svchost.exe", "services.exe", "lsass.exe", "system", "ntoskrnl.exe",
-		"spoolsv.exe", "dwm.exe", "searchhost.exe", "tiworker.exe",
-		"trustedinstaller.exe", "msmpeng.exe", "usocoreworker.exe",
+		"c:/windows/system32/svchost.exe", "c:/windows/system32/services.exe",
+		"c:/windows/system32/lsass.exe", "c:/windows/system32/ntoskrnl.exe",
+		"c:/windows/system32/spoolsv.exe", "c:/windows/system32/dwm.exe",
+		"c:/windows/systemapps/microsoftwindows.client.cbs_*/searchhost.exe",
+		"c:/windows/winsxs/*/tiworker.exe", "c:/windows/servicing/trustedinstaller.exe",
+		"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe",
+		"c:/windows/system32/usocoreworker.exe",
 		// Linux
-		"systemd", "systemd-resolved", "systemd-timesyncd", "chronyd", "ntpd",
-		"snapd", "packagekitd", "unattended-upgr", "dbus-daemon",
+		"/usr/lib/systemd/systemd", "/usr/lib/systemd/systemd-resolved",
+		"/usr/lib/systemd/systemd-timesyncd", "/usr/sbin/chronyd", "/usr/sbin/ntpd",
+		"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd",
+		"/usr/libexec/packagekitd", "/usr/bin/dbus-daemon",
 		// This fleet's own agent, which heartbeats on a fixed interval and is
 		// therefore the most perfect beacon on any host it is installed on.
-		// "ominull_agent.exe" was the Windows entry and is not a file that
-		// exists; the service binary is ominulld.exe, so the Windows agent was
-		// never actually quiet and reported its own hub traffic as an
-		// exfiltration spike.
-		"ominull-agent", "ominulld", "ominulld.exe", "ominull_agent.exe",
-		// Trusted communication clients with known regular keepalive intervals
-		"telegram", "telegram-desktop", "Telegram.exe",
+		"/opt/ominull/bin/ominulld", "c:/program files/ominull/ominulld.exe",
 	}
 }
 
-// defaultQuietClients are the processes that talk to vendor networks all day by
+// defaultQuietClients are the programs that talk to vendor networks all day by
 // design. Being on this list silences nothing on its own: it only means that
-// this process talking to an already-vouched owner is unremarkable.
+// this program talking to an already-vouched owner is unremarkable.
 func defaultQuietClients() []string {
 	return []string{
 		// Browsers, which account for most traffic to CDN and vendor networks.
-		"chrome", "chrome.exe", "chromium", "firefox", "firefox.exe",
-		"msedge.exe", "safari", "brave", "brave.exe", "opera.exe",
+		"/opt/google/chrome/chrome", "c:/program files/google/chrome/application/chrome.exe",
+		"c:/program files (x86)/google/chrome/application/chrome.exe",
+		"/usr/lib/chromium/chromium", "/snap/chromium/*/usr/lib/chromium-browser/chrome",
+		"/usr/lib/firefox/firefox", "/snap/firefox/*/usr/lib/firefox/firefox",
+		"c:/program files/mozilla firefox/firefox.exe",
+		"c:/program files (x86)/microsoft/edge/application/msedge.exe",
+		"/applications/safari.app/contents/macos/safari",
+		"/opt/brave.com/brave/brave", "c:/program files/bravesoftware/brave-browser/application/brave.exe",
 		// Platform updaters and stores.
-		"svchost.exe", "usocoreworker.exe", "msmpeng.exe", "snapd",
-		"packagekitd", "unattended-upgr", "softwareupdated", "nsurlsessiond",
+		"c:/windows/system32/svchost.exe", "c:/windows/system32/usocoreworker.exe",
+		"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe",
+		"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd", "/usr/libexec/packagekitd",
+		"/usr/libexec/nsurlsessiond",
+		"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated",
 		// This fleet's own agent, which is the most regular talker on any host
 		// it is installed on.
-		"ominull-agent", "ominulld", "ominulld.exe",
+		"/opt/ominull/bin/ominulld", "c:/program files/ominull/ominulld.exe",
 		// Chat and assistant clients with fixed keepalives. These hold a
 		// websocket open and ping it on a timer, which is regular, uniform and
 		// entirely ordinary - the shape the beacon detector exists to find,
 		// produced by an application the operator installed on purpose.
-		"telegram", "telegram-desktop", "telegram.exe",
-		"chatgpt", "chatgpt.exe", "claude-desktop", "claude", "claude.exe",
+		"/usr/lib/chatgpt/chatgpt", "/usr/lib/claude-desktop/claude-desktop",
 	}
 }
 
+// defaultQuietOrgs are the vendors' own AS numbers: Apple, Microsoft, Google,
+// Cloudflare, Amazon, Akamai and Fastly. Rented compute inside them (EC2,
+// Azure, the published cloud ranges) is never quiet.
 func defaultQuietOrgs() []string {
-	return []string{"apple", "microsoft", "google", "cloudflare", "amazon", "akamai", "fastly", "telegram"}
+	return []string{"as714", "as8075", "as15169", "as13335", "as16509", "as20940", "as54113"}
 }
 
 func (s *Store) initDetectionTuningSchema() error {
@@ -260,7 +279,152 @@ func (s *Store) initDetectionTuningSchema() error {
 		updated_at DATETIME NOT NULL,
 		updated_by TEXT NOT NULL DEFAULT ''
 	);`)
-	return err
+	if err != nil {
+		return err
+	}
+	s.migrateLegacyQuietLists()
+	return nil
+}
+
+// legacyQuietPaths are the paths the shipped quiet names are installed at, for
+// rewriting a row saved when the quiet lists matched base names. A name not
+// here is dropped from the row: kept, it would match nothing anyway.
+var legacyQuietPaths = map[string][]string{
+	"svchost.exe":          {"c:/windows/system32/svchost.exe"},
+	"services.exe":         {"c:/windows/system32/services.exe"},
+	"lsass.exe":            {"c:/windows/system32/lsass.exe"},
+	"ntoskrnl.exe":         {"c:/windows/system32/ntoskrnl.exe"},
+	"spoolsv.exe":          {"c:/windows/system32/spoolsv.exe"},
+	"dwm.exe":              {"c:/windows/system32/dwm.exe"},
+	"usocoreworker.exe":    {"c:/windows/system32/usocoreworker.exe"},
+	"searchhost.exe":       {"c:/windows/systemapps/microsoftwindows.client.cbs_*/searchhost.exe"},
+	"tiworker.exe":         {"c:/windows/winsxs/*/tiworker.exe"},
+	"trustedinstaller.exe": {"c:/windows/servicing/trustedinstaller.exe"},
+	"msmpeng.exe":          {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
+	"systemd":              {"/usr/lib/systemd/systemd"},
+	"systemd-resolved":     {"/usr/lib/systemd/systemd-resolved"},
+	"systemd-timesyncd":    {"/usr/lib/systemd/systemd-timesyncd"},
+	"chronyd":              {"/usr/sbin/chronyd"},
+	"ntpd":                 {"/usr/sbin/ntpd"},
+	"snapd":                {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
+	"packagekitd":          {"/usr/libexec/packagekitd"},
+	"dbus-daemon":          {"/usr/bin/dbus-daemon"},
+	"ominull-agent":        {"/opt/ominull/bin/ominulld"},
+	"ominulld":             {"/opt/ominull/bin/ominulld"},
+	"ominulld.exe":         {"c:/program files/ominull/ominulld.exe"},
+	"ominull_agent.exe":    {"c:/program files/ominull/ominulld.exe"},
+	"chrome":               {"/opt/google/chrome/chrome"},
+	"chrome.exe": {"c:/program files/google/chrome/application/chrome.exe",
+		"c:/program files (x86)/google/chrome/application/chrome.exe"},
+	"chromium":        {"/usr/lib/chromium/chromium", "/snap/chromium/*/usr/lib/chromium-browser/chrome"},
+	"firefox":         {"/usr/lib/firefox/firefox", "/snap/firefox/*/usr/lib/firefox/firefox"},
+	"firefox.exe":     {"c:/program files/mozilla firefox/firefox.exe"},
+	"msedge.exe":      {"c:/program files (x86)/microsoft/edge/application/msedge.exe"},
+	"safari":          {"/applications/safari.app/contents/macos/safari"},
+	"brave":           {"/opt/brave.com/brave/brave"},
+	"brave.exe":       {"c:/program files/bravesoftware/brave-browser/application/brave.exe"},
+	"nsurlsessiond":   {"/usr/libexec/nsurlsessiond"},
+	"softwareupdated": {"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated"},
+	"chatgpt":         {"/usr/lib/chatgpt/chatgpt"},
+	"claude-desktop":  {"/usr/lib/claude-desktop/claude-desktop"},
+	"rclone":          {"/usr/bin/rclone", "/home/*/.local/bin/rclone"},
+}
+
+// legacyQuietOwners are the AS numbers behind the name fragments the shipped
+// quiet networks and known-workload owners used.
+var legacyQuietOwners = map[string]string{
+	"apple": "as714", "microsoft": "as8075", "google": "as15169", "cloudflare": "as13335",
+	"amazon": "as16509", "akamai": "as20940", "fastly": "as54113", "github": "as36459",
+}
+
+// migrateQuietLists rewrites quiet entries saved when processes matched by base
+// name and networks by a fragment of their name. Entries already written as
+// paths and AS numbers are kept as they are, so running it twice changes
+// nothing. It returns what it could not carry over.
+func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
+	var dropped []string
+	paths := func(list []string, what string) []string {
+		out := []string{}
+		for _, v := range list {
+			switch {
+			case ValidQuietPath(v) == nil:
+				out = append(out, v)
+			case legacyQuietPaths[v] != nil:
+				out = append(out, legacyQuietPaths[v]...)
+			default:
+				dropped = append(dropped, what+" "+v)
+			}
+		}
+		return out
+	}
+	t.QuietProcesses = paths(t.QuietProcesses, "quiet process")
+	t.QuietClients = paths(t.QuietClients, "expected client")
+
+	orgs := []string{}
+	for _, v := range t.QuietOrgs {
+		switch {
+		case IsASN(v):
+			orgs = append(orgs, v)
+		case legacyQuietOwners[v] != "":
+			orgs = append(orgs, legacyQuietOwners[v])
+		default:
+			dropped = append(dropped, "quiet network "+v)
+		}
+	}
+	t.QuietOrgs = orgs
+
+	pairs := []string{}
+	for _, v := range t.QuietPairs {
+		proc, owner, ok := splitPair(v)
+		procs := []string{proc}
+		if ValidQuietPath(proc) != nil {
+			procs = legacyQuietPaths[proc]
+		}
+		if asn := legacyQuietOwners[owner]; asn != "" {
+			owner = asn
+		}
+		if !ok || len(procs) == 0 {
+			dropped = append(dropped, "expected pair "+v)
+			continue
+		}
+		for _, p := range procs {
+			pairs = append(pairs, p+"@"+owner)
+		}
+	}
+	t.QuietPairs = pairs
+
+	for i, k := range t.KnownWorkloads {
+		if asn := legacyQuietOwners[k.Owner]; asn != "" {
+			t.KnownWorkloads[i].Owner = asn
+		}
+	}
+	return t.normalised(), dropped
+}
+
+// migrateLegacyQuietLists rewrites the stored row once, on the first start
+// that matches by path and AS number. A row it cannot save is left as it is:
+// its old entries match nothing now, which is quieter for nobody.
+func (s *Store) migrateLegacyQuietLists() {
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM detection_tuning WHERE id = 1`).Scan(&exists); err != nil || exists == 0 {
+		return
+	}
+	before := s.GetDetectionTuning()
+	after, dropped := migrateQuietLists(before)
+	was, _ := json.Marshal(quietListsOf(before))
+	now, _ := json.Marshal(quietListsOf(after))
+	if string(was) == string(now) {
+		return
+	}
+	if _, err := s.SaveDetectionTuning(after, "upgrade"); err != nil {
+		log.Printf("[-] Detection tuning: quiet lists could not be rewritten as paths and AS numbers, old entries now match nothing: %v", err)
+		return
+	}
+	log.Printf("[+] Detection tuning: quiet lists rewritten as paths and AS numbers (dropped: %s)", strings.Join(dropped, ", "))
+}
+
+func quietListsOf(t DetectionTuning) []any {
+	return []any{t.QuietProcesses, t.QuietOrgs, t.QuietClients, t.QuietPairs, t.KnownWorkloads}
 }
 
 // GetDetectionTuning returns the stored tuning, or the defaults if the hub has
@@ -316,6 +480,9 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
 		}
 	}
+	if err := t.validQuietLists(); err != nil {
+		return t, err
+	}
 	targets, err := validAdminTargets(t.AdminFanoutTargets)
 	if err != nil {
 		return t, err
@@ -349,12 +516,40 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
 		}
 	}
+	if err := t.validQuietLists(); err != nil {
+		return t, err
+	}
 	targets, err := validAdminTargets(t.AdminFanoutTargets)
 	if err != nil {
 		return t, err
 	}
 	t.AdminFanoutTargets = targets
 	return t, nil
+}
+
+// validQuietLists refuses an entry the matchers would read more widely than it
+// is written, or never match: a process by name, a network by a fragment of
+// its name.
+func (t DetectionTuning) validQuietLists() error {
+	for _, list := range [][]string{t.QuietProcesses, t.QuietClients} {
+		for _, entry := range list {
+			if err := ValidQuietPath(entry); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
+			}
+		}
+	}
+	for _, org := range t.QuietOrgs {
+		if !IsASN(org) {
+			return fmt.Errorf("%w: quiet network %q must be an AS number such as AS15169", ErrInvalidDetectionTuning, org)
+		}
+	}
+	for _, pair := range t.QuietPairs {
+		proc, _, _ := splitPair(pair)
+		if err := ValidQuietPath(proc); err != nil {
+			return fmt.Errorf("%w: expected pair %q: %v", ErrInvalidDetectionTuning, pair, err)
+		}
+	}
+	return nil
 }
 
 func (t DetectionTuning) normalised() DetectionTuning {
@@ -562,40 +757,108 @@ func (t DetectionTuning) IsOffHours(at time.Time) bool {
 	return h >= t.OffHoursStart || h < t.OffHoursEnd
 }
 
-// IsQuietProcess matches on the base name, lower-cased.
-func (t DetectionTuning) IsQuietProcess(base string) bool {
-	base = strings.ToLower(strings.TrimSpace(base))
+// ProcessPathKey is the form a process path is compared in: forward slashes,
+// lower case, without the kernel's " (deleted)" suffix - the same reading
+// detector.WorkloadOf gives an installed program.
+func ProcessPathKey(path string) string {
+	p := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	return strings.TrimSuffix(p, " (deleted)")
+}
+
+// quietHashPrefix marks the optional executable hash on a quiet path entry:
+// "/usr/bin/rclone sha256:<64 hex>" matches only that build of the program.
+const quietHashPrefix = " sha256:"
+
+// splitQuietPath separates a quiet path entry from its optional hash.
+func splitQuietPath(entry string) (pattern, sha string) {
+	if i := strings.LastIndex(entry, quietHashPrefix); i >= 0 {
+		return entry[:i], entry[i+len(quietHashPrefix):]
+	}
+	return entry, ""
+}
+
+// ValidQuietPath accepts an absolute path, "*" standing for one path segment
+// as in known workloads (a versioned directory), with its first directory and
+// file name spelled out, optionally followed by the executable's SHA-256.
+func ValidQuietPath(entry string) error {
+	pattern, sha := splitQuietPath(entry)
+	if sha != "" || strings.HasSuffix(entry, strings.TrimSpace(quietHashPrefix)) {
+		if len(sha) != 64 || strings.Trim(sha, "0123456789abcdef") != "" {
+			return fmt.Errorf("%q: the hash must be sha256: and 64 hex digits", entry)
+		}
+	}
+	if !isPathWorkload(pattern) {
+		return fmt.Errorf("%q is not an absolute path; a program is named by where it is installed, not by its name", entry)
+	}
+	if len(pattern) > 2 && pattern[1] == ':' {
+		pattern = pattern[2:]
+	}
+	return literalPath(pattern)
+}
+
+// MatchesQuietPath reports whether a process, by its executable path and
+// (when the entry names one) its hash, is the one a quiet entry names. An
+// entry that is not a path - a base name left from before paths were required
+// - matches nothing.
+func MatchesQuietPath(entry, path, sha string) bool {
+	pattern, want := splitQuietPath(entry)
+	key := ProcessPathKey(path)
+	if key == "" || !isPathWorkload(pattern) || !matchWorkload(pattern, key) {
+		return false
+	}
+	return want == "" || strings.EqualFold(want, strings.TrimSpace(sha))
+}
+
+// IsQuietProcess matches the process's installed path.
+func (t DetectionTuning) IsQuietProcess(path, sha string) bool {
 	for _, q := range t.QuietProcesses {
-		if q == base {
+		if MatchesQuietPath(q, path, sha) {
 			return true
 		}
 	}
 	return false
 }
 
-// IsQuietOrg matches a substring of the resolved network owner, because the
-// same operator writes "Apple" and reads "APPLE-ENGINEERING, Apple Inc.".
-func (t DetectionTuning) IsQuietOrg(org string) bool {
-	org = strings.ToLower(org)
-	if strings.TrimSpace(org) == "" {
+// IsASN reports an entry written as an AS number ("AS15169", any case).
+func IsASN(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return len(v) > 2 && strings.HasPrefix(v, "as") && strings.Trim(v[2:], "0123456789") == ""
+}
+
+// OwnerMatches is the one way a quiet entry names a network: by its AS number,
+// or by its exact resolved name. A fragment of a name used to be enough, and
+// "amazon" or "google" also named every machine rented inside their clouds.
+func OwnerMatches(owner, asn, org string) bool {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	if owner == "" {
+		return false
+	}
+	if IsASN(owner) {
+		return strings.EqualFold(owner, strings.TrimSpace(asn))
+	}
+	return owner == strings.ToLower(strings.TrimSpace(org))
+}
+
+// IsQuietOrg matches the destination's AS number. Rented compute is never
+// quiet, whoever's AS it sits in: an EC2 instance is Amazon's address and
+// somebody else's machine.
+func (t DetectionTuning) IsQuietOrg(asn, tenancy string) bool {
+	if strings.TrimSpace(asn) == "" || strings.TrimSpace(tenancy) == TenancyHosting {
 		return false
 	}
 	for _, q := range t.QuietOrgs {
-		if strings.Contains(org, q) {
+		if IsASN(q) && strings.EqualFold(q, strings.TrimSpace(asn)) {
 			return true
 		}
 	}
 	return false
 }
 
-// IsQuietClient matches the process base name against the expected-client list.
-func (t DetectionTuning) IsQuietClient(base string) bool {
-	base = strings.ToLower(strings.TrimSpace(base))
-	if base == "" {
-		return false
-	}
+// IsQuietClient matches the process's installed path against the
+// expected-client list.
+func (t DetectionTuning) IsQuietClient(path, sha string) bool {
 	for _, q := range t.QuietClients {
-		if q == base {
+		if MatchesQuietPath(q, path, sha) {
 			return true
 		}
 	}
@@ -609,12 +872,7 @@ func (t DetectionTuning) IsQuietClient(base string) bool {
 // owner's name is - an EC2 instance is Amazon's address and somebody else's
 // machine - and a process nobody has vouched for is a finding even on the most
 // ordinary network in the estate.
-func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
-	procBase = strings.ToLower(strings.TrimSpace(procBase))
-	org = strings.ToLower(strings.TrimSpace(org))
-	if procBase == "" || org == "" {
-		return false
-	}
+func (t DetectionTuning) IsVouchedPair(path, sha, asn, org, tenancy string) bool {
 	if strings.TrimSpace(tenancy) == TenancyHosting {
 		return false
 	}
@@ -622,15 +880,12 @@ func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
 	// An explicit pair is the operator naming this exact conversation.
 	for _, entry := range t.QuietPairs {
 		proc, owner, ok := splitPair(entry)
-		if !ok || proc != procBase {
-			continue
-		}
-		if strings.Contains(org, owner) {
+		if ok && MatchesQuietPath(proc, path, sha) && OwnerMatches(owner, asn, org) {
 			return true
 		}
 	}
 
-	return t.IsQuietOrg(org) && t.IsQuietClient(procBase)
+	return t.IsQuietOrg(asn, tenancy) && t.IsQuietClient(path, sha)
 }
 
 // KnownWorkload is one program whose outbound conversations are its job.
@@ -638,9 +893,9 @@ func (t DetectionTuning) IsVouchedPair(procBase, org, tenancy string) bool {
 // Workload is a pattern over detector.WorkloadOf's output, where "*" stands
 // for any run of characters within one path segment of one argument (never a
 // "/" or a space), so a release directory named by its hash can be matched
-// without matching every directory. Owner is a substring of the network
-// owner, or "*" for a program whose destinations are arbitrary by design,
-// such as a web crawler. Reason is required: an exclusion nobody can explain
+// without matching every directory. Owner is the network's AS number or exact
+// name (OwnerMatches), or "*" for a program whose destinations are arbitrary
+// by design, such as a web crawler. Reason is required: an exclusion nobody can explain
 // later is one nobody can remove.
 //
 // IncludeRented widens an interpreter's "*" to rented compute and unnamed
@@ -793,12 +1048,11 @@ func matchWorkload(pattern, workload string) bool {
 // command-and-control server would be - unless the entry says IncludeRented.
 // Either way only the novelty detectors are silenced: a disguised process
 // that beacons or moves volume is still judged by the detectors that see it.
-func (t DetectionTuning) KnownWorkloadFor(workload, org, tenancy string) (KnownWorkload, bool) {
+func (t DetectionTuning) KnownWorkloadFor(workload, asn, org, tenancy string) (KnownWorkload, bool) {
 	if workload == "" || isInlineWorkload(workload) {
 		return KnownWorkload{}, false
 	}
-	org = strings.ToLower(strings.TrimSpace(org))
-	named := org != "" && strings.TrimSpace(tenancy) != TenancyHosting
+	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
 	for _, k := range t.KnownWorkloads {
 		if !matchWorkload(k.Workload, workload) {
 			continue
@@ -806,7 +1060,7 @@ func (t DetectionTuning) KnownWorkloadFor(workload, org, tenancy string) (KnownW
 		if k.Owner == AnyOwner && k.coversAnywhere(workload, named) {
 			return k, true
 		}
-		if named && strings.Contains(org, k.Owner) {
+		if named && k.Owner != AnyOwner && OwnerMatches(k.Owner, asn, org) {
 			return k, true
 		}
 	}

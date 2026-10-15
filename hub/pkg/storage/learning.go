@@ -64,9 +64,9 @@ const HeldLearning = "learning"
 
 // Observation kinds.
 const (
-	LearnPair    = "pair"    // key: "procbase@owner"
-	LearnProcess = "process" // key: process base name
-	LearnOwner   = "owner"   // key: destination network owner
+	LearnPair    = "pair"    // key: "path@owner"
+	LearnProcess = "process" // key: process path (ProcessPathKey)
+	LearnOwner   = "owner"   // key: destination AS number, else its name
 	LearnPort    = "port"    // key: destination port
 	LearnHour    = "hour"    // key: hour of the day, in the tuned zone
 )
@@ -573,10 +573,12 @@ func (s *Store) ComputeLearningProposals(windowID string) ([]LearningProposal, e
 	// button makes by hand, with the evidence attached.
 	for key, a := range byKind[LearnPair] {
 		proc, owner, ok := splitPair(key)
-		if !ok {
+		// Observations from before programs were named by path carry a
+		// base name, which the tuning would refuse.
+		if !ok || ValidQuietPath(proc) != nil {
 			continue
 		}
-		if tuning.IsVouchedPair(proc, owner, "") {
+		if tuning.IsVouchedPair(proc, "", owner, owner, "") {
 			continue // already expected; nothing to propose
 		}
 		out = append(out, LearningProposal{
@@ -600,7 +602,7 @@ func (s *Store) ComputeLearningProposals(windowID string) ([]LearningProposal, e
 	// over a list of familiar names: a program that reached one unnamed address
 	// during the window does not qualify, whatever it is called.
 	for proc, a := range byKind[LearnProcess] {
-		if tuning.IsQuietClient(proc) {
+		if ValidQuietPath(proc) != nil || tuning.IsQuietClient(proc, "") {
 			continue
 		}
 		pairs := 0
@@ -611,7 +613,7 @@ func (s *Store) ComputeLearningProposals(windowID string) ([]LearningProposal, e
 				continue
 			}
 			pairs++
-			if !tuning.IsQuietOrg(owner) {
+			if !tuning.IsQuietOrg(owner, "") {
 				allVouched = false
 				break
 			}

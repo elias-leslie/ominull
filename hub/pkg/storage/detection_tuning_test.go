@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,21 +54,117 @@ func TestADisabledWindowIsNeverOffHours(t *testing.T) {
 	}
 }
 
-// The quiet lists are the operator's answer to "this is normal here", and the
-// network one has to match how a resolver actually writes an owner.
-func TestQuietMatchingIsForgivingInTheRightPlaces(t *testing.T) {
+// A quiet process is the program installed at a path, never its name: an
+// implant copied to /tmp as svchost.exe or claude is not the operating
+// system's svchost, and a quiet network is an AS number, never a fragment of a
+// name that also covers the clouds rented inside it.
+func TestQuietListsMatchInstalledPathsAndASNumbersOnly(t *testing.T) {
 	cfg := DefaultDetectionTuning()
-	if !cfg.IsQuietProcess("SVCHOST.EXE") {
-		t.Error("process matching is case sensitive")
+	if !cfg.IsQuietProcess(`C:\Windows\System32\SVCHOST.EXE`, "") {
+		t.Error("the installed svchost is not quiet; Windows paths compare case-insensitively")
 	}
-	if cfg.IsQuietProcess("svchost") {
-		t.Error("a partial process name matched; that is a way to be talked past")
+	for _, impostor := range []string{"svchost.exe", `C:\Users\Public\svchost.exe`, "/tmp/svchost.exe", "/tmp/systemd-resolved", "", "system"} {
+		if cfg.IsQuietProcess(impostor, "") {
+			t.Errorf("%q is quiet by name alone", impostor)
+		}
 	}
-	if !cfg.IsQuietOrg("APPLE-ENGINEERING, Apple Inc.") {
-		t.Error("network matching does not tolerate a real registry string")
+	if !cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "") {
+		t.Error("a snap revision directory is not covered by its wildcard")
 	}
-	if cfg.IsQuietOrg("") {
-		t.Error("an unresolved owner counted as quiet")
+	if cfg.IsQuietProcess("/snap/snapd/28254/tmp/usr/lib/snapd/snapd", "") {
+		t.Error("a wildcard reached across a directory boundary")
+	}
+	if !cfg.IsQuietClient("/opt/google/chrome/chrome", "") || cfg.IsQuietClient("/home/user/.cache/chrome", "") {
+		t.Error("expected clients do not match by installed path")
+	}
+
+	if !cfg.IsQuietOrg("AS15169", TenancyVendor) {
+		t.Error("Google's own AS is not quiet")
+	}
+	if cfg.IsQuietOrg("AS16509", TenancyHosting) {
+		t.Error("rented compute inside Amazon's AS counted as quiet")
+	}
+	if cfg.IsQuietOrg("", TenancyVendor) || cfg.IsQuietOrg("AS396982", TenancyHosting) {
+		t.Error("an unnumbered or rented destination counted as quiet")
+	}
+	cfg.QuietOrgs = append(cfg.QuietOrgs, "google")
+	if cfg.IsQuietOrg("", "") {
+		t.Error("a name fragment matched an unresolved owner")
+	}
+}
+
+// An entry may also pin the build: then only an executable with that hash is
+// the program, and an event that reports no hash is not.
+func TestAQuietPathCanPinTheExecutableHash(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	cfg := DefaultDetectionTuning()
+	cfg.QuietProcesses = []string{"/usr/bin/rclone sha256:" + sha}
+	if !cfg.IsQuietProcess("/usr/bin/rclone", strings.ToUpper(sha)) {
+		t.Error("the pinned build is not quiet")
+	}
+	if cfg.IsQuietProcess("/usr/bin/rclone", strings.Repeat("cd", 32)) || cfg.IsQuietProcess("/usr/bin/rclone", "") {
+		t.Error("another build, or one with no hash, matched a pinned entry")
+	}
+}
+
+// The matchers would read a name or a fragment more widely than it is written,
+// or never match it, so a save that holds one is refused outright.
+func TestASaveRefusesNamesAndFragments(t *testing.T) {
+	s := newTestStore(t)
+	for _, bad := range []func(*DetectionTuning){
+		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "svchost.exe") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "chrome") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/*/chrome") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/opt/google/chrome/*") },
+		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/usr/bin/rclone sha256:abc") },
+		func(c *DetectionTuning) { c.QuietOrgs = append(c.QuietOrgs, "amazon") },
+		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "rclone@as15169") },
+	} {
+		cfg := DefaultDetectionTuning()
+		bad(&cfg)
+		if _, err := s.SaveDetectionTuning(cfg, "test"); !errors.Is(err, ErrInvalidDetectionTuning) {
+			t.Errorf("saved %v / %v / %v / %v: err=%v", cfg.QuietProcesses[len(cfg.QuietProcesses)-1], cfg.QuietClients[len(cfg.QuietClients)-1], cfg.QuietOrgs, cfg.QuietPairs, err)
+		}
+		if _, err := PrepareDetectionTuning(cfg); !errors.Is(err, ErrInvalidDetectionTuning) {
+			t.Errorf("a replay draft accepted what a save refuses: %v", err)
+		}
+	}
+}
+
+// Pair and known-workload owners are the AS number or the exact name. A
+// fragment such as "google" used to name Google Cloud's customers too.
+func TestOwnersMatchExactlyOrByASNumber(t *testing.T) {
+	cases := []struct {
+		owner, asn, org string
+		want            bool
+	}{
+		{"as36459", "AS36459", "GitHub, Inc.", true},
+		{"github, inc.", "AS36459", "GitHub, Inc.", true},
+		{"github", "AS36459", "GitHub, Inc.", false},
+		{"google", "AS396982", "Google Cloud (customer range)", false},
+		{"as15169", "", "Google LLC", false},
+		{"", "AS15169", "Google LLC", false},
+	}
+	for _, c := range cases {
+		if got := OwnerMatches(c.owner, c.asn, c.org); got != c.want {
+			t.Errorf("OwnerMatches(%q, %q, %q) = %v, want %v", c.owner, c.asn, c.org, got, c.want)
+		}
+	}
+	cfg := DefaultDetectionTuning()
+	cfg.QuietPairs = []string{"/home/*/.local/bin/rclone@as15169"}
+	if !cfg.IsVouchedPair("/home/me/.local/bin/rclone", "", "AS15169", "Google LLC", TenancyVendor) {
+		t.Error("the pair did not vouch for its own conversation")
+	}
+	if cfg.IsVouchedPair("/tmp/rclone", "", "AS15169", "Google LLC", TenancyVendor) ||
+		cfg.IsVouchedPair("/home/me/.local/bin/rclone", "", "AS396982", "Google Cloud (customer range)", TenancyHosting) {
+		t.Error("the pair vouched for another program or for rented compute")
+	}
+	cfg.KnownWorkloads = []KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "GitHub CLI"}}
+	if _, ok := cfg.KnownWorkloadFor("/usr/bin/gh", "AS36459", "GitHub, Inc.", TenancyVendor); !ok {
+		t.Error("a known workload did not cover its AS")
+	}
+	if _, ok := cfg.KnownWorkloadFor("/usr/bin/gh", "AS36459", "Rented cloud, listed by GitHub", TenancyHosting); ok {
+		t.Error("a known workload covered rented compute inside its owner's AS")
 	}
 }
 
@@ -86,7 +185,7 @@ func TestASavedTuningSurvivesTheRoundTrip(t *testing.T) {
 	in := DefaultDetectionTuning()
 	in.WarmupHours = 72
 	in.BeaconScore = 0.95
-	in.QuietProcesses = append(in.QuietProcesses, "Backup Helper")
+	in.QuietProcesses = append(in.QuietProcesses, "C:/Program Files/Backup Helper/helper.exe")
 
 	if _, err := s.SaveDetectionTuning(in, "someone@example.invalid"); err != nil {
 		t.Fatalf("save: %v", err)
@@ -95,10 +194,107 @@ func TestASavedTuningSurvivesTheRoundTrip(t *testing.T) {
 	if got.WarmupHours != 72 || got.BeaconScore != 0.95 {
 		t.Fatalf("round trip lost values: %+v", got)
 	}
-	if !got.IsQuietProcess("backup helper") {
-		t.Error("an added name was not lower-cased on the way in")
+	if !got.IsQuietProcess(`c:\program files\backup helper\HELPER.EXE`, "") {
+		t.Error("an added path was not lower-cased on the way in")
 	}
 	if got.UpdatedBy != "someone@example.invalid" {
 		t.Errorf("authorship not recorded: %q", got.UpdatedBy)
+	}
+}
+
+// legacyTuningRow is the shape of a row saved before quiet lists were paths
+// and AS numbers: the production row's quiet lists as they stood, with two of
+// its known workloads.
+const legacyTuningRow = `{"beacon_enabled":true,"first_seen_cooldown_minutes":240,
+"quiet_processes":["chronyd","dbus-daemon","dwm.exe","lsass.exe","msmpeng.exe","ntoskrnl.exe","ntpd","ominull-agent","ominull_agent.exe","ominulld","ominulld.exe","packagekitd","searchhost.exe","services.exe","snapd","spoolsv.exe","svchost.exe","system","systemd","systemd-resolved","systemd-timesyncd","telegram","telegram-desktop","telegram.exe","tiworker.exe","trustedinstaller.exe","unattended-upgr","usocoreworker.exe"],
+"quiet_orgs":["akamai","amazon","apple","cloudflare","fastly","google","microsoft","telegram"],
+"quiet_clients":["brave","brave.exe","chatgpt","chatgpt.exe","chrome","chrome.exe","chromium","claude","claude-desktop","claude.exe","firefox","firefox.exe","msedge.exe","msmpeng.exe","nsurlsessiond","ominull-agent","ominulld","ominulld.exe","opera.exe","packagekitd","safari","snapd","softwareupdated","svchost.exe","telegram","telegram-desktop","telegram.exe","unattended-upgr","usocoreworker.exe"],
+"quiet_pairs":["rclone@google"],
+"known_workloads":[{"workload":"/usr/bin/gh","owner":"github","reason":"GitHub CLI"},{"workload":"/opt/google/chrome/chrome","owner":"*","reason":"the owner's browser"},{"workload":"/usr/bin/curl","owner":"Example Org","reason":"named exactly"}]}`
+
+// The production row is rewritten at upgrade, not just the shipped defaults:
+// every name becomes the paths that program is installed at, every fragment
+// its AS number, and what has no known path is dropped rather than kept as a
+// name. A second start changes nothing.
+func TestTheStoredRowIsMigratedToPathsAndASNumbers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO detection_tuning (id, settings, updated_at, updated_by) VALUES (1, ?, ?, 'admin')`,
+		legacyTuningRow, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.GetDetectionTuning()
+	if got.UpdatedBy != "upgrade" {
+		t.Errorf("the migrated row does not say it was the upgrade: %q", got.UpdatedBy)
+	}
+	if got.FirstSeenCooldown != 240 {
+		t.Errorf("the migration lost an unrelated setting: %d", got.FirstSeenCooldown)
+	}
+	if _, err := PrepareDetectionTuning(got); err != nil {
+		t.Fatalf("the migrated row is not one a save would accept: %v", err)
+	}
+	has := func(list []string, v string) bool {
+		for _, x := range list {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-resolved", "/snap/snapd/*/usr/lib/snapd/snapd", "/opt/ominull/bin/ominulld"} {
+		if !has(got.QuietProcesses, want) {
+			t.Errorf("quiet processes lack %s: %v", want, got.QuietProcesses)
+		}
+	}
+	for _, gone := range []string{"system", "telegram", "unattended-upgr", "svchost.exe"} {
+		if has(got.QuietProcesses, gone) || has(got.QuietClients, gone) {
+			t.Errorf("%q survived as a name", gone)
+		}
+	}
+	if has(got.QuietClients, "claude") || !has(got.QuietClients, "/usr/lib/claude-desktop/claude-desktop") || !has(got.QuietClients, "/opt/google/chrome/chrome") {
+		t.Errorf("expected clients were not carried over by path: %v", got.QuietClients)
+	}
+	if want := []string{"as13335", "as15169", "as16509", "as20940", "as54113", "as714", "as8075"}; strings.Join(got.QuietOrgs, ",") != strings.Join(want, ",") {
+		t.Errorf("quiet networks = %v, want %v", got.QuietOrgs, want)
+	}
+	if want := []string{"/home/*/.local/bin/rclone@as15169", "/usr/bin/rclone@as15169"}; strings.Join(got.QuietPairs, ",") != strings.Join(want, ",") {
+		t.Errorf("expected pairs = %v, want %v", got.QuietPairs, want)
+	}
+	owners := map[string]string{}
+	for _, k := range got.KnownWorkloads {
+		owners[k.Workload] = k.Owner
+	}
+	if owners["/usr/bin/gh"] != "as36459" || owners["/opt/google/chrome/chrome"] != "*" || owners["/usr/bin/curl"] != "example org" {
+		t.Errorf("known-workload owners = %v", owners)
+	}
+	stamped := got.UpdatedAt
+	s.Close()
+
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if again := s.GetDetectionTuning(); !again.UpdatedAt.Equal(stamped) {
+		t.Errorf("a second start rewrote the row again (%v, then %v)", stamped, again.UpdatedAt)
+	}
+}
+
+// A hub that was never tuned has no row, and the upgrade does not write one:
+// the shipped values stay the shipped values.
+func TestAnUntunedHubGetsNoRowFromTheUpgrade(t *testing.T) {
+	s := newTestStore(t)
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM detection_tuning`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("rows=%d err=%v", n, err)
 	}
 }

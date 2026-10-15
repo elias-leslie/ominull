@@ -29,7 +29,7 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	t.Helper()
 	at := time.Now().UTC().Add(-time.Hour)
 	ev := func(cmd string) string {
-		return fmt.Sprintf(`{"command_line":%q,"destination_owner":"Cloudflare, Inc.","destination_tenancy":"shared-cdn"}`, cmd)
+		return fmt.Sprintf(`{"command_line":%q,"destination_owner":"Cloudflare, Inc.","destination_asn":"AS13335","destination_tenancy":"shared-cdn"}`, cmd)
 	}
 	for i := 0; i < n; i++ {
 		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{
@@ -48,7 +48,7 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	return at
 }
 
-var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare", Reason: "npm registry"}}
+var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
 
 func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 	t.Parallel()

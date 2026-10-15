@@ -105,21 +105,21 @@ func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
 // rented compute is not, because anyone can rent a machine in that range.
 func TestANamedOwnerNeverCoversRentedCompute(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare", Reason: "npm registry"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "Cloudflare, Inc.", storage.TenancySharedCDN); !ok {
+	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN); !ok {
 		t.Fatal("npm to Cloudflare should be known")
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "Cloudflare, Inc.", storage.TenancyHosting); ok {
+	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "AS13335", "Cloudflare, Inc.", storage.TenancyHosting); ok {
 		t.Fatal("a named owner must not cover rented compute")
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "", ""); ok {
+	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "", "", ""); ok {
 		t.Fatal("a named owner must not cover an unnamed address")
 	}
-	if tu.IsVouchedPair("node", "Cloudflare, Inc.", storage.TenancySharedCDN) {
+	if tu.IsVouchedPair("/usr/bin/node", "", "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN) {
 		t.Fatal("a known workload must not vouch for the beacon and volume detectors")
 	}
 }
@@ -137,26 +137,26 @@ func TestAnyOwnerForAnInterpreterStopsAtRentedCompute(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := "python3.13 /srv/app/.venv/bin/python -m app.worker"
-	if _, ok := tu.KnownWorkloadFor(w, "Example Bank", storage.TenancySharedCDN); !ok {
+	if _, ok := tu.KnownWorkloadFor(w, "", "Example Bank", storage.TenancySharedCDN); !ok {
 		t.Fatal("the worker to a named network should be known")
 	}
-	if _, ok := tu.KnownWorkloadFor(w, "DigitalOcean, LLC", storage.TenancyHosting); ok {
+	if _, ok := tu.KnownWorkloadFor(w, "", "DigitalOcean, LLC", storage.TenancyHosting); ok {
 		t.Fatal("an interpreter's AnyOwner must not cover rented compute")
 	}
-	if _, ok := tu.KnownWorkloadFor(w, "", ""); ok {
+	if _, ok := tu.KnownWorkloadFor(w, "", "", ""); ok {
 		t.Fatal("an interpreter's AnyOwner must not cover an unnamed address")
 	}
-	if _, ok := tu.KnownWorkloadFor("/opt/google/chrome/chrome", "", ""); !ok {
+	if _, ok := tu.KnownWorkloadFor("/opt/google/chrome/chrome", "", "", ""); !ok {
 		t.Fatal("an installed program's AnyOwner covers every destination")
 	}
 	tu.KnownWorkloads[1].IncludeRented = true // sorted: the python entry is second
-	if _, ok := tu.KnownWorkloadFor(w, "DigitalOcean, LLC", storage.TenancyHosting); !ok {
+	if _, ok := tu.KnownWorkloadFor(w, "", "DigitalOcean, LLC", storage.TenancyHosting); !ok {
 		t.Fatal("include_rented should widen an interpreter's AnyOwner to rented compute")
 	}
 	// "*" never crosses a space, so it cannot swallow the next argument.
 	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /srv/tool/bin/*", Owner: storage.AnyOwner, Reason: "tools"}}
 	tu, _ = storage.PrepareDetectionTuning(tu)
-	if _, ok := tu.KnownWorkloadFor("node /srv/tool/bin/a b", "Example", ""); ok {
+	if _, ok := tu.KnownWorkloadFor("node /srv/tool/bin/a b", "", "Example", ""); ok {
 		t.Fatal("a wildcard crossed an argument boundary")
 	}
 }
@@ -230,7 +230,7 @@ func TestAKnownServiceIsNotOffHours(t *testing.T) {
 	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
 		tu.KnownWorkloads = []storage.KnownWorkload{
 			{Workload: "node /usr/local/bin/corepack", Owner: storage.AnyOwner, Reason: "registry service"},
-			{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare", Reason: "npm registry"},
+			{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"},
 		}
 	})
 	// A tool known only for one owner is not a service: a build at night is news.
@@ -258,8 +258,9 @@ func TestAKnownServiceIsNotOffHours(t *testing.T) {
 
 func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 	at := time.Date(2026, 10, 7, 3, 0, 0, 0, time.UTC)
+	asn := map[string]string{"Cloudflare, Inc.": "AS13335", "GitHub, Inc.": "AS36459"}
 	ev := func(cmd, owner string) string {
-		return fmt.Sprintf(`{"command_line":%q,"destination_owner":%q,"destination_tenancy":"shared-cdn"}`, cmd, owner)
+		return fmt.Sprintf(`{"command_line":%q,"destination_owner":%q,"destination_asn":%q,"destination_tenancy":"shared-cdn"}`, cmd, owner, asn[owner])
 	}
 	alerts := []storage.AnomalyAlert{
 		{ID: "a", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/node", Evidence: ev("node /opt/node/lib/npm-cli.js ci", "Cloudflare, Inc."), Timestamp: at},
@@ -272,7 +273,7 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 		{ID: "g", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl z", "GitHub, Inc."), Timestamp: at.Add(2 * time.Hour)},
 	}
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare", Reason: "npm registry"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
 	tu, _ = storage.PrepareDetectionTuning(tu)
 	res := Replay(alerts, tu)
 	kept := map[string]bool{}

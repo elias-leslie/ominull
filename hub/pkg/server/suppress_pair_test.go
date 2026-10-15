@@ -51,23 +51,25 @@ func seedFinding(t *testing.T, store *storage.Store, id, process, evidence strin
 func TestMarkingAFindingExpectedWritesThePair(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
-	seedFinding(t, store, "f-1", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
+	seedFinding(t, store, "f-1", `C:\Program Files\Acme\backup-agent.exe`, `{"destination_owner":"Acme Vendor","destination_asn":"AS64500","destination_tenancy":"vendor"}`)
 
 	code, body := suppressFinding(t, srv, "f-1")
 	if code != http.StatusOK {
 		t.Fatalf("suppress: %d %v", code, body)
 	}
-	if body["pair"] != "backup-agent@acme vendor" {
+	// The program where it is installed, the network by its AS number.
+	if body["pair"] != "c:/program files/acme/backup-agent.exe@as64500" {
 		t.Fatalf("silenced the wrong thing: %v", body["pair"])
 	}
 
 	tuning := store.GetDetectionTuning()
-	if !tuning.IsVouchedPair("backup-agent", "Acme Vendor", "vendor") {
+	if !tuning.IsVouchedPair(`C:\Program Files\Acme\backup-agent.exe`, "", "AS64500", "Acme Vendor", "vendor") {
 		t.Fatal("the pair was not written into the tuning, so the same finding raises again tomorrow")
 	}
 	// Silencing one program talking to that owner must not silence every
-	// program talking to it.
-	if tuning.IsVouchedPair("curl", "Acme Vendor", "vendor") {
+	// program talking to it, nor a copy of it somewhere else.
+	if tuning.IsVouchedPair("/usr/bin/curl", "", "AS64500", "Acme Vendor", "vendor") ||
+		tuning.IsVouchedPair(`C:\Users\Public\backup-agent.exe`, "", "AS64500", "Acme Vendor", "vendor") {
 		t.Fatal("the whole owner was silenced, not the pair")
 	}
 
@@ -169,7 +171,7 @@ func TestMarkingExpectedTwiceIsIdempotent(t *testing.T) {
 	}
 	count := 0
 	for _, p := range store.GetDetectionTuning().QuietPairs {
-		if strings.EqualFold(p, "backup-agent@acme vendor") {
+		if strings.EqualFold(p, "/usr/bin/backup-agent@acme vendor") {
 			count++
 		}
 	}
@@ -179,5 +181,37 @@ func TestMarkingExpectedTwiceIsIdempotent(t *testing.T) {
 	found, _ := store.GetAnomalyAlert("f-7")
 	if !found.Acknowledged {
 		t.Error("the second finding was left open")
+	}
+}
+
+// A finding whose program is known only by its name - an agent that could not
+// read the executable path - has no installed program to vouch for, and a name
+// is something any program can take.
+func TestAProgramKnownOnlyByNameCannotBeMarkedExpected(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	seedFinding(t, store, "f-9", "rclone", `{"destination_owner":"Google LLC","destination_asn":"AS15169","destination_tenancy":"vendor"}`)
+
+	if code, body := suppressFinding(t, srv, "f-9"); code != http.StatusBadRequest {
+		t.Fatalf("a bare program name was vouched for: %d %v", code, body)
+	}
+	if len(store.GetDetectionTuning().QuietPairs) != 0 {
+		t.Fatal("a pair was written for a program named only by its name")
+	}
+}
+
+// Without an AS number in the evidence the pair names the network exactly as
+// it was resolved, never a fragment of it.
+func TestAnUnnumberedOwnerIsWrittenExactly(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	seedFinding(t, store, "f-10", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_tenancy":"vendor"}`)
+
+	code, body := suppressFinding(t, srv, "f-10")
+	if code != http.StatusOK || body["pair"] != "/usr/bin/backup-agent@acme vendor" {
+		t.Fatalf("suppress: %d %v", code, body)
+	}
+	if store.GetDetectionTuning().IsVouchedPair("/usr/bin/backup-agent", "", "", "Acme Vendor Cloud (customer range)", "vendor") {
+		t.Fatal("an exact owner matched a longer name that contains it")
 	}
 }

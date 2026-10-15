@@ -482,25 +482,25 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	// Both lists are the operator's, held in the database and shown in the
 	// console, not a table compiled into this file.
-	isTrustedSys := cfg.IsQuietProcess(strings.ToLower(procName))
-	isTrustedDst := cfg.IsQuietOrg(geo.Org)
+	isTrustedSys := cfg.IsQuietProcess(ev.ProcessPath, ev.ExecutableSHA256)
+	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
 
 	// While a window is open the estate is being described. The findings below
 	// still run and are still written - recordAnomaly holds them - and this is
 	// the second, much cheaper record that the proposals are argued from.
-	e.observeForLearning(ev, endpoint, geo.Org, geo.Tenancy, hr, now)
+	e.observeForLearning(ev, endpoint, geo, hr, now)
 
 	// isVouched is the narrower question: this process, to this owner. A quiet
 	// org alone silenced every process on every port to networks that front a
 	// large part of the web - which is where beaconing hides, not where it is
 	// absent. The beacon and volume detectors below ask this instead.
-	isVouched := cfg.IsVouchedPair(procName, geo.Org, geo.Tenancy)
+	isVouched := cfg.IsVouchedPair(ev.ProcessPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy)
 
 	// A known workload is the finer answer for the novelty detectors: this
 	// program - an interpreter together with what it runs - talking to this
 	// owner is its job. It never reaches the beacon and volume detectors.
 	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
-	_, isKnownConversation := cfg.KnownWorkloadFor(workload, geo.Org, geo.Tenancy)
+	_, isKnownConversation := cfg.KnownWorkloadFor(workload, geo.ASN, geo.Org, geo.Tenancy)
 	_, isKnownService := cfg.KnownService(workload, geo.Org, geo.Tenancy)
 
 	// Agent runtimes are judged against their own baselines, not excluded.
@@ -707,7 +707,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// ordinary web sessions, because a site being hosted on rented compute says
 	// nothing about the browser talking to it. Browser-borne exfiltration shows
 	// up in the volume and storage rules above, which still apply in full.
-	browserToKnownNetwork := cfg.IsQuietClient(procName) && geo.Resolved()
+	//
+	// Rented compute is the exception to the exception: a browser extension or
+	// an injected page calling home to a rented machine is the beacon this
+	// detector is for, and "the browser" was only ever a program name.
+	browserToKnownNetwork := cfg.IsQuietClient(ev.ProcessPath, ev.ExecutableSHA256) && geo.Resolved() &&
+		geo.Tenancy != threatintel.TenancyHosting
 	// A collection cadence is not a packet cadence. Keep legacy behavior for
 	// older agents, but require one intact socket-I/O observation from new ones.
 	cadenceUsable := ev.Observation.Source == "" ||
@@ -862,7 +867,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	if procKey == "" || procKey == "." {
 		procKey = "unknown"
 	}
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) {
 		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
 		history := e.portHistory[sweepKey]
@@ -922,7 +927,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	destination, _ := netaddr.Parse(ev.DstIP)
 	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
 	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
-		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) && !cfg.IsQuietProcess(procKey) {
+		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) {
 
 		e.mu.Lock()
 		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
@@ -1117,7 +1122,6 @@ func isPrivateIP(ipStr string) bool {
 	return netaddr.IsLocal(ipStr)
 }
 
-// isKnownInfrastructureProcess checks if a process is a container runtime, local DNS resolver, or test runner
 // isInterpreterOrShell matches the base name of the process, not the tail of
 // its path.
 //
@@ -1275,19 +1279,21 @@ func firstLine(cmd string) string {
 	return cmd
 }
 
+// isKnownInfrastructureProcess reports a container runtime or local resolver,
+// by the path it is installed at, whose job is to reach many ports and hosts.
+// Base names and build-cache test binaries ("go-build", ".test") used to count
+// too, and any program could be given either from a writable directory.
 func isKnownInfrastructureProcess(procPath string) bool {
-	p := strings.ToLower(procPath)
-	base := filepath.Base(p)
-	if strings.HasSuffix(p, ".test") || strings.Contains(p, "go-build") {
-		return true
-	}
-	switch base {
-	case "docker-proxy", "dockerd", "containerd", "runc", "dnsmasq",
-		"systemd-resolved", "kubelet", "cilium-agent", "avahi-daemon",
-		"coredns", "named", "unbound", "wireguard-go":
-		return true
-	}
-	return false
+	return knownInfrastructurePaths[storage.ProcessPathKey(procPath)]
+}
+
+var knownInfrastructurePaths = map[string]bool{
+	"/usr/bin/docker-proxy": true, "/usr/libexec/docker/docker-proxy": true,
+	"/usr/bin/dockerd": true, "/usr/bin/containerd": true, "/usr/bin/runc": true,
+	"/usr/sbin/dnsmasq": true, "/usr/lib/systemd/systemd-resolved": true,
+	"/usr/bin/kubelet": true, "/usr/bin/cilium-agent": true, "/usr/sbin/avahi-daemon": true,
+	"/usr/bin/coredns": true, "/usr/sbin/named": true, "/usr/sbin/unbound": true,
+	"/usr/bin/wireguard-go": true,
 }
 
 // describeOwner renders what is known about a destination's network, and says

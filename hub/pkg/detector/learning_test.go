@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
 
 // A window does not switch the detectors off. The finding is written in full -
@@ -100,7 +101,9 @@ func TestAWindowRecordsWhatItSaw(t *testing.T) {
 	for _, o := range obs {
 		seen[o.Kind+":"+o.Key] += o.Count
 	}
-	if seen[storage.LearnProcess+":curl"] != 5 {
+	// The program by its path and the network by its AS number: the forms a
+	// proposal is applied in.
+	if seen[storage.LearnProcess+":/usr/bin/curl"] != 5 || seen[storage.LearnPair+":/usr/bin/curl@as13335"] != 5 {
 		t.Fatalf("the program was not counted: %v", seen)
 	}
 	if seen[storage.LearnPort+":443"] != 5 {
@@ -186,7 +189,7 @@ func TestRentedComputeNeverBecomesALearnedPair(t *testing.T) {
 		engine.observeForLearning(storage.Event{
 			TenantID: "default", EndpointID: "linux-05", Direction: "OUTBOUND",
 			DstIP: "203.0.113.44", DstPort: 443, ProcessPath: "/usr/bin/python3.13",
-		}, *ep, "Rented cloud, listed by Someone", storage.TenancyHosting, 14, now)
+		}, *ep, threatintel.GeoRecord{ASN: "AS64500", Org: "Rented cloud, listed by Someone", Tenancy: storage.TenancyHosting}, 14, now)
 	}
 	engine.flushLearning()
 

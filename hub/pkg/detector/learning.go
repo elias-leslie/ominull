@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
 
 // Learning observations: the cheap record kept while a window is open.
@@ -48,7 +49,7 @@ type learnCount struct {
 // observeForLearning folds one flow into the open window's record, if there is
 // one. It returns whether the endpoint is learning, so the caller does not have
 // to ask twice.
-func (e *Engine) observeForLearning(ev storage.Event, ep storage.Endpoint, org, tenancy string, localHour int, now time.Time) bool {
+func (e *Engine) observeForLearning(ev storage.Event, ep storage.Endpoint, geo threatintel.GeoRecord, localHour int, now time.Time) bool {
 	window, learning := e.store.LearningWindowFor(ep)
 	if !learning {
 		return false
@@ -59,8 +60,18 @@ func (e *Engine) observeForLearning(ev storage.Event, ep storage.Endpoint, org, 
 		return true
 	}
 
-	proc := processBase(ev.ProcessPath)
-	owner := strings.ToLower(strings.TrimSpace(org))
+	// A program is known by where it is installed and a network by its AS
+	// number, the forms the tuning matches; a name stands in only for an
+	// owner nobody has numbered.
+	proc := storage.ProcessPathKey(ev.ProcessPath)
+	if proc == "" {
+		proc = "unknown"
+	}
+	owner := strings.ToLower(strings.TrimSpace(geo.ASN))
+	if owner == "" {
+		owner = strings.ToLower(strings.TrimSpace(geo.Org))
+	}
+	tenancy := geo.Tenancy
 
 	facts := []struct{ kind, key string }{
 		{storage.LearnHour, fmt.Sprintf("%d", localHour)},

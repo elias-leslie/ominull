@@ -268,11 +268,16 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proc := processBaseName(finding.ProcessPath)
+	proc := storage.ProcessPathKey(finding.ProcessPath)
 	owner, tenancy := destinationFromEvidence(finding.Evidence)
 	if proc == "" || proc == "unknown" {
 		writeJSONError(w, http.StatusBadRequest,
 			"this finding has no attributed process, so there is no program to vouch for")
+		return
+	}
+	if storage.ValidQuietPath(proc) != nil {
+		writeJSONError(w, http.StatusBadRequest,
+			"this finding names the program only by its name, not where it is installed, and a name is something any program can take")
 		return
 	}
 	if owner == "" {
@@ -330,16 +335,6 @@ func (s *Server) writeSuppressed(w http.ResponseWriter, pair string, finding sto
 	})
 }
 
-// processBaseName reduces a path to the program's own name, the way the
-// detectors match on it.
-func processBaseName(path string) string {
-	p := strings.TrimSpace(path)
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
-		p = p[i+1:]
-	}
-	return strings.ToLower(p)
-}
-
 // destinationFromEvidence reads the counterparty back out of the evidence the
 // detector attached. The alert row carries the address; who owns it, and
 // whether that owner rents the range out, lives in the evidence JSON.
@@ -357,5 +352,11 @@ func destinationFromEvidence(evidence string) (owner, tenancy string) {
 		}
 		return ""
 	}
-	return text("destination_owner"), text("destination_tenancy")
+	// The AS number is the owner a pair is written with; the name stands in
+	// only where nothing numbered the network.
+	owner = text("destination_asn")
+	if owner == "" {
+		owner = text("destination_owner")
+	}
+	return owner, text("destination_tenancy")
 }

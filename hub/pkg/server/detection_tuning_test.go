@@ -114,11 +114,11 @@ func TestTheShippedThresholdsCanBeRestored(t *testing.T) {
 func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 	t.Parallel()
 	srv, _ := setupTestServer(t)
-	if code, body := tuningBody(t, srv, http.MethodPost, `{"warmup_hours":48,"quiet_pairs":["rclone@google"],
-		"known_workloads":[{"workload":"/usr/bin/gh","owner":"github","reason":"cli"},{"workload":"/usr/bin/ssh","owner":"github","reason":"git"}]}`); code != http.StatusOK {
+	if code, body := tuningBody(t, srv, http.MethodPost, `{"warmup_hours":48,"quiet_pairs":["/usr/bin/rclone@AS15169"],
+		"known_workloads":[{"workload":"/usr/bin/gh","owner":"AS36459","reason":"cli"},{"workload":"/usr/bin/ssh","owner":"AS36459","reason":"git"}]}`); code != http.StatusOK {
 		t.Fatalf("first save: %d %v", code, body)
 	}
-	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"fastly","reason":"x"}]}`)
+	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"AS54113","reason":"x"}]}`)
 	if code != http.StatusOK {
 		t.Fatalf("partial save: %d %v", code, body)
 	}
@@ -132,7 +132,7 @@ func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 		t.Errorf("unnamed values were reset: warmup %v, quiet processes %v, pairs %v", tun["warmup_hours"], tun["quiet_processes"], tun["quiet_pairs"])
 	}
 	kw := tun["known_workloads"].([]interface{})
-	if len(kw) != 1 || kw[0].(map[string]interface{})["owner"] != "fastly" || kw[0].(map[string]interface{})["include_rented"] == true {
+	if len(kw) != 1 || kw[0].(map[string]interface{})["owner"] != "as54113" || kw[0].(map[string]interface{})["include_rented"] == true {
 		t.Errorf("a named list replaces the saved one exactly: %v", kw)
 	}
 	if code, _ := tuningBody(t, srv, http.MethodPost, `{"beacon_enabled":false}`); code != http.StatusOK {
@@ -141,5 +141,32 @@ func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 	_, got := tuningBody(t, srv, http.MethodGet, "")
 	if g := got["tuning"].(map[string]interface{}); g["beacon_enabled"] != false || g["silence_enabled"] != true {
 		t.Errorf("an explicit false is kept and nothing else moves: %v %v", g["beacon_enabled"], g["silence_enabled"])
+	}
+}
+
+// Through the API, a quiet entry the matchers would read more widely than it
+// is written is refused with the reason, and nothing is saved.
+func TestASaveNamingAProgramOrNetworkByNameIsRefused(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	for _, body := range []string{
+		`{"quiet_processes":["svchost.exe"]}`,
+		`{"quiet_clients":["chrome"]}`,
+		`{"quiet_orgs":["amazon"]}`,
+		`{"quiet_pairs":["rclone@google"]}`,
+	} {
+		code, out := tuningBody(t, srv, http.MethodPost, body)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s: %d %v", body, code, out)
+		}
+	}
+	got := store.GetDetectionTuning()
+	for _, v := range append(got.QuietProcesses, got.QuietClients...) {
+		if !strings.HasPrefix(v, "/") && !strings.Contains(v, ":/") {
+			t.Fatalf("a name reached the tuning: %q", v)
+		}
+	}
+	if len(got.QuietPairs) != 0 {
+		t.Fatalf("a refused pair was saved: %v", got.QuietPairs)
 	}
 }
