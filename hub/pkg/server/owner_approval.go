@@ -379,13 +379,19 @@ func withNormalizedField(w http.ResponseWriter, body []byte, name string, value 
 
 // normalizedAllowIPs validates an isolation's allow list and returns the body
 // carrying it normalized (nil when the request has none).
-func normalizedAllowIPs(w http.ResponseWriter, body []byte, in []string) ([]byte, []string, bool) {
+// Ranges are taken only where ranges is set (a single endpoint's isolation,
+// checked against its agent afterwards).
+func normalizedAllowIPs(w http.ResponseWriter, body []byte, in []string, ranges bool) ([]byte, []string, bool) {
 	if len(in) == 0 {
 		return nil, nil, true
 	}
 	out := make([]string, 0, len(in))
 	for _, raw := range in {
-		ip, err := validateIP(raw)
+		validate := validateIP
+		if ranges {
+			validate = validateAllowEntry
+		}
+		ip, err := validate(raw)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "allow_ips: "+err.Error())
 			return nil, nil, false
@@ -415,8 +421,12 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 		writeJSONError(w, http.StatusBadRequest, "full isolation takes no allow_ips; use mode selective")
 		return nil, false
 	}
-	nb, allow, ok := normalizedAllowIPs(w, body, req.AllowIPs)
+	nb, allow, ok := normalizedAllowIPs(w, body, req.AllowIPs, true)
 	if !ok {
+		return nil, false
+	}
+	if p := s.allowRangesProblem(req.EndpointID, allow); p != "" {
+		writeJSONError(w, http.StatusBadRequest, p)
 		return nil, false
 	}
 	req.AllowIPs = allow
@@ -455,7 +465,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 		summary += " except " + strings.Join(req.AllowIPs, ", ")
 	}
 	if len(notEnforced) > 0 {
-		summary += "; trusted ranges not enforced (agents take single addresses): " + strings.Join(notEnforced, ", ")
+		summary += "; trusted ranges not enforced (the agent takes single addresses, or the range is too wide): " + strings.Join(notEnforced, ", ")
 	}
 	if req.Force {
 		summary += " (readiness gate overridden)"
@@ -527,7 +537,7 @@ func (s *Server) resolveBulkIsolation(isolate bool) approvalResolver {
 			return nil, false
 		}
 		if isolate {
-			nb, _, ok := normalizedAllowIPs(w, body, req.AllowIPs)
+			nb, _, ok := normalizedAllowIPs(w, body, req.AllowIPs, false)
 			if !ok {
 				return nil, false
 			}

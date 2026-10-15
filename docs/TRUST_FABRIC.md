@@ -64,9 +64,16 @@ length, then port/protocol), deny on a tie; no match means not trusted.
   what was approved. Without `mode` only the request's own `allow_ips` apply.
   Detector isolation is always full.
 
-Agents enforce single addresses: only addresses a rule names (`ip`, or a
-`/32` / `/128`) and the policy allows are added; a trusted range is listed as
-not enforced in the approval summary and stays closed. The expansion is kept
+Agents from 1.8.65 report `allow_prefixes` and enforce address ranges in the
+allow list (Linux iptables `-s/-d addr/len`, Windows WFP address-mask
+filters), no wider than `/8` (IPv4) or `/32` (IPv6); the hub and the agent
+both refuse wider ones. Selective isolation of such an endpoint carries the
+policy's merged prefixes; a request may name a range only for one endpoint
+(bulk isolation names addresses). An older agent refuses a grant naming a
+range, so for it only addresses a rule names (`ip`, or a `/32` / `/128`) and
+the policy allows are added, a trusted range is listed as not enforced in the
+approval summary and stays closed, and a request naming a range is refused
+before approval. The expansion is kept
 under the approval id, so a rule changed while the owner decides does not
 void the approval (after a hub restart it is expanded again and refused if it
 differs). Port- or

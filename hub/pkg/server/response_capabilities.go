@@ -11,6 +11,7 @@ import (
 // (forkpty, ConPTY, ...) offers. OS names are labels; this is the contract.
 type responseCapabilities struct {
 	Isolate          bool     `json:"isolate"`
+	AllowPrefixes    bool     `json:"-"` // the isolation allow list may hold address ranges
 	Collect          bool     `json:"collect"`
 	TerminalPrograms []string `json:"-"`
 	NoResponseKey    bool     `json:"-"` // the agent pins no tenant response key, so it drops every grant
@@ -18,10 +19,11 @@ type responseCapabilities struct {
 }
 
 type wireCapabilities struct {
-	Isolate     bool  `json:"isolate"`
-	Collect     bool  `json:"collect"`
-	ResponseKey *bool `json:"response_key,omitempty"`
-	Terminal    *struct {
+	Isolate       bool  `json:"isolate"`
+	AllowPrefixes bool  `json:"allow_prefixes,omitempty"`
+	Collect       bool  `json:"collect"`
+	ResponseKey   *bool `json:"response_key,omitempty"`
+	Terminal      *struct {
 		Programs []string `json:"programs"`
 	} `json:"terminal,omitempty"`
 }
@@ -31,7 +33,7 @@ func parseResponseCapabilities(raw string) responseCapabilities {
 	if strings.TrimSpace(raw) == "" || json.Unmarshal([]byte(raw), &w) != nil {
 		return responseCapabilities{}
 	}
-	out := responseCapabilities{Isolate: w.Isolate, Collect: w.Collect, reported: true,
+	out := responseCapabilities{Isolate: w.Isolate, AllowPrefixes: w.AllowPrefixes, Collect: w.Collect, reported: true,
 		NoResponseKey: w.ResponseKey != nil && !*w.ResponseKey}
 	if w.Terminal != nil {
 		for _, p := range w.Terminal.Programs {
@@ -54,7 +56,7 @@ func normalizeResponseCapabilities(raw json.RawMessage) string {
 	if !c.reported {
 		return ""
 	}
-	w := wireCapabilities{Isolate: c.Isolate, Collect: c.Collect}
+	w := wireCapabilities{Isolate: c.Isolate, AllowPrefixes: c.AllowPrefixes, Collect: c.Collect}
 	if c.NoResponseKey {
 		f := false
 		w.ResponseKey = &f

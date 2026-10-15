@@ -471,7 +471,7 @@ func sameAddressSet(signed, recorded []string) bool {
 	norm := func(in []string) (map[string]bool, bool) {
 		out := make(map[string]bool, len(in))
 		for _, raw := range in {
-			ip, err := validateIP(raw)
+			ip, err := validateAllowEntry(raw)
 			if err != nil {
 				return nil, false
 			}

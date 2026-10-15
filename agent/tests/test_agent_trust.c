@@ -161,6 +161,19 @@ static void test_ip(void) {
     expect("v6 long group refused", !Trust_IsIPLiteral("12345::1"));
     expect("cidr refused", !Trust_IsIPLiteral("0.0.0.0/0"));
     expect("name refused", !Trust_IsIPLiteral("example"));
+    expect("allow entry: address", Trust_IsAllowEntry("10.0.0.9") && Trust_IsAllowEntry("fd00::1"));
+    expect("allow entry: v4 range", Trust_IsAllowEntry("10.0.8.0/22") && Trust_IsAllowEntry("10.0.0.0/8") && Trust_IsAllowEntry("10.0.0.9/32"));
+    expect("allow entry: v6 range", Trust_IsAllowEntry("fd00:10::/48") && Trust_IsAllowEntry("fd00::/32") && Trust_IsAllowEntry("fd00::1/128") &&
+                                        Trust_IsAllowEntry("2001:db8::/32") && Trust_IsAllowEntry("2a00:1450::/32"));
+    expect("allow entry: link-local and translation ranges refused", !Trust_IsAllowEntry("fe80::/64") && !Trust_IsAllowEntry("64:ff9b::/96") &&
+                                                                       !Trust_IsAllowEntry("2001::/32") && !Trust_IsAllowEntry("2001:0:1::/48") &&
+                                                                       !Trust_IsAllowEntry("2002::/16") && !Trust_IsAllowEntry("2002:a00::/32") &&
+                                                                       !Trust_IsAllowEntry("::ffff:0:0/96") && !Trust_IsAllowEntry("ff02::/32"));
+    expect("allow entry: too wide refused", !Trust_IsAllowEntry("0.0.0.0/0") && !Trust_IsAllowEntry("10.0.0.0/7") && !Trust_IsAllowEntry("fd00::/31") &&
+                                               !Trust_IsAllowEntry("::/0"));
+    expect("allow entry: malformed refused", !Trust_IsAllowEntry("10.0.0.0/") && !Trust_IsAllowEntry("10.0.0.0/33") && !Trust_IsAllowEntry("fd00::/129") &&
+                                                 !Trust_IsAllowEntry("10.0.0.0/024") && !Trust_IsAllowEntry("10.0.0.0/2x") &&
+                                                 !Trust_IsAllowEntry("/24") && !Trust_IsAllowEntry("10.0.0/24") && !Trust_IsAllowEntry("10.0.0.0/24/1"));
     printf("[*] threat indicators only for public addresses\n");
     expect("public v4", Trust_PublicAddress("8.8.8.8") && Trust_PublicAddress("1.2.3.4"));
     const char* local[] = {"10.0.0.1", "127.0.0.53", "192.168.1.1", "172.16.0.1", "172.31.255.255", "169.254.1.1",
@@ -335,6 +348,16 @@ static void test_grants(int64_t now) {
     expect("a host named in two exception sets is refused", T.state.ruleCount == 2 && refused_with("twice"));
     one(now, FX_G_REL_RULES);
     expect("release clears the exceptions", !T.state.isolated && T.state.ruleCount == 0);
+
+    one(now, FX_G_ISO_CIDR_WIDE);
+    expect("an allow range wider than /8 refuses the isolation", !T.state.isolated && refused_with("too wide"));
+    one(now, FX_G_ISO_CIDR);
+    expect("allow ranges are applied", T.state.isolated && T.state.allowCount == 3 && strcmp(T.state.allow[1], "10.0.8.0/22") == 0 &&
+                                           strcmp(T.state.allow[2], "fd00:10::/48") == 0);
+    init();
+    expect("allow ranges survive a restart", T.state.isolated && T.state.allowCount == 3 && strcmp(T.state.allow[2], "fd00:10::/48") == 0);
+    one(now, FX_G_REL_CIDR);
+    expect("release clears the allow ranges", !T.state.isolated && T.state.allowCount == 0);
 }
 
 static void test_monitor_release(int64_t now) {

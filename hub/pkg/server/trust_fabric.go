@@ -27,9 +27,11 @@ import (
 //     approved; a rule changed later does not reach an isolation in force.
 //   - omitted: the request's own allow_ips only, as before modes existed.
 //
-// Agents enforce literal addresses. A fabric range wider than one address is
+// Agents that report allow_prefixes enforce address ranges (no wider than /8
+// for IPv4 or /32 for IPv6); older agents take single addresses and refuse a
+// grant naming a range. For those, a fabric range wider than one address is
 // reported as not enforced rather than opened, so selective isolation errs
-// closed until agents take prefixes.
+// closed.
 
 const (
 	isolationModeFull      = "full"
@@ -48,8 +50,93 @@ func parseIsolationMode(raw string) (string, error) {
 	}
 }
 
-// fabricPolicy is an endpoint's compiled trust and the part of it agents can
-// enforce today.
+// Narrowest prefix lengths an allow list may carry, as the agents check them
+// (Trust_IsAllowEntry): the list is a pinhole through a default deny.
+const (
+	allowMinBitsV4 = 8
+	allowMinBitsV6 = 32
+)
+
+// validateAllowEntry accepts an address or a bounded address range and
+// returns it canonical: a range is masked, a one-address range is the
+// address.
+func validateAllowEntry(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if !strings.Contains(v, "/") {
+		return validateIP(v)
+	}
+	pre, err := netip.ParsePrefix(v)
+	if err != nil {
+		return "", fmt.Errorf("%q is not an IP address or range", v)
+	}
+	if pre.Addr().Is4In6() {
+		return "", fmt.Errorf("%q: write an IPv4 range as IPv4", v)
+	}
+	pre = pre.Masked()
+	if s := allowPrefixProblem(pre); s != "" {
+		return "", fmt.Errorf("%q %s", v, s)
+	}
+	if pre.IsSingleIP() {
+		return pre.Addr().String(), nil
+	}
+	return pre.String(), nil
+}
+
+// IPv6 ranges an allow list may open: global unicast and unique local, but
+// not Teredo or 6to4. Link-local and translation prefixes (64:ff9b::/96
+// reaches all of IPv4 through NAT64) stay closed. The agents check the same.
+var (
+	allowV6Within = []netip.Prefix{netip.MustParsePrefix("2000::/3"), netip.MustParsePrefix("fc00::/7")}
+	allowV6Never  = []netip.Prefix{netip.MustParsePrefix("2001::/32"), netip.MustParsePrefix("2002::/16")}
+)
+
+func allowPrefixProblem(pre netip.Prefix) string {
+	if pre.Addr().Is4() {
+		if pre.Bits() < allowMinBitsV4 {
+			return fmt.Sprintf("is wider than /%d", allowMinBitsV4)
+		}
+		return ""
+	}
+	if pre.Bits() < allowMinBitsV6 {
+		return fmt.Sprintf("is wider than /%d", allowMinBitsV6)
+	}
+	if pre.IsSingleIP() {
+		return ""
+	}
+	within := false
+	for _, w := range allowV6Within {
+		within = within || w.Contains(pre.Addr())
+	}
+	for _, n := range allowV6Never {
+		if n.Overlaps(pre) {
+			within = false
+		}
+	}
+	if !within {
+		return "is not a global unicast or unique local IPv6 range (link-local, Teredo, 6to4 and translation prefixes stay closed)"
+	}
+	return ""
+}
+
+// takesAllowRanges reports whether the endpoint's agent enforces address
+// ranges in its isolation allow list.
+func (s *Server) takesAllowRanges(endpointID string) bool {
+	ep, err := s.store.GetEndpoint(endpointID)
+	return err == nil && ep != nil && parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes
+}
+
+// allowRangesProblem refuses ranges for an agent that would reject the grant.
+func (s *Server) allowRangesProblem(endpointID string, allow []string) string {
+	for _, a := range allow {
+		if strings.Contains(a, "/") && !s.takesAllowRanges(endpointID) {
+			return "allow_ips: " + a + " is a range, and the agent on " + endpointID + " enforces single addresses only; update the agent or name addresses"
+		}
+	}
+	return ""
+}
+
+// fabricPolicy is an endpoint's compiled trust and the part of it its agent
+// can enforce.
 type fabricPolicy struct {
 	trustfabric.Policy
 	Enforced    []string `json:"enforced"`
@@ -72,6 +159,19 @@ func (s *Server) fabricPolicyFor(endpointID string, now time.Time) (fabricPolicy
 		ID: ep.ID, TenantID: ep.TenantID, LocationID: ep.LocationID, Role: ep.RoleTag,
 	}, rules, now)}
 	p.Enforced = []string{}
+	if parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes {
+		for _, pre := range p.Allow {
+			switch {
+			case allowPrefixProblem(pre) != "":
+				p.NotEnforced = append(p.NotEnforced, pre.String())
+			case pre.IsSingleIP():
+				p.Enforced = append(p.Enforced, pre.Addr().String())
+			default:
+				p.Enforced = append(p.Enforced, pre.String())
+			}
+		}
+		return p, nil
+	}
 	named := map[netip.Addr]bool{}
 	for _, a := range p.Addresses {
 		named[a] = true

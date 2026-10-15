@@ -322,6 +322,48 @@ static inline bool Trust_IsIPLiteral(const char* s) {
     return colons >= 2 && colons <= 7 && (doubles == 1 || colons == 7);
 }
 
+/* Trust_IsAllowEntry: one isolation allow-list entry, an address or an
+ * address range "addr/len". A range may not be wider than /8 (IPv4) or /32
+ * (IPv6): the allow list is a pinhole through a default deny, never a way to
+ * switch the deny off. An IPv6 range must be global unicast (2000::/3) or
+ * unique local (fc00::/7) and not Teredo (2001::/32) or 6to4 (2002::/16), so
+ * neither link-local nor a translation prefix such as 64:ff9b::/96 (which
+ * reaches all of IPv4 through NAT64) can be opened. The hub refuses the same. */
+#define TRUST_ALLOW_MIN_V4 8
+#define TRUST_ALLOW_MIN_V6 32
+static inline bool Trust_IsAllowEntry(const char* s) {
+    if (!s || !*s || strlen(s) >= 64) return false;
+    const char* slash = strchr(s, '/');
+    if (!slash) return Trust_IsIPLiteral(s);
+    char addr[64];
+    size_t n = (size_t)(slash - s);
+    if (n == 0 || n >= sizeof(addr)) return false;
+    memcpy(addr, s, n);
+    addr[n] = '\0';
+    if (!Trust_IsIPLiteral(addr)) return false;
+    const char* p = slash + 1;
+    int len = 0, digits = 0;
+    for (; *p; p++) {
+        if (!isdigit((unsigned char)*p) || ++digits > 3) return false;
+        len = len * 10 + (*p - '0');
+    }
+    if (digits == 0 || (digits > 1 && slash[1] == '0')) return false;
+    bool v6 = strchr(addr, ':') != NULL;
+    if (!v6) return len >= TRUST_ALLOW_MIN_V4 && len <= 32;
+    if (len < TRUST_ALLOW_MIN_V6 || len > 128) return false;
+    /* The first two groups decide; "::" in front means they are zero. */
+    unsigned g0 = 0, g1 = 0;
+    if (addr[0] != ':') {
+        g0 = (unsigned)strtoul(addr, NULL, 16);
+        const char* c = strchr(addr, ':');
+        if (c && c[1] != ':') g1 = (unsigned)strtoul(c + 1, NULL, 16);
+    }
+    bool global = (g0 & 0xe000) == 0x2000, ula = (g0 & 0xfe00) == 0xfc00;
+    if (!global && !ula) return false;
+    if (g0 == 0x2002 || (g0 == 0x2001 && g1 == 0)) return false;
+    return true;
+}
+
 /* Trust_PublicAddress: a globally routable unicast address. Threat
  * indicators are not signed (they come from the hub's feeds), so an agent
  * drops traffic only to public addresses: never to private, loopback,
@@ -788,7 +830,7 @@ static inline void Trust_LoadState(TrustContext* t) {
         } else if (sscanf(line, "seen %lld %lld", &x, &y) == 2) {
             s->iso_seen = x;
             s->mesh_seen = y;
-        } else if (sscanf(line, "allow %63s", a) == 1 && s->allowCount < TRUST_MAX_ALLOW && Trust_IsIPLiteral(a)) {
+        } else if (sscanf(line, "allow %63s", a) == 1 && s->allowCount < TRUST_MAX_ALLOW && Trust_IsAllowEntry(a)) {
             snprintf(s->allow[s->allowCount++], 64, "%s", a);
         } else if (sscanf(line, "mesh %63s %d %lld", a, &on, &x) == 3 && s->meshCount < TRUST_MAX_MESH && Trust_IsIPLiteral(a)) {
             TrustMeshSlot* m = &s->mesh[s->meshCount++];
@@ -1230,7 +1272,7 @@ static inline const char* Trust_ParseAction(const char* payload, size_t len, con
         if (r == 1) {
             a->allowCount = TJ_PlainArray(av, ave, a->allow, TRUST_MAX_ALLOW);
             if (a->allowCount < 0) return "isolation allow list unreadable or too long";
-            for (int i = 0; i < a->allowCount; i++) if (!Trust_IsIPLiteral(a->allow[i])) return "isolation allow list holds a non-address";
+            for (int i = 0; i < a->allowCount; i++) if (!Trust_IsAllowEntry(a->allow[i])) return "isolation allow list holds a non-address or too wide a range";
         }
         return Trust_ParseBaselines(payload, end, self, a);
     }
@@ -1476,7 +1518,7 @@ static inline bool Trust_ProcessHeartbeat(TrustContext* t, const char* resp, siz
         if (np < 0) np = 0;
         int ka = 0, kp = 0;
         for (int i = 0; i < na; i++) {
-            if (!Trust_IsIPLiteral(allow[i])) continue;
+            if (!Trust_IsAllowEntry(allow[i])) continue;
             if (ka != i) memmove(allow[ka], allow[i], sizeof(allow[0]));
             ka++;
         }

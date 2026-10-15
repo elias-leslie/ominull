@@ -211,6 +211,11 @@ func buildTrustFixtures() []byte {
 		"G_ISO_RULES_BAD":   fixtureGrant{key: resp, id: "g-iso-rules-bad", endpoint: ep, kind: ActionKindIsolationChange, payload: isoRulesBad, issued: fixtureT0 + 121, ttl: day}.wire(),
 		"G_ISO_RULES_TWICE": fixtureGrant{key: resp, id: "g-iso-rules-2x", endpoint: ep, kind: ActionKindIsolationChange, payload: isoRulesTwice, issued: fixtureT0 + 122, ttl: day}.wire(),
 		"G_REL_RULES":       fixtureGrant{key: resp, id: "g-rel-rules", endpoint: ep, kind: ActionKindIsolationChange, payload: rel, issued: fixtureT0 + 123, ttl: day}.wire(),
+		// Address ranges in the allow list (agents reporting allow_prefixes):
+		// one too wide is refused, bounded ones are taken, then released.
+		"G_ISO_CIDR_WIDE": fixtureGrant{key: resp, id: "g-iso-cidr-wide", endpoint: ep, kind: ActionKindIsolationChange, payload: iso([]string{"10.0.0.9", "0.0.0.0/1"}), issued: fixtureT0 + 124, ttl: day}.wire(),
+		"G_ISO_CIDR":      fixtureGrant{key: resp, id: "g-iso-cidr", endpoint: ep, kind: ActionKindIsolationChange, payload: iso([]string{"10.0.0.9", "10.0.8.0/22", "fd00:10::/48"}), issued: fixtureT0 + 125, ttl: day}.wire(),
+		"G_REL_CIDR":      fixtureGrant{key: resp, id: "g-rel-cidr", endpoint: ep, kind: ActionKindIsolationChange, payload: rel, issued: fixtureT0 + 126, ttl: day}.wire(),
 		// Refused, issued before the first genuine one so the order of the
 		// C test does not depend on watermark effects.
 		"G_ISO_FORGED":        fixtureGrant{key: evil, id: "g-forged", endpoint: ep, kind: ActionKindIsolationChange, payload: iso(nil), issued: fixtureT0 + 9_000_000, ttl: day}.wire(),

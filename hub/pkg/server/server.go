@@ -2020,15 +2020,20 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The allow list is a pinhole through a default-deny rule and reaches the
-	// agent's firewall layer. Only addresses belong in it.
+	// agent's firewall layer. Only addresses, and bounded ranges for an agent
+	// that enforces them, belong in it.
 	allowIPs := make([]string, 0, len(req.AllowIPs))
 	for _, raw := range req.AllowIPs {
-		ip, err := validateIP(raw)
+		ip, err := validateAllowEntry(raw)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "allow_ips: "+err.Error())
 			return
 		}
 		allowIPs = append(allowIPs, ip)
+	}
+	if p := s.allowRangesProblem(req.EndpointID, allowIPs); p != "" {
+		writeJSONError(w, http.StatusBadRequest, p)
+		return
 	}
 
 	if err := s.store.SetEndpointIsolation(req.EndpointID, true, allowIPs); err != nil {

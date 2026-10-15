@@ -435,12 +435,12 @@ func TestPendingGrantsAreReconciled(t *testing.T) {
 func TestApprovedAddressesAreNormalizedBeforeSigning(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	nb, allow, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":[" 10.0.0.9 ","::ffff:10.0.0.8"],"endpoint_id":"ep-1"}`), []string{" 10.0.0.9 ", "::ffff:10.0.0.8"})
+	nb, allow, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":[" 10.0.0.9 ","::ffff:10.0.0.8"],"endpoint_id":"ep-1"}`), []string{" 10.0.0.9 ", "::ffff:10.0.0.8"}, true)
 	if !ok || strings.Join(allow, ",") != "10.0.0.9,10.0.0.8" || string(nb) != `{"allow_ips":["10.0.0.9","10.0.0.8"],"endpoint_id":"ep-1"}` {
 		t.Fatalf("normalized %s %v %v", nb, allow, ok)
 	}
 	rec = httptest.NewRecorder()
-	if _, _, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":["host.example"]}`), []string{"host.example"}); ok || rec.Code != http.StatusBadRequest {
+	if _, _, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":["host.example"]}`), []string{"host.example"}, true); ok || rec.Code != http.StatusBadRequest {
 		t.Fatalf("a non-address allow entry was accepted (%d)", rec.Code)
 	}
 }

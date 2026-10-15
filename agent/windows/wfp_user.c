@@ -254,6 +254,54 @@ static int AddressCondition(const char* ipStr, FWPM_FILTER_CONDITION0* cond, FWP
     return 0;
 }
 
+/* AllowStore owns what an allow-list condition points at; like `store` above
+ * it has to outlive the FwpmFilterAdd0 call. */
+typedef struct {
+    FWP_BYTE_ARRAY16 a16;
+    FWP_V4_ADDR_AND_MASK v4;
+    FWP_V6_ADDR_AND_MASK v6;
+} OMINULL_ALLOW_STORE;
+
+/* AllowCondition matches one allow-list entry: an address (AddressCondition)
+ * or a range "addr/len", already bounded by Trust_IsAllowEntry. Returns the
+ * family, or 0 for an entry it cannot express. */
+static int AllowCondition(const char* entry, FWPM_FILTER_CONDITION0* cond, OMINULL_ALLOW_STORE* st) {
+    const char* slash = entry ? strchr(entry, '/') : NULL;
+    if (!slash) return AddressCondition(entry, cond, &st->a16);
+    char addr[64];
+    size_t n = (size_t)(slash - entry);
+    if (n == 0 || n >= sizeof(addr)) return 0;
+    memcpy(addr, entry, n);
+    addr[n] = '\0';
+    char* end = NULL;
+    long len = strtol(slash + 1, &end, 10);
+    if (!end || *end || end == slash + 1) return 0;
+    struct in_addr a4;
+    struct in6_addr a6;
+    memset(cond, 0, sizeof(*cond));
+    cond->fieldKey = OMINULL_CONDITION_IP_REMOTE_ADDRESS;
+    cond->matchType = FWP_MATCH_EQUAL;
+    if (inet_pton(AF_INET, addr, &a4) == 1) {
+        if (len < 8 || len > 32) return 0;
+        UINT32 mask = len == 0 ? 0 : (UINT32)(0xffffffffu << (32 - len));
+        st->v4.mask = mask;
+        st->v4.addr = ntohl(a4.s_addr) & mask;
+        cond->conditionValue.type = FWP_V4_ADDR_MASK;
+        cond->conditionValue.v4AddrMask = &st->v4;
+        return OMINULL_FAMILY_V4;
+    }
+    if (inet_pton(AF_INET6, addr, &a6) == 1) {
+        if (len < 32 || len > 128) return 0;
+        if (a6.s6_addr[0] == 0xfe && (a6.s6_addr[1] & 0xc0) == 0x80) return 0;   /* link-local, as AddressCondition */
+        memcpy(st->v6.addr, &a6, sizeof(st->v6.addr));
+        st->v6.prefixLength = (UINT8)len;
+        cond->conditionValue.type = FWP_V6_ADDR_MASK;
+        cond->conditionValue.v6AddrMask = &st->v6;
+        return OMINULL_FAMILY_V6;
+    }
+    return 0;
+}
+
 /* UdpRemotePort builds the two conditions that name one UDP service.
  *
  * The port is the remote one in both directions on purpose: outbound it is the
@@ -457,8 +505,9 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
      *    enforce it, which was honest and still meant a Windows endpoint was
      *    the one platform where a trust rule did nothing. */
     for (int i = 0; i < allowCount; i++) {
-        int family = AddressCondition(allowIPs[i], &cond[0], &store);
-        if (!family) continue;             /* a CIDR is not this filter's shape */
+        OMINULL_ALLOW_STORE allowStore;
+        int family = AllowCondition(allowIPs[i], &cond[0], &allowStore);
+        if (!family) continue;
         status = AddFilterEverywhere(L"Ominull Isolation Allow", FWP_ACTION_PERMIT,
                                      OMINULL_WEIGHT_PERMIT_ALLOW, cond, 1, family);
         if (status != ERROR_SUCCESS) {
@@ -599,8 +648,10 @@ DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
     }
     for (int i = 0; i < blockedCount; i++)
         if (!AddressCondition(blockedIPs[i], &condition, &address)) return ERROR_INVALID_PARAMETER;
-    for (int i = 0; i < allowCount; i++)
-        if (!AddressCondition(allowIPs[i], &condition, &address)) return ERROR_INVALID_PARAMETER;
+    for (int i = 0; i < allowCount; i++) {
+        OMINULL_ALLOW_STORE allowStore;
+        if (!AllowCondition(allowIPs[i], &condition, &allowStore)) return ERROR_INVALID_PARAMETER;
+    }
     for (int i = 0; i < baselineCount; i++) {
         FWPM_FILTER_CONDITION0 conditions[3];
         if (!ServiceCondition(&baseline[i], conditions, &address)) return ERROR_INVALID_PARAMETER;

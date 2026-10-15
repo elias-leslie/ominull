@@ -8,16 +8,19 @@
 #ifndef OMINULL_RESPONSE_CAPABILITIES_H
 #define OMINULL_RESPONSE_CAPABILITIES_H
 
+/* "allow_prefixes": the isolation allow list may hold address ranges
+ * (Trust_IsAllowEntry); an agent without it rejects a grant naming one, so
+ * the hub sends ranges only to agents that report it. */
 /* Collection and the terminal arrive as signed grants, verified against the
  * tenant response key pinned on this host. Without that key every grant is
  * dropped, so an agent without one reports only what needs no grant, and says
  * why: "response_key":false. */
 #define OMINULL_CAPS_LINUX \
-    "{\"isolate\":true,\"collect\":true,\"response_key\":true,\"terminal\":{\"programs\":[\"/bin/bash\",\"/bin/sh\"]}}"
+    "{\"isolate\":true,\"allow_prefixes\":true,\"collect\":true,\"response_key\":true,\"terminal\":{\"programs\":[\"/bin/bash\",\"/bin/sh\"]}}"
 #define OMINULL_CAPS_NO_RESPONSE_KEY "{\"isolate\":true,\"response_key\":false}"
 
 #define OMINULL_CAPS_WINDOWS_BASE \
-    "{\"isolate\":true,\"collect\":true,\"response_key\":true,\"terminal\":{\"programs\":[\"cmd.exe\",\"powershell.exe\""
+    "{\"isolate\":true,\"allow_prefixes\":true,\"collect\":true,\"response_key\":true,\"terminal\":{\"programs\":[\"cmd.exe\",\"powershell.exe\""
 #define OMINULL_CAPS_WINDOWS_PWSH ",\"pwsh.exe\""
 #define OMINULL_CAPS_WINDOWS_END "]}}"
 
