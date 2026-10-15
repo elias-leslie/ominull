@@ -276,9 +276,21 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if storage.ValidQuietPath(proc) != nil {
-		writeJSONError(w, http.StatusBadRequest,
-			"this finding names the program only by its name, not where it is installed, and a name is something any program can take")
-		return
+		// A program in a folder any account can write to is vouched for by
+		// the build the finding saw, never by where it sits.
+		pinned := proc + " sha256:" + evidenceText(finding.Evidence, "executable_sha256")
+		switch {
+		case storage.ValidQuietPath(pinned) == nil:
+			proc = pinned
+		case strings.HasPrefix(proc, "/") || (len(proc) > 2 && proc[1] == ':'):
+			writeJSONError(w, http.StatusBadRequest,
+				"this program is in a folder any account can write to, and the agent did not record which build it was, so there is nothing safe to vouch for")
+			return
+		default:
+			writeJSONError(w, http.StatusBadRequest,
+				"this finding names the program only by its name, not where it is installed, and a name is something any program can take")
+			return
+		}
 	}
 	if owner == "" {
 		writeJSONError(w, http.StatusBadRequest,
@@ -339,24 +351,23 @@ func (s *Server) writeSuppressed(w http.ResponseWriter, pair string, finding sto
 // detector attached. The alert row carries the address; who owns it, and
 // whether that owner rents the range out, lives in the evidence JSON.
 func destinationFromEvidence(evidence string) (owner, tenancy string) {
-	if strings.TrimSpace(evidence) == "" {
-		return "", ""
-	}
-	var fields map[string]any
-	if err := json.Unmarshal([]byte(evidence), &fields); err != nil {
-		return "", ""
-	}
-	text := func(key string) string {
-		if v, ok := fields[key].(string); ok {
-			return strings.ToLower(strings.TrimSpace(v))
-		}
-		return ""
-	}
 	// The AS number is the owner a pair is written with; the name stands in
 	// only where nothing numbered the network.
-	owner = text("destination_asn")
+	owner = evidenceText(evidence, "destination_asn")
 	if owner == "" {
-		owner = text("destination_owner")
+		owner = evidenceText(evidence, "destination_owner")
 	}
-	return owner, text("destination_tenancy")
+	return owner, evidenceText(evidence, "destination_tenancy")
+}
+
+// evidenceText reads one string field of a finding's evidence, lower-cased.
+func evidenceText(evidence, key string) string {
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(evidence), &fields); err != nil {
+		return ""
+	}
+	if v, ok := fields[key].(string); ok {
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+	return ""
 }

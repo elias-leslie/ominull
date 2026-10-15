@@ -60,18 +60,18 @@ func TestADisabledWindowIsNeverOffHours(t *testing.T) {
 // name that also covers the clouds rented inside it.
 func TestQuietListsMatchInstalledPathsAndASNumbersOnly(t *testing.T) {
 	cfg := DefaultDetectionTuning()
-	if !cfg.IsQuietProcess(`C:\Windows\System32\SVCHOST.EXE`, "") {
+	if !cfg.IsQuietProcess(`C:\Windows\System32\SVCHOST.EXE`, "", `NT AUTHORITY\NETWORK SERVICE`) {
 		t.Error("the installed svchost is not quiet; Windows paths compare case-insensitively")
 	}
 	for _, impostor := range []string{"svchost.exe", `C:\Users\Public\svchost.exe`, "/tmp/svchost.exe", "/tmp/systemd-resolved", "", "system"} {
-		if cfg.IsQuietProcess(impostor, "") {
+		if cfg.IsQuietProcess(impostor, "", "root") {
 			t.Errorf("%q is quiet by name alone", impostor)
 		}
 	}
-	if !cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "") {
+	if !cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "", "root") {
 		t.Error("a snap revision directory is not covered by its wildcard")
 	}
-	if cfg.IsQuietProcess("/snap/snapd/28254/tmp/usr/lib/snapd/snapd", "") {
+	if cfg.IsQuietProcess("/snap/snapd/28254/tmp/usr/lib/snapd/snapd", "", "root") {
 		t.Error("a wildcard reached across a directory boundary")
 	}
 	if !cfg.IsQuietClient("/opt/google/chrome/chrome", "") || cfg.IsQuietClient("/home/user/.cache/chrome", "") {
@@ -99,11 +99,82 @@ func TestAQuietPathCanPinTheExecutableHash(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
 	cfg := DefaultDetectionTuning()
 	cfg.QuietProcesses = []string{"/usr/bin/rclone sha256:" + sha}
-	if !cfg.IsQuietProcess("/usr/bin/rclone", strings.ToUpper(sha)) {
+	if !cfg.IsQuietProcess("/usr/bin/rclone", strings.ToUpper(sha), "root") {
 		t.Error("the pinned build is not quiet")
 	}
-	if cfg.IsQuietProcess("/usr/bin/rclone", strings.Repeat("cd", 32)) || cfg.IsQuietProcess("/usr/bin/rclone", "") {
+	if cfg.IsQuietProcess("/usr/bin/rclone", strings.Repeat("cd", 32), "root") || cfg.IsQuietProcess("/usr/bin/rclone", "", "root") {
 		t.Error("another build, or one with no hash, matched a pinned entry")
+	}
+}
+
+// A login user can make any program appear at a listed path - bind-mounted
+// over it in a user namespace, or with a library preloaded into the real one -
+// and the path and even the hash then read as the real component. What it
+// cannot do is run that program as the system or the daemon's own account, so
+// a quiet process matches only as one of those, and an event whose account was
+// not read matches nothing.
+func TestAQuietProcessIsQuietOnlyAsItsServiceAccount(t *testing.T) {
+	cfg := DefaultDetectionTuning()
+	resolved := "/usr/lib/systemd/systemd-resolved"
+	for _, user := range []string{"systemd-resolve", "root"} {
+		if !cfg.IsQuietProcess(resolved, "", user) {
+			t.Errorf("systemd-resolved running as %s is not quiet", user)
+		}
+	}
+	for _, user := range []string{"kasadis", "UID:1000", "", "systemd-timesync", "nobody"} {
+		if cfg.IsQuietProcess(resolved, "", user) {
+			t.Errorf("systemd-resolved running as %q is quiet", user)
+		}
+	}
+	if cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "", "kasadis") ||
+		cfg.IsQuietProcess("/opt/ominull/bin/ominulld", "", "kasadis") {
+		t.Error("a root daemon's path was quiet for a login user")
+	}
+	svchost := `C:\Windows\System32\svchost.exe`
+	for _, user := range []string{`NT AUTHORITY\SYSTEM`, `NT AUTHORITY\LOCAL SERVICE`, `nt authority\network service`, "SYSTEM"} {
+		if !cfg.IsQuietProcess(svchost, "", user) {
+			t.Errorf("svchost running as %s is not quiet", user)
+		}
+	}
+	if cfg.IsQuietProcess(svchost, "", `LAPTOP-85T7CI9J\Administrator`) || cfg.IsQuietProcess(svchost, "", "") {
+		t.Error("svchost started by a login user, or by nobody known, is quiet")
+	}
+	cfg.QuietProcesses = []string{"/usr/sbin/ntpd sha256:" + strings.Repeat("ab", 32) + " user:ntp"}
+	if !cfg.IsQuietProcess("/usr/sbin/ntpd", strings.Repeat("ab", 32), "ntp") ||
+		cfg.IsQuietProcess("/usr/sbin/ntpd", strings.Repeat("ab", 32), "kasadis") ||
+		cfg.IsQuietProcess("/usr/sbin/ntpd", "", "ntp") {
+		t.Error("an entry with both a hash and an account does not need both")
+	}
+	if _, err := PrepareDetectionTuning(cfg); err != nil {
+		t.Errorf("an entry with both clauses was refused: %v", err)
+	}
+	// The expected-client and pair lists are about programs a person runs and
+	// carry no account; an account clause there would never be checked.
+	if MatchesQuietPath("/usr/bin/rclone user:kasadis", "/usr/bin/rclone", "") {
+		t.Error("an account-bound entry matched where no account is checked")
+	}
+}
+
+// A folder any account can write to holds whatever was put there last, so an
+// entry there names a build by its hash or is refused.
+func TestAWritableFolderNeedsTheBuildPinned(t *testing.T) {
+	sha := strings.Repeat("ef", 32)
+	if err := ValidQuietPath("/home/*/.local/bin/rclone sha256:" + sha); err != nil {
+		t.Errorf("a pinned user-local program was refused: %v", err)
+	}
+	for _, bad := range []string{"/home/*/.local/bin/rclone", "/tmp/x/agent", "/var/tmp/agent", "c:/users/me/app.exe"} {
+		if ValidQuietPath(bad) == nil {
+			t.Errorf("%s was accepted without a hash", bad)
+		}
+	}
+	cfg := DefaultDetectionTuning()
+	cfg.QuietPairs = []string{"/home/*/.local/bin/rclone sha256:" + sha + "@as15169"}
+	if _, err := PrepareDetectionTuning(cfg); err != nil {
+		t.Fatalf("a pinned pair was refused: %v", err)
+	}
+	if !cfg.IsVouchedPair("/home/me/.local/bin/rclone", sha, "AS15169", "Google LLC", TenancyVendor) ||
+		cfg.IsVouchedPair("/home/me/.local/bin/rclone", "", "AS15169", "Google LLC", TenancyVendor) {
+		t.Error("a pinned pair does not hold to its build")
 	}
 }
 
@@ -119,6 +190,13 @@ func TestASaveRefusesNamesAndFragments(t *testing.T) {
 		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/usr/bin/rclone sha256:abc") },
 		func(c *DetectionTuning) { c.QuietOrgs = append(c.QuietOrgs, "amazon") },
 		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "rclone@as15169") },
+		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "/home/*/.local/bin/rclone@as15169") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/tmp/chrome") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, `c:/users/me/appdata/local/app.exe`) },
+		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/dev/shm/x/agent") },
+		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/usr/sbin/ntpd user:") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/usr/bin/rclone user:kasadis") },
+		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "/usr/bin/rclone user:kasadis@as15169") },
 	} {
 		cfg := DefaultDetectionTuning()
 		bad(&cfg)
@@ -151,12 +229,12 @@ func TestOwnersMatchExactlyOrByASNumber(t *testing.T) {
 		}
 	}
 	cfg := DefaultDetectionTuning()
-	cfg.QuietPairs = []string{"/home/*/.local/bin/rclone@as15169"}
-	if !cfg.IsVouchedPair("/home/me/.local/bin/rclone", "", "AS15169", "Google LLC", TenancyVendor) {
+	cfg.QuietPairs = []string{"/usr/bin/rclone@as15169"}
+	if !cfg.IsVouchedPair("/usr/bin/rclone", "", "AS15169", "Google LLC", TenancyVendor) {
 		t.Error("the pair did not vouch for its own conversation")
 	}
 	if cfg.IsVouchedPair("/tmp/rclone", "", "AS15169", "Google LLC", TenancyVendor) ||
-		cfg.IsVouchedPair("/home/me/.local/bin/rclone", "", "AS396982", "Google Cloud (customer range)", TenancyHosting) {
+		cfg.IsVouchedPair("/usr/bin/rclone", "", "AS396982", "Google Cloud (customer range)", TenancyHosting) {
 		t.Error("the pair vouched for another program or for rented compute")
 	}
 	cfg.KnownWorkloads = []KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "GitHub CLI"}}
@@ -194,7 +272,7 @@ func TestASavedTuningSurvivesTheRoundTrip(t *testing.T) {
 	if got.WarmupHours != 72 || got.BeaconScore != 0.95 {
 		t.Fatalf("round trip lost values: %+v", got)
 	}
-	if !got.IsQuietProcess(`c:\program files\backup helper\HELPER.EXE`, "") {
+	if !got.IsQuietProcess(`c:\program files\backup helper\HELPER.EXE`, "", `NT AUTHORITY\SYSTEM`) {
 		t.Error("an added path was not lower-cased on the way in")
 	}
 	if got.UpdatedBy != "someone@example.invalid" {
@@ -250,12 +328,12 @@ func TestTheStoredRowIsMigratedToPathsAndASNumbers(t *testing.T) {
 		}
 		return false
 	}
-	for _, want := range []string{"c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-resolved", "/snap/snapd/*/usr/lib/snapd/snapd", "/opt/ominull/bin/ominulld"} {
+	for _, want := range []string{"c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-resolved user:systemd-resolve", "/usr/sbin/chronyd user:_chrony", "/snap/snapd/*/usr/lib/snapd/snapd", "/opt/ominull/bin/ominulld"} {
 		if !has(got.QuietProcesses, want) {
 			t.Errorf("quiet processes lack %s: %v", want, got.QuietProcesses)
 		}
 	}
-	for _, gone := range []string{"system", "telegram", "unattended-upgr", "svchost.exe"} {
+	for _, gone := range []string{"system", "telegram", "unattended-upgr", "svchost.exe", "/usr/bin/dbus-daemon", "/usr/lib/systemd/systemd", "c:/windows/system32/services.exe"} {
 		if has(got.QuietProcesses, gone) || has(got.QuietClients, gone) {
 			t.Errorf("%q survived as a name", gone)
 		}
@@ -266,7 +344,7 @@ func TestTheStoredRowIsMigratedToPathsAndASNumbers(t *testing.T) {
 	if want := []string{"as13335", "as15169", "as16509", "as20940", "as54113", "as714", "as8075"}; strings.Join(got.QuietOrgs, ",") != strings.Join(want, ",") {
 		t.Errorf("quiet networks = %v, want %v", got.QuietOrgs, want)
 	}
-	if want := []string{"/home/*/.local/bin/rclone@as15169", "/usr/bin/rclone@as15169"}; strings.Join(got.QuietPairs, ",") != strings.Join(want, ",") {
+	if want := []string{"/usr/bin/rclone@as15169"}; strings.Join(got.QuietPairs, ",") != strings.Join(want, ",") {
 		t.Errorf("expected pairs = %v, want %v", got.QuietPairs, want)
 	}
 	owners := map[string]string{}

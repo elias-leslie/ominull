@@ -215,3 +215,31 @@ func TestAnUnnumberedOwnerIsWrittenExactly(t *testing.T) {
 		t.Fatal("an exact owner matched a longer name that contains it")
 	}
 }
+
+// A program in a folder any account can write to is vouched for by the build
+// the finding saw: ~/.local/bin/rclone by path alone is whatever an agent
+// copied there last. Without a recorded hash there is nothing to vouch for.
+func TestAProgramInAWritableFolderIsMarkedExpectedByItsBuild(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	sha := strings.Repeat("ab", 32)
+	seedFinding(t, store, "f-11", "/home/me/.local/bin/rclone",
+		`{"destination_asn":"AS15169","destination_tenancy":"vendor","executable_sha256":"`+strings.ToUpper(sha)+`"}`)
+	code, body := suppressFinding(t, srv, "f-11")
+	if want := "/home/me/.local/bin/rclone sha256:" + sha + "@as15169"; code != http.StatusOK || body["pair"] != want {
+		t.Fatalf("suppress: %d %v, want pair %s", code, body, want)
+	}
+	tuning := store.GetDetectionTuning()
+	if !tuning.IsVouchedPair("/home/me/.local/bin/rclone", sha, "AS15169", "Google LLC", "vendor") ||
+		tuning.IsVouchedPair("/home/me/.local/bin/rclone", strings.Repeat("cd", 32), "AS15169", "Google LLC", "vendor") {
+		t.Fatal("the pair does not hold to the build the finding saw")
+	}
+
+	seedFinding(t, store, "f-12", "/tmp/rclone", `{"destination_asn":"AS15169","destination_tenancy":"vendor"}`)
+	if code, body := suppressFinding(t, srv, "f-12"); code != http.StatusBadRequest {
+		t.Fatalf("an unhashed program in /tmp was vouched for: %d %v", code, body)
+	}
+	if n := len(store.GetDetectionTuning().QuietPairs); n != 1 {
+		t.Fatalf("pairs = %d, want only the pinned one", n)
+	}
+}

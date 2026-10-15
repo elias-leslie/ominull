@@ -482,7 +482,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	// Both lists are the operator's, held in the database and shown in the
 	// console, not a table compiled into this file.
-	isTrustedSys := cfg.IsQuietProcess(ev.ProcessPath, ev.ExecutableSHA256)
+	isTrustedSys := cfg.IsQuietProcess(ev.ProcessPath, ev.ExecutableSHA256, ev.UserIdentity)
 	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
 
 	// While a window is open the estate is being described. The findings below
@@ -867,7 +867,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	if procKey == "" || procKey == "." {
 		procKey = "unknown"
 	}
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) {
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath, ev.UserIdentity) {
 		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
 		history := e.portHistory[sweepKey]
@@ -927,7 +927,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	destination, _ := netaddr.Parse(ev.DstIP)
 	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
 	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
-		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath) {
+		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath, ev.UserIdentity) {
 
 		e.mu.Lock()
 		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
@@ -1280,20 +1280,39 @@ func firstLine(cmd string) string {
 }
 
 // isKnownInfrastructureProcess reports a container runtime or local resolver,
-// by the path it is installed at, whose job is to reach many ports and hosts.
-// Base names and build-cache test binaries ("go-build", ".test") used to count
-// too, and any program could be given either from a writable directory.
-func isKnownInfrastructureProcess(procPath string) bool {
-	return knownInfrastructurePaths[storage.ProcessPathKey(procPath)]
+// by the path it is installed at and the account it runs as, whose job is to
+// reach many ports and hosts. Base names and build-cache test binaries
+// ("go-build", ".test") used to count, and any program could be given either
+// from a writable directory; a path alone still could, bind-mounted over the
+// real one in a user namespace or preloaded into it, by a login user - who
+// cannot run it as the system or the daemon's own account.
+func isKnownInfrastructureProcess(procPath, user string) bool {
+	accounts, ok := knownInfrastructurePaths[storage.ProcessPathKey(procPath)]
+	if !ok {
+		return false
+	}
+	if storage.IsServiceAccount(user, "") {
+		return true
+	}
+	for _, account := range accounts {
+		if storage.IsServiceAccount(user, account) {
+			return true
+		}
+	}
+	return false
 }
 
-var knownInfrastructurePaths = map[string]bool{
-	"/usr/bin/docker-proxy": true, "/usr/libexec/docker/docker-proxy": true,
-	"/usr/bin/dockerd": true, "/usr/bin/containerd": true, "/usr/bin/runc": true,
-	"/usr/sbin/dnsmasq": true, "/usr/lib/systemd/systemd-resolved": true,
-	"/usr/bin/kubelet": true, "/usr/bin/cilium-agent": true, "/usr/sbin/avahi-daemon": true,
-	"/usr/bin/coredns": true, "/usr/sbin/named": true, "/usr/sbin/unbound": true,
-	"/usr/bin/wireguard-go": true,
+// knownInfrastructurePaths maps each path to the service accounts its daemon
+// drops to, beyond root.
+var knownInfrastructurePaths = map[string][]string{
+	"/usr/bin/docker-proxy": nil, "/usr/libexec/docker/docker-proxy": nil,
+	"/usr/bin/dockerd": nil, "/usr/bin/containerd": nil, "/usr/bin/runc": nil,
+	"/usr/sbin/dnsmasq":                 {"nobody", "dnsmasq", "libvirt-dnsmasq"},
+	"/usr/lib/systemd/systemd-resolved": {"systemd-resolve"},
+	"/usr/bin/kubelet":                  nil, "/usr/bin/cilium-agent": nil,
+	"/usr/sbin/avahi-daemon": {"avahi"},
+	"/usr/bin/coredns":       {"coredns"}, "/usr/sbin/named": {"bind", "named"},
+	"/usr/sbin/unbound": {"unbound"}, "/usr/bin/wireguard-go": nil,
 }
 
 // describeOwner renders what is known about a destination's network, and says

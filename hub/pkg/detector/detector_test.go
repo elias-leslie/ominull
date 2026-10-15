@@ -206,30 +206,32 @@ func TestDockerAndInfrastructureExcludedFromLateralSweep(t *testing.T) {
 	// Simulate docker-proxy connecting to 10 distinct containers in 172.18.0.0/16
 	for i := 1; i <= 10; i++ {
 		engine.Evaluate(storage.Event{
-			TenantID:    "default",
-			EndpointID:  "dev-workstation",
-			Timestamp:   time.Now().UTC(),
-			Action:      "PERMIT",
-			Direction:   "OUTBOUND",
-			DstIP:       "172.18.0." + strconv.Itoa(i),
-			DstPort:     8080,
-			ProcessPath: "/usr/bin/docker-proxy",
-			ProcessID:   uint32(1000 + i),
+			TenantID:     "default",
+			EndpointID:   "dev-workstation",
+			Timestamp:    time.Now().UTC(),
+			Action:       "PERMIT",
+			Direction:    "OUTBOUND",
+			DstIP:        "172.18.0." + strconv.Itoa(i),
+			DstPort:      8080,
+			ProcessPath:  "/usr/bin/docker-proxy",
+			UserIdentity: "root",
+			ProcessID:    uint32(1000 + i),
 		})
 	}
 
 	// Simulate dnsmasq connecting to 10 local interfaces
 	for i := 1; i <= 10; i++ {
 		engine.Evaluate(storage.Event{
-			TenantID:    "default",
-			EndpointID:  "dev-workstation",
-			Timestamp:   time.Now().UTC(),
-			Action:      "PERMIT",
-			Direction:   "OUTBOUND",
-			DstIP:       "10.0.0." + strconv.Itoa(i),
-			DstPort:     53,
-			ProcessPath: "/usr/sbin/dnsmasq",
-			ProcessID:   uint32(2000 + i),
+			TenantID:     "default",
+			EndpointID:   "dev-workstation",
+			Timestamp:    time.Now().UTC(),
+			Action:       "PERMIT",
+			Direction:    "OUTBOUND",
+			DstIP:        "10.0.0." + strconv.Itoa(i),
+			DstPort:      53,
+			ProcessPath:  "/usr/sbin/dnsmasq",
+			UserIdentity: "nobody",
+			ProcessID:    uint32(2000 + i),
 		})
 	}
 

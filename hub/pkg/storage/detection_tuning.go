@@ -210,23 +210,22 @@ func defaultDetectionTuning() DetectionTuning {
 // rather than the intruder. They are listed in the console and can be removed.
 //
 // Each is the path the component is installed at, in directories only an
-// administrator can write. The base names these replaced were the first thing
-// an implant would call itself.
+// administrator can write, and matches only while it runs as the system or as
+// its own service account (IsServiceAccount): a login user can make any
+// program appear at one of these paths, but not run it as that account.
+// Components that were listed only because they are familiar, and in two weeks
+// of this estate's traffic never reached the network, are not: an entry that
+// silences nothing real is cover for whatever borrows its path.
 func defaultQuietProcesses() []string {
 	return []string{
 		// Windows
-		"c:/windows/system32/svchost.exe", "c:/windows/system32/services.exe",
-		"c:/windows/system32/lsass.exe", "c:/windows/system32/ntoskrnl.exe",
-		"c:/windows/system32/spoolsv.exe", "c:/windows/system32/dwm.exe",
-		"c:/windows/systemapps/microsoftwindows.client.cbs_*/searchhost.exe",
-		"c:/windows/winsxs/*/tiworker.exe", "c:/windows/servicing/trustedinstaller.exe",
+		"c:/windows/system32/svchost.exe", "c:/windows/system32/lsass.exe",
 		"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe",
-		"c:/windows/system32/usocoreworker.exe",
 		// Linux
-		"/usr/lib/systemd/systemd", "/usr/lib/systemd/systemd-resolved",
-		"/usr/lib/systemd/systemd-timesyncd", "/usr/sbin/chronyd", "/usr/sbin/ntpd",
+		"/usr/lib/systemd/systemd-resolved user:systemd-resolve",
+		"/usr/lib/systemd/systemd-timesyncd user:systemd-timesync",
+		"/usr/sbin/chronyd user:_chrony", "/usr/sbin/chronyd user:chrony",
 		"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd",
-		"/usr/libexec/packagekitd", "/usr/bin/dbus-daemon",
 		// This fleet's own agent, which heartbeats on a fixed interval and is
 		// therefore the most perfect beacon on any host it is installed on.
 		"/opt/ominull/bin/ominulld", "c:/program files/ominull/ominulld.exe",
@@ -286,34 +285,40 @@ func (s *Store) initDetectionTuningSchema() error {
 	return nil
 }
 
-// legacyQuietPaths are the paths the shipped quiet names are installed at, for
-// rewriting a row saved when the quiet lists matched base names. A name not
-// here is dropped from the row: kept, it would match nothing anyway.
+// legacyQuietProcesses are the quiet-process entries the shipped quiet names
+// become, for rewriting a row saved when the quiet lists matched base names.
+// The components that never reached the network (defaultQuietProcesses) are
+// left out, and so dropped from the row, like any name not here: kept, a name
+// would match nothing anyway.
+var legacyQuietProcesses = map[string][]string{
+	"svchost.exe":       {"c:/windows/system32/svchost.exe"},
+	"lsass.exe":         {"c:/windows/system32/lsass.exe"},
+	"msmpeng.exe":       {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
+	"systemd-resolved":  {"/usr/lib/systemd/systemd-resolved user:systemd-resolve"},
+	"systemd-timesyncd": {"/usr/lib/systemd/systemd-timesyncd user:systemd-timesync"},
+	"chronyd":           {"/usr/sbin/chronyd user:_chrony", "/usr/sbin/chronyd user:chrony"},
+	"snapd":             {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
+	"ominull-agent":     {"/opt/ominull/bin/ominulld"},
+	"ominulld":          {"/opt/ominull/bin/ominulld"},
+	"ominulld.exe":      {"c:/program files/ominull/ominulld.exe"},
+	"ominull_agent.exe": {"c:/program files/ominull/ominulld.exe"},
+}
+
+// legacyQuietPaths are the paths the shipped expected-client and pair names
+// are installed at. A program in a folder any account can write to, such as
+// ~/.local/bin/rclone, is not carried over: by path alone that is whatever
+// was put there last.
 var legacyQuietPaths = map[string][]string{
-	"svchost.exe":          {"c:/windows/system32/svchost.exe"},
-	"services.exe":         {"c:/windows/system32/services.exe"},
-	"lsass.exe":            {"c:/windows/system32/lsass.exe"},
-	"ntoskrnl.exe":         {"c:/windows/system32/ntoskrnl.exe"},
-	"spoolsv.exe":          {"c:/windows/system32/spoolsv.exe"},
-	"dwm.exe":              {"c:/windows/system32/dwm.exe"},
-	"usocoreworker.exe":    {"c:/windows/system32/usocoreworker.exe"},
-	"searchhost.exe":       {"c:/windows/systemapps/microsoftwindows.client.cbs_*/searchhost.exe"},
-	"tiworker.exe":         {"c:/windows/winsxs/*/tiworker.exe"},
-	"trustedinstaller.exe": {"c:/windows/servicing/trustedinstaller.exe"},
-	"msmpeng.exe":          {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
-	"systemd":              {"/usr/lib/systemd/systemd"},
-	"systemd-resolved":     {"/usr/lib/systemd/systemd-resolved"},
-	"systemd-timesyncd":    {"/usr/lib/systemd/systemd-timesyncd"},
-	"chronyd":              {"/usr/sbin/chronyd"},
-	"ntpd":                 {"/usr/sbin/ntpd"},
-	"snapd":                {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
-	"packagekitd":          {"/usr/libexec/packagekitd"},
-	"dbus-daemon":          {"/usr/bin/dbus-daemon"},
-	"ominull-agent":        {"/opt/ominull/bin/ominulld"},
-	"ominulld":             {"/opt/ominull/bin/ominulld"},
-	"ominulld.exe":         {"c:/program files/ominull/ominulld.exe"},
-	"ominull_agent.exe":    {"c:/program files/ominull/ominulld.exe"},
-	"chrome":               {"/opt/google/chrome/chrome"},
+	"svchost.exe":       {"c:/windows/system32/svchost.exe"},
+	"usocoreworker.exe": {"c:/windows/system32/usocoreworker.exe"},
+	"msmpeng.exe":       {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
+	"snapd":             {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
+	"packagekitd":       {"/usr/libexec/packagekitd"},
+	"ominull-agent":     {"/opt/ominull/bin/ominulld"},
+	"ominulld":          {"/opt/ominull/bin/ominulld"},
+	"ominulld.exe":      {"c:/program files/ominull/ominulld.exe"},
+	"ominull_agent.exe": {"c:/program files/ominull/ominulld.exe"},
+	"chrome":            {"/opt/google/chrome/chrome"},
 	"chrome.exe": {"c:/program files/google/chrome/application/chrome.exe",
 		"c:/program files (x86)/google/chrome/application/chrome.exe"},
 	"chromium":        {"/usr/lib/chromium/chromium", "/snap/chromium/*/usr/lib/chromium-browser/chrome"},
@@ -327,7 +332,7 @@ var legacyQuietPaths = map[string][]string{
 	"softwareupdated": {"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated"},
 	"chatgpt":         {"/usr/lib/chatgpt/chatgpt"},
 	"claude-desktop":  {"/usr/lib/claude-desktop/claude-desktop"},
-	"rclone":          {"/usr/bin/rclone", "/home/*/.local/bin/rclone"},
+	"rclone":          {"/usr/bin/rclone"},
 }
 
 // legacyQuietOwners are the AS numbers behind the name fragments the shipped
@@ -343,22 +348,22 @@ var legacyQuietOwners = map[string]string{
 // nothing. It returns what it could not carry over.
 func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
 	var dropped []string
-	paths := func(list []string, what string) []string {
+	paths := func(list []string, what string, valid func(string) error, legacy map[string][]string) []string {
 		out := []string{}
 		for _, v := range list {
 			switch {
-			case ValidQuietPath(v) == nil:
+			case valid(v) == nil:
 				out = append(out, v)
-			case legacyQuietPaths[v] != nil:
-				out = append(out, legacyQuietPaths[v]...)
+			case legacy[v] != nil:
+				out = append(out, legacy[v]...)
 			default:
 				dropped = append(dropped, what+" "+v)
 			}
 		}
 		return out
 	}
-	t.QuietProcesses = paths(t.QuietProcesses, "quiet process")
-	t.QuietClients = paths(t.QuietClients, "expected client")
+	t.QuietProcesses = paths(t.QuietProcesses, "quiet process", ValidQuietPath, legacyQuietProcesses)
+	t.QuietClients = paths(t.QuietClients, "expected client", validClientPath, legacyQuietPaths)
 
 	orgs := []string{}
 	for _, v := range t.QuietOrgs {
@@ -377,7 +382,7 @@ func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
 	for _, v := range t.QuietPairs {
 		proc, owner, ok := splitPair(v)
 		procs := []string{proc}
-		if ValidQuietPath(proc) != nil {
+		if validClientPath(proc) != nil {
 			procs = legacyQuietPaths[proc]
 		}
 		if asn := legacyQuietOwners[owner]; asn != "" {
@@ -531,11 +536,14 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 // is written, or never match: a process by name, a network by a fragment of
 // its name.
 func (t DetectionTuning) validQuietLists() error {
-	for _, list := range [][]string{t.QuietProcesses, t.QuietClients} {
-		for _, entry := range list {
-			if err := ValidQuietPath(entry); err != nil {
-				return fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
-			}
+	for _, entry := range t.QuietProcesses {
+		if err := ValidQuietPath(entry); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
+		}
+	}
+	for _, entry := range t.QuietClients {
+		if err := validClientPath(entry); err != nil {
+			return fmt.Errorf("%w: expected client %v", ErrInvalidDetectionTuning, err)
 		}
 	}
 	for _, org := range t.QuietOrgs {
@@ -545,9 +553,22 @@ func (t DetectionTuning) validQuietLists() error {
 	}
 	for _, pair := range t.QuietPairs {
 		proc, _, _ := splitPair(pair)
-		if err := ValidQuietPath(proc); err != nil {
+		if err := validClientPath(proc); err != nil {
 			return fmt.Errorf("%w: expected pair %q: %v", ErrInvalidDetectionTuning, pair, err)
 		}
+	}
+	return nil
+}
+
+// validClientPath is ValidQuietPath for the expected-client and pair lists,
+// which are about the programs a person runs and so are not bound to an
+// account.
+func validClientPath(entry string) error {
+	if err := ValidQuietPath(entry); err != nil {
+		return err
+	}
+	if splitQuietPath(entry).hasAccount {
+		return fmt.Errorf("%q: only a quiet process is bound to the account it runs as", entry)
 	}
 	return nil
 }
@@ -765,31 +786,71 @@ func ProcessPathKey(path string) string {
 	return strings.TrimSuffix(p, " (deleted)")
 }
 
-// quietHashPrefix marks the optional executable hash on a quiet path entry:
-// "/usr/bin/rclone sha256:<64 hex>" matches only that build of the program.
-const quietHashPrefix = " sha256:"
+// A quiet path entry is a path, optionally followed by clauses that narrow it:
+// "/usr/lib/systemd/systemd-resolved user:systemd-resolve" matches only while
+// the program runs as that account, and "... sha256:<64 hex>" only that build.
+const (
+	quietHashClause = "sha256:"
+	quietUserClause = "user:"
+)
 
-// splitQuietPath separates a quiet path entry from its optional hash.
-func splitQuietPath(entry string) (pattern, sha string) {
-	if i := strings.LastIndex(entry, quietHashPrefix); i >= 0 {
-		return entry[:i], entry[i+len(quietHashPrefix):]
+// quietPath is one quiet entry taken apart.
+type quietPath struct {
+	pattern, sha, account string
+	hasSHA, hasAccount    bool
+}
+
+// splitQuietPath separates a quiet path entry from its trailing clauses.
+func splitQuietPath(entry string) quietPath {
+	q := quietPath{pattern: entry}
+	for {
+		i := strings.LastIndex(q.pattern, " ")
+		if i < 0 {
+			return q
+		}
+		clause := q.pattern[i+1:]
+		switch {
+		case strings.HasPrefix(clause, quietHashClause) && !q.hasSHA:
+			q.sha, q.hasSHA = strings.TrimPrefix(clause, quietHashClause), true
+		case strings.HasPrefix(clause, quietUserClause) && !q.hasAccount:
+			q.account, q.hasAccount = strings.TrimPrefix(clause, quietUserClause), true
+		default:
+			return q
+		}
+		q.pattern = strings.TrimRight(q.pattern[:i], " ")
 	}
-	return entry, ""
+}
+
+// userWritablePrefixes are directories any local account can put a program
+// in. A path there names whatever was copied there last, so an entry under one
+// has to pin the build it means.
+var userWritablePrefixes = []string{
+	"/home/", "/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/",
+	"c:/users/", "c:/windows/temp/",
 }
 
 // ValidQuietPath accepts an absolute path, "*" standing for one path segment
 // as in known workloads (a versioned directory), with its first directory and
-// file name spelled out, optionally followed by the executable's SHA-256.
+// file name spelled out, optionally followed by the account it runs as
+// ("user:systemd-resolve") and the executable's SHA-256. A path in a directory
+// anyone can write to must carry the hash.
 func ValidQuietPath(entry string) error {
-	pattern, sha := splitQuietPath(entry)
-	if sha != "" || strings.HasSuffix(entry, strings.TrimSpace(quietHashPrefix)) {
-		if len(sha) != 64 || strings.Trim(sha, "0123456789abcdef") != "" {
-			return fmt.Errorf("%q: the hash must be sha256: and 64 hex digits", entry)
-		}
+	q := splitQuietPath(entry)
+	if q.hasSHA && (len(q.sha) != 64 || strings.Trim(q.sha, "0123456789abcdef") != "") {
+		return fmt.Errorf("%q: the hash must be sha256: and 64 hex digits", entry)
 	}
-	if !isPathWorkload(pattern) {
+	if q.hasAccount && (q.account == "" || strings.ContainsAny(q.account, "@*")) {
+		return fmt.Errorf("%q: user: must name one account, such as user:systemd-resolve", entry)
+	}
+	if !isPathWorkload(q.pattern) {
 		return fmt.Errorf("%q is not an absolute path; a program is named by where it is installed, not by its name", entry)
 	}
+	for _, dir := range userWritablePrefixes {
+		if strings.HasPrefix(q.pattern, dir) && !q.hasSHA {
+			return fmt.Errorf("%q is in a folder any account can write to; add sha256:<hash> to name the build you mean", entry)
+		}
+	}
+	pattern := q.pattern
 	if len(pattern) > 2 && pattern[1] == ':' {
 		pattern = pattern[2:]
 	}
@@ -797,22 +858,46 @@ func ValidQuietPath(entry string) error {
 }
 
 // MatchesQuietPath reports whether a process, by its executable path and
-// (when the entry names one) its hash, is the one a quiet entry names. An
-// entry that is not a path - a base name left from before paths were required
-// - matches nothing.
+// (when the entry names one) its hash, is the one an expected-client or pair
+// entry names. An entry that is not a path - a base name left from before
+// paths were required - matches nothing, and neither does one bound to an
+// account, which only the quiet-process list can check.
 func MatchesQuietPath(entry, path, sha string) bool {
-	pattern, want := splitQuietPath(entry)
-	key := ProcessPathKey(path)
-	if key == "" || !isPathWorkload(pattern) || !matchWorkload(pattern, key) {
-		return false
-	}
-	return want == "" || strings.EqualFold(want, strings.TrimSpace(sha))
+	q := splitQuietPath(entry)
+	return !q.hasAccount && q.matches(path, sha)
 }
 
-// IsQuietProcess matches the process's installed path.
-func (t DetectionTuning) IsQuietProcess(path, sha string) bool {
-	for _, q := range t.QuietProcesses {
-		if MatchesQuietPath(q, path, sha) {
+func (q quietPath) matches(path, sha string) bool {
+	key := ProcessPathKey(path)
+	if key == "" || !isPathWorkload(q.pattern) || !matchWorkload(q.pattern, key) {
+		return false
+	}
+	return !q.hasSHA || strings.EqualFold(q.sha, strings.TrimSpace(sha))
+}
+
+// IsServiceAccount reports a process running as the system itself, or as the
+// one service account an entry names. Any program can be started from a
+// listed path by a login user - bind-mounted over it in a user namespace, or
+// with its own library preloaded into the real one - but no login user can
+// start it as root, SYSTEM or a daemon's own account. An event whose account
+// was not read is not one of these.
+func IsServiceAccount(user, account string) bool {
+	u := strings.ToLower(strings.TrimSpace(user))
+	switch u {
+	case "":
+		return false
+	case "root", "system", `nt authority\system`, `nt authority\local service`, `nt authority\network service`:
+		return true
+	}
+	return account != "" && u == strings.ToLower(account)
+}
+
+// IsQuietProcess matches the process's installed path, and the account it
+// runs as: the system's, or the one the entry names.
+func (t DetectionTuning) IsQuietProcess(path, sha, user string) bool {
+	for _, entry := range t.QuietProcesses {
+		q := splitQuietPath(entry)
+		if q.matches(path, sha) && IsServiceAccount(user, q.account) {
 			return true
 		}
 	}

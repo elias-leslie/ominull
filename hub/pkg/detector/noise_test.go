@@ -87,7 +87,7 @@ func TestAQuietProcessDoesNotRaiseABandwidthSpike(t *testing.T) {
 			TenantID: "default", EndpointID: "win-02", Timestamp: now.Add(time.Duration(i) * time.Second),
 			Action: "PERMIT", Direction: "OUTBOUND",
 			DstIP: "20.190.135.3", DstPort: 443, BytesOut: bytes,
-			ProcessPath: `C:\Windows\System32\svchost.exe`,
+			ProcessPath: `C:\Windows\System32\svchost.exe`, UserIdentity: `NT AUTHORITY\NETWORK SERVICE`,
 		})
 	}
 	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
@@ -881,6 +881,73 @@ func TestASweepFromATestBinaryOrAnInfrastructureNameIsReported(t *testing.T) {
 		}
 		if got := anomaliesOfType(t, store, "PORT_SCAN_RECON"); len(got) != 1 {
 			t.Errorf("%s sweeping 35 ports raised %d findings, want 1", path, len(got))
+		}
+	}
+}
+
+// A login user can make any program appear at a daemon's path - bind-mounted
+// over it in a user namespace, or with a library preloaded into the real
+// binary - and the agent then reports the daemon's path and, for the preload,
+// its real hash. It cannot run it as the daemon's account. So systemd-resolved
+// running as a login user, or as an account nobody read, is judged by every
+// detector like any other program, and only the real daemon is left alone.
+func TestADaemonPathRunAsALoginUserIsStillJudged(t *testing.T) {
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	beacon := func(engine *Engine, ep, path, user string) {
+		for i := 0; i < 40; i++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: ep, Timestamp: start.Add(time.Duration(i) * time.Minute),
+				Action: "PERMIT", Direction: "OUTBOUND",
+				// 104.16.0.1 is Cloudflare, which the shipped tuning vouches for.
+				DstIP: "104.16.0.1", DstPort: 443, BytesOut: 1024,
+				ProcessPath: path, UserIdentity: user,
+			})
+		}
+	}
+	sweep := func(engine *Engine, ep, path, user string) {
+		for port := 0; port < 35; port++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: ep, Timestamp: start.Add(time.Duration(port) * 100 * time.Millisecond),
+				Action: "PERMIT", Direction: "OUTBOUND",
+				DstIP: "203.0.113.9", DstPort: uint16(2000 + port), BytesOut: 60,
+				ProcessPath: path, UserIdentity: user,
+			})
+		}
+	}
+	lateral := func(engine *Engine, ep, path, user string) {
+		// A compiled program sweeps at twenty distinct hosts in a minute.
+		for host := 1; host <= 25; host++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: ep, Timestamp: start.Add(time.Duration(host) * time.Second),
+				Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6,
+				DstIP: fmt.Sprintf("10.0.0.%d", 100+host), DstPort: 8080, BytesOut: 60,
+				ProcessPath: path, UserIdentity: user,
+			})
+		}
+	}
+	// systemd-resolved is a quiet process and local infrastructure; dnsmasq
+	// is infrastructure only, so it is exempt from the sweep detectors alone.
+	for _, c := range []struct {
+		detector, path, account string
+		run                     func(*Engine, string, string, string)
+	}{
+		{"C2_BEACONING", "/usr/lib/systemd/systemd-resolved", "systemd-resolve", beacon},
+		{"PORT_SCAN_RECON", "/usr/lib/systemd/systemd-resolved", "systemd-resolve", sweep},
+		{"LATERAL_PORT_SWEEP", "/usr/lib/systemd/systemd-resolved", "systemd-resolve", lateral},
+		{"PORT_SCAN_RECON", "/usr/sbin/dnsmasq", "nobody", sweep},
+		{"LATERAL_PORT_SWEEP", "/usr/sbin/dnsmasq", "nobody", lateral},
+	} {
+		for i, user := range []string{"kasadis", "UID:1000", ""} {
+			engine, store := noiseEngine(t)
+			c.run(engine, fmt.Sprintf("linux-9%d", i), c.path, user)
+			if got := anomaliesOfType(t, store, c.detector); len(got) == 0 {
+				t.Errorf("%s: %s running as %q raised nothing", c.detector, c.path, user)
+			}
+		}
+		engine, store := noiseEngine(t)
+		c.run(engine, "linux-99", c.path, c.account)
+		if got := anomaliesOfType(t, store, c.detector); len(got) != 0 {
+			t.Errorf("%s: the real %s raised %d finding(s)", c.detector, c.path, len(got))
 		}
 	}
 }

@@ -1240,7 +1240,7 @@
       first_seen_enabled: true, first_seen_cooldown_minutes: 30,
       bandwidth_enabled: true, bandwidth_cooldown_minutes: 5,
       warmup_hours: 24,
-      quiet_processes: ["c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-timesyncd", "/opt/ominull/bin/ominulld"],
+      quiet_processes: ["c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-timesyncd user:systemd-timesync", "/opt/ominull/bin/ominulld"],
       quiet_orgs: ["as13335", "as8075"]
     };
     var t = {};
@@ -6041,7 +6041,7 @@
 
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
     var containers = listField(t.container_cidrs, "172.17.0.0/16, fd12:3456::/64");
-    var procs = listField(t.quiet_processes, "c:/windows/system32/svchost.exe, /usr/lib/systemd/systemd-timesyncd");
+    var procs = listField(t.quiet_processes, "c:/windows/system32/svchost.exe, /usr/lib/systemd/systemd-timesyncd user:systemd-timesync");
     var orgs = listField(t.quiet_orgs, "AS714, AS8075, AS13335");
     var clients = listField(t.quiet_clients, "/opt/google/chrome/chrome, /usr/lib/firefox/firefox");
     var pairs = listField(t.quiet_pairs, "/opt/backup/backup-agent@AS64500, /usr/bin/curl@AS36459");
@@ -6081,9 +6081,9 @@
 
       h("h4", { cls: "tune-head", text: "Known-quiet" }),
       h("div", { cls: "tune-list" },
-        tuningRow("Processes", "The operating system's own components, whose job is to talk to their vendor on a timer. Each is the full path it is installed at, because any program can take a name. * stands for one folder, such as a version number; add sha256:<hash> after a path to match only that build.", procs),
+        tuningRow("Processes", "The operating system's own components, whose job is to talk to their vendor on a timer. Each is the full path it is installed at, and counts only while it runs as root, SYSTEM or the account given with user:name. Any account can make another program appear at that path, but not run it as those accounts. * stands for one folder, such as a version number; add sha256:<hash> to match only that build.", procs),
         tuningRow("Networks", "AS numbers, such as AS15169 for Google. A listed network counts as ordinary, except the machines rented inside it. It does not silence everything that reaches it.", orgs),
-        tuningRow("Expected clients", "Programs, by installed path, whose regular traffic to those networks is expected - browsers, updaters, this agent. Beaconing and volume findings are silenced only for a listed program talking to a listed network, because a CDN is exactly where an implant would rather hide.", clients),
+        tuningRow("Expected clients", "Programs, by installed path, whose regular traffic to those networks is expected - browsers, updaters, this agent. Beaconing and volume findings are silenced only for a listed program talking to a listed network, because a CDN is exactly where an implant would rather hide. A program in a folder any account can write to, such as /home or /tmp, needs sha256:<hash>.", clients),
         tuningRow("Expected pairs", "One-off exceptions written path@network, the network as an AS number or its exact name. The Expected button on an alert writes these. Rented cloud ranges are never silenced by either list.", pairs)));
 
     var save = function () {
