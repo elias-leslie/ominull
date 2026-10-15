@@ -99,6 +99,14 @@ if [ "${hub_pem}" != "${embedded}" ]; then
     echo "[-] hub/pkg/response/trust.go ReleasePublicKeyPEM differs from agent/include/release_key.h; pin the same key in both." >&2
     exit 1
 fi
+# Windows agents verify with the raw X||Y bytes in the same header, not the PEM.
+pinned_xy="$(sed -n '/OMINULL_RELEASE_PUBKEY_XY\[/,/};/p' "${ROOT_DIR}/agent/include/release_key.h" \
+    | grep -o '0x[0-9a-fA-F]\{2\}' | sed 's/^0x//' | tr -d '\n' | tr 'A-F' 'a-f')"
+pem_xy="$(printf '%s\n' "${embedded}" | openssl pkey -pubin -outform DER 2>/dev/null | tail -c 64 | od -An -v -tx1 | tr -d ' \n')"
+if [ "${#pem_xy}" -ne 128 ] || [ "${pinned_xy}" != "${pem_xy}" ]; then
+    echo "[-] agent/include/release_key.h OMINULL_RELEASE_PUBKEY_XY is not the key in OMINULL_RELEASE_PUBKEY_PEM; pin the same key in both." >&2
+    exit 1
+fi
 if [ -n "${OMINULL_SIGNING_ROTATE_FROM:-}" ]; then
     outgoing="$(git -C "${ROOT_DIR}" show "${OMINULL_SIGNING_ROTATE_FROM}:agent/include/release_key.h" | pinned_pem)"
     if [ -z "${outgoing}" ] || [ "${outgoing}" = "${embedded}" ]; then
