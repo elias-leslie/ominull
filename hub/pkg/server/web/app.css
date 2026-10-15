@@ -705,6 +705,8 @@ kbd {
   color: var(--ink);
   cursor: pointer;
   white-space: nowrap;
+  /* Links styled as buttons (the console's links to its pages) too. */
+  text-decoration: none;
 }
 
 .btn:hover {

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Server-rendered console pages. The single-page console in web/app.js grew to
@@ -27,7 +28,7 @@ var (
 
 func loadPages() {
 	pageTemplates = map[string]*template.Template{}
-	for _, name := range []string{"timeline", "terminal"} {
+	for _, name := range []string{"timeline", "terminal", "jobs"} {
 		t := template.New("layout.tmpl").Funcs(pageFuncs)
 		pageTemplates[name] = template.Must(t.ParseFS(pageFS, "pages/layout.tmpl", "pages/"+name+".tmpl"))
 	}
@@ -101,4 +102,20 @@ func pageURL(path string, query url.Values) string {
 		return path
 	}
 	return path + "?" + query.Encode()
+}
+
+// pageStamp is a time as pages print it: the clock alone today, the date and
+// clock this year, the full date before that, in the hub's display zone.
+func pageStamp(t, now time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return ""
+	}
+	local, today := t.In(loc), now.In(loc)
+	switch {
+	case local.Year() == today.Year() && local.YearDay() == today.YearDay():
+		return local.Format("15:04")
+	case local.Year() == today.Year():
+		return local.Format("Jan 2 15:04")
+	}
+	return local.Format("Jan 2 2006 15:04")
 }

@@ -3483,6 +3483,7 @@ func (s *Server) routes() *http.ServeMux {
 	// Server-rendered console pages (pages.go).
 	mux.HandleFunc("/console/timeline", s.handleTimelinePage)
 	mux.HandleFunc("/console/terminal", s.handleTerminalPage)
+	mux.HandleFunc("/console/jobs", s.handleJobsPage)
 	for _, assetPath := range consoleAssetPaths() {
 		mux.HandleFunc(assetPath, s.handleConsoleAsset)
 	}

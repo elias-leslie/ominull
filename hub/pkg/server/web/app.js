@@ -2559,17 +2559,6 @@
     return h("span", { cls: "st", "data-state": tone || "idle" }, h("span", { text: String(text == null ? "" : text) }));
   }
 
-  /* A terminal session's state as a chip tone. `detached` is a running shell
-     with nobody watching it - warn, not crit: nothing is broken, but it is
-     holding an endpoint's one session slot and burning its 60m budget. */
-  function terminalStateTone(st) {
-    if (st === "active") return "ok";
-    if (st === "detached") return "warn";
-    if (st === "waiting" || st === "connecting") return "info";
-    if (st === "failed" || st === "expired") return "crit";
-    return "idle";
-  }
-
   function setChip(el, tone, text) {
     if (!el) return el;
     el.className = "st";
@@ -6856,43 +6845,6 @@
      refuses, instead of silently hiding the button on a job that is very much
      still running. cancel_requested is already on its way out, so it is
      finished for this purpose too. */
-  var RESPONSE_JOB_CLOSED = {
-    succeeded: true, failed: true, cancelled: true, cancel_requested: true
-  };
-
-  function responseJobIsOpen(j) {
-    return !RESPONSE_JOB_CLOSED[String((j && j.state) || "queued")];
-  }
-
-  function confirmCancelResponseJob(j) {
-    /* A job the agent has not taken yet is cancelled outright. Once it has been
-       offered or acknowledged the hub can only *ask*: the agent has to notice
-       the cancellation and stop. Saying "cancelled" in that case would tell an
-       operator the action is over when it may still be running on the host. */
-    var takenUp = String(j.state || "queued") !== "queued";
-    confirmSheet({
-      title: "Cancel response job",
-      consequence: takenUp
-        ? "The agent on " + (j.endpoint_id || "the endpoint") + " has already taken this job. Cancelling asks it to stop; anything it has already done is not undone, and there is no guarantee it stops before it finishes."
-        : "The job stops being offered to " + (j.endpoint_id || "the endpoint") + " and is closed without ever running.",
-      detail: (j.action_kind || j.kind || "response job") + " \u00b7 " + (j.id || "") +
-        " \u00b7 " + (j.state || "queued") +
-        (j.requested_by ? " \u00b7 requested by " + j.requested_by : ""),
-      confirmLabel: takenUp ? "Ask the agent to stop" : "Cancel job",
-      onConfirm: function () {
-        request("/api/v1/response/jobs/cancel", "POST", { job_id: j.id })
-          .then(function (res) {
-            var requested = !res || res.status !== "cancelled";
-            toast(requested && takenUp
-              ? "Cancellation sent to " + (j.endpoint_id || "the endpoint") + ". The job closes when the agent acknowledges it."
-              : "Response job cancelled.", "ok");
-            refresh();
-          })
-          .catch(function (e) { toast("Could not cancel the job: " + e.message, "crit"); });
-      }
-    });
-  }
-
   function confirmLockResponseSession() {
     confirmSheet({
       title: "Lock response authority",
@@ -7157,10 +7109,6 @@
     terminalPage(asset && asset.endpoint ? "endpoint=" + encodeURIComponent(asset.endpoint.id) : "");
   }
 
-  function openLaunchEndpointShellPicker() {
-    terminalPage("");
-  }
-
   function reattachTerminal(sessionSummary) {
     if (!sessionSummary || !sessionSummary.session_id) return;
     terminalPage("session=" + encodeURIComponent(sessionSummary.session_id));
@@ -7218,135 +7166,29 @@
     var authCard = card("Response access", h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
         chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Response Unlocked" : "Response Locked"),
-        h("span", { cls: "dim-2", text: "Active Operator Sessions: " + (auth.active_sessions || 0) + " | Key ID: " + (auth.signer_key_id ? auth.signer_key_id.slice(0, 16) + "..." : "configured") })
+        h("span", { cls: "dim-2", text: (auth.active_sessions || 0) + " unlocked " + ((auth.active_sessions || 0) === 1 ? "session" : "sessions") + (auth.signer_key_id ? " \u00b7 signing key " + auth.signer_key_id.slice(0, 16) + "\u2026" : "") })
       ),
       isUnlocked
-        ? h("p", { cls: "pending", text: "Response authority is currently unlocked. You may launch forensic collections and run immutable scripts under signed ActionProof V2. An ephemeral browser key signed with TOTP is active in memory. Terminals do not use this unlock; each one is approved on your phone." })
-        : h("p", { cls: "pending", text: "Autonomous threat nullification, script execution, and endpoint response actions require ephemeral operator proof signed by an authenticated response session. Unlock with TOTP/Passkey to issue commands." }),
+        ? h("p", { cls: "pending", text: "Unlocked. You can collect evidence and run scripts; each one is signed with a key this browser holds in memory until you lock it. Terminals don't use this unlock: your phone approves each one." })
+        : h("p", { cls: "pending", text: "Collecting evidence and running scripts need an unlocked session. Unlock it with your authenticator code or passkey." }),
       h("div", { cls: "form-row" }, authActions)
     ));
 
-    // Remote Terminal Sessions Card
-    var termSessions = state.terminalSessions || [];
-    var termRows = termSessions.map(function (ts) {
-      var live = terminalSessionIsLive(ts);
-      /* The session-id link used to call openTerminalEmulator unconditionally
-         for every row - only the row's *button* was gated on state - so
-         clicking a closed session opened an emulator against a dead session
-         that could never connect. A closed session's id is a label. */
-      var idCell = live
-        ? h("a", {
-            cls: "ip", href: "#",
-            title: "Reattach to this session",
-            text: ts.session_id ? ts.session_id.slice(0, 8) + "\u2026" : "",
-            on: { click: function (e) { e.preventDefault(); reattachTerminal(ts); } }
-          })
-        : h("span", {
-            cls: "ip dim-2",
-            title: "Session " + (ts.close_reason || "closed") + " \u2014 inspect its recording in Forensics",
-            text: ts.session_id ? ts.session_id.slice(0, 8) + "\u2026" : ""
-          });
-
-      return [
-        idCell,
-        h("span", { text: ts.endpoint_id || "" }),
-        h("span", { text: ts.program || "" }),
-        chip(terminalStateTone(ts.state), ts.state || "unknown"),
-        h("span", { cls: "dim-2", text: (ts.recording_state || (ts.closed_at ? "sealed" : "recording")) + (ts.frame_count !== undefined ? " (" + ts.frame_count + " frames)" : "") }),
-        h("span", { cls: "dim", text: ts.operator_id || "" }),
-        stamp(parseTime(ts.created_at)),
-        h("div", { cls: "row-actions" },
-          live
-            ? [
-                /* One reattach implementation, shared with the Assets banner
-                   and the context menu, so the token rotation and the replay
-                   cannot drift between three copies. */
-                h("button", { cls: "btn mini", type: "button", text: ts.state === "detached" ? "Reattach" : "Open", on: { click: function () { reattachTerminal(ts); } } }),
-                h("button", { cls: "btn mini", "data-danger": "true", type: "button", text: "End session", on: { click: function () { terminateTerminalSession(ts, ts.endpoint_id); } } })
-              ]
-            : h("span", { cls: "dim-3", text: ts.close_reason || "closed" })
-        )
-      ];
-    });
-
-    var termCardHead = h("div", { cls: "card-header-actions" },
-      h("button", {
-        cls: "btn btn-primary",
-        type: "button",
-        text: "Open a terminal",
-        on: {
-          click: function () {
-            openLaunchEndpointShellPicker();
-          }
-        }
-      })
-    );
-
+    /* Terminals and response jobs have their own pages; this view says how
+       many there are and links there. */
+    var liveTerms = arrayOf(state.terminalSessions).filter(terminalSessionIsLive).length;
     var termCard = card("Remote terminals",
-      termRows.length ? simpleTable(["Session ID", "Endpoint", "Program", "State", "Recording", "Operator", "Created", "Action"], termRows) : h("div", { cls: "card-body", text: "No terminal sessions. Open a terminal to request one; your phone asks you to approve it." }),
-      [termCardHead]
-    );
+      h("div", { cls: "card-body form-row" },
+        h("span", { cls: "dim-2", text: liveTerms ? liveTerms + (liveTerms === 1 ? " terminal running." : " terminals running.") : "No terminal is running." }),
+        h("a", { cls: "btn", href: "/console/terminal", text: liveTerms ? "Terminals" : "Open a terminal" })));
 
-    var jobRows = (state.responseJobs || []).filter(function (job) { return state.responseHistory ? !responseJobIsOpen(job) : responseJobIsOpen(job); }).map(function (j) {
-      return [
-        h("a", {
-          cls: "ip mono",
-          href: "#",
-          text: j.id ? j.id.slice(0, 8) + "..." : "",
-          on: {
-            click: function (e) {
-              e.preventDefault();
-              openJobOutputModal(j.id);
-            }
-          }
-        }),
-        h("span", { text: (assetForEndpoint(j.endpoint_id) || {}).name || j.endpoint_id || "" }),
-        h("span", { text: String(j.action_kind || j.kind || "").replace(/_/g, " ") }),
-        /* A failed job's error_code is the difference between "it failed" and
-           "the grant had expired", and it was fetched and dropped. */
-        h("div", { cls: "uf-col" },
-          chip(j.state === "succeeded" ? "ok" : (j.state === "failed" || j.state === "timed_out" ? "crit" : "warn"), j.state || "queued"),
-          j.error_code ? h("span", { cls: "dim-3 u-t1", text: j.error_code }) : null,
-          (j.attempt || 0) > 1 ? h("span", { cls: "dim-3 u-t1", text: "attempt " + j.attempt }) : null),
-        /* The job carries requested_by. The console read operator_id, which no
-           response job has ever had, so the Operator column was blank for every
-           row on the page - and "who ran this" is the first question asked of
-           any response job. */
-        h("span", { cls: "dim", text: j.requested_by || j.operator_id || "\u2014" }),
-        stamp(parseTime(j.requested_at || j.created_at)),
-        /* lease_expires_at says when the agent's claim on this job lapses,
-           which is the difference between "still running" and "stuck". */
-        h("div", { cls: "row-actions" },
-          h("button", {
-            cls: "btn mini",
-            type: "button",
-            text: "Inspect",
-            on: {
-              click: function () {
-                openJobOutputModal(j.id);
-              }
-            }
-          }),
-          /* The hub has always served a cancel route and the console never
-             called it, so a job dispatched by mistake could only be waited
-             out. Only a job that has not finished can be cancelled. */
-          responseJobIsOpen(j)
-            ? h("button", {
-                cls: "btn mini", type: "button", "data-danger": "true", text: "Cancel",
-                title: j.lease_expires_at
-                  ? "Agent lease runs to " + stampTitle(parseTime(j.lease_expires_at))
-                  : "This job has not been leased by an agent yet",
-                on: { click: function () { confirmCancelResponseJob(j); } }
-              })
-            : null
-        )
-      ];
-    });
-
-    var jobsCard = card(state.responseHistory ? "Response history" : "Active response jobs",
-      jobRows.length ? simpleTable(["Job ID", "Endpoint", "Action", "State", "Operator", "Created", "Output"], jobRows) : h("div", { cls: "card-body", text: state.responseHistory ? "No completed jobs in the latest 50 records." : "No active jobs in the latest 50 records." }),
-      [h("button", { cls: "btn", type: "button", text: state.responseHistory ? "Show active jobs" : "Show completed history", on: { click: function () { state.responseHistory = !state.responseHistory; renderBody(); } } })]
-    );
+    var openJobs = arrayOf(state.responseJobs).filter(function (j) {
+      return ["succeeded", "failed", "cancelled"].indexOf(String(j.state || "queued")) < 0;
+    }).length;
+    var jobsCard = card("Response jobs",
+      h("div", { cls: "card-body form-row" },
+        h("span", { cls: "dim-2", text: openJobs ? openJobs + (openJobs === 1 ? " job in flight." : " jobs in flight.") : "Nothing in flight." }),
+        h("a", { cls: "btn", href: "/console/jobs" + (openJobs ? "" : "?view=history"), text: openJobs ? "See jobs" : "Finished jobs" })));
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
@@ -7442,163 +7284,6 @@
     );
 
     view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard, schedulesCard));
-  }
-
-  function openJobOutputModal(jobId) {
-    if (!jobId) return;
-
-    var headTitle = "Response Job: " + (jobId.length > 16 ? jobId.slice(0, 16) + "..." : jobId);
-    var statusBadge = chip("warn", "Loading...");
-    statusBadge.setAttribute("aria-live", "polite");
-    var metaGrid = h("div", { cls: "alert-exp-grid" });
-    var stdoutBox = h("pre", { cls: "job-output-console", text: "Fetching output..." });
-    var stderrBox = h("pre", { cls: "job-output-console stderr", hidden: true });
-    var truncNotice = h("div", { cls: "st-banner", "data-state": "warn", hidden: true, text: "Output exceeded maximum buffer size and was truncated by endpoint worker." });
-    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
-
-    var copyStdoutBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Copy stdout",
-      on: {
-        click: function () {
-          copyText(stdoutBox.textContent, "stdout");
-        }
-      }
-    });
-
-    var copyStderrBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Copy stderr",
-      hidden: true,
-      on: {
-        click: function () {
-          copyText(stderrBox.textContent, "stderr");
-        }
-      }
-    });
-
-    var stdoutHeader = h("div", { cls: "form-row uf uf-between" },
-      h("label", { cls: "u-strong", text: "Standard Output (stdout):" }),
-      copyStdoutBtn
-    );
-
-    var stderrHeader = h("div", { cls: "form-row uf uf-between", hidden: true },
-      h("label", { cls: "u-strong", text: "Standard Error (stderr):" }),
-      copyStderrBtn
-    );
-
-    function renderJobData(job) {
-      if (!job) return;
-      var isSucceeded = job.state === "succeeded";
-      var isFailed = job.state === "failed" || job.state === "timed_out";
-      setChip(statusBadge, isSucceeded ? "ok" : (isFailed ? "crit" : "warn"));
-      statusBadge.textContent = (job.state || "queued").toUpperCase();
-
-      clear(metaGrid);
-      function addMeta(label, val) {
-        metaGrid.appendChild(h("div", { cls: "alert-exp-box" },
-          h("div", { cls: "alert-exp-label", text: label }),
-          h("div", { cls: "alert-exp-val", text: val || "—" })
-        ));
-      }
-
-      addMeta("Endpoint", job.endpoint_id);
-      addMeta("Action Kind", job.action_kind || job.kind);
-      addMeta("Operator", job.requested_by || job.operator_id);
-      addMeta("Grant", job.authorization_grant_id);
-      if (job.error_code) addMeta("Error code", job.error_code);
-      if (job.attempt) addMeta("Attempt", String(job.attempt));
-      if (job.lease_expires_at) addMeta("Lease expires", job.lease_expires_at);
-      addMeta("Dispatched", job.created_at ? new Date(job.created_at).toLocaleString() : "—");
-
-      var res = null;
-      if (job.result_json) {
-        try { res = JSON.parse(job.result_json); } catch (e) { res = null; }
-      }
-
-      if (res) {
-        addMeta("Exit Code", res.exit_code !== undefined ? String(res.exit_code) : (isSucceeded ? "0" : "—"));
-        addMeta("Duration", res.duration_ms !== undefined ? res.duration_ms + " ms" : "—");
-        if (res.error_code) addMeta("Error Code", res.error_code);
-
-        stdoutBox.textContent = res.stdout || "(no standard output produced)";
-        if (res.stderr && res.stderr.trim()) {
-          stderrBox.textContent = res.stderr;
-          stderrBox.removeAttribute("hidden");
-          stderrHeader.removeAttribute("hidden");
-          copyStderrBtn.removeAttribute("hidden");
-        } else {
-          stderrBox.setAttribute("hidden", "");
-          stderrHeader.setAttribute("hidden", "");
-          copyStderrBtn.setAttribute("hidden", "");
-        }
-
-        if (res.truncated) {
-          truncNotice.removeAttribute("hidden");
-        } else {
-          truncNotice.setAttribute("hidden", "");
-        }
-      } else {
-        addMeta("Status Detail", job.state === "queued" ? "Queued in hub dispatch queue" : "Running on endpoint worker");
-        stdoutBox.textContent = "Job is currently " + (job.state || "queued") + ".\nWaiting for endpoint execution and telemetry return...";
-        stderrBox.setAttribute("hidden", "");
-        stderrHeader.setAttribute("hidden", "");
-        copyStderrBtn.setAttribute("hidden", "");
-        truncNotice.setAttribute("hidden", "");
-      }
-    }
-
-    var pollTimer = null;
-    function poll() {
-      request("/api/v1/response/jobs?id=" + encodeURIComponent(jobId))
-        .then(function (job) {
-          errBox.setAttribute("hidden", "");
-          renderJobData(job);
-          if (job && (job.state === "succeeded" || job.state === "failed" || job.state === "timed_out")) {
-            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-          }
-        })
-        .catch(function (err) {
-          errBox.textContent = err.message || "Failed to load job details.";
-          errBox.removeAttribute("hidden");
-        });
-    }
-
-    poll();
-    pollTimer = setInterval(poll, 2000);
-
-    var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row uf uf-between" },
-        h("div", { cls: "form-row" },
-          statusBadge,
-          h("span", { cls: "ip mono dim-2", text: jobId })
-        ),
-        h("button", { cls: "btn mini", type: "button", text: "Refresh", on: { click: poll } })
-      ),
-      metaGrid,
-      truncNotice,
-      errBox,
-      stdoutHeader,
-      stdoutBox,
-      stderrHeader,
-      stderrBox
-    );
-
-    var foot = [
-      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } })
-    ];
-
-    openSheet(headTitle, body, foot, "sheet-wide");
-    if (sheetEl) {
-      sheetEl._cleanup = function () {
-        if (pollTimer) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-        }
-      };
-    }
   }
 
   function openCreateScriptSheet() {
@@ -8085,11 +7770,7 @@
           .then(function (job) {
             closeSheet();
             toast("Script execution job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "...) Target: " + epId, "ok");
-            request("/api/v1/response/jobs?limit=50").then(function (d) {
-              state.responseJobs = arrayOf(d && d.jobs || d);
-              if (state.section === "response") renderBody();
-            });
-            openJobOutputModal(job.id);
+            if (job.id) location.assign("/console/jobs?id=" + encodeURIComponent(job.id));
           })
           .catch(function (err) {
             actionBtn.disabled = false;

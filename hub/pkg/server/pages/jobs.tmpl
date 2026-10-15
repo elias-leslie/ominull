@@ -1,0 +1,77 @@
+{{define "content"}}{{with .Body}}
+{{if .Off}}
+<p class="page-problem" role="alert">Remote response is turned off on this hub, so it runs no response jobs.</p>
+{{else if .View}}{{with .View}}
+{{if $.Body.Gone}}
+<p class="page-note">{{$.Body.Gone}}</p>
+<p><a class="btn" href="/console/jobs">All response jobs</a></p>
+{{else}}
+<section class="card page-card" id="job" data-id="{{.ID}}" data-state="{{.State}}" data-updated="{{.Updated}}" data-open="{{if .Open}}1{{end}}">
+  <h3>{{.Action}} on {{.Host}}<span class="fill"></span><span class="st" data-state="{{.Tone}}" role="status">{{.Label}}</span></h3>
+  <dl class="card-body job-meta">
+  {{range .Meta}}<div><dt>{{.Label}}</dt><dd>{{.Value}}</dd></div>{{end}}
+  </dl>
+  <p class="card-body dim-3 job-id">Job {{.ID}}{{if .Open}} · <span id="job-live" role="status">this page updates when the job changes</span>{{end}}</p>
+  {{if .CanCancel}}
+  <div class="card-body">
+    <button class="btn" data-danger="true" type="button" id="job-cancel">Cancel job</button>
+    <div class="term-confirm job-confirm" id="job-confirm" role="alertdialog" aria-labelledby="job-confirm-title" aria-describedby="job-confirm-what" hidden>
+      <p id="job-confirm-title"><b>{{if .TakenUp}}Ask the agent to stop?{{else}}Cancel this job?{{end}}</b></p>
+      <p id="job-confirm-what">{{if .TakenUp}}The agent on {{.Host}} has already taken this job. It is asked to stop; anything it has already done stays done, and it may finish before it notices.{{else}}The job is no longer offered to {{.Host}} and closes without running.{{end}}</p>
+      <p class="page-problem" id="job-cancel-problem" role="alert" hidden></p>
+      <div class="job-confirm-actions">
+        <button class="btn" type="button" id="job-cancel-keep">Keep it</button>
+        <button class="btn btn-crit" type="button" id="job-cancel-confirm">{{if .TakenUp}}Ask it to stop{{else}}Cancel job{{end}}</button>
+      </div>
+    </div>
+  </div>
+  {{end}}
+</section>
+
+<section class="card page-card">
+  <h3>Output{{if .Stdout}}<span class="fill"></span><button class="btn mini" type="button" data-copy="job-stdout">Copy</button>{{end}}</h3>
+  {{if .Stdout}}<pre class="job-output-console" id="job-stdout">{{.Stdout}}</pre>
+  {{else if .HasResult}}<p class="card-body dim-2">The job printed nothing.</p>
+  {{else if .Open}}<p class="card-body dim-2">Nothing yet. Output shows here when the agent reports back.</p>
+  {{else}}<p class="card-body dim-2">The agent sent no output for this job.</p>{{end}}
+</section>
+{{if .Stderr}}
+<section class="card page-card">
+  <h3>Errors printed<span class="fill"></span><button class="btn mini" type="button" data-copy="job-stderr">Copy</button></h3>
+  <pre class="job-output-console stderr" id="job-stderr">{{.Stderr}}</pre>
+</section>
+{{end}}
+{{if .Steps}}
+<section class="card page-card">
+  <h3>What happened</h3>
+  <ol class="term-list job-steps">
+  {{range .Steps}}<li><div class="term-list-what"><span class="dim-2">{{.When}}</span> <b>{{.What}}</b>{{if .Who}} <span class="dim-3">{{.Who}}</span>{{end}}{{if .Detail}} <span class="dim-3">· {{.Detail}}</span>{{end}}</div></li>{{end}}
+  </ol>
+</section>
+{{end}}
+<p><a class="btn" href="/console/jobs{{if not .Open}}?view=history{{end}}">All response jobs</a>{{if .HostID}} <a class="btn" href="/console/timeline?endpoint={{.HostID}}">{{.Host}} timeline</a>{{end}}</p>
+{{end}}
+{{end}}{{else}}
+
+<nav class="page-tabs" aria-label="Which jobs">
+  <a href="/console/jobs"{{if not .History}} aria-current="page"{{end}}>In flight <span class="dim-3">{{.Open}}</span></a>
+  <a href="/console/jobs?view=history"{{if .History}} aria-current="page"{{end}}>Finished <span class="dim-3">{{.Done}}</span></a>
+</nav>
+{{range .Problems}}<p class="page-problem" role="alert">{{.}}</p>{{end}}
+<section class="card page-card">
+  {{if .Rows}}
+  <ul class="term-list">
+  {{range .Rows}}
+    <li>
+      <div class="term-list-what"><a href="/console/jobs?id={{.ID}}"><b>{{.Action}}</b></a> on <b>{{.Host}}</b>
+        <span class="st" data-state="{{.Tone}}">{{.Label}}</span>{{if .ErrorCode}} <span class="dim-3">{{.ErrorCode}}</span>{{end}}{{if gt .Attempt 1}} <span class="dim-3">attempt {{.Attempt}}</span>{{end}}
+        <span class="dim-3">{{.When}}{{if .Who}} · {{.Who}}{{end}}</span></div>
+      <a class="btn mini" href="/console/jobs?id={{.ID}}">Details</a>
+    </li>
+  {{end}}
+  </ul>
+  {{else}}<p class="card-body dim-2">{{if .History}}No finished jobs among the latest 100.{{else}}Nothing is in flight. Jobs start from Response and Forensics in the console.{{end}}</p>{{end}}
+</section>
+<p class="page-note">The latest 100 jobs. Times in {{.Zone}}.</p>
+{{end}}
+{{end}}{{end}}

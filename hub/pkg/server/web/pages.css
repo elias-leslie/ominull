@@ -283,10 +283,6 @@ body.term-mode .page-main {
   flex-wrap: wrap;
 }
 
-body.page a.btn {
-  text-decoration: none;
-}
-
 body.page .btn[disabled] {
   color: var(--ink-3);
   border-color: var(--line);
@@ -338,4 +334,76 @@ body.page .btn[disabled] {
   body.term-mode .page-who {
     display: none;
   }
+}
+
+/* ------------------------------------------------------------ response jobs */
+
+.page-tabs {
+  display: flex;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.page-tabs a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 36px;
+  padding: var(--s-1) var(--s-3);
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.page-tabs a[aria-current="page"] {
+  color: var(--ink);
+  border-bottom-color: var(--brand);
+}
+
+.job-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5em, 1fr));
+  gap: var(--s-3);
+  margin: 0;
+}
+
+.job-meta dt {
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+.job-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.job-id {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.page-card .job-output-console {
+  margin: 0 var(--s-3) var(--s-3);
+}
+
+body.page .btn[data-danger="true"] {
+  color: var(--crit);
+  border-color: var(--crit-hot);
+}
+
+.job-confirm {
+  position: static;
+  margin: var(--s-3) 0 0;
+}
+
+.job-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.job-steps .term-list-what {
+  gap: var(--s-1) var(--s-2);
 }
