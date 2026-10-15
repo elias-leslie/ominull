@@ -99,8 +99,8 @@ jobs:
           go vet ./...
           go test -v -race ./...
 
-      - name: Verify isolated IPv6 packet capture
-        run: bash scripts/test-ipv6-monitor.sh
+      - name: Verify isolated IPv6 neighbor discovery
+        run: bash scripts/test-ipv6-discovery.sh
 
       - name: Check reachable Go vulnerabilities
         working-directory: hub

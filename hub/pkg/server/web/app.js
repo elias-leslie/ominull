@@ -6480,57 +6480,6 @@
       .catch(function (e) { toast("Could not read the proposals: " + e.message, "crit"); });
   }
 
-  function openIPv6Monitor() {
-    var body = h("div", { cls: "stack", role: "status", text: "Reading IPv6 monitor configuration…" });
-    openSheet("IPv6 infrastructure monitor", body, [], "", { stack: true });
-    var frame = sheetEl;
-    request("/api/v1/ipv6/monitor").then(function (data) {
-      if (!frame.isConnected) return;
-      clear(body);
-      var cfg = data.config || {}, status = data.status || {};
-      var enabled = h("input", { type: "checkbox" }); enabled.checked = !!cfg.enabled;
-      var tenant = h("select", {}, state.hierarchy.map(function (row) { return h("option", { value: row.tenant.id, text: row.tenant.name || row.tenant.id }); }));
-      tenant.value = cfg.tenant_id || (state.hierarchy[0] && state.hierarchy[0].tenant.id) || "";
-      var iface = h("select", {}, [h("option", { value: "", text: "Choose a link" })].concat(arrayOf(data.interfaces).map(function (name) { return h("option", { value: name, text: name }); })));
-      iface.value = cfg.interface || "";
-      function peerText(peers) { return arrayOf(peers).map(function (p) { return p.ip + " " + p.mac; }).join("\n"); }
-      var routers = h("textarea", { rows: "3", value: peerText(cfg.routers), placeholder: "fe80::1 02:00:00:00:00:01" });
-      var dhcp = h("textarea", { rows: "3", value: peerText(cfg.dhcp_servers) });
-      var prefixes = h("textarea", { rows: "3", value: arrayOf(cfg.prefixes).join("\n"), placeholder: "2001:db8:1::/64" });
-      var dns = h("textarea", { rows: "3", value: arrayOf(cfg.dns).join("\n"), placeholder: "2001:db8::53" });
-      var result = h("p", { role: "status" });
-      function field(label, input) { return h("label", { cls: "field" }, h("span", { text: label }), input); }
-      body.appendChild(h("p", { cls: "note", text: "Administrator configuration. Capture is passive and limited to packets visible on the selected hub link. Empty trust lists record observations without declaring discovered infrastructure approved. Findings follow learning holds and never trigger automatic isolation." }));
-      body.appendChild(chip(status.active ? "ok" : cfg.enabled ? "crit" : "idle", status.active ? "Capture active" : cfg.enabled ? "Configured but inactive" : "Disabled"));
-      if (status.error || status.persistence_error) body.appendChild(h("p", { role: "alert", text: status.error || status.persistence_error }));
-      body.appendChild(h("p", { text: "Since capture started: " + (status.observations || 0) + " observations; " + (status.malformed || 0) + " invalid packets; " + (status.dropped || 0) + " observations dropped at the batch limit." }));
-      body.appendChild(h("div", { cls: "form-row" }, field("Enabled", enabled), field("Owning tenant", tenant), field("Hub interface", iface)));
-      body.appendChild(field("Approved routers — one IPv6 address and MAC pair per line", routers));
-      body.appendChild(field("Approved DHCPv6 servers — one IPv6 address and MAC pair per line", dhcp));
-      body.appendChild(field("Approved advertised prefixes — one CIDR per line", prefixes));
-      body.appendChild(field("Approved IPv6 DNS servers — one address per line", dns));
-      body.appendChild(result);
-      var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save monitoring configuration", on: { click: function () {
-        function lines(input) { return input.value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean); }
-        function peers(input) { return lines(input).map(function (line) { var pair = line.split(/\s+/); if (pair.length !== 2) throw new Error("Each trusted peer needs one IPv6 address and one MAC."); return { ip: pair[0], mac: pair[1] }; }); }
-        var payload;
-        try { payload = { enabled: enabled.checked, tenant_id: tenant.value, interface: iface.value, routers: peers(routers), dhcp_servers: peers(dhcp), prefixes: lines(prefixes), dns: lines(dns) }; }
-        catch (e) { result.textContent = e.message; return; }
-        save.disabled = true; result.textContent = "Saving…";
-        request("/api/v1/ipv6/monitor", "PUT", payload).then(function (saved) {
-          frame._dirty = false;
-          var current = saved.status || {};
-          result.textContent = current.error || current.persistence_error ? "Configuration saved; monitor needs attention: " + (current.error || current.persistence_error) : "Configuration saved. " + (current.active ? "Capture is active." : "Capture is disabled.");
-          loadDiagnostics();
-        }).catch(function (e) { result.textContent = "Save failed: " + e.message; }).finally(function () { save.disabled = false; });
-      } } });
-      body.appendChild(save);
-      body.appendChild(h("h3", { text: "Recent observed infrastructure" }));
-      body.appendChild(h("p", { cls: "dim", text: "Latest 100 of up to 2,048 distinct observations per tenant. Repeated packets are counted. ND addresses and autonomous prefixes are evidence for investigating SLAAC; they do not prove how a host configured its address. Encrypted, fragmented, DHCP relay and TCP DNS traffic are not decoded." }));
-      body.appendChild(simpleTable(["Last seen", "Source / MAC", "Observation", "Count"], arrayOf(data.observations).map(function (o) { return [stamp(parseTime(o.last_seen)), h("span", { cls: "u-break", text: o.source + " / " + o.mac }), h("span", { cls: "u-break", text: o.kind.replace(/_/g, " ") + ": " + arrayOf(o.prefixes).concat(arrayOf(o.addresses), arrayOf(o.dns), arrayOf(o.domains)).join(", ") }), h("span", { text: String(o.count) })]; }), { empty: "No observations recorded. This does not establish that the link is safe or quiet." }));
-    }).catch(function (e) { if (frame.isConnected) body.textContent = "Could not read monitor: " + e.message; });
-  }
-
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -6596,7 +6545,6 @@
 
     var stackItems = [
       diagnosticsCard(),
-      IS_ADMIN ? card("IPv6 infrastructure", h("p", { cls: "card-body", text: "Inspect passive link observations and configure approved routers, DHCPv6 servers, prefixes and DNS." }), [h("button", { cls: "btn", type: "button", text: "Configure and inspect", on: { click: openIPv6Monitor } })]) : null,
       convergenceCard(),
       baselineCard(),
       tuningCard(),

@@ -82,10 +82,10 @@ timeout_seconds = 1800
 format = "go-test-json"
 source = "stdout"
 [native.stages.evidence.not_applicable_tests]
-"ominull/hub/pkg/ipv6guard.TestIsolatedPacketCapture" = "isolated packet capture runs via scripts/test-ipv6-monitor.sh"
 "ominull/hub/pkg/scanner.TestLiveFingerprint" = "opt-in probe of the real network via OMINULL_LIVE_TARGETS"
 "ominull/hub/pkg/scanner.TestIsolatedKernelNeighborDiscovery" = "isolated network namespace fixture only"
 "ominull/hub/pkg/storage.TestTopologyPerformanceFixture" = "opt-in performance fixture"
+"ominull/hub/pkg/server.TestAgentTerminalBenchmark" = "opt-in terminal relay measurement via OMINULL_TERMINAL_BENCH"
 "ominull/hub/pkg/server.TestTelemetryPerformanceFeedback" = "opt-in production-shaped performance loop via OMINULL_PERF_TEST"
 
 [[native.stages]]

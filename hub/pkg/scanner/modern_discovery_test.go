@@ -14,8 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"ominull/hub/pkg/storage"
 )
 
 func TestTLSIdentityMatching(t *testing.T) {
@@ -362,90 +360,5 @@ func TestLiveTLSCertAndHTTPProbe(t *testing.T) {
 	ident := IdentifyHost("00:50:56:01:02:03", 64, []int{port}, []string{"Server: " + server}, []string{certInfo, "http-title:" + title}, 1.2, nil)
 	if !strings.Contains(ident.Name, "Proxmox VE") {
 		t.Errorf("IdentifyHost = %q; want Proxmox VE", ident.Name)
-	}
-}
-
-func TestSchedulerAnomalyDetection(t *testing.T) {
-	dbPath := t.TempDir() + "/test-scheduler.db"
-	store, err := storage.New(dbPath)
-	if err != nil {
-		t.Fatalf("open temp store: %v", err)
-	}
-	defer store.Close()
-
-	sc := New(store)
-	defer sc.StopBackground()
-
-	// Seed cached unmanaged asset
-	sc.mu.Lock()
-	sc.cachedAssets["10.0.0.199"] = DiscoveredAsset{
-		IP:             "10.0.0.199",
-		MAC:            "CC:50:E3:99:88:77",
-		Vendor:         "Shelly / Allterco Robotics",
-		Hostname:       "shelly-plug-novel",
-		OSGuess:        "Shelly Smart Relay / Sensor",
-		Category:       "Smart Home / IoT",
-		Confidence:     0.95,
-		RiskScore:      "HIGH",
-		OpenPorts:      []PortInfo{{Port: 80, Service: "HTTP", RiskLevel: "MEDIUM"}},
-		IdentityMethod: "http-title",
-	}
-	sc.mu.Unlock()
-
-	scheduler := NewScheduler(sc, store, 1*time.Hour, []string{"10.0.0.0/24"})
-	knownMap := map[string]bool{"10.0.0.1": true} // 10.0.0.199 is novel
-
-	scheduler.evaluateNewDevices(knownMap)
-
-	// Verify alert was inserted into SQLite
-	alerts, err := store.ListAnomalyAlerts("default", 10)
-	if err != nil {
-		t.Fatalf("list alerts: %v", err)
-	}
-	if len(alerts) != 1 {
-		t.Fatalf("expected 1 anomaly alert, got %d", len(alerts))
-	}
-	if alerts[0].DstIP != "10.0.0.199" {
-		t.Errorf("alert DstIP = %q; want 10.0.0.199", alerts[0].DstIP)
-	}
-	if !strings.Contains(alerts[0].Title, "New Unmanaged Device") {
-		t.Errorf("alert Title = %q; want New Unmanaged Device", alerts[0].Title)
-	}
-}
-
-func TestSchedulerOffByDefault(t *testing.T) {
-	dbPath := t.TempDir() + "/test-scheduler-off.db"
-	store, err := storage.New(dbPath)
-	if err != nil {
-		t.Fatalf("open temp store: %v", err)
-	}
-	defer store.Close()
-
-	sc := New(store)
-	defer sc.StopBackground()
-
-	// Fresh install: scheduler created with nil subnets
-	sched := NewScheduler(sc, store, 1*time.Hour, nil)
-	if len(sched.Subnets()) != 0 {
-		t.Errorf("expected 0 subnets by default, got %d", len(sched.Subnets()))
-	}
-	sched.Start()
-	if sched.isRunning {
-		t.Errorf("scheduler should not be running when subnets list is empty")
-	}
-	sched.Stop()
-
-	// Configure explicit subnets
-	sched.SetSubnets([]string{"10.0.0.0/24"})
-	if len(sched.Subnets()) != 1 || sched.Subnets()[0] != "10.0.0.0/24" {
-		t.Errorf("SetSubnets did not update subnets: %v", sched.Subnets())
-	}
-	sched.Start()
-	if !sched.isRunning {
-		t.Errorf("scheduler should be running when explicit subnets are configured")
-	}
-	sched.Stop()
-	if sched.isRunning {
-		t.Errorf("scheduler should be stopped after Stop()")
 	}
 }

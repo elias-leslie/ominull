@@ -25,7 +25,6 @@ import (
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/evidence"
-	"ominull/hub/pkg/ipv6guard"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
@@ -39,23 +38,19 @@ import (
 
 type Server struct {
 	// batches remembers recent batch ids for replay deduplication.
-	batches     batchLedger
-	ipv6Monitor *ipv6guard.Monitor
-	store       *storage.Store
-	ti          *threatintel.Manager
-	detector    *detector.Engine
-	pki         *pki.Manager
-	scanner     *scanner.Scanner
+	batches  batchLedger
+	store    *storage.Store
+	ti       *threatintel.Manager
+	detector *detector.Engine
+	pki      *pki.Manager
+	scanner  *scanner.Scanner
 	// startScan begins a sweep. Tests replace it so no test ever probes a real
 	// network: an accepted sweep used to go out to whatever the test subnet
 	// routed to, and the hub's own agent reported it as a lateral port sweep.
 	startScan func(subnet string, profile scanner.ScanProfile) (string, error)
-	// startSweeps starts the scheduled sweeps of the hub's own subnets, for
-	// the same reason: a test that starts the hub must not start them.
-	startSweeps func()
-	adminKey    string
-	binaryDir   string
-	hubURL      string
+	adminKey  string
+	binaryDir string
+	hubURL    string
 	// Whether hubURL actually serves this hub, and when that was last checked.
 	// A configured public URL is a claim, not a fact: see downloadBaseWithNote.
 	publicURLMu      sync.Mutex
@@ -420,7 +415,6 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		setupSessions:   map[string]setupSession{},
 	}
 	s.startScan = s.scanner.StartScan
-	s.startSweeps = s.scanner.StartBackground
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
 		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
 			if errors.Is(err, storage.ErrMonitorOnly) {
@@ -444,7 +438,6 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		go s.signDetectorIsolation(endpointID, reason)
 		return nil
 	})
-	s.ipv6Monitor = ipv6guard.New(s.persistIPv6Observations)
 	return s
 }
 
@@ -715,16 +708,10 @@ func (s *Server) Start(addr string) error {
 	// themselves are updated on.
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
-	s.startSweeps()
 	go s.reconcilePendingGrantsLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
-	}
-	if cfg, err := s.store.IPv6GuardConfig(); err != nil {
-		s.ipv6Monitor.PersistenceResult(err)
-	} else if err = s.ipv6Monitor.Configure(cfg); err != nil {
-		log.Printf("IPv6 monitoring unavailable: %v", err)
 	}
 
 	mux := s.routes()
@@ -995,12 +982,8 @@ func (s *Server) hubOwnsAddress(ip string) string {
 }
 
 func (s *Server) Close() error {
-	if s.ipv6Monitor != nil {
-		s.ipv6Monitor.Stop()
-	}
 	s.ti.Stop()
 	s.detector.Stop()
-	s.scanner.StopBackground()
 	if s.stopEvidenceRetention != nil {
 		close(s.stopEvidenceRetention)
 		s.stopEvidenceRetention = nil
@@ -3664,7 +3647,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/topology/workspace", s.authMiddleware(requireTopologyOperator(s.handleTopologyWorkspace)))
 	mux.HandleFunc("/api/v1/topology/views", s.authMiddleware(requireTopologyOperator(s.handleTopologyViews)))
 	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
-	mux.HandleFunc("/api/v1/ipv6/monitor", s.authMiddleware(requireAdmin(s.handleIPv6Monitor)))
 	mux.HandleFunc("/api/v1/topology/networks", s.authMiddleware(requireAdmin(s.handleTopologyNetworks)))
 
 	// 8b. Unified asset graph.

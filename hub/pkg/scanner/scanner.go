@@ -90,7 +90,6 @@ type Scanner struct {
 	customSigs   []DeviceSignature
 	activeScans  map[string]*ScanStatus
 	cachedAssets map[string]DiscoveredAsset
-	scheduler    *Scheduler
 	mu           sync.RWMutex
 }
 
@@ -101,26 +100,11 @@ func New(store *storage.Store) *Scanner {
 		activeScans:  make(map[string]*ScanStatus),
 		cachedAssets: make(map[string]DiscoveredAsset),
 	}
-	s.scheduler = NewScheduler(s, store, 4*time.Hour, nil)
 	// Discovery used to live only in cachedAssets, so a hub restart erased
 	// every host the scanner had ever found. The assets table is now the
 	// record of truth and this map is a read cache over it.
 	s.hydrateFromStore()
 	return s
-}
-
-// StartBackground launches only the explicitly configured sweep scheduler.
-func (s *Scanner) StartBackground() {
-	if s.scheduler != nil {
-		s.scheduler.Start()
-	}
-}
-
-// StopBackground stops the sweep scheduler.
-func (s *Scanner) StopBackground() {
-	if s.scheduler != nil {
-		s.scheduler.Stop()
-	}
 }
 
 // hydrateFromStore refills the in-memory cache from the persisted asset

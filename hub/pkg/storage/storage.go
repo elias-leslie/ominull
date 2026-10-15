@@ -728,7 +728,9 @@ func (s *Store) initSchema() error {
 	if err := s.initLearningSchema(); err != nil {
 		return err
 	}
-	if err := s.initIPv6GuardSchema(); err != nil {
+	// The hub's passive IPv6 monitor was retired (agents keep IPv6
+	// collection and isolation); drop what it stored.
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS ipv6_observations; DELETE FROM settings WHERE key = 'ipv6.guard'`); err != nil {
 		return err
 	}
 	if err := s.initRouterSchema(); err != nil {

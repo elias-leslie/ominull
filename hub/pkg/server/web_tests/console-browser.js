@@ -95,18 +95,6 @@
    let rejected=false; try { await a.request('/api/v1/fixture-error-'+status+'-'+type); } catch { rejected=true; } assert(rejected,'Invalid API response accepted');
   } } finally {window.fetch=original;a.state.demo=true;}
  });
- await check('IPv6 configuration is labeled and guards an edited draft', async () => {
-  const original=window.fetch;a.state.demo=false;
-  window.fetch=async()=>new Response(JSON.stringify({config:{enabled:false,routers:[],dhcp_servers:[],prefixes:[],dns:[]},status:{active:false},interfaces:['fixture-link'],observations:[]}),{headers:{'Content-Type':'application/json'}});
-  try {a.openIPv6Monitor();await wait();
-   const dialog=document.querySelector('.sheet');assert(dialog.textContent.includes('Capture is passive'),'Missing coverage explanation');
-   const input=dialog.querySelector('textarea');input.value='fe80::1 02:00:00:00:00:01';input.dispatchEvent(new Event('input',{bubbles:true}));
-   const section=a.state.section;a.go('traffic');
-   assert(a.state.section===section && document.querySelector('.sheet').getAttribute('aria-label')==='Leave this work?','Navigation bypassed the draft guard');
-   [...document.querySelectorAll('.sheet button')].find(button=>button.textContent==='Cancel').click();
-   assert(document.querySelector('.sheet textarea').value==='fe80::1 02:00:00:00:00:01','Cancel lost monitoring draft');
-  }finally{a.closeAllSheets();window.fetch=original;a.state.demo=true;}
- });
  await check('gated action waits for owner approval and retries with the approval id', async () => {
   const original=window.fetch;a.state.demo=false;const calls=[];
   const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});

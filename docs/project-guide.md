@@ -257,8 +257,10 @@ by the anomaly retention. On agent-heavy endpoints (tuning
 with `agent_heavy_observed` (default on), any endpoint whose own telemetry has
 shown an agent runtime; never the operating system; a console save keeps all
 three) a lead is also muted to LOW, the detector's
-severity kept as `detector_severity`. The subnet sweep's new-device findings
-(`alert-disc-*`) share the `NOVEL_DESTINATION` type and keep paging. Findings
+severity kept as `detector_severity`. New-device findings from the retired
+scheduled subnet sweep (`alert-disc-*`, kept until anomaly retention removes
+them) share the `NOVEL_DESTINATION` type and keep paging. Discovery now runs
+only on demand. Findings
 recorded before the tiers were moved once at startup (setting
 `anomaly_hunt_tier_backfill_v1`). The replay route reports `paging`: before
 (every kept finding not held by learning) and after (kept findings of paging

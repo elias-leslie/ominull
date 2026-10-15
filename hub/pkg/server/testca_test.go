@@ -79,7 +79,6 @@ func newTestServer(t testing.TB, store *storage.Store, adminKey, binaryDir, hubU
 	srv := New(store, adminKey, binaryDir, hubURL, agentVersion)
 	// A test proves the hub accepts or refuses a sweep; it never runs one.
 	srv.startScan = func(subnet string, _ scanner.ScanProfile) (string, error) { return "test-scan-" + subnet, nil }
-	srv.startSweeps = func() {}
 	srv.publicURLMu.Lock()
 	srv.publicURLOK = false
 	srv.publicURLAt = time.Now()
