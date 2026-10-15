@@ -750,6 +750,9 @@ func (s *Store) initSchema() error {
 	if err := s.initDataInventorySchema(); err != nil {
 		return err
 	}
+	if err := s.initTrustRuleSchema(); err != nil {
+		return err
+	}
 	if err := s.initEnforcementGrantSchema(); err != nil {
 		return err
 	}
