@@ -3072,8 +3072,13 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             f->enrichment.attribution_status[0] ? f->enrichment.attribution_status : "unknown"
         );
         if (obsTimeBuf[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - 64) {
-            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen,
+            enrichLen += snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen,
                 ",\"observed_at\":\"%s\"", obsTimeBuf);
+        }
+        if (f->enrichment.actor[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - sizeof(f->enrichment.actor) * 6 - 16) {
+            char escapedActor[sizeof(f->enrichment.actor) * 6 + 1] = {0};
+            ProcessLineage_EscapeJSON(f->enrichment.actor, escapedActor, sizeof(escapedActor));
+            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen, ",\"actor\":\"%s\"", escapedActor);
         }
 
         char observationJson[640];

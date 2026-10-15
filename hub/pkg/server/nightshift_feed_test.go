@@ -274,7 +274,7 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 	}
 }
 
-func TestNightshiftFeedReportsAgentEgressAtItsWorstSeverity(t *testing.T) {
+func TestNightshiftFeedAgentEgressDigestIsANote(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -304,12 +304,14 @@ func TestNightshiftFeedReportsAgentEgressAtItsWorstSeverity(t *testing.T) {
 		t.Fatalf("no agent findings should be resolved, got %d", st)
 	}
 	add("a1", "AGENT_NEW_DESTINATION", "MEDIUM")
-	if st, sev := find(); st != ocsfStatusNew || sev != ocsfSevLow {
+	if st, sev := find(); st != ocsfStatusNew || sev != ocsfSevInformational {
 		t.Fatalf("an ordinary new destination = status %d severity %d", st, sev)
 	}
+	// A HIGH one is rated (and asks) in the Open alerts summary; the digest
+	// stays a note so the owner is not asked twice.
 	add("a2", "AGENT_NEW_DESTINATION", "HIGH")
-	if _, sev := find(); sev != ocsfSevHigh {
-		t.Fatalf("a HIGH new destination surfaced at severity %d", sev)
+	if _, sev := find(); sev != ocsfSevInformational {
+		t.Fatalf("a HIGH new destination raised the digest to severity %d", sev)
 	}
 }
 

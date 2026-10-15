@@ -33,6 +33,27 @@ import (
 type sweepTarget struct {
 	at    time.Time
 	ports map[uint16]bool
+	// actors are the endpoint-traced actors of the flows to this target
+	// ("" for an untraced flow): a sweep is credited to an actor only when
+	// every flow in its window carries that one actor.
+	actors map[string]bool
+}
+
+// sweepActor is the one actor behind every flow of the window, or "".
+func sweepActor(window map[string]*sweepTarget) string {
+	actor := ""
+	for _, t := range window {
+		if len(t.actors) != 1 {
+			return ""
+		}
+		for a := range t.actors {
+			if a == "" || (actor != "" && a != actor) {
+				return ""
+			}
+			actor = a
+		}
+	}
+	return actor
 }
 
 // inventoryTTL bounds how stale the enrolled-address set may be.

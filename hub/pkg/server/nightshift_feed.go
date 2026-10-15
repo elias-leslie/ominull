@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -286,22 +287,21 @@ func (s *Server) huntFinding(now time.Time) (feedFinding, error) {
 // agentEgressTypes are the findings of the per-runtime agent egress detector.
 var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS"}
 
-// agentEgressFinding reports what the agent runtimes did that their own
-// baselines did not expect, at the severity of the worst of it: an ordinary
-// new destination is a note, since runtimes gain endpoints with their
-// updates; one on rented compute, an unusual hour of uploads, or a tool
-// resolving names past the router asks for a look.
+// agentEgressFinding is the day's digest of what the agent runtimes did
+// outside their own baselines, each alert named (host, program, where). It is
+// informational: every one of these alerts is also listed, and rated, in the
+// Open alerts summary, which is where Nightshift asks. A digest that asked as
+// well made the owner answer the same alerts twice, by counts.
 func (s *Server) agentEgressFinding(now time.Time) (feedFinding, error) {
 	win, err := s.store.SummariseOpenAnomalies(now.Add(-feedAnomalyWindow))
 	if err != nil {
 		return feedFinding{}, err
 	}
 	counts := map[string]int{}
-	total, high := 0, 0
+	total := 0
 	for _, t := range agentEgressTypes {
 		counts[t] = win.ByType[t]
 		total += win.ByType[t]
-		high += win.HighByType[t]
 	}
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_type": counts}
 	const uid, title = "ominull.anomalies.agent_egress", "Agent egress"
@@ -309,13 +309,31 @@ func (s *Server) agentEgressFinding(now time.Time) (feedFinding, error) {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"Agent runtimes stayed inside their baselines in the last 24 h", nil, unmapped), nil
 	}
-	sev := ocsfSevLow
-	if high > 0 {
-		sev = ocsfSevHigh
+	list, err := s.store.NewOpenAlerts(now.Add(-feedAnomalyWindow), feedAlertScan)
+	if err != nil {
+		return feedFinding{}, err
 	}
-	msg := fmt.Sprintf("Agent egress in the last 24 h: %d new destinations, %d unusual upload hours, %d resolver bypasses",
-		counts["AGENT_NEW_DESTINATION"], counts["AGENT_UPLOAD_VOLUME"], counts["AGENT_DNS_BYPASS"])
-	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
+	tuning := s.store.GetDetectionTuning()
+	var named []string
+	for _, a := range list {
+		if !slices.Contains(agentEgressTypes, a.AnomalyType) {
+			continue
+		}
+		if len(named) == 3 {
+			break
+		}
+		d := describeAlert(a, tuning)
+		line := d.What
+		if d.Expected != "" {
+			line += " (" + d.Expected + ")"
+		}
+		named = append(named, line)
+	}
+	msg := strings.Join(named, "; ")
+	if rest := total - len(named); rest > 0 {
+		msg += fmt.Sprintf("; +%d more", rest)
+	}
+	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
 func (s *Server) agentFinding(now time.Time) (feedFinding, error) {

@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <limits.h>
 #include <pwd.h>
 #include <stdbool.h>
@@ -42,6 +43,7 @@ typedef struct {
     char user_identity[64];
     char executable_sha256[65];
     char attribution_status[32]; // authoritative, inferred_cached, race_suspected, permission_denied, unknown
+    char actor[160];             // agent:claude:<aico widget>, service:nightshift:<unit>, or empty (see ProcessLineage_ReadActor)
     int64_t observed_at;
 } PROCESS_ENRICHMENT;
 
@@ -269,9 +271,200 @@ static inline bool ProcessLineage_ReadUser(uint32_t pid, char* outUser, size_t m
     return true;
 }
 
+/*
+ * Actor: who started a process, when it is one of our own agents or services.
+ *
+ * Nightshift (the host steward) lists alerts our agents cause instead of
+ * asking the owner about them. The endpoint is the only place the process is
+ * visible at the time, so the agent names it here:
+ *   - agent:<claude|codex>:<widget>  an ancestor (not the process itself)
+ *     running as the same user executes an installed Claude Code or Codex
+ *     binary (by the kernel's /proc/PID/exe, never the renameable comm or
+ *     argv[0]); the widget is its AICO_WIDGET_ID (hex) when it runs in an
+ *     Aico window, else empty.
+ *   - service:nightshift:<unit>      the process's own cgroup is a nightshift-*
+ *     system unit; service:summitflow:<unit> a summitflow-* or sf-rebuild-*
+ *     one. Only under system.slice: a user manager starts whatever its user
+ *     names, so a user unit says nothing.
+ * Anything else is empty. This is attribution, not authentication: a process
+ * of the same user can still install a binary at an agent's path, and the hub
+ * only uses it to explain this endpoint's own alerts of kinds an operator's
+ * session causes.
+ */
+#define LINUX_ACTOR_MAX_DEPTH 32
+#define LINUX_ACTOR_ENV_MAX (256 * 1024)
+#define LINUX_ACTOR_CACHE_CAP 256
+
+typedef struct {
+    uint32_t pid;
+    unsigned long long start;
+    char actor[160];
+    bool valid;
+} LINUX_ACTOR_CACHE_ENTRY;
+
+static LINUX_ACTOR_CACHE_ENTRY g_LinuxActorCache[LINUX_ACTOR_CACHE_CAP];
+
+static inline bool ProcessLineage_ReadSmall(uint32_t pid, const char* what, char* out, size_t outLen, size_t* outRead) {
+    char suffix[64], path[512];
+    snprintf(suffix, sizeof(suffix), "%u/%s", pid, what);
+    ProcessLineage_ProcPath(path, sizeof(path), suffix);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, out, outLen - 1);
+    close(fd);
+    if (n < 0) return false;
+    out[n] = '\0';
+    if (outRead) *outRead = (size_t)n;
+    return true;
+}
+
+static inline bool ProcessLineage_ReadRealUID(uint32_t pid, uid_t* outUID) {
+    char buf[2048];
+    if (!ProcessLineage_ReadSmall(pid, "status", buf, sizeof(buf), NULL)) return false;
+    const char* line = strstr(buf, "\nUid:");
+    unsigned int uid = 0;
+    if (!line || sscanf(line + 5, "%u", &uid) != 1) return false;
+    *outUID = (uid_t)uid;
+    return true;
+}
+
+/* Where Claude Code and Codex install their binaries. */
+static const struct {
+    const char* pattern;
+    const char* tool;
+} kLinuxAgentBinaries[] = {
+    {"/home/*/.local/share/claude/versions/[0-9]*", "claude"},
+    {"/home/*/.local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-*/vendor/*/bin/codex", "codex"},
+    {"/usr/lib/chatgpt/resources/codex", "codex"},
+    {"/usr/bin/codex", "codex"},
+    {"/usr/local/bin/codex", "codex"},
+};
+
+/* The agent tool a process runs, by the binary the kernel says it executes. */
+static inline const char* ProcessLineage_AgentTool(uint32_t pid) {
+    char suffix[64], path[512], exe[PATH_MAX];
+    snprintf(suffix, sizeof(suffix), "%u/exe", pid);
+    ProcessLineage_ProcPath(path, sizeof(path), suffix);
+    ssize_t n = readlink(path, exe, sizeof(exe) - 1);
+    if (n <= 0) return NULL;
+    exe[n] = '\0';
+    static const char deleted[] = " (deleted)"; // an agent that updated itself while running
+    size_t len = (size_t)n;
+    if (len > sizeof(deleted) - 1 && strcmp(exe + len - (sizeof(deleted) - 1), deleted) == 0) exe[len - (sizeof(deleted) - 1)] = '\0';
+    for (size_t i = 0; i < sizeof(kLinuxAgentBinaries) / sizeof(kLinuxAgentBinaries[0]); i++) {
+        if (fnmatch(kLinuxAgentBinaries[i].pattern, exe, FNM_PATHNAME) == 0) return kLinuxAgentBinaries[i].tool;
+    }
+    return NULL;
+}
+
+/* AICO_WIDGET_ID from a process's environment, when it is 4-64 lowercase hex. */
+static inline void ProcessLineage_ReadWidget(uint32_t pid, char* out, size_t outLen) {
+    out[0] = '\0';
+    char suffix[64], path[512];
+    snprintf(suffix, sizeof(suffix), "%u/environ", pid);
+    ProcessLineage_ProcPath(path, sizeof(path), suffix);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    char* env = malloc(LINUX_ACTOR_ENV_MAX + 1);
+    if (!env) {
+        close(fd);
+        return;
+    }
+    size_t total = 0;
+    ssize_t n;
+    while (total < LINUX_ACTOR_ENV_MAX && (n = read(fd, env + total, LINUX_ACTOR_ENV_MAX - total)) > 0) total += (size_t)n;
+    close(fd);
+    env[total] = '\0';
+    static const char key[] = "AICO_WIDGET_ID=";
+    for (size_t i = 0; i < total;) {
+        const char* var = env + i;
+        size_t len = strnlen(var, total - i);
+        if (len > sizeof(key) - 1 && strncmp(var, key, sizeof(key) - 1) == 0) {
+            const char* v = var + sizeof(key) - 1;
+            size_t vlen = len - (sizeof(key) - 1);
+            bool hex = vlen >= 4 && vlen <= 64 && vlen < outLen;
+            for (size_t j = 0; hex && j < vlen; j++) hex = (v[j] >= '0' && v[j] <= '9') || (v[j] >= 'a' && v[j] <= 'f');
+            if (hex) {
+                memcpy(out, v, vlen);
+                out[vlen] = '\0';
+            }
+            break;
+        }
+        i += len + 1;
+    }
+    free(env);
+}
+
+/* service:<owner>:<unit> when the process's own cgroup is one of our units. */
+static inline bool ProcessLineage_ReadServiceActor(uint32_t pid, char* out, size_t outLen) {
+    char buf[1024];
+    if (!ProcessLineage_ReadSmall(pid, "cgroup", buf, sizeof(buf), NULL)) return false;
+    char* line = strstr(buf, "0::");
+    if (!line) return false;
+    char* cg = line + 3;
+    cg[strcspn(cg, "\n")] = '\0';
+    char* leaf = strrchr(cg, '/');
+    if (strncmp(cg, "/system.slice/", 14) != 0 || !leaf || !leaf[1]) return false;
+    leaf++;
+    size_t len = strlen(leaf);
+    bool unit = len > 8 && len <= 120 && strcmp(leaf + len - 8, ".service") == 0;
+    for (size_t i = 0; unit && i < len; i++) {
+        char c = leaf[i];
+        unit = isalnum((unsigned char)c) || c == '_' || c == '@' || c == '.' || c == ':' || c == '-';
+    }
+    if (!unit) return false;
+    const char* owner = NULL;
+    if (strncmp(leaf, "nightshift-", 11) == 0) owner = "nightshift";
+    else if (strncmp(leaf, "summitflow-", 11) == 0 || strncmp(leaf, "sf-rebuild-", 11) == 0) owner = "summitflow";
+    if (!owner) return false;
+    snprintf(out, outLen, "service:%s:%s", owner, leaf);
+    return true;
+}
+
+/* Fills out with the process's actor ("" when it is none of ours). */
+static inline void ProcessLineage_ReadActor(uint32_t pid, unsigned long long start, char* out, size_t outLen) {
+    out[0] = '\0';
+    if (pid == 0 || outLen < 2) return;
+    LINUX_ACTOR_CACHE_ENTRY* slot = &g_LinuxActorCache[pid % LINUX_ACTOR_CACHE_CAP];
+    if (start != 0 && slot->valid && slot->pid == pid && slot->start == start) {
+        snprintf(out, outLen, "%s", slot->actor);
+        return;
+    }
+    uid_t uid;
+    unsigned long long ownStart = 0;
+    uint32_t parent = 0;
+    if (ProcessLineage_ReadRealUID(pid, &uid) && ProcessLineage_ReadStat(pid, &ownStart, &parent) && parent != pid) {
+        // From the parent: what the agent ran made the connection, not the agent.
+        uint32_t cur = parent;
+        for (int depth = 0; depth < LINUX_ACTOR_MAX_DEPTH && cur > 1; depth++) {
+            uid_t curUID;
+            if (!ProcessLineage_ReadRealUID(cur, &curUID) || curUID != uid) break;
+            const char* tool = ProcessLineage_AgentTool(cur);
+            if (tool) {
+                char widget[65];
+                ProcessLineage_ReadWidget(cur, widget, sizeof(widget));
+                snprintf(out, outLen, "agent:%s:%s", tool, widget);
+                break;
+            }
+            unsigned long long st = 0;
+            uint32_t ppid = 0;
+            if (!ProcessLineage_ReadStat(cur, &st, &ppid) || ppid == cur) break;
+            cur = ppid;
+        }
+    }
+    if (out[0] == '\0') (void)ProcessLineage_ReadServiceActor(pid, out, outLen);
+    if (start != 0) {
+        slot->pid = pid;
+        slot->start = start;
+        snprintf(slot->actor, sizeof(slot->actor), "%s", out);
+        slot->valid = true;
+    }
+}
+
 /* Reset hash cache (useful for test teardown) */
 static inline void ProcessLineage_ResetCache(void) {
     memset(g_LinuxHashCache, 0, sizeof(g_LinuxHashCache));
+    memset(g_LinuxActorCache, 0, sizeof(g_LinuxActorCache));
     g_LinuxHashAccessCounter = 0;
     g_LinuxCachedBootID[0] = '\0';
 }
@@ -425,6 +618,7 @@ static inline bool ProcessLineage_InspectProcess(uint32_t pid, PROCESS_ENRICHMEN
                          "%s:%u:%llu", bootID, ppid, parentStart);
             }
         }
+        ProcessLineage_ReadActor(pid, startTime, outEnrichment->actor, sizeof(outEnrichment->actor));
     } else {
         snprintf(outEnrichment->attribution_status, sizeof(outEnrichment->attribution_status), "race_suspected");
     }

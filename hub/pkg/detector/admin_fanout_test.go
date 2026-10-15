@@ -212,3 +212,30 @@ func TestAdminFanoutTargetsMustBePrivate(t *testing.T) {
 		t.Fatalf("private targets: %v %v", saved.AdminFanoutTargets, err)
 	}
 }
+
+// A sweep is credited to an actor only when every flow in it carries that one.
+func TestSweepActor(t *testing.T) {
+	t.Parallel()
+	target := func(actors ...string) *sweepTarget {
+		st := &sweepTarget{actors: map[string]bool{}}
+		for _, a := range actors {
+			st.actors[a] = true
+		}
+		return st
+	}
+	cases := []struct {
+		window map[string]*sweepTarget
+		want   string
+	}{
+		{map[string]*sweepTarget{"a": target("agent:claude:x"), "b": target("agent:claude:x")}, "agent:claude:x"},
+		{map[string]*sweepTarget{"a": target("agent:claude:x"), "b": target("agent:codex:y")}, ""},
+		{map[string]*sweepTarget{"a": target("agent:claude:x", "")}, ""},
+		{map[string]*sweepTarget{"a": target("agent:claude:x"), "b": target("")}, ""},
+		{map[string]*sweepTarget{"a": target()}, ""},
+	}
+	for i, c := range cases {
+		if got := sweepActor(c.window); got != c.want {
+			t.Errorf("case %d: %q, want %q", i, got, c.want)
+		}
+	}
+}

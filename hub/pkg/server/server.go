@@ -3537,6 +3537,7 @@ func (s *Server) routes() *http.ServeMux {
 	// read the fleet nor approve anything; only the owner's passkey can.
 	mux.HandleFunc("/api/v1/integrations/nightshift/approvals", s.approvalRelayAuth(s.handleRelayApprovals))
 	mux.HandleFunc("/api/v1/integrations/nightshift/approvals/answer", s.approvalRelayAuth(s.handleRelayAnswer))
+	mux.HandleFunc("/api/v1/integrations/nightshift/alerts/verdict", s.approvalRelayAuth(s.handleRelayAlertVerdict))
 	mux.HandleFunc("/api/v1/integrations/nightshift/approval-key", s.authMiddleware(s.handleApprovalRelayKey))
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))

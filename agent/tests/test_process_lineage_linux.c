@@ -500,6 +500,102 @@ static void test_json_escaping(void) {
     check(len == 0 && out[0] == '\0', "NULL input handled safely", NULL);
 }
 
+static void mock_proc(int pid, int ppid, const char* comm, const char* argv0, int uid, const char* cgroup, const char* env, size_t envLen) {
+    char rel[64], buf[512];
+    snprintf(rel, sizeof(rel), "%d/stat", pid);
+    int n = snprintf(buf, sizeof(buf), "%d (%s) S %d %d %d 0 -1 4194304 100 0 0 0 10 20 0 0 20 0 1 0 %d 12345 678 0 0 0\n", pid, comm, ppid, ppid, ppid, 1000 + pid);
+    create_file(rel, buf, (size_t)n);
+    snprintf(rel, sizeof(rel), "%d/comm", pid);
+    n = snprintf(buf, sizeof(buf), "%s\n", comm);
+    create_file(rel, buf, (size_t)n);
+    snprintf(rel, sizeof(rel), "%d/cmdline", pid);
+    create_file(rel, argv0, strlen(argv0) + 1);
+    snprintf(rel, sizeof(rel), "%d/status", pid);
+    n = snprintf(buf, sizeof(buf), "Name:\t%s\nUid:\t%d\t%d\t%d\t%d\n", comm, uid, uid, uid, uid);
+    create_file(rel, buf, (size_t)n);
+    snprintf(rel, sizeof(rel), "%d/cgroup", pid);
+    create_file(rel, cgroup, strlen(cgroup));
+    snprintf(rel, sizeof(rel), "%d/environ", pid);
+    create_file(rel, env ? env : "", env ? envLen : 0);
+}
+
+static void test_actor(void) {
+    printf("[*] Testing actor attribution (our agents and services)...\n");
+    init_mock_proc();
+    ProcessLineage_ResetCache();
+    const char* pane = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux.scope\n";
+    static const char env[] = "HOME=/home/u\0AICO_WIDGET_ID=fb39ca7b\0TERM=xterm\0";
+    // claude (native build: comm is its version) -> bash -> ssh
+    mock_proc(100, 1, "2.1.30", "/home/u/.local/bin/claude", 1000, pane, env, sizeof(env));
+    make_mock_exe("100", "/home/u/.local/share/claude/versions/2.1.30");
+    mock_proc(101, 100, "bash", "/bin/bash", 1000, pane, NULL, 0);
+    make_mock_exe("101", "/usr/bin/bash");
+    mock_proc(102, 101, "ssh", "ssh", 1000, pane, NULL, 0);
+    char actor[160];
+    ProcessLineage_ReadActor(102, 1102, actor, sizeof(actor));
+    check(strcmp(actor, "agent:claude:fb39ca7b") == 0, "ssh under an Aico Claude Code pane is that agent", actor);
+
+    // codex outside Aico (npm install, replaced on disk while running): no widget
+    mock_proc(200, 1, "codex", "codex", 1000, pane, "HOME=/x\0", 8);
+    make_mock_exe("200", "/home/u/.local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex (deleted)");
+    mock_proc(201, 200, "curl", "curl", 1000, pane, NULL, 0);
+    ProcessLineage_ReadActor(201, 1201, actor, sizeof(actor));
+    check(strcmp(actor, "agent:codex:") == 0, "codex outside Aico has no widget", actor);
+
+    // The agent's own connection is not traced to it: only what it ran.
+    ProcessLineage_ReadActor(200, 1200, actor, sizeof(actor));
+    check(actor[0] == '\0', "the walk starts at the parent", actor);
+
+    // A bad widget value is dropped, the agent kept.
+    static const char badEnv[] = "AICO_WIDGET_ID=FB39;rm\0";
+    mock_proc(300, 1, "codex", "codex", 1000, pane, badEnv, sizeof(badEnv));
+    make_mock_exe("300", "/usr/lib/chatgpt/resources/codex");
+    mock_proc(301, 300, "ssh", "ssh", 1000, pane, NULL, 0);
+    ProcessLineage_ReadActor(301, 1301, actor, sizeof(actor));
+    check(strcmp(actor, "agent:codex:") == 0, "malformed widget dropped", actor);
+
+    // A uid change (sudo) ends the walk: a root ssh under an agent is not traced.
+    mock_proc(401, 100, "sudo", "sudo", 0, pane, NULL, 0);
+    mock_proc(402, 401, "ssh", "ssh", 0, pane, NULL, 0);
+    ProcessLineage_ReadActor(402, 1402, actor, sizeof(actor));
+    check(actor[0] == '\0', "the walk stops at a uid change", actor);
+
+    // A process only named like an agent (comm, argv[0]) or running another
+    // binary is not one.
+    mock_proc(500, 1, "claude", "/home/u/.local/bin/claude", 1000, pane, env, sizeof(env));
+    make_mock_exe("500", "/tmp/claude");
+    mock_proc(501, 500, "ssh", "ssh", 1000, pane, NULL, 0);
+    ProcessLineage_ReadActor(501, 1501, actor, sizeof(actor));
+    check(actor[0] == '\0', "a renamed binary is not Claude Code", actor);
+    mock_proc(502, 1, "codex", "codex", 1000, pane, env, sizeof(env));
+    make_mock_exe("502", "/home/u/.local/share/claude/versions/../../../bin/x");
+    mock_proc(503, 502, "ssh", "ssh", 1000, pane, NULL, 0);
+    ProcessLineage_ReadActor(503, 1503, actor, sizeof(actor));
+    check(actor[0] == '\0', "a path that only starts like an agent's is not one", actor);
+
+    // Our units, by the process's own cgroup.
+    mock_proc(600, 1, "python3", "python3", 0, "0::/system.slice/nightshift-check.service\n", NULL, 0);
+    ProcessLineage_ReadActor(600, 1600, actor, sizeof(actor));
+    check(strcmp(actor, "service:nightshift:nightshift-check.service") == 0, "a Nightshift unit", actor);
+    mock_proc(601, 1, "uv", "uv", 1000, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/summitflow-portfolio-backend.service\n", NULL, 0);
+    ProcessLineage_ReadActor(601, 1601, actor, sizeof(actor));
+    check(actor[0] == '\0', "a user unit names nothing (its user picks the name)", actor);
+    mock_proc(602, 1, "sh", "sh", 0, "0::/machine.slice/nightshift-x.service\n", NULL, 0);
+    ProcessLineage_ReadActor(602, 1602, actor, sizeof(actor));
+    check(actor[0] == '\0', "a unit outside system.slice is not ours", actor);
+    mock_proc(603, 1, "sh", "sh", 0, "0::/system.slice/cron.service\n", NULL, 0);
+    ProcessLineage_ReadActor(603, 1603, actor, sizeof(actor));
+    check(actor[0] == '\0', "another system unit is not ours", actor);
+    mock_proc(604, 1, "sh", "sh", 0, "0::/system.slice/summitflow-backend.service\n", NULL, 0);
+    ProcessLineage_ReadActor(604, 1604, actor, sizeof(actor));
+    check(strcmp(actor, "service:summitflow:summitflow-backend.service") == 0, "a SummitFlow system unit", actor);
+
+    // InspectProcess carries it.
+    PROCESS_ENRICHMENT enr;
+    ProcessLineage_InspectProcess(102, &enr);
+    check(strcmp(enr.actor, "agent:claude:fb39ca7b") == 0, "enrichment carries the actor", enr.actor);
+}
+
 int main(void) {
     printf("=== Ominull Linux Endpoint Process Lineage & Hashing Test Suite ===\n");
 
@@ -510,6 +606,7 @@ int main(void) {
     test_executable_hashing_and_lru();
     test_process_lineage_and_pid_reuse();
     test_json_escaping();
+    test_actor();
 
     cleanup_mock_proc();
 

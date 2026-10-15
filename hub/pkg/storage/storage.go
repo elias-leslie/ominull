@@ -123,6 +123,11 @@ type Event struct {
 	ExecutableSHA256        string     `json:"executable_sha256,omitempty"`
 	AttributionStatus       string     `json:"attribution_status,omitempty"`
 	ObservedAt              *time.Time `json:"observed_at,omitempty"`
+
+	// Actor is what the endpoint agent traced the process to: one of our agent
+	// sessions ("agent:claude:<aico widget>") or services
+	// ("service:nightshift:<unit>"). Finding evidence only; flows do not keep it.
+	Actor string `json:"actor,omitempty"`
 }
 
 type CommProfile struct {

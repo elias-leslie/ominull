@@ -305,6 +305,10 @@ func withFlowContext(evidence string, ev storage.Event, geo threatintel.GeoRecor
 	set("executable_sha256", ev.ExecutableSHA256)
 	set("process_instance_id", ev.ProcessInstanceID)
 	set("attribution_status", ev.AttributionStatus)
+	set("domain", ev.Domain)
+	set("sni", ev.SNI)
+	set("actor", ev.Actor)
+	fields["bytes_out"] = ev.BytesOut
 	set("destination_owner", geo.Org)
 	set("destination_asn", geo.ASN)
 	set("destination_tenancy", geo.Tenancy)
@@ -931,15 +935,16 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 		target := targetMap[ev.DstIP]
 		if target == nil {
-			target = &sweepTarget{ports: map[uint16]bool{}}
+			target = &sweepTarget{ports: map[uint16]bool{}, actors: map[string]bool{}}
 			targetMap[ev.DstIP] = target
 		}
 		target.at = now
 		target.ports[ev.DstPort] = true
+		target.actors[ev.Actor] = true
 		distinctTargets := len(targetMap)
 		window := make(map[string]*sweepTarget, len(targetMap))
 		for ip, t := range targetMap {
-			window[ip] = &sweepTarget{at: t.at, ports: maps.Clone(t.ports)}
+			window[ip] = &sweepTarget{at: t.at, ports: maps.Clone(t.ports), actors: maps.Clone(t.actors)}
 		}
 		e.mu.Unlock()
 
@@ -971,7 +976,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		if distinctTargets >= threshold && !routine {
 			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
 			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
-				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why})
+				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
+					"sweep_actor": sweepActor(window)})
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,

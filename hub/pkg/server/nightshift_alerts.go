@@ -51,8 +51,13 @@ type feedAlert struct {
 	Destinations string `json:"destinations,omitempty"`
 	Cause        string `json:"cause,omitempty"`
 	// Expected is set when the hub explains the alert as the owner's own
-	// automation ("own automation"): it is listed, and it does not page.
+	// automation ("own automation"), one of our agents or services, or a
+	// connection test: it is listed, and it does not page.
 	Expected string `json:"expected,omitempty"`
+	// Actor names the agent session or service the endpoint traced the
+	// process to ("Agent in Aico window fb39ca7b"), whether or not that
+	// explains the alert.
+	Actor string `json:"actor,omitempty"`
 }
 
 const secretWord = `(?:pass(?:word|wd|phrase)?|pwd|token|secret|api[_-]?key|auth|bearer|credential|private[_-]?key)`
@@ -101,6 +106,16 @@ type alertEvidence struct {
 		Ports []int  `json:"ports"`
 	} `json:"sweep_targets"`
 	AdminRule string `json:"admin_rule"`
+	Domain    string `json:"domain"`
+	SNI       string `json:"sni"`
+	Owner     string `json:"destination_owner"`
+	// Actor is what the endpoint agent traced the flow's process to (see
+	// actorLabel); SweepActor the one actor behind every flow of a sweep.
+	Actor      string `json:"actor"`
+	SweepActor string `json:"sweep_actor"`
+	Protocol   int    `json:"protocol"`
+	// BytesOut is nil on findings raised before the hub recorded it.
+	BytesOut *int64 `json:"bytes_out"`
 }
 
 func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedAlert {
@@ -143,6 +158,12 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	if proc != "" {
 		who = proc
 	}
+	actor := actorLabel(ev.Actor)
+	if a.AnomalyType == "LATERAL_PORT_SWEEP" {
+		// One flow's actor says nothing about the others in the window.
+		actor = actorLabel(ev.SweepActor)
+	}
+	out.Actor = actor
 	switch a.AnomalyType {
 	case "LATERAL_PORT_SWEEP":
 		n := len(ev.Targets)
@@ -171,15 +192,178 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "ENDPOINT_SILENT":
 		out.What = fmt.Sprintf("The OmniNull agent on %s stopped reporting", host)
 	case "AGENT_NEW_DESTINATION":
-		out.What = fmt.Sprintf("%s on %s reached %s for the first time", who, host, orUnknown(a.DstIP))
+		name := firstName(ev.SNI, ev.Domain, titleDestination(a.Title))
+		out.What = fmt.Sprintf("%s on %s reached %s for the first time", who, host, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
+		if vendor := vendorOf(proc, name); vendor != "" {
+			// A cause, not an explanation: on a shared CDN address the name
+			// can be any other site's.
+			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)
+		}
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
 	case "AGENT_DNS_BYPASS":
-		out.What = fmt.Sprintf("%s on %s looked up names without going through the router", who, host)
+		out.What = fmt.Sprintf("%s on %s connected straight to %s, so any name lookups it made skipped the router", who, host,
+			resolverPhrase(firstName(ev.SNI, ev.Domain), a.DstIP, a.DstPort))
+		if connectProbe(ev.CommandLine) {
+			// The command line is the process's own to rewrite: only a TCP
+			// flow that carried nothing out is explained by it.
+			if ev.Protocol == 6 && ev.BytesOut != nil && *ev.BytesOut == 0 {
+				out.Cause = "A connection test: the command only opened the connection and sent nothing, so it looked nothing up"
+				out.Expected = "connection test"
+			} else {
+				out.Cause = "Probably a connection test (the command only opens the connection)"
+			}
+		}
 	default:
 		out.What = fmt.Sprintf("%s on %s", strings.TrimSpace(a.Title), host)
 	}
+	if actor != "" && out.Expected == "" {
+		if attributable[a.AnomalyType] {
+			out.Expected = actor
+			out.Cause = actor + " ran it"
+		} else {
+			// Ours, but the kind of thing a hijacked agent would do: the owner
+			// still looks, told who it was.
+			out.Cause = actor + " ran it. It still asks because " + riskyWhy(a.AnomalyType)
+		}
+	}
 	return out
+}
+
+// attributable are the kinds one of our agents or services explains: a sweep
+// of hosts on the local network the way an operator does, credited only when
+// every flow in its window carries that one actor. The egress kinds (a new
+// destination, an upload, a resolver bypass, cloud storage) are what a
+// prompt-injected agent would do, so naming the agent does not explain them;
+// threat-list and beacon matches are never explained.
+var attributable = map[string]bool{"LATERAL_PORT_SWEEP": true}
+
+func riskyWhy(anomalyType string) string {
+	switch anomalyType {
+	case "THREAT_INTEL_MATCH", "C2_BEACONING":
+		return "a threat-list or beacon match is never explained by who ran it"
+	}
+	return "sending data somewhere new is what a hijacked agent would do"
+}
+
+var (
+	actorAgent   = regexp.MustCompile(`^agent:(claude|codex):([0-9a-f]{4,64})?$`)
+	actorService = regexp.MustCompile(`^service:(nightshift|summitflow):([\w@.:-]{1,120}\.(?:service|scope))$`)
+)
+
+// actorLabel turns the endpoint's actor ("agent:claude:fb39ca7b",
+// "service:nightshift:nightshift-check.service") into owner words; anything
+// else is dropped. The agent reads it from the process's own ancestry and
+// cgroup, so it only ever describes that endpoint's own alert. The agent
+// label matches Nightshift's, which swaps in the Aico window title.
+func actorLabel(actor string) string {
+	if m := actorAgent.FindStringSubmatch(actor); m != nil {
+		tool := map[string]string{"claude": "Claude Code", "codex": "Codex"}[m[1]]
+		if m[2] != "" {
+			return "Agent in Aico window " + m[2]
+		}
+		return tool + " session outside Aico"
+	}
+	if m := actorService.FindStringSubmatch(actor); m != nil {
+		return map[string]string{"nightshift": "Nightshift", "summitflow": "SummitFlow"}[m[1]] + " (" + m[2] + ")"
+	}
+	return ""
+}
+
+// probeShape is a shell opening a TCP connection by redirection and reading
+// nothing into it (bash's </dev/tcp/host/port), or nc -z: a reachability
+// test that sends no payload.
+var probeShape = regexp.MustCompile(`^(?:\S*/)?(?:ba|z)?sh -c '?(?:timeout \d+ )?(?:(?:\S*/)?(?:ba)?sh -c )?(?:: |true )?< ?/dev/tcp/[\w.:\[\]-]+/\d+'?$|^(?:\S*/)?(?:nc|ncat|netcat) -[-vw0-9 ]*z[-vw0-9 ]*\s+[\w.:\[\]-]+\s+\d+$`)
+
+func connectProbe(cmd string) bool {
+	return probeShape.MatchString(strings.Join(strings.Fields(cmd), " "))
+}
+
+// vendors are the runtimes' own services: a runtime fetching from its maker
+// is the runtime working, not a new sink.
+var vendors = map[string]struct {
+	name    string
+	domains []string
+}{
+	"codex":  {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
+	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"}},
+}
+
+func vendorOf(proc, name string) string {
+	v, ok := vendors[strings.ToLower(proc)]
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if !ok || name == "" {
+		return ""
+	}
+	for _, d := range v.domains {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return v.name
+		}
+	}
+	return ""
+}
+
+func firstName(v ...string) string {
+	for _, s := range v {
+		s = strings.TrimSpace(s)
+		if s != "" && s != "-" && !strings.ContainsAny(s, " /") {
+			return s
+		}
+	}
+	return ""
+}
+
+// titleDestination reads the destination from an agent-egress title written
+// before the evidence carried the name ("codex reached a destination it never
+// has: x.oaiusercontent.com@cloudflare, inc.").
+func titleDestination(title string) string {
+	_, dest, ok := strings.Cut(title, " it never has: ")
+	if !ok {
+		return ""
+	}
+	dest, _, _ = strings.Cut(dest, "@")
+	if strings.HasPrefix(dest, "owner:") || strings.HasPrefix(dest, "net:") {
+		return ""
+	}
+	return dest
+}
+
+func destPhrase(name, ip string, port uint16, owner string) string {
+	addr := orUnknown(ip)
+	if ip != "" && port != 0 {
+		addr = fmt.Sprintf("%s:%d", ip, port)
+	}
+	parts := addr
+	if name != "" {
+		parts = name + " (" + addr
+		if owner != "" {
+			parts += ", " + owner
+		}
+		parts += ")"
+	} else if owner != "" {
+		parts += " (" + owner + ")"
+	}
+	return parts
+}
+
+// resolverNames are the public DNS services by address, for the sentence.
+var resolverNames = map[string]string{
+	"8.8.8.8": "Google Public DNS", "8.8.4.4": "Google Public DNS",
+	"1.1.1.1": "Cloudflare DNS", "1.0.0.1": "Cloudflare DNS", "1.1.1.2": "Cloudflare DNS", "1.0.0.2": "Cloudflare DNS",
+	"1.1.1.3": "Cloudflare DNS", "1.0.0.3": "Cloudflare DNS",
+	"9.9.9.9": "Quad9", "149.112.112.112": "Quad9", "208.67.222.222": "OpenDNS", "208.67.220.220": "OpenDNS",
+	"94.140.14.14": "AdGuard DNS", "94.140.15.15": "AdGuard DNS",
+}
+
+func resolverPhrase(name, ip string, port uint16) string {
+	svc := resolverNames[ip]
+	if svc == "" && name != "" {
+		svc = name
+	}
+	if svc == "" {
+		svc = "a public DNS service"
+	}
+	return fmt.Sprintf("%s (%s:%d)", svc, orUnknown(ip), port)
 }
 
 // ownSSH: the admin rule failed only because a host was not inventoried
