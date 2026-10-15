@@ -217,10 +217,18 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	default:
 		out.What = fmt.Sprintf("%s on %s", strings.TrimSpace(a.Title), host)
 	}
+	// A sweep that touches a floor port is never explained, by an actor or by
+	// the admin fan-out rule: SMB, RDP, telnet and RPC are how a worm moves.
+	floor := a.AnomalyType == "LATERAL_PORT_SWEEP" && touchesFloorPort(ports, a.DstPort)
+	if floor {
+		out.Expected = ""
+	}
 	if actor != "" && out.Expected == "" {
-		if attributable[a.AnomalyType] {
+		if attributable[a.AnomalyType] && !floor {
 			out.Expected = actor
 			out.Cause = actor + " ran it"
+		} else if floor {
+			out.Cause = actor + " ran it. It still asks because " + floorWhy
 		} else {
 			// Ours, but the kind of thing a hijacked agent would do: the owner
 			// still looks, told who it was.
@@ -237,6 +245,24 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 // prompt-injected agent would do, so naming the agent does not explain them;
 // threat-list and beacon matches are never explained.
 var attributable = map[string]bool{"LATERAL_PORT_SWEEP": true}
+
+// floorPorts are the sensitive ports (SMB, RDP, telnet, RPC) the detector
+// treats as a floor; a lateral sweep touching one always asks.
+var floorPorts = map[int]bool{445: true, 3389: true, 23: true, 135: true}
+
+const floorWhy = "it reached SMB, RDP, telnet or RPC ports, which is how a worm spreads"
+
+func touchesFloorPort(ports []int, dstPort uint16) bool {
+	if floorPorts[int(dstPort)] {
+		return true
+	}
+	for _, p := range ports {
+		if floorPorts[p] {
+			return true
+		}
+	}
+	return false
+}
 
 func riskyWhy(anomalyType string) string {
 	switch anomalyType {

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -164,6 +163,8 @@ type Exclusion struct {
 	Reason      string    `json:"reason"`
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"created_at"`
+	// ExpiresAt is required: an exclusion lapses on its own (see Problem).
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type AnomalyAlert struct {
@@ -674,11 +675,17 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
+		"ALTER TABLE exclusions ADD COLUMN expires_at DATETIME",
 	}
 	for _, m := range migrations {
 		if err := runAdditiveMigration(s.db, m); err != nil {
 			return err
 		}
+	}
+	// Exclusions written before expiry was required get one 90-day term from
+	// the first start that knows about it; new rows always carry their own.
+	if _, err := s.db.Exec("UPDATE exclusions SET expires_at = ? WHERE expires_at IS NULL", time.Now().UTC().Add(ExclusionMaxLifetime)); err != nil {
+		return fmt.Errorf("exclusion expiry migration failed: %w", err)
 	}
 	// Presence "lab" was renamed parked (presence.go); idempotent.
 	if _, err := s.db.Exec("UPDATE endpoints SET presence = 'parked' WHERE presence = 'lab'"); err != nil {
@@ -1789,163 +1796,7 @@ func (s *Store) ListCommProfiles(level string, id string, limit int) ([]CommProf
 	return list, nil
 }
 
-/* CUSTOM EXCLUSIONS (ALLOWLISTS & PINHOLES) */
-
-func (s *Store) CreateExclusion(ex Exclusion) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	actInt := 0
-	if ex.Active {
-		actInt = 1
-	}
-
-	query := `
-	INSERT INTO exclusions (id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name=excluded.name,
-		process_path=excluded.process_path,
-		dst_ip_range=excluded.dst_ip_range,
-		port=excluded.port,
-		protocol=excluded.protocol,
-		reason=excluded.reason,
-		active=excluded.active
-	`
-	_, err := s.db.Exec(
-		query,
-		ex.ID, ex.TenantID, ex.Scope, ex.ScopeValue, ex.Name,
-		ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Protocol, ex.Reason, actInt, ex.CreatedAt,
-	)
-	return err
-}
-
-func (s *Store) ListExclusions(tenantID string) ([]Exclusion, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if tenantID != "" && tenantID != "default" {
-		rows, err = s.db.Query("SELECT id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at FROM exclusions WHERE tenant_id = ? OR scope = 'global' ORDER BY created_at DESC", tenantID)
-	} else {
-		rows, err = s.db.Query("SELECT id, tenant_id, scope, scope_value, name, process_path, dst_ip_range, port, protocol, reason, active, created_at FROM exclusions ORDER BY created_at DESC")
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := make([]Exclusion, 0)
-	for rows.Next() {
-		var ex Exclusion
-		var actInt int
-		if err := rows.Scan(
-			&ex.ID, &ex.TenantID, &ex.Scope, &ex.ScopeValue, &ex.Name,
-			&ex.ProcessPath, &ex.DstIPRange, &ex.Port, &ex.Protocol, &ex.Reason, &actInt, &ex.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		ex.Active = actInt != 0
-		list = append(list, ex)
-	}
-	return list, nil
-}
-
-func (s *Store) DeleteExclusion(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.Exec("DELETE FROM exclusions WHERE id = ?", id)
-	return err
-}
-
-func (s *Store) ToggleExclusion(id string, active bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	actInt := 0
-	if active {
-		actInt = 1
-	}
-	_, err := s.db.Exec("UPDATE exclusions SET active = ? WHERE id = ?", actInt, id)
-	return err
-}
-
-func (s *Store) IsExclusionMatch(ev Event, locationID string) bool {
-	exclusions, err := s.ListExclusions(ev.TenantID)
-	if err != nil || len(exclusions) == 0 {
-		return false
-	}
-
-	for _, ex := range exclusions {
-		if !ex.Active {
-			continue
-		}
-
-		// Check Scope
-		switch ex.Scope {
-		case "client":
-			if ex.ScopeValue != "" && ex.ScopeValue != ev.TenantID {
-				continue
-			}
-		case "location":
-			if ex.ScopeValue != "" && ex.ScopeValue != locationID {
-				continue
-			}
-		case "endpoint":
-			if ex.ScopeValue != "" && ex.ScopeValue != ev.EndpointID {
-				continue
-			}
-		}
-
-		// Check Protocol
-		if ex.Protocol != "any" && ex.Protocol != "" {
-			evProto := "tcp"
-			if ev.Protocol == 17 {
-				evProto = "udp"
-			}
-			if !strings.EqualFold(ex.Protocol, evProto) {
-				continue
-			}
-		}
-
-		// Check Port
-		if ex.Port > 0 && ex.Port != ev.DstPort && ex.Port != ev.SrcPort {
-			continue
-		}
-
-		// Check Process Path
-		if ex.ProcessPath != "*" && ex.ProcessPath != "" {
-			procLower := strings.ToLower(ev.ProcessPath)
-			targetLower := strings.ToLower(ex.ProcessPath)
-			if !strings.Contains(procLower, targetLower) {
-				continue
-			}
-		}
-
-		// Check IP Range / Target
-		if ex.DstIPRange != "*" && ex.DstIPRange != "" {
-			if strings.Contains(ex.DstIPRange, "/") {
-				_, ipNet, err := net.ParseCIDR(ex.DstIPRange)
-				if err == nil {
-					targetIP := net.ParseIP(ev.DstIP)
-					if targetIP == nil || !ipNet.Contains(targetIP) {
-						continue
-					}
-				}
-			} else if ex.DstIPRange != ev.DstIP {
-				continue
-			}
-		}
-
-		return true
-	}
-
-	return false
-}
+/* CUSTOM EXCLUSIONS (ALLOWLISTS & PINHOLES): see exclusions.go */
 
 /* ANOMALY ALERTS */
 

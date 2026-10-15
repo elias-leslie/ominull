@@ -398,15 +398,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		ev.Country = geo.Country
 	}
 
-	// 0.1 Check Active Custom Exclusions (Pinholes & Allowlists)
-	if snapshot != nil {
-		if storage.MatchesExclusion(ev, snapshot.LocationID, snapshot.Exclusions) {
-			return // Traffic matches verified security tool or operational exclusion
-		}
-	} else if e.store.IsExclusionMatch(ev, "") {
-		return // Traffic matches verified security tool or operational exclusion
-	}
-
 	var endpoint storage.Endpoint
 	if snapshot != nil {
 		endpoint = snapshot.Endpoint
@@ -456,6 +447,19 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 			e.autoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
 		}
+	}
+
+	e.checkSensitivePort(ev, geo, endpoint, now)
+
+	// Custom exclusions (pinholes and allowlists) apply only from here on. The
+	// threat-list match above and the sensitive-port check are floors: an
+	// exclusion that silenced them would also hide an auto-isolation.
+	if snapshot != nil {
+		if storage.MatchesExclusion(ev, snapshot.LocationID, snapshot.Exclusions) {
+			return
+		}
+	} else if e.store.IsExclusionMatch(ev, "") {
+		return
 	}
 
 	// The behavioural detectors below are the ones an operator tunes. They read
@@ -1073,8 +1077,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			log.Printf("[!] ANOMALY ALERT [%s]: %s on endpoint %s (%s:%d)", severity, title, alert.EndpointID, ev.DstIP, ev.DstPort)
 		}
 	}
+}
 
-	// 8. Sensitive Port External Exposure
+// checkSensitivePort raises the sensitive-port floor: SMB, RDP, telnet or RPC
+// leaving the network. It runs before exclusions, so none can hide it.
+func (e *Engine) checkSensitivePort(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, now time.Time) {
 	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && (ev.DstPort == 445 || ev.DstPort == 3389 || ev.DstPort == 23 || ev.DstPort == 135) {
 		alertKey := fmt.Sprintf("sensport:%s:%d", ev.EndpointID, ev.DstPort)
 		if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
@@ -1098,7 +1105,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}
-
 }
 
 func isPrivateIP(ipStr string) bool {

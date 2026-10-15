@@ -3,7 +3,6 @@ package storage
 import (
 	"crypto/sha256"
 	"fmt"
-	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -89,77 +88,6 @@ func communicationValues(ev Event, hostname, locationID string) []interface{} {
 		procName, ev.ProcessPath, ev.DstIP, ev.DstPort, proto, direction, country,
 		ev.Timestamp, ev.Timestamp, ev.BytesIn, ev.BytesOut, ev.Domain,
 	}
-}
-
-// MatchesExclusion applies a previously loaded exclusion snapshot. Loading
-// the snapshot is the caller's responsibility; this function has no database
-// side effect and can be used for every event in one batch.
-func MatchesExclusion(ev Event, locationID string, exclusions []Exclusion) bool {
-	for _, ex := range exclusions {
-		if !ex.Active {
-			continue
-		}
-		switch ex.Scope {
-		case "client":
-			if ex.ScopeValue != "" && ex.ScopeValue != ev.TenantID {
-				continue
-			}
-		case "location":
-			if ex.ScopeValue != "" && ex.ScopeValue != locationID {
-				continue
-			}
-		case "endpoint":
-			if ex.ScopeValue != "" && ex.ScopeValue != ev.EndpointID {
-				continue
-			}
-		}
-
-		if ex.Protocol != "any" && ex.Protocol != "" {
-			if strings.ToUpper(ex.Protocol) == "TCP" && ev.Protocol != 6 {
-				continue
-			}
-			if strings.ToUpper(ex.Protocol) == "UDP" && ev.Protocol != 17 {
-				continue
-			}
-			if strings.ToUpper(ex.Protocol) == "ICMP" && ev.Protocol != 1 {
-				continue
-			}
-		}
-
-		if ex.DstIPRange != "*" && ex.DstIPRange != "" {
-			if strings.Contains(ex.DstIPRange, "/") {
-				_, ipNet, err := net.ParseCIDR(ex.DstIPRange)
-				if err == nil {
-					targetIP := net.ParseIP(ev.DstIP)
-					if targetIP != nil && !ipNet.Contains(targetIP) {
-						continue
-					}
-				}
-			} else {
-				if ex.DstIPRange != ev.DstIP {
-					continue
-				}
-			}
-		}
-
-		if ex.Port != 0 && ex.Port != ev.DstPort {
-			continue
-		}
-
-		if ex.ProcessPath != "*" && ex.ProcessPath != "" {
-			pattern := strings.ToLower(strings.ReplaceAll(ex.ProcessPath, "\\", "/"))
-			actual := strings.ToLower(strings.ReplaceAll(ev.ProcessPath, "\\", "/"))
-			matched, err := filepath.Match(pattern, actual)
-			if err != nil || !matched {
-				if !strings.Contains(actual, pattern) && !strings.HasSuffix(actual, pattern) {
-					continue
-				}
-			}
-		}
-
-		return true
-	}
-	return false
 }
 
 // InsertTelemetryBatch is the durable ingestion boundary for the hub. Event

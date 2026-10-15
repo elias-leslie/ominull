@@ -273,6 +273,22 @@ func TestDescribeAlertActor(t *testing.T) {
 			t.Errorf("actor %q accepted: %+v", bad, got)
 		}
 	}
+	// A sweep touching a floor port is never Expected, whoever ran it: an
+	// owner-writable binary can claim to be an agent.
+	for _, ports := range [][]int{{445}, {22, 3389}, {23}, {135, 80}} {
+		ev, _ := json.Marshal(map[string]any{"sweep_actor": "agent:claude:fb39ca7b", "sweep_targets": []map[string]any{
+			{"ip": "192.168.86.10", "ports": ports}, {"ip": "192.168.86.11", "ports": []int{22}}}})
+		got := describeAlert(storage.AnomalyAlert{ID: "f", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
+			ProcessPath: "/home/u/.local/share/claude/versions/9/x", Evidence: string(ev)}, tuning)
+		if got.Expected != "" || !strings.Contains(got.Cause, "It still asks because it reached SMB, RDP") {
+			t.Fatalf("floor-port sweep %v = %+v", ports, got)
+		}
+	}
+	// The same holds without an actor and with the single-target shape.
+	if got := describeAlert(storage.AnomalyAlert{ID: "g", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
+		DstIP: "192.168.86.10", DstPort: 445, Evidence: `{"sweep_actor":"agent:claude:fb39ca7b"}`}, tuning); got.Expected != "" {
+		t.Fatalf("single-target floor sweep = %+v", got)
+	}
 	ti := describeAlert(storage.AnomalyAlert{ID: "t", AnomalyType: "THREAT_INTEL_MATCH", Severity: "HIGH", Hostname: "ws", DstIP: "203.0.113.9",
 		Evidence: `{"actor":"agent:claude:fb39ca7b"}`}, tuning)
 	if ti.Expected != "" || !strings.Contains(ti.Cause, "never explained") {

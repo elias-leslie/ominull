@@ -2805,11 +2805,20 @@ func (s *Server) handleNetworkProfiles(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(profiles)
 }
 
+// handleExclusions lists and writes exclusions. An exclusion silences
+// detection, so writing one is an administrator action, as tuning is: the
+// tenant key ships to every endpoint, and a compromised host must not be able
+// to hide its own traffic. Every write is audited.
 func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Role")
 	tenantID := ""
 	if role == "tenant" {
 		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	if r.Method != http.MethodGet && role != "admin" {
+		writeJSONError(w, http.StatusForbidden, "changing an exclusion is an administrator action")
+		return
 	}
 
 	switch r.Method {
@@ -2825,23 +2834,36 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var ex storage.Exclusion
 		if err := json.NewDecoder(r.Body).Decode(&ex); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid exclusion body")
 			return
 		}
 		if ex.ID == "" {
 			ex.ID = "ex-" + uuid.New().String()[:8]
+		} else if existing, err := s.store.GetExclusion(ex.ID); err == nil {
+			// Saving over an id renews that row; it never moves it to
+			// another tenant.
+			ex.TenantID = existing.TenantID
+		} else if !errors.Is(err, storage.ErrExclusionNotFound) {
+			writeJSONError(w, http.StatusInternalServerError, "could not read the exclusion")
+			return
 		}
 		if ex.TenantID == "" {
 			ex.TenantID = "default"
-		}
-		if role == "tenant" {
-			ex.TenantID = r.Header.Get("X-Tenant-ID")
 		}
 		if ex.Scope == "" {
 			ex.Scope = "global"
 		}
 		ex.Active = true
-		ex.CreatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		ex.CreatedAt = now
+		if problem := ex.Problem(now); problem != "" {
+			writeJSONError(w, http.StatusBadRequest, problem)
+			return
+		}
+		if ex.ExpiresAt.After(now.Add(storage.ExclusionMaxLifetime)) {
+			writeJSONError(w, http.StatusBadRequest, "expires_at can be at most 90 days ahead; renew the exclusion to keep it longer")
+			return
+		}
 
 		if err := s.store.CreateExclusion(ex); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2855,7 +2877,7 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			Username:  r.Header.Get("X-Username"),
 			Action:    "CREATE_EXCLUSION",
 			Resource:  ex.ID,
-			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s:%d)", ex.Name, ex.ProcessPath, ex.Port),
+			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s %s:%d, %s scope %s) until %s: %s", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Scope, ex.ScopeValue, ex.ExpiresAt.Format(time.RFC3339), ex.Reason),
 			IPAddress: clientIP(r),
 			Timestamp: time.Now().UTC(),
 		})
@@ -2867,19 +2889,38 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")
 		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "missing id")
+			return
+		}
+		ex, ok := s.exclusionForWrite(w, id, tenantID)
+		if !ok {
 			return
 		}
 		if err := s.store.DeleteExclusion(id); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"deleted","id":"` + id + `"}`))
+		s.audit(r, "DELETE_EXCLUSION", id, fmt.Sprintf("Deleted exclusion %s (%s %s:%d)", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port))
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// exclusionForWrite loads the row a delete or toggle names, and refuses one
+// outside the caller's tenant as if it did not exist.
+func (s *Server) exclusionForWrite(w http.ResponseWriter, id, tenantID string) (storage.Exclusion, bool) {
+	ex, err := s.store.GetExclusion(id)
+	if errors.Is(err, storage.ErrExclusionNotFound) || (err == nil && tenantID != "" && ex.TenantID != tenantID) {
+		writeJSONError(w, http.StatusNotFound, "exclusion not found")
+		return storage.Exclusion{}, false
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "could not read the exclusion")
+		return storage.Exclusion{}, false
+	}
+	return ex, true
 }
 
 func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
@@ -2887,18 +2928,39 @@ func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Header.Get("X-Role") != "admin" {
+		writeJSONError(w, http.StatusForbidden, "changing an exclusion is an administrator action")
+		return
+	}
 	var req struct {
 		ID     string `json:"id"`
 		Active bool   `json:"active"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid toggle body")
 		return
+	}
+	ex, ok := s.exclusionForWrite(w, req.ID, "")
+	if !ok {
+		return
+	}
+	if req.Active {
+		// Turning an expired or malformed row back on would read as active
+		// in the console while matching nothing; say so instead.
+		if problem := ex.Problem(time.Now().UTC()); problem != "" {
+			writeJSONError(w, http.StatusConflict, "this exclusion cannot be turned on: "+problem+"; save it again with a new expiry")
+			return
+		}
 	}
 	if err := s.store.ToggleExclusion(req.ID, req.Active); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	state := "Disabled"
+	if req.Active {
+		state = "Enabled"
+	}
+	s.audit(r, "TOGGLE_EXCLUSION", req.ID, fmt.Sprintf("%s exclusion %s (%s %s:%d)", state, ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "updated", "id": req.ID, "active": req.Active})
 }

@@ -59,7 +59,7 @@ func TestOperatorWritesPreserveIPv6AuditPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ path, body, action string }{
-		{"/api/v1/exclusions", `{"name":"test exclusion","process_path":"/test/tool"}`, "CREATE_EXCLUSION"},
+		{"/api/v1/exclusions", `{"name":"test exclusion","process_path":"/test/tool","reason":"test","expires_at":"` + time.Now().UTC().Add(time.Hour).Format(time.RFC3339) + `"}`, "CREATE_EXCLUSION"},
 		{"/api/v1/assets/correct", `{"ip":"10.0.4.2","field":"hostname","value":"test-host","reason":"test"}`, "CORRECT_ASSET"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {

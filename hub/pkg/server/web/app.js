@@ -1097,8 +1097,8 @@
         { id: "mq-01", target_ip: "10.0.4.99", target_mac: "B8:27:EB:12:34:56", subnet: "10.0.4.0/24", reason: "Metasploit listener on 4444", active: true, created_at: mins(22) }
       ],
       "/api/v1/exclusions": [
-        { id: "ex-01", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Directory service authentication", process_path: "", dst_ip_range: "10.0.4.10/32", port: 88, protocol: "tcp", reason: "Kerberos to the site directory server", active: true, created_at: "2026-08-20T10:00:00Z" },
-        { id: "ex-02", tenant_id: "corp-default", scope: "location", scope_value: "loc-cloud", name: "Database replication", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip_range: "172.16.10.0/24", port: 5432, protocol: "tcp", reason: "Intra-VPC replication", active: true, created_at: "2026-08-21T10:00:00Z" }
+        { id: "ex-01", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Directory service authentication", process_path: "", dst_ip_range: "10.0.4.10/32", port: 88, protocol: "tcp", reason: "Kerberos to the site directory server", active: true, created_at: "2026-08-20T10:00:00Z", expires_at: mins(-60 * 24 * 30) },
+        { id: "ex-02", tenant_id: "corp-default", scope: "location", scope_value: "loc-cloud", name: "Database replication", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip_range: "172.16.10.0/24", port: 5432, protocol: "tcp", reason: "Intra-VPC replication", active: true, created_at: "2026-08-21T10:00:00Z", expires_at: mins(60) }
       ],
       "/api/v1/threatintel/iocs": [
         { id: "ioc-01", value: "185.220.101.5", type: "ipv4", source: "feodo", threat_type: "c2", confidence: 90, active: true, created_at: mins(180), last_seen_at: mins(12) },
@@ -6361,10 +6361,12 @@
           h("span", { cls: "dim", text: x.process_path || "any" }),
           h("span", { cls: "ip", text: x.dst_ip_range || "any" }),
           h("span", { cls: "ip", text: (x.port ? String(x.port) : "any") + "/" + (x.protocol || "any") }),
-          h("span", { cls: "st", "data-state": x.active ? "ok" : "idle" },
-            icon(x.active ? "g-online" : "g-offline", true),
-            h("span", { text: x.active ? "Active" : "Off" })),
-          h("div", { cls: "row-actions" }, h("button", {
+          h("span", { cls: "st", "data-state": x.active && !exclusionExpired(x) ? "ok" : "idle" },
+            icon(x.active && !exclusionExpired(x) ? "g-online" : "g-offline", true),
+            h("span", { text: exclusionState(x) })),
+          /* An expired exclusion matches nothing and the hub refuses to turn
+             it back on; it is renewed by saving it with a new expiry. */
+          exclusionExpired(x) ? h("span") : h("div", { cls: "row-actions" }, h("button", {
             cls: "btn mini" + (x.active ? "" : " btn-primary"), type: "button",
             text: x.active ? "Disable" : "Enable",
             on: { click: function () { confirmToggleExclusion(x); } }
@@ -6815,6 +6817,19 @@
      and a fresh key, which is a real interruption mid-incident, so the two
      deliberate "Lock Response Authority" buttons ask first. Expiry and idle
      timeout call lockResponseSession() directly and must not prompt. */
+  /* Every exclusion expires (at most 90 days ahead); a missing expiry reads
+     as expired, which is how the hub treats it. */
+  function exclusionExpired(x) {
+    var at = Date.parse(x.expires_at || "");
+    return !(at > Date.now());
+  }
+
+  function exclusionState(x) {
+    if (exclusionExpired(x)) return "Expired";
+    var until = new Date(x.expires_at).toLocaleDateString();
+    return (x.active ? "Active until " : "Off, expires ") + until;
+  }
+
   /* Disabling an exclusion tightens the policy and enabling one loosens it, so
      only the loosening direction is stopped for a sentence. */
   function confirmToggleExclusion(x) {
@@ -6830,7 +6845,8 @@
     if (x.active) { apply(); return; }
     confirmSheet({
       title: "Enable exclusion " + name,
-      consequence: "Traffic matching this exclusion stops being inspected and stops being enforced against, on every endpoint in scope, until somebody turns it off again.",
+      consequence: "Traffic matching this exclusion stops being inspected and stops being enforced against, on every endpoint in scope, until it expires on " +
+        new Date(x.expires_at).toLocaleDateString() + " or somebody turns it off. Threat-list matches and sensitive ports are still reported.",
       detail: (x.process_path || "any process") + " \u2192 " + (x.dst_ip_range || "any destination") +
         " on " + (x.port ? String(x.port) : "any port") + "/" + (x.protocol || "any"),
       confirmLabel: "Enable exclusion",
