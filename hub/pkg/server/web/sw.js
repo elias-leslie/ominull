@@ -5,7 +5,7 @@ const HUB_VERSION = "{{HUB_VERSION}}";
 const CACHE_NAME = "ominull-shell-v" + HUB_VERSION;
 const STATIC_ASSETS = [
   "/app.css?v=" + HUB_VERSION,
-  "/app.js?v=" + HUB_VERSION,
+  "/app.min.js?v=" + HUB_VERSION,
   "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"
 ];
 const OFFLINE_DOCUMENT = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Ominull — Offline</title><main><h1>Ominull is offline</h1><p>Current fleet state and authenticated identity are unavailable. Reconnect to the hub and sign in to continue.</p><a href="/">Try again</a></main></html>';

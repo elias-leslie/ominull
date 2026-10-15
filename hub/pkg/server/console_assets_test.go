@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
@@ -195,7 +197,7 @@ func TestServiceWorkerCacheTracksVersion(t *testing.T) {
 	if m := regexp.MustCompile(`"v?[0-9]+\.[0-9]+\.[0-9]+"`).FindString(sw); m != "" {
 		t.Errorf("sw.js contains a hardcoded version literal %s: use HUB_VERSION", m)
 	}
-	for _, asset := range []string{"app.css", "app.js"} {
+	for _, asset := range []string{"app.css", "app.min.js"} {
 		want := `"/` + asset + `?v=" + HUB_VERSION`
 		if !strings.Contains(sw, want) {
 			t.Errorf("sw.js precache entry for %s must be %s, or it never matches the request the document makes", asset, want)
@@ -333,8 +335,8 @@ func TestConsoleAssetsServeGzip(t *testing.T) {
 	t.Parallel()
 	s := &Server{agentVersion: "9.9.9"}
 	plain := httptest.NewRecorder()
-	s.handleConsoleAsset(plain, httptest.NewRequest("GET", "/app.js", nil))
-	req := httptest.NewRequest("GET", "/app.js", nil)
+	s.handleConsoleAsset(plain, httptest.NewRequest("GET", "/app.min.js", nil))
+	req := httptest.NewRequest("GET", "/app.min.js", nil)
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	zipped := httptest.NewRecorder()
 	s.handleConsoleAsset(zipped, req)
@@ -357,7 +359,7 @@ func TestConsoleAssetsServeGzip(t *testing.T) {
 		t.Errorf("gzip body decodes to %d bytes (identity %d), wire %d", len(decoded), plain.Body.Len(), zipped.Body.Len())
 	}
 
-	again := httptest.NewRequest("GET", "/app.js", nil)
+	again := httptest.NewRequest("GET", "/app.min.js", nil)
 	again.Header.Set("Accept-Encoding", "gzip")
 	again.Header.Set("If-None-Match", zipped.Header().Get("ETag"))
 	revalidated := httptest.NewRecorder()
@@ -372,5 +374,17 @@ func TestConsoleAssetsServeGzip(t *testing.T) {
 	s.handleConsoleAsset(fontRec, font)
 	if fontRec.Header().Get("Content-Encoding") != "" {
 		t.Error("an already-compressed font was gzipped again")
+	}
+}
+
+// TestConsoleMinifiedScriptIsFresh fails when app.js changed but app.min.js,
+// the script the console actually loads, was not rebuilt from it
+// (npm --prefix web-build run build).
+func TestConsoleMinifiedScriptIsFresh(t *testing.T) {
+	t.Parallel()
+	sum := sha256.Sum256([]byte(consoleSource(t, "app.js")))
+	stamp := "/* app.js sha256:" + hex.EncodeToString(sum[:]) + " */"
+	if !strings.Contains(consoleSource(t, "app.min.js"), stamp) {
+		t.Fatal("app.min.js was not built from the current app.js: run npm --prefix web-build run build")
 	}
 }

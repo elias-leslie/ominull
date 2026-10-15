@@ -26,7 +26,7 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 
 	body := w.Body.String()
 	for _, want := range []string{
-		"app.js?v=" + srv.agentVersion,
+		"app.min.js?v=" + srv.agentVersion,
 		"app.css?v=" + srv.agentVersion,
 	} {
 		if !strings.Contains(body, want) {
@@ -47,7 +47,7 @@ func TestTheConsoleAsksForItsAssetsByVersion(t *testing.T) {
 	// And the versioned URLs still resolve: the query string is not part of the
 	// path this handler matches on.
 	for _, assetPath := range []string{
-		"/app.js?v=" + srv.agentVersion,
+		"/app.min.js?v=" + srv.agentVersion,
 		"/vendor/xterm.js?v=" + srv.agentVersion,
 		"/vendor/xterm.css?v=" + srv.agentVersion,
 	} {
@@ -68,11 +68,11 @@ func TestConsoleContainsNoUnimplementedShellControls(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	r := httptest.NewRequest("GET", "/app.js?v="+srv.agentVersion, nil)
+	r := httptest.NewRequest("GET", "/app.min.js?v="+srv.agentVersion, nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
-		t.Fatalf("fetching /app.js returned %d", w.Code)
+		t.Fatalf("fetching /app.min.js returned %d", w.Code)
 	}
 
 	body := w.Body.String()
@@ -88,7 +88,7 @@ func TestConsoleContainsNoUnimplementedShellControls(t *testing.T) {
 
 	for _, forbidden := range forbiddenStrings {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("served app.js contains forbidden unimplemented shell claim: %q", forbidden)
+			t.Errorf("served app.min.js contains forbidden unimplemented shell claim: %q", forbidden)
 		}
 	}
 }
