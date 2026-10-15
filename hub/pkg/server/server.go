@@ -3484,6 +3484,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/console/timeline", s.handleTimelinePage)
 	mux.HandleFunc("/console/terminal", s.handleTerminalPage)
 	mux.HandleFunc("/console/jobs", s.handleJobsPage)
+	mux.HandleFunc("/console/evidence", s.handleEvidencePage)
 	for _, assetPath := range consoleAssetPaths() {
 		mux.HandleFunc(assetPath, s.handleConsoleAsset)
 	}
