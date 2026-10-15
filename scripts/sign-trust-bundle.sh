@@ -35,7 +35,7 @@ esac
 . "${SCRIPT_DIR}/lib/signing-backend.sh"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/ominull-trust-bundle.XXXXXX")"
-trap 'rm -rf "${work}"; rm -f "${verify_pub}"' EXIT
+trap 'signing_end; rm -rf "${work}"; rm -f "${verify_pub}"' EXIT
 
 hub_call() {
     local method="$1" path="$2"
@@ -66,6 +66,7 @@ fi
 
 echo "[*] Signing the trust bundle for tenant ${TENANT}, epoch ${EPOCH}:"
 sed -n '4,6p' "${work}/authority.statement" | sed 's/^/      /'
+signing_begin trust "${TENANT}" "${work}/authority.statement"
 sign_file "${work}/authority.statement" "${work}/bundle.sig"
 if ! verify_sig "${work}/authority.statement" "${work}/bundle.sig"; then
     echo "[-] The bundle signature does not verify against the pinned release key." >&2

@@ -1,7 +1,13 @@
 # Release-key signing backend, sourced by sign-release.sh and
 # sign-trust-bundle.sh (needs ROOT_DIR). See sign-release.sh for the backends.
 # After sourcing: sign_file IN OUT, verify_sig FILE SIG (against the pinned
-# key), and the signing key is known to be the pinned one.
+# key), signing_begin/signing_end, and the signing key is known to be the
+# pinned one.
+#
+# Rotation release (the build pins the incoming key, the fleet still pins the
+# outgoing one): OMINULL_SIGNING_ROTATE_FROM=<git ref of the last release>.
+# The release is then signed with, and verified against, the key pinned at that
+# ref, and the build must pin a different key.
 BACKEND="${OMINULL_SIGNING_BACKEND:-file}"
 KEY="${OMINULL_SIGNING_KEY:-}"
 PASSPHRASE=""
@@ -40,7 +46,7 @@ file)
     ;;
 command)
     if [ -z "${OMINULL_SIGNING_COMMAND:-}" ] || [ ! -x "${OMINULL_SIGNING_COMMAND}" ]; then
-        echo "[-] Set OMINULL_SIGNING_COMMAND to an executable signer (pubkey | sign FILE)." >&2
+        echo "[-] Set OMINULL_SIGNING_COMMAND to an executable signer (pubkey | sign FILE; optional begin/end)." >&2
         exit 1
     fi
     ;;
@@ -80,8 +86,28 @@ sign_file() {
 # The pinned public key is the contract. Signing with a key the fleet will not
 # recognise produces packages every agent rejects, which is a fleet-wide outage
 # discovered one endpoint at a time. Catch it here instead.
-embedded="$(sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' "${ROOT_DIR}/agent/include/release_key.h" \
-    | sed -E 's/^[[:space:]]*"//; s/\\n".*$//')"
+pinned_pem() {
+    sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' | sed -E 's/^[[:space:]]*"//; s/\\n".*$//'
+}
+embedded="$(pinned_pem < "${ROOT_DIR}/agent/include/release_key.h")"
+# The hub verifies trust bundles with its own copy (response.ReleasePublicKeyPEM).
+# A rotation that changes one and not the other leaves the hub refusing every
+# bundle the new key signs.
+hub_pem="$(sed -n '/^const ReleasePublicKeyPEM = `/,/^-----END PUBLIC KEY-----/p' "${ROOT_DIR}/hub/pkg/response/trust.go" \
+    | sed 's/^const ReleasePublicKeyPEM = `//')"
+if [ "${hub_pem}" != "${embedded}" ]; then
+    echo "[-] hub/pkg/response/trust.go ReleasePublicKeyPEM differs from agent/include/release_key.h; pin the same key in both." >&2
+    exit 1
+fi
+if [ -n "${OMINULL_SIGNING_ROTATE_FROM:-}" ]; then
+    outgoing="$(git -C "${ROOT_DIR}" show "${OMINULL_SIGNING_ROTATE_FROM}:agent/include/release_key.h" | pinned_pem)"
+    if [ -z "${outgoing}" ] || [ "${outgoing}" = "${embedded}" ]; then
+        echo "[-] OMINULL_SIGNING_ROTATE_FROM=${OMINULL_SIGNING_ROTATE_FROM} pins no key or the same key as this build; not a rotation." >&2
+        exit 1
+    fi
+    echo "[*] Rotation release: signing with the key pinned at ${OMINULL_SIGNING_ROTATE_FROM}; this build pins the new key." >&2
+    embedded="${outgoing}"
+fi
 signing_pub="$(signing_pubkey || true)"
 if [ -z "${signing_pub}" ]; then
     echo "[-] Could not read the public half of the signing key (wrong passphrase?)." >&2
@@ -93,10 +119,30 @@ if [ "${embedded}" != "${signing_pub}" ]; then
     exit 1
 fi
 verify_pub="$(mktemp "${TMPDIR:-/tmp}/ominull-release-pub.XXXXXX")"
-trap 'rm -f "${verify_pub}"' EXIT
+trap 'signing_end; rm -f "${verify_pub}"' EXIT
 printf '%s\n' "${embedded}" > "${verify_pub}"
 
 
 verify_sig() {
     openssl dgst -sha256 -verify "${verify_pub}" -signature "$2" "$1" >/dev/null 2>&1
+}
+
+# A command backend may put a whole run behind one approval (Nightshift's
+# nightshift-release-signer: the owner approves once with a passkey):
+#   CMD begin release VERSION NAME[=SHA256]...   or   CMD begin trust TENANT FILE
+# prints a session token that later "CMD sign" calls get as
+# OMINULL_SIGNING_SESSION; "CMD end" closes it. A signer without sessions exits
+# 64 on begin and is called per file as before. The file backend needs none.
+signing_begin() {
+    [ "${BACKEND}" = command ] || return 0
+    local token rc=0
+    token="$("${OMINULL_SIGNING_COMMAND}" begin "$@")" || rc=$?
+    case "${rc}" in
+    0) OMINULL_SIGNING_SESSION="${token}"; export OMINULL_SIGNING_SESSION ;;
+    64) ;;
+    *) echo "[-] The signer opened no signing session (not approved, or it failed)." >&2; exit 1 ;;
+    esac
+}
+signing_end() {
+    [ -z "${OMINULL_SIGNING_SESSION:-}" ] || "${OMINULL_SIGNING_COMMAND}" end >/dev/null 2>&1 || true
 }

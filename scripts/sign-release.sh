@@ -11,9 +11,11 @@
 #            writes one); the passphrase is asked once on the terminal, or read
 #            from OMINULL_SIGNING_PASSFILE, and reaches openssl only through a
 #            pipe, never argv, the environment or a file.
-#   command  OMINULL_SIGNING_COMMAND is an executable for a token or HSM:
-#            "CMD pubkey" prints the PEM public key, "CMD sign FILE" prints the
-#            DER ECDSA-SHA256 signature over FILE. The key never leaves it.
+#   command  OMINULL_SIGNING_COMMAND is an executable for a token, HSM or an
+#            approval signer: "CMD pubkey" prints the PEM public key, "CMD sign
+#            FILE" prints the DER ECDSA-SHA256 signature over FILE. The key never
+#            leaves it. Nightshift's nightshift-release-signer asks the owner
+#            once for the whole release (begin/end in lib/signing-backend.sh).
 # The private key is never in this repo, on the hub, or in CI.
 set -euo pipefail
 
@@ -31,6 +33,13 @@ packages=("${agent_deb}" "${hub_deb}" "${windows_msi}")
 for pkg in "${packages[@]}"; do
     [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
 done
+
+# One approval for the whole release: the endpoint packages by digest, the hub
+# by name (it is rebuilt below with the endpoint signatures inside).
+signing_begin release "${VERSION}" \
+    "$(basename "${agent_deb}")=$(sha256sum "${agent_deb}" | awk '{print $1}')" \
+    "$(basename "${windows_msi}")=$(sha256sum "${windows_msi}" | awk '{print $1}')" \
+    "$(basename "${hub_deb}")"
 
 sign_package() {
     local pkg="$1" name sha statement
@@ -68,7 +77,7 @@ sign_package "${windows_msi}"
 # survives hub package purge so artifact availability follows the data-retention
 # contract, while the signed source remains part of the release package.
 bundle_dir="$(mktemp -d "${TMPDIR:-/tmp}/ominull-hub-bundle.XXXXXX")"
-trap 'find "${bundle_dir}" -depth -delete; rm -f "${verify_pub}"' EXIT
+trap 'signing_end; find "${bundle_dir}" -depth -delete; rm -f "${verify_pub}"' EXIT
 dpkg-deb --raw-extract "${hub_deb}" "${bundle_dir}/root"
 install -d -m 0755 "${bundle_dir}/root/usr/share/ominull/packages"
 for artifact in "${agent_deb}" "${agent_deb}.sig" "${agent_deb}.sha256" "${agent_deb}.release.sig" \
