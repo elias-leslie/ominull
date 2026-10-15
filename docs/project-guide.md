@@ -349,6 +349,15 @@ first, rolls retained Linux and Windows canaries, waits for native package
 provenance, then rolls the rest. Production credentials and topology come from
 the operations vault or environment and never from tracked files.
 
+With `--canary`, the owner approves the release once. The approval covers
+every endpoint; the hub queues only the canaries and holds the rest
+(`agent_rollouts`). Once each canary runs the version, has a clean provenance
+check and was seen in the last two minutes, the hub queues the held
+endpoints. A canary that fails the provenance check, or is not healthy within
+30 minutes, halts the rollout and nothing more is queued. `update-status`
+lists the last rollouts under `staged_rollouts`. A hub without staged rollouts
+gets the older two-approval sequence.
+
 Official protocol and provider references:
 
 - [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)

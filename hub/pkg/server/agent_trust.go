@@ -370,9 +370,16 @@ func (s *Server) reconcilePendingGrantsIssuedBefore(cutoff int64, now time.Time)
 	if err != nil || len(list) == 0 {
 		return
 	}
+	held, err := s.store.HeldRolloutGrants()
+	if err != nil {
+		return // settle nothing rather than withdraw a staged rollout's grants
+	}
 	var release, withdraw []string
 	expired := 0
 	for _, g := range list {
+		if held[g.GrantID] && g.ExpiresAt > now.Unix() {
+			continue // a staged rollout releases or withdraws it
+		}
 		if g.ExpiresAt <= now.Unix() {
 			// Too late to enforce: never released. If the hub recorded the
 			// action, hub and agent now disagree, which the fleet trust view

@@ -709,6 +709,7 @@ func (s *Server) Start(addr string) error {
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
 	go s.reconcilePendingGrantsLoop()
+	go s.agentRolloutLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
@@ -1357,22 +1358,8 @@ func (s *Server) agentPackageURL(r *http.Request, version, pkg string) string {
 // means an unsigned release shows up as "not offered" in one place instead of
 // as an install failure on every endpoint.
 func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (map[string]string, bool) {
-	name := agentPackageName(version, pkg)
-	if name == "" || !downloadArtifact.MatchString(name) {
-		return nil, false
-	}
-	if _, err := os.Stat(filepath.Join(s.binaryDir, name)); err != nil {
-		return nil, false
-	}
-	raw, err := os.ReadFile(filepath.Join(s.binaryDir, name+".sha256"))
-	if err != nil {
-		return nil, false
-	}
-	fields := strings.Fields(string(raw))
-	if len(fields) == 0 || len(fields[0]) != 64 {
-		return nil, false
-	}
-	if _, err := os.Stat(filepath.Join(s.binaryDir, name+".sig")); err != nil {
+	name, sha, ok := s.signedAgentPackage(version, pkg)
+	if !ok {
 		return nil, false
 	}
 	base := s.downloadBase(r)
@@ -1382,7 +1369,7 @@ func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (ma
 		"package_identifier": packageIdentifierForKind(pkg),
 		"url":                base + "/download/" + name,
 		"signature":          base + "/download/" + name + ".sig",
-		"sha256":             fields[0],
+		"sha256":             sha,
 	}
 	// The release statement signs package name, version and digest together,
 	// so an agent can refuse an older signed package offered as an update.
@@ -1391,6 +1378,30 @@ func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (ma
 		desc["release_sig"] = base64.StdEncoding.EncodeToString(sig)
 	}
 	return desc, true
+}
+
+// signedAgentPackage finds a published package with its digest and signature
+// beside it, returning its name and digest.
+func (s *Server) signedAgentPackage(version, pkg string) (string, string, bool) {
+	name := agentPackageName(version, pkg)
+	if name == "" || !downloadArtifact.MatchString(name) {
+		return "", "", false
+	}
+	if _, err := os.Stat(filepath.Join(s.binaryDir, name)); err != nil {
+		return "", "", false
+	}
+	raw, err := os.ReadFile(filepath.Join(s.binaryDir, name+".sha256"))
+	if err != nil {
+		return "", "", false
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 || len(fields[0]) != 64 {
+		return "", "", false
+	}
+	if _, err := os.Stat(filepath.Join(s.binaryDir, name+".sig")); err != nil {
+		return "", "", false
+	}
+	return name, fields[0], true
 }
 
 func packageIdentifierForKind(pkg string) string {
@@ -1517,6 +1528,7 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		EndpointIDs []string `json:"endpoint_ids"`
 		All         bool     `json:"all"`
 		Version     string   `json:"version"`
+		Canary      []string `json:"canary"` // agent_rollout.go
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1540,50 +1552,24 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"refusing to downgrade: hub bundle ships agent `+s.agentVersion+`"}`, http.StatusBadRequest)
 		return
 	}
+	canary := sortedTargets(req.Canary)
+	if len(canary) > 0 {
+		s.stageAgentRollout(w, r, version, req.All, req.EndpointIDs, canary)
+		return
+	}
 	if req.All {
 		if err := s.store.SetSetting("desired_agent_version", version); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
-
-	endpoints, err := s.store.ListEndpoints("")
+	s.supersedeAgentRollouts(r, version)
+	scheduled, unsupported, err := s.scheduleAgentUpdates(version, func(ep storage.Endpoint) bool {
+		return req.All || contains(req.EndpointIDs, ep.ID)
+	}, grantedTargets(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	granted := grantedTargets(r)
-	var scheduled, unsupported []map[string]string
-	for _, ep := range endpoints {
-		if granted != nil && !contains(granted, ep.ID) {
-			continue // only what the owner approved, even for "all"
-		}
-		if !req.All && !contains(req.EndpointIDs, ep.ID) {
-			continue
-		}
-		if ep.Status == "retired" {
-			continue
-		}
-		if compareVersions(ep.DriverVersion, version) >= 0 {
-			continue // already up to date
-		}
-		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability)
-		if !selfInstallable {
-			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "endpoint reports no supported native package capability"})
-			continue
-		}
-		// Refuse to queue a job for a release the endpoint could never install.
-		// The agent verifies the signature itself and would reject it, so an
-		// unsigned release must surface here as one clear answer rather than as
-		// a queued job that quietly never completes.
-		if _, signed := s.agentUpdateDescriptor(r, version, pkg); !signed {
-			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "no signed " + agentPackageName(version, pkg) + " on the hub; sign the release with scripts/sign-release.sh and redeploy"})
-			continue
-		}
-		if err := s.store.RequestAgentUpdate(ep.ID, version); err == nil {
-			scheduled = append(scheduled, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "from": ep.DriverVersion, "to": version})
-		}
 	}
 
 	scope := "the named endpoints"
@@ -1655,8 +1641,13 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 		}
 	}
 	pending, _ := s.store.ListPendingAgentUpdates()
+	rollouts, err := s.store.AgentRollouts(false, 5)
+	if err != nil {
+		rollouts = []storage.AgentRollout{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"staged_rollouts":   rollouts,
 		"latest_version":    latest,
 		"endpoints":         observed,
 		"outdated":          outdated,

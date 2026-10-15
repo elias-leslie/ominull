@@ -24,7 +24,8 @@ usage() {
 
 Options:
   --version X.Y.Z  release version (otherwise use VERSION)
-  --canary IDS     comma-separated endpoint IDs; roll these, verify, then roll all
+  --canary IDS     comma-separated endpoint IDs; one approval, the hub rolls these,
+                   then the rest once they are healthy (halts if not)
   --skip-tests     skip local quality tests (never skips signing or live checks)
   --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
   --agents-only    skip build/deploy; roll agents against an already-live hub
@@ -162,8 +163,13 @@ target_json() {
 }
 
 queue() {
-    local ids="$1" body
-    if [ -n "${ids}" ]; then
+    local ids="$1" canary="${2:-}" body
+    if [ -n "${canary}" ]; then
+        # One approval for the release: the hub queues the canaries and holds
+        # the rest until the canaries are healthy (or halts the rollout).
+        body="$(jq -cn --arg version "${VERSION}" --argjson canary "$(target_json "${canary}")" \
+            '{all:true,version:$version,canary:$canary}')"
+    elif [ -n "${ids}" ]; then
         body="$(jq -cn --arg version "${VERSION}" --argjson ids "$(target_json "${ids}")" \
             '{endpoint_ids:$ids,version:$version}')"
     else
@@ -276,7 +282,49 @@ if [ "${WAIT_FOR_AGENTS}" -eq 1 ] && [ "${COHORT_IDS_JSON}" = "[]" ]; then
     exit 1
 fi
 
+# wait_rollout follows the staged rollout the hub created (by id) until it
+# releases the fleet or halts. The hub judges the canaries itself.
+wait_rollout() {
+    local id="$1" status state detail
+    echo "[*] Waiting for the hub to release the fleet after the canaries."
+    # The hub halts a rollout whose canaries are not healthy within 30 minutes.
+    for _ in $(seq 1 420); do
+        if ! status="$(api GET /api/v1/agents/update-status 2>/dev/null)"; then
+            sleep 5
+            continue
+        fi
+        state="$(printf '%s' "${status}" | jq -r --arg id "${id}" '[.staged_rollouts[]? | select(.id == $id)][0].state // ""')"
+        detail="$(printf '%s' "${status}" | jq -r --arg id "${id}" '[.staged_rollouts[]? | select(.id == $id)][0].detail // ""')"
+        case "${state}" in
+            released) echo "[+] Hub released the fleet: ${detail}"; return 0 ;;
+            halted|superseded) echo "[-] Rollout ${state}: ${detail}" >&2; return 1 ;;
+        esac
+        sleep 5
+    done
+    echo "[-] The hub did not release or halt the rollout within 35 minutes." >&2
+    return 1
+}
+
+if [ -n "${CANARY_IDS}" ] && printf '%s' "${INITIAL_STATUS}" | jq -e 'has("staged_rollouts")' >/dev/null; then
+    STAGED="$(queue "" "${CANARY_IDS}")"
+    printf '%s' "${STAGED}" | jq -c '{desired_version,scheduled_count: ((.scheduled // []) | length),rollout: .rollout.id}'
+    ROLLOUT_ID="$(printf '%s' "${STAGED}" | jq -r '.rollout.id // ""')"
+    if [ -z "${ROLLOUT_ID}" ]; then
+        echo "[-] The hub did not return a staged rollout." >&2
+        exit 1
+    fi
+    if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
+        echo "[+] Staged rollout ${ROLLOUT_ID} queued: the hub releases the fleet once the canaries are healthy."
+        exit 0
+    fi
+    wait_rollout "${ROLLOUT_ID}"
+    wait_for ""
+    exit 0
+fi
+
 if [ -n "${CANARY_IDS}" ]; then
+    # A hub without staged rollouts would ignore the canary field and update
+    # everything at once, so it gets two approvals instead.
     queue_report "${CANARY_IDS}"
     if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
     if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then

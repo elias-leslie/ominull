@@ -267,13 +267,29 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				if err := s.store.DeleteEnforcementGrants(kept); err != nil {
 					log.Printf("[!] could not withdraw %d pending grant(s) of a failed %s: %v", len(kept), plan.Action, err)
 				}
-			} else if err := s.store.MarkGrantsDeliverable(kept); err != nil {
+			} else if err := s.store.MarkGrantsDeliverable(s.withoutHeldGrants(kept)); err != nil {
 				// The action ran; agents have not been told. Visible in the
 				// fleet trust view (hub and agent disagree) and in the audit.
 				s.audit(r, "OWNER_APPROVAL_UNDELIVERED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s under approval %s ran, but its grants were not released to agents: %v", plan.Action, id, err))
 			}
 		}
 	}
+}
+
+// withoutHeldGrants drops grants a staged rollout keeps pending until its
+// canaries are healthy.
+func (s *Server) withoutHeldGrants(ids []string) []string {
+	held, err := s.store.HeldRolloutGrants()
+	if err != nil {
+		return nil // deliver nothing now; the reconcile loop settles them
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !held[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // statusRecorder remembers the status a handler wrote.
@@ -545,6 +561,7 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		EndpointIDs []string `json:"endpoint_ids"`
 		All         bool     `json:"all"`
 		Version     string   `json:"version"`
+		Canary      []string `json:"canary"`
 	}
 	if !decodeInto(w, body, &req) {
 		return nil, false
@@ -581,8 +598,17 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 	if req.All {
 		scope = "the whole fleet (" + scope + ")"
 	}
+	summary := "Install agent " + version + " on " + scope
+	if canary := sortedTargets(req.Canary); len(canary) > 0 {
+		if p := canaryProblem(canary, sortedTargets(targets)); p != "" {
+			writeJSONError(w, http.StatusBadRequest, p)
+			return nil, false
+		}
+		summary += fmt.Sprintf(": %s first; the other %d approved endpoint(s) only once every canary runs %s with a clean provenance check, otherwise the rollout halts (within %d minutes)",
+			s.endpointLabels(canary), len(sortedTargets(targets))-len(canary), version, int(rolloutCanaryDeadline/time.Minute))
+	}
 	return &approvalPlan{Kind: responseauth.ActionKindAgentUpdate, Action: "Update agents",
-		Summary: "Install agent " + version + " on " + scope, Targets: targets, Body: newBody}, true
+		Summary: summary, Targets: targets, Body: newBody}, true
 }
 
 func (s *Server) resolveMesh(quarantine bool) approvalResolver {

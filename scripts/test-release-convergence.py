@@ -13,8 +13,8 @@ import unittest
 VERSION = "1.2.0"
 
 
-def status(online=("required",), offline=("sleeping",), outdated=(), issues=()):
-    return {
+def status(online=("required",), offline=("sleeping",), outdated=(), issues=(), staged=None):
+    response = {
         "latest_version": VERSION,
         "endpoints": [
             {"endpoint_id": identifier, "driver_version": "1.1.0" if identifier in outdated else VERSION, "status": state}
@@ -26,6 +26,12 @@ def status(online=("required",), offline=("sleeping",), outdated=(), issues=()):
         "retired": None,
         "pending": [{"endpoint_id": identifier} for identifier in outdated] or None,
     }
+    if staged is not None:
+        # A hub that stages rollouts lists them; state "" means none yet.
+        response["staged_rollouts"] = [
+            {"id": "ro_other", "version": VERSION, "state": "halted", "detail": "an older rollout"},
+        ] + ([{"id": "ro_1", "version": VERSION, "state": staged, "detail": "fixture " + staged}] if staged else [])
+    return response
 
 
 class ReleaseConvergence(unittest.TestCase):
@@ -63,7 +69,10 @@ class ReleaseConvergence(unittest.TestCase):
                 requests.append(("POST", body))
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps({"desired_version": VERSION, "scheduled": [], "unsupported": []}).encode())
+                reply: dict[str, object] = {"desired_version": VERSION, "scheduled": [], "unsupported": []}
+                if "canary" in body:
+                    reply["rollout"] = {"id": "ro_1"}
+                self.wfile.write(json.dumps(reply).encode())
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         # shutdown() waits for the serve loop to poll; the default 0.5 s poll
@@ -216,6 +225,30 @@ class ReleaseConvergence(unittest.TestCase):
         self.assertIn("canary endpoints converged", result.stdout)
         self.assertIn("online cohort converged", result.stdout)
         self.assertEqual(len([method for method, _ in requests if method == "POST"]), 2)
+
+    def test_staged_rollout_needs_one_approval(self):
+        result, requests = self.release([
+            status(outdated=("required",), staged=""), status(staged="canary"), status(staged="released"),
+        ], canary="required", approval=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Hub released the fleet", result.stdout)
+        self.assertEqual(self.approvals.count("held"), 1)
+        self.assertEqual([r for r in requests if r[0] == "POST"],
+                         [("POST", {"all": True, "version": VERSION, "canary": ["required"]})])
+
+    def test_halted_staged_rollout_fails(self):
+        result, requests = self.release([
+            status(outdated=("required",), staged=""), status(staged="halted"),
+        ], canary="required")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Rollout halted", result.stderr)
+        self.assertEqual(len([r for r in requests if r[0] == "POST"]), 1)
+
+    def test_staged_no_wait_queues_once(self):
+        result, requests = self.release([status(staged="")], canary="required", wait=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Staged rollout ro_1 queued", result.stdout)
+        self.assertEqual(len([r for r in requests if r[0] == "POST"]), 1)
 
     def test_absent_canary_prevents_any_queue(self):
         result, requests = self.release([status()], canary="absent")
