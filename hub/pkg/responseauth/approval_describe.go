@@ -205,8 +205,9 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 			*b.Revision, targets[0], cleanText(b.Reason, 120)), nil
 	case "/api/v1/agents/update":
 		var b struct {
-			Version string `json:"version"`
-			All     bool   `json:"all"`
+			Version string   `json:"version"`
+			All     bool     `json:"all"`
+			Canary  []string `json:"canary"`
 		}
 		if err := decodeJSON(p.Body, &b); err != nil || strings.TrimSpace(b.Version) == "" {
 			return "", "", errors.New("agent update body must name the version")
@@ -214,6 +215,21 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		s := fmt.Sprintf("Install agent %s on %d host(s): %s", cleanText(b.Version, 40), n, list)
 		if b.All {
 			s += " (and make it the fleet's desired version)"
+		}
+		// A staged rollout: the hub installs on the canaries first and holds
+		// the rest until they run the version healthily, else halts.
+		if len(b.Canary) > 0 {
+			inTargets := map[string]bool{}
+			for _, t := range targets {
+				inTargets[t] = true
+			}
+			for _, c := range b.Canary {
+				if !inTargets[c] {
+					return "", "", errors.New("agent update canary is not one of its targets")
+				}
+			}
+			s += fmt.Sprintf(". Staged: %s first; the other %d only once the canaries run it healthily, otherwise the rollout halts",
+				strings.Join(b.Canary, ", "), n-len(b.Canary))
 		}
 		return spec.action, s, nil
 	case "/api/v1/endpoints/capabilities":
