@@ -33,6 +33,24 @@ curl() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['ok', 'ok', 'ok'])
 
+    def test_admin_key_scripts_refuse_plain_http(self):
+        # The trust-bundle signer and the canary sync send the admin key: never
+        # as plain HTTP on the LAN, and always with the hub CA over HTTPS.
+        here = Path(__file__).parent
+        for name in ['sign-trust-bundle.sh', 'sync-data-canaries.sh']:
+            with self.subTest(name=name):
+                source = here.joinpath(name).read_text()
+                self.assertNotIn('X-API-Key', source)
+                self.assertIn('hub_curl_config', source)
+                self.assertNotIn('http://', source)
+                env = {'PATH': '/usr/bin:/bin', 'OMINULL_HUB_URL': 'http://192.0.2.1:9999', 'OMINULL_ADMIN_KEY': 'k',
+                       'OMINULL_ADMIN_KEY_FILE': '/dev/null', 'OMINULL_TRUST_STATEMENT_CMD': 'exit 90',
+                       'NIGHTSHIFT_CMD': '/bin/false'}
+                result = subprocess.run(['bash', str(here / name), '--dry-run' if name.startswith('sync') else 'default'],
+                                        env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('Refusing to send the hub key to http://192.0.2.1:9999', result.stderr)
+
     def test_convergence_requires_observed_requested_endpoints(self):
         source = Path(__file__).with_name('release.sh').read_text()
         wait_match = re.search(r'^wait_for\(\) \{.*?^\}', source, re.M | re.S)

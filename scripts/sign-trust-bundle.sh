@@ -3,7 +3,7 @@
 # hub. Agents from 1.8.59 pin the response authority's three public keys only
 # with this signature, so a hub cannot make an agent pin keys of its own.
 #
-#   OMINULL_HUB_URL=http://hub:9999 OMINULL_ADMIN_KEY=... \
+#   OMINULL_HUB_URL=https://HUB:9443 OMINULL_ADMIN_KEY=... \
 #   OMINULL_TRUST_STATEMENT_CMD='ssh root@pve pct exec 150 -- /opt/ominull/bin/ominull-response-authority -trust-statement default' \
 #   OMINULL_SIGNING_KEY=/media/.../ominull-release-signing.enc.pem \
 #   scripts/sign-trust-bundle.sh [TENANT]
@@ -31,6 +31,11 @@ case "${TENANT}" in
 *[!A-Za-z0-9._-]* | "") echo "[-] Invalid tenant ${TENANT}." >&2; exit 1 ;;
 esac
 
+# The admin key travels only over TLS checked against the hub CA.
+# shellcheck source=scripts/owner-approval.sh
+. "${SCRIPT_DIR}/owner-approval.sh"
+hub_url_safe "${HUB_URL}" || exit 1
+
 # shellcheck source=lib/signing-backend.sh
 . "${SCRIPT_DIR}/lib/signing-backend.sh"
 
@@ -41,7 +46,7 @@ hub_call() {
     local method="$1" path="$2"
     shift 2
     curl -fsS --connect-timeout 5 --max-time 20 -X "${method}" \
-        -K <(printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY}") "$@" "${HUB_URL}${path}"
+        -K <(hub_curl_config "${OMINULL_ADMIN_KEY}" "${HUB_URL}") "$@" "${HUB_URL}${path}"
 }
 
 hub_call GET "/api/v1/trust/statement?tenant=${TENANT}" > "${work}/hub.json"

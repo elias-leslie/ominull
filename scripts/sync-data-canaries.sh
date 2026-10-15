@@ -6,7 +6,8 @@
 # endpoint is synced with an empty list (checked, holds none). The hub keeps
 # scanning off for an endpoint until it has been synced at least once.
 #
-#   OMINULL_HUB_URL      hub operator API base, e.g. http://10.0.0.58:9999 (required)
+#   OMINULL_HUB_URL      hub operator API base, e.g. https://10.0.0.58:9443 (required;
+#                        the key travels only over TLS checked against OMINULL_HUB_CA)
 #   OMINULL_ADMIN_KEY_FILE  file whose first line is the admin key (required)
 #   --endpoint ID        the workstation's endpoint id (default: matched by hostname)
 #   --dry-run            print endpoint ids and path counts, send nothing
@@ -18,6 +19,9 @@ set +x
 
 HUB_URL="${OMINULL_HUB_URL:?set OMINULL_HUB_URL to the hub operator API base}"
 KEY_FILE="${OMINULL_ADMIN_KEY_FILE:?set OMINULL_ADMIN_KEY_FILE to the admin key file}"
+# shellcheck source=scripts/owner-approval.sh
+. "$(dirname "${BASH_SOURCE[0]}")/owner-approval.sh"
+hub_url_safe "$HUB_URL" || exit 1
 NIGHTSHIFT="${NIGHTSHIFT_CMD:-nightshift}"
 ENDPOINT=""
 DRY=0
@@ -32,7 +36,7 @@ done
 hdr() {
   local ominull_admin_key
   IFS= read -r ominull_admin_key < "$KEY_FILE"
-  printf 'header = "X-API-Key: %s"\n' "$ominull_admin_key"
+  hub_curl_config "$ominull_admin_key" "$HUB_URL"
 }
 
 work="$(mktemp -d)"
