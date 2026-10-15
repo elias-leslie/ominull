@@ -655,6 +655,11 @@ func (s *Store) initSchema() error {
 		// stored here because the agent now reads its isolation state from its
 		// own heartbeat reply.
 		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
+		// Each isolation gets an id when it starts, so the trust fabric
+		// snapshot taken then and every rule change made during it can be
+		// told apart from the next isolation's (trust_fabric.go).
+		"ALTER TABLE endpoints ADD COLUMN isolation_id TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN isolation_mode TEXT DEFAULT ''",
 		"ALTER TABLE endpoints ADD COLUMN presence TEXT DEFAULT 'always_on'",
 		"ALTER TABLE endpoints ADD COLUMN collector_health TEXT DEFAULT '[]'",
 		"ALTER TABLE endpoints ADD COLUMN response_capabilities TEXT DEFAULT ''",
@@ -1078,8 +1083,63 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []stri
 	if isIsolated { // a monitor-only endpoint is refused here, whoever asks (response_profile.go)
 		return s.isolateOneLocked(id, strings.Join(allowIPs, ","))
 	}
-	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = 0, isolation_allow_ips = '' WHERE id = ?", id)
+	_, err := s.db.Exec("UPDATE endpoints SET is_isolated = 0, isolation_allow_ips = '', "+isolationClearSQL+" WHERE id = ?", id)
 	return err
+}
+
+// isolationStartSQL keeps the id of an isolation already in force (a changed
+// allow list is the same incident) and starts a new one otherwise.
+const isolationStartSQL = "isolation_id = CASE WHEN is_isolated = 1 AND COALESCE(isolation_id, '') != '' THEN isolation_id ELSE lower(hex(randomblob(8))) END, " +
+	"isolation_mode = CASE WHEN is_isolated = 1 AND COALESCE(isolation_mode, '') != '' THEN isolation_mode ELSE 'full' END"
+
+const isolationClearSQL = "isolation_id = '', isolation_mode = ''"
+
+// IsolationRecord is the isolation an endpoint is under.
+type IsolationRecord struct {
+	EndpointID string
+	TenantID   string
+	LocationID string
+	Role       string
+	ID         string
+	Mode       string
+	AllowIPs   []string
+}
+
+// SetIsolationMode records how the current isolation was chosen: full (no
+// exceptions from the trust fabric) or selective (the fabric's allow list).
+func (s *Store) SetIsolationMode(id, mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE endpoints SET isolation_mode = ? WHERE id = ? AND is_isolated = 1", mode, id)
+	return err
+}
+
+// IsolatedEndpoints lists every endpoint under isolation now.
+func (s *Store) IsolatedEndpoints() ([]IsolationRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT id, COALESCE(tenant_id, ''), COALESCE(location_id, ''), COALESCE(role_tag, ''),
+		COALESCE(isolation_id, ''), COALESCE(isolation_mode, ''), COALESCE(isolation_allow_ips, '')
+		FROM endpoints WHERE is_isolated = 1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IsolationRecord
+	for rows.Next() {
+		var r IsolationRecord
+		var allow string
+		if err := rows.Scan(&r.EndpointID, &r.TenantID, &r.LocationID, &r.Role, &r.ID, &r.Mode, &allow); err != nil {
+			return nil, err
+		}
+		for _, part := range strings.Split(allow, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				r.AllowIPs = append(r.AllowIPs, part)
+			}
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // RetireEndpoint removes pending control state and marks an endpoint as
@@ -1094,7 +1154,7 @@ func (s *Store) RetireEndpoint(id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec("UPDATE endpoints SET status = 'retired', is_isolated = 0, isolation_allow_ips = '' WHERE id = ?", id); err != nil {
+	if _, err := tx.Exec("UPDATE endpoints SET status = 'retired', is_isolated = 0, isolation_allow_ips = '', "+isolationClearSQL+" WHERE id = ?", id); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -1225,7 +1285,11 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 	}
 	args := append([]interface{}{val, allow}, whereArgs...)
 
-	res, err := s.db.Exec("UPDATE endpoints SET is_isolated = ?, isolation_allow_ips = ?"+where, args...)
+	track := isolationClearSQL
+	if isIsolated {
+		track = isolationStartSQL
+	}
+	res, err := s.db.Exec("UPDATE endpoints SET "+track+", is_isolated = ?, isolation_allow_ips = ?"+where, args...)
 	if err != nil {
 		return 0, err
 	}

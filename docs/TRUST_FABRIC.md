@@ -43,3 +43,32 @@ telemetry or audit data. Old feature tables and settings may remain as inert
 legacy rows during schema upgrades. New installations do not recreate removed
 product paths. Retention bounds raw events, profiles, alerts, anomalies, and
 audit data by configured policy.
+
+## Trusted destinations during isolation
+
+Rules name what an isolated endpoint may still reach. A rule has a scope
+(`provider`, `client` = tenant, `site` = location, `group` = role tag,
+`endpoint`), an `ip` or `cidr` value, `allow` or `deny`, and optionally a
+port and protocol, a direction, `locked`, `expires_at` and a justification.
+Precedence (`hub/pkg/trustfabric`): the hub, loopback and DHCP are always
+reachable; a locked rule cannot be overridden from below (the least specific
+locked scope wins); otherwise the most specific rule wins (scope, then prefix
+length, then port/protocol), deny on a tie; no match means not trusted.
+
+- `GET|POST /api/v1/trust/rules`, `DELETE /api/v1/trust/rules?id=` (admin).
+- `GET /api/v1/trust/effective?endpoint_id=ID[&addr=A&port=P&proto=tcp]`:
+  the compiled allow list, which part agents enforce, and one decision.
+- `POST /api/v1/endpoints/isolate` takes `mode`: `full` reaches only the hub
+  and refuses `allow_ips`; `selective` adds the endpoint's effective policy to
+  `allow_ips` before the owner approves, so the signed grant carries exactly
+  what was approved. Without `mode` only the request's own `allow_ips` apply.
+  Detector isolation is always full.
+
+Agents enforce single addresses: a trusted range wider than one address is
+listed as not enforced in the approval summary and stays closed. Port- or
+direction-scoped allows are withheld for the same reason. Each isolation gets
+an id; the fabric as it stood is recorded under it
+(`ISOLATION_FABRIC_SNAPSHOT`), and a rule created or deleted while it is in
+force is recorded against it (`TRUST_RULE_DURING_ISOLATION`) without changing
+it. An endpoint allow rule written while that endpoint is isolated expires
+after four hours unless it names its own expiry.

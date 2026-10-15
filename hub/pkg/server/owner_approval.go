@@ -379,9 +379,19 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	var req struct {
 		EndpointID string   `json:"endpoint_id"`
 		AllowIPs   []string `json:"allow_ips"`
+		Mode       string   `json:"mode"`
 		Force      bool     `json:"force"`
 	}
 	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseMonitorOnly(w, req.EndpointID) {
+		return nil, false
+	}
+	mode, err := parseIsolationMode(req.Mode)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+	if mode == isolationModeFull && len(req.AllowIPs) > 0 {
+		writeJSONError(w, http.StatusBadRequest, "full isolation takes no allow_ips; use mode selective")
 		return nil, false
 	}
 	nb, allow, ok := normalizedAllowIPs(w, body, req.AllowIPs)
@@ -389,9 +399,33 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 		return nil, false
 	}
 	req.AllowIPs = allow
+	var notEnforced []string
+	if mode == isolationModeSelective {
+		// The fabric is expanded here, before approval, so the owner approves
+		// and the agent enforces the same list.
+		p, err := s.fabricPolicyFor(req.EndpointID, time.Now().UTC())
+		if err != nil {
+			writeJSONError(w, http.StatusConflict, "trust fabric: "+err.Error())
+			return nil, false
+		}
+		req.AllowIPs = unionAddrs(req.AllowIPs, p.Enforced)
+		notEnforced = p.NotEnforced
+		if nb == nil {
+			nb = body
+		}
+		if nb, ok = withNormalizedField(w, nb, "allow_ips", req.AllowIPs); !ok {
+			return nil, false
+		}
+	}
 	summary := "Cut " + s.endpointLabels([]string{req.EndpointID}) + " off the network"
+	if mode != "" {
+		summary += " (" + mode + ")"
+	}
 	if len(req.AllowIPs) > 0 {
 		summary += " except " + strings.Join(req.AllowIPs, ", ")
+	}
+	if len(notEnforced) > 0 {
+		summary += "; trusted ranges not enforced (agents take single addresses): " + strings.Join(notEnforced, ", ")
 	}
 	if req.Force {
 		summary += " (readiness gate overridden)"

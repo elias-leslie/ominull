@@ -142,7 +142,7 @@ func (s *Store) SplitMonitorOnly(ids []string) (allowed, monitor []string, err e
 // isolateOneLocked sets is_isolated for one endpoint unless it is monitor-only.
 // Caller holds s.mu.
 func (s *Store) isolateOneLocked(id, allow string) error {
-	res, err := s.db.Exec("UPDATE endpoints SET is_isolated = 1, isolation_allow_ips = ? WHERE id = ? AND NOT "+monitorOnlySQL, allow, id)
+	res, err := s.db.Exec("UPDATE endpoints SET "+isolationStartSQL+", is_isolated = 1, isolation_allow_ips = ? WHERE id = ? AND NOT "+monitorOnlySQL, allow, id)
 	if err != nil {
 		return err
 	}

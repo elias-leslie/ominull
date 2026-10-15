@@ -2022,6 +2022,7 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		EndpointID string   `json:"endpoint_id"`
 		AllowIPs   []string `json:"allow_ips"`
+		Mode       string   `json:"mode"` // trust_fabric.go
 		// Force overrides the readiness gate. It is not a flag for getting past
 		// an inconvenient refusal: an operator containing a host that is
 		// actively compromised must not be blocked by a stale probe, and that
@@ -2033,6 +2034,11 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.endpointInScope(w, r, req.EndpointID) || s.refuseMonitorOnly(w, req.EndpointID) {
+		return
+	}
+	mode, err := parseIsolationMode(req.Mode)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !s.guardIsolation(w, r, req.EndpointID, req.Force) {
@@ -2070,6 +2076,7 @@ func (s *Server) handleIsolate(w http.ResponseWriter, r *http.Request) {
 		IPAddress: clientIP(r),
 		Timestamp: time.Now().UTC(),
 	})
+	s.recordIsolationSnapshot(r, req.EndpointID, mode)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "isolated", "endpoint_id": req.EndpointID})
 }
@@ -3580,6 +3587,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
 	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
+	mux.HandleFunc("/api/v1/trust/rules", s.authMiddleware(requireAdmin(s.handleTrustRules)))
+	mux.HandleFunc("/api/v1/trust/effective", s.authMiddleware(requireAdmin(s.handleTrustEffective)))
 	mux.HandleFunc("/api/v1/endpoints/allow-isolation", s.authMiddleware(s.ownerApproved(s.resolveAllowIsolation, s.handleAllowIsolation)))
 	mux.HandleFunc("/api/v1/endpoints/capabilities", s.authMiddleware(s.ownerApproved(s.resolveCapabilities, s.handleEndpointCapabilities)))
 	mux.HandleFunc("/api/v1/fleet/trust", s.authMiddleware(s.handleFleetTrust))
