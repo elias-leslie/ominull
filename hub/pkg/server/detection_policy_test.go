@@ -500,3 +500,159 @@ func TestTheFeedReportsPolicyChangesAndAnUnsoundRow(t *testing.T) {
 		}
 	}
 }
+
+// A save that pads a loosening with tightening edits cannot hide it: the
+// tightening half is saved at once, and the owner is asked about the
+// loosening alone, which the summary shows in full.
+func TestAMixedSaveIsAskedAboutOnlyItsLoosening(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	shipped := tuningFields(storage.DefaultDetectionTuning())
+	body := map[string]any{}
+	for _, k := range []string{"admin_fanout_max_hosts", "agent_baseline_days", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
+		"bandwidth_min_samples", "beacon_cooldown_minutes", "beacon_min_samples", "beacon_min_span_minutes",
+		"first_seen_cooldown_minutes", "warmup_hours"} {
+		body[k] = shipped[k].(float64) - 1
+	}
+	body["quiet_processes"] = append(append([]any(nil), shipped["quiet_processes"].([]any)...), "/usr/bin/curl")
+	raw, _ := json.Marshal(body)
+	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
+	p := mustPend(t, w)
+	if strings.Join(p.Loosens, ",") != "quiet_processes" || !strings.Contains(p.Summary, "quiet_processes +/usr/bin/curl") ||
+		strings.Contains(p.Summary, "admin_fanout_max_hosts") || strings.Contains(p.Summary, " more") {
+		t.Fatalf("the owner would not see the loosening on its own: %+v", p)
+	}
+	if !strings.Contains(w.Body.String(), `"tightened_now"`) {
+		t.Fatalf("the 202 does not say what was already saved: %s", w.Body.String())
+	}
+	got := store.GetDetectionTuning()
+	if float64(got.WarmupHours) != shipped["warmup_hours"].(float64)-1 {
+		t.Fatal("the tightening half was not saved")
+	}
+	for _, q := range got.QuietProcesses {
+		if q == "/usr/bin/curl" {
+			t.Fatal("the loosening applied before the owner approved it")
+		}
+	}
+	// The caller repeats the same request under the approval, as the console does.
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), p.ApprovalID); w.Code != http.StatusOK {
+		t.Fatalf("approved retry = %d %s", w.Code, w.Body.String())
+	}
+	got = store.GetDetectionTuning()
+	if !strings.Contains(strings.Join(got.QuietProcesses, "\n")+"\n", "/usr/bin/curl\n") {
+		t.Fatalf("the approved loosening did not apply: %v", got.QuietProcesses)
+	}
+	notes := policyNotes(t, store)
+	if len(notes) != 2 {
+		t.Fatalf("want a tightened note and a loosened note, got %+v", notes)
+	}
+
+	// A list that loses entries and gains one loses them now; the owner is
+	// asked only about the one it gains.
+	orgs := got.QuietOrgs
+	if len(orgs) < 2 {
+		t.Fatalf("need shipped quiet orgs: %v", orgs)
+	}
+	swap, _ := json.Marshal(map[string]any{"quiet_orgs": []string{orgs[0], "as64500"}})
+	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""))
+	if p.Summary != "quiet_orgs +as64500" {
+		t.Fatalf("swap summary %q", p.Summary)
+	}
+	if len(store.GetDetectionTuning().QuietOrgs) != 1 {
+		t.Fatal("the dropped quiet networks were not dropped at once")
+	}
+}
+
+// A loosening too large to show the owner in full is refused, not cut short.
+func TestALooseningTooLargeToShowIsRefused(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	orgs := append([]string(nil), store.GetDetectionTuning().QuietOrgs...)
+	for i := 0; i < 60; i++ {
+		orgs = append(orgs, "as"+strings.Repeat("6", 4)+string(rune('0'+i%10))+string(rune('0'+i/10)))
+	}
+	raw, _ := json.Marshal(map[string]any{"quiet_orgs": orgs})
+	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "smaller changes") {
+		t.Fatalf("oversized loosening = %d %s", w.Code, w.Body.String())
+	}
+	if len(store.GetDetectionTuning().QuietOrgs) == len(orgs) {
+		t.Fatal("the oversized loosening applied")
+	}
+}
+
+// Presence and retirement decide whether the silence floor reports a host,
+// so watching one less closely waits for the owner like any loosening.
+func TestParkingOrRetiringAHostWaitsForTheOwner(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "srv-1", TenantID: "t-01", Hostname: "web", Status: "online", LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEndpointIsolation("srv-1", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	watched := func() bool {
+		ep, err := store.GetEndpoint("srv-1")
+		if err != nil || ep == nil {
+			t.Fatalf("endpoint: %v", err)
+		}
+		_, on := ep.QuietAllowance(time.Hour)
+		return on && ep.Status != "retired"
+	}
+
+	park := `{"endpoint_id":"srv-1","presence":"parked","reason":"off between tests"}`
+	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, ""))
+	if p.Action != "Expect a host to go quiet" || p.Targets[0] != "endpoint:srv-1" ||
+		p.Summary != "host srv-1 (web); presence always_on -> parked; reason off between tests" {
+		t.Fatalf("park approval = %+v", p)
+	}
+	if !watched() {
+		t.Fatal("the host stopped being watched before the owner approved")
+	}
+	// Another reason, or an approval nobody granted, changes nothing.
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, p.ApprovalID); w.Code != http.StatusForbidden || !watched() {
+		t.Fatalf("unapproved park = %d %s", w.Code, w.Body.String())
+	}
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", strings.Replace(park, "between tests", "for good", 1), p.ApprovalID); w.Code != http.StatusForbidden || !watched() {
+		t.Fatalf("park under another reason = %d %s", w.Code, w.Body.String())
+	}
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, p.ApprovalID); w.Code != http.StatusOK || watched() {
+		t.Fatalf("approved park = %d %s", w.Code, w.Body.String())
+	}
+	// Watching it closely again needs nobody, and is noted.
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", `{"endpoint_id":"srv-1","presence":"always_on"}`, ""); w.Code != http.StatusOK || !watched() {
+		t.Fatalf("always on = %d %s", w.Code, w.Body.String())
+	}
+
+	retire := `{"endpoint_id":"srv-1","reason":"decommissioned"}`
+	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""))
+	if p.Action != "Retire a host" || p.Summary != "host srv-1 (web); isolated true -> false; status active -> retired; reason decommissioned" {
+		t.Fatalf("retire approval = %+v", p)
+	}
+	if ep, _ := store.GetEndpoint("srv-1"); ep.Status == "retired" || !ep.IsIsolated {
+		t.Fatal("the host was retired, or its isolation lifted, before the owner approved")
+	}
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, p.ApprovalID); w.Code != http.StatusOK || watched() {
+		t.Fatalf("approved retire = %d %s", w.Code, w.Body.String())
+	}
+	// Retiring a host already retired changes nothing and needs nobody.
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK {
+		t.Fatalf("retire again = %d %s", w.Code, w.Body.String())
+	}
+	var kinds []string
+	for _, n := range policyNotes(t, store) {
+		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
+	}
+	if len(kinds) != 3 || !strings.HasPrefix(kinds[0], "loosened (retire) with owner approval") || kinds[1] != "tightened endpoint watch presence" ||
+		!strings.HasPrefix(kinds[2], "loosened (presence) with owner approval") {
+		t.Fatalf("notes = %v", kinds)
+	}
+}

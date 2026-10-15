@@ -29,14 +29,20 @@ func TestEndpointPresenceNeedsAReasonAndAKnownHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	for body, want := range map[string]int{
-		`{"endpoint_id":"lt","presence":"intermittent"}`:                               http.StatusBadRequest,
-		`{"endpoint_id":"lt","presence":"sometimes","reason":"x"}`:                     http.StatusBadRequest,
-		`{"endpoint_id":"nope","presence":"lab","reason":"test guest"}`:                http.StatusNotFound,
-		`{"endpoint_id":"lt","presence":"intermittent","reason":"in use, often shut"}`: http.StatusOK,
+		`{"endpoint_id":"lt","presence":"intermittent"}`:                http.StatusBadRequest,
+		`{"endpoint_id":"lt","presence":"sometimes","reason":"x"}`:      http.StatusBadRequest,
+		`{"endpoint_id":"nope","presence":"lab","reason":"test guest"}`: http.StatusNotFound,
 	} {
 		if w := postPresence(srv, "mock_admin_token", body); w.Code != want {
 			t.Fatalf("%s = %d %s, want %d", body, w.Code, w.Body.String(), want)
 		}
+	}
+	// Watching a host less closely waits for the owner's tap.
+	body := `{"endpoint_id":"lt","presence":"intermittent","reason":"in use, often shut"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/presence", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	if w := serveApproved(t, srv, srv.Handler(), req, body); w.Code != http.StatusOK {
+		t.Fatalf("approved intermittent = %d %s", w.Code, w.Body.String())
 	}
 	ep, err := store.GetEndpoint("lt")
 	if err != nil || ep.Presence != storage.PresenceIntermittent {

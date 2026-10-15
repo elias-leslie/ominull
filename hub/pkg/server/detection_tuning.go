@@ -91,6 +91,10 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 // applyTuning saves a judged tuning change: at once when it only tightens,
 // after the owner's approval when it loosens. The caller holds policyMu.
 func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyChange, action string) {
+	c, ok := s.tightenFirst(w, r, c)
+	if !ok {
+		return
+	}
 	approvalID, ok := s.policyApproved(w, r, c)
 	if !ok {
 		return

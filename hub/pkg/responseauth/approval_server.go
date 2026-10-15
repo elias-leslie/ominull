@@ -29,6 +29,8 @@ func approvalErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrApprovalRateLimit):
 		return http.StatusTooManyRequests
+	case errors.Is(err, ErrApprovalTooLong):
+		return http.StatusUnprocessableEntity
 	case errors.Is(err, ErrNoApprovers):
 		return http.StatusServiceUnavailable
 	default:

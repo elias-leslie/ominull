@@ -125,6 +125,9 @@ func approvalStatus(err error) int {
 	if errors.As(err, &ae) && ae.Status != 0 {
 		return ae.Status
 	}
+	if errors.Is(err, responseauth.ErrApprovalTooLong) {
+		return http.StatusUnprocessableEntity
+	}
 	return http.StatusServiceUnavailable
 }
 

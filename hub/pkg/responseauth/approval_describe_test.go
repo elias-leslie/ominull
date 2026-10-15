@@ -2,6 +2,7 @@ package responseauth
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -29,23 +30,58 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 		t.Fatalf("action %q summary %q err %v", action, summary, err)
 	}
 
-	// Many changes fit the statement cap and say how many did not.
-	before, after := map[string]interface{}{}, map[string]interface{}{}
-	for i := 0; i < 40; i++ {
-		k := strings.Repeat("x", 20) + string(rune('a'+i%26)) + string(rune('a'+i/26))
-		before[k], after[k] = 1, 2
+	// Changes that do not all fit the statement are refused, never cut to
+	// "and N more": eleven tightening numbers ahead of one quiet entry
+	// would otherwise push the quiet entry out of sight.
+	before, after := map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd"}}, map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd", "/usr/bin/curl"}}
+	for _, k := range []string{"admin_fanout_max_hosts", "agent_baseline_days", "agent_upload_factor", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
+		"bandwidth_min_samples", "beacon_cooldown_minutes", "beacon_min_interval_seconds", "beacon_min_samples", "beacon_min_span_minutes", "first_seen_cooldown_minutes",
+		"warmup_hours", "silence_after_minutes", "beacon_score_threshold"} {
+		before[k], after[k] = 10, 9
 	}
 	raw, _ := json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save", "before": before, "after": after})
 	_, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin")
-	if err != nil || len([]rune(summary)) > approvalMaxSummary || !strings.Contains(summary, " more") {
-		t.Fatalf("long summary (%d runes) %q err %v", len([]rune(summary)), summary, err)
+	if !errors.Is(err, ErrApprovalTooLong) || summary != "" {
+		t.Fatalf("an oversized change was described as %q (err %v)", summary, err)
+	}
+	// Short enough, every change shows in full.
+	raw, _ = json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save",
+		"before": map[string]interface{}{"warmup_hours": 24, "quiet_processes": []string{}}, "after": map[string]interface{}{"warmup_hours": 12, "quiet_processes": []string{"/usr/bin/curl"}}})
+	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "quiet_processes +/usr/bin/curl; warmup_hours 24 -> 12" {
+		t.Fatalf("summary %q err %v", summary, err)
+	}
+	// A list entry shows what it matches before its reason.
+	raw, _ = json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save",
+		"before": map[string]interface{}{"known_workloads": []interface{}{}},
+		"after":  map[string]interface{}{"known_workloads": []interface{}{map[string]interface{}{"workload": "/usr/bin/gh", "owner": "*", "reason": "cli"}}}})
+	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "known_workloads +{owner=* workload=/usr/bin/gh reason=cli}" {
+		t.Fatalf("workload summary %q err %v", summary, err)
 	}
 
 	exclusion := []byte(`{"after":{"active":true,"dst_ip_range":"172.18.0.0/16","expires_at":"2026-11-01T00:00:00Z","id":"","name":"bridge","port":7070,"process_path":"/usr/bin/docker-proxy","reason":"bridge","scope":"global","scope_value":"","tenant_id":"default"},"before":null,"op":"create","policy":"exclusion"}`)
 	action, summary, err = describeApproval(ActionKindDetection, exclusion, []string{"exclusion:new"}, "admin")
 	if err != nil || action != "Add a detection exclusion" ||
-		summary != "name bridge; process_path /usr/bin/docker-proxy; dst_ip_range 172.18.0.0/16; port 7070; scope global; expires_at 2026-11-01T00:00:00Z; reason bridge" {
+		summary != "process_path /usr/bin/docker-proxy; dst_ip_range 172.18.0.0/16; port 7070; scope global; expires_at 2026-11-01T00:00:00Z; name bridge; reason bridge" {
 		t.Fatalf("exclusion action %q summary %q err %v", action, summary, err)
+	}
+	// A long name cannot push what the exclusion matches out of sight: the
+	// match shows in full and the name and reason are shortened instead.
+	long, _ := json.Marshal(map[string]interface{}{"policy": "exclusion", "op": "create", "before": nil, "after": map[string]interface{}{
+		"name": strings.Repeat("n", 130), "process_path": "/usr/lib/" + strings.Repeat("p", 60), "dst_ip_range": "0.0.0.0/0",
+		"scope": "global", "expires_at": "2026-11-01T00:00:00Z", "reason": strings.Repeat("r", 200)}})
+	_, summary, err = describeApproval(ActionKindDetection, long, []string{"exclusion:new"}, "admin")
+	if err != nil || len([]rune(summary)) > approvalMaxSummary || !strings.Contains(summary, "dst_ip_range 0.0.0.0/0") ||
+		!strings.Contains(summary, "scope global") || !strings.Contains(summary, "…") || strings.Contains(summary, " more") {
+		t.Fatalf("long exclusion (%d runes) %q err %v", len([]rune(summary)), summary, err)
+	}
+	// Host watch changes name the host and what changes about it.
+	watch := []byte(`{"after":{"endpoint_id":"ep-1","hostname":"web","isolated":false,"presence":"parked","reason":"lab","status":"active"},"before":{"endpoint_id":"ep-1","hostname":"web","isolated":false,"presence":"always_on","status":"active"},"op":"presence","policy":"endpoint_watch"}`)
+	if action, summary, err = describeApproval(ActionKindDetection, watch, []string{"endpoint:ep-1"}, "admin"); err != nil ||
+		action != "Expect a host to go quiet" || summary != "host ep-1 (web); presence always_on -> parked; reason lab" {
+		t.Fatalf("watch action %q summary %q err %v", action, summary, err)
+	}
+	if _, _, err = describeApproval(ActionKindDetection, watch, []string{"endpoint:ep-2"}, "admin"); err == nil {
+		t.Fatal("a watch change for one host was described under another")
 	}
 
 	for name, c := range map[string]struct {

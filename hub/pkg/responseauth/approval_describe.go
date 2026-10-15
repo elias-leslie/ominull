@@ -299,6 +299,13 @@ var detectionPolicyOps = map[string]map[string]string{
 		"create": "Add a detection exclusion",
 		"enable": "Turn a detection exclusion on",
 	},
+	// The silence floor itself cannot be switched off, but each host's
+	// presence decides when its going quiet is reported, and a retired host
+	// is not watched at all.
+	"endpoint_watch": {
+		"presence": "Expect a host to go quiet",
+		"retire":   "Retire a host",
+	},
 }
 
 // describeDetectionPolicy shows the owner the change field by field, worked
@@ -337,11 +344,33 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		if targets[0] != "detection:tuning" || before == nil {
 			return "", "", errors.New("a tuning change targets detection:tuning and carries the saved tuning")
 		}
-		parts := policyDiff(before, after)
+		parts := policyDiff(before, after, func(string) bool { return true })
 		if len(parts) == 0 {
 			return "", "", errors.New("this tuning change changes nothing")
 		}
-		return action, fitParts(parts), nil
+		summary, err := fitParts(parts, nil)
+		return action, summary, err
+	}
+	if p.Policy == "endpoint_watch" {
+		// How closely the silence floor watches one host: before is the host
+		// as watched now, after as the change would leave it.
+		if !strings.HasPrefix(targets[0], "endpoint:") || before == nil || before["endpoint_id"] != targets[0][len("endpoint:"):] || after["endpoint_id"] != before["endpoint_id"] {
+			return "", "", errors.New("a watch change targets endpoint:<id> and carries the host as watched now")
+		}
+		parts := policyDiff(before, after, func(k string) bool { return !policyLabels[k] })
+		if len(parts) == 0 {
+			return "", "", errors.New("this watch change changes nothing")
+		}
+		host := "host " + policyValue(after["endpoint_id"])
+		if name, _ := after["hostname"].(string); name != "" && name != after["endpoint_id"] {
+			host += " (" + name + ")"
+		}
+		var labels []string
+		if reason, _ := after["reason"].(string); reason != "" {
+			labels = append(labels, "reason "+reason)
+		}
+		summary, err := fitParts(append([]string{host}, parts...), labels)
+		return action, summary, err
 	}
 	if !strings.HasPrefix(targets[0], "exclusion:") {
 		return "", "", errors.New("an exclusion change targets exclusion:<id>")
@@ -349,9 +378,11 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	if p.Op == "enable" && before == nil {
 		return "", "", errors.New("turning an exclusion on carries the saved exclusion")
 	}
-	var parts []string
+	// What the exclusion matches comes first and must fit in full; its name
+	// and reason only label it, so they take whatever room is left.
+	var parts, labels []string
 	shown := map[string]bool{"id": true, "tenant_id": true, "active": true, "created_at": true}
-	for _, k := range append([]string{"name", "process_path", "dst_ip_range", "port", "protocol", "scope", "scope_value", "expires_at", "reason"}, sortedKeys(after)...) {
+	for _, k := range append([]string{"process_path", "dst_ip_range", "port", "protocol", "scope", "scope_value", "expires_at"}, sortedKeys(after)...) {
 		v, present := after[k]
 		if shown[k] || !present {
 			continue
@@ -360,14 +391,24 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		if v == nil || v == "" || v == float64(0) {
 			continue
 		}
-		parts = append(parts, k+" "+policyValue(v))
+		if policyLabels[k] {
+			labels = append(labels, k+" "+policyValue(v))
+		} else {
+			parts = append(parts, k+" "+policyValue(v))
+		}
 	}
 	if before != nil && p.Op == "create" {
 		// Saving over an existing exclusion renews or rewrites it.
-		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after)...)
+		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after, func(k string) bool { return !policyLabels[k] })...)
+		labels = policyDiff(before, after, func(k string) bool { return policyLabels[k] })
 	}
-	return action, fitParts(parts), nil
+	summary, err := fitParts(parts, labels)
+	return action, summary, err
 }
+
+// policyLabels are the fields that name or explain a policy entry without
+// changing what it matches.
+var policyLabels = map[string]bool{"name": true, "reason": true}
 
 func sortedKeys(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
@@ -378,9 +419,9 @@ func sortedKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// policyDiff lists each top-level field that differs: a list as the entries
-// it gains and loses, anything else as old -> new.
-func policyDiff(before, after map[string]interface{}) []string {
+// policyDiff lists each top-level field that differs, of those keep accepts:
+// a list as the entries it gains and loses, anything else as old -> new.
+func policyDiff(before, after map[string]interface{}, keep func(string) bool) []string {
 	union := map[string]interface{}{}
 	for k, v := range before {
 		union[k] = v
@@ -391,7 +432,7 @@ func policyDiff(before, after map[string]interface{}) []string {
 	var parts []string
 	for _, k := range sortedKeys(union) {
 		a, b := before[k], after[k]
-		if policyJSON(a) == policyJSON(b) {
+		if !keep(k) || policyJSON(a) == policyJSON(b) {
 			continue
 		}
 		la, aList := a.([]interface{})
@@ -440,10 +481,16 @@ func policyValue(v interface{}) string {
 		}
 		return t
 	case map[string]interface{}:
-		fields := []string{}
+		// What an entry matches first, its labels last.
+		fields, named := []string{}, []string{}
 		for _, k := range sortedKeys(t) {
-			fields = append(fields, k+"="+policyValue(t[k]))
+			if policyLabels[k] {
+				named = append(named, k+"="+policyValue(t[k]))
+			} else {
+				fields = append(fields, k+"="+policyValue(t[k]))
+			}
 		}
+		fields = append(fields, named...)
 		return "{" + strings.Join(fields, " ") + "}"
 	case []interface{}:
 		items := make([]string, 0, len(t))
@@ -455,27 +502,42 @@ func policyValue(v interface{}) string {
 	return policyJSON(v)
 }
 
-// fitParts joins the changes inside the statement's summary cap, saying how
-// many did not fit rather than dropping them silently.
-func fitParts(parts []string) string {
-	const partMax = 140
+// ErrApprovalTooLong refuses a detection-policy change whose changes do not
+// all fit the owner's statement: the owner's tap is the only human check, so
+// nothing the change does may be cut to "and N more".
+var ErrApprovalTooLong = errors.New("this change is too large to show the owner in full")
+
+// fitParts joins every change in full inside the statement's summary cap, or
+// refuses. Labels (a name, a reason) follow in whatever room is left,
+// shortened if they must be: they explain the change and match nothing.
+func fitParts(parts, labels []string) (string, error) {
 	out := ""
-	for i, p := range parts {
-		p = cleanText(p, partMax)
-		next := out
-		if next != "" {
-			next += "; "
+	for _, p := range parts {
+		if out != "" {
+			out += "; "
 		}
-		next += p
-		rest := len(parts) - i - 1
-		room := approvalMaxSummary
-		if rest > 0 {
-			room -= len(fmt.Sprintf("; and %d more", rest))
-		}
-		if len([]rune(next)) > room {
-			return out + fmt.Sprintf("; and %d more", len(parts)-i)
-		}
-		out = next
+		out += cleanText(p, approvalMaxSummary+1)
 	}
-	return out
+	if n := len([]rune(out)); n > approvalMaxSummary {
+		return "", fmt.Errorf("%w (%d characters, at most %d fit): make it as several smaller changes", ErrApprovalTooLong, n, approvalMaxSummary)
+	}
+	for _, l := range labels {
+		l = cleanText(l, approvalMaxSummary)
+		sep := ""
+		if out != "" {
+			sep = "; "
+		}
+		room := approvalMaxSummary - len([]rune(out)) - len(sep)
+		if room < 16 {
+			if room >= 1 {
+				out += sep + "…"
+			}
+			break
+		}
+		if len([]rune(l)) > room {
+			l = string([]rune(l)[:room-1]) + "…"
+		}
+		out += sep + l
+	}
+	return out, nil
 }

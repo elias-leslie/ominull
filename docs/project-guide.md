@@ -194,11 +194,11 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
-| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason |
-| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; audited |
+| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked waits for the owner's tap (202, kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
 | `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint |
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |

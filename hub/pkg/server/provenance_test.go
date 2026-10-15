@@ -41,11 +41,11 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 		t.Fatalf("insert history: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/retire",
-		bytes.NewBufferString(`{"endpoint_id":"retired-macos","reason":"platform retired"}`))
+	// Retiring stops the silence watch, so it waits for the owner's tap.
+	retireBody := `{"endpoint_id":"retired-macos","reason":"platform retired"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/retire", bytes.NewBufferString(retireBody))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := serveApproved(t, srv, srv.Handler(), req, retireBody)
 	if w.Code != http.StatusOK {
 		t.Fatalf("retire returned %d: %s", w.Code, w.Body.String())
 	}
@@ -67,7 +67,11 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 		t.Fatalf("retirement removed telemetry history: %v (%v)", events, err)
 	}
 	logs, err := store.ListAuditLogs("", 20)
-	if err != nil || len(logs) == 0 || logs[0].Action != "ENDPOINT_RETIRED" {
+	retiredAudit := false
+	for _, l := range logs {
+		retiredAudit = retiredAudit || l.Action == "ENDPOINT_RETIRED"
+	}
+	if err != nil || !retiredAudit {
 		t.Fatalf("retirement was not audited: %v (%v)", logs, err)
 	}
 

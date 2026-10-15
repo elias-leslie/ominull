@@ -198,7 +198,12 @@ func parseGlobalFlags(args []string) (CLIConfig, []string) {
 }
 
 func (c *APIClient) doRequest(method, endpoint string, body interface{}) ([]byte, error) {
-	raw, _, err := c.doRequestWith(method, endpoint, body, nil)
+	raw, status, err := c.doRequestWith(method, endpoint, body, nil)
+	if err == nil && status == http.StatusAccepted && strings.Contains(string(raw), `"approval_id"`) {
+		// A request the hub holds for the owner did not happen; a caller
+		// that should wait for the tap uses ownerApproved.
+		return nil, fmt.Errorf("%s waits for the owner's approval, which this command does not wait for: %s", endpoint, string(raw))
+	}
 	return raw, err
 }
 
@@ -1470,7 +1475,9 @@ func (c *APIClient) cmdLearning(args []string) error {
 		if len(list) == 0 {
 			return fmt.Errorf("name the proposals to apply with --ids; there is no apply-all")
 		}
-		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/proposals/apply",
+		// Every proposal quiets something, so the hub holds the apply for
+		// the owner's tap; wait for it rather than report a 202 as done.
+		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/learning/proposals/apply",
 			map[string]interface{}{"window": *window, "ids": list})
 		if err != nil {
 			return err

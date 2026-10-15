@@ -1952,6 +1952,8 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 // retaining its telemetry, asset identity, certificate history, and audit log.
 // It clears recorded isolation first so an operator never retires a host with
 // a stale Ominull control order waiting for a heartbeat that will not come.
+// A retired host is no longer watched for silence, so retiring one waits for
+// the owner's tap like any other loosening of detection policy.
 func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1979,6 +1981,21 @@ func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "endpoint not registered")
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	before := watchView(*ep)
+	after := before
+	after.Status, after.Isolated = "retired", false
+	after.Reason = strings.TrimSpace(req.Reason)
+	change := policyChange{policy: "endpoint_watch", op: "retire", target: "endpoint:" + ep.ID,
+		before: before, after: after, wording: "retired " + ep.ID}
+	if before.Status != "retired" {
+		change.loosens = []string{"retire"}
+	}
+	approvalID, ok := s.policyApproved(w, r, change)
+	if !ok {
+		return
+	}
 	if err := s.store.RetireEndpoint(req.EndpointID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1986,8 +2003,12 @@ func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	details := "Endpoint retired; telemetry and audit history retained"
 	if reason := strings.TrimSpace(req.Reason); reason != "" {
 		details += ": " + reason
+		change.wording += ": " + reason
 	}
 	s.audit(r, "ENDPOINT_RETIRED", req.EndpointID, details)
+	if before.Status != "retired" {
+		s.notePolicyChange(r, change, approvalID)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "retired", "endpoint_id": req.EndpointID})
 }

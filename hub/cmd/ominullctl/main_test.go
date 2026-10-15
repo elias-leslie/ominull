@@ -664,3 +664,41 @@ func TestOminullctl_WaitsForTheOwnersApproval(t *testing.T) {
 		t.Fatalf("sends %v polls %d", sends, polls)
 	}
 }
+
+// Applying learning proposals waits for the owner's tap and then applies;
+// any other command the hub holds for the owner fails instead of reporting
+// the 202 as done.
+func TestOminullctl_LearningApplyWaitsForTheOwner(t *testing.T) {
+	mux := http.NewServeMux()
+	var sends []string
+	mux.HandleFunc("/api/v1/learning/proposals/apply", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := r.Header.Get("X-Approval-ID")
+		sends = append(sends, id)
+		if id == "" {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"approval_id":"ap-2","state":"pending","action":"Apply learning proposals","summary":"quiet_pairs +/usr/bin/x@as1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"applied":["p-1"],"skipped":{}}`))
+	})
+	mux.HandleFunc("/api/v1/learning/windows/close", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"approval_id":"ap-3","state":"pending"}`))
+	})
+	mux.HandleFunc("/api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ap-2","state":"approved"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newAPIClient(CLIConfig{HubURL: server.URL, APIKey: "test"})
+	if err := client.cmdLearning([]string{"apply", "--window", "w-1", "--ids", "p-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) != 2 || sends[0] != "" || sends[1] != "ap-2" {
+		t.Fatalf("sends %v", sends)
+	}
+	if _, err := client.doRequest(http.MethodPost, "/api/v1/learning/windows/close", map[string]string{"id": "w-1"}); err == nil || !strings.Contains(err.Error(), "owner's approval") {
+		t.Fatalf("a held request reported success: %v", err)
+	}
+}

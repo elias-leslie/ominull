@@ -1,8 +1,9 @@
 package server
 
 // One choke point for every write to detection policy: tuning saves, the
-// shipped-values reset, "Expected" on a finding, learning proposals, and the
-// exclusions. Each change is compared field by field with what is saved now.
+// shipped-values reset, "Expected" on a finding, learning proposals, the
+// exclusions, and each host's presence and retirement (which decide whether
+// the silence floor reports it). Each change is compared field by field with what is saved now.
 // One that only tightens applies at once and leaves a note for Nightshift. One
 // that loosens anything waits for the owner's passkey tap, through the same
 // response-authority approval isolation uses: the admin key, a console session
@@ -34,13 +35,16 @@ const policyChangedAudit = "DETECTION_POLICY_CHANGED"
 
 // policyChange is one write to detection policy, judged before it is applied.
 type policyChange struct {
-	policy  string // "detection_tuning" or "exclusion"
+	policy  string // "detection_tuning", "exclusion" or "endpoint_watch"
 	op      string // see responseauth's detectionPolicyOps
-	target  string // "detection:tuning" or "exclusion:<id>"
+	target  string // "detection:tuning", "exclusion:<id>" or "endpoint:<id>"
 	before  any    // the saved policy (nil for a new exclusion)
 	after   any    // the policy the change would save
 	loosens []string
 	wording string // what changed, for the audit row and the note
+	// tightenedFirst is the tightening half of a mixed change, already
+	// saved, so the owner is asked about the loosening alone.
+	tightenedFirst string
 }
 
 // payload is what the authority digests and describes. Both sides build it
@@ -114,7 +118,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 		}
 		s.approvalWake.notify()
 		s.audit(r, "OWNER_APPROVAL_REQUESTED", c.target, fmt.Sprintf("%s (approval %s): %s", v.Action, v.ID, v.Summary))
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		body := map[string]interface{}{
 			"approval_id": v.ID,
 			"state":       v.State,
 			"action":      v.Action,
@@ -123,7 +127,11 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 			"loosens":     c.loosens,
 			"expires_at":  v.ExpiresAt,
 			"next":        "This change loosens detection, so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
-		})
+		}
+		if c.tightenedFirst != "" {
+			body["tightened_now"] = c.tightenedFirst
+		}
+		writeJSON(w, http.StatusAccepted, body)
 		return "", false
 	}
 	sum := sha256.Sum256(payload)
@@ -167,6 +175,103 @@ func tuningChange(op string, before, after storage.DetectionTuning) policyChange
 		loosens: tuningLoosens(before, after),
 		wording: tuningDelta(before, after),
 	}
+}
+
+// tightenFirst splits a tuning change that tightens some fields and loosens
+// others. The tightening half needs nobody, so it is saved now and noted; the
+// change returned carries only the loosening, which is all the owner is asked
+// about. A list that loses some entries and gains others loses them now. The
+// caller holds policyMu; false means the request has been answered.
+func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyChange) (policyChange, bool) {
+	before, okB := c.before.(storage.DetectionTuning)
+	after, okA := c.after.(storage.DetectionTuning)
+	if len(c.loosens) == 0 || !okB || !okA {
+		return c, true
+	}
+	loose := map[string]bool{}
+	for _, k := range c.loosens {
+		loose[k] = true
+	}
+	a, b := tuningFields(before), tuningFields(after)
+	mid := tuningFields(before)
+	keys := map[string]bool{}
+	for k := range a {
+		keys[k] = true
+	}
+	for k := range b {
+		keys[k] = true
+	}
+	for k := range keys {
+		dir := tuningDirections[k]
+		takeAfter := !loose[k]
+		if dir == windowField {
+			takeAfter = !loose["off_hours_window"]
+		}
+		switch {
+		case takeAfter:
+			if v, ok := b[k]; ok {
+				mid[k] = v
+			} else {
+				delete(mid, k)
+			}
+		case dir == addLoosens:
+			mid[k] = keptEntries(a[k], b[k])
+		}
+	}
+	var half storage.DetectionTuning
+	raw, err := json.Marshal(mid)
+	if err == nil {
+		err = json.Unmarshal(raw, &half)
+	}
+	if err == nil {
+		half, err = storage.PrepareDetectionTuning(half)
+	}
+	if err == nil && len(tuningLoosens(before, half)) > 0 {
+		err = fmt.Errorf("it would loosen %s", strings.Join(tuningLoosens(before, half), ", "))
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusConflict, "this change tightens some settings and loosens others ("+strings.Join(c.loosens, ", ")+
+			"), and its tightening part cannot be saved on its own ("+err.Error()+"); save the tightening and the loosening as separate changes")
+		return c, false
+	}
+	tight := tuningChange(c.op, before, half)
+	if !tight.changed() {
+		return c, true
+	}
+	if _, err := s.store.SaveDetectionTuning(half, operatorName(r)); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return c, false
+	}
+	if s.detector != nil {
+		s.detector.InvalidateTuning()
+	}
+	s.notePolicyChange(r, tight, "")
+	rest := tuningChange(c.op, s.store.GetDetectionTuning(), after)
+	rest.tightenedFirst = tight.wording
+	return rest, true
+}
+
+// keptEntries is the list before without the entries after drops.
+func keptEntries(before, after any) any {
+	list, ok := before.([]any)
+	if !ok {
+		return before
+	}
+	has := map[string]bool{}
+	if next, ok := after.([]any); ok {
+		for _, x := range next {
+			raw, _ := json.Marshal(x)
+			has[string(raw)] = true
+		}
+	}
+	kept := []any{}
+	for _, x := range list {
+		raw, _ := json.Marshal(x)
+		if has[string(raw)] {
+			kept = append(kept, x)
+		}
+	}
+	return kept
 }
 
 // changed reports whether a change changes anything at all.

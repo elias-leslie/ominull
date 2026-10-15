@@ -236,7 +236,11 @@ func (s *Server) handleApplyLearningProposals(w http.ResponseWriter, r *http.Req
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	c := tuningChange("learning", before, after)
+	// An active-hours proposal can tighten while a quiet entry loosens.
+	c, ok := s.tightenFirst(w, r, tuningChange("learning", before, after))
+	if !ok {
+		return
+	}
 	approvalID, ok := s.policyApproved(w, r, c)
 	if !ok {
 		return
