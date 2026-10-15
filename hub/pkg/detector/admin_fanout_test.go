@@ -239,3 +239,72 @@ func TestSweepActor(t *testing.T) {
 		}
 	}
 }
+
+// The evidence lists ten hosts, sorted as text; the floor is worked out over
+// the whole window. Twenty hosts where the ten on 445 sort last still record
+// 445 as a floor port.
+func TestSweepFloorPortsCoverTheWholeWindow(t *testing.T) {
+	engine, store := adminEngine(t, nil)
+	var h []hop
+	for i := 90; i < 100; i++ {
+		h = append(h, hop{fmt.Sprintf("10.0.0.%d", i), 445})
+	}
+	for i := 10; i < 20; i++ {
+		h = append(h, hop{fmt.Sprintf("10.0.0.%d", i), 80})
+	}
+	fanOut(engine, "ws-admin", "/home/u/.local/bin/scan", h)
+	got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP")
+	if len(got) != 1 {
+		t.Fatalf("want one sweep alert, got %d", len(got))
+	}
+	var ev struct {
+		Targets []struct {
+			Ports []int `json:"ports"`
+		} `json:"sweep_targets"`
+		Floor []int `json:"floor_ports"`
+	}
+	if err := json.Unmarshal([]byte(got[0].Evidence), &ev); err != nil {
+		t.Fatalf("evidence: %v", err)
+	}
+	for _, tg := range ev.Targets {
+		if len(tg.Ports) != 1 || tg.Ports[0] != 80 {
+			t.Fatalf("the listed ten should be the port-80 hosts (the case this guards): %+v", ev.Targets)
+		}
+	}
+	if len(ev.Targets) != 10 || len(ev.Floor) != 1 || ev.Floor[0] != 445 {
+		t.Fatalf("floor ports should cover all 20 hosts: %+v", ev)
+	}
+}
+
+// An ordinary sweep's ten-minute cooldown does not hide a floor sweep by the
+// same process right after it; a non-floor sweep records an empty list.
+func TestFloorSweepIsNotHiddenByAnEarlierSweep(t *testing.T) {
+	engine, store := adminEngine(t, nil)
+	var h []hop
+	for i := 10; i < 30; i++ {
+		h = append(h, hop{fmt.Sprintf("10.0.0.%d", i), 80})
+	}
+	fanOut(engine, "ws-admin", "/home/u/.local/bin/scan", h)
+	first := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP")
+	if len(first) != 1 || !strings.Contains(first[0].Evidence, `"floor_ports":[]`) {
+		t.Fatalf("ordinary sweep: %d alerts %+v", len(first), first)
+	}
+	h = nil
+	for i := 40; i < 45; i++ {
+		h = append(h, hop{fmt.Sprintf("10.0.0.%d", i), 445})
+	}
+	fanOut(engine, "ws-admin", "/home/u/.local/bin/scan", h)
+	got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP")
+	if len(got) != 2 {
+		t.Fatalf("a floor sweep inside the ordinary sweep's cooldown was hidden: %d alerts", len(got))
+	}
+	floors := 0
+	for _, a := range got {
+		if strings.Contains(a.Evidence, `"floor_ports":[445]`) {
+			floors++
+		}
+	}
+	if floors != 1 {
+		t.Fatalf("want one floor sweep alert, got %d", floors)
+	}
+}

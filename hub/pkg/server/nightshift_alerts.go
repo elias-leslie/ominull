@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/storage"
 )
 
@@ -113,6 +114,10 @@ type alertEvidence struct {
 	// actorLabel); SweepActor the one actor behind every flow of a sweep.
 	Actor      string `json:"actor"`
 	SweepActor string `json:"sweep_actor"`
+	// FloorPorts is every floor port the whole sweep window reached (the
+	// target list keeps ten hosts). Nil on a sweep raised before the hub
+	// recorded it, which is read as a floor sweep.
+	FloorPorts *[]int `json:"floor_ports"`
 	Protocol   int    `json:"protocol"`
 	// BytesOut is nil on findings raised before the hub recorded it.
 	BytesOut *int64 `json:"bytes_out"`
@@ -120,7 +125,7 @@ type alertEvidence struct {
 
 func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedAlert {
 	var ev alertEvidence
-	_ = json.Unmarshal([]byte(a.Evidence), &ev)
+	evidenceOK := json.Unmarshal([]byte(a.Evidence), &ev) == nil
 	proc := ""
 	if p := strings.ReplaceAll(a.ProcessPath, "\\", "/"); p != "" && p != "unknown" {
 		proc = filepath.Base(p)
@@ -146,6 +151,15 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 			dests = append(dests, fmt.Sprintf("%s:%s", t.IP, joinInts(t.Ports)))
 		}
 	}
+	if ev.FloorPorts != nil {
+		// Floor ports reached by hosts past the ten the evidence lists.
+		for _, p := range *ev.FloorPorts {
+			if !seenPort[p] {
+				seenPort[p] = true
+				ports = append(ports, p)
+			}
+		}
+	}
 	if n := len(ev.Targets); n > feedDestinationMax {
 		dests = append(dests, fmt.Sprintf("+%d more", n-feedDestinationMax))
 	}
@@ -166,10 +180,8 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	out.Actor = actor
 	switch a.AnomalyType {
 	case "LATERAL_PORT_SWEEP":
-		n := len(ev.Targets)
-		if n == 0 {
-			n = countFromTitle(a.Title)
-		}
+		// The evidence lists ten hosts; the title counts them all.
+		n := max(len(ev.Targets), countFromTitle(a.Title))
 		out.What = fmt.Sprintf("%s on %s connected to %s on the local network within a minute%s", who, host, plural(n, "host", "hosts"), portPhrase(ports))
 		if proc == "ssh" && ev.AdminRule != "" && tuning.IsAdminFanoutSource(a.EndpointID) {
 			out.Cause = "Probably your own ssh use from this workstation. It still alerted because " + ev.AdminRule
@@ -219,7 +231,14 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	}
 	// A sweep that touches a floor port is never explained, by an actor or by
 	// the admin fan-out rule: SMB, RDP, telnet and RPC are how a worm moves.
-	floor := a.AnomalyType == "LATERAL_PORT_SWEEP" && touchesFloorPort(ports, a.DstPort)
+	// Evidence that does not say which ports the whole window reached is
+	// read as a floor sweep.
+	unknownPorts := !evidenceOK || ev.FloorPorts == nil
+	floor := a.AnomalyType == "LATERAL_PORT_SWEEP" && (unknownPorts || len(*ev.FloorPorts) > 0 || touchesFloorPort(ports, a.DstPort))
+	why := floorWhy
+	if floor && unknownPorts && !touchesFloorPort(ports, a.DstPort) {
+		why = unknownPortsWhy
+	}
 	if floor {
 		out.Expected = ""
 	}
@@ -228,7 +247,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 			out.Expected = actor
 			out.Cause = actor + " ran it"
 		} else if floor {
-			out.Cause = actor + " ran it. It still asks because " + floorWhy
+			out.Cause = actor + " ran it. It still asks because " + why
 		} else {
 			// Ours, but the kind of thing a hijacked agent would do: the owner
 			// still looks, told who it was.
@@ -246,18 +265,16 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 // threat-list and beacon matches are never explained.
 var attributable = map[string]bool{"LATERAL_PORT_SWEEP": true}
 
-// floorPorts are the sensitive ports (SMB, RDP, telnet, RPC) the detector
-// treats as a floor; a lateral sweep touching one always asks.
-var floorPorts = map[int]bool{445: true, 3389: true, 23: true, 135: true}
-
 const floorWhy = "it reached SMB, RDP, telnet or RPC ports, which is how a worm spreads"
 
+const unknownPortsWhy = "the alert does not record every port the sweep reached"
+
 func touchesFloorPort(ports []int, dstPort uint16) bool {
-	if floorPorts[int(dstPort)] {
+	if detector.FloorPort(int(dstPort)) {
 		return true
 	}
 	for _, p := range ports {
-		if floorPorts[p] {
+		if detector.FloorPort(p) {
 			return true
 		}
 	}

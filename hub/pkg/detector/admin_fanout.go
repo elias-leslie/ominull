@@ -121,6 +121,28 @@ func (e *Engine) inventoried(tenantID, ip string) bool {
 	return set[ip]
 }
 
+// FloorPort says whether a port is on the sensitive-port floor: SMB, RDP,
+// telnet and RPC, how a worm moves. No exclusion, actor or admin rule
+// explains a flow on one.
+func FloorPort(p int) bool { return p == 445 || p == 3389 || p == 23 || p == 135 }
+
+// sweepFloorPorts is every floor port reached anywhere in the window, sorted.
+// The evidence's target list keeps ten hosts; this covers all of them.
+func sweepFloorPorts(targets map[string]*sweepTarget) []int {
+	seen := map[int]bool{}
+	out := []int{}
+	for _, t := range targets {
+		for p := range t.ports {
+			if FloorPort(int(p)) && !seen[int(p)] {
+				seen[int(p)] = true
+				out = append(out, int(p))
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
 // sweepTargetList is the window's hosts and ports for the alert's evidence,
 // sorted, at most ten.
 func sweepTargetList(targets map[string]*sweepTarget) []map[string]any {

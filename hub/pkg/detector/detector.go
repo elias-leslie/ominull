@@ -978,10 +978,16 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			}
 		}
 		if distinctTargets >= threshold && !routine {
+			// A sweep reaching a floor port has its own cooldown: an earlier
+			// sweep on ordinary ports (explained, a note) cannot hide it.
+			floor := sweepFloorPorts(window)
 			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
+			if len(floor) > 0 {
+				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
+			}
 			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
 				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
-					"sweep_actor": sweepActor(window)})
+					"sweep_actor": sweepActor(window), "floor_ports": floor})
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -1082,7 +1088,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 // checkSensitivePort raises the sensitive-port floor: SMB, RDP, telnet or RPC
 // leaving the network. It runs before exclusions, so none can hide it.
 func (e *Engine) checkSensitivePort(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, now time.Time) {
-	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && (ev.DstPort == 445 || ev.DstPort == 3389 || ev.DstPort == 23 || ev.DstPort == 135) {
+	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && FloorPort(int(ev.DstPort)) {
 		alertKey := fmt.Sprintf("sensport:%s:%d", ev.EndpointID, ev.DstPort)
 		if !e.shouldSuppressAlert(alertKey, 15*time.Second) {
 			anomaly := storage.AnomalyAlert{

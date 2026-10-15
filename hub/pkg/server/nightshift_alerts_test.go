@@ -50,6 +50,7 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 		"command_line":  "ssh -o BatchMode=yes 10.0.0.9 uptime --token=abcdef",
 		"sweep_targets": []map[string]any{{"ip": "10.0.0.1", "ports": []int{22}}, {"ip": "10.0.0.39", "ports": []int{22}}, {"ip": "10.0.0.9", "ports": []int{22}}},
 		"admin_rule":    "10.0.0.9 was reached on port 23",
+		"floor_ports":   []int{},
 	})
 	tuning := store.GetDetectionTuning()
 	tuning.AdminFanoutSources = []string{"ws-01"}
@@ -142,6 +143,7 @@ func TestNightshiftFeedOwnAutomationDoesNotPage(t *testing.T) {
 	own, _ := json.Marshal(map[string]any{
 		"sweep_targets": []map[string]any{{"ip": "10.0.0.1", "ports": []int{22}}, {"ip": "10.0.0.39", "ports": []int{22}}, {"ip": "10.0.0.77", "ports": []int{22}}},
 		"admin_rule":    "10.0.0.77 is not an inventoried host",
+		"floor_ports":   []int{},
 	})
 	add := func(a storage.AnomalyAlert) {
 		a.TenantID, a.Description, a.Hostname = "t-01", "d", a.EndpointID
@@ -255,7 +257,8 @@ func TestDescribeAlertActor(t *testing.T) {
 	t.Parallel()
 	tuning := storage.DetectionTuning{}
 	sweep := func(actor string) feedAlert {
-		ev, _ := json.Marshal(map[string]any{"sweep_actor": actor, "sweep_targets": []map[string]any{{"ip": "192.168.86.10", "ports": []int{22}}}})
+		ev, _ := json.Marshal(map[string]any{"sweep_actor": actor, "sweep_targets": []map[string]any{{"ip": "192.168.86.10", "ports": []int{22}}},
+			"floor_ports": []int{}})
 		return describeAlert(storage.AnomalyAlert{ID: "s", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
 			ProcessPath: "/usr/bin/ssh", Evidence: string(ev)}, tuning)
 	}
@@ -277,7 +280,7 @@ func TestDescribeAlertActor(t *testing.T) {
 	// owner-writable binary can claim to be an agent.
 	for _, ports := range [][]int{{445}, {22, 3389}, {23}, {135, 80}} {
 		ev, _ := json.Marshal(map[string]any{"sweep_actor": "agent:claude:fb39ca7b", "sweep_targets": []map[string]any{
-			{"ip": "192.168.86.10", "ports": ports}, {"ip": "192.168.86.11", "ports": []int{22}}}})
+			{"ip": "192.168.86.10", "ports": ports}, {"ip": "192.168.86.11", "ports": []int{22}}}, "floor_ports": []int{}})
 		got := describeAlert(storage.AnomalyAlert{ID: "f", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
 			ProcessPath: "/home/u/.local/share/claude/versions/9/x", Evidence: string(ev)}, tuning)
 		if got.Expected != "" || !strings.Contains(got.Cause, "It still asks because it reached SMB, RDP") {
@@ -288,6 +291,34 @@ func TestDescribeAlertActor(t *testing.T) {
 	if got := describeAlert(storage.AnomalyAlert{ID: "g", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
 		DstIP: "192.168.86.10", DstPort: 445, Evidence: `{"sweep_actor":"agent:claude:fb39ca7b"}`}, tuning); got.Expected != "" {
 		t.Fatalf("single-target floor sweep = %+v", got)
+	}
+	// The evidence lists ten hosts; floor_ports covers the whole window. A
+	// sweep whose 445 hosts sort past the ten listed (all on port 80) is still
+	// a floor sweep, and says so.
+	var ten []map[string]any
+	for i := 10; i < 20; i++ {
+		ten = append(ten, map[string]any{"ip": fmt.Sprintf("192.168.86.%d", i), "ports": []int{80}})
+	}
+	ev, _ := json.Marshal(map[string]any{"sweep_actor": "agent:claude:fb39ca7b", "sweep_targets": ten, "floor_ports": []int{445}})
+	hidden := describeAlert(storage.AnomalyAlert{ID: "h", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "CRITICAL", Hostname: "ws",
+		Title: "Lateral Port Sweep / Internal Fan-Out (20 Hosts)", ProcessPath: "/home/u/.local/bin/x", DstIP: "192.168.86.19", DstPort: 80,
+		Evidence: string(ev)}, tuning)
+	if hidden.Expected != "" || !strings.Contains(hidden.Cause, "It still asks because it reached SMB, RDP") ||
+		!strings.Contains(hidden.What, "20 hosts") || !strings.Contains(hidden.What, "445") {
+		t.Fatalf("floor port past the listed ten = %+v", hidden)
+	}
+	// Evidence that does not record the window's floor ports (older alerts,
+	// or unreadable evidence) is read as a floor sweep.
+	for _, raw := range []string{`{"sweep_actor":"agent:claude:fb39ca7b","sweep_targets":[{"ip":"192.168.86.10","ports":[22]}]}`,
+		`{"sweep_actor":"agent:claude:fb39ca7b","floor_ports":"none"}`, `not json`, ``} {
+		got := describeAlert(storage.AnomalyAlert{ID: "u", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
+			ProcessPath: "/usr/bin/ssh", DstIP: "192.168.86.10", DstPort: 22, Evidence: raw}, storage.DetectionTuning{AdminFanoutSources: []string{"ws"}})
+		if got.Expected != "" {
+			t.Errorf("evidence %q without floor ports explained: %+v", raw, got)
+		}
+		if got.Actor != "" && !strings.Contains(got.Cause, "does not record every port") {
+			t.Errorf("evidence %q cause = %q", raw, got.Cause)
+		}
 	}
 	ti := describeAlert(storage.AnomalyAlert{ID: "t", AnomalyType: "THREAT_INTEL_MATCH", Severity: "HIGH", Hostname: "ws", DstIP: "203.0.113.9",
 		Evidence: `{"actor":"agent:claude:fb39ca7b"}`}, tuning)
