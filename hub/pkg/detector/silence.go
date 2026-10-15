@@ -73,10 +73,9 @@ func (e *Engine) StartSilenceWatch(ctx context.Context) {
 // SweepSilence raises a finding for every endpoint that has gone quiet, and a
 // recovery note for every one that has come back.
 func (e *Engine) SweepSilence(now time.Time) {
+	// Silence is part of the floor (DetectionTuning.normalised): no setting
+	// switches this sweep off.
 	cfg := e.settings()
-	if !cfg.SilenceOn {
-		return
-	}
 
 	endpoints, err := e.store.ListEndpoints("")
 	if err != nil {

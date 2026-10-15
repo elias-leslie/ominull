@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,7 +136,11 @@ func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"off_hours_start": 23}); w.Code != http.StatusOK {
+	// Starting the off-hours window later shrinks it, which loosens: the
+	// test owner approves it.
+	sheet := httptest.NewRequest(http.MethodPost, "/api/v1/detection/tuning", strings.NewReader(`{"off_hours_start":23}`))
+	sheet.Header.Set("X-API-Key", "mock_admin_token")
+	if w := serveApproved(t, srv, srv.Handler(), sheet, `{"off_hours_start":23}`); w.Code != http.StatusOK {
 		t.Fatalf("sheet-shaped save = %d %s", w.Code, w.Body.String())
 	}
 	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 1 || got.OffHoursStart != 23 {

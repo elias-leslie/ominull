@@ -462,37 +462,10 @@ func (s *Store) GetDetectionTuning() DetectionTuning {
 // of packets a beacon, and a threshold above one would switch the detector off
 // without saying so.
 func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuning, error) {
-	t = t.normalised()
-	for i, raw := range t.ContainerCIDRs {
-		p, err := netip.ParsePrefix(raw)
-		valid := false
-		if err == nil && !p.Addr().Is4In6() {
-			for _, space := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"} {
-				private := netip.MustParsePrefix(space)
-				if p.Bits() >= private.Bits() && private.Contains(p.Masked().Addr()) {
-					valid = true
-					break
-				}
-			}
-		}
-		if !valid {
-			return t, fmt.Errorf("%w: container network %q must lie wholly inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, raw)
-		}
-		t.ContainerCIDRs[i] = p.Masked().String()
-	}
-	for _, k := range t.KnownWorkloads {
-		if err := k.validate(); err != nil {
-			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
-		}
-	}
-	if err := t.validQuietLists(); err != nil {
-		return t, err
-	}
-	targets, err := validAdminTargets(t.AdminFanoutTargets)
+	t, err := PrepareDetectionTuning(t)
 	if err != nil {
 		return t, err
 	}
-	t.AdminFanoutTargets = targets
 	blob, err := json.Marshal(t)
 	if err != nil {
 		return t, err
@@ -513,9 +486,18 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 }
 
 // PrepareDetectionTuning normalises and checks a draft without saving it, so a
-// replay judges exactly what a save would store.
+// replay, and the owner approving a loosening, judge exactly what a save would
+// store.
 func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	t = t.normalised()
+	for i, raw := range t.ContainerCIDRs {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || !privatePrefix(p) {
+			return t, fmt.Errorf("%w: container network %q must lie wholly inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, raw)
+		}
+		t.ContainerCIDRs[i] = p.Masked().String()
+	}
+	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
 	for _, k := range t.KnownWorkloads {
 		if err := k.validate(); err != nil {
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
@@ -530,6 +512,30 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	}
 	t.AdminFanoutTargets = targets
 	return t, nil
+}
+
+// DetectionTuningProblem says what is wrong with the saved tuning row, or ""
+// when it is sound (or the hub has never been tuned). A row that cannot be
+// read runs as the shipped defaults (GetDetectionTuning), and one holding an
+// entry a save would refuse is read more widely than anyone could have
+// written it; neither may pass unnoticed.
+func (s *Store) DetectionTuningProblem() string {
+	var raw string
+	err := s.db.QueryRow(`SELECT settings FROM detection_tuning WHERE id = 1`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	if err != nil {
+		return "the saved detection tuning could not be read (" + err.Error() + "), so the shipped defaults run"
+	}
+	t := DefaultDetectionTuning()
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return "the saved detection tuning is not valid JSON (" + err.Error() + "), so the shipped defaults run"
+	}
+	if _, err := PrepareDetectionTuning(t); err != nil {
+		return "the saved detection tuning holds an entry a save would refuse: " + err.Error()
+	}
+	return ""
 }
 
 // validQuietLists refuses an entry the matchers would read more widely than it
@@ -608,6 +614,9 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	// Below five minutes this reports every reboot and every flaky link; above
 	// a day it is not alerting on absence, it is noticing it eventually.
 	t.SilenceAfterMinutes = clampInt(t.SilenceAfterMinutes, 5, 1440, 15)
+	// Silence is part of the floor: a host that stops reporting blinds every
+	// other detector, so no saved row switches it off.
+	t.SilenceOn = true
 	if t.WarmupHours < 0 {
 		t.WarmupHours = 0
 	}

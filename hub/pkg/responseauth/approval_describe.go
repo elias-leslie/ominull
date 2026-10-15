@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"ominull/hub/pkg/response"
@@ -116,6 +117,10 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		}
 		return "Open terminal", fmt.Sprintf("Interactive %s on %s, recorded, for %s",
 			cleanText(p.Program, 120), targets[0], requester), nil
+	}
+
+	if kind == ActionKindDetection {
+		return describeDetectionPolicy(payload, targets)
 	}
 
 	var p routedPayload
@@ -267,4 +272,210 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		}
 		return spec.action, "Agents stop dropping traffic for " + ip.String(), nil
 	}
+}
+
+// detectionPolicyPayload is a loosening of the hub's detection policy: the
+// policy as it is saved now and as the change would save it. The digest binds
+// both, so a change approved against one saved policy cannot be spent once
+// that policy has changed.
+type detectionPolicyPayload struct {
+	Policy string          `json:"policy"`
+	Op     string          `json:"op"`
+	Before json.RawMessage `json:"before"`
+	After  json.RawMessage `json:"after"`
+}
+
+var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": true, "after": true}
+
+// detectionPolicyOps names each change the hub can ask for, by policy.
+var detectionPolicyOps = map[string]map[string]string{
+	"detection_tuning": {
+		"save":          "Loosen detection tuning",
+		"reset":         "Restore shipped detection tuning",
+		"suppress_pair": "Mark a conversation expected",
+		"learning":      "Apply learning proposals",
+	},
+	"exclusion": {
+		"create": "Add a detection exclusion",
+		"enable": "Turn a detection exclusion on",
+	},
+}
+
+// describeDetectionPolicy shows the owner the change field by field, worked
+// out from the before and after the digest covers.
+func describeDetectionPolicy(payload []byte, targets []string) (string, string, error) {
+	var top map[string]json.RawMessage
+	if err := decodeJSON(payload, &top); err != nil {
+		return "", "", errors.New("detection policy payload must carry policy, op, before and after")
+	}
+	for k := range top {
+		if !detectionPolicyKeys[k] {
+			return "", "", fmt.Errorf("detection policy payload carries an unknown member %q", cleanText(k, 40))
+		}
+	}
+	var p detectionPolicyPayload
+	if err := decodeJSON(payload, &p); err != nil {
+		return "", "", errors.New("detection policy payload must carry policy, op, before and after")
+	}
+	action, ok := detectionPolicyOps[p.Policy][p.Op]
+	if !ok {
+		return "", "", fmt.Errorf("%q %q is not a detection policy change", cleanText(p.Policy, 40), cleanText(p.Op, 40))
+	}
+	var before, after map[string]interface{}
+	if err := decodeJSON(p.After, &after); err != nil || after == nil {
+		return "", "", errors.New("detection policy payload must carry the policy after the change")
+	}
+	if b := bytes.TrimSpace(p.Before); len(b) > 0 && string(b) != "null" {
+		if err := decodeJSON(b, &before); err != nil || before == nil {
+			return "", "", errors.New("detection policy before must be an object or null")
+		}
+	}
+	if len(targets) != 1 {
+		return "", "", errors.New("a detection policy change names exactly one target")
+	}
+	if p.Policy == "detection_tuning" {
+		if targets[0] != "detection:tuning" || before == nil {
+			return "", "", errors.New("a tuning change targets detection:tuning and carries the saved tuning")
+		}
+		parts := policyDiff(before, after)
+		if len(parts) == 0 {
+			return "", "", errors.New("this tuning change changes nothing")
+		}
+		return action, fitParts(parts), nil
+	}
+	if !strings.HasPrefix(targets[0], "exclusion:") {
+		return "", "", errors.New("an exclusion change targets exclusion:<id>")
+	}
+	if p.Op == "enable" && before == nil {
+		return "", "", errors.New("turning an exclusion on carries the saved exclusion")
+	}
+	var parts []string
+	shown := map[string]bool{"id": true, "tenant_id": true, "active": true, "created_at": true}
+	for _, k := range append([]string{"name", "process_path", "dst_ip_range", "port", "protocol", "scope", "scope_value", "expires_at", "reason"}, sortedKeys(after)...) {
+		v, present := after[k]
+		if shown[k] || !present {
+			continue
+		}
+		shown[k] = true
+		if v == nil || v == "" || v == float64(0) {
+			continue
+		}
+		parts = append(parts, k+" "+policyValue(v))
+	}
+	if before != nil && p.Op == "create" {
+		// Saving over an existing exclusion renews or rewrites it.
+		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after)...)
+	}
+	return action, fitParts(parts), nil
+}
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// policyDiff lists each top-level field that differs: a list as the entries
+// it gains and loses, anything else as old -> new.
+func policyDiff(before, after map[string]interface{}) []string {
+	union := map[string]interface{}{}
+	for k, v := range before {
+		union[k] = v
+	}
+	for k, v := range after {
+		union[k] = v
+	}
+	var parts []string
+	for _, k := range sortedKeys(union) {
+		a, b := before[k], after[k]
+		if policyJSON(a) == policyJSON(b) {
+			continue
+		}
+		la, aList := a.([]interface{})
+		lb, bList := b.([]interface{})
+		if (aList || a == nil) && (bList || b == nil) {
+			had, has := map[string]bool{}, map[string]bool{}
+			for _, x := range la {
+				had[policyJSON(x)] = true
+			}
+			for _, x := range lb {
+				has[policyJSON(x)] = true
+			}
+			var d []string
+			for _, x := range lb {
+				if !had[policyJSON(x)] {
+					d = append(d, "+"+policyValue(x))
+				}
+			}
+			for _, x := range la {
+				if !has[policyJSON(x)] {
+					d = append(d, "-"+policyValue(x))
+				}
+			}
+			parts = append(parts, k+" "+strings.Join(d, " "))
+			continue
+		}
+		parts = append(parts, k+" "+policyValue(a)+" -> "+policyValue(b))
+	}
+	return parts
+}
+
+func policyJSON(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// policyValue renders one value the way the owner reads it: a string as
+// itself, an object as its fields.
+func policyValue(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return "none"
+	case string:
+		if t == "" {
+			return "\"\""
+		}
+		return t
+	case map[string]interface{}:
+		fields := []string{}
+		for _, k := range sortedKeys(t) {
+			fields = append(fields, k+"="+policyValue(t[k]))
+		}
+		return "{" + strings.Join(fields, " ") + "}"
+	case []interface{}:
+		items := make([]string, 0, len(t))
+		for _, x := range t {
+			items = append(items, policyValue(x))
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	}
+	return policyJSON(v)
+}
+
+// fitParts joins the changes inside the statement's summary cap, saying how
+// many did not fit rather than dropping them silently.
+func fitParts(parts []string) string {
+	const partMax = 140
+	out := ""
+	for i, p := range parts {
+		p = cleanText(p, partMax)
+		next := out
+		if next != "" {
+			next += "; "
+		}
+		next += p
+		rest := len(parts) - i - 1
+		room := approvalMaxSummary
+		if rest > 0 {
+			room -= len(fmt.Sprintf("; and %d more", rest))
+		}
+		if len([]rune(next)) > room {
+			return out + fmt.Sprintf("; and %d more", len(parts)-i)
+		}
+		out = next
+	}
+	return out
 }

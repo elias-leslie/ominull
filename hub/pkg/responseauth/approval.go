@@ -47,6 +47,7 @@ const (
 	ActionKindAgentUpdate = response.ActionKindAgentUpdate
 	ActionKindMesh        = response.ActionKindMeshQuarantine
 	ActionKindCapability  = response.ActionKindCapability
+	ActionKindDetection   = response.ActionKindDetectionPolicy
 )
 
 // ApprovalState is the lifecycle of one owner approval.
@@ -293,7 +294,7 @@ func sortedUnique(in []string) []string {
 
 func approvalKindAllowed(k response.ActionKind) bool {
 	switch k {
-	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, response.ActionKindTerminalSession:
+	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, ActionKindDetection, response.ActionKindTerminalSession:
 		return true
 	}
 	return false
@@ -718,6 +719,12 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 	requester, stmt, payload := r.stmt.Requester, r.stmt, r.payload
 	b.mu.Unlock()
 
+	if req.Kind == ActionKindDetection {
+		// The hub applies a detection-policy change itself; no agent acts on
+		// it, so there is nothing to sign beyond spending the approval.
+		a.auditApproval(req.TenantID, requester, "approval_consumed", string(req.Kind), strings.Join(targets, ","), stmt.ID, "success", "detection policy change "+stmt.Digest)
+		return nil, nil
+	}
 	if manifestApproval(req.Kind, payload) {
 		if err := a.applyCapabilityApproval(req.TenantID, stmt, payload); err != nil {
 			a.auditApproval(req.TenantID, requester, "manifest_refused", string(req.Kind), strings.Join(targets, ","), stmt.ID, "denied", err.Error())

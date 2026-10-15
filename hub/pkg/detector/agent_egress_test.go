@@ -105,6 +105,27 @@ func TestAToolResolvingNamesPastTheRouterIsReported(t *testing.T) {
 	}
 }
 
+// Resolver bypass is part of the floor: switching agent egress off silences
+// the runtimes' baselines, never a tool resolving names past the router.
+func TestResolverBypassIsReportedWithAgentEgressOff(t *testing.T) {
+	engine, store := noiseEngine(t)
+	tuning := storage.DefaultDetectionTuning()
+	tuning.AgentEgressOn = false
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatal(err)
+	}
+	engine.InvalidateTuning()
+	now := time.Now().UTC()
+	engine.Evaluate(agentEvent("linux-73", "/usr/bin/curl", "dns.google", "8.8.8.8", 443, 300, now))
+	if got := anomaliesOfType(t, store, "AGENT_DNS_BYPASS"); len(got) != 1 {
+		t.Fatalf("resolver bypass with agent egress off: %d findings, want 1", len(got))
+	}
+	engine.Evaluate(agentEvent("linux-73", claudePath, "drop.attacker.example", "198.51.100.40", 443, 4<<20, now.Add(time.Second)))
+	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 0 {
+		t.Fatalf("agent egress is off, yet its baseline finding fired %d times", len(got))
+	}
+}
+
 func TestAgentBaselinesAreSeededFromProfilesOnce(t *testing.T) {
 	engine, store := noiseEngine(t)
 	old := time.Now().UTC().Add(-30 * 24 * time.Hour)

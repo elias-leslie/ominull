@@ -142,13 +142,14 @@ func (e *Engine) SeedAgentBaselines() {
 
 func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	procName string, isInterpreter, warming bool, now time.Time) {
-	if !cfg.AgentEgressOn || ev.Direction != "OUTBOUND" {
+	if ev.Direction != "OUTBOUND" {
 		return
 	}
 	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
 
 	// Resolver bypass is judged for the runtimes and for the tools they run:
 	// an injected "curl https://dns.google/resolve?name=..." is the shape.
+	// It is part of the floor, so agent_egress_enabled does not switch it off.
 	if (runtime != "" || isInterpreter) && isResolverBypass(ev) {
 		key := fmt.Sprintf("dnsbypass:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), ev.DstIP)
 		if !e.shouldSuppressAlert(key, agentDNSCooldown) {
@@ -166,7 +167,7 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 			})
 		}
 	}
-	if runtime == "" || isPrivateIP(ev.DstIP) {
+	if !cfg.AgentEgressOn || runtime == "" || isPrivateIP(ev.DstIP) {
 		return
 	}
 

@@ -28,8 +28,7 @@ func learningCall(t *testing.T, srv *Server, method, path, body, role string) (i
 	default:
 		r.Header.Set("X-API-Key", "mock_admin_token")
 	}
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
+	w := serveApproved(t, srv, srv.Handler(), r, body)
 	out := map[string]interface{}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return w.Code, out

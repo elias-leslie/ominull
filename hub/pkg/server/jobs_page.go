@@ -103,6 +103,7 @@ var jobActionNames = map[response.ActionKind]string{
 	response.ActionKindMeshQuarantine:  "Mesh quarantine",
 	response.ActionKindAutoIsolate:     "Automatic isolation",
 	response.ActionKindCapability:      "Capability change",
+	response.ActionKindDetectionPolicy: "Detection policy change",
 }
 
 func jobActionName(kind response.ActionKind) string {

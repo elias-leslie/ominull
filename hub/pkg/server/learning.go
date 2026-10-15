@@ -193,7 +193,12 @@ func (s *Server) handleApplyLearningProposals(w http.ResponseWriter, r *http.Req
 		byID[p.ID] = p
 	}
 
-	tuning := s.store.GetDetectionTuning()
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	before := s.store.GetDetectionTuning()
+	tuning := before
+	tuning.QuietPairs = append([]string(nil), before.QuietPairs...)
+	tuning.QuietClients = append([]string(nil), before.QuietClients...)
 	applied := []string{}
 	skipped := map[string]string{}
 	for _, id := range req.IDs {
@@ -226,13 +231,26 @@ func (s *Server) handleApplyLearningProposals(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	saved, err := s.store.SaveDetectionTuning(tuning, operatorName(r))
+	after, err := storage.PrepareDetectionTuning(tuning)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	c := tuningChange("learning", before, after)
+	approvalID, ok := s.policyApproved(w, r, c)
+	if !ok {
+		return
+	}
+	saved, err := s.store.SaveDetectionTuning(after, operatorName(r))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if s.detector != nil {
 		s.detector.InvalidateTuning()
+	}
+	if c.changed() {
+		s.notePolicyChange(r, c, approvalID)
 	}
 	sort.Strings(applied)
 	s.audit(r, "LEARNING_PROPOSALS_APPLIED", "detection",

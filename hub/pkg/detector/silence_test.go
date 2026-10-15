@@ -134,7 +134,9 @@ func TestTheThresholdIsTheOperatorsToSet(t *testing.T) {
 	}
 }
 
-func TestSilenceCanBeSwitchedOff(t *testing.T) {
+// Silence is part of the floor: a saved row that says it is off, written by
+// hand or by an older hub, still leaves the sweep running.
+func TestSilenceCannotBeSwitchedOff(t *testing.T) {
 	engine, store := silentEngine(t)
 	now := time.Now().UTC()
 	addEndpoint(t, store, "linux-off", now.Add(-40*time.Minute))
@@ -147,8 +149,8 @@ func TestSilenceCanBeSwitchedOff(t *testing.T) {
 	engine.InvalidateTuning()
 
 	engine.SweepSilence(now)
-	if got := anomaliesOfType(t, store, "ENDPOINT_SILENT"); len(got) != 0 {
-		t.Fatalf("the detector fired while switched off: %d findings", len(got))
+	if got := anomaliesOfType(t, store, "ENDPOINT_SILENT"); len(got) != 1 {
+		t.Fatalf("silence detection was switched off: %d findings, want 1", len(got))
 	}
 }
 

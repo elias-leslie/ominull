@@ -331,3 +331,37 @@ func TestApprovalCapsHoldUnderConcurrency(t *testing.T) {
 		t.Fatalf("%d concurrent requests passed the pending cap of 3", got)
 	}
 }
+
+// A detection-policy approval is spent once, against the exact digest, and
+// signs no grant: the hub applies the change itself.
+func TestDetectionPolicyApprovalIsSpentWithoutGrants(t *testing.T) {
+	auth, ap := newApprovalAuthority(t)
+	payload := []byte(`{"after":{"beacon_enabled":false},"before":{"beacon_enabled":true},"op":"save","policy":"detection_tuning"}`)
+	in := &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin (api-key)", Kind: responseauth.ActionKindDetection,
+		Summary: "hub words are ignored", Targets: []string{"detection:tuning"}, Payload: payload}
+	v, err := auth.RequestApproval(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Summary != "beacon_enabled true -> false" {
+		t.Fatalf("summary %q", v.Summary)
+	}
+	if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	consume := &responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin (api-key)", Kind: responseauth.ActionKindDetection,
+		Digest: hex.EncodeToString(sum[:]), Targets: []string{"detection:tuning"}}
+	other := *consume
+	other.Digest = strings.Repeat("0", 64)
+	if _, err := auth.ConsumeApproval(&other); !errors.Is(err, responseauth.ErrApprovalMismatch) {
+		t.Fatalf("other digest: %v", err)
+	}
+	grants, err := auth.ConsumeApproval(consume)
+	if err != nil || len(grants) != 0 {
+		t.Fatalf("consume: %v %v", grants, err)
+	}
+	if _, err := auth.ConsumeApproval(consume); !errors.Is(err, responseauth.ErrApprovalNotUsable) {
+		t.Fatalf("second consume: %v", err)
+	}
+}

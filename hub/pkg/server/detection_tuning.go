@@ -43,6 +43,8 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		s.policyMu.Lock()
+		defer s.policyMu.Unlock()
 		before := s.store.GetDetectionTuning()
 		// A deep copy: decoding into lists shared with before would rewrite
 		// the before side of the audit delta.
@@ -63,46 +65,55 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		by := r.Header.Get("X-Username")
-		if by == "" {
-			by = "admin"
-		}
-		saved, err := s.store.SaveDetectionTuning(req, by)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, storage.ErrInvalidDetectionTuning) {
-				status = http.StatusBadRequest
-			}
-			writeJSONError(w, status, err.Error())
+		if !req.SilenceOn {
+			writeJSONError(w, http.StatusBadRequest, "silence detection is part of the floor and cannot be switched off: a host that stops reporting blinds every other detector")
 			return
 		}
-		// The engine caches the row for a few seconds; drop it so the operator
-		// sees their change take effect rather than wondering whether it did.
-		if s.detector != nil {
-			s.detector.InvalidateTuning()
+		after, err := storage.PrepareDetectionTuning(req)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		s.audit(r, "DETECTION_TUNING_SAVED", "detection", tuningDelta(before, saved))
-		s.writeTuning(w, saved)
+		s.applyTuning(w, r, tuningChange("save", before, after), "DETECTION_TUNING_SAVED")
 
 	case http.MethodDelete:
-		by := r.Header.Get("X-Username")
-		if by == "" {
-			by = "admin"
-		}
-		saved, err := s.store.SaveDetectionTuning(storage.DefaultDetectionTuning(), by)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if s.detector != nil {
-			s.detector.InvalidateTuning()
-		}
-		s.audit(r, "DETECTION_TUNING_RESET", "detection", "restored the shipped thresholds")
-		s.writeTuning(w, saved)
+		s.policyMu.Lock()
+		defer s.policyMu.Unlock()
+		// A reset tightens only when it silences a subset of what it
+		// replaces: shipped quiet entries someone removed come back with it.
+		s.applyTuning(w, r, tuningChange("reset", s.store.GetDetectionTuning(), storage.DefaultDetectionTuning()), "DETECTION_TUNING_RESET")
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// applyTuning saves a judged tuning change: at once when it only tightens,
+// after the owner's approval when it loosens. The caller holds policyMu.
+func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyChange, action string) {
+	approvalID, ok := s.policyApproved(w, r, c)
+	if !ok {
+		return
+	}
+	saved, err := s.store.SaveDetectionTuning(c.after.(storage.DetectionTuning), operatorName(r))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrInvalidDetectionTuning) {
+			status = http.StatusBadRequest
+		}
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	// The engine caches the row for a few seconds; drop it so the operator
+	// sees their change take effect rather than wondering whether it did.
+	if s.detector != nil {
+		s.detector.InvalidateTuning()
+	}
+	s.audit(r, action, "detection", c.wording+"; credential "+credentialOf(r)+" (unverified)")
+	if c.changed() {
+		s.notePolicyChange(r, c, approvalID)
+	}
+	s.writeTuning(w, saved)
 }
 
 // writeTuning sends the settings alongside the shipped defaults, so the console
@@ -303,28 +314,37 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tuning := s.store.GetDetectionTuning()
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	before := s.store.GetDetectionTuning()
 	pair := proc + "@" + owner
-	for _, existing := range tuning.QuietPairs {
+	for _, existing := range before.QuietPairs {
 		if strings.EqualFold(strings.TrimSpace(existing), pair) {
 			_ = s.store.AcknowledgeAnomaly(finding.ID)
 			s.writeSuppressed(w, pair, finding, false)
 			return
 		}
 	}
-	tuning.QuietPairs = append(tuning.QuietPairs, pair)
-
-	by := r.Header.Get("X-Username")
-	if by == "" {
-		by = "admin"
+	tuning := before
+	tuning.QuietPairs = append(append([]string(nil), before.QuietPairs...), pair)
+	after, err := storage.PrepareDetectionTuning(tuning)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if _, err := s.store.SaveDetectionTuning(tuning, by); err != nil {
+	c := tuningChange("suppress_pair", before, after)
+	approvalID, ok := s.policyApproved(w, r, c)
+	if !ok {
+		return
+	}
+	if _, err := s.store.SaveDetectionTuning(after, operatorName(r)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if s.detector != nil {
 		s.detector.InvalidateTuning()
 	}
+	s.notePolicyChange(r, c, approvalID)
 	if err := s.store.AcknowledgeAnomaly(finding.ID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return

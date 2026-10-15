@@ -75,6 +75,10 @@ type Server struct {
 	// responseAuth communicates with the Response Authority daemon
 	responseAuth responseauth.Client
 	approvalWake approvalNotifier
+	// policyMu serialises detection-policy writes from reading the saved
+	// policy to saving the new one (detection_policy.go), so two saves cannot
+	// interleave and an approval is spent against the policy it was asked on.
+	policyMu sync.Mutex
 	// evidenceStore manages encrypted forensic collections
 	evidenceStore *evidence.Store
 	// stopEvidenceRetention ends the hourly evidence prune started by Start.
@@ -2837,15 +2841,22 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid exclusion body")
 			return
 		}
-		if ex.ID == "" {
-			ex.ID = "ex-" + uuid.New().String()[:8]
-		} else if existing, err := s.store.GetExclusion(ex.ID); err == nil {
-			// Saving over an id renews that row; it never moves it to
-			// another tenant.
-			ex.TenantID = existing.TenantID
-		} else if !errors.Is(err, storage.ErrExclusionNotFound) {
-			writeJSONError(w, http.StatusInternalServerError, "could not read the exclusion")
-			return
+		s.policyMu.Lock()
+		defer s.policyMu.Unlock()
+		// An exclusion silences detection, so every create, and every save
+		// over an existing id (a renewal), loosens and waits for the owner.
+		var before any
+		named := ex.ID != ""
+		if named {
+			if existing, err := s.store.GetExclusion(ex.ID); err == nil {
+				// Saving over an id renews that row; it never moves it to
+				// another tenant.
+				ex.TenantID = existing.TenantID
+				before = exclusionView(existing, true)
+			} else if !errors.Is(err, storage.ErrExclusionNotFound) {
+				writeJSONError(w, http.StatusInternalServerError, "could not read the exclusion")
+				return
+			}
 		}
 		if ex.TenantID == "" {
 			ex.TenantID = "default"
@@ -2864,6 +2875,24 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "expires_at can be at most 90 days ahead; renew the exclusion to keep it longer")
 			return
 		}
+		target := "exclusion:new"
+		if named {
+			target = "exclusion:" + ex.ID
+		}
+		change := policyChange{
+			policy: "exclusion", op: "create", target: target,
+			before: before, after: exclusionView(ex, named),
+			loosens: []string{"exclusion"},
+			wording: fmt.Sprintf("exclusion %s (%s %s:%d, %s scope %s) until %s: %s", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Scope, ex.ScopeValue, ex.ExpiresAt.Format(time.RFC3339), ex.Reason),
+		}
+		approvalID, ok := s.policyApproved(w, r, change)
+		if !ok {
+			return
+		}
+		if !named {
+			ex.ID = "ex-" + uuid.New().String()[:8]
+			change.target = "exclusion:" + ex.ID
+		}
 
 		if err := s.store.CreateExclusion(ex); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2877,10 +2906,11 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			Username:  r.Header.Get("X-Username"),
 			Action:    "CREATE_EXCLUSION",
 			Resource:  ex.ID,
-			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s %s:%d, %s scope %s) until %s: %s", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Scope, ex.ScopeValue, ex.ExpiresAt.Format(time.RFC3339), ex.Reason),
+			Details:   fmt.Sprintf("Created security tool exclusion: %s (%s %s:%d, %s scope %s) until %s: %s; credential %s (unverified)", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Scope, ex.ScopeValue, ex.ExpiresAt.Format(time.RFC3339), ex.Reason, credentialOf(r)),
 			IPAddress: clientIP(r),
 			Timestamp: time.Now().UTC(),
 		})
+		s.notePolicyChange(r, change, approvalID)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -2892,6 +2922,8 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "missing id")
 			return
 		}
+		s.policyMu.Lock()
+		defer s.policyMu.Unlock()
 		ex, ok := s.exclusionForWrite(w, id, tenantID)
 		if !ok {
 			return
@@ -2900,7 +2932,10 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.audit(r, "DELETE_EXCLUSION", id, fmt.Sprintf("Deleted exclusion %s (%s %s:%d)", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port))
+		s.audit(r, "DELETE_EXCLUSION", id, fmt.Sprintf("Deleted exclusion %s (%s %s:%d); credential %s (unverified)", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, credentialOf(r)))
+		// Deleting an exclusion only tightens: it applies at once, noted.
+		s.notePolicyChange(r, policyChange{policy: "exclusion", op: "delete", target: "exclusion:" + id,
+			wording: fmt.Sprintf("deleted exclusion %s (%s %s:%d)", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port)}, "")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
 
 	default:
@@ -2940,10 +2975,14 @@ func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid toggle body")
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	ex, ok := s.exclusionForWrite(w, req.ID, "")
 	if !ok {
 		return
 	}
+	state := "Disabled"
+	change := policyChange{policy: "exclusion", op: "disable", target: "exclusion:" + req.ID}
 	if req.Active {
 		// Turning an expired or malformed row back on would read as active
 		// in the console while matching nothing; say so instead.
@@ -2951,16 +2990,28 @@ func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusConflict, "this exclusion cannot be turned on: "+problem+"; save it again with a new expiry")
 			return
 		}
+		state = "Enabled"
+		on := ex
+		on.Active = true
+		change = policyChange{policy: "exclusion", op: "enable", target: "exclusion:" + req.ID,
+			before: exclusionView(ex, true), after: exclusionView(on, true)}
+		if !ex.Active {
+			change.loosens = []string{"exclusion"}
+		}
+	}
+	change.wording = fmt.Sprintf("%s exclusion %s (%s %s:%d)", strings.ToLower(state), ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port)
+	approvalID, ok := s.policyApproved(w, r, change)
+	if !ok {
+		return
 	}
 	if err := s.store.ToggleExclusion(req.ID, req.Active); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	state := "Disabled"
-	if req.Active {
-		state = "Enabled"
+	s.audit(r, "TOGGLE_EXCLUSION", req.ID, fmt.Sprintf("%s exclusion %s (%s %s:%d); credential %s (unverified)", state, ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, credentialOf(r)))
+	if ex.Active != req.Active {
+		s.notePolicyChange(r, change, approvalID)
 	}
-	s.audit(r, "TOGGLE_EXCLUSION", req.ID, fmt.Sprintf("%s exclusion %s (%s %s:%d)", state, ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "updated", "id": req.ID, "active": req.Active})
 }

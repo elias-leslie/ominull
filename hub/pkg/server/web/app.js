@@ -717,7 +717,7 @@
      waiting state can be seen and screenshotted without a phone. */
   var DEMO_APPROVAL_MS = 4000;
   var demoApprovals = {};
-  function demoApprovalPost(path, body, headers) {
+  function demoApprovalPost(path, body, headers, method) {
     var id = headers["X-Approval-ID"];
     if (!id) {
       id = "demo-" + Math.random().toString(16).slice(2, 10);
@@ -727,7 +727,7 @@
     var a = demoApprovals[id];
     if (!a || a.state !== "approved") return Promise.reject(Object.assign(new Error("approval is not valid"), { status: 403 }));
     a.state = "consumed";
-    return demoResponse(path, "POST", body).then(function (v) { return { status: 200, body: v }; });
+    return demoResponse(path, method || "POST", body).then(function (v) { return { status: 200, body: v }; });
   }
   function demoApprovalPoll(id) {
     var a = demoApprovals[id];
@@ -752,7 +752,10 @@
 
   /* The one way the console sends a gated action. opts.label names the
      action for the waiting panel; opts.onPending runs once when the hub says
-     the owner has to approve (callers close their confirmation sheet there). */
+     the owner has to approve (callers close their confirmation sheet there).
+     opts.method is POST unless given: restoring the shipped tuning is a
+     DELETE. A detection-policy change that only tightens is answered at once,
+     with no panel. */
   function ownerApproved(path, body, opts) {
     opts = opts || {};
     if (READ_ONLY) return Promise.reject(Object.assign(new Error("Read-only access"), { status: 403 }));
@@ -810,7 +813,8 @@
     approvalWakers.push(wakeAll);
     var deps = {
       post: function (headers) {
-        return state.demo ? demoApprovalPost(path, body, headers) : rawRequest(path, "POST", body, headers);
+        var method = opts.method || "POST";
+        return state.demo ? demoApprovalPost(path, body, headers, method) : rawRequest(path, method, body, headers);
       },
       poll: function (id) {
         return state.demo ? demoApprovalPoll(id) : rawRequest("/api/v1/approvals?id=" + encodeURIComponent(id) + "&wait=" + APPROVAL_POLL_WAIT_S).then(function (r) { return r.body; });
@@ -3985,7 +3989,7 @@
             on: {
               click: function (e) {
                 e.stopPropagation();
-                request("/api/v1/detection/tuning/suppress", "POST", { id: a.id })
+                ownerApproved("/api/v1/detection/tuning/suppress", { id: a.id }, { label: "Mark this alert's program and network as expected" })
                   .then(function (res) {
                     var pair = (res && res.pair) || "this conversation";
                     toast(res && res.added
@@ -3993,7 +3997,7 @@
                       : pair + " was already expected", "ok");
                     refresh();
                   })
-                  .catch(function (err) { toast(err.message, "crit"); });
+                  .catch(function (err) { if (err && err.handled) return; toast(err.message, "crit"); });
               }
             }
           }));
@@ -6036,7 +6040,6 @@
     var bwCool = numberField(t.bandwidth_cooldown_minutes, 1, 1440, 1);
     var bwSamples = numberField(t.bandwidth_min_samples, 4, 1000, 1);
 
-    var silenceOn = toggleField(t.silence_enabled, "Report agents that stop reporting");
     var silenceAfter = numberField(t.silence_after_minutes, 5, 1440, 1);
 
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
@@ -6047,7 +6050,7 @@
     var pairs = listField(t.quiet_pairs, "/opt/backup/backup-agent@AS64500, /usr/bin/curl@AS36459");
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored." }),
+      h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored. A change that tightens detection applies at once; one that loosens it waits for your approval on your phone." }),
 
       tuningRow("Container networks", "Explicit private CIDRs excluded from lateral fan-out detection. Leave empty when unknown; private addresses alone do not prove container traffic.", containers),
       h("h4", { cls: "tune-head", text: "Periodic beaconing" }),
@@ -6072,7 +6075,7 @@
         tuningRow("", "", bwOn.node),
         tuningRow("Transfers required", "A spike is measured against what this process normally sends. Below this many observed transfers the baseline is guesswork, and every large-ish upload looks like an outlier. Shipped default " + (d.bandwidth_min_samples || 20) + ".", bwSamples),
         tuningRow("Repeat at most every", "Minutes, per process.", bwCool),
-        tuningRow("", "", silenceOn.node),
+        tuningRow("", "", h("span", { text: "Agents that stop reporting are always reported. This detector cannot be switched off." })),
         tuningRow("Silent after", "Minutes without a heartbeat before a host is reported as dark. Every other detector here needs telemetry, so stopping the agent is the cheapest way to blind all of them - and a crashed, rebuilt or disconnected host looks the same. One finding per host, and a recovery note when it returns.", silenceAfter)),
 
       h("h4", { cls: "tune-head", text: "New endpoints" }),
@@ -6104,7 +6107,6 @@
         bandwidth_enabled: bwOn.input.checked,
         bandwidth_cooldown_minutes: parseInt(bwCool.value, 10) || 0,
         bandwidth_min_samples: parseInt(bwSamples.value, 10) || 0,
-        silence_enabled: silenceOn.input.checked,
         silence_after_minutes: parseInt(silenceAfter.value, 10) || 0,
         warmup_hours: parseInt(warmup.value, 10) || 0,
         quiet_processes: parseList(procs.value),
@@ -6113,12 +6115,12 @@
         quiet_pairs: parseList(pairs.value),
         container_cidrs: parseList(containers.value)
       };
-      request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
+      ownerApproved("/api/v1/detection/tuning", payload, { label: "Save detection tuning", onPending: closeSheet }).then(function (res) {
         state.tuning = res;
         toast("Detection tuning saved", "ok");
         closeSheet();
         renderBody();
-      }).catch(function (e) { toast("Could not save: " + e.message, "crit"); });
+      }).catch(function (e) { if (e && e.handled) return; toast("Could not save: " + e.message, "crit"); });
     };
 
     var restore = function () {
@@ -6132,12 +6134,12 @@
     };
 
     var sendRestoreTuning = function () {
-      request("/api/v1/detection/tuning", "DELETE").then(function (res) {
+      ownerApproved("/api/v1/detection/tuning", null, { method: "DELETE", label: "Restore the shipped detection tuning", onPending: closeSheet }).then(function (res) {
         state.tuning = res;
         toast("Restored the shipped thresholds", "ok");
         closeSheet();
         renderBody();
-      }).catch(function (e) { toast("Could not restore: " + e.message, "crit"); });
+      }).catch(function (e) { if (e && e.handled) return; toast("Could not restore: " + e.message, "crit"); });
     };
 
     openSheet("Detection tuning", body, [
@@ -6329,14 +6331,14 @@
               click: function () {
                 var ids = Object.keys(chosen).filter(function (k) { return chosen[k]; });
                 if (!ids.length) { toast("Nothing selected", "warn"); return; }
-                request("/api/v1/learning/proposals/apply", "POST", { window: w.id, ids: ids })
+                ownerApproved("/api/v1/learning/proposals/apply", { window: w.id, ids: ids }, { label: "Apply " + ids.length + " learning proposal(s)", onPending: closeSheet })
                   .then(function (res) {
                     var n = arrayOf(res && res.applied).length;
                     toast("Applied " + n + " proposal(s) \u2014 see Detection tuning", "ok");
                     closeSheet();
                     refresh();
                   })
-                  .catch(function (e) { toast("Apply failed: " + e.message, "crit"); });
+                  .catch(function (e) { if (e && e.handled) return; toast("Apply failed: " + e.message, "crit"); });
               }
             }
           })
@@ -6835,12 +6837,12 @@
   function confirmToggleExclusion(x) {
     var name = x.name || x.id;
     var apply = function () {
-      request("/api/v1/exclusions/toggle", "POST", { id: x.id, active: !x.active })
+      ownerApproved("/api/v1/exclusions/toggle", { id: x.id, active: !x.active }, { label: "Turn exclusion " + name + " on", onPending: closeSheet })
         .then(function () {
           toast((x.active ? "Disabled" : "Enabled") + " exclusion " + name, "ok");
           refresh();
         })
-        .catch(function (e) { toast("Could not change the exclusion: " + e.message, "crit"); });
+        .catch(function (e) { if (e && e.handled) return; toast("Could not change the exclusion: " + e.message, "crit"); });
     };
     if (x.active) { apply(); return; }
     confirmSheet({

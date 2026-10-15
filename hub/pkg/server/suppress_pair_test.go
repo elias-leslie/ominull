@@ -17,8 +17,7 @@ func suppressFinding(t *testing.T, srv *Server, id string) (int, map[string]inte
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/detection/tuning/suppress", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
+	w := serveApproved(t, srv, srv.Handler(), r, body)
 	out := map[string]interface{}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return w.Code, out

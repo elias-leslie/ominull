@@ -28,6 +28,10 @@ const (
 	ActionKindMeshQuarantine  ActionKind = "mesh_quarantine"
 	ActionKindAutoIsolate     ActionKind = "auto_isolate"
 	ActionKindCapability      ActionKind = "capability_change"
+	// ActionKindDetectionPolicy is an owner-approved loosening of the hub's
+	// own detection policy (tuning, exclusions). The hub applies it; no agent
+	// ever receives a grant of this kind.
+	ActionKindDetectionPolicy ActionKind = "detection_policy"
 )
 
 // AutoIsolateRoute is the route field of the detector's isolation payload.
