@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <winhttp.h>
+#include <bcrypt.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,8 @@
 #include <stdarg.h>
 #include "../include/agent.h"
 #include "../include/response_capabilities.h"
+#include "../include/gzip_encode.h"
+#include "../include/upload_queue.h"
 
 /* WinHTTP keeps a connection alive when its response body is drained. The old
  * heartbeat path opened and closed a session and a connection every 2.5s, so
@@ -432,6 +435,14 @@ char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *ev
     } while (0)
     APPEND("{\"type\":\"telemetry\",\"tenant_id\":\"default\"");
     FIELD("endpoint_id", config->endpoint_id);
+    {
+        static uint64_t nonce;
+        if (!nonce && (BCryptGenRandom(NULL, (PUCHAR)&nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0 || !nonce))
+            nonce = (GetTickCount64() << 20) ^ GetCurrentProcessId();
+        char batchID[40];
+        Upload_BatchID(nonce, batchID, sizeof(batchID));
+        FIELD("batch_id", batchID);
+    }
     if (config->evidence_signing_key[0])
         FIELD("evidence_signing_key", config->evidence_signing_key);
     FIELD("location_id", config->location_id[0] ? config->location_id : "loc-home");
@@ -531,22 +542,20 @@ failed:
     return NULL;
 }
 
-bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
-                            char* respOut, size_t respCap) {
-    if (!config) {
-        return false;
-    }
+/* Upload transport (upload_queue.h): gzip once the hub has said it decodes
+ * it, and batches it could not take kept for a replay after the next accepted
+ * heartbeat. Guarded by the telemetry loop being the only caller. */
+static bool g_HubTakesGzip;
+static UPLOAD_QUEUE g_Uploads;
+
+/* One telemetry POST of a body as built. Returns false when no HTTP answer
+ * came back; *statusOut is the hub's status, 0 without one. */
+static bool HubPostTelemetryBody(const AGENT_CONFIG* config, const void* body, size_t length, bool gzipped,
+                                 bool replay, char* respOut, size_t respCap, DWORD* statusOut) {
+    *statusOut = 0;
     if (respOut && respCap > 0) {
         respOut[0] = '\0';
     }
-
-    /* Checked before the batch is built, not after the send fails. The payload
-     * and the device credential header that authenticates it are the things being
-     * protected, so the hub has to be proven to be the hub first. */
-    if (!Hub_TransportReady(config)) {
-        return false;
-    }
-
     char hostStr[128] = {0};
     WCHAR wHost[128] = {0};
     WORD port = 80;
@@ -554,18 +563,13 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     Hub_SplitURL(config->hub_url, hostStr, sizeof(hostStr), &port, &isHttps);
     MultiByteToWideChar(CP_UTF8, 0, hostStr, -1, wHost, 128);
 
-    char *jsonBuf = Hub_BuildTelemetryJSON(config, events, count);
-    if (!jsonBuf) return false;
-
     // Send HTTP POST via the persistent WinHTTP session/connection.
     if (!HubHTTPEnter()) {
-        free(jsonBuf);
         return false;
     }
 
     if (!HubHTTPPrepare(wHost, port, isHttps)) {
         LeaveCriticalSection(&g_http.lock);
-        free(jsonBuf);
         return false;
     }
     HINTERNET hConnect = g_http.connect;
@@ -589,7 +593,6 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     if (!hRequest) {
         HubHTTPDropConnection();
         LeaveCriticalSection(&g_http.lock);
-        free(jsonBuf);
         return false;
     }
 
@@ -609,7 +612,8 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
     MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
     const wchar_t* credentialHeader = strncmp(config->api_key, "omd_", 4) == 0
         ? L"X-Ominull-Device-Credential" : L"X-API-Key";
-    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: application/json\r\n", credentialHeader, wKey);
+    swprintf(wHeaders, 1024, L"%ls: %ls\r\nContent-Type: application/json\r\n%ls%ls", credentialHeader, wKey,
+             gzipped ? L"Content-Encoding: gzip\r\n" : L"", replay ? L"X-Ominull-Replay: 1\r\n" : L"");
 
     WinHttpAddRequestHeaders(hRequest, wHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
@@ -617,9 +621,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         hRequest,
         WINHTTP_NO_ADDITIONAL_HEADERS,
         0,
-        jsonBuf,
-        (DWORD)strlen(jsonBuf),
-        (DWORD)strlen(jsonBuf),
+        (LPVOID)body,
+        (DWORD)length,
+        (DWORD)length,
         0
     );
 
@@ -632,9 +636,9 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
             hRequest,
             WINHTTP_NO_ADDITIONAL_HEADERS,
             0,
-            jsonBuf,
-            (DWORD)strlen(jsonBuf),
-            (DWORD)strlen(jsonBuf),
+            (LPVOID)body,
+            (DWORD)length,
+            (DWORD)length,
             0
         );
     }
@@ -710,9 +714,100 @@ bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* eve
         HubHTTPDropConnection();
     }
     LeaveCriticalSection(&g_http.lock);
-    free(jsonBuf);
 
-    return (bResults && (dwStatusCode == 200 || dwStatusCode == 204));
+    *statusOut = bResults ? dwStatusCode : 0;
+    return bResults;
+}
+
+/* Sends kept batches, oldest first, after an accepted heartbeat. A hub that
+ * does not advertise gzip predates replays: what is kept is lost to it. */
+static void HubReplayQueued(const AGENT_CONFIG* config, UPLOAD_LOSS* loss) {
+    if (!g_HubTakesGzip) {
+        while (UploadQueue_Peek(&g_Uploads))
+            UploadQueue_Pop(&g_Uploads, loss);
+        return;
+    }
+    /* Room for a full control reply: a replay for an endpoint the hub has not
+     * stored yet is answered like a heartbeat. */
+    static char reply[32768];
+    for (int sent = 0; sent < UPLOAD_QUEUE_REPLAY_PER_BEAT; sent++) {
+        UPLOAD_ITEM* item = UploadQueue_Peek(&g_Uploads);
+        if (!item)
+            break;
+        DWORD status = 0;
+        bool answered = HubPostTelemetryBody(config, item->data, item->length, item->gzip, true, reply,
+                                             sizeof(reply), &status);
+        if (answered && status >= 200 && status < 300) {
+            UploadQueue_Pop(&g_Uploads, NULL);
+        } else if (Upload_Retryable(answered ? (long)status : 0)) {
+            break; /* kept for the next beat */
+        } else {
+            UploadQueue_Pop(&g_Uploads, loss); /* refused for good */
+        }
+    }
+}
+
+bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
+                            char* respOut, size_t respCap, uint64_t* lostTcp, uint64_t* lostUdp) {
+    UPLOAD_LOSS loss = {0};
+    uint64_t tcpObs = 0, udpObs = 0;
+    for (size_t i = 0; events && i < count; i++) {
+        uint64_t n = events[i].ObservationCount ? events[i].ObservationCount : 1;
+        if (events[i].Protocol == 17)
+            udpObs += n;
+        else
+            tcpObs += n;
+    }
+    if (respOut && respCap > 0)
+        respOut[0] = '\0';
+    bool accepted = false;
+    char *jsonBuf = NULL;
+    /* Checked before the batch is built, not after the send fails. The payload
+     * and the device credential header that authenticates it are the things being
+     * protected, so the hub has to be proven to be the hub first. */
+    if (config && Hub_TransportReady(config))
+        jsonBuf = Hub_BuildTelemetryJSON(config, events, count);
+    if (!jsonBuf) {
+        loss.tcp_observations = tcpObs;
+        loss.udp_observations = udpObs;
+        goto done;
+    }
+    size_t length = strlen(jsonBuf);
+    uint8_t *body = (uint8_t *)jsonBuf;
+    bool gzipped = false;
+    if (g_HubTakesGzip) {
+        size_t packedLength = 0;
+        uint8_t *packed = Gzip_Encode(jsonBuf, length, &packedLength);
+        if (packed && packedLength < length) {
+            free(jsonBuf);
+            body = packed;
+            length = packedLength;
+            gzipped = true;
+        } else {
+            free(packed);
+        }
+    }
+    DWORD status = 0;
+    bool answered = HubPostTelemetryBody(config, body, length, gzipped, false, respOut, respCap, &status);
+    accepted = answered && (status == 200 || status == 204);
+    if (accepted) {
+        free(body);
+        if (respOut && respCap > 0)
+            g_HubTakesGzip = Upload_HubAcceptsGzip(respOut);
+        HubReplayQueued(config, &loss);
+    } else if (Upload_Retryable(answered ? (long)status : 0)) {
+        UploadQueue_Push(&g_Uploads, body, length, gzipped, tcpObs, udpObs, &loss);
+    } else {
+        free(body);
+        loss.tcp_observations += tcpObs;
+        loss.udp_observations += udpObs;
+    }
+done:
+    if (lostTcp)
+        *lostTcp = loss.tcp_observations;
+    if (lostUdp)
+        *lostUdp = loss.udp_observations;
+    return accepted;
 }
 
 bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const char* contentType,

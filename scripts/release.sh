@@ -100,6 +100,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
         -o "${ROOT_DIR}/build/test_terminal_frame" "${ROOT_DIR}/agent/tests/test_terminal_frame.c"
     "${ROOT_DIR}/build/test_terminal_frame"
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_gzip_encode" "${ROOT_DIR}/agent/tests/test_gzip_encode.c" -lz
+    "${ROOT_DIR}/build/test_gzip_encode"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_terminal_linux" "${ROOT_DIR}/agent/tests/test_terminal_linux.c" -lcurl -lutil
     "${ROOT_DIR}/build/test_terminal_linux"
 fi

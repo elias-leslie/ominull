@@ -9,11 +9,20 @@
 #define UDP_BUCKETS 2048
 #define UDP_POLL_CAP 16384
 
+/* Loopback conversations are counted, not itemized. The hub keeps them as
+ * hourly counters per process and service port (flow_local_hourly), yet every
+ * DNS query to the local resolver used a fresh ephemeral port and so arrived as
+ * a row of its own: on a workstation that was about half of all telemetry. A
+ * loopback observation is keyed by process, direction, addresses and the
+ * service port (the lower of the two, as the hub computes it) with the
+ * ephemeral side zeroed, and is held for up to five minutes before it goes. */
+#define UDP_LOCAL_HOLD_NS (300ULL * 1000000000ULL)
+
 typedef struct {
     struct ominull_udp_observation event;
     uint64_t first_ns, bytes, observations;
     int next;
-    bool used;
+    bool used, local;
 } UDP_PENDING;
 static struct udp_bpf *g_UDPProgram;
 static struct ring_buffer *g_UDPRing;
@@ -24,6 +33,29 @@ static uint64_t g_UDPQueueDrops, g_UDPDecodeDrops;
 static bool g_UDPStarted;
 static const char *g_UDPStatus = "not_started";
 static int g_UDPError;
+/* Set to release held loopback counters at once (shutdown, tests). */
+static bool g_UDPFlushLocal;
+
+static bool UDPIsLoopback(const unsigned char *ip, unsigned char version) {
+    static const unsigned char v6loop[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    if (version == 4)
+        return ip[0] == 127;
+    return memcmp(ip, v6loop, 16) == 0 || (memcmp(ip, mapped, 12) == 0 && ip[12] == 127);
+}
+
+/* Zeroes the ephemeral side of a loopback observation's ports and reports
+ * whether it is one. Ports stay in network order. */
+static bool UDPLocalKey(struct ominull_udp_observation *e) {
+    if (!UDPIsLoopback(e->local_ip, e->ip_version) && !UDPIsLoopback(e->remote_ip, e->ip_version))
+        return false;
+    uint16_t local = ntohs(e->local_port), remote = ntohs(e->remote_port);
+    if (local && (!remote || local < remote))
+        e->remote_port = 0;
+    else
+        e->local_port = 0;
+    return true;
+}
 
 static uint32_t UDPHash(const struct ominull_udp_observation *e) {
     uint32_t h = e->pid ^ (uint32_t)e->process_start_ns ^ e->ifindex;
@@ -43,7 +75,9 @@ static int UDPReceive(void *context, void *data, size_t size) {
         g_UDPDecodeDrops++;
         return 0;
     }
-    const struct ominull_udp_observation *e = data;
+    struct ominull_udp_observation key = *(const struct ominull_udp_observation *)data;
+    const struct ominull_udp_observation *e = &key;
+    bool local = UDPLocalKey(&key);
     unsigned bucket = UDPHash(e);
     int index = g_UDPBuckets[bucket];
     while (index >= 0 && !UDPKeyEqual(e, &g_UDPQueue[index].event))
@@ -59,6 +93,7 @@ static int UDPReceive(void *context, void *data, size_t size) {
         slot->event = *e;
         slot->first_ns = e->observed_ns;
         slot->used = true;
+        slot->local = local;
         slot->next = g_UDPBuckets[bucket];
         g_UDPBuckets[bucket] = index;
     }
@@ -165,11 +200,19 @@ static bool UDPAddress(const unsigned char *raw, unsigned char version, uint32_t
 }
 static size_t UDPCollectorDrain(LINUX_FLOW_EVENT *output, size_t capacity) {
     size_t count = 0;
+    struct timespec now;
+    clock_gettime(CLOCK_BOOTTIME, &now);
+    uint64_t nowNs = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+    /* Held counters must never crowd out new observations: past three
+     * quarters full, they go regardless of age. */
+    bool releaseLocal = g_UDPFlushLocal || g_UDPFreeCount < UDP_QUEUE_CAP / 4;
     for (size_t visited = 0; visited < UDP_QUEUE_CAP && count < capacity; visited++) {
         int index = (int)g_UDPCursor;
         g_UDPCursor = (g_UDPCursor + 1) % UDP_QUEUE_CAP;
         UDP_PENDING *slot = &g_UDPQueue[index];
         if (!slot->used)
+            continue;
+        if (slot->local && !releaseLocal && nowNs - slot->first_ns < UDP_LOCAL_HOLD_NS)
             continue;
         struct ominull_udp_observation *e = &slot->event;
         LINUX_FLOW_EVENT *f = &output[count];

@@ -118,6 +118,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		// A destination a runtime has not reached for the profile period is
 		// forgotten with its profile, and reaching it again is news again.
 		{"agent_egress_destinations", "last_seen", policy.CommProfiles},
+		{"ingest_uploads_daily", "day", policy.FlowRollups},
 	} {
 		if target.keep <= 0 {
 			continue // 0 disables pruning for this table
@@ -132,7 +133,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		stmt := fmt.Sprintf(
 			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s < ? LIMIT %d)",
 			target.table, target.table, target.column, pruneBatch)
-		if target.table == "anomaly_signature_daily" {
+		if target.table == "anomaly_signature_daily" || target.table == "ingest_uploads_daily" {
 			stmt = fmt.Sprintf("DELETE FROM %s WHERE %s < ?", target.table, target.column)
 		}
 

@@ -889,14 +889,13 @@ void RunAgentLoop(AGENT_CONFIG* config) {
              * to five enforcement grants with their payloads. */
             static char hubResponse[32768];
             hubResponse[0] = '\0';
+            uint64_t lostTcp = 0, lostUdp = 0;
             bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
-                                                   hubResponse, sizeof(hubResponse));
-            if (!accepted) {
-                UDPWinTransportLost(eventBatch, batchCount);
-                for (size_t i = 0; i < batchCount; i++)
-                    if (eventBatch[i].Protocol == 6)
-                        g_TCPDrops += eventBatch[i].ObservationCount;
-            }
+                                                   hubResponse, sizeof(hubResponse), &lostTcp, &lostUdp);
+            /* Counted when lost for good, not when a send fails: a batch the
+             * hub could not take is kept and sent again (upload_queue.h). */
+            UDPWinCountLost(lostUdp);
+            g_TCPDrops += lostTcp;
             batchCount = 0;
             lastFlush = now;
             HubContact(accepted);
@@ -922,10 +921,13 @@ void RunAgentLoop(AGENT_CONFIG* config) {
         Sleep(100);
     }
 
+    /* Held loopback counters go with a last batch rather than with the service. */
+    g_UDPWinFlushLocal = true;
+    batchCount += UDPWinDrain(eventBatch + batchCount, 64 - batchCount);
     UDPWinStop();
 
     if (batchCount > 0) {
-        Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0);
+        Hub_SendTelemetryBatch(config, eventBatch, batchCount, NULL, 0, NULL, NULL);
     }
 
     /* The engine handle is closed, not the filters: the session is not dynamic,

@@ -31,8 +31,15 @@ func (s *Server) handleStorageReport(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "reading cold segments failed")
 		return
 	}
+	// Agent uploads per endpoint and day (wire and decoded bytes), the last
+	// week: read live, not from the cached report.
+	uploads, err := s.store.UploadsSince(time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02"))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "reading upload counts failed")
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"report": rep, "cold_segments": segments})
+	writeJSON(w, http.StatusOK, map[string]any{"report": rep, "cold_segments": segments, "uploads": uploads})
 }
 
 // storageFinding is the Nightshift "Data per endpoint" row: informational

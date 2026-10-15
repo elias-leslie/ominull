@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
         Sleep(10000);
     OMINULL_EVENT event;
     UDPWinDrain(&event, 1);
-    UDPWinTransportLost(&event, 0);
+    UDPWinCountLost(0);
     char health[512];
     UDPWinHealthJSON(health, sizeof(health));
     UDPWinStop();

@@ -39,10 +39,29 @@ TCP measured deltas use `tcp_socket_counter`; unavailable counters use `unknown`
 TCP timing is `counter_sample`, never packet timing. Queued records retain their
 original interval, even when the socket closes before upload.
 
+Loopback UDP (127.0.0.0/8, ::1) is counted, not itemized: the key keeps the
+process, direction, addresses and the service port (the lower of the two ports),
+with the ephemeral side reported as 0, and a key is held up to five minutes before
+it is sent. The hub stores loopback as hourly counters per process and service
+port anyway; before 1.8.60 every query to a local resolver from a fresh port was a
+record of its own, about half of a workstation's telemetry. Held keys are released
+early when the queue is three quarters full, and on agent stop.
+
 The wire cap remains 64 records. Each transport gets capacity before spare slots
 are lent to the other. Pending flow queues hold at most 1,024 keys per transport
-and drain by rotating slots. Queue overflow and failed uploads count as lost
-observations. TCP socket scans rotate through bounded candidate windows and report
+and drain by rotating slots. Queue overflow counts as lost observations.
+
+Uploads (1.8.60): once a heartbeat reply carries `"accept_encoding":"gzip"`, the
+agent gzips its batch (a shared fixed-Huffman encoder, `agent/include/gzip_encode.h`;
+about 8x on telemetry JSON). A batch the hub could not take for a passing reason
+(no answer, timeout, HTTP 408, 429 or 5xx) is kept, as built, in a queue bounded at
+4 MiB and 1,024 batches, and sent again after the next accepted heartbeat with
+`X-Ominull-Replay: 1`, up to 16 per beat. The hub stores only a replay's events,
+never its stale collector counters or endpoint fields, and each batch carries a
+`batch_id` so a replay of a batch whose reply was lost is answered `duplicate`
+instead of being stored twice. Observations count as lost only when a kept batch
+is evicted or refused for good. The hub counts wire and decoded bytes per endpoint
+and day (`uploads` in `GET /api/v1/storage/report`). TCP socket scans rotate through bounded candidate windows and report
 how many eligible rows were deferred. A scan still cannot recover a TCP socket that
 opened and closed entirely between samples.
 

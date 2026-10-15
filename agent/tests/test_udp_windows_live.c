@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
      * All other omissions, queue overflow and trace loss still fail the test. */
     assert(g_UDPWinDropped == g_UDPWinScopeOmitted && g_UDPWinSchemaOmitted == 0 && g_UDPWinTraceLost == 0 &&
            g_UDPWinBuffersLost == 0);
-    UDPWinTransportLost(events, 0);
+    UDPWinCountLost(0);
     UDPWinStop();
     printf("UDP rows=%u v4=%llu/%llu v6=%llu/%llu\n", count, in4, out4, in6, out6);
     assert(count > 0 && in4 == 10 * rounds && out4 == 10 * rounds && in6 == 10 * rounds &&

@@ -145,6 +145,8 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	if err != nil {
 		return nil, err
 	}
+	// Agents compress their next batches only once they have read this.
+	resp["accept_encoding"] = "gzip"
 	s.addTrustControl(r.Context(), resp, persisted, batch.Trust)
 	if desc, ok := resp["agent_update"].(map[string]string); ok && batch.Trust != nil {
 		if g := s.updateGrantFor(batch.EndpointID, desc["version"]); g != nil {
@@ -152,6 +154,43 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		}
 	}
 	return resp, nil
+}
+
+// ingestTelemetryReplay stores the events of a batch the agent could not
+// deliver when it was taken. Its header fields describe the endpoint as it was
+// then: the collector counters and readiness would move backwards and the
+// endpoint record would be overwritten with stale values, so only the events
+// are used, against the endpoint as it is now. The live heartbeat that
+// preceded it already carried the control reply, so none is sent.
+func (s *Server) ingestTelemetryReplay(r *http.Request, tenantID string, batch TelemetryBatchMessage) (map[string]interface{}, error) {
+	persisted, err := s.store.GetEndpoint(batch.EndpointID)
+	if err != nil {
+		return nil, fmt.Errorf("load endpoint before replay: %w", err)
+	}
+	if persisted == nil {
+		// Never seen live: there is nothing newer to protect.
+		return s.ingestTelemetry(r, tenantID, batch)
+	}
+	if persisted.Status == "retired" {
+		return nil, errRetiredEndpoint
+	}
+	if err := validateObservationBatch(batch.Events, nil); err != nil {
+		return nil, err
+	}
+	if err := validateTelemetryAddresses(batch.Events); err != nil {
+		return nil, err
+	}
+	events := normalizeTelemetryEvents(batch.Events, tenantID, batch.EndpointID, time.Now().UTC())
+	snapshot, err := s.telemetrySnapshot(tenantID, *persisted, events)
+	if err != nil {
+		return nil, err
+	}
+	applyThreatIntel(s.ti, events, batch.EndpointID)
+	if err := s.store.InsertTelemetryBatch(events, persisted.Hostname, persisted.LocationID); err != nil {
+		return nil, fmt.Errorf("persist replayed batch: %w", err)
+	}
+	s.detector.EvaluateBatch(events, snapshot)
+	return map[string]interface{}{"status": "ok", "replayed": len(events)}, nil
 }
 
 func requestRemoteIP(r *http.Request) string {

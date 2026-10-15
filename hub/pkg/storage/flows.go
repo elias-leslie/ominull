@@ -211,6 +211,9 @@ func (s *Store) initFlowSchema() error {
 	if err := s.initAnomalyCountsSchema(); err != nil {
 		return err
 	}
+	if err := s.initUploadSchema(); err != nil {
+		return err
+	}
 	if err := s.initColdSchema(); err != nil {
 		return err
 	}

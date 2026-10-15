@@ -39,6 +39,8 @@
 #include "../include/process_lineage_linux.h"
 #include "../include/software_inventory_linux.h"
 #include "../include/data_inventory_linux.h"
+#include "../include/gzip_encode.h"
+#include "../include/upload_queue.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -1465,7 +1467,8 @@ static size_t HubResponseWrite(char* ptr, size_t size, size_t nmemb, void* userd
 /* Sets every option of one hub POST on curl (headers, TLS, timeouts) and
  * returns the header list the caller frees after the transfer; NULL on error. */
 static struct curl_slist* SetupHubCurl(CURL* curl, const LINUX_AGENT_CONFIG* config, const char* url,
-                                       const char* body, HUB_RESPONSE_BUFFER* response, long timeoutMs) {
+                                       const char* body, size_t bodyLength, const char* const* extraHeaders,
+                                       HUB_RESPONSE_BUFFER* response, long timeoutMs) {
 	char apiHeader[256];
 	const char* headerName = IsDeviceCredentialValue(config->api_key)
 	    ? "X-Ominull-Device-Credential" : "X-API-Key";
@@ -1474,13 +1477,15 @@ static struct curl_slist* SetupHubCurl(CURL* curl, const LINUX_AGENT_CONFIG* con
 	}
 	struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
 	headers = curl_slist_append(headers, apiHeader);
+	for (size_t i = 0; headers && extraHeaders && extraHeaders[i]; i++)
+		headers = curl_slist_append(headers, extraHeaders[i]);
 	if (!headers) return NULL;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)(body ? strlen(body) : 0));
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)(body ? bodyLength : 0));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HubResponseWrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "OminullAgent/1.0");
@@ -1511,8 +1516,9 @@ static struct curl_slist* SetupHubCurl(CURL* curl, const LINUX_AGENT_CONFIG* con
     return headers;
 }
 
-static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
-                              const char* body, char* out, size_t outCap, long timeoutMs) {
+static bool RunHubCurlBody(const LINUX_AGENT_CONFIG* config, const char* url, const char* body,
+                           size_t bodyLength, const char* const* extraHeaders, char* out, size_t outCap,
+                           long timeoutMs) {
     if (out && outCap) out[0] = '\0';
     static CURL* curl = NULL;
     if (!curl) {
@@ -1522,7 +1528,7 @@ static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
     HUB_RESPONSE_BUFFER response = {
         .data = out, .cap = outCap, .len = 0, .overflow = false
     };
-    struct curl_slist* headers = SetupHubCurl(curl, config, url, body, &response, timeoutMs);
+    struct curl_slist* headers = SetupHubCurl(curl, config, url, body, bodyLength, extraHeaders, &response, timeoutMs);
     if (!headers) return false;
 
     CURLcode result = curl_easy_perform(curl);
@@ -1535,6 +1541,11 @@ static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
     }
     curl_slist_free_all(headers);
     return result == CURLE_OK && !response.overflow;
+}
+
+static bool RunHubCurlTimeout(const LINUX_AGENT_CONFIG* config, const char* url,
+                              const char* body, char* out, size_t outCap, long timeoutMs) {
+    return RunHubCurlBody(config, url, body, body ? strlen(body) : 0, NULL, out, outCap, timeoutMs);
 }
 
 static bool RunHubCurl(const LINUX_AGENT_CONFIG* config, const char* url,
@@ -2909,6 +2920,59 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
     }
 }
 
+/* Upload transport (upload_queue.h): gzip once the hub has said it decodes
+ * it, and batches it could not take kept for a replay after the next accepted
+ * heartbeat. */
+static bool g_HubTakesGzip;
+static UPLOAD_QUEUE g_Uploads;
+/* The last batch at shutdown is delivered and nothing else: no reply is acted
+ * on (no job, update or enforcement change on the way out) and no replays
+ * hold up the stop. */
+static bool g_FinalBatch;
+
+/* One telemetry POST of a body as built. Returns false when no HTTP answer
+ * came back; *status is the hub's status, 0 without one. */
+static bool PostTelemetryBody(const LINUX_AGENT_CONFIG* config, const char* url, const uint8_t* body,
+                              size_t length, bool gzipped, bool replay, char* out, size_t outCap, long* status) {
+    const char* extra[3] = {NULL, NULL, NULL};
+    size_t n = 0;
+    if (gzipped)
+        extra[n++] = "Content-Encoding: gzip";
+    if (replay)
+        extra[n++] = "X-Ominull-Replay: 1";
+    *status = 0;
+    bool answered = RunHubCurlBody(config, url, (const char*)body, length, extra, out, outCap, 5000L);
+    if (answered)
+        *status = SplitHubStatus(out);
+    return answered;
+}
+
+/* Sends kept batches, oldest first, after an accepted heartbeat. A hub that
+ * does not advertise gzip predates replays: what is kept is lost to it. */
+static void ReplayQueuedTelemetry(const LINUX_AGENT_CONFIG* config, const char* url, char* reply,
+                                  size_t replyCap, UPLOAD_LOSS* loss) {
+    if (!g_HubTakesGzip) {
+        while (UploadQueue_Peek(&g_Uploads))
+            UploadQueue_Pop(&g_Uploads, loss);
+        return;
+    }
+    for (int sent = 0; sent < UPLOAD_QUEUE_REPLAY_PER_BEAT; sent++) {
+        UPLOAD_ITEM* item = UploadQueue_Peek(&g_Uploads);
+        if (!item)
+            break;
+        long status = 0;
+        bool answered = PostTelemetryBody(config, url, item->data, item->length, item->gzip, true, reply,
+                                          replyCap, &status);
+        if (answered && status >= 200 && status < 300) {
+            UploadQueue_Pop(&g_Uploads, NULL);
+        } else if (Upload_Retryable(answered ? status : 0)) {
+            break; /* kept for the next beat */
+        } else {
+            UploadQueue_Pop(&g_Uploads, loss); /* refused for good */
+        }
+    }
+}
+
 static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
     /* Checked before the batch is built, not after it fails: the payload and
      * the header that authenticates it are the things being protected. */
@@ -2942,6 +3006,11 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     char header[sizeof(rawHeader) / sizeof(rawHeader[0])][1537];
     char trustReport[768];
     Trust_ReportJSON(&g_Trust, trustReport, sizeof(trustReport));
+    static uint64_t nonce;
+    while (!nonce && syscall(SYS_getrandom, &nonce, sizeof(nonce), 0) != (long)sizeof(nonce))
+        nonce = ((uint64_t)time(NULL) << 20) ^ (uint64_t)getpid();
+    char batchID[40];
+    Upload_BatchID(nonce, batchID, sizeof(batchID));
     for (size_t i = 0; i < sizeof(rawHeader) / sizeof(rawHeader[0]); i++)
         ProcessLineage_EscapeJSON(rawHeader[i], header[i], sizeof(header[i]));
 
@@ -2951,9 +3020,9 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                  "\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\","
                  "\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_"
                  "identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\","
-                 "\"evidence_signing_key\":\"%s\",\"response_capabilities\":%s,\"trust\":%s,\"events\":[",
+                 "\"evidence_signing_key\":\"%s\",\"batch_id\":\"%s\",\"response_capabilities\":%s,\"trust\":%s,\"events\":[",
                  header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
-                 header[8], header[9], header[10], header[11], header[12],
+                 header[8], header[9], header[10], header[11], header[12], batchID,
                  g_Trust.have_key[TRUST_KEY_RESPONSE] ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY, trustReport);
 
     for (size_t i = 0; i < flowCount; i++) {
@@ -3051,29 +3120,57 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
      * enforcement grants with their payloads. */
     static char respBuf[32768];
     memset(respBuf, 0, sizeof(respBuf));
-    bool accepted = false;
-    if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
-        long status = SplitHubStatus(respBuf);
-        if (!ReportHubRejection(config, status)) {
-            accepted = true;
-            AdoptDeviceCredential(config, respBuf);
-            Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
-            SyncEnforcement(config, respBuf);
-            ApplyAgentUpdate(config, respBuf);
-            ProcessResponseOffers(config, respBuf);
+    uint64_t tcpObs = 0, udpObs = 0;
+    for (size_t i = 0; i < flowCount; i++) {
+        if (flows[i].protocol == 17)
+            udpObs += flows[i].observation_count;
+        else
+            tcpObs += flows[i].observation_count;
+    }
+    size_t bodyLength = strlen(jsonBuf);
+    uint8_t* body = (uint8_t*)jsonBuf;
+    bool gzipped = false;
+    if (g_HubTakesGzip) {
+        size_t packedLength = 0;
+        uint8_t* packed = Gzip_Encode(jsonBuf, bodyLength, &packedLength);
+        if (packed && packedLength < bodyLength) {
+            free(jsonBuf);
+            body = packed;
+            bodyLength = packedLength;
+            gzipped = true;
+        } else {
+            free(packed);
         }
+    }
+    bool accepted = false;
+    long status = 0;
+    if (PostTelemetryBody(config, url, body, bodyLength, gzipped, false, respBuf, sizeof(respBuf), &status) &&
+        !ReportHubRejection(config, status)) {
+        accepted = true;
+    }
+    if (accepted && !g_FinalBatch) {
+        g_HubTakesGzip = Upload_HubAcceptsGzip(respBuf);
+        AdoptDeviceCredential(config, respBuf);
+        Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
+        SyncEnforcement(config, respBuf);
+        ApplyAgentUpdate(config, respBuf);
+        ProcessResponseOffers(config, respBuf);
     }
     HubContact(accepted);
-    if (!accepted) {
-        for (size_t i = 0; i < flowCount; i++) {
-            if (flows[i].protocol == 17)
-                g_UDPQueueDrops += flows[i].observation_count;
-            else
-                g_TCPDrops += flows[i].observation_count;
-        }
+    UPLOAD_LOSS loss = {0};
+    if (accepted) {
+        free(body);
+        if (!g_FinalBatch)
+            ReplayQueuedTelemetry(config, url, respBuf, sizeof(respBuf), &loss);
+    } else if (Upload_Retryable(status)) {
+        UploadQueue_Push(&g_Uploads, body, bodyLength, gzipped, tcpObs, udpObs, &loss);
+    } else {
+        free(body);
+        loss.tcp_observations += tcpObs;
+        loss.udp_observations += udpObs;
     }
-
-    free(jsonBuf);
+    g_TCPDrops += loss.tcp_observations;
+    g_UDPQueueDrops += loss.udp_observations;
 }
 
 static time_t g_LastSoftwareInventorySync = 0;
@@ -3207,7 +3304,7 @@ static void FinishDataInventory(const LINUX_AGENT_CONFIG* config) {
         g_DataResp[0] = '\0';
         g_DataRespBuf = (HUB_RESPONSE_BUFFER){.data = g_DataResp, .cap = sizeof(g_DataResp), .len = 0, .overflow = false};
         if (g_DataDoc && g_DataState && g_DataMulti && g_DataEasy &&
-            (g_DataHeaders = SetupHubCurl(g_DataEasy, config, url, g_DataDoc, &g_DataRespBuf, 300000L)) != NULL &&
+            (g_DataHeaders = SetupHubCurl(g_DataEasy, config, url, g_DataDoc, strlen(g_DataDoc), NULL, &g_DataRespBuf, 300000L)) != NULL &&
             curl_multi_add_handle(g_DataMulti, g_DataEasy) == CURLM_OK) {
             DataInv_Reset(&g_DataRun);
             return;
@@ -3520,6 +3617,13 @@ int main(int argc, char* argv[]) {
         }
         TickDataInventory(&config);
     }
+
+    /* Held loopback counters go with a last batch rather than with the process. */
+    g_UDPFlushLocal = true;
+    g_FinalBatch = true;
+    flowCount = CollectActiveFlows(flows, MAX_FLOWS_PER_BATCH);
+    if (flowCount)
+        SendTelemetryBatch(&config, flows, flowCount);
 
     DataInv_Abort(&g_DataRun);
     EndDataUpload();

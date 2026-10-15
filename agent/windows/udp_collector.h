@@ -42,6 +42,29 @@ static volatile LONG g_UDPWinError;
 static UINT64 g_UDPWinDropped, g_UDPWinTraceLost, g_UDPWinBuffersLost;
 static UINT64 g_UDPWinScopeOmitted, g_UDPWinSchemaOmitted;
 
+/* Loopback conversations are counted, not itemized, as on Linux: the hub
+ * keeps them as hourly counters per process and service port, but every query
+ * to a local service from a fresh ephemeral port arrived as a row of its own.
+ * A loopback observation is keyed with the ephemeral side zeroed (the service
+ * port is the lower one, as the hub computes it) and held up to five minutes. */
+#define UDP_WIN_LOCAL_HOLD_TICKS (300ULL * 10000000ULL)
+static bool g_UDPWinLocal[UDP_WIN_CAP];
+/* Set to release held loopback counters at once (service stop, tests). */
+static volatile bool g_UDPWinFlushLocal;
+
+static bool UDPWinLocalKey(OMINULL_EVENT *e) {
+    static const unsigned char v6loop[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    bool loop = e->IpVersion == 4 ? ((e->Addr.Ipv4.LocalIp >> 24) == 127 || (e->Addr.Ipv4.RemoteIp >> 24) == 127)
+                                  : (!memcmp(e->Addr.Ipv6.LocalIp, v6loop, 16) || !memcmp(e->Addr.Ipv6.RemoteIp, v6loop, 16));
+    if (!loop)
+        return false;
+    if (e->LocalPort && (!e->RemotePort || e->LocalPort < e->RemotePort))
+        e->RemotePort = 0;
+    else
+        e->LocalPort = 0;
+    return true;
+}
+
 static UINT64 UDPWinFileTime(FILETIME t) { return ((UINT64)t.dwHighDateTime << 32) | t.dwLowDateTime; }
 static unsigned UDPWinHash(const OMINULL_EVENT *e) {
     unsigned h =
@@ -147,6 +170,7 @@ static void WINAPI UDPWinEvent(PEVENT_RECORD record) {
     else
         e.BytesIn = bytes;
     UDPWinProcess(&e);
+    bool loopback = UDPWinLocalKey(&e);
     unsigned bucket = UDPWinHash(&e);
     int index = g_UDPWinBuckets[bucket];
     while (index >= 0 && !UDPWinSame(&e, &g_UDPWinQueue[index].event))
@@ -160,6 +184,7 @@ static void WINAPI UDPWinEvent(PEVENT_RECORD record) {
         UDP_WIN_SLOT *slot = &g_UDPWinQueue[index];
         slot->event = e;
         slot->used = true;
+        g_UDPWinLocal[index] = loopback;
         slot->next = g_UDPWinBuckets[bucket];
         g_UDPWinBuckets[bucket] = index;
     } else {
@@ -262,12 +287,21 @@ static size_t UDPWinDrain(OMINULL_EVENT *events, size_t capacity) {
     if (!g_UDPWinInitialized)
         return 0;
     size_t count = 0;
+    FILETIME nowFt;
+    GetSystemTimeAsFileTime(&nowFt);
+    UINT64 now = UDPWinFileTime(nowFt);
     EnterCriticalSection(&g_UDPWinLock);
+    /* Held counters must never crowd out new observations: past three
+     * quarters full, they go regardless of age. */
+    bool releaseLocal = g_UDPWinFlushLocal || g_UDPWinFreeCount < UDP_WIN_CAP / 4;
     for (size_t visited = 0; visited < UDP_WIN_CAP && count < capacity; visited++) {
         int index = (int)g_UDPWinCursor;
         g_UDPWinCursor = (g_UDPWinCursor + 1) % UDP_WIN_CAP;
         UDP_WIN_SLOT *slot = &g_UDPWinQueue[index];
         if (!slot->used)
+            continue;
+        if (g_UDPWinLocal[index] && !releaseLocal && now > slot->event.FirstObservedAt &&
+            now - slot->event.FirstObservedAt < UDP_WIN_LOCAL_HOLD_TICKS)
             continue;
         events[count++] = slot->event;
         unsigned bucket = UDPWinHash(&slot->event);
@@ -282,13 +316,11 @@ static size_t UDPWinDrain(OMINULL_EVENT *events, size_t capacity) {
     LeaveCriticalSection(&g_UDPWinLock);
     return count;
 }
-static void UDPWinTransportLost(const OMINULL_EVENT *events, size_t count) {
-    if (!g_UDPWinInitialized)
+static void UDPWinCountLost(UINT64 observations) {
+    if (!g_UDPWinInitialized || !observations)
         return;
     EnterCriticalSection(&g_UDPWinLock);
-    for (size_t i = 0; i < count; i++)
-        if (events[i].Protocol == 17)
-            g_UDPWinDropped += events[i].ObservationCount;
+    g_UDPWinDropped += observations;
     LeaveCriticalSection(&g_UDPWinLock);
 }
 static size_t UDPWinHealthJSON(char *out, size_t capacity) {

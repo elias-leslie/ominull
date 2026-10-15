@@ -412,6 +412,8 @@ type Store struct {
 	coldDir string
 	// dataReport is the last computed data size report (datasize.go).
 	dataReport dataReportCache
+	// uploads counts agent request bytes before they are written (uploads.go).
+	uploads uploadLedger
 }
 
 func New(dbPath string) (*Store, error) {

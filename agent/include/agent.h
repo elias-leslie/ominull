@@ -166,8 +166,11 @@ bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
 // The hub answers a telemetry POST with the agent_update descriptor, which is
 // how the agent learns a release exists at all. respOut receives that response
 // body (truncated to respCap) so the caller can act on it; pass NULL to ignore.
+// A batch the hub could not take for a passing reason is kept and sent again
+// later (upload_queue.h); lostTcp/lostUdp receive the observations that are
+// lost for good in this call (refused, or evicted from a full queue).
 bool Hub_SendTelemetryBatch(const AGENT_CONFIG* config, const OMINULL_EVENT* events, size_t count,
-                            char* respOut, size_t respCap);
+                            char* respOut, size_t respCap, uint64_t* lostTcp, uint64_t* lostUdp);
 bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody,
                       char* respOut, size_t respCap);
 bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const char* contentType,

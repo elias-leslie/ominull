@@ -42,6 +42,7 @@ int main(void) {
     exchange(AF_INET);
     exchange(AF_INET6);
     UDPCollectorPoll();
+    g_UDPFlushLocal = true; /* loopback counters are otherwise held five minutes */
     LINUX_FLOW_EVENT events[64];
     size_t count = UDPCollectorDrain(events, 64);
     uint64_t in4 = 0, out4 = 0, in6 = 0, out6 = 0;

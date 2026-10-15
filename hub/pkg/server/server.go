@@ -38,6 +38,8 @@ import (
 )
 
 type Server struct {
+	// batches remembers recent batch ids for replay deduplication.
+	batches     batchLedger
 	ipv6Monitor *ipv6guard.Monitor
 	store       *storage.Store
 	ti          *threatintel.Manager
@@ -111,13 +113,16 @@ type Server struct {
 type TelemetryBatchMessage struct {
 	CollectorHealth storage.CollectorHealthList `json:"collector_health"`
 	Type            string                      `json:"type"` // "telemetry"
-	EndpointID      string                      `json:"endpoint_id"`
-	TenantID        string                      `json:"tenant_id"`
-	LocationID      string                      `json:"location_id"`
-	Role            string                      `json:"role"`
-	Hostname        string                      `json:"hostname"`
-	OS              string                      `json:"os"`
-	IP              string                      `json:"ip"`
+	// BatchID names one batch as the agent built it, so a batch sent again
+	// after a lost reply is stored once (telemetry_upload.go).
+	BatchID    string `json:"batch_id,omitempty"`
+	EndpointID string `json:"endpoint_id"`
+	TenantID   string `json:"tenant_id"`
+	LocationID string `json:"location_id"`
+	Role       string `json:"role"`
+	Hostname   string `json:"hostname"`
+	OS         string `json:"os"`
+	IP         string `json:"ip"`
 	// MAC is the endpoint's primary hardware address. Asset identity keys on
 	// it, so an agented host that changes DHCP lease stays one record instead
 	// of forking a second one. The retained Linux and Windows agents send
@@ -2436,9 +2441,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost {
 		var batch TelemetryBatchMessage
-		bodyBytes, err := io.ReadAll(r.Body)
+		bodyBytes, wireBytes, gzipped, err := readTelemetryBody(r)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, telemetryBodyStatus(err), "telemetry was not accepted: "+err.Error())
 			return
 		}
 
@@ -2446,7 +2451,28 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !s.endpointIdentityOK(w, r, batch.EndpointID) {
 				return
 			}
-			resp, err := s.ingestTelemetry(r, tenantID, batch)
+			replay := isTelemetryReplay(r)
+			switch s.batches.begin(batch.EndpointID, batch.BatchID) {
+			case batchDone:
+				// Stored when it was first sent; the agent lost the reply.
+				writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "duplicate": true})
+				return
+			case batchInFlight:
+				// The first send is still being written: the agent keeps
+				// this copy and asks again on a later beat.
+				writeJSONError(w, http.StatusServiceUnavailable, "this batch is still being stored")
+				return
+			}
+			var resp map[string]interface{}
+			if replay {
+				resp, err = s.ingestTelemetryReplay(r, tenantID, batch)
+			} else {
+				resp, err = s.ingestTelemetry(r, tenantID, batch)
+			}
+			s.batches.finish(batch.EndpointID, batch.BatchID, err == nil)
+			if err == nil {
+				s.store.RecordUpload(batch.EndpointID, wireBytes, int64(len(bodyBytes)), gzipped, replay)
+			}
 			if err != nil {
 				log.Printf("[-] telemetry ingestion failed for %s: %v", batch.EndpointID, err)
 				status := http.StatusInternalServerError
