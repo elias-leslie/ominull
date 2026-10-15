@@ -62,17 +62,21 @@ done
 ssh "${PROXMOX_HOST}" "pct exec '${LXC_VMID}' -- systemctl restart ominull-hub.service"
 
 # systemctl restart returns before the new hub listens, so the first probe used
-# to hit a closed port. Wait (bounded) for the unit to be active and :9999 to
+# to hit a closed port. Wait (bounded) for the unit to be active and :9443 to
 # listen, then require the hub to answer as the version just installed and to
 # serve the authenticated API. Anything short of that inside the window fails.
 : "${OMINULL_ADMIN_KEY:?set OMINULL_ADMIN_KEY}"
+# The admin key only travels over TLS (the hub's :9443 listener), checked
+# against the hub CA that enrolment pins on every agent.
+HUB_CA="${OMINULL_HUB_CA:-/etc/ominull/ca.crt}"
+[ -f "${HUB_CA}" ] || { echo "[-] Hub CA ${HUB_CA} is missing; set OMINULL_HUB_CA." >&2; exit 1; }
 hdr() {
     printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY}"
 }
 deadline=$((SECONDS + 60))
-until ssh "${PROXMOX_HOST}" "pct exec '${LXC_VMID}' -- sh -c 'systemctl is-active --quiet ominull-hub.service && ss -Hltn \"sport = :9999\" | grep -q .'"; do
+until ssh "${PROXMOX_HOST}" "pct exec '${LXC_VMID}' -- sh -c 'systemctl is-active --quiet ominull-hub.service && ss -Hltn \"sport = :9443\" | grep -q .'"; do
     if [ "${SECONDS}" -ge "${deadline}" ]; then
-        echo "[-] ominull-hub.service is not active and listening on :9999 within 60 s of the restart." >&2
+        echo "[-] ominull-hub.service is not active and listening on :9443 within 60 s of the restart." >&2
         exit 1
     fi
     sleep 1
@@ -80,10 +84,10 @@ done
 while :; do
     # The console page needs the key too; each curl reads its own descriptor.
     exec 3< <(hdr) 4< <(hdr)
-    if curl -fsS --max-time 5 -K /dev/fd/4 "http://${LXC_IP}:9999/" 2>/dev/null | grep -qF "app.css?v=${VERSION}\"" &&
-        status="$(curl -fsS --max-time 5 -K /dev/fd/3 "http://${LXC_IP}:9999/api/v1/hierarchy" 2>/dev/null)" &&
+    if curl -fsS --max-time 5 --cacert "${HUB_CA}" -K /dev/fd/4 "https://${LXC_IP}:9443/" 2>/dev/null | grep -qF "app.css?v=${VERSION}\"" &&
+        status="$(curl -fsS --max-time 5 --cacert "${HUB_CA}" -K /dev/fd/3 "https://${LXC_IP}:9443/api/v1/hierarchy" 2>/dev/null)" &&
         printf '%s' "${status}" | jq -e . >/dev/null 2>&1; then
-        echo "[+] Hub package v${VERSION} is live: unit active, :9999 listening, console reports v${VERSION}, API answering."
+        echo "[+] Hub package v${VERSION} is live: unit active, :9443 listening, console reports v${VERSION}, API answering."
         exit 0
     fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then

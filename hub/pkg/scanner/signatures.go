@@ -32,7 +32,7 @@ var defaultSignatures = []DeviceSignature{
 		Name:           "NVIDIA Shield TV Pro (Android 11/12)",
 		Vendor:         "NVIDIA Corporation",
 		Category:       "Smart TV / Media Streamer",
-		OUIPrefixes:    []string{"00:04:4B", "48:B0:2D", "B8:27:EB"},
+		OUIPrefixes:    []string{"00:04:4B", "48:B0:2D"},
 		ExpectedTTL:    []int{64},
 		ExpectedPorts:  []int{8008, 8009, 5555, 8443, 9000},
 		BannerPatterns: []string{"(?i)android", "(?i)shield", "(?i)chromecast", "(?i)nvidia", "(?i)upnp"},

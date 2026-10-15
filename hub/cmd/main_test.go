@@ -78,3 +78,20 @@ func TestRetentionPolicyKeepsDefaultsForTablesWithoutAFlag(t *testing.T) {
 		t.Fatalf("flag values not applied: events %v audit %v", p.Events, p.AuditLogs)
 	}
 }
+
+// The package installs admin.key as root:ominull 0640 so the hub can read it
+// but not rewrite it. Group read is accepted only on a root-owned file.
+func TestKeyFileModeAllowsOnlyTheRootOwnedPackageLayout(t *testing.T) {
+	for _, tc := range []struct {
+		perm os.FileMode
+		uid  int
+		ok   bool
+	}{
+		{0o600, 998, true}, {0o400, 0, true}, {0o640, 0, true}, {0o440, 0, true},
+		{0o640, 998, false}, {0o660, 0, false}, {0o644, 0, false}, {0o604, 0, false}, {0o650, 0, false}, {0o640, -1, false},
+	} {
+		if got := keyFileModeOK(tc.perm, tc.uid); got != tc.ok {
+			t.Errorf("mode %04o uid %d: got %t, want %t", tc.perm, tc.uid, got, tc.ok)
+		}
+	}
+}

@@ -381,8 +381,12 @@ func readKeyFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("mode is %04o; a credential file must not be readable by group or other (chmod 600 %s)", perm, path)
+	uid := -1
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		uid = int(st.Uid)
+	}
+	if perm := info.Mode().Perm(); !keyFileModeOK(perm, uid) {
+		return "", fmt.Errorf("mode is %04o; a credential file must be 0600, or root-owned 0640 for the service group (chmod 600 %s)", perm, path)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -393,6 +397,16 @@ func readKeyFile(path string) (string, error) {
 		return "", fmt.Errorf("file is empty")
 	}
 	return key, nil
+}
+
+// keyFileModeOK accepts a private file, or the package layout: root-owned and
+// readable by the service's group (root:ominull 0640), which the hub reads but
+// cannot rewrite. Nothing else may read it, and the group may never write it.
+func keyFileModeOK(perm os.FileMode, uid int) bool {
+	if perm&0o077 == 0 {
+		return true
+	}
+	return uid == 0 && perm&0o037 == 0
 }
 
 // splitList turns a comma-separated flag value into a trimmed, non-empty slice.

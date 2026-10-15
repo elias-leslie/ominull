@@ -106,6 +106,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_terminal_linux" "${ROOT_DIR}/agent/tests/test_terminal_linux.c" -lcurl -lutil
     "${ROOT_DIR}/build/test_terminal_linux"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_script_exec_linux" "${ROOT_DIR}/agent/tests/test_script_exec_linux.c"
+    "${ROOT_DIR}/build/test_script_exec_linux"
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then
@@ -139,7 +142,7 @@ fi
 }
 : "${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY for the rollout phase}"
 hdr() {
-    printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY}"
+    hub_curl_config "${OMINULL_ADMIN_KEY}" "${HUB_URL}"
 }
 
 api() {
@@ -157,6 +160,7 @@ api() {
 
 
 . "${ROOT_DIR}/scripts/owner-approval.sh"
+hub_url_safe "${HUB_URL}" || exit 1
 
 target_json() {
     jq -cn --arg ids "${1}" '$ids | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))'

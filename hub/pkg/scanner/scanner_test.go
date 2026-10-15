@@ -138,3 +138,21 @@ func TestWeakpointEvaluation(t *testing.T) {
 		t.Errorf("Expected at least 3 weakpoints identified, got: %d (%v)", len(weakpoints), weakpoints)
 	}
 }
+
+// B8:27:EB is the Raspberry Pi Foundation's prefix. It sat in the NVIDIA
+// Shield signature, so a Pi on the network scored as a media streamer.
+func TestRaspberryPiPrefixIsNotAShield(t *testing.T) {
+	for _, sig := range defaultSignatures {
+		if sig.ID != "sig-nvidia-shield" {
+			continue
+		}
+		for _, prefix := range sig.OUIPrefixes {
+			if prefix == "B8:27:EB" {
+				t.Fatal("the NVIDIA Shield signature claims the Raspberry Pi prefix B8:27:EB")
+			}
+		}
+	}
+	if name, _, _ := MatchDeviceSignature("B8:27:EB:12:34:56", 64, []int{8008, 8009}, []string{"upnp"}, 35.0, nil); name == "NVIDIA Shield TV Pro (Android 11/12)" {
+		t.Fatalf("a Raspberry Pi MAC was identified as %s", name)
+	}
+}

@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #include "../include/script_exec_linux.h"
 
@@ -295,8 +296,70 @@ static void test_json_escaping(void) {
     free(escaped);
 }
 
+/* 12. The state directory fails closed and planted links are never followed */
+static void simple_params(ScriptExecParams* params) {
+    memset(params, 0, sizeof(*params));
+    strncpy(params->script_id, "scr-state", sizeof(params->script_id) - 1);
+    params->script_version = 1;
+    strncpy(params->interpreter, "/bin/sh", sizeof(params->interpreter) - 1);
+    strncpy(params->source, "echo -n ok\n", sizeof(params->source) - 1);
+    params->source_len = strlen(params->source);
+    params->timeout_seconds = 10;
+    params->max_output_bytes = 4096;
+}
+
+static void test_state_dir_fails_closed(const char* private_dir) {
+    printf("[*] Testing State Directory Fails Closed...\n");
+    ScriptExecParams params;
+    simple_params(&params);
+    char output[1024];
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+
+    /* /tmp is writable by everyone: no fallback, the job fails. */
+    g_script_exec_state_dir = "/tmp";
+    int code = ScriptExec_RunContained(&params, "job-state-tmp", output, sizeof(output), &truncated, &timed_out, &duration_ms);
+    expect("/tmp refused as state dir", code != 0 && strstr(output, "not private") != NULL);
+
+    g_script_exec_state_dir = "/nonexistent/ominull-state";
+    code = ScriptExec_RunContained(&params, "job-state-missing", output, sizeof(output), &truncated, &timed_out, &duration_ms);
+    expect("missing state dir refused", code != 0 && strstr(output, "not private") != NULL);
+
+    char link_dir[512];
+    snprintf(link_dir, sizeof(link_dir), "%s-link", private_dir);
+    expect("state dir symlink created", symlink(private_dir, link_dir) == 0);
+    g_script_exec_state_dir = link_dir;
+    code = ScriptExec_RunContained(&params, "job-state-link", output, sizeof(output), &truncated, &timed_out, &duration_ms);
+    expect("symlinked state dir refused", code != 0);
+    unlink(link_dir);
+
+    /* A link planted at the script path is replaced, not written through. */
+    g_script_exec_state_dir = private_dir;
+    char target[512], planted[512];
+    snprintf(target, sizeof(target), "%s/victim.txt", private_dir);
+    snprintf(planted, sizeof(planted), "%s/ominull_script_job-state-plant.sh", private_dir);
+    FILE* f = fopen(target, "w");
+    if (f) { fputs("untouched", f); fclose(f); }
+    expect("planted link created", symlink(target, planted) == 0);
+    code = ScriptExec_RunContained(&params, "job-state-plant", output, sizeof(output), &truncated, &timed_out, &duration_ms);
+    expect("job runs past a planted link", code == 0 && strcmp(output, "ok") == 0);
+    char buf[32] = {0};
+    f = fopen(target, "r");
+    if (f) { size_t n = fread(buf, 1, sizeof(buf) - 1, f); buf[n] = '\0'; fclose(f); }
+    expect("link target untouched", strcmp(buf, "untouched") == 0);
+    unlink(target);
+}
+
 int main(void) {
     printf("=== Starting Linux Script Execution Worker C Tests ===\n");
+    /* A private state directory of the test's own; the agent's is root-owned. */
+    char state_template[] = "/tmp/ominull-script-state-XXXXXX";
+    char* state_dir = mkdtemp(state_template);
+    if (!state_dir) {
+        printf("  [-] FAILED: mkdtemp\n");
+        return 1;
+    }
+    g_script_exec_state_dir = state_dir;
     test_interpreter_allowlist();
     test_json_unescaping();
     test_param_parsing();
@@ -308,6 +371,8 @@ int main(void) {
     test_timeout_escalation();
     test_nonzero_exit();
     test_json_escaping();
+    test_state_dir_fails_closed(state_dir);
+    rmdir(state_dir);
 
     printf("\nTotal Failures: %d\n", failures);
     return failures == 0 ? 0 : 1;

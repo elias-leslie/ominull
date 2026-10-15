@@ -13,6 +13,9 @@ class ReleaseHeaders(unittest.TestCase):
         api = re.search(r'^api\(\) \{.*?^\}', source, re.M | re.S)
         assert api is not None
         hdr = re.search(r'^hdr\(\) \{.*?^\}', source, re.M | re.S)
+        helper = Path(__file__).with_name('owner-approval.sh').read_text()
+        config = re.search(r'^hub_curl_config\(\) \{.*?^\}', helper, re.M | re.S)
+        assert config is not None
         script = '''set -eu
 OMINULL_ADMIN_KEY=test-release-credential
 HUB_URL=http://example.test
@@ -24,7 +27,7 @@ curl() {
  printf 'ok\\n'
 }
 '''
-        script += (hdr.group() + '\n') if hdr else ''
+        script += config.group() + '\n' + ((hdr.group() + '\n') if hdr else '')
         script += api.group() + '\napi GET /test\napi POST /test "{}"\napi GET /test\n'
         result = subprocess.run(['bash', '-c', script], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)

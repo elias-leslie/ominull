@@ -123,14 +123,8 @@ static inline bool ScriptExec_IsAllowedInterpreterWindows(const char* interprete
             }
             return true;
         }
-        char searchBuf[MAX_PATH];
-        if (SearchPathA(NULL, "pwsh.exe", NULL, sizeof(searchBuf), searchBuf, NULL) > 0) {
-            if (out_canonical && out_max > 0) {
-                strncpy(out_canonical, searchBuf, out_max - 1);
-                out_canonical[out_max - 1] = '\0';
-            }
-            return true;
-        }
+        // Only the fixed install path, as terminal_windows.h does: a search
+        // of PATH as SYSTEM would run whatever pwsh.exe comes first.
         return false;
     }
 

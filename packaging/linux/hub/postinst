@@ -81,6 +81,9 @@ chown ominull-authority:ominull-authority /run/ominull-response-authority 2>/dev
 chmod 0750 /run/ominull-response-authority
 
 # 4. Configuration files
+# hub.env and admin.key are root:ominull 0640: the hub reads them and cannot
+# rewrite them, so a compromised hub cannot repoint its own binary directory,
+# TLS paths or credential for the next start.
 [ -L /etc/ominull/admin.key ] && { echo "ominull: refusing symlinked /etc/ominull/admin.key" >&2; exit 1; }
 [ -L /etc/ominull/hub.env ] && { echo "ominull: refusing symlinked /etc/ominull/hub.env" >&2; exit 1; }
 [ -e /etc/ominull/admin.key ] && [ ! -f /etc/ominull/admin.key ] && { echo "ominull: /etc/ominull/admin.key is not a regular file" >&2; exit 1; }
@@ -89,11 +92,11 @@ chmod 0750 /run/ominull-response-authority
 if [ ! -s /etc/ominull/admin.key ]; then
     umask 077
     openssl rand -hex 32 > /etc/ominull/admin.key
-    chown ominull:ominull /etc/ominull/admin.key 2>/dev/null || true
-    chmod 0600 /etc/ominull/admin.key
+    chown root:ominull /etc/ominull/admin.key 2>/dev/null || true
+    chmod 0640 /etc/ominull/admin.key
 fi
-chown ominull:ominull /etc/ominull/admin.key 2>/dev/null || true
-chmod 0600 /etc/ominull/admin.key
+chown root:ominull /etc/ominull/admin.key 2>/dev/null || true
+chmod 0640 /etc/ominull/admin.key
 
 if [ ! -s /etc/ominull/hub.env ]; then
     umask 077
@@ -110,11 +113,11 @@ OMINULL_CONSOLE_HOSTNAME=hub.lan
 OMINULL_CLIENT_CERTS=optional
 OMINULL_AGENT_VERSION=@VERSION@
 OMINULL_ENV
-    chown ominull:ominull /etc/ominull/hub.env 2>/dev/null || true
-    chmod 0600 /etc/ominull/hub.env
+    chown root:ominull /etc/ominull/hub.env 2>/dev/null || true
+    chmod 0640 /etc/ominull/hub.env
 fi
-chown ominull:ominull /etc/ominull/hub.env 2>/dev/null || true
-chmod 0600 /etc/ominull/hub.env
+chown root:ominull /etc/ominull/hub.env 2>/dev/null || true
+chmod 0640 /etc/ominull/hub.env
 
 if [ ! -s /etc/ominull/response-authority.env ]; then
     umask 077
@@ -136,8 +139,8 @@ if grep -q '^OMINULL_ADMIN_KEY=' /etc/ominull/hub.env; then
     if [ -n "${legacy_admin_key}" ]; then
         umask 077
         printf '%s\n' "${legacy_admin_key}" > /etc/ominull/admin.key
-        chown ominull:ominull /etc/ominull/admin.key 2>/dev/null || true
-        chmod 0600 /etc/ominull/admin.key
+        chown root:ominull /etc/ominull/admin.key 2>/dev/null || true
+        chmod 0640 /etc/ominull/admin.key
     fi
     sed -i '/^OMINULL_ADMIN_KEY=/d' /etc/ominull/hub.env
 fi

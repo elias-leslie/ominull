@@ -43,6 +43,13 @@
 
 #include "response_dispatcher.h"
 
+/* Where job scripts and their parameters are written: root-owned, never /tmp.
+ * Tests point it at a private directory of their own. */
+#ifndef OMINULL_SCRIPT_STATE_DIR
+#define OMINULL_SCRIPT_STATE_DIR "/var/lib/ominull"
+#endif
+static const char* g_script_exec_state_dir = OMINULL_SCRIPT_STATE_DIR;
+
 #define SCRIPT_EXEC_MAX_SOURCE_BYTES  65536  // 64 KiB
 #define SCRIPT_EXEC_MAX_PARAMS_BYTES  16384  // 16 KiB
 #define SCRIPT_EXEC_DEFAULT_TIMEOUT   60     // 60 seconds
@@ -425,17 +432,23 @@ static inline int ScriptExec_RunContained(
         }
     }
 
-    // 3. Select state directory (/var/lib/ominull or fallback /tmp)
-    char state_dir[64] = "/var/lib/ominull";
+    // 3. The state directory. There is no fallback: /tmp is writable by every
+    // account, and a planted symlink there would turn this root write into a
+    // clobber of any file. A missing or loose directory fails the job.
+    const char* state_dir = g_script_exec_state_dir;
     struct stat st;
-    if (stat(state_dir, &st) != 0 || !S_ISDIR(st.st_mode) || access(state_dir, W_OK) != 0) {
-        strncpy(state_dir, "/tmp", sizeof(state_dir) - 1);
+    if (lstat(state_dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        snprintf(output_buf, output_cap, "Error: script state directory %s is missing or not private to this agent", state_dir);
+        return 1;
     }
 
-    // 4. Create secure script file (mode 0700)
+    // 4. Create secure script file (mode 0700). A stale file from a crashed
+    // job is removed; the new one is created exclusively and never followed.
     char script_path[256];
     snprintf(script_path, sizeof(script_path), "%s/ominull_script_%s.sh", state_dir, job_id);
-    int sfd = open(script_path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+    unlink(script_path);
+    int sfd = open(script_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
     if (sfd < 0) {
         snprintf(output_buf, output_cap, "Error: failed to create temporary script file: %s", strerror(errno));
         return 1;
@@ -451,7 +464,8 @@ static inline int ScriptExec_RunContained(
     // 5. Create secure parameter file (mode 0600)
     char params_path[256];
     snprintf(params_path, sizeof(params_path), "%s/ominull_params_%s.json", state_dir, job_id);
-    int pfd = open(params_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    unlink(params_path);
+    int pfd = open(params_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (pfd >= 0) {
         const char* pcontent = params->parameters_len > 0 ? params->parameters_json : "{}";
         ssize_t pw = write(pfd, pcontent, strlen(pcontent));
