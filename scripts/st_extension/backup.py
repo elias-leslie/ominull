@@ -83,7 +83,7 @@ def remote_argv(config, words):
 def remote(config, verb, attempt, backup_id):
     try:
         result = subprocess.run(remote_argv(config, [verb, attempt, backup_id]), stdin=subprocess.DEVNULL,
-                                capture_output=True, timeout=DEADLINE_SECONDS if verb == REMOTE_CREATE else 300,
+                                capture_output=True, timeout=DEADLINE_SECONDS if verb in (REMOTE_CREATE, REMOTE_ARTIFACT) else 300,
                                 check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise obs.ObservationError("backup_remote_unavailable") from exc

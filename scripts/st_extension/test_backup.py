@@ -237,6 +237,67 @@ class RemoteArtifactTests(unittest.TestCase):
                 with self.assertRaises(pd.Refused):  # owned by the test user, not root
                     self.artifact()
 
+    def fetch(self, which="archive", forced=False):
+        out = io.BytesIO()
+        with patch.object(pd, "api", side_effect=finished):
+            pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], forced=forced, out=out)
+        return out.getvalue()
+
+    def test_fetch_before_artifact_is_refused(self):
+        # The forced key could otherwise create a dump and read it whole,
+        # keys included, by never calling artifact.
+        for forced in [True, False]:
+            with self.subTest(forced=forced), dump_root() as root:
+                write_dump(owned_attempt(root))
+                for which in ["archive", "secrets"]:
+                    with self.assertRaises(pd.Refused):
+                        self.fetch(which, forced)
+
+    def test_unsplit_archive_is_fetched_only_by_the_alias_while_no_recipient_exists(self):
+        with dump_root() as root:
+            directory = owned_attempt(root)
+            archive = write_dump(directory)
+            self.artifact()
+            self.assertEqual(oct((directory / "artifact.json").stat().st_mode & 0o777), "0o600")
+            self.assertEqual(self.fetch(), archive.read_bytes())
+            with self.assertRaises(pd.Refused):
+                self.fetch(forced=True)
+            with self.assertRaises(pd.Refused):
+                self.fetch("secrets")
+            recipient = root / "recipient"
+            recipient.write_text("age1" + "q" * 58 + "\n")
+            recipient.chmod(0o600)
+            with patch.object(pd, "RECIPIENT_FILE", recipient), patch.object(pd, "RECIPIENT_OWNER", os.getuid()):
+                with self.assertRaises(pd.Refused):
+                    self.fetch()
+
+    def test_fetch_refuses_a_file_changed_or_replaced_after_artifact(self):
+        for change in ["appended", "replaced", "symlink"]:
+            with self.subTest(change=change), dump_root() as root:
+                directory = owned_attempt(root)
+                archive = write_dump(directory)
+                self.artifact()
+                data = archive.read_bytes()
+                if change == "appended":
+                    with archive.open("ab") as file:
+                        file.write(b"x")
+                elif change == "replaced":
+                    archive.unlink()
+                    archive.write_bytes(data)
+                else:
+                    target = directory / "vzdump-lxc-150-2026_10_06-15_00_00.log"
+                    archive.rename(target)
+                    archive.symlink_to(target)
+                with self.assertRaises((pd.Refused, OSError)):
+                    self.fetch()
+
+    def test_artifact_runs_once(self):
+        with dump_root() as root:
+            write_dump(owned_attempt(root))
+            self.artifact()
+            with self.assertRaises(pd.Refused):
+                self.artifact()
+
 
 @unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"), "age is not installed")
 class SecretSplitTests(unittest.TestCase):
@@ -341,15 +402,23 @@ class SecretSplitTests(unittest.TestCase):
                 self.assertFalse((directory / "secrets.tar.age").exists())
 
     def test_fetch_streams_only_the_named_files(self):
+        for forced in [True, False]:
+            with self.subTest(forced=forced), dump_root() as root:
+                directory = owned_attempt(root)
+                archive = write_dump(directory)
+                self.split(root, forced)
+                for which, path in [("archive", archive), ("secrets", directory / "secrets.tar.age")]:
+                    out = io.BytesIO()
+                    with self.recipient(root), patch.object(pd, "api", side_effect=finished):
+                        pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], forced=forced, out=out)
+                    self.assertEqual(out.getvalue(), path.read_bytes())
+
+    def test_forced_fetch_before_the_split_is_refused_with_a_recipient(self):
         with dump_root() as root:
-            directory = owned_attempt(root)
-            archive = write_dump(directory)
-            self.split(root)
-            for which, path in [("archive", archive), ("secrets", directory / "secrets.tar.age")]:
-                out = io.BytesIO()
-                with patch.object(pd, "api", side_effect=finished):
-                    pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], out=out)
-                self.assertEqual(out.getvalue(), path.read_bytes())
+            write_dump(owned_attempt(root))
+            for which in ["archive", "secrets"]:
+                with self.recipient(root), patch.object(pd, "api", side_effect=finished), self.assertRaises(pd.Refused):
+                    pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], forced=True, out=io.BytesIO())
 
 
 class BackupConfigurationTests(unittest.TestCase):

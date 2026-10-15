@@ -20,6 +20,11 @@ they stream from the vzdump tar into age. Under the forced command a missing
 recipient refuses the backup; through the transitional alias the old single
 plaintext tar is still produced, so backups keep running until root installs
 the recipient.
+
+fetch streams only what artifact verified and recorded in artifact.json: the
+bulk tar after its secrets were moved out, or the sealed secrets. The unsplit
+tar is never fetched under the forced command, nor once a recipient exists, so
+the forced key cannot read the plaintext vzdump by skipping artifact.
 """
 import hashlib
 import json
@@ -39,6 +44,7 @@ RECIPIENT_OWNER = 0  # Only root may name who can read the secrets.
 GUEST = 150
 ARCHIVE = re.compile(r"vzdump-lxc-150-[0-9_\-]+\.tar")
 SECRETS_NAME = "secrets.tar.age"
+PUBLISHED = "artifact.json"
 RECIPIENT = re.compile(r"age1[0-9a-z]{58}")
 
 # Selected by prefix, so a key added later under these trees is covered too.
@@ -198,20 +204,42 @@ def scan(archive):
     return names, found, wal
 
 
+def identity(info):
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def hashed(path):
+    """The file's digest and identity, refused if it changed while hashed."""
+    before = path.lstat()
+    sha = digest(path)
+    need(identity(before) == identity(path.lstat()), "archive changed while hashed")
+    return sha, before
+
+
+def publish(a, archive, sealed=None):
+    """Record what artifact verified; fetch streams nothing else."""
+    value = {"split": sealed is not None, "archive": identity(archive.lstat()),
+             "secrets": identity(sealed.lstat()) if sealed is not None else None}
+    with (a.directory / PUBLISHED).open("x") as file:
+        os.fchmod(file.fileno(), 0o600)
+        json.dump(value, file)
+
+
 def artifact(a, forced):
     a.task_ok()
+    need(not (a.directory / PUBLISHED).exists() and not (a.directory / PUBLISHED).is_symlink(), "artifact already published")
     archive = a.archive()
     info = archive.lstat()
     need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size > 0, "archive file")
     to = recipient()
     if to is None:
         need(not forced, "no backup recipient installed; refusing to publish secrets in plaintext")
-        sha = digest(archive)
-        after = archive.lstat()
-        need((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) ==
-             (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns), "archive changed while hashed")
+        sha, hashed_info = hashed(archive)
+        need(identity(info) == identity(hashed_info), "archive changed while hashed")
         members, found, wal = scan(archive)
         need(found == BULK_REQUIRED | SECRET_REQUIRED, "Required production data missing from archive")
+        need(identity(archive.lstat()) == identity(info), "archive changed while scanned")
+        publish(a, archive)
         return {"path": str(archive), "size_bytes": info.st_size, "sha256": sha,
                 "required_paths_verified": sorted(found), "wal_paths_verified": sorted(wal)}
     return split(a, archive, to)
@@ -267,17 +295,21 @@ def split(a, archive, to):
     with names.open("xb") as file:
         file.write(b"".join(m.name.encode() + b"\0" for m in secret))
     try:
+        # Below the caller's one-hour budget for this verb.
         subprocess.run(["tar", "--delete", "--file", str(archive), "--no-wildcards", "--no-recursion",
-                        "--null", "--files-from", str(names)], check=True, capture_output=True, timeout=3600)
+                        "--null", "--files-from", str(names)], check=True, capture_output=True, timeout=2400)
     finally:
         names.unlink()
     # The bulk tar must now hold no member under a secret prefix.
+    before = archive.lstat()
     remaining, bulk_found, _ = scan(archive)
     need(not any(is_secret(m.name) for m in remaining), "secret member left in the bulk tar")
     need(bulk_found == BULK_REQUIRED, "Required production data missing from bulk archive")
-    after = archive.lstat()
+    sha, after = hashed(archive)
+    need(identity(before) == identity(after), "archive changed while scanned")
+    publish(a, archive, sealed)
     sealed_paths = sorted((found | wal) - BULK_REQUIRED - {p for p in wal if not is_secret(p)})
-    return {"path": str(archive), "size_bytes": after.st_size, "sha256": digest(archive),
+    return {"path": str(archive), "size_bytes": after.st_size, "sha256": sha,
             "required_paths_verified": sorted(bulk_found),
             "wal_paths_verified": sorted(p for p in wal if not is_secret(p)),
             "secrets": {"path": str(sealed), "size_bytes": sealed.stat().st_size, "sha256": digest(sealed),
@@ -285,20 +317,29 @@ def split(a, archive, to):
                         "members": len(secret), "paths_verified": sealed_paths}}
 
 
-def fetch(a, which, out):
+def fetch(a, which, out, forced):
     a.task_ok()
+    record = a.directory / PUBLISHED
+    need(record.is_file() and not record.is_symlink() and record.stat().st_uid == os.getuid(), "artifact not published")
+    published = json.loads(record.read_text())
     if which == "archive":
-        path = a.archive()
+        path, expected = a.archive(), published["archive"]
+        # An unsplit tar still holds the keys: only the transitional root
+        # alias may fetch it, and only while no recipient is installed.
+        need(published["split"] or (not forced and recipient() is None), "secrets not sealed")
     else:
         need(which == "secrets", "fetch target")
-        path = a.directory / SECRETS_NAME
-    info = path.lstat()
-    need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid(), "fetch file")
-    with path.open("rb") as file:
+        need(published["split"], "secrets not sealed")
+        path, expected = a.directory / SECRETS_NAME, published["secrets"]
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as file:
+        info = os.fstat(file.fileno())
+        need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid(), "fetch file")
+        need(identity(info) == expected, "fetch file changed since artifact")
         shutil.copyfileobj(file, out, 1024 * 1024)
 
 
-ALLOWED_CHILD = re.compile(r"vzdump-lxc-150-[0-9_\-]+\.(tar(?:\.dat|\.notes)?|log)|attempt\.json|secrets\.tar\.age|secret-members\.list")
+ALLOWED_CHILD = re.compile(r"vzdump-lxc-150-[0-9_\-]+\.(tar(?:\.dat|\.notes)?|log)|attempt\.json|secrets\.tar\.age|secret-members\.list|artifact\.json")
 
 
 def cleanup(a):
@@ -349,7 +390,7 @@ def run(words, forced=False, out=None):
     a = Attempt(*rest)
     if verb == "fetch":
         need(len(words) == 5, "fetch target")
-        fetch(a, words[4], out or sys.stdout.buffer)
+        fetch(a, words[4], out or sys.stdout.buffer, forced)
         return None
     need(len(words) == 4, "usage")
     if verb == "artifact":
