@@ -107,3 +107,39 @@ func TestTheShippedThresholdsCanBeRestored(t *testing.T) {
 		t.Error("reset left the beacon detector switched off")
 	}
 }
+
+// A save names only what it changes. Adding one known workload through the API
+// once decoded the rest of the body onto zero values and switched beacon,
+// first-seen, bandwidth and silence detection off and emptied the quiet lists.
+func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+	if code, body := tuningBody(t, srv, http.MethodPost, `{"warmup_hours":48,"quiet_pairs":["rclone@google"],
+		"known_workloads":[{"workload":"/usr/bin/gh","owner":"github","reason":"cli"},{"workload":"/usr/bin/ssh","owner":"github","reason":"git"}]}`); code != http.StatusOK {
+		t.Fatalf("first save: %d %v", code, body)
+	}
+	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"fastly","reason":"x"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("partial save: %d %v", code, body)
+	}
+	tun := body["tuning"].(map[string]interface{})
+	for _, k := range []string{"beacon_enabled", "first_seen_enabled", "bandwidth_enabled", "silence_enabled", "off_hours_enabled", "agent_egress_enabled"} {
+		if tun[k] != true {
+			t.Errorf("%s = %v after a save that did not name it", k, tun[k])
+		}
+	}
+	if tun["warmup_hours"].(float64) != 48 || len(tun["quiet_processes"].([]interface{})) == 0 || len(tun["quiet_pairs"].([]interface{})) != 1 {
+		t.Errorf("unnamed values were reset: warmup %v, quiet processes %v, pairs %v", tun["warmup_hours"], tun["quiet_processes"], tun["quiet_pairs"])
+	}
+	kw := tun["known_workloads"].([]interface{})
+	if len(kw) != 1 || kw[0].(map[string]interface{})["owner"] != "fastly" || kw[0].(map[string]interface{})["include_rented"] == true {
+		t.Errorf("a named list replaces the saved one exactly: %v", kw)
+	}
+	if code, _ := tuningBody(t, srv, http.MethodPost, `{"beacon_enabled":false}`); code != http.StatusOK {
+		t.Fatal("explicit false")
+	}
+	_, got := tuningBody(t, srv, http.MethodGet, "")
+	if g := got["tuning"].(map[string]interface{}); g["beacon_enabled"] != false || g["silence_enabled"] != true {
+		t.Errorf("an explicit false is kept and nothing else moves: %v %v", g["beacon_enabled"], g["silence_enabled"])
+	}
+}

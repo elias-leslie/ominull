@@ -30,55 +30,38 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// The console's tuning sheet posts the fields it shows. Known workloads,
-		// agent runtimes and the agent-heavy lists are not among them, and a save from the sheet must
-		// not erase them: a list the request leaves out keeps its saved value.
-		// The shadowing pointers decode with the same case-insensitive key
-		// matching as every other field, so "Known_Workloads" is not "absent".
-		var patch struct {
-			storage.DetectionTuning
-			KnownWorkloads      *[]storage.KnownWorkload `json:"known_workloads"`
-			AgentRuntimes       *[]storage.AgentRuntime  `json:"agent_runtimes"`
-			AgentHeavyEndpoints *[]string                `json:"agent_heavy_endpoints"`
-			AgentHeavyRoles     *[]string                `json:"agent_heavy_roles"`
-			AgentHeavyObserved  *bool                    `json:"agent_heavy_observed"`
-			AdminFanoutSources  *[]string                `json:"admin_fanout_sources"`
-			AdminFanoutTargets  *[]string                `json:"admin_fanout_targets"`
-			AdminFanoutMax      *int                     `json:"admin_fanout_max_hosts"`
-		}
-		if err := json.Unmarshal(raw, &patch); err != nil {
+		// A save is a patch over the saved tuning: a field the request leaves
+		// out keeps its saved value. The console's sheet posts only the fields
+		// it shows, and an API caller adding one known workload must not switch
+		// every detector off; a body that decoded onto zero values did exactly
+		// that once (beacon, first-seen, bandwidth, silence and the quiet lists
+		// all went to false and empty). A list in the request replaces the saved
+		// one. List fields of structs are cleared before decoding, so a shorter
+		// list cannot inherit fields from the saved entries it overwrites.
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		before := s.store.GetDetectionTuning()
-		req := patch.DetectionTuning
-		req.KnownWorkloads, req.AgentRuntimes = before.KnownWorkloads, before.AgentRuntimes
-		if patch.KnownWorkloads != nil {
-			req.KnownWorkloads = *patch.KnownWorkloads
+		// A deep copy: decoding into lists shared with before would rewrite
+		// the before side of the audit delta.
+		var req storage.DetectionTuning
+		if blob, err := json.Marshal(before); err != nil || json.Unmarshal(blob, &req) != nil {
+			writeJSONError(w, http.StatusInternalServerError, "the saved tuning could not be read")
+			return
 		}
-		if patch.AgentRuntimes != nil {
-			req.AgentRuntimes = *patch.AgentRuntimes
+		for k := range keys {
+			switch strings.ToLower(k) {
+			case "known_workloads":
+				req.KnownWorkloads = nil
+			case "agent_runtimes":
+				req.AgentRuntimes = nil
+			}
 		}
-		req.AgentHeavyEndpoints, req.AgentHeavyRoles = before.AgentHeavyEndpoints, before.AgentHeavyRoles
-		if patch.AgentHeavyEndpoints != nil {
-			req.AgentHeavyEndpoints = *patch.AgentHeavyEndpoints
-		}
-		if patch.AgentHeavyRoles != nil {
-			req.AgentHeavyRoles = *patch.AgentHeavyRoles
-		}
-		req.AgentHeavyObserved = before.AgentHeavyObserved
-		if patch.AgentHeavyObserved != nil {
-			req.AgentHeavyObserved = *patch.AgentHeavyObserved
-		}
-		req.AdminFanoutSources, req.AdminFanoutTargets, req.AdminFanoutMax = before.AdminFanoutSources, before.AdminFanoutTargets, before.AdminFanoutMax
-		if patch.AdminFanoutSources != nil {
-			req.AdminFanoutSources = *patch.AdminFanoutSources
-		}
-		if patch.AdminFanoutTargets != nil {
-			req.AdminFanoutTargets = *patch.AdminFanoutTargets
-		}
-		if patch.AdminFanoutMax != nil {
-			req.AdminFanoutMax = *patch.AdminFanoutMax
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		by := r.Header.Get("X-Username")
 		if by == "" {
