@@ -21,6 +21,10 @@ func writeAuthorityJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func approvalErrorStatus(err error) int {
 	switch {
+	case errors.Is(err, ErrAutoIsolateRateLimit):
+		return http.StatusTooManyRequests
+	case errors.Is(err, ErrManifestNeedsApproval):
+		return http.StatusForbidden
 	case errors.Is(err, ErrApprovalNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrApprovalRateLimit):
@@ -227,3 +231,107 @@ func (c *InProcessClient) ConsumeApproval(_ context.Context, req *ApprovalConsum
 
 var _ ApprovalClient = (*UDSClient)(nil)
 var _ ApprovalClient = (*InProcessClient)(nil)
+
+// ------------------------------------------------------------- agent trust
+
+func (s *Server) registerTrustRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/v1/trust/keys", func(w http.ResponseWriter, r *http.Request) {
+		k, err := s.auth.TrustKeys(r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, k)
+	})
+	mux.HandleFunc("/v1/trust/auto-isolate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAuthorityJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		var req AutoIsolateRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8*1024)).Decode(&req); err != nil {
+			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		g, err := s.auth.SignAutoIsolation(&req)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, ErrAutoIsolateRateLimit) {
+				status = http.StatusTooManyRequests
+			}
+			writeAuthorityJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, g)
+	})
+	mux.HandleFunc("/v1/trust/manifest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAuthorityJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		var req ManifestRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8*1024)).Decode(&req); err != nil {
+			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		m, err := s.auth.EndpointManifest(&req)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, ErrManifestNeedsApproval) {
+				status = http.StatusForbidden
+			}
+			writeAuthorityJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, m)
+	})
+}
+
+// TrustClient is the agent-trust half of the authority API.
+type TrustClient interface {
+	TrustKeys(ctx context.Context, tenantID string) (*response.TrustKeys, error)
+	SignAutoIsolation(ctx context.Context, req *AutoIsolateRequest) (*response.EnforcementGrant, error)
+	EndpointManifest(ctx context.Context, req *ManifestRequest) (*response.CapabilityManifest, error)
+}
+
+func (c *UDSClient) TrustKeys(ctx context.Context, tenantID string) (*response.TrustKeys, error) {
+	var k response.TrustKeys
+	if err := c.approvalCall(ctx, http.MethodGet, "/v1/trust/keys?"+url.Values{"tenant_id": {tenantID}}.Encode(), nil, &k); err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+func (c *UDSClient) SignAutoIsolation(ctx context.Context, req *AutoIsolateRequest) (*response.EnforcementGrant, error) {
+	var g response.EnforcementGrant
+	if err := c.approvalCall(ctx, http.MethodPost, "/v1/trust/auto-isolate", req, &g); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
+func (c *UDSClient) EndpointManifest(ctx context.Context, req *ManifestRequest) (*response.CapabilityManifest, error) {
+	var m response.CapabilityManifest
+	if err := c.approvalCall(ctx, http.MethodPost, "/v1/trust/manifest", req, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (c *InProcessClient) TrustKeys(_ context.Context, tenantID string) (*response.TrustKeys, error) {
+	k, err := c.auth.TrustKeys(tenantID)
+	return k, asApprovalError(err)
+}
+
+func (c *InProcessClient) SignAutoIsolation(_ context.Context, req *AutoIsolateRequest) (*response.EnforcementGrant, error) {
+	g, err := c.auth.SignAutoIsolation(req)
+	return g, asApprovalError(err)
+}
+
+func (c *InProcessClient) EndpointManifest(_ context.Context, req *ManifestRequest) (*response.CapabilityManifest, error) {
+	m, err := c.auth.EndpointManifest(req)
+	return m, asApprovalError(err)
+}
+
+var _ TrustClient = (*UDSClient)(nil)
+var _ TrustClient = (*InProcessClient)(nil)

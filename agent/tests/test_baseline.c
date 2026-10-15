@@ -23,71 +23,40 @@ static void check(bool cond, const char* what) {
 int main(void) {
     printf("[*] Baseline isolation policy - Linux agent parser\n");
 
-    /* A hub that says nothing about a baseline is a hub too old to have one.
-     * That has to be distinguishable from a hub whose baseline is empty: the
-     * first keeps the built-in permits, the second means hub and loopback only,
-     * and confusing them either strands a fleet or leaves the hole open. */
+    /* Isolation exceptions are read whole or not at all: they arrive inside
+     * the signed isolation (agent_trust.h Trust_ParseRules) or, once, in the
+     * bootstrap answer. */
     {
-        BASELINE_RULE r[MAX_BASELINE_RULES];
-        int n = ParseBaselineRules("{\"status\":\"ok\",\"is_isolated\":false}", r, MAX_BASELINE_RULES);
-        check(n == -1, "a reply with no baseline key reports \"absent\", not \"empty\"");
-
-        n = ParseBaselineRules("{\"isolation_baseline\":[]}", r, MAX_BASELINE_RULES);
-        check(n == 0, "an empty baseline reports zero rules, not \"absent\"");
-    }
-
-    /* The ordinary case. */
-    {
-        const char* reply =
-            "{\"status\":\"ok\",\"isolation_baseline\":["
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.1\",\"protocol\":\"udp\",\"port\":53},"
-            "{\"service\":\"dhcp\",\"destination\":\"10.0.0.1\",\"protocol\":\"udp\",\"port\":67},"
-            "{\"service\":\"custom\",\"destination\":\"10.0.0.4\",\"protocol\":\"tcp\",\"port\":88}"
-            "],\"is_isolated\":true}";
-        BASELINE_RULE r[MAX_BASELINE_RULES];
-        int n = ParseBaselineRules(reply, r, MAX_BASELINE_RULES);
-        check(n == 3, "three rules parse out of a well-formed reply");
+        TrustRule r[TRUST_MAX_RULES];
+        const char* empty = "[]";
+        check(Trust_ParseRules(empty, empty + 2, r, TRUST_MAX_RULES) == 0, "an empty list reads as zero rules");
+        const char* ok = "[{\"destination\":\"10.0.0.1\",\"port\":53,\"protocol\":\"udp\",\"service\":\"dns\"},"
+                         "{\"destination\":\"10.0.0.1\",\"port\":67,\"protocol\":\"udp\",\"service\":\"dhcp\"},"
+                         "{\"destination\":\"10.0.0.4\",\"port\":88,\"protocol\":\"tcp\",\"service\":\"custom\"}]";
+        int n = Trust_ParseRules(ok, ok + strlen(ok), r, TRUST_MAX_RULES);
+        check(n == 3, "three rules parse out of a well-formed list");
         check(n == 3 && strcmp(r[0].service, "dns") == 0 && strcmp(r[0].destination, "10.0.0.1") == 0
               && strcmp(r[0].protocol, "udp") == 0 && r[0].port == 53, "the DNS rule keeps all four fields");
-        check(n == 3 && r[2].port == 88 && strcmp(r[2].protocol, "tcp") == 0,
-              "a custom TCP rule keeps its own protocol and port");
-    }
-
-    /* Everything in a rule becomes an argument to iptables. A hub that sends
-     * something else is either running a build that does not validate its own
-     * policy or is not the hub. */
-    {
-        const char* hostile =
-            "{\"isolation_baseline\":["
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.1 -j ACCEPT\",\"protocol\":\"udp\",\"port\":53},"
-            "{\"service\":\"dns\",\"destination\":\"example.com\",\"protocol\":\"udp\",\"port\":53},"
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.2\",\"protocol\":\"icmp\",\"port\":53},"
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.3\",\"protocol\":\"udp\",\"port\":99999},"
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.4\",\"protocol\":\"udp\",\"port\":0},"
-            "{\"service\":\"dns\",\"destination\":\"10.0.0.9\",\"protocol\":\"udp\",\"port\":53}"
-            "]}";
-        BASELINE_RULE r[MAX_BASELINE_RULES];
-        int n = ParseBaselineRules(hostile, r, MAX_BASELINE_RULES);
-        check(n == 1, "five malformed rules are dropped and the good one survives");
-        check(n == 1 && strcmp(r[0].destination, "10.0.0.9") == 0,
-              "the surviving rule is the well-formed one, so a bad entry does not shift the list");
-    }
-
-    /* A hub answering with more rules than this agent has room for must fill the
-     * array and stop, not walk off the end of it. */
-    {
+        check(n == 3 && r[2].port == 88 && strcmp(r[2].protocol, "tcp") == 0, "a custom TCP rule keeps its own protocol and port");
+        const char* hostile[] = {
+            "[{\"destination\":\"10.0.0.1 -j ACCEPT\",\"port\":53,\"protocol\":\"udp\",\"service\":\"dns\"}]",
+            "[{\"destination\":\"example.com\",\"port\":53,\"protocol\":\"udp\",\"service\":\"dns\"}]",
+            "[{\"destination\":\"10.0.0.2\",\"port\":53,\"protocol\":\"icmp\",\"service\":\"dns\"}]",
+            "[{\"destination\":\"10.0.0.3\",\"port\":99999,\"protocol\":\"udp\",\"service\":\"dns\"}]",
+            "[{\"destination\":\"10.0.0.4\",\"port\":0,\"protocol\":\"udp\",\"service\":\"dns\"}]",
+            "[{\"destination\":\"0.0.0.0/0\",\"port\":443,\"protocol\":\"tcp\",\"service\":\"custom\"}]",
+            "[{\"destination\":\"10.0.0.5\",\"port\":53,\"protocol\":\"udp\",\"service\":\"d n s\"}]",
+            "[{\"destination\":\"10.0.0.5\",\"port\":53,\"protocol\":\"udp\",\"service\":\"dns\",\"Service\":\"x\"}]",
+        };
+        for (size_t i = 0; i < sizeof(hostile) / sizeof(hostile[0]); i++)
+            check(Trust_ParseRules(hostile[i], hostile[i] + strlen(hostile[i]), r, TRUST_MAX_RULES) == -1, "a malformed rule refuses the whole list");
         char big[16384];
-        int off = snprintf(big, sizeof(big), "{\"isolation_baseline\":[");
-        for (int i = 0; i < MAX_BASELINE_RULES + 20; i++) {
-            off += snprintf(big + off, sizeof(big) - off,
-                            "%s{\"service\":\"dns\",\"destination\":\"10.0.1.%d\",\"protocol\":\"udp\",\"port\":53}",
+        int off = snprintf(big, sizeof(big), "[");
+        for (int i = 0; i < TRUST_MAX_RULES + 1; i++)
+            off += snprintf(big + off, sizeof(big) - off, "%s{\"destination\":\"10.0.1.%d\",\"port\":53,\"protocol\":\"udp\",\"service\":\"dns\"}",
                             i ? "," : "", i % 250);
-        }
-        snprintf(big + off, sizeof(big) - off, "]}");
-
-        BASELINE_RULE r[MAX_BASELINE_RULES];
-        int n = ParseBaselineRules(big, r, MAX_BASELINE_RULES);
-        check(n == MAX_BASELINE_RULES, "an over-long baseline is capped at the array size");
+        snprintf(big + off, sizeof(big) - off, "]");
+        check(Trust_ParseRules(big, big + strlen(big), r, TRUST_MAX_RULES) == -1, "a list longer than the agent can hold is refused, not cut");
     }
 
     /* IsIPLiteral is what stands between a hub reply and an iptables argument. */

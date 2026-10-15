@@ -43,9 +43,10 @@ import (
 
 // Action kinds that only an owner approval can authorize.
 const (
-	ActionKindIsolation   response.ActionKind = "isolation_change"
-	ActionKindAgentUpdate response.ActionKind = "agent_update"
-	ActionKindMesh        response.ActionKind = "mesh_quarantine"
+	ActionKindIsolation   = response.ActionKindIsolationChange
+	ActionKindAgentUpdate = response.ActionKindAgentUpdate
+	ActionKindMesh        = response.ActionKindMeshQuarantine
+	ActionKindCapability  = response.ActionKindCapability
 )
 
 // ApprovalState is the lifecycle of one owner approval.
@@ -184,6 +185,7 @@ type approvalRecord struct {
 	stmt      ApprovalStatement
 	kind      response.ActionKind
 	digest    string
+	payload   []byte
 	createdAt time.Time
 }
 
@@ -291,7 +293,7 @@ func sortedUnique(in []string) []string {
 
 func approvalKindAllowed(k response.ActionKind) bool {
 	switch k {
-	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, response.ActionKindTerminalSession:
+	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, response.ActionKindTerminalSession:
 		return true
 	}
 	return false
@@ -322,6 +324,16 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	if len(in.Payload) == 0 || len(in.Payload) > approvalMaxPayload || !json.Valid(in.Payload) {
 		return nil, errors.New("approval payload must be valid JSON up to 16 KiB")
+	}
+	if strings.Contains(in.TenantID, "#") {
+		return nil, errors.New("invalid tenant ID")
+	}
+	// Agents act on these payloads themselves, so the owner must see what
+	// the agent will read: one canonical reading, no case-variant keys.
+	if in.Kind != response.ActionKindTerminalSession {
+		if err := strictPayload(in.Payload); err != nil {
+			return nil, fmt.Errorf("approval payload refused: %w", err)
+		}
 	}
 	requester := cleanText(in.Requester, 80)
 	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
@@ -403,6 +415,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		stmt:      stmt,
 		kind:      in.Kind,
 		digest:    stmt.Digest,
+		payload:   append([]byte(nil), in.Payload...),
 		createdAt: now,
 		view: ApprovalView{
 			ID:        stmt.ID,
@@ -702,16 +715,25 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 		return nil, ErrApprovalMismatch
 	}
 	r.view.State = ApprovalConsumed
-	requester, stmt := r.stmt.Requester, r.stmt
+	requester, stmt, payload := r.stmt.Requester, r.stmt, r.payload
 	b.mu.Unlock()
 
+	if manifestApproval(req.Kind, payload) {
+		if err := a.applyCapabilityApproval(req.TenantID, stmt, payload); err != nil {
+			a.auditApproval(req.TenantID, requester, "manifest_refused", string(req.Kind), strings.Join(targets, ","), stmt.ID, "denied", err.Error())
+			return nil, err
+		}
+	}
 	priv, keyID, err := a.tenantSigningKey(req.TenantID)
 	if err != nil {
 		return nil, err
 	}
-	ttl := req.TTLSeconds
-	if ttl <= 0 || ttl > 3600 {
-		ttl = 300
+	ttl := grantTTL(req.Kind, req.TTLSeconds)
+	issued := now.Unix()
+	if enforcementKind(req.Kind) {
+		if issued, err = a.enfClock.next(req.TenantID, now); err != nil {
+			return nil, err
+		}
 	}
 	grants := make([]*response.EndpointGrant, 0, len(targets))
 	for _, ep := range targets {
@@ -728,8 +750,8 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 			ActionDigest:      stmt.Digest,
 			OperatorID:        requester,
 			ResponseSessionID: "approval:" + stmt.ID,
-			IssuedAt:          now.Unix(),
-			ExpiresAt:         now.Unix() + ttl,
+			IssuedAt:          issued,
+			ExpiresAt:         issued + ttl,
 			Nonce:             hex.EncodeToString(nonce),
 			SignerKeyID:       keyID,
 		}

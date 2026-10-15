@@ -154,21 +154,16 @@ int main(void) {
     puts("Both ESTATS APIs preserve deltas; family, scope and process creation "
          "separate baselines");
 
-    char peers[4][PEER_ADDR_LEN];
-    int parsed = ParseAddressArray(
-        "{\"quarantined_peers\":[\"2001:db8::42\",\"203.0.113.8\"]}",
-        "quarantined_peers", peers, 4);
+    /* Enforcement addresses now come from verified grants (agent_trust.h);
+     * the Windows enforcer still applies only addresses WFP can hold. */
+    int parsed = (IsIPLiteralAny("2001:db8::42") ? 1 : 0) + (IsIPLiteralAny("203.0.113.8") ? 1 : 0);
     AGENT_CONFIG config = {0};
     strcpy(config.hub_url, "https://[2001:db8::9]:9443");
     char literal[64];
     bool hub = HubAddressLiteral(&config, literal, sizeof(literal));
     printf("Parsed peers=%d IPv6 hub=%d\n", parsed, hub);
-    assert(ParseAddressArray("{\"quarantined_peers\":[\"fe80::1%11\"]}",
-                             "quarantined_peers", peers, 4) == -1);
-    assert(ParseAddressArray("{\"quarantined_peers\":[\"fe80::1\"]}",
-                             "quarantined_peers", peers, 4) == -1);
-    assert(ParseAddressArray("{\"quarantined_peers\":[\"203.0.113.1\",]}",
-                             "quarantined_peers", peers, 4) == -1);
+    assert(!IsIPLiteralAny("fe80::1%11"));
+    assert(!IsIPLiteralAny("fe80::1"));
 
     return v4 == 1 && v6 == 1 && parsed == 2 && hub &&
                    !strcmp(literal, "2001:db8::9")

@@ -26,6 +26,11 @@ type Config struct {
 	DefaultSessionTTL time.Duration // e.g. 8h
 	DefaultIdleTTL    time.Duration // e.g. 30m
 	ApproversPath     string        // root-pinned owner approver keys; default DefaultApproversPath
+	// TrustEpochFloor is the lowest trust bundle epoch this authority hands
+	// out, set by root on the authority host (never by the hub). After a
+	// rotation that lost the authority's state, set it above every epoch ever
+	// signed so the new bundle outranks the retired one.
+	TrustEpochFloor int64
 }
 
 // AuthenticatorRecord stores enrolled credentials (TOTP, WebAuthn) for an operator.
@@ -45,14 +50,18 @@ type AuthenticatorRecord struct {
 
 // Authority manages tenant response keys, sessions, and endpoint grant signing.
 type Authority struct {
-	mu         sync.RWMutex
-	cfg        Config
-	store      Store
-	tenantKeys map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
-	masterKey  []byte                        // 32-byte master key for encrypting secrets at rest
-	webauthn   *WebAuthnManager              // WebAuthn registration and assertion coordinator
-	approvals  *approvalBook                 // owner approvals (push + passkey tap)
-	startedAt  time.Time
+	mu          sync.RWMutex
+	cfg         Config
+	store       Store
+	tenantKeys  map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
+	masterKey   []byte                        // 32-byte master key for encrypting secrets at rest
+	webauthn    *WebAuthnManager              // WebAuthn registration and assertion coordinator
+	approvals   *approvalBook                 // owner approvals (push + passkey tap)
+	autoIso     *autoIsolateBook              // the detector's isolation budget
+	manifests   *manifestBook                 // capability manifests, one per endpoint
+	enfClock    *enforcementClock             // strictly ordered enforcement grant times
+	trustEpochs *trustEpochs                  // trust bundle epoch per tenant
+	startedAt   time.Time
 }
 
 // NewAuthority creates a new Response Authority instance backed by SQLite.
@@ -122,8 +131,12 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 				"https://localhost:8443",
 			},
 		}),
-		startedAt: time.Now(),
-		approvals: newApprovalBook(cfg.ApproversPath),
+		startedAt:   time.Now(),
+		approvals:   newApprovalBook(cfg.ApproversPath),
+		autoIso:     &autoIsolateBook{byTenant: map[string][]time.Time{}, byEndpoint: map[string]time.Time{}},
+		manifests:   newManifestBook(cfg.StateDir),
+		enfClock:    newEnforcementClock(cfg.StateDir),
+		trustEpochs: newTrustEpochs(cfg.StateDir, cfg.TrustEpochFloor),
 	}
 
 	// 1. Load keys from durable store
@@ -202,7 +215,16 @@ func (a *Authority) Close() error {
 }
 
 // GetOrCreateTenantKey returns or generates the Ed25519 response keypair for a tenant.
+// Tenant IDs never contain '#': that separator names the tenant's internal
+// keys (auto-isolation, policy), which no caller may reach through a tenant ID.
 func (a *Authority) GetOrCreateTenantKey(tenantID string) (ed25519.PublicKey, string, error) {
+	if strings.Contains(tenantID, "#") {
+		return nil, "", errors.New("invalid tenant ID")
+	}
+	return a.getOrCreateKey(tenantID)
+}
+
+func (a *Authority) getOrCreateKey(tenantID string) (ed25519.PublicKey, string, error) {
 	if tenantID == "" || tenantID == "." || tenantID == ".." || strings.ContainsAny(tenantID, "/\\\x00") {
 		return nil, "", errors.New("invalid tenant ID")
 	}
@@ -769,6 +791,9 @@ func (a *Authority) FinishWebAuthnAuthentication(req *WebAuthnAuthenticationRequ
 func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, error) {
 	if req == nil || req.Proof == nil {
 		return nil, errors.New("missing sign grant request or proof")
+	}
+	if strings.Contains(req.TenantID, "#") {
+		return nil, errors.New("invalid tenant ID")
 	}
 
 	now := time.Now()

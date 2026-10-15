@@ -70,7 +70,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-proveout-weekly.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
-    bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" \
+    bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
         "${ROOT_DIR}/scripts/deploy_remote.sh.example" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
         "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \

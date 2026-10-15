@@ -30,9 +30,9 @@ mkdir -p "${DIST_DIR}" "${BUILD_DIR}"
 # These are exact release-output name families; persistent source and the
 # tracked checksum index are left alone until signing regenerates that index.
 find "${DIST_DIR}" -maxdepth 1 -type f \( \
-    -name 'ominull-agent_*.deb' -o -name 'ominull-agent_*.deb.sig' -o -name 'ominull-agent_*.deb.sha256' -o \
-    -name 'ominull-agent-windows-*.msi' -o -name 'ominull-agent-windows-*.msi.sig' -o -name 'ominull-agent-windows-*.msi.sha256' -o \
-    -name 'ominull-hub_*.deb' -o -name 'ominull-hub_*.deb.sig' -o -name 'ominull-hub_*.deb.sha256' \
+    -name 'ominull-agent_*.deb' -o -name 'ominull-agent_*.deb.sig' -o -name 'ominull-agent_*.deb.sha256' -o -name 'ominull-agent_*.deb.release.sig' -o \
+    -name 'ominull-agent-windows-*.msi' -o -name 'ominull-agent-windows-*.msi.sig' -o -name 'ominull-agent-windows-*.msi.sha256' -o -name 'ominull-agent-windows-*.msi.release.sig' -o \
+    -name 'ominull-hub_*.deb' -o -name 'ominull-hub_*.deb.sig' -o -name 'ominull-hub_*.deb.sha256' -o -name 'ominull-hub_*.deb.release.sig' \
 \) -delete
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ominull-packages.XXXXXX")"
 trap 'find "${WORK_DIR}" -depth -delete' EXIT
@@ -65,6 +65,7 @@ x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
     "${ROOT_DIR}/agent/src/updater.c" \
     "${ROOT_DIR}/agent/src/provenance_windows.c" \
     "${ROOT_DIR}/agent/src/response_windows.c" \
+    "${ROOT_DIR}/agent/src/trust_windows.c" \
     "${ROOT_DIR}/agent/windows/wfp_user.c" \
     -o "${BUILD_DIR}/ominulld.exe" \
     -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \

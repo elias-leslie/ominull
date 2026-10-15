@@ -240,6 +240,19 @@ done:
     return ok;
 }
 
+static bool Sha256Bytes(const unsigned char* data, size_t len, unsigned char out[32]) {
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    bool ok = false;
+    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0) != STATUS_SUCCESS) return false;
+    if (BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) == STATUS_SUCCESS &&
+        BCryptHashData(hHash, (PUCHAR)data, (ULONG)len, 0) == STATUS_SUCCESS)
+        ok = (BCryptFinishHash(hHash, out, 32, 0) == STATUS_SUCCESS);
+    if (hHash) BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return ok;
+}
+
 /* VerifyReleaseSignature checks a detached signature against the pinned release
  * key. This is the control that makes the whole update path safe: the key is
  * compiled in, so trust never routes through the hub. */
@@ -495,6 +508,43 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     const char* sigPath = HubPathOf(sigUrl);
     if (!pkgPath || !sigPath) {
         printf("[!] Rejected agent update v%s: package or signature is not on a hub download path.\n", version);
+        return;
+    }
+    /* Never backwards, and only what the owner approved for this host: the
+     * response authority's grant, verified against the pinned key. */
+    const char* why = Agent_TrustUpdateRefusal(respJson, version, OMINULL_AGENT_VERSION);
+    if (why) {
+        if (strcmp(why, "not newer than the running version") == 0) {
+            printf("[!] Rejected agent update v%s: not newer than the running v%s.\n", version, OMINULL_AGENT_VERSION);
+            attempts = 3;
+        } else {
+            attempts--;   /* the grant may still arrive; nothing was downloaded */
+        }
+        return;
+    }
+    /* The release key signs package name, version and digest together, so an
+     * older signed package cannot be offered as this version. */
+    char releaseSigB64[512] = {0};
+    unsigned char releaseSig[384];
+    size_t releaseSigLen = 0;
+    if (!ExtractJsonString(block, "release_sig", releaseSigB64, sizeof(releaseSigB64)) || !releaseSigB64[0] ||
+        (releaseSigLen = Agent_TrustBase64Decode(releaseSigB64, releaseSig, sizeof(releaseSig))) == 0) {
+        printf("[!] Rejected agent update v%s: the hub sent no readable signed release statement.\n", version);
+        return;
+    }
+    const char* pkgName = strrchr(pkgPath, '/');
+    pkgName = pkgName ? pkgName + 1 : pkgPath;
+    char wantName[128];
+    if (!Agent_TrustArtifactName(version, wantName, sizeof(wantName)) || strcmp(pkgName, wantName) != 0) {
+        printf("[!] Rejected agent update v%s: the offered package is not this agent's own artifact.\n", version);
+        return;
+    }
+    char statement[512];
+    int sn = Agent_TrustReleaseStatement(pkgName, version, sha, statement, sizeof(statement));
+    unsigned char stmtHash[32];
+    if (sn <= 0 || sn >= (int)sizeof(statement) || !Sha256Bytes((const unsigned char*)statement, (size_t)sn, stmtHash) ||
+        !VerifyReleaseSignature(stmtHash, releaseSig, releaseSigLen)) {
+        printf("[!] Rejected agent update v%s: the release statement does not verify against the pinned release key.\n", version);
         return;
     }
 

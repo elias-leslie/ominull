@@ -90,7 +90,7 @@ func TestApprovalStatementIsSignedAndChallengeDerived(t *testing.T) {
 		t.Fatal("challenge is not sha256(prefix || statement)")
 	}
 	var parsed responseauth.ApprovalStatement
-	if err := json.Unmarshal(stmt, &parsed); err != nil || parsed.ID != v.ID || parsed.Summary != "Cut 1 host(s) off the network: ep-1" || parsed.Action != "Isolate host" {
+	if err := json.Unmarshal(stmt, &parsed); err != nil || parsed.ID != v.ID || parsed.Summary != "Cut 1 host(s) off the network: ep-1 (no exceptions: hub and loopback only)" || parsed.Action != "Isolate host" {
 		t.Fatalf("statement does not carry the shown fields: %+v %v", parsed, err)
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -166,11 +167,29 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		}
 		payload := plan.Payload
 		if payload == nil {
-			payload, _ = json.Marshal(map[string]interface{}{
+			fields := map[string]interface{}{
 				"route":   r.URL.Path,
 				"body":    json.RawMessage(canon),
 				"targets": plan.Targets,
-			})
+			}
+			if r.URL.Path == "/api/v1/endpoints/isolate" || r.URL.Path == "/api/v1/endpoints/isolate-bulk" {
+				// The exceptions are approved with the isolation; agents use
+				// only these while isolated.
+				b, err := s.isolationBaselines(plan.Targets)
+				if err != nil {
+					writeJSONError(w, http.StatusConflict, err.Error())
+					return
+				}
+				if len(b) > 0 {
+					fields["baselines"] = b
+				}
+			}
+			payload, _ = json.Marshal(fields)
+		}
+		if _, grantRoute := grantRoutes[r.URL.Path]; grantRoute && len(payload) > maxGrantPayload {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+				"this action's signed payload would be %d bytes; agents accept at most %d. Act on fewer hosts at once.", len(payload), maxGrantPayload))
+			return
 		}
 		tenantID := s.tenantFromRequest(r)
 		if tenantID == "" {
@@ -226,7 +245,47 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		s.audit(r, "OWNER_APPROVAL_USED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s under approval %s, grants %s", plan.Action, id, strings.Join(ids, ",")))
 		r = r.WithContext(context.WithValue(r.Context(), grantsCtxKey{}, grants))
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		next(w, r)
+		// Agents verify the grants themselves. They are kept (pending) before
+		// the action runs, so the hub never records an action whose grants it
+		// could not keep, and released to agents only once it succeeded; a
+		// failed action's grants are withdrawn and never delivered.
+		kept, err := s.keepApprovalGrants(r.URL.Path, plan.Kind, payload, grants)
+		if err != nil {
+			s.audit(r, "OWNER_APPROVAL_UNDELIVERABLE", strings.Join(plan.Targets, ","), fmt.Sprintf("%s under approval %s: %v", plan.Action, id, err))
+			writeJSONError(w, http.StatusInternalServerError, "the approved grants could not be kept for delivery; nothing was changed: "+err.Error())
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next(rec, r)
+		if len(kept) > 0 {
+			if rec.status >= 300 {
+				if err := s.store.DeleteEnforcementGrants(kept); err != nil {
+					log.Printf("[!] could not withdraw %d pending grant(s) of a failed %s: %v", len(kept), plan.Action, err)
+				}
+			} else if err := s.store.MarkGrantsDeliverable(kept); err != nil {
+				// The action ran; agents have not been told. Visible in the
+				// fleet trust view (hub and agent disagree) and in the audit.
+				s.audit(r, "OWNER_APPROVAL_UNDELIVERED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s under approval %s ran, but its grants were not released to agents: %v", plan.Action, id, err))
+			}
+		}
+	}
+}
+
+// statusRecorder remembers the status a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush keeps streaming handlers working behind the recorder.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -273,6 +332,49 @@ func decodeInto(w http.ResponseWriter, body []byte, v interface{}) bool {
 	return true
 }
 
+// withNormalizedField returns body with one member replaced by its normalized
+// value, so the owner approves, the authority signs and the handler records
+// the same spelling an agent accepts (no surrounding space, no IPv4-mapped
+// form).
+func withNormalizedField(w http.ResponseWriter, body []byte, name string, value interface{}) ([]byte, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return nil, false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, name+": "+err.Error())
+		return nil, false
+	}
+	m[name] = raw
+	out, err := json.Marshal(m)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return nil, false
+	}
+	return out, true
+}
+
+// normalizedAllowIPs validates an isolation's allow list and returns the body
+// carrying it normalized (nil when the request has none).
+func normalizedAllowIPs(w http.ResponseWriter, body []byte, in []string) ([]byte, []string, bool) {
+	if len(in) == 0 {
+		return nil, nil, true
+	}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		ip, err := validateIP(raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "allow_ips: "+err.Error())
+			return nil, nil, false
+		}
+		out = append(out, ip)
+	}
+	nb, ok := withNormalizedField(w, body, "allow_ips", out)
+	return nb, out, ok
+}
+
 func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
 	var req struct {
 		EndpointID string   `json:"endpoint_id"`
@@ -282,6 +384,11 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseMonitorOnly(w, req.EndpointID) {
 		return nil, false
 	}
+	nb, allow, ok := normalizedAllowIPs(w, body, req.AllowIPs)
+	if !ok {
+		return nil, false
+	}
+	req.AllowIPs = allow
 	summary := "Cut " + s.endpointLabels([]string{req.EndpointID}) + " off the network"
 	if len(req.AllowIPs) > 0 {
 		summary += " except " + strings.Join(req.AllowIPs, ", ")
@@ -289,7 +396,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	if req.Force {
 		summary += " (readiness gate overridden)"
 	}
-	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}}, true
+	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb}, true
 }
 
 func (s *Server) resolveUnisolate(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
@@ -356,6 +463,10 @@ func (s *Server) resolveBulkIsolation(isolate bool) approvalResolver {
 			return nil, false
 		}
 		if isolate {
+			nb, _, ok := normalizedAllowIPs(w, body, req.AllowIPs)
+			if !ok {
+				return nil, false
+			}
 			// Monitor-only endpoints (hypervisors) are left out of the
 			// approval, so the grants never name them.
 			allowed, monitor, ok := s.splitMonitorOnly(w, targets)
@@ -370,7 +481,7 @@ func (s *Server) resolveBulkIsolation(isolate bool) approvalResolver {
 			if len(monitor) > 0 {
 				summary += fmt.Sprintf(" (%d monitor-only host(s) left out: %s)", len(monitor), s.endpointLabels(monitor))
 			}
-			return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate hosts", Summary: summary, Targets: allowed}, true
+			return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate hosts", Summary: summary, Targets: allowed, Body: nb}, true
 		}
 		return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Release isolation",
 			Summary: fmt.Sprintf("Return %d host(s) to the network: %s", len(targets), s.endpointLabels(targets)), Targets: targets}, true
@@ -437,6 +548,10 @@ func (s *Server) resolveMesh(quarantine bool) approvalResolver {
 			writeJSONError(w, http.StatusBadRequest, "target_ip: "+err.Error())
 			return nil, false
 		}
+		nb, ok := withNormalizedField(w, body, "target_ip", ip)
+		if !ok {
+			return nil, false
+		}
 		if quarantine {
 			// Refused before the owner is asked: the handler would refuse it anyway.
 			if why := s.hubOwnsAddress(ip); why != "" {
@@ -444,10 +559,10 @@ func (s *Server) resolveMesh(quarantine bool) approvalResolver {
 				return nil, false
 			}
 			return &approvalPlan{Kind: responseauth.ActionKindMesh, Action: "Quarantine address",
-				Summary: "Every agent drops traffic to and from " + ip + " (" + strings.TrimSpace(req.Reason) + ")", Targets: []string{"mesh:" + ip}}, true
+				Summary: "Every agent drops traffic to and from " + ip + " (" + strings.TrimSpace(req.Reason) + ")", Targets: []string{"mesh:" + ip}, Body: nb}, true
 		}
 		return &approvalPlan{Kind: responseauth.ActionKindMesh, Action: "Lift quarantine",
-			Summary: "Agents stop dropping traffic for " + ip, Targets: []string{"mesh:" + ip}}, true
+			Summary: "Agents stop dropping traffic for " + ip, Targets: []string{"mesh:" + ip}, Body: nb}, true
 	}
 }
 

@@ -108,6 +108,7 @@ func (s *Server) handleMonitorOnly(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "ENDPOINT_MONITOR_ONLY_SET", req.EndpointID, "Host isolation refused from now on: "+req.Reason)
+	s.afterProfileChange(r.Context(), req.EndpointID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": storage.ResponseProfileMonitor,
 		"monitor_only": true, "response_profile_rev": rev})
 }
@@ -186,6 +187,7 @@ func (s *Server) handleAllowIsolation(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "ENDPOINT_MONITOR_ONLY_LIFTED", req.EndpointID, fmt.Sprintf("Operator monitor-only setting (revision %d) lifted: %s",
 		*req.Revision, strings.TrimSpace(req.Reason)))
+	s.afterProfileChange(r.Context(), req.EndpointID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"endpoint_id": req.EndpointID, "response_profile": "", "monitor_only": false,
 		"response_profile_rev": rev})
 }

@@ -165,9 +165,11 @@ if [ -d /usr/share/ominull/packages ]; then
     for artifact in /usr/share/ominull/packages/ominull-agent_*.deb \
                     /usr/share/ominull/packages/ominull-agent_*.deb.sig \
                     /usr/share/ominull/packages/ominull-agent_*.deb.sha256 \
+                    /usr/share/ominull/packages/ominull-agent_*.deb.release.sig \
                     /usr/share/ominull/packages/ominull-agent-windows-*.msi \
                     /usr/share/ominull/packages/ominull-agent-windows-*.msi.sig \
-                    /usr/share/ominull/packages/ominull-agent-windows-*.msi.sha256; do
+                    /usr/share/ominull/packages/ominull-agent-windows-*.msi.sha256 \
+                    /usr/share/ominull/packages/ominull-agent-windows-*.msi.release.sig; do
         [ -f "${artifact}" ] || continue
         install -o root -g root -m 0644 "${artifact}" /opt/ominull/bin/"$(basename "${artifact}")"
     done

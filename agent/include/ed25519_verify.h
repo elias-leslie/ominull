@@ -156,7 +156,7 @@ ED_SV ed_car25519(ed_gf o) {
         o[i] += (1LL << 16);
         ed_i64 c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        o[i] -= c * 65536;   /* c may be negative: a multiply is defined, a shift is not */
     }
 }
 
@@ -325,7 +325,7 @@ ED_SV ed_modL(ed_u8 *r, ed_i64 x[64]) {
         for (j = i - 32; j < i - 12; ++j) {
             x[j] += carry - 16 * x[i] * (ed_i64)ed_L[j - (i - 32)];
             carry = (x[j] + 128) >> 8;
-            x[j] -= carry << 8;
+            x[j] -= carry * 256;
         }
         x[j] += carry;
         x[i] = 0;

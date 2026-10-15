@@ -141,7 +141,17 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	}
 	s.detector.EvaluateBatch(events, snapshot)
 
-	return s.telemetryControlResponse(r, tenantID, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
+	resp, err := s.telemetryControlResponse(r, tenantID, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
+	if err != nil {
+		return nil, err
+	}
+	s.addTrustControl(r.Context(), resp, persisted, batch.Trust)
+	if desc, ok := resp["agent_update"].(map[string]string); ok && batch.Trust != nil {
+		if g := s.updateGrantFor(batch.EndpointID, desc["version"]); g != nil {
+			resp["agent_update_grant"] = g
+		}
+	}
+	return resp, nil
 }
 
 func requestRemoteIP(r *http.Request) string {

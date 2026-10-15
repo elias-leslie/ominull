@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -89,6 +91,9 @@ type Server struct {
 	// responseEnabled toggles the unreleased response, evidence, script, terminal,
 	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
 	responseEnabled bool
+	// trust caches the authority's public keys and manifests and the agents'
+	// trust reports; see agent_trust.go.
+	trust agentTrustCache
 	// topology holds the rendered graph briefly; see responsecache.go.
 	topology responseCache
 	// setup is deliberately separate from console authentication. A fresh
@@ -145,6 +150,9 @@ type TelemetryBatchMessage struct {
 	// gate distinguishes from a failing answer.
 	Readiness          *storage.Readiness `json:"isolation_readiness"`
 	EvidenceSigningKey string             `json:"evidence_signing_key,omitempty"`
+	// Trust is a grant-verifying agent's own account of its trust state
+	// (pinned keys, manifest, enforcement watermarks, last refusal).
+	Trust *response.AgentTrustReport `json:"trust,omitempty"`
 }
 
 type DiscoveredAsset struct {
@@ -425,6 +433,9 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 			ID: uuid.New().String(), Username: "detector", Action: "AUTO_ISOLATE_HOST", Resource: endpointID,
 			Details: reason, Timestamp: time.Now().UTC(),
 		})
+		// Agents that verify grants act only on the detector's own narrow key.
+		// Off the detector's path: the authority call must not slow ingestion.
+		go s.signDetectorIsolation(endpointID, reason)
 		return nil
 	})
 	s.ipv6Monitor = ipv6guard.New(s.persistIPv6Observations)
@@ -689,6 +700,9 @@ func (s *Server) setConsoleSession(w http.ResponseWriter, r *http.Request, opera
 }
 
 func (s *Server) Start(addr string) error {
+	// Grants a stopped hub left pending are settled before anything else can
+	// run an action (math.MaxInt64: no age guard; no request is in flight).
+	s.reconcilePendingGrantsIssuedBefore(math.MaxInt64, time.Now())
 	// Start Threat Intelligence feed scheduler, behavioral detector, and autonomous scanner.
 	s.ti.Start(context.Background(), 1*time.Hour)
 	// Published vendor ranges change slowly; daily is the cadence the feeds
@@ -696,6 +710,7 @@ func (s *Server) Start(addr string) error {
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
 	s.startSweeps()
+	go s.reconcilePendingGrantsLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
@@ -1372,14 +1387,21 @@ func (s *Server) agentUpdateDescriptor(r *http.Request, version, pkg string) (ma
 		return nil, false
 	}
 	base := s.downloadBase(r)
-	return map[string]string{
+	desc := map[string]string{
 		"version":            version,
 		"package":            pkg,
 		"package_identifier": packageIdentifierForKind(pkg),
 		"url":                base + "/download/" + name,
 		"signature":          base + "/download/" + name + ".sig",
 		"sha256":             fields[0],
-	}, true
+	}
+	// The release statement signs package name, version and digest together,
+	// so an agent can refuse an older signed package offered as an update.
+	// Agents from 1.8.59 require it.
+	if sig, err := os.ReadFile(filepath.Join(s.binaryDir, name+".release.sig")); err == nil && len(sig) > 0 && len(sig) < 512 {
+		desc["release_sig"] = base64.StdEncoding.EncodeToString(sig)
+	}
+	return desc, true
 }
 
 func packageIdentifierForKind(pkg string) string {
@@ -3533,6 +3555,10 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
 	mux.HandleFunc("/api/v1/endpoints/allow-isolation", s.authMiddleware(s.ownerApproved(s.resolveAllowIsolation, s.handleAllowIsolation)))
+	mux.HandleFunc("/api/v1/endpoints/capabilities", s.authMiddleware(s.ownerApproved(s.resolveCapabilities, s.handleEndpointCapabilities)))
+	mux.HandleFunc("/api/v1/fleet/trust", s.authMiddleware(s.handleFleetTrust))
+	mux.HandleFunc("/api/v1/trust/statement", s.authMiddleware(s.handleTrustStatement))
+	mux.HandleFunc("/api/v1/trust/bundle", s.authMiddleware(s.handleTrustBundle))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.ownerApproved(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))

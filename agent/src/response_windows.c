@@ -173,8 +173,13 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
     for (int i = 0; i < offer_count; i++) {
         ResponseJobOffer* offer = &offers[i];
 
-        // 1. Verify EndpointGrant V2
-        if (!VerifyResponseGrant(&offer->grant, offer->payload_json, config->endpoint_id, NULL)) {
+        // 1. Verify EndpointGrant V2, against the pinned key, for this kind,
+        //    inside this endpoint's capability manifest
+        if (Agent_TrustOfferRefusal(offer->kind, &offer->grant)) continue;
+        /* Against the pinned key in memory (trust.pin), never a file copy. */
+        uint8_t responseKey[32];
+        if (!Agent_TrustResponseKey(responseKey) ||
+            !VerifyResponseGrantKey(&offer->grant, offer->payload_json, config->endpoint_id, responseKey)) {
             // Drop offer silently: no ACK, no result
             continue;
         }

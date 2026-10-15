@@ -67,6 +67,12 @@ static void PrintUsage(const char* prog) {
     printf("                       the client certificate adds a second matching proof.\n");
     printf("  --allow-plaintext    Permit an http:// hub. Telemetry and the device credential then cross the network in the clear.\n");
     printf("  --version            Print the version and exit.\n");
+    printf("  --repin-trust        Forget the pinned response authority keys; the next contact with the\n");
+    printf("                       hub pins the keys it offers with a release-key-signed bundle (after a rotation).\n");
+    printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, respond,\n");
+    printf("                       engagement; none removes it). Set at the host, never by the hub.\n");
+    printf("  --release-local      Local recovery: record that isolation and quarantines were lifted\n");
+    printf("                       here (run as Administrator, then restart the service).\n");
     printf("  --config <path>      Read package-owned runtime configuration from this file.\n");
 }
 
@@ -113,6 +119,8 @@ int main(int argc, char* argv[]) {
     bool doConsole = false;
     bool doService = false;
     bool doConfigure = false;
+    bool doRepin = false, doLocalRelease = false;
+    const char* setCeiling = NULL;
     char nativePackage[MAX_PATH] = {0};
 
     for (int i = 1; i + 1 < argc; i++) {
@@ -130,6 +138,12 @@ int main(int argc, char* argv[]) {
             doService = true;
         } else if (strcmp(argv[i], "--configure-stdin") == 0) {
             doConfigure = true;
+        } else if (strcmp(argv[i], "--repin-trust") == 0) {
+            doRepin = true;
+        } else if (strcmp(argv[i], "--capability-ceiling") == 0 && i + 1 < argc) {
+            setCeiling = argv[++i];
+        } else if (strcmp(argv[i], "--release-local") == 0) {
+            doLocalRelease = true;
         } else if (strcmp(argv[i], "--apply-msi") == 0 && i + 1 < argc) {
             strncpy(nativePackage, argv[++i], sizeof(nativePackage) - 1);
         } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
@@ -179,6 +193,33 @@ int main(int argc, char* argv[]) {
 
     if (doConfigure) {
         return Service_ConfigureFromStdin() ? 0 : 1;
+    }
+    if (setCeiling) {
+        Agent_TrustInit(config.endpoint_id);
+        if (!Agent_TrustSetCeiling(setCeiling)) {
+            fprintf(stderr, "[-] --capability-ceiling takes monitor, respond, engagement or none (run as Administrator).\n");
+            return 1;
+        }
+        printf("[+] Capability ceiling %s recorded; restart the service.\n", setCeiling);
+        return 0;
+    }
+    if (doRepin || doLocalRelease) {
+        Agent_TrustInit(config.endpoint_id);
+        if (doRepin) {
+            int removed = Agent_TrustRepin();
+            if (removed < 0) {
+                fprintf(stderr, "[-] The pinned trust bundle could not be removed; the current keys stay trusted.\n");
+                return 1;
+            }
+            printf("[+] Removed %d pinned trust bundle(s); restart the service so it pins the hub's current release-signed bundle.\n", removed);
+        }
+        if (doLocalRelease) {
+            bool ok = Agent_TrustLocalRelease();
+            printf(ok ? "[+] Recorded a local release: the service will not re-apply isolation or quarantines.\n"
+                      : "[-] No authorized enforcement state to release, or it could not be written.\n");
+            if (!ok) return 1;
+        }
+        return 0;
     }
 	if (nativePackage[0]) {
 		return Update_RunNativeInstaller(nativePackage);

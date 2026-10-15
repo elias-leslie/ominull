@@ -153,6 +153,7 @@ jobs:
           if-no-files-found: error
           path: |
             build/test_windows_telemetry_json.exe
+            build/test_agent_trust.exe
             build/test_windows_ipv6_json.exe
             build/test_windows_adapter.exe
             build/test_wfp_transaction.exe

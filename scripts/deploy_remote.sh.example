@@ -23,9 +23,11 @@ required=(
     "ominull-agent_${VERSION}_amd64.deb"
     "ominull-agent_${VERSION}_amd64.deb.sig"
     "ominull-agent_${VERSION}_amd64.deb.sha256"
+    "ominull-agent_${VERSION}_amd64.deb.release.sig"
     "ominull-agent-windows-${VERSION}.msi"
     "ominull-agent-windows-${VERSION}.msi.sig"
     "ominull-agent-windows-${VERSION}.msi.sha256"
+    "ominull-agent-windows-${VERSION}.msi.release.sig"
 )
 for file in "${required[@]}"; do
     [ -f "${DIST_DIR}/${file}" ] || { echo "[-] Missing dist/${file}; build and sign first." >&2; exit 1; }

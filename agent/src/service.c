@@ -580,107 +580,6 @@ bool HubAddressLiteral(const AGENT_CONFIG *config, char *out, size_t cap) {
     return true;
 }
 
-/* JsonStringField pulls one flat "key":"value" out of an object fragment. The
- * hub's baseline rules have no nesting and no escaping beyond this. */
-static bool JsonStringField(const char* json, const char* key, char* out, size_t outLen) {
-    char needle[48];
-    _snprintf(needle, sizeof(needle), "\"%s\":\"", key);
-    needle[sizeof(needle) - 1] = '\0';
-    const char* p = strstr(json, needle);
-    if (!p) return false;
-    p += strlen(needle);
-    size_t idx = 0;
-    while (*p && *p != '"' && idx < outLen - 1) out[idx++] = *p++;
-    out[idx] = '\0';
-    return idx > 0;
-}
-
-/* ParseBaselineRules reads the resolved baseline policy off the heartbeat reply.
- *
- * Returns the number of usable rules, or -1 when the key is absent entirely. The
- * caller has to be able to tell "this hub has no policy" from "this hub's policy
- * is empty", because they mean opposite things: the first keeps the compiled-in
- * permits, the second means hub and loopback only. */
-static int ParseBaselineRules(const char* json, OMINULL_BASELINE_RULE* out, int maxOut) {
-    const char* p = strstr(json, "\"isolation_baseline\":[");
-    if (!p) return -1;
-    p += strlen("\"isolation_baseline\":[");
-
-    int count = 0;
-    while (*p && *p != ']') {
-        const char* obj = strchr(p, '{');
-        if (!obj) break;
-        const char* end = strchr(obj, '}');
-        if (!end) break;
-
-        char frag[256];
-        size_t len = (size_t)(end - obj) + 1;
-        if (len >= sizeof(frag)) len = sizeof(frag) - 1;
-        memcpy(frag, obj, len);
-        frag[len] = '\0';
-        p = end + 1;
-
-        OMINULL_BASELINE_RULE r;
-        memset(&r, 0, sizeof(r));
-        JsonStringField(frag, "service", r.service, sizeof(r.service));
-        JsonStringField(frag, "destination", r.destination, sizeof(r.destination));
-        JsonStringField(frag, "protocol", r.protocol, sizeof(r.protocol));
-        const char* portKey = strstr(frag, "\"port\":");
-        if (portKey) r.port = atoi(portKey + strlen("\"port\":"));
-
-        /* Re-validated even though the hub validates it. These values become
-         * filter conditions in the user-mode filtering API; the value itself is never echoed,
-         * because it is attacker-controlled text on its way to a log. */
-        if (!IsIPLiteralAny(r.destination)) {
-            printf("[!] Unsupported baseline destination; refusing policy update.\n");
-            return -2;
-        }
-        if (strcmp(r.protocol, "udp") != 0 && strcmp(r.protocol, "tcp") != 0) {
-            return -2;
-        }
-        if (r.port < 1 || r.port > 65535) {
-            return -2;
-        }
-        if (count >= maxOut) return -2;
-        out[count++] = r;
-    }
-    return count;
-}
-
-/* ParseAddressArray pulls the entries of a flat "key":["a","b"] array. */
-static int ParseAddressArray(const char* json, const char* key,
-                             char out[][PEER_ADDR_LEN], int maxOut) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\"", key);
-    const char *p = strstr(json, needle);
-    if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-    if (*p++ != ':') return -1;
-    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-    if (*p++ != '[') return -1;
-    int count = 0;
-    for (;;) {
-        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-        if (*p == ']') return count;
-        if (count >= maxOut || *p++ != '"') return -1;
-        char ip[PEER_ADDR_LEN]; size_t length = 0;
-        while (*p && *p != '"') {
-            if (length >= sizeof(ip) - 1 || *p == '\\') return -1;
-            ip[length++] = *p++;
-        }
-        if (*p++ != '"') return -1;
-        ip[length] = '\0';
-        if (!IsIPLiteralAny(ip)) return -1;
-        strcpy(out[count++], ip);
-        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-        if (*p == ']') return count;
-        if (*p++ != ',') return -1;
-        while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-        if (*p == ']') return -1;
-    }
-}
-
 /* What this agent has actually put in the filtering engine. At file scope rather than
  * inside SyncEnforcement because the dead-man timer has to rebuild from it -
  * specifically, to lift this host's isolation while leaving the mesh quarantine
@@ -714,7 +613,7 @@ static char g_ApplyNote[160] = {0};
  * every isolation in the fleet. This loop flushes every 2500ms, so 120 is five
  * minutes - long enough to outlast all three, short enough that the person who
  * just isolated the host is still watching. */
-#define OMINULL_DEADMAN_BEATS 120
+#define OMINULL_DEADMAN_BEATS 120   /* unsupervised; an owner's isolation: Agent_TrustDeadmanBeats */
 
 /* EnforcementEngineReady probes the filtering engine once and caches the answer.
  *
@@ -761,28 +660,36 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
 
     const char* p = strstr(respJson, "\"is_isolated\":");
     if (!p) return;                     /* an older hub; nothing to obey */
-    p += strlen("\"is_isolated\":");
-    while (*p == ' ') p++;
-    bool wantIsolated = (strncmp(p, "true", 4) == 0);
+    /* Isolation, its allow list and the mesh peers are the authorized state
+     * (verified grants, agent_trust.h), never the hub's say-so. */
+    bool wantIsolated = Agent_TrustIsolated();
 
     char peers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
-    int peerCount = ParseAddressArray(respJson, "quarantined_peers", peers, MAX_BLOCKED_PEERS);
+    int peerCount = Agent_TrustPeers(peers, MAX_BLOCKED_PEERS);
 
     char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
-    int allowCount = ParseAddressArray(respJson, "isolation_allow_ips", allow, MAX_BLOCKED_PEERS);
-    if (peerCount < 0 || allowCount < 0) {
-        strcpy(g_ApplyNote, "policy not applied: invalid, unsupported or oversized address list");
-        return;
-    }
+    int allowCount = Agent_TrustAllow(allow, MAX_BLOCKED_PEERS);
+    /* Only addresses the filtering engine can hold (no link-local, no scope). */
+    int kept = 0;
+    for (int i = 0; i < peerCount; i++)
+        if (IsIPLiteralAny(peers[i])) memmove(peers[kept++], peers[i], PEER_ADDR_LEN);
+    peerCount = kept;
+    kept = 0;
+    for (int i = 0; i < allowCount; i++)
+        if (IsIPLiteralAny(allow[i])) memmove(allow[kept++], allow[i], PEER_ADDR_LEN);
+    allowCount = kept;
 
+    /* An isolation's exceptions are the ones bound into it (the owner approved
+     * them with the isolation; agent_trust.h keeps them in the authorized
+     * state). The heartbeat's baseline never opens a hole. */
     OMINULL_BASELINE_RULE baseline[OMINULL_MAX_BASELINE_RULES];
-    int baselineCount = ParseBaselineRules(respJson, baseline, OMINULL_MAX_BASELINE_RULES);
-    if (baselineCount == -2) {
-        strcpy(g_ApplyNote, "policy not applied: invalid or oversized baseline");
-        return;
-    }
-    bool baselineKnown = baselineCount >= 0;
-    if (!baselineKnown) baselineCount = 0;
+    memset(baseline, 0, sizeof(baseline));
+    int baselineCount = wantIsolated ? Agent_TrustRules(baseline, OMINULL_MAX_BASELINE_RULES) : 0;
+    kept = 0;
+    for (int i = 0; i < baselineCount; i++)
+        if (IsIPLiteralAny(baseline[i].destination)) baseline[kept++] = baseline[i];
+    baselineCount = kept;
+    bool baselineKnown = true;
 
     bool changed = !known || wantIsolated != appliedIsolated ||
                    peerCount != appliedPeerCount || allowCount != appliedAllowCount ||
@@ -884,7 +791,7 @@ static void HubContact(bool accepted) {
         missed = 0;
         return;
     }
-    if (++missed < OMINULL_DEADMAN_BEATS) return;
+    if (++missed < Agent_TrustDeadmanBeats(OMINULL_DEADMAN_BEATS, 2500)) return;
 
     printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
            "this host's isolation: an isolation the hub cannot lift is not a containment, it is a "
@@ -955,6 +862,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
     size_t batchCount = 0;
     DWORD lastFlush = GetTickCount();
 
+    Agent_TrustInit(config->endpoint_id);
     printf("[+] Ominull Agent running. Streaming network flows to Hub: %s\n", config->hub_url);
     UDPWinStart();
     SyncSoftwareInventoryWin(config);
@@ -977,7 +885,10 @@ void RunAgentLoop(AGENT_CONFIG* config) {
              * peer list and the allow list. Four kilobytes truncated it once the
              * policy had a handful of rules in it, and a truncated reply is not
              * a parse error - it is a silently shorter enforcement state. */
-            char hubResponse[16384];
+            /* 32 KiB: the answer also carries trust keys, a manifest and up
+             * to five enforcement grants with their payloads. */
+            static char hubResponse[32768];
+            hubResponse[0] = '\0';
             bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
                                                    hubResponse, sizeof(hubResponse));
             if (!accepted) {
@@ -991,6 +902,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             HubContact(accepted);
 
             Service_AdoptDeviceCredential(config, hubResponse);
+            if (accepted) Agent_TrustProcessHeartbeat(hubResponse);
 
             // The hub answers with an agent_update descriptor when a newer
             // release is published. Update_Apply verifies it against the
@@ -1325,6 +1237,14 @@ bool Service_ConfigureFromStdin(void) {
         return false;
     }
 
+    /* Owned by Administrators with a protected ACL before anything is put in
+     * it: a directory a user pre-created must not keep their rights. The
+     * response authority's keys are pinned later, from a trust bundle the
+     * release key signed (agent_trust.h). */
+    if (!Agent_TrustSecureDirectory("C:\\ProgramData\\Ominull")) {
+        fprintf(stderr, "[-] Cannot secure the package data directory.\n");
+        return false;
+    }
     if (!WriteProtectedFile(OMINULL_DEFAULT_KEY_PATH, key)) {
         fprintf(stderr, "[-] Cannot install the package device credential (Error: %lu).\n", GetLastError());
         return false;

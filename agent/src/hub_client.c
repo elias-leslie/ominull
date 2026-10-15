@@ -446,13 +446,18 @@ char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *ev
     FIELD("package_identifier", config->package_identifier);
     FIELD("registered_package_version", config->registered_package_version);
     FIELD("provenance_status", config->provenance_status);
-    if (GetFileAttributesA("C:\\ProgramData\\Ominull\\response.pub") == INVALID_FILE_ATTRIBUTES) {
+    if (!Agent_TrustHasResponseKey()) {
         APPEND(",\"response_capabilities\":%s", OMINULL_CAPS_NO_RESPONSE_KEY);
     } else {
         APPEND(",\"response_capabilities\":%s", OMINULL_CAPS_WINDOWS_BASE);
         if (GetFileAttributesA("C:\\Program Files\\PowerShell\\7\\pwsh.exe") != INVALID_FILE_ATTRIBUTES)
             APPEND("%s", OMINULL_CAPS_WINDOWS_PWSH);
         APPEND("%s", OMINULL_CAPS_WINDOWS_END);
+    }
+    {
+        char trust[768];
+        Agent_TrustReport(trust, sizeof(trust));
+        APPEND(",\"trust\":%s", trust);
     }
     APPEND(",\"events\":[");
     for (size_t i = 0; i < count; i++) {

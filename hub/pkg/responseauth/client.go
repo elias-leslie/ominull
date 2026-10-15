@@ -27,6 +27,7 @@ type Client interface {
 	ConsumeRecoveryToken(ctx context.Context, tenantID, operatorID, token string) error
 	Status(ctx context.Context, tenantID string) (*ResponseAuthorityStatus, error)
 	ApprovalClient
+	TrustClient
 }
 
 // UDSClient connects to the response authority over a Unix domain socket.

@@ -5,44 +5,24 @@
 # the hub serves, so an unsigned package is one no agent will install. Run this
 # after scripts/build-packages.sh and before the packages reach the hub.
 #
-# The private key lives in the operations vault. It is never in this repo, on
-# the hub, or in CI. Point OMINULL_SIGNING_KEY at it.
+# Backends (OMINULL_SIGNING_BACKEND):
+#   file     (default) OMINULL_SIGNING_KEY is a PEM EC private key. It may be an
+#            encrypted PEM on removable media (scripts/release-key-offline.sh
+#            writes one); the passphrase is asked once on the terminal, or read
+#            from OMINULL_SIGNING_PASSFILE, and reaches openssl only through a
+#            pipe, never argv, the environment or a file.
+#   command  OMINULL_SIGNING_COMMAND is an executable for a token or HSM:
+#            "CMD pubkey" prints the PEM public key, "CMD sign FILE" prints the
+#            DER ECDSA-SHA256 signature over FILE. The key never leaves it.
+# The private key is never in this repo, on the hub, or in CI.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DIST_DIR="${ROOT_DIR}/dist"
-KEY="${OMINULL_SIGNING_KEY:-}"
+DIST_DIR="${OMINULL_DIST_DIR:-${ROOT_DIR}/dist}"
 VERSION="${OMINULL_RELEASE_VERSION:-$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")}"
-
-if [ -z "${KEY}" ]; then
-    echo "[-] Set OMINULL_SIGNING_KEY to the release signing key (it lives in the ops vault)." >&2
-    exit 1
-fi
-if [ ! -f "${KEY}" ]; then
-    echo "[-] Signing key not found: ${KEY}" >&2
-    exit 1
-fi
-
-# Refuse to sign with a key anyone but its owner can read. A release key with
-# loose permissions is a key that should be assumed copied.
-mode="$(stat -c '%a' "${KEY}" 2>/dev/null || stat -f '%Lp' "${KEY}")"
-if [ "$(( 8#${mode} & 8#077 ))" -ne 0 ]; then
-    echo "[-] Signing key ${KEY} is mode ${mode}; it must not be group- or world-readable." >&2
-    exit 1
-fi
-
-# The pinned public key is the contract. Signing with a key the fleet will not
-# recognise produces packages every agent rejects, which is a fleet-wide outage
-# discovered one endpoint at a time. Catch it here instead.
-embedded="$(sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' "${ROOT_DIR}/agent/include/release_key.h" \
-    | sed -E 's/^[[:space:]]*"//; s/\\n".*$//')"
-signing_pub="$(openssl ec -in "${KEY}" -pubout 2>/dev/null)"
-if [ "${embedded}" != "${signing_pub}" ]; then
-    echo "[-] ${KEY} is not the key pinned in agent/include/release_key.h." >&2
-    echo "    Agents would reject every package signed with it. Rotate deliberately, not by accident." >&2
-    exit 1
-fi
+# shellcheck source=lib/signing-backend.sh
+. "${SCRIPT_DIR}/lib/signing-backend.sh"
 
 agent_deb="${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
 hub_deb="${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
@@ -53,20 +33,28 @@ for pkg in "${packages[@]}"; do
 done
 
 sign_package() {
-    local pkg="$1"
-    openssl dgst -sha256 -sign "${KEY}" -out "${pkg}.sig" "${pkg}"
-    sha256sum "${pkg}" | awk '{print $1}' > "${pkg}.sha256"
+    local pkg="$1" name sha statement
+    name="$(basename "${pkg}")"
+    sign_file "${pkg}" "${pkg}.sig"
+    sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+    printf '%s\n' "${sha}" > "${pkg}.sha256"
+
+    # The release statement binds name, version and digest under the same key,
+    # so an agent can refuse an older, genuinely signed package offered as an
+    # update (agents from 1.8.59 require it; the hub serves it as release_sig).
+    statement="$(mktemp "${TMPDIR:-/tmp}/ominull-release-statement.XXXXXX")"
+    printf 'OMINULL-RELEASE-V1\npackage=%s\nversion=%s\nsha256=%s\n' "${name}" "${VERSION}" "${sha}" > "${statement}"
+    sign_file "${statement}" "${pkg}.release.sig"
 
     # Verify with the pinned public key exactly as an agent will, so a bad
     # signature is caught here and not on an endpoint mid-upgrade.
-    printf '%s\n' "${embedded}" > "${DIST_DIR}/.verify.pub"
-    if ! openssl dgst -sha256 -verify "${DIST_DIR}/.verify.pub" -signature "${pkg}.sig" "${pkg}" >/dev/null 2>&1; then
-        rm -f "${DIST_DIR}/.verify.pub"
-        echo "[-] Signature over $(basename "${pkg}") failed verification against the pinned key." >&2
+    if ! verify_sig "${pkg}" "${pkg}.sig" || ! verify_sig "${statement}" "${pkg}.release.sig"; then
+        rm -f "${statement}"
+        echo "[-] Signature over ${name} failed verification against the pinned key." >&2
         exit 1
     fi
-    rm -f "${DIST_DIR}/.verify.pub"
-    echo "  [+] $(basename "${pkg}").sig  ($(cat "${pkg}.sha256"))"
+    rm -f "${statement}"
+    echo "  [+] ${name}.sig + .release.sig  (${sha})"
 }
 
 echo "[*] Signing endpoint packages with the release key..."
@@ -80,11 +68,11 @@ sign_package "${windows_msi}"
 # survives hub package purge so artifact availability follows the data-retention
 # contract, while the signed source remains part of the release package.
 bundle_dir="$(mktemp -d "${TMPDIR:-/tmp}/ominull-hub-bundle.XXXXXX")"
-trap 'find "${bundle_dir}" -depth -delete' EXIT
+trap 'find "${bundle_dir}" -depth -delete; rm -f "${verify_pub}"' EXIT
 dpkg-deb --raw-extract "${hub_deb}" "${bundle_dir}/root"
 install -d -m 0755 "${bundle_dir}/root/usr/share/ominull/packages"
-for artifact in "${agent_deb}" "${agent_deb}.sig" "${agent_deb}.sha256" \
-                "${windows_msi}" "${windows_msi}.sig" "${windows_msi}.sha256"; do
+for artifact in "${agent_deb}" "${agent_deb}.sig" "${agent_deb}.sha256" "${agent_deb}.release.sig" \
+                "${windows_msi}" "${windows_msi}.sig" "${windows_msi}.sha256" "${windows_msi}.release.sig"; do
     install -m 0644 "${artifact}" "${bundle_dir}/root/usr/share/ominull/packages/$(basename "${artifact}")"
 done
 bundled_hub="${bundle_dir}/ominull-hub_${VERSION}_amd64.deb"

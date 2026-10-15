@@ -31,6 +31,8 @@
 #include "../include/release_key.h"
 #include "../include/hub_address.h"
 #include "../include/response_dispatcher.h"
+#include "../include/agent_trust.h"
+#include "../include/release_verify_posix.h"
 #include "../include/terminal_linux.h"
 #include "../include/forensics_linux.h"
 #include "../include/script_exec_linux.h"
@@ -133,6 +135,11 @@ typedef struct {
 
 #include "udp_collector.h"
 #include "response_capabilities.h"
+
+/* What this host is authorized to enforce, and the keys and manifest that
+ * decide it (agent_trust.h). Loaded once at start, moved only by verified
+ * grants. */
+static TrustContext g_Trust;
 
 typedef struct {
     unsigned long inode;
@@ -568,6 +575,9 @@ static bool ConfigureFromStdin(void) {
 	if (pinHubCA && !CopyPrivateFile(caSource, "/etc/ominull/ca.crt", 0644)) return false;
     if (certSource[0] && !CopyPrivateFile(certSource, "/etc/ominull/client.crt", 0600)) return false;
     if (keySource[0] && !CopyPrivateFile(keySource, "/etc/ominull/client.key", 0600)) return false;
+    /* The response authority's keys are not taken from the enrollment bundle:
+     * the agent pins them on first contact, only from a trust bundle the
+     * release key signed (agent_trust.h, Trust_PinKeys). */
 
     char config[2048];
     int n = snprintf(config, sizeof(config),
@@ -601,7 +611,12 @@ static void PrintUsage(const char* prog) {
     printf("  --version          Print the version and exit.\n");
     printf("  --config <path>    Read package-owned runtime configuration.\n");
     printf("  --configure-stdin  Install enrollment material from stdin.\n");
-    printf("  --cleanup          Remove Ominull-owned host enforcement state.\n");
+    printf("  --cleanup          Remove Ominull-owned host enforcement state (local recovery: also\n");
+    printf("                     records that isolation and quarantines were lifted here).\n");
+    printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, respond,\n");
+    printf("                     engagement; none removes it). Set at the host, never by the hub.\n");
+    printf("  --repin-trust      Forget the pinned response authority keys; the next contact with\n");
+    printf("                     the hub pins the keys it offers with a release-key-signed bundle (rotation).\n");
 }
 
 /* ---------------------------------------------------------------------------
@@ -1578,62 +1593,6 @@ typedef struct {
     int  port;
 } BASELINE_RULE;
 
-/* ParseBaselineRules reads the flat object array the hub sends. Returns the
- * number of usable rules, or -1 when the key is absent entirely - the caller
- * has to tell "this hub has no baseline" from "this hub's baseline is empty",
- * because those two mean opposite things for what gets enforced. */
-static int ParseBaselineRules(const char* respJson, BASELINE_RULE* out, int cap) {
-    const char* p = strstr(respJson, "\"isolation_baseline\":[");
-    if (!p) return -1;
-    p += strlen("\"isolation_baseline\":[");
-
-    int count = 0;
-    while (*p && *p != ']') {
-        const char* obj = strchr(p, '{');
-        if (!obj) break;
-        const char* end = strchr(obj, '}');
-        if (!end) break;
-
-        char frag[256];
-        size_t len = (size_t)(end - obj) + 1;
-        if (len >= sizeof(frag)) len = sizeof(frag) - 1;
-        memcpy(frag, obj, len);
-        frag[len] = '\0';
-
-        BASELINE_RULE r;
-        memset(&r, 0, sizeof(r));
-        ExtractJsonString(frag, "service", r.service, sizeof(r.service));
-        ExtractJsonString(frag, "destination", r.destination, sizeof(r.destination));
-        ExtractJsonString(frag, "protocol", r.protocol, sizeof(r.protocol));
-        const char* portKey = strstr(frag, "\"port\":");
-        if (portKey) r.port = atoi(portKey + strlen("\"port\":"));
-
-        p = end + 1;
-
-        /* Everything here becomes an argument to iptables. A hub that sends
-         * something else is either running a build that does not validate its
-         * own policy or is not the hub; the value is never echoed, because this
-         * log is read by people and by journald. */
-        if (!IsIPLiteral(r.destination)) {
-            printf("[!] Hub sent a baseline rule whose destination is not an IP address; ignoring it.\n");
-            fflush(stdout);
-            continue;
-        }
-        if (strcmp(r.protocol, "udp") != 0 && strcmp(r.protocol, "tcp") != 0) {
-            printf("[!] Hub sent a baseline rule for an unsupported protocol; ignoring it.\n");
-            fflush(stdout);
-            continue;
-        }
-        if (r.port < 1 || r.port > 65535) {
-            printf("[!] Hub sent a baseline rule with an out-of-range port; ignoring it.\n");
-            fflush(stdout);
-            continue;
-        }
-        if (count < cap) out[count++] = r;
-    }
-    return count;
-}
-
 /* BaselinePermit writes one permit into both chains for one rule.
  *
  * Both directions, because a reply is a new flow rather than part of the
@@ -1873,6 +1832,29 @@ static int ParseAddressList(const char* respJson, const char* key,
 static bool known = false;              /* nothing reconciled yet this run */
 static bool appliedIsolated = false;
 static OMINULL_HUB_TARGETS appliedHubTargets;
+
+/* SameAddress compares two address literals as addresses (family and bytes),
+ * so "2001:4860::8888" and its expanded form are one address. */
+static bool SameAddress(const char* a, const char* b) {
+    unsigned char x[16], y[16];
+    if (inet_pton(AF_INET, a, x) == 1) return inet_pton(AF_INET, b, y) == 1 && memcmp(x, y, 4) == 0;
+    if (inet_pton(AF_INET6, a, x) == 1) return inet_pton(AF_INET6, b, y) == 1 && memcmp(x, y, 16) == 0;
+    return false;
+}
+
+/* LocalResolvers lists the nameservers in /etc/resolv.conf. */
+static int LocalResolvers(char out[][64], int cap) {
+    FILE* f = fopen("/etc/resolv.conf", "r");
+    if (!f) return 0;
+    char line[256];
+    int n = 0;
+    while (n < cap && fgets(line, sizeof(line), f)) {
+        char addr[64];
+        if (sscanf(line, " nameserver %63s", addr) == 1) snprintf(out[n++], 64, "%s", addr);
+    }
+    fclose(f);
+    return n;
+}
 static char appliedAllow[MAX_ISOLATION_ALLOW][64];
 static int appliedAllowCount = 0;
 static char appliedPeers[MAX_QUARANTINED_PEERS][64];
@@ -1899,7 +1881,8 @@ static bool g_DeadmanReleased = false;
  * every isolation in the fleet. Beats are three seconds apart, so 100 is five
  * minutes - long enough to outlast all three, short enough that a person who has
  * just isolated a host is still watching when it comes back. */
-#define OMINULL_DEADMAN_BEATS 100
+/* The count itself comes from Trust_DeadmanBeats (agent_trust.h): 100 beats
+ * for an isolation nobody supervised, twelve hours for an owner's. */
 
 /* SyncEnforcement reconciles this host's whole link state - isolation, the
  * mesh peer list and the isolation allow list - against the hub's answer on
@@ -1925,23 +1908,52 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     if (!p) return;                         /* an older hub; nothing to obey */
     p += strlen("\"is_isolated\":");
     while (*p == ' ') p++;
-    bool wantIsolated = (strncmp(p, "true", 4) == 0);
+    (void)p;
+    /* Isolation, its allow list and the mesh peers come from the authorized
+     * state (verified grants, agent_trust.h), never from the hub's say-so. */
+    bool wantIsolated = Trust_EffectiveIsolated(&g_Trust);
 
     char allow[MAX_ISOLATION_ALLOW][64];
-    int allowCount = ParseAddressList(respJson, "isolation_allow_ips", allow, MAX_ISOLATION_ALLOW);
+    int allowCount = 0;
+    for (int i = 0; wantIsolated && i < g_Trust.state.allowCount && i < MAX_ISOLATION_ALLOW; i++)
+        snprintf(allow[allowCount++], 64, "%s", g_Trust.state.allow[i]);
     char peers[MAX_QUARANTINED_PEERS][64];
-    int peerCount = ParseAddressList(respJson, "quarantined_peers", peers, MAX_QUARANTINED_PEERS);
+    int peerCount = Trust_EffectivePeers(&g_Trust, peers, MAX_QUARANTINED_PEERS);
     char threats[MAX_QUARANTINED_PEERS][64];
     int threatCount = ParseAddressList(respJson, "threat_indicators", threats, MAX_QUARANTINED_PEERS);
+    {
+        /* Unsigned indicators: public addresses only, never a local resolver
+         * (the hub's own addresses are permitted ahead of any drop). */
+        char resolvers[8][64];
+        int nres = LocalResolvers(resolvers, 8);
+        int kept = 0;
+        for (int i = 0; i < threatCount; i++) {
+            bool skip = !Trust_PublicAddress(threats[i]);
+            for (int j = 0; !skip && j < nres; j++) skip = SameAddress(threats[i], resolvers[j]);
+            if (!skip && kept != i) memcpy(threats[kept], threats[i], sizeof(threats[0]));
+            if (!skip) kept++;
+        }
+        threatCount = kept;
+    }
 
     if (allowCount > 1) qsort(allow, allowCount, sizeof(allow[0]), (int (*)(const void*, const void*))strcmp);
     if (peerCount > 1) qsort(peers, peerCount, sizeof(peers[0]), (int (*)(const void*, const void*))strcmp);
     if (threatCount > 1) qsort(threats, threatCount, sizeof(threats[0]), (int (*)(const void*, const void*))strcmp);
 
+    /* An isolation's exceptions are the ones bound into it: the owner
+     * approved them with the isolation (signed payload), and they are kept in
+     * the authorized state. The heartbeat's baseline never opens a hole. */
     BASELINE_RULE baseline[MAX_BASELINE_RULES];
-    int baselineCount = ParseBaselineRules(respJson, baseline, MAX_BASELINE_RULES);
-    bool baselineKnown = baselineCount >= 0;
-    if (!baselineKnown) baselineCount = 0;
+    int baselineCount = 0;
+    bool baselineKnown = true;
+    memset(baseline, 0, sizeof(baseline));
+    for (int i = 0; wantIsolated && i < g_Trust.state.ruleCount && i < MAX_BASELINE_RULES; i++) {
+        const TrustRule* r = &g_Trust.state.rules[i];
+        snprintf(baseline[baselineCount].service, sizeof(baseline[0].service), "%s", r->service);
+        snprintf(baseline[baselineCount].destination, sizeof(baseline[0].destination), "%s", r->destination);
+        snprintf(baseline[baselineCount].protocol, sizeof(baseline[0].protocol), "%s", r->protocol);
+        baseline[baselineCount++].port = r->port;
+    }
 
     bool changed = !known || wantIsolated != appliedIsolated
                    || allowCount != appliedAllowCount || peerCount != appliedPeerCount
@@ -2049,7 +2061,7 @@ static void HubContact(bool accepted) {
         missed = 0;                          /* nothing to roll back */
         return;
     }
-    if (++missed < OMINULL_DEADMAN_BEATS) return;
+    if (++missed < Trust_DeadmanBeats(&g_Trust, 100, 3000)) return;
 
     printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. "
            "Releasing this host's isolation: an isolation the hub cannot lift is not a "
@@ -2477,6 +2489,34 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
         return;
     }
+    /* Never backwards: an older signed package is still validly signed, so
+     * only the version check keeps a hub from downgrading this host to a
+     * release with a known hole. */
+    if (!Trust_UpdateVersionAdmissible(version, OMINULL_LINUX_AGENT_VERSION)) {
+        printf("[!] Rejected agent update v%s: not newer than the running v%s.\n", version, OMINULL_LINUX_AGENT_VERSION);
+        attempts = 3;
+        return;
+    }
+    /* The owner approved this version for this host: the response authority's
+     * grant, verified here against the pinned key. */
+    const char* why = Trust_UpdateAuthorized(&g_Trust, respJson, strlen(respJson), version, (int64_t)time(NULL));
+    if (why) {
+        Trust_Refuse(&g_Trust, (int64_t)time(NULL), "agent update refused: %s", why);
+        attempts--;   /* the grant may still arrive; this was not a download attempt */
+        return;
+    }
+    /* The release key signs package name, version and digest together. */
+    char releaseSig[512] = {0};
+    if (!ExtractJsonString(block, "release_sig", releaseSig, sizeof(releaseSig)) || !releaseSig[0]) {
+        printf("[!] Rejected agent update v%s: the hub sent no signed release statement.\n", version);
+        return;
+    }
+    for (const char* c = releaseSig; *c; c++) {
+        if (!isalnum((unsigned char)*c) && *c != '+' && *c != '/' && *c != '=') {
+            printf("[!] Rejected agent update v%s: release statement signature is not base64.\n", version);
+            return;
+        }
+    }
 
     const char* pkgPath = HubPathOf(url);
     const char* sigPath = HubPathOf(sigUrl);
@@ -2487,6 +2527,20 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
 
     if (!PrepareUpdateDir()) return;
     if (!WriteStagedFile("release.pub", OMINULL_RELEASE_PUBKEY_PEM, 0600)) return;
+    const char* pkgName = strrchr(pkgPath, '/');
+    pkgName = pkgName ? pkgName + 1 : pkgPath;
+    char wantName[128];
+    if (!Trust_AgentArtifactName(version, wantName, sizeof(wantName)) || strcmp(pkgName, wantName) != 0) {
+        printf("[!] Rejected agent update v%s: the offered package is not this agent's own artifact.\n", version);
+        return;
+    }
+    char statement[512];
+    int sn = Trust_ReleaseStatement(pkgName, version, sha256, statement, sizeof(statement));
+    if (sn < 0 || sn >= (int)sizeof(statement)) return;
+    char sigLine[520];
+    snprintf(sigLine, sizeof(sigLine), "%s\n", releaseSig);
+    if (!WriteStagedFile("release.statement", statement, 0600)) return;
+    if (!WriteStagedFile("release.sig.b64", sigLine, 0600)) return;
 
     printf("[*] Hub published agent v%s (running v%s); fetching and verifying before install.\n",
            version, OMINULL_LINUX_AGENT_VERSION);
@@ -2516,6 +2570,8 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         "curl -fsSL %s -m 60 -o \"$D/agent.deb.sig\" \"%s%s\"\n"
         "echo \"%s  $D/agent.deb\" | sha256sum -c -\n"
         "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/agent.deb.sig\" \"$D/agent.deb\"\n"
+        "base64 -d \"$D/release.sig.b64\" > \"$D/release.sig\"\n"
+        "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/release.sig\" \"$D/release.statement\"\n"
         "echo \"[+] v%s verified against the pinned release key; installing\"\n"
         "dpkg -i \"$D/agent.deb\"\n"
         "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
@@ -2608,8 +2664,15 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
     for (int i = 0; i < offer_count; i++) {
         ResponseJobOffer* offer = &offers[i];
 
-        // 1. Verify EndpointGrant V2
-        if (!VerifyResponseGrant(&offer->grant, offer->payload_json, config->endpoint_id, NULL)) {
+        // 1. Verify EndpointGrant V2, against the pinned key, for this kind,
+        //    inside this endpoint's capability manifest
+        const char* refusal = Trust_OfferRefusal(&g_Trust, offer->kind, &offer->grant);
+        if (refusal) {
+            Trust_Refuse(&g_Trust, (int64_t)time(NULL), "response offer refused: %s", refusal);
+            continue;
+        }
+        /* Against the pinned key in memory (trust.pin), never a file copy. */
+        if (!VerifyResponseGrantKey(&offer->grant, offer->payload_json, config->endpoint_id, g_Trust.keys[TRUST_KEY_RESPONSE])) {
             // Drop offer silently: no ACK, no result
             continue;
         }
@@ -2877,6 +2940,8 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                                config->provenance_status,
                                config->evidence_pubkey_hex};
     char header[sizeof(rawHeader) / sizeof(rawHeader[0])][1537];
+    char trustReport[768];
+    Trust_ReportJSON(&g_Trust, trustReport, sizeof(trustReport));
     for (size_t i = 0; i < sizeof(rawHeader) / sizeof(rawHeader[0]); i++)
         ProcessLineage_EscapeJSON(rawHeader[i], header[i], sizeof(header[i]));
 
@@ -2886,10 +2951,10 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                  "\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\","
                  "\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_"
                  "identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\","
-                 "\"evidence_signing_key\":\"%s\",\"response_capabilities\":%s,\"events\":[",
+                 "\"evidence_signing_key\":\"%s\",\"response_capabilities\":%s,\"trust\":%s,\"events\":[",
                  header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
                  header[8], header[9], header[10], header[11], header[12],
-                 access(OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH, R_OK) == 0 ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY);
+                 g_Trust.have_key[TRUST_KEY_RESPONSE] ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY, trustReport);
 
     for (size_t i = 0; i < flowCount; i++) {
         const LINUX_FLOW_EVENT* f = &flows[i];
@@ -2982,13 +3047,17 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
      * the allow list. Four kilobytes truncated it once the policy had a handful
      * of rules in it, and a truncated reply is not a parse error - it is a
      * silently shorter enforcement state. */
-    char respBuf[16384] = {0};
+    /* 32 KiB: the answer also carries trust keys, a manifest and up to five
+     * enforcement grants with their payloads. */
+    static char respBuf[32768];
+    memset(respBuf, 0, sizeof(respBuf));
     bool accepted = false;
     if (RunHubCurl(config, url, jsonBuf, respBuf, sizeof(respBuf))) {
         long status = SplitHubStatus(respBuf);
         if (!ReportHubRejection(config, status)) {
             accepted = true;
             AdoptDeviceCredential(config, respBuf);
+            Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
             SyncEnforcement(config, respBuf);
             ApplyAgentUpdate(config, respBuf);
             ProcessResponseOffers(config, respBuf);
@@ -3243,6 +3312,8 @@ int main(int argc, char* argv[]) {
 
     bool doConfigure = false;
     bool doCleanup = false;
+    bool doRepin = false;
+    const char* setCeiling = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--hub") == 0 && i + 1 < argc) {
@@ -3257,6 +3328,10 @@ int main(int argc, char* argv[]) {
             doConfigure = true;
         } else if (strcmp(argv[i], "--cleanup") == 0) {
             doCleanup = true;
+        } else if (strcmp(argv[i], "--repin-trust") == 0) {
+            doRepin = true;
+        } else if (strcmp(argv[i], "--capability-ceiling") == 0 && i + 1 < argc) {
+            setCeiling = argv[++i];
         } else if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
             strncpy(config.endpoint_id, argv[++i], sizeof(config.endpoint_id) - 1);
         } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
@@ -3311,6 +3386,35 @@ int main(int argc, char* argv[]) {
     if (doCleanup) {
         EnforcementTeardown("iptables");
         EnforcementTeardown("ip6tables");
+        Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
+        if (g_Trust.state.exists) Trust_LocalRelease(&g_Trust);
+        return 0;
+    }
+    if (setCeiling) {
+        if (geteuid() != 0) {
+            fprintf(stderr, "[-] --capability-ceiling must run as root.\n");
+            return 1;
+        }
+        Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
+        if (!Trust_SetCeiling(&g_Trust, setCeiling)) {
+            fprintf(stderr, "[-] --capability-ceiling takes monitor, respond, engagement or none.\n");
+            return 1;
+        }
+        printf("[+] Capability ceiling %s recorded; restart the agent.\n", setCeiling);
+        return 0;
+    }
+    if (doRepin) {
+        if (geteuid() != 0) {
+            fprintf(stderr, "[-] --repin-trust must run as root.\n");
+            return 1;
+        }
+        Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
+        int removed = Trust_Repin(&g_Trust);
+        if (removed < 0) {
+            fprintf(stderr, "[-] The pinned trust bundle could not be removed from /etc/ominull; the current keys stay trusted.\n");
+            return 1;
+        }
+        printf("[+] Removed %d pinned trust bundle(s); restart the agent so it pins the hub's current release-signed bundle.\n", removed);
         return 0;
     }
 
@@ -3373,6 +3477,12 @@ int main(int argc, char* argv[]) {
      * terminal worker is double-forked so init reaps it. */
 
     mkdir("/var/lib/ominull", 0755);
+    Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
+    g_ReleaseVerifyPem = OMINULL_RELEASE_PUBKEY_PEM;
+    g_Trust.verify_release = ReleaseVerifyPosix;
+    printf("  Trust:         response key %s, auto-isolation key %s, policy key %s; manifest %s\n",
+           g_Trust.have_key[TRUST_KEY_RESPONSE] ? "pinned" : "missing", g_Trust.have_key[TRUST_KEY_AUTO] ? "pinned" : "missing",
+           g_Trust.have_key[TRUST_KEY_POLICY] ? "pinned" : "missing", g_Trust.manifest.have ? g_Trust.manifest.profile : "none yet");
     uint8_t ep_pub[32];
     uint8_t ep_priv[64];
     if (Forensics_GetOrCreateEndpointKey(FORENSICS_DEFAULT_KEY_PATH, ep_pub, ep_priv, config.evidence_pubkey_hex, sizeof(config.evidence_pubkey_hex))) {

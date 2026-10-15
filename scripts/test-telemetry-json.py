@@ -26,6 +26,8 @@ try:
     caps = data['response_capabilities']
     assert caps['isolate'] is True and caps['collect'] is True, caps
     assert caps['terminal']['programs'][0] == '/bin/bash', caps
+    trust = data['trust']
+    assert trust['v'] == 1 and trust['response_key'] is True and trust['keys'] == 'missing', trust
     assert data['events'][0]['process_path'][4] == '\n'
     assert data['role'] == 'role\"with\ncontrols'
     assert len(data['events'][0]['process_path']) == 511

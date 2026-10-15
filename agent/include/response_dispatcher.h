@@ -212,23 +212,34 @@ static inline int Response_B64Val(char c) {
     return -1;
 }
 
+/* Response_Base64Decode decodes standard base64. Whitespace is skipped (PEM
+ * bodies); any other character outside the alphabet, data after padding, more
+ * than two pad characters or output past out_cap makes it return 0, so a
+ * value is never silently truncated or read two ways. */
 static inline size_t Response_Base64Decode(const char* in, size_t in_len, uint8_t* out, size_t out_cap) {
-    size_t out_len = 0;
-    int buf = 0, bits = 0;
+    size_t out_len = 0, chars = 0, pad = 0;
+    uint32_t buf = 0;
+    int bits = 0;
     for (size_t i = 0; i < in_len; i++) {
         char c = in[i];
-        if (c == '=') break;
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+        chars++;
+        if (c == '=') {
+            if (++pad > 2) return 0;
+            continue;
+        }
+        if (pad) return 0;
         int v = Response_B64Val(c);
-        if (v < 0) continue;
-        buf = (buf << 6) | v;
+        if (v < 0) return 0;
+        buf = ((buf << 6) | (uint32_t)v) & 0xFFFFFFu;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
-            if (out_len < out_cap) {
-                out[out_len++] = (uint8_t)((buf >> bits) & 0xFF);
-            }
+            if (out_len >= out_cap) return 0;
+            out[out_len++] = (uint8_t)((buf >> bits) & 0xFFu);
         }
     }
+    if (pad && chars % 4 != 0) return 0;
     return out_len;
 }
 
@@ -349,12 +360,14 @@ static inline bool ParseInt64Field(const char** p, int64_t* out) {
         (*p)++;
     }
     if (!isdigit((unsigned char)**p)) return false;
-    int64_t val = 0;
+    uint64_t val = 0;
     while (isdigit((unsigned char)**p)) {
-        val = (val * 10) + (**p - '0');
+        unsigned d = (unsigned)(**p - '0');
+        if (val > (UINT64_C(9223372036854775807) - d) / 10) return false;   /* beyond INT64_MAX */
+        val = val * 10 + d;
         (*p)++;
     }
-    *out = negative ? -val : val;
+    *out = negative ? -(int64_t)val : (int64_t)val;
     return true;
 }
 
@@ -539,13 +552,15 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
  * Grant Verification & Digest Verification
  * ------------------------------------------------------------------------- */
 
-static inline bool VerifyResponseGrant(
+/* VerifyResponseGrantKey checks a response job grant against a public key
+ * held in memory (the agent's pinned response key). */
+static inline bool VerifyResponseGrantKey(
     const ResponseGrant* grant,
     const char* payload_json,
     const char* expected_endpoint_id,
-    const char* pubkey_path
+    const uint8_t pub_bytes[32]
 ) {
-    if (!grant || !expected_endpoint_id) return false;
+    if (!grant || !expected_endpoint_id || !pub_bytes) return false;
 
     // 1. Version must be strictly 2
     if (grant->version != 2) return false;
@@ -619,14 +634,20 @@ static inline bool VerifyResponseGrant(
     uint8_t sig_bytes[64];
     if (!Response_HexToBytes(grant->signature, sig_bytes, 64)) return false;
 
-    // 7. Load trusted tenant public key and verify in-process
+    // 7. Verify in-process against the trusted tenant public key
+    return Ed25519_Verify(sig_bytes, canonical_bytes, canonical_len, pub_bytes);
+}
+
+static inline bool VerifyResponseGrant(
+    const ResponseGrant* grant,
+    const char* payload_json,
+    const char* expected_endpoint_id,
+    const char* pubkey_path
+) {
     const char* key_path = pubkey_path ? pubkey_path : OMINULL_DEFAULT_RESPONSE_PUBKEY_PATH;
     uint8_t pub_bytes[32];
-    if (!Response_LoadPublicKey(key_path, pub_bytes)) {
-        return false; // Public key missing or unreadable
-    }
-
-    return Ed25519_Verify(sig_bytes, canonical_bytes, canonical_len, pub_bytes);
+    if (!Response_LoadPublicKey(key_path, pub_bytes)) return false;   // Public key missing or unreadable
+    return VerifyResponseGrantKey(grant, payload_json, expected_endpoint_id, pub_bytes);
 }
 
 /* ---------------------------------------------------------------------------

@@ -24,6 +24,8 @@ int main(int argc, char **argv) {
         f->process_path[4] = '\n';
         memset(f->enrichment.command_line, 1, sizeof(f->enrichment.command_line) - 1);
     }
+    /* A host with the response key pinned reports collect and the terminal. */
+    g_Trust.have_key[TRUST_KEY_RESPONSE] = true;
     SendTelemetryBatch(&config, events, 64);
     return 0;
 }

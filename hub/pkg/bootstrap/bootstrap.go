@@ -2,7 +2,11 @@
 // Linux and Windows native packages.
 package bootstrap
 
-import "strings"
+import (
+	"strings"
+
+	"ominull/hub/pkg/response"
+)
 
 // Options contains public installer parameters. EnrollmentCode is optional: an
 // interactive script asks for it through the terminal, while a console-rendered
@@ -22,11 +26,7 @@ type Options struct {
 	UseSystemCA bool
 }
 
-const releasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F
-0e6k7D05y7jLxXQblk3d7ZirBH3MNJlo7aUbtmlQ2izz/u5wTG2ztJ9TBw==
------END PUBLIC KEY-----
-`
+const releasePublicKeyPEM = response.ReleasePublicKeyPEM
 
 func (o Options) normalized() Options {
 	if o.AgentHubURL == "" {

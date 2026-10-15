@@ -11,8 +11,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 $Batch = ($JsonOutput -join "`n") | ConvertFrom-Json
 $Caps = $Batch.response_capabilities
-if (-not $Caps.isolate -or -not $Caps.collect -or $Caps.terminal.programs[0] -ne 'cmd.exe') {
-    throw "Expected response capabilities with cmd.exe first, got $($Caps | ConvertTo-Json -Compress)"
+# The fixture runs without pinned response authority keys, so the agent says
+# so and offers only what needs no grant.
+if (-not $Caps.isolate -or $Caps.response_key -ne $false -or $Caps.PSObject.Properties.Name -contains 'collect') {
+    throw "Expected isolate with response_key:false and no collect, got $($Caps | ConvertTo-Json -Compress)"
+}
+if (-not ($Batch.PSObject.Properties.Name -contains 'trust')) {
+    throw 'Expected the trust report field in the telemetry batch.'
 }
 if ($Batch.events.Count -ne 64) {
     throw "Expected 64 serialized events, got $($Batch.events.Count)"
@@ -26,7 +31,7 @@ foreach ($Event in $Batch.events) {
     }
 }
 Write-Output 'Windows serializer: 64 records with preserved long fields and controls.'
-foreach ($Fixture in @('test_windows_ipv6_json', 'test_windows_adapter', 'test_wfp_transaction')) {
+foreach ($Fixture in @('test_agent_trust', 'test_windows_ipv6_json', 'test_windows_adapter', 'test_wfp_transaction')) {
     & (Join-Path $Build "$Fixture.exe")
     if ($LASTEXITCODE -ne 0) {
         throw "$Fixture failed: $LASTEXITCODE"

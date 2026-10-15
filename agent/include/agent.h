@@ -235,4 +235,36 @@ void Service_MigrateKeyToFile(const AGENT_CONFIG* config);
 void Service_EnsureRecovery(void);
 void RunAgentLoop(AGENT_CONFIG* config);
 
+/* Agent trust (src/trust_windows.c over agent_trust.h): what the hub may ask
+ * this host to do to itself, verified here. */
+void Agent_TrustInit(const char* endpoint_id);
+bool Agent_TrustLoaded(void);
+bool Agent_TrustHasResponseKey(void);
+void Agent_TrustReport(char* out, size_t cap);
+bool Agent_TrustProcessHeartbeat(const char* resp);
+bool Agent_TrustIsolated(void);
+int Agent_TrustAllow(char out[][64], int cap);
+int Agent_TrustPeers(char out[][64], int cap);
+int Agent_TrustDeadmanBeats(int unsupervisedBeats, int beatMillis);
+const char* Agent_TrustOfferRefusal(const char* kind, const void* grant);
+void Agent_TrustResponseKeyPath(char* out, size_t cap);
+/* Agent_TrustResponseKey copies the pinned response key (false when none). */
+bool Agent_TrustResponseKey(uint8_t out[32]);
+bool Agent_TrustSetCeiling(const char* profile);
+const char* Agent_TrustUpdateRefusal(const char* respJson, const char* version, const char* running);
+int Agent_TrustReleaseStatement(const char* package, const char* version, const char* sha256, char* out, size_t cap);
+size_t Agent_TrustBase64Decode(const char* in, unsigned char* out, size_t cap);
+int Agent_TrustRepin(void);
+bool Agent_TrustLocalRelease(void);
+bool Agent_TrustArtifactName(const char* version, char* out, size_t cap);
+/* Agent_TrustRules copies the authorized isolation's exceptions (none when
+ * not isolated). */
+int Agent_TrustRules(OMINULL_BASELINE_RULE* out, int cap);
+/* Agent_TrustSecureDirectory makes dir SYSTEM/Administrators-owned with a
+ * protected ACL (users read only) and refuses a reparse point. */
+bool Agent_TrustSecureDirectory(const char* dir);
+/* Agent_VerifyReleaseMessage checks a DER ECDSA signature over msg against the
+ * compiled-in release key (updater.c, CNG). */
+bool Agent_VerifyReleaseMessage(const char* msg, size_t len, const unsigned char* der, size_t derlen);
+
 #endif // OMINULL_AGENT_H

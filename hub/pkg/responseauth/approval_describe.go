@@ -22,6 +22,55 @@ type routedPayload struct {
 	Route   string          `json:"route"`
 	Body    json.RawMessage `json:"body"`
 	Targets []string        `json:"targets"`
+	// Baselines are an isolation's exceptions, approved with it (agents use
+	// only these while isolated).
+	Baselines []response.IsolationBaseline `json:"baselines,omitempty"`
+}
+
+var routedPayloadKeys = map[string]bool{"route": true, "body": true, "targets": true, "baselines": true}
+
+// checkBaselines validates an isolation's exceptions: each entry names only
+// targets, no target twice, and every rule is one the agent accepts (an agent
+// refuses the whole grant over one bad rule). It returns the owner's view.
+func checkBaselines(list []response.IsolationBaseline, targets []string) (string, error) {
+	in := map[string]bool{}
+	for _, t := range targets {
+		in[t] = true
+	}
+	seen := map[string]bool{}
+	shown := []string{}
+	distinct := map[string]bool{}
+	for _, b := range list {
+		if len(b.Endpoints) == 0 || len(b.Rules) == 0 || len(b.Rules) > response.MaxIsolationRules {
+			return "", errors.New("isolation exceptions must name endpoints and 1..64 rules")
+		}
+		for _, ep := range b.Endpoints {
+			if !in[ep] || seen[ep] {
+				return "", fmt.Errorf("isolation exceptions name %q, which is not a target or is named twice", cleanText(ep, 64))
+			}
+			seen[ep] = true
+		}
+		for _, r := range b.Rules {
+			if !r.Valid() {
+				return "", errors.New("isolation exceptions carry a rule agents refuse")
+			}
+			d := fmt.Sprintf("%s %s/%d %s", r.Service, r.Protocol, r.Port, r.Destination)
+			if !distinct[d] {
+				distinct[d] = true
+				if len(shown) < 6 {
+					shown = append(shown, d)
+				}
+			}
+		}
+	}
+	if len(distinct) == 0 {
+		return " (no exceptions: hub and loopback only)", nil
+	}
+	s := " (exceptions: " + strings.Join(shown, ", ")
+	if len(distinct) > len(shown) {
+		s += fmt.Sprintf(" and %d more", len(distinct)-len(shown))
+	}
+	return s + ")", nil
 }
 
 type routeSpec struct {
@@ -38,6 +87,7 @@ var approvalRoutes = map[string]routeSpec{
 	"/api/v1/agents/update":             {ActionKindAgentUpdate, "Update agents"},
 	"/api/v1/mesh/quarantine":           {ActionKindMesh, "Quarantine address"},
 	"/api/v1/mesh/unquarantine":         {ActionKindMesh, "Lift quarantine"},
+	"/api/v1/endpoints/capabilities":    {ActionKindCapability, "Change what a host accepts"},
 }
 
 func decodeJSON(raw []byte, v interface{}) error {
@@ -69,8 +119,21 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 	}
 
 	var p routedPayload
+	var top map[string]json.RawMessage
+	if err := decodeJSON(payload, &top); err != nil {
+		return "", "", errors.New("approval payload must carry route, body and targets")
+	}
+	for k := range top {
+		if !routedPayloadKeys[k] {
+			return "", "", fmt.Errorf("approval payload carries an unknown member %q", cleanText(k, 40))
+		}
+	}
 	if err := decodeJSON(payload, &p); err != nil {
 		return "", "", errors.New("approval payload must carry route, body and targets")
+	}
+	isolating := p.Route == "/api/v1/endpoints/isolate" || p.Route == "/api/v1/endpoints/isolate-bulk"
+	if _, has := top["baselines"]; has && !isolating {
+		return "", "", errors.New("only an isolation carries exceptions")
 	}
 	spec, ok := approvalRoutes[p.Route]
 	if !ok {
@@ -109,6 +172,11 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 			}
 			s += " (still allowed: " + strings.Join(ips, ", ") + ")"
 		}
+		ex, err := checkBaselines(p.Baselines, targets)
+		if err != nil {
+			return "", "", err
+		}
+		s += ex
 		if b.Force {
 			s += " (readiness gate overridden)"
 		}
@@ -146,6 +214,20 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		s := fmt.Sprintf("Install agent %s on %d host(s): %s", cleanText(b.Version, 40), n, list)
 		if b.All {
 			s += " (and make it the fleet's desired version)"
+		}
+		return spec.action, s, nil
+	case "/api/v1/endpoints/capabilities":
+		var b capabilityPayload
+		if err := decodeJSON(p.Body, &b); err != nil || n != 1 || b.EndpointID != targets[0] {
+			return "", "", errors.New("capability body names a different endpoint")
+		}
+		caps, ok := response.ProfileCaps(b.Profile)
+		if !ok {
+			return "", "", fmt.Errorf("unknown profile %q", cleanText(b.Profile, 24))
+		}
+		s := fmt.Sprintf("Set %s to profile %s (accepts: %s)", targets[0], b.Profile, strings.Join(caps, ", "))
+		if r := cleanText(b.Reason, 120); r != "" {
+			s += " (reason given: " + r + ")"
 		}
 		return spec.action, s, nil
 	default: // mesh

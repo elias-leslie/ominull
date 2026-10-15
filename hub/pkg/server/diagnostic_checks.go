@@ -102,9 +102,11 @@ func (s *Server) checkPackage(context.Context) diagnostics.Result {
 		filepath.Join(s.binaryDir, "ominull-agent_"+version+"_amd64.deb"),
 		filepath.Join(s.binaryDir, "ominull-agent_"+version+"_amd64.deb.sig"),
 		filepath.Join(s.binaryDir, "ominull-agent_"+version+"_amd64.deb.sha256"),
+		filepath.Join(s.binaryDir, "ominull-agent_"+version+"_amd64.deb.release.sig"),
 		filepath.Join(s.binaryDir, "ominull-agent-windows-"+version+".msi"),
 		filepath.Join(s.binaryDir, "ominull-agent-windows-"+version+".msi.sig"),
 		filepath.Join(s.binaryDir, "ominull-agent-windows-"+version+".msi.sha256"),
+		filepath.Join(s.binaryDir, "ominull-agent-windows-"+version+".msi.release.sig"),
 	}
 	missing := make([]string, 0)
 	for _, path := range paths {
