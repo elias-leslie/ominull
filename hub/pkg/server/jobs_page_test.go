@@ -121,8 +121,11 @@ func TestJobsPage(t *testing.T) {
 			t.Errorf("offered job view lacks %q", want)
 		}
 	}
-	if body := get("?id="+queued.ID, "viewer").Body.String(); strings.Contains(body, `id="job-cancel"`) {
+	if body := get("?id="+queued.ID, "auditor").Body.String(); strings.Contains(body, `id="job-cancel"`) {
 		t.Error("a read-only role is offered cancel")
+	}
+	if body := get("?id="+queued.ID, "analyst").Body.String(); strings.Contains(body, "closes without running") && !strings.Contains(body, `id="job-cancel"`) {
+		t.Error("an analyst, whom the hub lets cancel, is not offered cancel")
 	}
 	if body := get("?id=nope", "admin").Body.String(); !strings.Contains(body, "No response job with ID \u201cnope\u201d.") || strings.Contains(body, "jobs.js") {
 		t.Error("an unknown job id is not explained")

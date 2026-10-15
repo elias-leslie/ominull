@@ -12,6 +12,7 @@ const bundles = [
   { name: "layout", entry: path.join(__dirname, "layout.cjs"), out: "vendor/topology-layout.js" },
   { name: "terminal", entry: path.join(src, "terminal.ts"), out: "terminal.js", page: true },
   { name: "jobs", entry: path.join(src, "jobs.ts"), out: "jobs.js", page: true },
+  { name: "evidence", entry: path.join(src, "evidence.ts"), out: "evidence.js", page: true },
 ];
 const appSource = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const outputs = [

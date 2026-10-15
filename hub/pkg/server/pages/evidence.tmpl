@@ -1,0 +1,95 @@
+{{define "content"}}{{with .Body}}
+{{if .Off}}
+<p class="page-problem" role="alert">Remote response is turned off on this hub, so it collects no evidence.</p>
+{{else if .View}}{{with .View}}
+{{if $.Body.Gone}}
+<p class="page-note">{{$.Body.Gone}}</p>
+<p><a class="btn" href="/console/evidence">All evidence</a></p>
+{{else}}
+<section class="card page-card" id="bundle" data-id="{{.ID}}"{{if .Arriving}} data-arriving="1"{{end}}>
+  <h3 class="page-title-wrap">{{.Kind}} from {{.Host}}<span class="fill"></span><span class="page-badges">{{if .Held}}<span class="st" data-state="crit">On hold</span> {{end}}<span class="st" data-state="{{.Tone}}">{{.Label}}</span></span></h3>
+  <dl class="card-body job-meta">
+  {{range .Meta}}<div><dt>{{.Label}}</dt><dd>{{.Value}}</dd></div>{{end}}
+  </dl>
+  <p class="card-body dim-3 job-id">Evidence {{.ID}}</p>
+  <div class="card-body page-actions">
+    <a class="btn btn-primary" href="/api/v1/evidence/export?id={{.ID}}" download>Download (.tar.gz)</a>
+    {{if .JobID}}<a class="btn" href="/console/jobs?id={{.JobID}}">The job that collected it</a>{{end}}
+  </div>
+</section>
+
+<section class="card page-card">
+  <h3>Chain of custody</h3>
+  {{if .Sealed}}
+  <dl class="card-body job-meta custody">
+    <div><dt>Manifest SHA-256</dt><dd class="ip">{{.Manifest}}</dd></div>
+    <div><dt>Signed receipt SHA-256</dt><dd class="ip">{{.Receipt}}</dd></div>
+  </dl>
+  <p class="card-body dim-2">The download includes the file list (manifest.json) and the hub's signed receipt (receipt.json). Anyone with the hub's public key can check nothing changed after sealing.</p>
+  {{else}}<p class="card-body dim-2">Not sealed. The hub seals a bundle when the agent sends its file list: it hashes the list and signs a receipt. Until then the download has the files but nothing that proves they weren't changed.</p>{{end}}
+</section>
+
+<section class="card page-card">
+  <h3>Files<span class="fill"></span><span class="dim-3">{{len .Items}}</span></h3>
+  {{if .ItemsProblem}}<p class="card-body page-problem" role="alert">{{.ItemsProblem}}</p>{{end}}
+  {{if .Items}}
+  <ul class="term-list">
+  {{range .Items}}
+    <li><div class="term-list-what"><b>{{.Name}}</b> <span class="st" data-state="{{.Tone}}">{{.Label}}</span> <span class="dim-2">{{.Size}}</span></div></li>
+  {{end}}
+  </ul>
+  {{else if not .ItemsProblem}}<p class="card-body dim-2">No files have arrived.</p>{{end}}
+</section>
+
+<section class="card page-card">
+  <h3>Legal hold</h3>
+  <div class="card-body page-form" id="hold" data-held="{{if .Held}}1{{end}}">
+  {{if .Held}}
+    <p>On hold{{if .HoldBy}}, set by {{.HoldBy}}{{end}}{{if .HoldWhy}}: {{.HoldWhy}}{{end}}. The retention sweep keeps it until the hold is released.</p>
+  {{else}}
+    <p>Not on hold. The retention sweep deletes it after the date above. A hold keeps it until you release it.</p>
+  {{end}}
+  {{if $.Body.CanAct}}
+    {{if .Held}}
+    <button class="btn" data-danger="true" type="button" id="hold-release">Release hold</button>
+    <div class="term-confirm job-confirm" id="hold-confirm" role="alertdialog" aria-labelledby="hold-confirm-title" aria-describedby="hold-confirm-what" hidden>
+      <p id="hold-confirm-title"><b>Release the hold?</b></p>
+      <p id="hold-confirm-what">{{if .ExpiryPassed}}Its keep-until date has passed, so the next retention sweep deletes it.{{else if .Expiry}}Without the hold it's deleted after {{.Expiry}}.{{else}}The next retention sweep can delete it.{{end}} Deleted evidence can't be recovered. The release is recorded in the audit log under your name.</p>
+      <div class="job-confirm-actions">
+        <button class="btn" type="button" id="hold-keep">Keep the hold</button>
+        <button class="btn btn-crit" type="button" id="hold-release-confirm">Release hold</button>
+      </div>
+    </div>
+    {{else}}
+    <form class="page-form" id="hold-form">
+      <label>Why (optional, kept with the hold)<input type="text" id="hold-reason" maxlength="200" autocomplete="off" enterkeyhint="done"></label>
+      <button class="btn btn-primary" type="submit" id="hold-apply">Put on hold</button>
+    </form>
+    {{end}}
+    <p class="page-problem" id="hold-problem" role="alert" hidden></p>
+  {{end}}
+  </div>
+</section>
+<p><a class="btn" href="/console/evidence">All evidence</a>{{if .HostID}} <a class="btn" href="/console/timeline?endpoint={{.HostID}}">{{.Host}} timeline</a>{{end}}</p>
+{{end}}
+{{end}}{{else}}
+
+{{range .Problems}}<p class="page-problem" role="alert">{{.}}</p>{{end}}
+<section class="card page-card">
+  <h3>Evidence<span class="fill"></span>{{if .Held}}<span class="dim-3">{{.Held}} on hold</span>{{end}}</h3>
+  {{if .Rows}}
+  <ul class="term-list">
+  {{range .Rows}}
+    <li>
+      <div class="term-list-what"><a href="/console/evidence?id={{.ID}}"><b>{{.Kind}}</b></a> from <b>{{.Host}}</b>
+        <span class="st" data-state="{{.Tone}}">{{.Label}}</span>{{if .Held}} <span class="st" data-state="crit">On hold</span>{{end}}
+        <span class="dim-3">{{.When}} · {{.Items}} {{if eq .Items 1}}file{{else}}files{{end}}, {{.Size}}</span></div>
+      <a class="btn mini" href="/console/evidence?id={{.ID}}">Details</a>
+    </li>
+  {{end}}
+  </ul>
+  {{else}}<p class="card-body dim-2">No evidence yet. Collect it from a host in Forensics; terminal recordings land here when a terminal ends.</p>{{end}}
+</section>
+<p class="page-note">The latest 100. Times in {{.Zone}}.</p>
+{{end}}
+{{end}}{{end}}

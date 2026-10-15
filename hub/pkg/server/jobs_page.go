@@ -139,7 +139,8 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 		body.Off = true
 		return body
 	}
-	body.CanAct = viewer.Role == "admin" || viewer.Role == "operator"
+	// The hub refuses writes from read-only roles; the page offers what it allows.
+	body.CanAct = roleAllows(viewer.Role, http.MethodPost)
 	loc := s.store.GetDetectionTuning().Location()
 	body.Zone = loc.String()
 	if body.Zone == "Local" {

@@ -28,7 +28,7 @@ var (
 
 func loadPages() {
 	pageTemplates = map[string]*template.Template{}
-	for _, name := range []string{"timeline", "terminal", "jobs"} {
+	for _, name := range []string{"timeline", "terminal", "jobs", "evidence"} {
 		t := template.New("layout.tmpl").Funcs(pageFuncs)
 		pageTemplates[name] = template.Must(t.ParseFS(pageFS, "pages/layout.tmpl", "pages/"+name+".tmpl"))
 	}

@@ -407,3 +407,41 @@ body.page .btn[data-danger="true"] {
 .job-steps .term-list-what {
   gap: var(--s-1) var(--s-2);
 }
+
+/* ------------------------------------------------------------ evidence */
+
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.custody dd {
+  font-size: var(--t-2);
+}
+
+.page-title-wrap {
+  flex-wrap: wrap;
+  row-gap: var(--s-1);
+}
+
+.page-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.page-badges .st,
+.term-list .st {
+  white-space: nowrap;
+}
+
+.page-form input[type="text"] {
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-4);
+}
