@@ -83,7 +83,19 @@ func TestServer_ConsoleTLSListener(t *testing.T) {
 	go func() {
 		_ = srv.Start("")
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Start does setup work before it listens; under -race on a busy host
+	// that takes longer than any fixed sleep, so wait for the port.
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		c, err := net.DialTimeout("tcp", consoleAddr, 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("console listener never came up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// 6. Connect to console listener with standard browser-like TLS client (no client cert)
 	tr := &http.Transport{
