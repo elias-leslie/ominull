@@ -70,6 +70,9 @@ tar = "/usr/bin/tar"
 gzip = "/usr/bin/gzip"
 dpkg-deb = "/usr/bin/dpkg-deb"
 openssl = "/usr/bin/openssl"
+# The backup secret-split tests seal and open a fixture with a throwaway key.
+age = "/usr/bin/age"
+age-keygen = "/usr/bin/age-keygen"
 
 [[native.stages]]
 id = "go"

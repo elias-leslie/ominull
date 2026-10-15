@@ -49,6 +49,8 @@ MAX_OUTPUT = 2 * 1024 * 1024
 MAX_BINARY = 64 * 1024 * 1024
 COMMAND_TIMEOUT = 60
 HTTP_TIMEOUT = 10
+# The hub CA the enrolled agent pins on this workstation (root-installed).
+HUB_CA = Path("/etc/ominull/ca.crt")
 
 
 class ObservationError(Exception):
@@ -132,9 +134,14 @@ def load_config(root, *, require_deployment_inputs=True):
         raw = file.read(16385)
     require(len(raw) <= 16384, "config_too_large")
     config = parse_json(raw)
-    # proxmox_node names the hypervisor node the backup extension snapshots on.
-    require(isinstance(config, dict) and set(config) in (CONFIG_KEYS, CONFIG_KEYS | {"proxmox_node"}),
-            "config_fields")
+    # proxmox_node names the hypervisor node the backup extension snapshots on;
+    # backup_ssh_alias, once root installs it, is the forced-command key that
+    # can run only the backup dispatcher (pve_backup_dispatch.py).
+    require(isinstance(config, dict) and CONFIG_KEYS <= set(config)
+            and set(config) - CONFIG_KEYS <= {"proxmox_node", "backup_ssh_alias"}, "config_fields")
+    require("backup_ssh_alias" not in config or (
+        isinstance(config["backup_ssh_alias"], str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", config["backup_ssh_alias"])), "config_backup_ssh_alias")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1,
             "config_version")
     require(type(config["lxc_id"]) is int and config["lxc_id"] > 0, "config_target")
@@ -150,7 +157,9 @@ def load_config(root, *, require_deployment_inputs=True):
         port = url.port
     except ValueError as exc:
         raise ObservationError("config_url") from exc
-    require(url.scheme in {"http", "https"} and url.hostname and not url.username
+    # The routes check sends the admin key, so the hub is only ever reached
+    # over TLS, verified against the hub CA (HUB_CA), never as plain HTTP.
+    require(url.scheme == "https" and url.hostname and not url.username
             and not url.password and url.path in {"", "/"} and not url.query
             and not url.fragment and (port is None or 1 <= port <= 65535)
             and not any(ch.isspace() for ch in config["hub_base_url"]), "config_url")
@@ -420,9 +429,9 @@ def http_read(config, path, key=None, max_body=MAX_OUTPUT):
     url = urlsplit(config["hub_base_url"])
     if url.scheme == "https":
         conn = http.client.HTTPSConnection(url.hostname, url.port, timeout=HTTP_TIMEOUT,
-                                          context=ssl.create_default_context())
+                                          context=ssl.create_default_context(cafile=str(regular_file(HUB_CA))))
     else:
-        conn = http.client.HTTPConnection(url.hostname, url.port, timeout=HTTP_TIMEOUT)
+        raise ObservationError("config_url")
     headers = {"Accept-Encoding": "identity", "Cache-Control": "no-cache"}
     if key is not None:
         headers["X-API-Key"] = key

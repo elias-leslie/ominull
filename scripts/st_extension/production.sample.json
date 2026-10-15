@@ -4,7 +4,7 @@
   "ssh_alias": "approved-ssh-alias",
   "lxc_id": 100,
   "proxmox_node": "pve-node",
-  "hub_base_url": "http://hub.example.invalid:9999",
+  "hub_base_url": "https://hub.example.invalid:9443",
   "admin_key_file": "/private/approved/admin.key",
   "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
   "local_binary": "build/ominull-hub",

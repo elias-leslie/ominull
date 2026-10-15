@@ -31,7 +31,7 @@ class Fixture(unittest.TestCase):
         self.key_file.write_text("fixture-only-credential\n")
         self.key_file.chmod(0o600)
         self.config: dict[str, Any] = {"schema_version": 1, "target_id": "fixture-target", "ssh_alias": "fixture-alias",
-            "lxc_id": 100, "hub_base_url": "http://hub.example.invalid:9999",
+            "lxc_id": 100, "hub_base_url": "https://hub.example.invalid:9443",
             "admin_key_file": str(self.key_file), "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
             "local_binary": "build/ominull-hub", "local_authority_binary": "build/ominull-response-authority"}
         for path in (self.config["hub_package"], self.config["local_binary"],
@@ -109,8 +109,9 @@ class ConfigurationTests(Fixture):
     def test_missing_unsafe_or_expanded_configuration_fails_closed(self):
         mutations = ({"ssh_alias": "-oProxyCommand=secret"}, {"lxc_id": 0},
                      {"lxc_id": -1}, {"lxc_id": "100"}, {"lxc_id": True},
-                     {"hub_base_url": "http://secret@hub/"},
-                     {"hub_base_url": "http://hub/?key=secret"},
+                     {"hub_base_url": "https://secret@hub/"},
+                     {"hub_base_url": "https://hub/?key=secret"},
+                     {"hub_base_url": "http://hub.example.invalid:9999"},
                      {"local_binary": "../../outside"}, {"hub_package": "dist/../outside.deb"},
                      {"expected_source_commit": COMMIT}, {"target_id": "secret\n"})
         original = copy.deepcopy(self.config)
@@ -151,8 +152,38 @@ class ConfigurationTests(Fixture):
             with self.subTest(value=value), self.assertRaises(obs.ObservationError):
                 obs.credential(self.config)
 
+    def test_hub_is_reached_only_over_tls_with_the_hub_ca(self):
+        ca = self.root / "hub-ca.crt"
+        ca.write_text("fixture-ca")
+        seen = {}
+
+        def context(**kwargs):
+            seen.update(kwargs)
+            return "fixture-context"
+
+        class Connection:
+            def __init__(self, host, port, timeout, context):
+                seen.update(host=host, port=port, context=context)
+
+            def request(self, *args, **kwargs):
+                raise OSError("fixture network")
+
+            def close(self):
+                pass
+
+        with patch.object(obs, "HUB_CA", ca), patch.object(obs.ssl, "create_default_context", context), \
+                patch.object(obs.http.client, "HTTPSConnection", Connection):
+            with self.assertRaises(obs.ObservationError) as raised:
+                obs.http_read(self.config, "/", "fixture-key")
+        self.assertEqual(str(raised.exception), "http_unavailable")
+        self.assertEqual(seen, {"cafile": str(ca), "host": "hub.example.invalid", "port": 9443,
+                                "context": "fixture-context"})
+        with patch.object(obs.http.client, "HTTPConnection", side_effect=AssertionError("plain HTTP")):
+            with self.assertRaises(obs.ObservationError):
+                obs.http_read({**self.config, "hub_base_url": "http://hub.example.invalid:9999"}, "/", "fixture-key")
+
     def test_failure_response_does_not_echo_private_values(self):
-        self.config["hub_base_url"] = "http://secretcredential@host/"
+        self.config["hub_base_url"] = "https://secretcredential@host/"
         self.write_config()
         with patch.object(obs, "ssh", side_effect=AssertionError("must not contact target")):
             result = obs.observe(REQUEST, self.root, self.root)
@@ -162,7 +193,7 @@ class ConfigurationTests(Fixture):
 
     def test_actual_launcher_preserves_structured_failed_checks(self):
         code_root = Path(__file__).resolve().parents[2]
-        self.config["hub_base_url"] = "http://secretcredential@host/"
+        self.config["hub_base_url"] = "https://secretcredential@host/"
         self.write_config()
         context = {"contract_version": 1, "project_id": "ominull", "project_root": str(self.root),
                    "cwd": str(code_root), "api_base": "http://server.example.invalid",

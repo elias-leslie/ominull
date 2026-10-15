@@ -20,6 +20,20 @@ has the same permission requirements.
 The backup extension also needs `proxmox_node`, the Proxmox node name that hosts
 the container; the remote backup programs refuse to run on any other host. The
 observer accepts the file with or without it.
+
+Every Proxmox-side backup step is a fixed verb of `pve_backup_dispatch.py`.
+Root installs that file as `/usr/local/sbin/ominull-backup-dispatch` behind a
+`restrict,command=` key and the owner's offline age recipient in
+`/etc/ominull-backup/recipient`; then `backup_ssh_alias` in this file names that
+key's SSH alias and only the verb words cross. The dispatcher moves every member
+under `var/lib/ominull-response-authority/`, `etc/ominull/`,
+`var/lib/ominull/evidence/`, `var/lib/ominull/evidence.key` and
+`opt/ominull/bin/certs/*.key` into `secrets.tar.age`, refuses to publish if any
+remains in the bulk tar, and the generation holds `lxc-150.tar`,
+`lxc-150-secrets.tar.age` and a manifest with both digests. With
+`backup_ssh_alias` set an unsplit archive is refused. Without it the same file
+is sent over `ssh_alias`, and a host with no recipient still yields the single
+tar.
 The approved credential source has the admin token on line one and tenant token
 on line two; only the admin token is sent. Both lines must contain printable
 tokens without whitespace. A single-token file is also supported. No environment

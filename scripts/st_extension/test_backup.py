@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 import backup as bk
 import observer as obs
+import pve_backup_dispatch as pd
 
 REQUEST = {"contract_version": 1, "operation": "prepare_backup", "project": "ominull",
            "source_id": bk.SOURCE, "backup_id": "bkp-fixture"}
@@ -40,22 +42,37 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(obs.ObservationError):
             bk.parse_request('{"contract_version":1,"contract_version":1}')
 
-    def test_remote_programs_parse_and_fixed_backup_never_stops_or_prunes(self):
-        for program in [bk.REMOTE_GUEST, bk.REMOTE_CREATE, bk.REMOTE_STATUS, bk.REMOTE_ARTIFACT, bk.REMOTE_CLEANUP, bk.REMOTE_DISCARD]:
-            compile(program, "fixed-remote-program", "exec")
-        self.assertIn('"--mode", "snapshot"', bk.REMOTE_CREATE)
-        self.assertIn('"--compress", "0", "--remove", "0"', bk.REMOTE_CREATE)
-        self.assertIn('"--tmpdir", "/var/tmp"', bk.REMOTE_CREATE)
-        self.assertNotIn('"--stop"', bk.REMOTE_CREATE)
-        self.assertNotIn('rmtree', bk.REMOTE_CLEANUP)
-        self.assertIn('timeout=3600, worker_result=True', bk.REMOTE_CREATE)
-        with tempfile.TemporaryDirectory() as temporary, patch.object(bk.sys, "argv", ["fixture", "a" * 32, "bkp-fixture", "pve-fixture"]):
-            namespace = {}
-            exec(bk.REMOTE_COMMON.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({temporary!r})"), namespace)
-            result = subprocess.CompletedProcess([], 0, stdout='INFO: backup completed\n"UPID:pve-fixture:fixture"\n')
-            with patch.object(subprocess, "run", return_value=result) as process:
-                self.assertEqual(namespace["api"]("create", "/nodes/pve-fixture/vzdump", timeout=3600, worker_result=True), "UPID:pve-fixture:fixture")
-                self.assertEqual(process.call_args.kwargs["timeout"], 3600)
+    def test_dispatcher_verbs_are_fixed_and_backup_never_stops_or_prunes(self):
+        source = bk.DISPATCHER.read_text()
+        compile(source, "pve-backup-dispatch", "exec")
+        self.assertIn('"--mode", "snapshot"', source)
+        self.assertIn('"--compress", "0", "--remove", "0"', source)
+        self.assertIn('"--tmpdir", "/var/tmp"', source)
+        self.assertNotIn('"--stop"', source)
+        self.assertNotIn("rmtree", source)
+        self.assertIn("timeout=3600, worker_result=True", source)
+        result = subprocess.CompletedProcess([], 0, stdout='INFO: backup completed\n"UPID:pve-fixture:fixture"\n')
+        with patch.object(subprocess, "run", return_value=result) as process:
+            self.assertEqual(pd.api("create", "/nodes/pve-fixture/vzdump", timeout=3600, worker_result=True), "UPID:pve-fixture:fixture")
+            self.assertEqual(process.call_args.kwargs["timeout"], 3600)
+        for words in [["shell", "a" * 32, "bkp", "pve-fixture"], ["create", "a" * 31, "bkp", "pve-fixture"],
+                      ["create", "a" * 32, "../x", "pve-fixture"], ["create", "a" * 32, "bkp", "pve fixture"],
+                      ["fetch", "a" * 32, "bkp", "pve-fixture", "/etc/shadow"], ["guest"]]:
+            with self.subTest(words=words), self.assertRaises(pd.Refused):
+                pd.run(words)
+
+    def test_forced_key_sends_only_the_verb_and_the_alias_sends_the_dispatcher(self):
+        config = {"ssh_alias": "root-alias", "proxmox_node": "pve-fixture"}
+        argv = bk.remote_argv(config, ["status", "a" * 32, "bkp-fixture"])
+        self.assertEqual(argv[-2], "root-alias")
+        self.assertTrue(argv[-1].startswith("python3 -c "))
+        self.assertTrue(argv[-1].endswith(" status " + "a" * 32 + " bkp-fixture pve-fixture"))
+        forced = bk.remote_argv({**config, "backup_ssh_alias": "ominull-backup"}, ["fetch", "a" * 32, "bkp-fixture", "secrets"])
+        self.assertEqual(forced[-2:], ["ominull-backup", "fetch " + "a" * 32 + " bkp-fixture pve-fixture secrets"])
+        for words in [["status", "a" * 32, "bkp fixture"], ["status", "a" * 32, "bkp;id"], ["status", "a" * 32, ""]]:
+            with self.subTest(words=words), self.assertRaises(obs.ObservationError):
+                bk.remote_argv(config, words)
+        self.assertIn("SSH_ORIGINAL_COMMAND", bk.DISPATCHER.read_text())
 
     def test_remote_failure_withholds_stderr_and_host(self):
         failed = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"private credential material")
@@ -79,103 +96,260 @@ class ProtocolTests(unittest.TestCase):
             bk.require_backup_mount()
 
 
+REQUIRED = sorted(pd.BULK_REQUIRED | pd.SECRET_REQUIRED)
+
+
+@contextlib.contextmanager
+def dump_root():
+    """A private stand-in for /var/lib/vz/dump with one owned attempt."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        with patch.object(pd, "ROOT", root), patch.object(pd, "RECIPIENT_FILE", root / "no-recipient"):
+            yield root
+
+
+def owned_attempt(root, attempt="a" * 32, task="UPID:pve-fixture:fixture"):
+    directory = root / ("st-ominull-" + attempt)
+    directory.mkdir(mode=0o700)
+    (directory / "attempt.json").write_text(json.dumps({"attempt": attempt, "backup_id": "bkp-fixture",
+                                                        "guest": 150, "task": task}))
+    return directory
+
+
+def write_dump(directory, extra=()):
+    """A vzdump-shaped tar: directories, every required file, then extras."""
+    archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
+    with tarfile.open(archive, "w", format=tarfile.GNU_FORMAT) as tar:
+        for name in ["./", "./etc/", "./etc/ominull/", "./var/", "./var/lib/", "./var/lib/ominull/",
+                     "./var/lib/ominull/evidence/", "./var/lib/ominull-response-authority/", "./opt/",
+                     "./opt/ominull/", "./opt/ominull/bin/", "./opt/ominull/bin/certs/"]:
+            member = tarfile.TarInfo(name)
+            member.type, member.mode = tarfile.DIRTYPE, 0o755
+            tar.addfile(member)
+        for name in REQUIRED:
+            data = ("content of " + name).encode()
+            member = tarfile.TarInfo("./" + name)
+            member.size, member.mode = len(data), 0o600
+            tar.addfile(member, io.BytesIO(data))
+        for member, data in extra:
+            tar.addfile(member, None if data is None else io.BytesIO(data))
+    return archive
+
+
+def finished(*args, **kwargs):
+    if args[:2] == ("get", "/nodes/pve-fixture/tasks/UPID:pve-fixture:fixture/status"):
+        return {"status": "stopped", "exitstatus": "OK"}
+    raise AssertionError(args)
+
+
 class RemoteCleanupTests(unittest.TestCase):
     def test_exact_owned_attempt_cleanup_and_foreign_contents_refusal(self):
         for foreign in [False, True]:
-            with self.subTest(foreign=foreign), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                attempt = "a" * 32
-                directory = root / ("st-ominull-" + attempt)
-                directory.mkdir(mode=0o700)
-                marker = {"attempt": attempt, "backup_id": "bkp-fixture", "guest": 150,
-                          "task": "UPID:pve-fixture:fixture"}
-                (directory / "attempt.json").write_text(json.dumps(marker))
+            with self.subTest(foreign=foreign), dump_root() as root:
+                directory = owned_attempt(root)
                 archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
                 archive.write_bytes(b"verified fixture")
+                (directory / "secrets.tar.age").write_bytes(b"sealed")
                 if foreign:
                     (directory / "foreign.txt").write_text("preserve foreign data")
-                program = bk.REMOTE_CLEANUP.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
-                status = subprocess.CompletedProcess([], 0, stdout='{"status":"stopped","exitstatus":"OK"}')
-                with patch.object(bk.sys, "argv", ["cleanup", attempt, "bkp-fixture", "pve-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(pd, "api", side_effect=finished):
                     if foreign:
-                        with self.assertRaises(AssertionError):
-                            exec(program, {})
+                        with self.assertRaises(pd.Refused):
+                            pd.run(["cleanup", "a" * 32, "bkp-fixture", "pve-fixture"])
                     else:
-                        exec(program, {})
+                        self.assertEqual(pd.run(["cleanup", "a" * 32, "bkp-fixture", "pve-fixture"]), {"cleaned": True})
                 self.assertEqual(directory.exists(), foreign)
                 if foreign:
                     self.assertTrue(archive.exists())
 
     def test_failed_attempt_discard_waits_for_its_task_and_refuses_foreign_contents(self):
         for case in ["stopped", "running", "foreign", "absent"]:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+            with self.subTest(case=case), dump_root() as root:
                 attempt = "b" * 32
                 directory = root / ("st-ominull-" + attempt)
                 if case != "absent":
-                    directory.mkdir(mode=0o700)
-                    (directory / "attempt.json").write_text(json.dumps({"attempt": attempt, "backup_id": "bkp-old", "guest": 150, "task": "UPID:pve-fixture:fixture"}))
+                    owned_attempt(root, attempt)
                     (directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar.dat").write_bytes(b"partial")
                     if case == "foreign":
                         (directory / "foreign.txt").write_text("preserve")
-                program = bk.REMOTE_DISCARD.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
-
-                def run(args, **kwargs):
-                    if args[0] == "hostname":
-                        return subprocess.CompletedProcess(args, 0, stdout="pve-fixture\n")
-                    status = "running" if case == "running" else "stopped"
-                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"status": status, "exitstatus": "ERROR"}))
-                output = io.StringIO()
-                with patch.object(bk.sys, "argv", ["discard", attempt, "discard", "pve-fixture"]), patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
+                status = {"status": "running" if case == "running" else "stopped", "exitstatus": "ERROR"}
+                with patch.object(pd, "command", return_value="pve-fixture\n"), patch.object(pd, "api", return_value=status):
                     if case in {"running", "foreign"}:
-                        with self.assertRaises(AssertionError):
-                            exec(program, {})
+                        with self.assertRaises(pd.Refused):
+                            pd.run(["discard", attempt, "discard", "pve-fixture"])
                     else:
-                        exec(program, {})
+                        self.assertEqual(pd.run(["discard", attempt, "discard", "pve-fixture"]), {"discarded": True})
                 self.assertEqual(directory.exists(), case in {"running", "foreign"})
-                if case in {"stopped", "absent"}:
-                    self.assertEqual(json.loads(output.getvalue()), {"discarded": True})
+
+
+class RemoteArtifactTests(unittest.TestCase):
+    def artifact(self, forced=False):
+        with patch.object(pd, "api", side_effect=finished):
+            return pd.run(["artifact", "a" * 32, "bkp-fixture", "pve-fixture"], forced=forced)
 
     def test_checkpointed_database_without_wal_and_present_wal_shape(self):
-        required = ["var/lib/ominull/ominull.db", "var/lib/ominull/evidence.key",
-                    "var/lib/ominull/evidence/receipt.key", "var/lib/ominull-response-authority/authority.db",
-                    "var/lib/ominull-response-authority/secret.key", "opt/ominull/bin/certs/ca.key",
-                    "opt/ominull/bin/certs/ca.crt", "opt/ominull/bin/certs/server.key",
-                    "opt/ominull/bin/certs/server.crt", "etc/ominull/hub.env",
-                    "etc/ominull/response-authority.env", "etc/ominull/admin.key"]
         for wal in [None, "regular", "symlink"]:
-            with self.subTest(wal=wal), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                attempt = "a" * 32
-                directory = root / ("st-ominull-" + attempt)
-                directory.mkdir(mode=0o700)
-                (directory / "attempt.json").write_text(json.dumps({"attempt": attempt,
-                    "backup_id": "bkp-fixture", "guest": 150, "task": "UPID:pve-fixture:fixture"}))
-                archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
-                with tarfile.open(archive, "w") as tar:
-                    for name in required:
-                        member = tarfile.TarInfo("./" + name)
-                        member.size = 7
-                        tar.addfile(member, io.BytesIO(b"fixture"))
-                    if wal:
-                        member = tarfile.TarInfo("./var/lib/ominull/ominull.db-wal")
-                        if wal == "symlink":
-                            member.type = tarfile.SYMTYPE
-                            member.linkname = "foreign"
-                        tar.addfile(member)
-                program = bk.REMOTE_ARTIFACT.replace('pathlib.Path("/var/lib/vz/dump")', f"pathlib.Path({str(root)!r})")
-                status = subprocess.CompletedProcess([], 0, stdout='{"status":"stopped","exitstatus":"OK"}')
-                output = io.StringIO()
-                with patch.object(bk.sys, "argv", ["artifact", attempt, "bkp-fixture", "pve-fixture"]), patch.object(subprocess, "run", return_value=status), contextlib.redirect_stdout(output):
+            with self.subTest(wal=wal), dump_root() as root:
+                extra = []
+                if wal:
+                    member = tarfile.TarInfo("./var/lib/ominull/ominull.db-wal")
                     if wal == "symlink":
-                        with self.assertRaises(AssertionError):
-                            exec(program, {})
-                    else:
-                        exec(program, {})
-                if wal != "symlink":
-                    response = json.loads(output.getvalue())
-                    self.assertEqual(response["required_paths_verified"], sorted(required))
-                    self.assertEqual(response["wal_paths_verified"], [] if wal is None else ["var/lib/ominull/ominull.db-wal"])
+                        member.type, member.linkname = tarfile.SYMTYPE, "foreign"
+                    extra.append((member, None if wal == "symlink" else b""))
+                write_dump(owned_attempt(root), extra)
+                if wal == "symlink":
+                    with self.assertRaises(pd.Refused):
+                        self.artifact()
+                    continue
+                response = self.artifact()
+                self.assertEqual(response["required_paths_verified"], REQUIRED)
+                self.assertEqual(response["wal_paths_verified"], [] if wal is None else ["var/lib/ominull/ominull.db-wal"])
+                self.assertNotIn("secrets", response)
+
+    def test_missing_required_path_is_refused(self):
+        with dump_root() as root:
+            directory = owned_attempt(root)
+            archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
+            with tarfile.open(archive, "w") as tar:
+                member = tarfile.TarInfo("./var/lib/ominull/ominull.db")
+                member.size = 2
+                tar.addfile(member, io.BytesIO(b"db"))
+            with self.assertRaises(pd.Refused):
+                self.artifact()
+
+    def test_forced_key_without_recipient_refuses_plaintext_secrets(self):
+        with dump_root() as root:
+            write_dump(owned_attempt(root))
+            with self.assertRaises(pd.Refused):
+                self.artifact(forced=True)
+            self.assertFalse((root / ("st-ominull-" + "a" * 32) / "secrets.tar.age").exists())
+
+    def test_recipient_must_be_root_owned_and_well_formed(self):
+        with dump_root() as root:
+            write_dump(owned_attempt(root))
+            recipient = root / "recipient"
+            recipient.write_text("not-a-recipient\n")
+            recipient.chmod(0o644)
+            with patch.object(pd, "RECIPIENT_FILE", recipient), patch.object(pd, "RECIPIENT_OWNER", os.getuid()):
+                with self.assertRaises(pd.Refused):
+                    self.artifact()
+            with patch.object(pd, "RECIPIENT_FILE", recipient):
+                with self.assertRaises(pd.Refused):  # owned by the test user, not root
+                    self.artifact()
+
+
+@unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"), "age is not installed")
+class SecretSplitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.identity = Path(self.temp.name) / "identity.txt"
+        subprocess.run(["age-keygen", "-o", str(self.identity)], check=True, capture_output=True)
+        self.recipient_text = subprocess.run(["age-keygen", "-y", str(self.identity)], check=True,
+                                             capture_output=True, text=True).stdout.strip()
+
+    @contextlib.contextmanager
+    def recipient(self, root):
+        path = root / "recipient"
+        path.write_text(self.recipient_text + "\n")
+        path.chmod(0o644)
+        with patch.object(pd, "RECIPIENT_FILE", path), patch.object(pd, "RECIPIENT_OWNER", os.getuid()):
+            yield
+
+    def split(self, root, forced=True):
+        with self.recipient(root), patch.object(pd, "api", side_effect=finished):
+            return pd.run(["artifact", "a" * 32, "bkp-fixture", "pve-fixture"], forced=forced)
+
+    def decrypt(self, path):
+        plain = subprocess.run(["age", "--decrypt", "-i", str(self.identity), str(path)], check=True,
+                               capture_output=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(plain), mode="r:") as tar:
+            members = {}
+            for member in tar:
+                data = tar.extractfile(member) if member.isfile() else None
+                members[member.name.removeprefix("./")] = data.read() if data else None
+            return members
+
+    def test_secret_members_are_sealed_and_gone_from_the_bulk_tar(self):
+        later_key = tarfile.TarInfo("./var/lib/ominull-response-authority/tenants/t-1.key")
+        later_key.size = 6
+        nested = tarfile.TarInfo("./var/lib/ominull-response-authority/tenants/")
+        nested.type = tarfile.DIRTYPE
+        new_cert_key = tarfile.TarInfo("./opt/ominull/bin/certs/client.key")
+        new_cert_key.size = 4
+        wal = tarfile.TarInfo("./var/lib/ominull-response-authority/authority.db-wal")
+        wal.size = 3
+        with dump_root() as root:
+            directory = owned_attempt(root)
+            archive = write_dump(directory, [(nested, None), (later_key, b"tenant"), (new_cert_key, b"cert"), (wal, b"wal")])
+            response = self.split(root)
+            with tarfile.open(archive) as tar:
+                names = [m.name.removeprefix("./").rstrip("/") for m in tar.getmembers()]
+            self.assertFalse([n for n in names if pd.is_secret(n)], "secret member left in the bulk tar")
+            self.assertTrue(set(pd.BULK_REQUIRED) <= set(names))
+            self.assertIn("etc/ominull", names)  # the directory itself stays; only its contents move
+            self.assertEqual(response["required_paths_verified"], sorted(pd.BULK_REQUIRED))
+            self.assertEqual(response["wal_paths_verified"], [])
+            sealed = directory / "secrets.tar.age"
+            self.assertEqual(response["secrets"]["path"], str(sealed))
+            self.assertEqual(response["secrets"]["sha256"], hashlib.sha256(sealed.read_bytes()).hexdigest())
+            self.assertEqual(response["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+            self.assertEqual(oct(sealed.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(response["secrets"]["paths_verified"],
+                             sorted(pd.SECRET_REQUIRED | {"var/lib/ominull-response-authority/authority.db-wal"}))
+            members = self.decrypt(sealed)
+            for name in pd.SECRET_REQUIRED:
+                self.assertEqual(members[name], ("content of " + name).encode())
+            self.assertEqual(members["var/lib/ominull-response-authority/tenants/t-1.key"], b"tenant")
+            self.assertEqual(members["opt/ominull/bin/certs/client.key"], b"cert")
+            self.assertNotIn("var/lib/ominull/ominull.db", members)
+            self.assertNotIn(b"content of etc/ominull/admin.key", archive.read_bytes())
+            self.assertFalse((directory / "secret-members.list").exists())
+            # Cleanup accepts what the split leaves behind.
+            with patch.object(pd, "api", side_effect=finished):
+                self.assertEqual(pd.run(["cleanup", "a" * 32, "bkp-fixture", "pve-fixture"]), {"cleaned": True})
+
+    def test_transitional_alias_also_splits_once_the_recipient_exists(self):
+        with dump_root() as root:
+            write_dump(owned_attempt(root))
+            self.assertIn("secrets", self.split(root, forced=False))
+
+    def test_hard_link_across_the_boundary_is_refused(self):
+        for source, target in [("./var/lib/ominull/copy-of-secret", "./var/lib/ominull-response-authority/secret.key"),
+                               ("./etc/ominull/db-link", "./var/lib/ominull/ominull.db")]:
+            with self.subTest(source=source), dump_root() as root:
+                link = tarfile.TarInfo(source)
+                link.type, link.linkname = tarfile.LNKTYPE, target
+                directory = owned_attempt(root)
+                archive = write_dump(directory, [(link, None)])
+                before = archive.read_bytes()
+                with self.assertRaises(pd.Refused):
+                    self.split(root)
+                self.assertEqual(archive.read_bytes(), before)
+                self.assertFalse((directory / "secrets.tar.age").exists())
+
+    def test_dotted_names_cannot_hide_a_secret_from_the_prefix_test(self):
+        for name in ["./var/lib/ominull/../ominull-response-authority/copy.key", "./var//lib/ominull-response-authority/x",
+                     "./etc/./ominull/admin.key.bak", "../etc/ominull/escape"]:
+            with self.subTest(name=name), dump_root() as root:
+                member = tarfile.TarInfo(name)
+                member.size = 6
+                directory = owned_attempt(root)
+                write_dump(directory, [(member, b"secret")])
+                with self.assertRaises(pd.Refused):
+                    self.split(root)
+                self.assertFalse((directory / "secrets.tar.age").exists())
+
+    def test_fetch_streams_only_the_named_files(self):
+        with dump_root() as root:
+            directory = owned_attempt(root)
+            archive = write_dump(directory)
+            self.split(root)
+            for which, path in [("archive", archive), ("secrets", directory / "secrets.tar.age")]:
+                out = io.BytesIO()
+                with patch.object(pd, "api", side_effect=finished):
+                    pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], out=out)
+                self.assertEqual(out.getvalue(), path.read_bytes())
 
 
 class BackupConfigurationTests(unittest.TestCase):
@@ -185,7 +359,7 @@ class BackupConfigurationTests(unittest.TestCase):
             directory = root / "scripts/st_extension"
             directory.mkdir(parents=True)
             config = {"schema_version": 1, "target_id": "fixture-target", "ssh_alias": "fixture-alias",
-                      "lxc_id": 150, "hub_base_url": "http://hub.example.invalid:9999",
+                      "lxc_id": 150, "hub_base_url": "https://hub.example.invalid:9443",
                       "admin_key_file": str(root / "missing-admin.key"),
                       "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
                       "local_binary": "build/ominull-hub",
@@ -230,6 +404,7 @@ class PreparationTests(unittest.TestCase):
         self.failure = None
         self.guest_status = "running"
         self.discarded = []
+        self.sealed = None  # Set to bytes when the remote side splits secrets out.
 
     def remote(self, config, program, attempt, backup_id):
         self.calls.append(program)
@@ -242,9 +417,15 @@ class PreparationTests(unittest.TestCase):
         if program == bk.REMOTE_STATUS:
             return {"status": "stopped", "exitstatus": "ERROR" if self.failure == "task" else "OK"}
         if program == bk.REMOTE_ARTIFACT:
-            return {"path": f"/var/lib/vz/dump/st-ominull-{attempt}/vzdump-lxc-150-2026_10_06-15_00_00.tar",
-                    "size_bytes": len(self.payload), "sha256": hashlib.sha256(self.payload).hexdigest(),
-                    "required_paths_verified": ["fixture-required-path"], "wal_paths_verified": []}
+            artifact: dict[str, object] = {"path": f"/var/lib/vz/dump/st-ominull-{attempt}/vzdump-lxc-150-2026_10_06-15_00_00.tar",
+                        "size_bytes": len(self.payload), "sha256": hashlib.sha256(self.payload).hexdigest(),
+                        "required_paths_verified": ["fixture-required-path"], "wal_paths_verified": []}
+            if self.sealed is not None:
+                artifact["secrets"] = {"path": f"/var/lib/vz/dump/st-ominull-{attempt}/secrets.tar.age",
+                                       "size_bytes": len(self.sealed), "sha256": hashlib.sha256(self.sealed).hexdigest(),
+                                       "recipient_id": "age:" + "c" * 16, "members": 9,
+                                       "paths_verified": ["etc/ominull/admin.key"]}
+            return artifact
         if program == bk.REMOTE_CLEANUP:
             self.assertTrue((self.destination / "current/lxc-150.tar").exists())
             return {"cleaned": True}
@@ -253,11 +434,11 @@ class PreparationTests(unittest.TestCase):
             return {"discarded": True}
         self.fail("unexpected remote program")
 
-    def fetch(self, config, artifact, destination):
+    def fetch(self, config, attempt, backup_id, which, expected, destination):
         if self.failure == "fetch":
             destination.write_bytes(b"incomplete")
             raise obs.ObservationError("fixture_fetch_failure")
-        destination.write_bytes(self.payload)
+        destination.write_bytes(self.payload if which == "archive" else self.sealed)
         destination.chmod(0o600)
 
     def prepare(self, request=REQUEST):
@@ -535,17 +716,45 @@ class PreparationTests(unittest.TestCase):
         target = self.root / "incoming.tar"
         artifact = {"path": "/fixed/fixture.tar", "size_bytes": len(self.payload),
                     "sha256": hashlib.sha256(self.payload).hexdigest()}
+        config = {**self.config, "backup_ssh_alias": "ominull-backup"}
         def process(argv, **kwargs):
-            self.assertEqual(argv[-1], "cat -- /fixed/fixture.tar")
+            self.assertEqual(argv[-2:], ["ominull-backup", "fetch " + "a" * 32 + " bkp-fixture pve-fixture archive"])
             kwargs["stdout"].write(self.payload)
             return subprocess.CompletedProcess(argv, 0)
         with patch.object(subprocess, "run", side_effect=process):
-            bk.fetch(self.config, artifact, target)
+            bk.fetch(config, "a" * 32, "bkp-fixture", "archive", artifact, target)
         self.assertEqual(target.read_bytes(), self.payload)
         corrupt = self.root / "bad.tar"
         with patch.object(subprocess, "run", side_effect=process), self.assertRaises(obs.ObservationError):
-            bk.fetch(self.config, {**artifact, "sha256": "0" * 64}, corrupt)
+            bk.fetch(config, "a" * 32, "bkp-fixture", "archive", {**artifact, "sha256": "0" * 64}, corrupt)
         self.assertTrue(corrupt.exists())
+
+    def test_split_generation_publishes_both_digests_and_retires_both_files(self):
+        self.sealed = b"age-encrypted-secret-members"
+        first = self.prepare()
+        self.assertEqual(first["status"], "completed", first)
+        current = self.destination / "current"
+        self.assertEqual(sorted(p.name for p in current.iterdir()), ["lxc-150-secrets.tar.age", "lxc-150.tar", "manifest.json"])
+        self.assertEqual(first["secrets_archive_path"], str(current / "lxc-150-secrets.tar.age"))
+        self.assertEqual(first["secrets_sha256"], hashlib.sha256(self.sealed).hexdigest())
+        self.assertEqual(first["secrets_size_bytes"], len(self.sealed))
+        self.assertEqual(json.loads((current / "manifest.json").read_text()), first)
+        bk._generation(current, verify_hash=True)
+        (current / "lxc-150-secrets.tar.age").write_bytes(b"tampered-secret-archive-xxxx")
+        with self.assertRaises(obs.ObservationError):
+            bk._generation(current, verify_hash=True)
+        (current / "lxc-150-secrets.tar.age").write_bytes(self.sealed)
+        second = self.prepare(self.qualified_request(first))
+        self.assertEqual(second["status"], "completed", second)
+        self.assertFalse(list(self.destination.glob(".previous-*")))
+
+    def test_forced_key_refuses_an_unsplit_archive(self):
+        self.config["backup_ssh_alias"] = "ominull-backup"
+        response = self.prepare()
+        self.assertEqual(response["status"], "failed")
+        self.assertEqual(response["error"], "backup_secrets_not_sealed")
+        self.assertFalse((self.destination / "current").exists())
+        self.assertNotIn(bk.REMOTE_CLEANUP, self.calls)
 
 
 if __name__ == "__main__":

@@ -29,148 +29,15 @@ EVIDENCE_KEEP = 20  # Newest failure/retirement/recovery markers kept per kind.
 REQUEST_KEYS = {"contract_version", "operation", "project", "source_id", "backup_id"}
 
 # Each attempt has a newly-created private directory and immutable ownership
-# marker. All remote operations are fixed Python programs, not supplied commands.
-REMOTE_COMMON = r'''
-import hashlib, json, os, pathlib, re, shutil, stat, subprocess, sys, tarfile
-attempt, backup_id, node = sys.argv[1:]
-assert re.fullmatch(r"[0-9a-f]{32}", attempt)
-assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", backup_id)
-assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}", node)
-root = pathlib.Path("/var/lib/vz/dump")
-directory = root / ("st-ominull-" + attempt)
-assert root.resolve() == root and root.is_dir()
-def command(*args, timeout=60):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
-def api(*args, timeout=60, worker_result=False):
-    output = command("pvesh", *args, "--output-format", "json", timeout=timeout)
-    # CLI workers run synchronously and tee logs before the final JSON result.
-    return json.loads(output.splitlines()[-1] if worker_result else output)
-def owned():
-    assert directory.resolve() == directory and directory.is_dir()
-    assert directory.stat().st_uid == os.getuid() and stat.S_IMODE(directory.stat().st_mode) == 0o700
-    marker = directory / "attempt.json"
-    assert marker.is_file() and not marker.is_symlink()
-    value = json.loads(marker.read_text())
-    assert value["attempt"] == attempt and value["backup_id"] == backup_id and value["guest"] == 150
-    return value
-'''
-
-REMOTE_CREATE = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == node
-config = api("get", "/nodes/" + node + "/lxc/150/config")
-assert not any(re.fullmatch(r"mp\d+", k) for k in config), "Additional mount requires review"
-assert config["rootfs"].split(",", 1)[0] == "local-lvm:vm-150-disk-0"
-assert not config.get("lock") and not config.get("snapstate")
-storage = api("get", "/storage/local")
-assert storage["type"] == "dir" and storage["path"] == "/var/lib/vz"
-assert "backup" in storage["content"].split(",")
-used = int(command("pct", "exec", "150", "--", "python3", "-c", "import shutil;print(shutil.disk_usage('/').used)").strip())
-assert shutil.disk_usage(root).free >= used + 10 * 1024**3, "Insufficient remote staging space"
-directory.mkdir(mode=0o700)
-marker = {"attempt": attempt, "backup_id": backup_id, "guest": 150}
-with (directory / "attempt.json").open("x") as file:
-    os.fchmod(file.fileno(), 0o600)
-    json.dump(marker, file)
-task = api("create", "/nodes/" + node + "/vzdump", "--vmid", "150", "--mode", "snapshot",
-           "--dumpdir", str(directory), "--tmpdir", "/var/tmp", "--compress", "0", "--remove", "0",
-           timeout=3600, worker_result=True)
-assert isinstance(task, str) and task.startswith("UPID:" + node + ":")
-marker["task"] = task
-(directory / "attempt.json").write_text(json.dumps(marker))
-print(json.dumps({"task": task, "used_bytes": used}))
-'''
-
-REMOTE_GUEST = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == node
-state = api("get", "/nodes/" + node + "/lxc/150/status/current")
-print(json.dumps({"guest_status": state.get("status")}))
-'''
-
-REMOTE_STATUS = REMOTE_COMMON + r'''
-marker = owned()
-state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
-print(json.dumps({k:state.get(k) for k in ["status", "exitstatus"]}))
-'''
-
-REMOTE_ARTIFACT = REMOTE_COMMON + r'''
-marker = owned()
-state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
-assert state.get("status") == "stopped" and state.get("exitstatus") == "OK"
-archives = [p for p in directory.iterdir() if re.fullmatch(r"vzdump-lxc-150-[0-9_\-]+\.tar", p.name)]
-assert len(archives) == 1
-archive = archives[0]
-info = archive.lstat()
-assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size > 0
-digest = hashlib.sha256()
-with archive.open("rb") as file:
-    for chunk in iter(lambda: file.read(1024*1024), b""):
-        digest.update(chunk)
-after = archive.lstat()
-assert (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-required = {"var/lib/ominull/ominull.db",
-            "var/lib/ominull/evidence.key", "var/lib/ominull/evidence/receipt.key",
-            "var/lib/ominull-response-authority/authority.db",
-            "var/lib/ominull-response-authority/secret.key",
-            "opt/ominull/bin/certs/ca.key", "opt/ominull/bin/certs/ca.crt",
-            "opt/ominull/bin/certs/server.key", "opt/ominull/bin/certs/server.crt",
-            "etc/ominull/hub.env", "etc/ominull/response-authority.env", "etc/ominull/admin.key"}
-optional_wal = {"var/lib/ominull/ominull.db-wal", "var/lib/ominull-response-authority/authority.db-wal"}
-found = set()
-wal_found = set()
-with tarfile.open(archive, "r:") as tar:
-    for member in tar:
-        name = member.name.removeprefix("./")
-        if name in required:
-            assert member.isfile() and member.size > 0
-            found.add(name)
-        elif name in optional_wal:
-            assert member.isfile(), "WAL must be a regular file when present"
-            wal_found.add(name)
-assert found == required, "Required production data missing from archive"
-print(json.dumps({"path":str(archive), "size_bytes":info.st_size, "sha256":digest.hexdigest(),
-                  "required_paths_verified":sorted(found), "wal_paths_verified":sorted(wal_found)}))
-'''
-
-REMOTE_CLEANUP = REMOTE_COMMON + r'''
-marker = owned()
-state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
-assert state.get("status") == "stopped" and state.get("exitstatus") == "OK"
-# Refuse unexpected contents rather than recursively deleting a foreign tree.
-children = list(directory.iterdir())
-for child in children:
-    assert child.is_file() and not child.is_symlink() and child.stat().st_uid == os.getuid()
-    assert child.name == "attempt.json" or re.fullmatch(r"vzdump-lxc-150-[0-9_\-]+\.(tar(?:\.notes)?|log)", child.name)
-for child in children:
-    child.unlink()
-directory.rmdir()
-print(json.dumps({"cleaned":True}))
-'''
-
-
-# A failed or killed attempt never produced a published generation. Discard
-# its remote dump once no guest backup task can still be writing it.
-REMOTE_DISCARD = REMOTE_COMMON + r'''
-assert command("hostname", "-s").strip() == node
-if directory.exists() or directory.is_symlink():
-    assert directory.resolve() == directory and directory.is_dir()
-    assert directory.stat().st_uid == os.getuid() and stat.S_IMODE(directory.stat().st_mode) == 0o700
-    marker_path = directory / "attempt.json"
-    marker = json.loads(marker_path.read_text()) if marker_path.is_file() and not marker_path.is_symlink() else {}
-    assert marker.get("attempt", attempt) == attempt and marker.get("guest", 150) == 150
-    if marker.get("task"):
-        state = api("get", "/nodes/" + node + "/tasks/" + marker["task"] + "/status")
-        assert state.get("status") == "stopped", "Attempt task is still running"
-    else:
-        assert not api("get", "/nodes/" + node + "/tasks", "--vmid", "150", "--source", "active"), "A guest backup task is still active"
-    children = list(directory.iterdir())
-    for child in children:
-        assert child.is_file() and not child.is_symlink() and child.stat().st_uid == os.getuid()
-        assert child.name == "attempt.json" or re.fullmatch(r"vzdump-lxc-150-[0-9_\-]+\.(tar(?:\.dat|\.notes)?|log)", child.name)
-    for child in children:
-        child.unlink()
-    directory.rmdir()
-print(json.dumps({"discarded": True}))
-'''
+# marker. Every remote operation is a fixed verb of pve_backup_dispatch.py:
+# through backup_ssh_alias (a forced-command key root installs on Proxmox) the
+# verb is all that crosses; until then the same file is sent over ssh_alias.
+DISPATCHER = Path(__file__).with_name("pve_backup_dispatch.py")
+REMOTE_CREATE, REMOTE_GUEST, REMOTE_STATUS = "create", "guest", "status"
+REMOTE_ARTIFACT, REMOTE_CLEANUP, REMOTE_DISCARD = "artifact", "cleanup", "discard"
+ARCHIVE_NAME, SECRETS_NAME = "lxc-150.tar", "lxc-150-secrets.tar.age"
+SECRETS_KEYS = {"secrets_archive_path", "secrets_size_bytes", "secrets_sha256",
+                "secrets_recipient_id", "secrets_members", "secrets_paths_verified"}
 
 
 def parse_request(raw):
@@ -196,19 +63,27 @@ def parse_request(raw):
     return request
 
 
-def ssh_argv(config, command):
+def ssh_argv(alias, command):
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o",
-            "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", config["ssh_alias"], command]
+            "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", alias, command]
 
 
-def remote(config, script, attempt, backup_id):
+def remote_argv(config, words):
+    """The ssh call for one dispatcher verb; every word was validated here."""
     node = config.get("proxmox_node")
     obs.require(isinstance(node, str) and NODE_NAME.fullmatch(node), "backup_proxmox_node")
-    command = ("python3 -c " + shlex.quote(script) + " " + shlex.quote(attempt) + " "
-               + shlex.quote(backup_id) + " " + shlex.quote(node))
+    words = [*words[:3], node, *words[3:]]
+    obs.require(all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", word) for word in words), "backup_remote_words")
+    if config.get("backup_ssh_alias"):
+        return ssh_argv(config["backup_ssh_alias"], " ".join(words))
+    source = DISPATCHER.read_text()
+    return ssh_argv(config["ssh_alias"], "python3 -c " + shlex.quote(source) + " " + " ".join(words))
+
+
+def remote(config, verb, attempt, backup_id):
     try:
-        result = subprocess.run(ssh_argv(config, command), stdin=subprocess.DEVNULL,
-                                capture_output=True, timeout=DEADLINE_SECONDS if script == REMOTE_CREATE else 300,
+        result = subprocess.run(remote_argv(config, [verb, attempt, backup_id]), stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=DEADLINE_SECONDS if verb == REMOTE_CREATE else 300,
                                 check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise obs.ObservationError("backup_remote_unavailable") from exc
@@ -243,21 +118,22 @@ def require_backup_mount():
                 and rows[0].get("fstype") in {"ntfs", "ntfs3", "fuseblk"}, "backup_mount_identity")
 
 
-def fetch(config, artifact, destination):
+def fetch(config, attempt, backup_id, which, expected, destination):
+    """Copy one verified remote file (archive or secrets) into staging."""
     require_backup_mount()
-    command = "cat -- " + shlex.quote(artifact["path"])
     try:
         with destination.open("xb") as file:
             os.fchmod(file.fileno(), 0o600)
-            result = subprocess.run(ssh_argv(config, command), stdin=subprocess.DEVNULL,
-                                    stdout=file, stderr=subprocess.PIPE, timeout=DEADLINE_SECONDS, check=False)
+            result = subprocess.run(remote_argv(config, ["fetch", attempt, backup_id, which]),
+                                    stdin=subprocess.DEVNULL, stdout=file, stderr=subprocess.PIPE,
+                                    timeout=DEADLINE_SECONDS, check=False)
             file.flush()
             os.fsync(file.fileno())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise obs.ObservationError("backup_fetch_failed") from exc
     obs.require(result.returncode == 0, "backup_fetch_failed")
-    obs.require(destination.stat().st_size == artifact["size_bytes"], "backup_fetch_size")
-    obs.require(obs.sha256_file(destination) == artifact["sha256"], "backup_fetch_digest")
+    obs.require(destination.stat().st_size == expected["size_bytes"], "backup_fetch_size")
+    obs.require(obs.sha256_file(destination) == expected["sha256"], "backup_fetch_digest")
 
 
 def _sync_directory(path):
@@ -283,9 +159,11 @@ def _save_json(path, value):
 def _generation(path, *, verify_hash=False):
     obs.require(path.is_dir() and not path.is_symlink(), "backup_existing_publication")
     private_directory(path)
-    archive = obs.regular_file(path / "lxc-150.tar", private=True)
+    archive = obs.regular_file(path / ARCHIVE_NAME, private=True)
     value = obs.parse_json(obs.regular_file(path / "manifest.json", private=True).read_bytes())
     current = DESTINATION / "current"
+    split = isinstance(value, dict) and "secrets_sha256" in value
+    members = {ARCHIVE_NAME, "manifest.json"} | ({SECRETS_NAME} if split else set())
     obs.require(isinstance(value, dict) and value.get("status") == "completed" and value.get("project") == "ominull"
                 and value.get("source_id") == SOURCE and value.get("target_id") == GUEST
                 and value.get("archive_path") == str(current / "lxc-150.tar")
@@ -293,10 +171,19 @@ def _generation(path, *, verify_hash=False):
                 and type(value.get("size_bytes")) is int and value["size_bytes"] > 0
                 and isinstance(value.get("sha256"), str) and obs.DIGEST.fullmatch(value["sha256"])
                 and archive.stat().st_size == value["size_bytes"]
-                and set(p.name for p in path.iterdir()) == {"lxc-150.tar", "manifest.json"},
+                and set(p.name for p in path.iterdir()) == members,
                 "backup_existing_publication")
+    if split:
+        sealed = obs.regular_file(path / SECRETS_NAME, private=True)
+        obs.require(SECRETS_KEYS <= set(value)
+                    and value["secrets_archive_path"] == str(current / SECRETS_NAME)
+                    and type(value["secrets_size_bytes"]) is int and value["secrets_size_bytes"] > 0
+                    and isinstance(value["secrets_sha256"], str) and obs.DIGEST.fullmatch(value["secrets_sha256"])
+                    and sealed.stat().st_size == value["secrets_size_bytes"], "backup_existing_publication")
     if verify_hash:
         obs.require(obs.sha256_file(archive) == value["sha256"], "backup_fetch_digest")
+        if split:
+            obs.require(obs.sha256_file(path / SECRETS_NAME) == value["secrets_sha256"], "backup_fetch_digest")
     return value
 
 
@@ -369,16 +256,20 @@ def retire_qualified_previous():
     previous = DESTINATION / state["previous"]
     if previous.exists() or previous.is_symlink():
         private_directory(previous)
-        obs.require(set(p.name for p in previous.iterdir()) <= {"lxc-150.tar", "manifest.json"},
+        obs.require(set(p.name for p in previous.iterdir()) <= {ARCHIVE_NAME, SECRETS_NAME, "manifest.json"},
                     "backup_retirement_members")
-        manifest, archive = previous / "manifest.json", previous / "lxc-150.tar"
+        manifest, archive, sealed = previous / "manifest.json", previous / ARCHIVE_NAME, previous / SECRETS_NAME
         if manifest.exists() or manifest.is_symlink():
             value = obs.parse_json(obs.regular_file(manifest, private=True).read_bytes())
             obs.require(value["backup_id"] == state["qualification"]["backup_id"]
                         and value["sha256"] == state["qualification"]["sha256"]
                         and value["size_bytes"] == state["size_bytes"], "backup_retirement_qualification")
         else:
-            obs.require(not archive.exists() and not archive.is_symlink(), "backup_retirement_manifest")
+            obs.require(not archive.exists() and not archive.is_symlink()
+                        and not sealed.exists() and not sealed.is_symlink(), "backup_retirement_manifest")
+        if sealed.exists() or sealed.is_symlink():
+            obs.regular_file(sealed, private=True).unlink()
+            _sync_directory(previous)
         if archive.exists() or archive.is_symlink():
             obs.require(obs.regular_file(archive, private=True).stat().st_size == state["size_bytes"],
                         "backup_retirement_size")
@@ -464,7 +355,8 @@ def discard_unverified_attempts(config):
         if (staging / "manifest.json").exists() or (staging / "manifest.json").is_symlink():
             continue  # Verified bytes are reused or left for review.
         children = list(staging.iterdir())
-        obs.require(all(child.name == "lxc-150.tar" and child.is_file() and not child.is_symlink() for child in children),
+        obs.require(all(child.name in {ARCHIVE_NAME, SECRETS_NAME} and child.is_file() and not child.is_symlink()
+                        for child in children),
                     "backup_attempt_members")
         obs.require(remote(config, REMOTE_DISCARD, staging.name.removeprefix(".attempt-"), "discard") == {"discarded": True},
                     "backup_remote_discard")
@@ -554,21 +446,43 @@ def prepare(request, root):
                         "backup_proxmox_task_timeout")
             time.sleep(5)
         artifact = remote(config, REMOTE_ARTIFACT, attempt, request["backup_id"])
+        remote_dir = r"/var/lib/vz/dump/st-ominull-" + attempt
         obs.require(type(artifact.get("size_bytes")) is int and artifact["size_bytes"] > 0
                     and isinstance(artifact.get("sha256"), str) and obs.DIGEST.fullmatch(artifact["sha256"])
                     and isinstance(artifact.get("path"), str)
-                    and re.fullmatch(r"/var/lib/vz/dump/st-ominull-" + attempt
-                                     + r"/vzdump-lxc-150-[0-9_\-]+\.tar", artifact["path"]),
+                    and re.fullmatch(remote_dir + r"/vzdump-lxc-150-[0-9_\-]+\.tar", artifact["path"]),
                     "backup_remote_artifact")
-        obs.require(shutil.disk_usage(DESTINATION).free >= artifact["size_bytes"] + RESERVE_BYTES,
+        secrets = artifact.get("secrets")
+        # Under the forced-command key the secret members must be sealed; the
+        # transitional root alias keeps the single tar until root installs the
+        # recipient, so backups never stop in between.
+        obs.require(secrets is not None or not config.get("backup_ssh_alias"), "backup_secrets_not_sealed")
+        if secrets is not None:
+            obs.require(isinstance(secrets, dict) and secrets.get("path") == remote_dir + "/secrets.tar.age"
+                        and type(secrets.get("size_bytes")) is int and secrets["size_bytes"] > 0
+                        and isinstance(secrets.get("sha256"), str) and obs.DIGEST.fullmatch(secrets["sha256"])
+                        and isinstance(secrets.get("recipient_id"), str)
+                        and re.fullmatch(r"age:[0-9a-f]{16}", secrets["recipient_id"])
+                        and type(secrets.get("members")) is int and secrets["members"] > 0
+                        and isinstance(secrets.get("paths_verified"), list)
+                        and all(isinstance(path, str) for path in secrets["paths_verified"]), "backup_remote_artifact")
+        sealed_bytes = secrets["size_bytes"] if secrets else 0
+        obs.require(shutil.disk_usage(DESTINATION).free >= artifact["size_bytes"] + sealed_bytes + RESERVE_BYTES,
                     "backup_local_capacity")
-        fetch(config, artifact, staging / "lxc-150.tar")
-        response = {**base, "status": "completed", "archive_path": str(DESTINATION / "current/lxc-150.tar"),
+        fetch(config, attempt, request["backup_id"], "archive", artifact, staging / ARCHIVE_NAME)
+        if secrets:
+            fetch(config, attempt, request["backup_id"], "secrets", secrets, staging / SECRETS_NAME)
+        response = {**base, "status": "completed", "archive_path": str(DESTINATION / "current" / ARCHIVE_NAME),
                     "manifest_path": str(DESTINATION / "current/manifest.json"),
                     "size_bytes": artifact["size_bytes"], "sha256": artifact["sha256"],
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "required_paths_verified": artifact["required_paths_verified"],
                     "wal_paths_verified": artifact["wal_paths_verified"]}
+        if secrets:
+            response.update({"secrets_archive_path": str(DESTINATION / "current" / SECRETS_NAME),
+                             "secrets_size_bytes": secrets["size_bytes"], "secrets_sha256": secrets["sha256"],
+                             "secrets_recipient_id": secrets["recipient_id"], "secrets_members": secrets["members"],
+                             "secrets_paths_verified": secrets["paths_verified"]})
         publish(staging, response, request.get("qualified_previous"))
         published = True
         # Only our newly generated attempt is removed, after verified publication.
