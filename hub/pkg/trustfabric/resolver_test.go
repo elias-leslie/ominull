@@ -277,6 +277,7 @@ func TestNormalizeRefusals(t *testing.T) {
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "192.0.2.0/24", Action: Allow, Port: 70000, Proto: ProtoTCP},
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "192.0.2.0/24", Action: Allow, Direction: "sideways"},
 		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "example.com", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "cidr", Value: "::ffff:0.0.0.0/80", Action: Deny},
 	} {
 		if _, err := Normalize(r); err == nil {
 			t.Errorf("Normalize accepted %+v", r)
@@ -289,5 +290,59 @@ func TestNormalizeRefusals(t *testing.T) {
 	// A whole-family deny is allowed (an explicit default deny).
 	if _, err := Normalize(Rule{ScopeType: ScopeProvider, Kind: "cidr", Value: "::/0", Action: Deny}); err != nil {
 		t.Errorf("whole-family deny refused: %v", err)
+	}
+}
+
+// Agents take literal addresses, so the enforceable part of a policy is the
+// addresses rules name, not whatever single addresses a split or merge leaves.
+func TestCompileNamedAddresses(t *testing.T) {
+	cases := []struct {
+		name  string
+		rules []Rule
+		want  []string
+	}{
+		{
+			name: "adjacent named addresses stay enforceable after merging",
+			rules: []Rule{
+				rule(t, "a", ScopeProvider, "", "ip", "10.0.0.4", Allow),
+				rule(t, "b", ScopeProvider, "", "ip", "10.0.0.5", Allow),
+			},
+			want: []string{"10.0.0.4", "10.0.0.5"},
+		},
+		{
+			name: "a named address inside an allowed range is kept",
+			rules: []Rule{
+				rule(t, "range", ScopeClient, "acme", "cidr", "10.0.0.0/24", Allow),
+				rule(t, "one", ScopeEndpoint, "pos-04", "ip", "10.0.0.9", Allow),
+			},
+			want: []string{"10.0.0.9"},
+		},
+		{
+			name: "a deny in a range opens no neighbour",
+			rules: []Rule{
+				rule(t, "range", ScopeClient, "acme", "cidr", "10.0.0.0/24", Allow),
+				rule(t, "deny", ScopeEndpoint, "pos-04", "ip", "10.0.0.5", Deny),
+			},
+			want: []string{},
+		},
+		{
+			name: "a named address that is denied is left out",
+			rules: []Rule{
+				rule(t, "one", ScopeSite, "store-12", "ip", "10.0.0.9", Allow),
+				rule(t, "deny", ScopeEndpoint, "pos-04", "cidr", "10.0.0.8/30", Deny),
+			},
+			want: []string{},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := []string{}
+			for _, a := range Compile(pos04, c.rules, now).Addresses {
+				got = append(got, a.String())
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("addresses = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

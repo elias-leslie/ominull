@@ -173,6 +173,9 @@ func Normalize(r Rule) (Rule, error) {
 			return bad("value is not a CIDR prefix")
 		}
 		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return bad("an IPv4-mapped prefix must be /96 or longer")
+			}
 			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
 		p = p.Masked()
@@ -338,6 +341,11 @@ type Policy struct {
 	// Withheld lists port-, protocol- or direction-scoped allow rules: the
 	// isolation allow list names addresses only, so they are not in Allow.
 	Withheld []Withheld `json:"withheld,omitempty"`
+	// Addresses are the single addresses an allow rule names and the policy
+	// allows: what an agent that takes only literal addresses may be given.
+	// An address that is merely inside an allowed range is not one of them,
+	// so a deny elsewhere in a range never opens a neighbour nobody named.
+	Addresses []netip.Addr `json:"addresses"`
 }
 
 // Compile turns the rules that apply to an endpoint into its address allow
@@ -390,6 +398,20 @@ func Compile(ep Endpoint, rules []Rule, now time.Time) Policy {
 		walk(r.Prefix())
 	}
 	policy.Allow = mergePrefixes(policy.Allow)
+	policy.Addresses = []netip.Addr{}
+	named := map[netip.Addr]bool{}
+	for _, r := range applicable {
+		if p := r.Prefix(); r.Action == Allow && p.IsSingleIP() && !named[p.Addr()] {
+			named[p.Addr()] = true
+			for _, a := range policy.Allow {
+				if a.Contains(p.Addr()) {
+					policy.Addresses = append(policy.Addresses, p.Addr())
+					break
+				}
+			}
+		}
+	}
+	sort.Slice(policy.Addresses, func(i, j int) bool { return policy.Addresses[i].Less(policy.Addresses[j]) })
 	sort.Slice(policy.Entries, func(i, j int) bool { return lessPrefix(policy.Entries[i].Prefix, policy.Entries[j].Prefix) })
 	policy.Entries = dedupeEntries(policy.Entries)
 	return policy

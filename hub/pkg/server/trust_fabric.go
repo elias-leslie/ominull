@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -71,14 +72,67 @@ func (s *Server) fabricPolicyFor(endpointID string, now time.Time) (fabricPolicy
 		ID: ep.ID, TenantID: ep.TenantID, LocationID: ep.LocationID, Role: ep.RoleTag,
 	}, rules, now)}
 	p.Enforced = []string{}
+	named := map[netip.Addr]bool{}
+	for _, a := range p.Addresses {
+		named[a] = true
+		p.Enforced = append(p.Enforced, a.String())
+	}
 	for _, pre := range p.Allow {
-		if pre.IsSingleIP() {
-			p.Enforced = append(p.Enforced, pre.Addr().String())
-		} else {
+		if !pre.IsSingleIP() || !named[pre.Addr()] {
 			p.NotEnforced = append(p.NotEnforced, pre.String())
 		}
 	}
 	return p, nil
+}
+
+// fabricPin is a selective isolation's expanded fabric, kept under its
+// approval id until the approved request returns. In memory: a hub restart
+// in between means the request is expanded again, and an approval whose
+// list then differs is refused (fails closed) and must be asked for again.
+type fabricPin struct {
+	endpointID  string
+	enforced    []string
+	notEnforced []string
+	at          time.Time
+}
+
+type fabricPinStore struct {
+	mu   sync.Mutex
+	pins map[string]fabricPin
+}
+
+const (
+	fabricPinTTL = 24 * time.Hour
+	fabricPinMax = 1024
+)
+
+func (ps *fabricPinStore) put(approvalID string, p fabricPin) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.pins == nil {
+		ps.pins = map[string]fabricPin{}
+	}
+	now := time.Now()
+	for id, old := range ps.pins {
+		if now.Sub(old.at) > fabricPinTTL || len(ps.pins) >= fabricPinMax {
+			delete(ps.pins, id)
+		}
+	}
+	p.at = now
+	ps.pins[approvalID] = p
+}
+
+func (ps *fabricPinStore) get(approvalID, endpointID string) (fabricPin, bool) {
+	if approvalID == "" {
+		return fabricPin{}, false
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	p, ok := ps.pins[approvalID]
+	if !ok || p.endpointID != endpointID || time.Since(p.at) > fabricPinTTL {
+		return fabricPin{}, false
+	}
+	return p, true
 }
 
 // unionAddrs merges address lists, first occurrence kept.
@@ -118,9 +172,7 @@ func (s *Server) handleTrustRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rule.CreatedBy = r.Header.Get("X-Username")
-		if rule.Source == "" {
-			rule.Source = "operator"
-		}
+		rule.Source = "operator"
 		now := time.Now().UTC()
 		if rule.ExpiresAt != nil && !rule.ExpiresAt.After(now) {
 			writeJSONError(w, http.StatusBadRequest, "expires_at must be in the future")
@@ -283,14 +335,10 @@ func (s *Server) recordIsolationSnapshot(r *http.Request, endpointID, mode strin
 	if rec == nil {
 		return
 	}
-	if mode == "" {
-		mode = isolationModeFull
-		if len(rec.AllowIPs) > 0 {
-			mode = "explicit"
+	if mode == isolationModeSelective {
+		if err := s.store.SetIsolationMode(endpointID, mode); err == nil {
+			rec.Mode = mode
 		}
-	}
-	if err := s.store.SetIsolationMode(endpointID, mode); err == nil {
-		rec.Mode = mode
 	}
 	snap := map[string]any{"isolation_id": rec.ID, "mode": rec.Mode, "allow_ips": rec.AllowIPs}
 	if p, err := s.fabricPolicyFor(endpointID, time.Now().UTC()); err == nil {

@@ -93,6 +93,7 @@ type Server struct {
 	// responseEnabled toggles the unreleased response, evidence, script, terminal,
 	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
 	responseEnabled bool
+	fabricPins      fabricPinStore // selective isolations awaiting approval (trust_fabric.go)
 	// trust caches the authority's public keys and manifests and the agents'
 	// trust reports; see agent_trust.go.
 	trust agentTrustCache

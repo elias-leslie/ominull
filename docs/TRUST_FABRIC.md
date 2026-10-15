@@ -64,8 +64,12 @@ length, then port/protocol), deny on a tie; no match means not trusted.
   what was approved. Without `mode` only the request's own `allow_ips` apply.
   Detector isolation is always full.
 
-Agents enforce single addresses: a trusted range wider than one address is
-listed as not enforced in the approval summary and stays closed. Port- or
+Agents enforce single addresses: only addresses a rule names (`ip`, or a
+`/32` / `/128`) and the policy allows are added; a trusted range is listed as
+not enforced in the approval summary and stays closed. The expansion is kept
+under the approval id, so a rule changed while the owner decides does not
+void the approval (after a hub restart it is expanded again and refused if it
+differs). Port- or
 direction-scoped allows are withheld for the same reason. Each isolation gets
 an id; the fabric as it stood is recorded under it
 (`ISOLATION_FABRIC_SNAPSHOT`), and a rule created or deleted while it is in

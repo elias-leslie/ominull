@@ -72,6 +72,8 @@ type approvalPlan struct {
 	Targets []string
 	Payload []byte // the digested action; nil means route + canonical body + targets
 	Body    []byte // replaces the request body (digested and handed on) when set
+	// OnRequested is told the approval id once one is created for this plan.
+	OnRequested func(approvalID string)
 }
 
 // approvalResolver validates a request and describes it. It writes its own
@@ -210,6 +212,9 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
 				writeJSONError(w, approvalStatus(err), "owner approval could not be requested: "+err.Error())
 				return
+			}
+			if plan.OnRequested != nil {
+				plan.OnRequested(v.ID)
 			}
 			s.approvalWake.notify()
 			s.audit(r, "OWNER_APPROVAL_REQUESTED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s): %s", plan.Action, v.ID, plan.Summary))
@@ -400,16 +405,25 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	}
 	req.AllowIPs = allow
 	var notEnforced []string
+	var onRequested func(string)
 	if mode == isolationModeSelective {
 		// The fabric is expanded here, before approval, so the owner approves
-		// and the agent enforces the same list.
-		p, err := s.fabricPolicyFor(req.EndpointID, time.Now().UTC())
-		if err != nil {
-			writeJSONError(w, http.StatusConflict, "trust fabric: "+err.Error())
-			return nil, false
+		// and the agent enforces the same list. The expansion is pinned to the
+		// approval: when the approved request comes back it is reused, so a
+		// rule changed or expired meanwhile cannot void the approval.
+		approvalID := strings.TrimSpace(r.Header.Get(approvalHeader))
+		pin, pinned := s.fabricPins.get(approvalID, req.EndpointID)
+		if !pinned {
+			p, err := s.fabricPolicyFor(req.EndpointID, time.Now().UTC())
+			if err != nil {
+				writeJSONError(w, http.StatusConflict, "trust fabric: "+err.Error())
+				return nil, false
+			}
+			pin = fabricPin{endpointID: req.EndpointID, enforced: p.Enforced, notEnforced: p.NotEnforced}
+			onRequested = func(id string) { s.fabricPins.put(id, pin) }
 		}
-		req.AllowIPs = unionAddrs(req.AllowIPs, p.Enforced)
-		notEnforced = p.NotEnforced
+		req.AllowIPs = unionAddrs(req.AllowIPs, pin.enforced)
+		notEnforced = pin.notEnforced
 		if nb == nil {
 			nb = body
 		}
@@ -430,7 +444,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	if req.Force {
 		summary += " (readiness gate overridden)"
 	}
-	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb}, true
+	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb, OnRequested: onRequested}, true
 }
 
 func (s *Server) resolveUnisolate(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {

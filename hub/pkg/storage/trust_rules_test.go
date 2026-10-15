@@ -61,3 +61,63 @@ func TestTrustRulesRoundTrip(t *testing.T) {
 		t.Fatalf("second delete = %v", err)
 	}
 }
+
+func TestIsolationRecords(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "iso.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, id := range []string{"ep-1", "ep-2"} {
+		if err := store.UpsertEndpoint(Endpoint{ID: id, TenantID: "default", Hostname: id, OS: "Linux", Status: "online"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := func(id string) IsolationRecord {
+		t.Helper()
+		all, err := store.IsolatedEndpoints()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range all {
+			if r.EndpointID == id {
+				return r
+			}
+		}
+		return IsolationRecord{}
+	}
+
+	if err := store.SetEndpointIsolation("ep-1", true, []string{"10.0.0.9"}); err != nil {
+		t.Fatal(err)
+	}
+	first := rec("ep-1")
+	if first.ID == "" || first.Mode != "explicit" {
+		t.Fatalf("first %+v", first)
+	}
+	if err := store.SetIsolationMode("ep-1", "selective"); err != nil {
+		t.Fatal(err)
+	}
+	// The detector isolating again keeps the incident but drops the list:
+	// the label follows the list, not the earlier choice.
+	if err := store.SetEndpointIsolation("ep-1", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if again := rec("ep-1"); again.ID != first.ID || again.Mode != "full" || len(again.AllowIPs) != 0 {
+		t.Fatalf("again %+v (first %s)", again, first.ID)
+	}
+	if _, err := store.SetBulkIsolation("", "all", "", true, []string{"10.0.0.7"}); err != nil {
+		t.Fatal(err)
+	}
+	if b := rec("ep-2"); b.ID == "" || b.ID == first.ID || b.Mode != "explicit" {
+		t.Fatalf("bulk %+v", b)
+	}
+	if _, err := store.SetBulkIsolation("", "all", "", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEndpointIsolation("ep-1", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if next := rec("ep-1"); next.ID == "" || next.ID == first.ID {
+		t.Fatalf("a new isolation reused id %s", next.ID)
+	}
+}

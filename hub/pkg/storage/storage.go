@@ -1089,8 +1089,10 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []stri
 
 // isolationStartSQL keeps the id of an isolation already in force (a changed
 // allow list is the same incident) and starts a new one otherwise.
+// The mode starts from the allow list given (the one placeholder): explicit
+// with one, full without; the isolate route then names a selective one.
 const isolationStartSQL = "isolation_id = CASE WHEN is_isolated = 1 AND COALESCE(isolation_id, '') != '' THEN isolation_id ELSE lower(hex(randomblob(8))) END, " +
-	"isolation_mode = CASE WHEN is_isolated = 1 AND COALESCE(isolation_mode, '') != '' THEN isolation_mode ELSE 'full' END"
+	"isolation_mode = CASE WHEN ? != '' THEN 'explicit' ELSE 'full' END"
 
 const isolationClearSQL = "isolation_id = '', isolation_mode = ''"
 
@@ -1288,6 +1290,7 @@ func (s *Store) SetBulkIsolation(tenantID string, scope string, value string, is
 	track := isolationClearSQL
 	if isIsolated {
 		track = isolationStartSQL
+		args = append([]interface{}{allow}, args...)
 	}
 	res, err := s.db.Exec("UPDATE endpoints SET "+track+", is_isolated = ?, isolation_allow_ips = ?"+where, args...)
 	if err != nil {
