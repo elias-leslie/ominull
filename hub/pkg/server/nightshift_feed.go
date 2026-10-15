@@ -217,16 +217,37 @@ func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) 
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No new alerts in the last 24 h", nil, unmapped), nil
 	}
-	list, err := s.store.NewOpenAlerts(now.Add(-feedAnomalyWindow), feedAlertMax)
+	// Every alert of the window is judged (up to feedAlertScan), so an alert
+	// that needs the owner is never hidden behind five that are explained.
+	list, err := s.store.NewOpenAlerts(now.Add(-feedAnomalyWindow), feedAlertScan)
 	if err != nil {
 		return feedFinding{}, err
 	}
 	tuning := s.store.GetDetectionTuning()
-	alerts := make([]feedAlert, 0, len(list))
+	var needs, explained []feedAlert
 	sev := ocsfSevInformational
 	for _, a := range list {
-		alerts = append(alerts, describeAlert(a, tuning))
+		d := describeAlert(a, tuning)
+		if d.Expected != "" {
+			// The hub names it as the owner's own automation: listed for the
+			// record, never a reason to page.
+			explained = append(explained, d)
+			continue
+		}
+		needs = append(needs, d)
 		sev = max(sev, alertSeverity(a.Severity))
+	}
+	if len(list) == feedAlertScan && win.Total > feedAlertScan {
+		// Beyond the scan: judge the rest by the window's own counts.
+		for name, n := range win.BySeverity {
+			if n > 0 {
+				sev = max(sev, alertSeverity(name))
+			}
+		}
+	}
+	alerts := append(needs, explained...)
+	if len(alerts) > feedAlertMax {
+		alerts = alerts[:feedAlertMax]
 	}
 	alerts = fitAlerts(alerts)
 	more := max(0, win.Total-len(alerts))

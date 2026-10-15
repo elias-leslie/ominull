@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"ominull/hub/pkg/storage"
@@ -28,6 +29,7 @@ import (
 
 const (
 	feedAlertMax       = 5
+	feedAlertScan      = 200
 	feedCommandMax     = 100
 	feedDestinationMax = 4
 	// feedAlertBytes keeps the summary inside Nightshift's 4 KiB details cap
@@ -48,6 +50,9 @@ type feedAlert struct {
 	// Nightshift keeps source data at most four levels deep.
 	Destinations string `json:"destinations,omitempty"`
 	Cause        string `json:"cause,omitempty"`
+	// Expected is set when the hub explains the alert as the owner's own
+	// automation ("own automation"): it is listed, and it does not page.
+	Expected string `json:"expected,omitempty"`
 }
 
 const secretWord = `(?:pass(?:word|wd|phrase)?|pwd|token|secret|api[_-]?key|auth|bearer|credential|private[_-]?key)`
@@ -62,8 +67,9 @@ var (
 	bearer     = regexp.MustCompile(`(?i)\bbearer\s+[^\s'"]+`)
 	// user:password@ in a URL.
 	urlCredential = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+):[^@\s/]+@`)
-	// Long opaque runs: keys, tokens, hashes.
-	opaqueRun = regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`)
+	// Long opaque runs (keys, tokens, hashes): 24+ characters mixing letters
+	// and digits, never a path (no slash) or a hyphenated word.
+	opaqueRun = regexp.MustCompile(`[A-Za-z0-9+_=]{24,}`)
 )
 
 // sanitizeCommand redacts anything secret-looking and shortens the command
@@ -75,7 +81,12 @@ func sanitizeCommand(cmd string) string {
 	cmd = bearer.ReplaceAllString(cmd, "Bearer ***")
 	cmd = secretAssign.ReplaceAllString(cmd, "$1$2***")
 	cmd = secretFlag.ReplaceAllString(cmd, "$1 ***")
-	cmd = opaqueRun.ReplaceAllString(cmd, "***")
+	cmd = opaqueRun.ReplaceAllStringFunc(cmd, func(run string) string {
+		if strings.ContainsAny(run, "0123456789") && strings.IndexFunc(run, unicode.IsLetter) >= 0 {
+			return "***"
+		}
+		return run
+	})
 	if utf8.RuneCountInString(cmd) > feedCommandMax {
 		r := []rune(cmd)
 		cmd = strings.TrimSpace(string(r[:feedCommandMax-1])) + "…"
@@ -141,6 +152,9 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		out.What = fmt.Sprintf("%s on %s connected to %s on the local network within a minute%s", who, host, plural(n, "host", "hosts"), portPhrase(ports))
 		if proc == "ssh" && ev.AdminRule != "" && tuning.IsAdminFanoutSource(a.EndpointID) {
 			out.Cause = "Probably your own ssh use from this workstation. It still alerted because " + ev.AdminRule
+			if ownSSH(ev) {
+				out.Expected = "own automation"
+			}
 		}
 	case "PORT_SCAN_RECON":
 		out.What = fmt.Sprintf("%s on %s tried many different ports on %s within 10 seconds", who, host, orUnknown(a.DstIP))
@@ -166,6 +180,23 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		out.What = fmt.Sprintf("%s on %s", strings.TrimSpace(a.Title), host)
 	}
 	return out
+}
+
+// ownSSH: the admin rule failed only because a host was not inventoried
+// (ssh, from an admin workstation, port 22 only, within the host limit), which
+// is the owner's own ssh to a machine OmniNull does not know yet.
+func ownSSH(ev alertEvidence) bool {
+	if !strings.HasSuffix(ev.AdminRule, " is not an inventoried host") || len(ev.Targets) == 0 {
+		return false
+	}
+	for _, t := range ev.Targets {
+		for _, p := range t.Ports {
+			if p != 22 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func joinInts(v []int) string {
