@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"regexp"
 	"sort"
@@ -320,5 +323,54 @@ func TestConsoleSpriteReferencesResolve(t *testing.T) {
 	if len(missing) > 0 {
 		t.Fatalf("app.js references sprite symbols index.html does not define: %s",
 			strings.Join(sortedMissing(missing), ", "))
+	}
+}
+
+// TestConsoleAssetsServeGzip pins compression of the static console assets:
+// a gzip-accepting browser gets the compressed body under its own validator,
+// anything else gets the identity bytes, and both carry Vary.
+func TestConsoleAssetsServeGzip(t *testing.T) {
+	t.Parallel()
+	s := &Server{agentVersion: "9.9.9"}
+	plain := httptest.NewRecorder()
+	s.handleConsoleAsset(plain, httptest.NewRequest("GET", "/app.js", nil))
+	req := httptest.NewRequest("GET", "/app.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	zipped := httptest.NewRecorder()
+	s.handleConsoleAsset(zipped, req)
+
+	if plain.Header().Get("Content-Encoding") != "" || zipped.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("encodings: plain %q, gzip %q", plain.Header().Get("Content-Encoding"), zipped.Header().Get("Content-Encoding"))
+	}
+	if plain.Header().Get("Vary") != "Accept-Encoding" || zipped.Header().Get("Vary") != "Accept-Encoding" {
+		t.Error("compressible asset does not vary on Accept-Encoding")
+	}
+	if plain.Header().Get("ETag") == zipped.Header().Get("ETag") {
+		t.Error("identity and gzip bodies share an ETag")
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(zipped.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _ := io.ReadAll(zr)
+	if !bytes.Equal(decoded, plain.Body.Bytes()) || zipped.Body.Len()*3 > plain.Body.Len() {
+		t.Errorf("gzip body decodes to %d bytes (identity %d), wire %d", len(decoded), plain.Body.Len(), zipped.Body.Len())
+	}
+
+	again := httptest.NewRequest("GET", "/app.js", nil)
+	again.Header.Set("Accept-Encoding", "gzip")
+	again.Header.Set("If-None-Match", zipped.Header().Get("ETag"))
+	revalidated := httptest.NewRecorder()
+	s.handleConsoleAsset(revalidated, again)
+	if revalidated.Code != 304 {
+		t.Errorf("revalidation with the gzip ETag answered %d", revalidated.Code)
+	}
+
+	font := httptest.NewRequest("GET", "/fonts/plex-mono-400.woff2", nil)
+	font.Header.Set("Accept-Encoding", "gzip")
+	fontRec := httptest.NewRecorder()
+	s.handleConsoleAsset(fontRec, font)
+	if fontRec.Header().Get("Content-Encoding") != "" {
+		t.Error("an already-compressed font was gzipped again")
 	}
 }

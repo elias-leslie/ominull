@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -35,6 +36,9 @@ type consoleAsset struct {
 	body        []byte
 	contentType string
 	etag        string
+	// gzipped is the body compressed once at load, for text assets where it
+	// saves something. app.js alone went over the wire at 551 KB uncompressed.
+	gzipped []byte
 }
 
 var (
@@ -77,11 +81,17 @@ func loadConsole() {
 			return nil
 		}
 		sum := sha256.Sum256(body)
-		consoleAssets[name] = consoleAsset{
+		asset := consoleAsset{
 			body:        body,
 			contentType: consoleContentType(name),
 			etag:        `"` + hex.EncodeToString(sum[:8]) + `"`,
 		}
+		// An asset with serve-time substitutions is compressed per response
+		// shape elsewhere; only static bodies are compressed here.
+		if !bytes.Contains(body, []byte(hubVersionPlaceholder)) {
+			asset.gzipped = gzipConsoleBody(asset.contentType, body)
+		}
+		consoleAssets[name] = asset
 		return nil
 	})
 	if err != nil {
@@ -89,6 +99,22 @@ func loadConsole() {
 		// walk only fails if the embedded tree is malformed.
 		panic("ominull: embedded console is unreadable: " + err.Error())
 	}
+}
+
+// gzipConsoleBody compresses a text asset, or returns nil when the type is
+// already compressed (fonts, images) or compression would not save a tenth.
+func gzipConsoleBody(contentType string, body []byte) []byte {
+	if !strings.HasPrefix(contentType, "text/") && contentType != "application/manifest+json" && contentType != "image/svg+xml" {
+		return nil
+	}
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	_, _ = zw.Write(body)
+	_ = zw.Close()
+	if buf.Len() > len(body)*9/10 {
+		return nil
+	}
+	return buf.Bytes()
 }
 
 func consoleContentType(name string) string {
@@ -255,7 +281,17 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 
 	setConsoleSecurityHeaders(w, "")
 	w.Header().Set("Content-Type", asset.contentType)
-	w.Header().Set("ETag", asset.etag)
+	body, etag := asset.body, asset.etag
+	if asset.gzipped != nil {
+		// Each encoding is its own representation with its own validator, so
+		// a cache never answers a gzip request with identity bytes or back.
+		w.Header().Set("Vary", "Accept-Encoding")
+		if acceptsGzip(r.Header.Get("Accept-Encoding")) {
+			body, etag = asset.gzipped, strings.TrimSuffix(asset.etag, `"`)+`-gz"`
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+	}
+	w.Header().Set("ETag", etag)
 	// Revalidate every load: the console ships with the binary, so a hub
 	// upgrade must not leave an operator on a cached stylesheet from the
 	// previous build.
@@ -271,11 +307,11 @@ func (s *Server) handleConsoleAsset(w http.ResponseWriter, r *http.Request) {
 	// resolves the asset exactly as before.
 	w.Header().Set("Cache-Control", "no-cache")
 
-	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, asset.etag) {
+	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Write(asset.body)
+	w.Write(body)
 }
 
 // consoleAssetFor resolves one embedded asset, applying the serve-time
