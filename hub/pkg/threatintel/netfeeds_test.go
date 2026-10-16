@@ -310,3 +310,38 @@ func TestAFeedThatDoesNotMatchItsPinIsRefused(t *testing.T) {
 		t.Fatalf("a body that does not match its pin was accepted: %v", entries)
 	}
 }
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// A feed that fails one refresh keeps its previous rows. Without them the
+// built-in table answers for GCP customer space as Google LLC, a vendor, and
+// every rented VM there would be a quiet owner until the feed came back.
+func TestAFailedFeedKeepsItsPreviousRows(t *testing.T) {
+	client := &http.Client{Transport: failingTransport{}}
+	rented := netip.MustParseAddr("34.70.1.1")
+	tenancy := func(entries []NetworkPrefix) string {
+		rec, _ := buildTable(entries, "test").lookup(rented)
+		return rec.Tenancy
+	}
+	alone, label, err := mergeFeeds(context.Background(), client, nil)
+	if err == nil || label != "built-in" || tenancy(alone) != TenancyVendor {
+		t.Fatalf("with nothing to keep: label %q, tenancy %q, err %v", label, tenancy(alone), err)
+	}
+	previous := []NetworkPrefix{
+		{Prefix: "34.70.0.0/16", ASN: "AS396982", Org: "Google Cloud (customer range)", Tenancy: TenancyHosting, Source: "google-cloud"},
+		{Prefix: "198.51.100.0/24", ASN: "AS64500", Org: "retired feed", Tenancy: TenancyVendor, Source: "no-longer-a-feed"},
+	}
+	merged, label, err := mergeFeeds(context.Background(), client, previous)
+	if err == nil || label != "previous feeds (all unavailable)" || tenancy(merged) != TenancyHosting {
+		t.Fatalf("kept rows: label %q, tenancy %q, err %v", label, tenancy(merged), err)
+	}
+	for _, e := range merged {
+		if e.Source == "no-longer-a-feed" {
+			t.Fatal("rows of a feed that is no longer configured were carried forward")
+		}
+	}
+}

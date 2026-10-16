@@ -111,13 +111,34 @@ func mispList(name string) string {
 // built-in table, and swaps the result in. The built-in entries stay underneath
 // as the floor: a feed that disappears cannot take an owner's attribution with
 // it, and a hub with no internet resolves from them alone.
-func SyncNetworkAttribution(ctx context.Context, client *http.Client) ([]NetworkPrefix, AttributionStatus, error) {
+//
+// previous is the table in force (the stored snapshot). A feed that fails
+// keeps its rows from there: the built-in table tags Google's and Microsoft's
+// whole blocks as the vendor, so dropping the google-cloud or Azure feed for
+// one refresh would otherwise make every rented VM inside them a quiet owner.
+func SyncNetworkAttribution(ctx context.Context, client *http.Client, previous []NetworkPrefix) ([]NetworkPrefix, AttributionStatus, error) {
+	merged, label, firstErr := mergeFeeds(ctx, client, previous)
+	status, err := LoadAttribution(merged, label)
+	if err != nil {
+		return nil, status, err
+	}
+	log.Printf("[+] Network attribution: %d prefixes in force (%s)", status.Count, label)
+	return merged, status, firstErr
+}
+
+// mergeFeeds is SyncNetworkAttribution without the swap: the built-in table,
+// each feed that answered, and the previous rows of each feed that did not.
+func mergeFeeds(ctx context.Context, client *http.Client, previous []NetworkPrefix) ([]NetworkPrefix, string, error) {
 	if client == nil {
 		client = &http.Client{Timeout: feedTimeout}
 	}
+	kept := map[string][]NetworkPrefix{}
+	for _, e := range previous {
+		kept[e.Source] = append(kept[e.Source], e)
+	}
 
 	merged := BuiltinAttribution()
-	fetched, failed := 0, 0
+	fetched, failed, carried := 0, 0, 0
 	var firstErr error
 
 	for _, feed := range networkFeeds() {
@@ -127,28 +148,26 @@ func SyncNetworkAttribution(ctx context.Context, client *http.Client) ([]Network
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", feed.name, err)
 			}
-			log.Printf("[-] Network attribution feed %s could not be refreshed: %v", feed.name, err)
+			last := kept[feed.name]
+			carried += len(last)
+			merged = append(merged, last...)
+			log.Printf("[-] Network attribution feed %s could not be refreshed, keeping its %d previous prefixes: %v", feed.name, len(last), err)
 			continue
 		}
 		fetched += len(entries)
 		merged = append(merged, entries...)
 	}
-
-	status, err := LoadAttribution(merged, attributionSourceLabel(fetched, failed))
-	if err != nil {
-		return nil, status, err
-	}
-	log.Printf("[+] Network attribution: %d prefixes in force (%d from published feeds, %d feeds unavailable)",
-		status.Count, fetched, failed)
-	return merged, status, firstErr
+	return merged, attributionSourceLabel(fetched, failed, carried), firstErr
 }
 
-func attributionSourceLabel(fetched, failed int) string {
-	if fetched == 0 {
+func attributionSourceLabel(fetched, failed, carried int) string {
+	switch {
+	case fetched == 0 && carried == 0:
 		return "built-in"
-	}
-	if failed > 0 {
-		return fmt.Sprintf("published feeds (%d unavailable)", failed)
+	case fetched == 0:
+		return "previous feeds (all unavailable)"
+	case failed > 0:
+		return fmt.Sprintf("published feeds (%d unavailable, previous kept)", failed)
 	}
 	return "published feeds"
 }
@@ -505,7 +524,18 @@ func (m *Manager) restoreAttribution() {
 }
 
 func (m *Manager) refreshAttribution(ctx context.Context) {
-	entries, status, err := SyncNetworkAttribution(ctx, m.httpClient)
+	stored, err := m.store.ListNetworkAttribution()
+	if err != nil {
+		log.Printf("[-] The stored network attribution could not be read; a feed that fails now keeps nothing: %v", err)
+	}
+	previous := make([]NetworkPrefix, 0, len(stored))
+	for _, r := range stored {
+		previous = append(previous, NetworkPrefix{
+			Prefix: r.Prefix, Country: r.Country, CountryName: r.CountryName,
+			ASN: r.ASN, Org: r.Org, Tenancy: r.Tenancy, Source: r.Source,
+		})
+	}
+	entries, status, err := SyncNetworkAttribution(ctx, m.httpClient, previous)
 	if err != nil && entries == nil {
 		// Every feed failed and nothing was swapped in. Whatever was already in
 		// force stays in force; this is a diagnostics warning, not an outage.
