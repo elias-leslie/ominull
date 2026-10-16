@@ -619,6 +619,55 @@ static void test_actor(void) {
     check(strcmp(enr.actor, "agent:claude:fb39ca7b") == 0, "enrichment carries the actor", enr.actor);
 }
 
+static void test_path_names_running(void) {
+    printf("[*] Testing that a reported path names the running file...\n");
+    init_mock_proc();
+    const char a[] = "listed build", b[] = "an implant";
+    create_file("bin/listed", a, sizeof(a));
+    create_file("bin/implant", b, sizeof(b));
+    char listed[512], implant[512];
+    mock_path(listed, sizeof(listed), "bin/listed");
+    mock_path(implant, sizeof(implant), "bin/implant");
+    struct stat stListed, stImplant;
+    check(stat(listed, &stListed) == 0 && stat(implant, &stImplant) == 0, "Sample files stat", NULL);
+
+    check(ProcessLineage_PathNamesRunning(listed, &stListed, false), "The listed file at its own path is its path", NULL);
+    // A user namespace bind mount: the kernel reports the listed path, the file is the implant.
+    check(!ProcessLineage_PathNamesRunning(listed, &stImplant, true), "Another file behind a listed path is a mismatch", NULL);
+    // A container's own path names nothing on the host.
+    check(!ProcessLineage_PathNamesRunning("/nonexistent/in-container/rclone", &stListed, true), "A path the host lacks is a mismatch", NULL);
+    // Deleted since it started: trusted only in the host's mount namespace.
+    check(ProcessLineage_PathNamesRunning("/opt/google/chrome/chrome (deleted)", &stListed, true), "An upgraded browser left running keeps its path", NULL);
+    check(!ProcessLineage_PathNamesRunning("/usr/bin/dbus-daemon (deleted)", &stImplant, false), "A deleted file in another mount namespace is a mismatch", NULL);
+
+    // Mount namespaces compared against pid 1's.
+    create_file("ns-host", "h", 1);
+    create_file("ns-other", "o", 1);
+    char nsHost[512], nsOther[512], link[1024];
+    mock_path(nsHost, sizeof(nsHost), "ns-host");
+    mock_path(nsOther, sizeof(nsOther), "ns-other");
+    const char* pids[] = {"1", "300", "301"};
+    const char* targets[] = {nsHost, nsHost, nsOther};
+    for (int i = 0; i < 3; i++) {
+        char dir[512];
+        mock_path(dir, sizeof(dir), pids[i]);
+        mkdir(dir, 0755);
+        snprintf(link, sizeof(link), "%s/ns", dir);
+        mkdir(link, 0755);
+        snprintf(link, sizeof(link), "%s/ns/mnt", dir);
+        if (symlink(targets[i], link) != 0) perror("symlink ns");
+    }
+    check(ProcessLineage_InHostMountNamespace(300), "Same mount namespace as pid 1", NULL);
+    check(!ProcessLineage_InHostMountNamespace(301), "Another mount namespace", NULL);
+    check(!ProcessLineage_InHostMountNamespace(302), "An unreadable namespace is not the host's", NULL);
+
+    // End to end: a mock exe link reads and stats as the same file, so nothing is flagged.
+    make_mock_exe("300", listed);
+    PROCESS_ENRICHMENT enr;
+    ProcessLineage_InspectProcess(300, &enr);
+    check(strcmp(enr.attribution_status, "path_mismatch") != 0, "A process at its own path is not flagged", enr.attribution_status);
+}
+
 int main(void) {
     printf("=== Ominull Linux Endpoint Process Lineage & Hashing Test Suite ===\n");
 
@@ -630,6 +679,7 @@ int main(void) {
     test_process_lineage_and_pid_reuse();
     test_json_escaping();
     test_actor();
+    test_path_names_running();
 
     cleanup_mock_proc();
 

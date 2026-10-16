@@ -42,7 +42,7 @@ typedef struct {
     char command_line[1024];
     char user_identity[64];
     char executable_sha256[65];
-    char attribution_status[32]; // authoritative, inferred_cached, race_suspected, permission_denied, unknown
+    char attribution_status[32]; // authoritative, inferred_cached, race_suspected, permission_denied, path_mismatch, unknown
     char actor[160];             // agent:claude:<aico widget>, service:nightshift:<unit>, or empty (see ProcessLineage_ReadActor)
     int64_t observed_at;
 } PROCESS_ENRICHMENT;
@@ -596,6 +596,46 @@ static inline bool ProcessLineage_HashExecutable(uint32_t pid, char* outHex, siz
     return true;
 }
 
+/* Whether exe, the path the kernel reports for a running executable, names in
+ * the host's view the file that runs (running, from stat of /proc/PID/exe).
+ * A login user can bind-mount any program over a listed path inside a user
+ * namespace of its own: /proc/PID/exe then reads as the listed path while the
+ * file is another one, or the path names nothing on the host (a container's
+ * own path). An executable deleted since it started (a package upgraded under
+ * a running program) cannot be compared; it counts only in the host's mount
+ * namespace, where no bind mount put it at that path. */
+static inline bool ProcessLineage_PathNamesRunning(const char* exe, const struct stat* running, bool hostMountNamespace) {
+    static const char deleted[] = " (deleted)";
+    size_t len = strlen(exe);
+    if (len > sizeof(deleted) - 1 && strcmp(exe + len - (sizeof(deleted) - 1), deleted) == 0) return hostMountNamespace;
+    struct stat named;
+    return stat(exe, &named) == 0 && named.st_dev == running->st_dev && named.st_ino == running->st_ino;
+}
+
+/* Whether pid shares the mount namespace of pid 1 (the host's). */
+static inline bool ProcessLineage_InHostMountNamespace(uint32_t pid) {
+    char suffix[64], path[512];
+    struct stat host, own;
+    ProcessLineage_ProcPath(path, sizeof(path), "1/ns/mnt");
+    if (stat(path, &host) != 0) return false;
+    snprintf(suffix, sizeof(suffix), "%u/ns/mnt", pid);
+    ProcessLineage_ProcPath(path, sizeof(path), suffix);
+    return stat(path, &own) == 0 && own.st_dev == host.st_dev && own.st_ino == host.st_ino;
+}
+
+/* False only when pid's reported executable path is shown not to name the
+ * file it runs; a process that has gone, or has no executable, says nothing. */
+static inline bool ProcessLineage_PathIsHostPath(uint32_t pid) {
+    char suffix[64], link[512], exe[PATH_MAX];
+    snprintf(suffix, sizeof(suffix), "%u/exe", pid);
+    ProcessLineage_ProcPath(link, sizeof(link), suffix);
+    ssize_t n = readlink(link, exe, sizeof(exe) - 1);
+    struct stat running;
+    if (n <= 0 || stat(link, &running) != 0) return true;
+    exe[n] = '\0';
+    return ProcessLineage_PathNamesRunning(exe, &running, ProcessLineage_InHostMountNamespace(pid));
+}
+
 /* Enriches a process with full lineage and executable hashing */
 static inline bool ProcessLineage_InspectProcess(uint32_t pid, PROCESS_ENRICHMENT* outEnrichment) {
     if (!outEnrichment) return false;
@@ -641,6 +681,10 @@ static inline bool ProcessLineage_InspectProcess(uint32_t pid, PROCESS_ENRICHMEN
         if (outEnrichment->attribution_status[0] == '\0') {
             snprintf(outEnrichment->attribution_status, sizeof(outEnrichment->attribution_status), "%s", hashStatus[0] ? hashStatus : "unknown");
         }
+    }
+    // The hub matches quiet entries by path; this process's path is not its file.
+    if (!ProcessLineage_PathIsHostPath(pid)) {
+        snprintf(outEnrichment->attribution_status, sizeof(outEnrichment->attribution_status), "path_mismatch");
     }
 
     return true;

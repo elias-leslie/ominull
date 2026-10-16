@@ -951,3 +951,30 @@ func TestADaemonPathRunAsALoginUserIsStillJudged(t *testing.T) {
 		}
 	}
 }
+
+// Expected clients and pairs name a program by path alone, and a login user can
+// present any program at a listed path through a user namespace bind mount.
+// The agent reports such a process as path_mismatch, and then no path-based
+// entry speaks for it: an implant shown as Chrome beaconing to Cloudflare is
+// judged, while the real Chrome stays quiet.
+func TestAPathTheAgentCouldNotMatchToItsFileVouchesForNothing(t *testing.T) {
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	run := func(status string) int {
+		engine, store := noiseEngine(t)
+		for i := 0; i < 40; i++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: "linux-chrome", Timestamp: start.Add(time.Duration(i) * time.Minute),
+				Action: "PERMIT", Direction: "OUTBOUND",
+				DstIP: "104.16.0.1", DstPort: 443, BytesOut: 1024,
+				ProcessPath: "/opt/google/chrome/chrome", UserIdentity: "kasadis", AttributionStatus: status,
+			})
+		}
+		return len(anomaliesOfType(t, store, "C2_BEACONING"))
+	}
+	if n := run("authoritative"); n != 0 {
+		t.Fatalf("the real Chrome to Cloudflare raised %d beacon finding(s)", n)
+	}
+	if n := run("path_mismatch"); n == 0 {
+		t.Fatal("a program shown at Chrome's path but running another file was vouched for")
+	}
+}

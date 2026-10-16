@@ -4199,6 +4199,9 @@
     } else if (st === "permission_denied") {
       label = "permission denied";
       tip = "OS security boundaries prevented process descriptor or token inspection";
+    } else if (st === "path_mismatch") {
+      label = "path mismatch";
+      tip = "The reported path is not the file this process runs (a bind mount over it, or a container's own path), so quiet lists that name the path do not apply";
     }
     return h("span", { cls: "attribution-badge", "data-status": st, title: tip },
       h("span", { text: label }));

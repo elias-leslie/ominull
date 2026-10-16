@@ -4141,7 +4141,8 @@ input[type="url"] {
   color: var(--warn);
 }
 
-.attribution-badge[data-status="permission_denied"] {
+.attribution-badge[data-status="permission_denied"],
+.attribution-badge[data-status="path_mismatch"] {
   background: rgba(248, 81, 73, 0.15);
   border: 1px solid var(--crit);
   color: var(--crit);

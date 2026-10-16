@@ -496,7 +496,15 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	// Both lists are the operator's, held in the database and shown in the
 	// console, not a table compiled into this file.
-	isTrustedSys := cfg.IsQuietProcess(ev.ProcessPath, ev.ExecutableSHA256, ev.UserIdentity)
+	//
+	// They name programs by path, so a process whose agent found that its
+	// reported path is not the file it runs (a user namespace bind mount over a
+	// listed path, a container's own path) matches none of them.
+	quietPath := ev.ProcessPath
+	if ev.AttributionStatus == pathMismatch {
+		quietPath = ""
+	}
+	isTrustedSys := cfg.IsQuietProcess(quietPath, ev.ExecutableSHA256, ev.UserIdentity)
 	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
 
 	// While a window is open the estate is being described. The findings below
@@ -508,7 +516,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// org alone silenced every process on every port to networks that front a
 	// large part of the web - which is where beaconing hides, not where it is
 	// absent. The beacon and volume detectors below ask this instead.
-	isVouched := cfg.IsVouchedPair(ev.ProcessPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy)
+	isVouched := cfg.IsVouchedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy)
 
 	// A known workload is the finer answer for the novelty detectors: this
 	// program - an interpreter together with what it runs - talking to this
@@ -725,7 +733,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// Rented compute is the exception to the exception: a browser extension or
 	// an injected page calling home to a rented machine is the beacon this
 	// detector is for, and "the browser" was only ever a program name.
-	browserToKnownNetwork := cfg.IsQuietClient(ev.ProcessPath, ev.ExecutableSHA256) && geo.Resolved() &&
+	browserToKnownNetwork := cfg.IsQuietClient(quietPath, ev.ExecutableSHA256) && geo.Resolved() &&
 		geo.Tenancy != threatintel.TenancyHosting
 	// A collection cadence is not a packet cadence. Keep legacy behavior for
 	// older agents, but require one intact socket-I/O observation from new ones.
@@ -881,7 +889,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	if procKey == "" || procKey == "." {
 		procKey = "unknown"
 	}
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath, ev.UserIdentity) {
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
 		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
 		history := e.portHistory[sweepKey]
@@ -941,7 +949,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	destination, _ := netaddr.Parse(ev.DstIP)
 	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
 	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
-		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(ev.ProcessPath, ev.UserIdentity) {
+		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
 
 		e.mu.Lock()
 		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
@@ -1292,6 +1300,11 @@ func firstLine(cmd string) string {
 	}
 	return cmd
 }
+
+// pathMismatch is the attribution status an agent reports when the path the
+// kernel gives for a process's executable does not name, on the host, the file
+// that runs.
+const pathMismatch = "path_mismatch"
 
 // isKnownInfrastructureProcess reports a container runtime or local resolver,
 // by the path it is installed at and the account it runs as, whose job is to
