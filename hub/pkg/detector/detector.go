@@ -520,10 +520,14 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	// A known workload is the finer answer for the novelty detectors: this
 	// program - an interpreter together with what it runs - talking to this
-	// owner is its job. It never reaches the beacon and volume detectors.
+	// owner is its job. It never reaches the beacon and volume detectors. A
+	// program known by a path its agent could not match to the file that runs
+	// has no known workload (vouchedWorkload); the workload still names it in
+	// alert keys and details.
 	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
-	_, isKnownConversation := cfg.KnownWorkloadFor(workload, geo.ASN, geo.Org, geo.Tenancy)
-	_, isKnownService := cfg.KnownService(workload, geo.Org, geo.Tenancy)
+	vouched := vouchedWorkload(ev.ProcessPath, ev.CommandLine, ev.AttributionStatus)
+	_, isKnownConversation := cfg.KnownWorkloadFor(vouched, geo.ASN, geo.Org, geo.Tenancy)
+	_, isKnownService := cfg.KnownService(vouched, geo.Org, geo.Tenancy)
 
 	// Agent runtimes are judged against their own baselines, not excluded.
 	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, now)

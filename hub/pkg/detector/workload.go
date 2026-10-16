@@ -26,11 +26,7 @@ import (
 // is, which is why a known workload still answers to the volume, beacon and
 // threat-intelligence detectors.
 func WorkloadOf(processPath, commandLine string) string {
-	path := strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(processPath, "\\", "/")), " (deleted)")
-	base := filepath.Base(path)
-	if base == "." || base == "/" {
-		base, path = "", ""
-	}
+	path, base := executableOf(processPath)
 	family := interpreterFamily(base)
 	if family == "" {
 		// Any other program is known by where it is installed, not by its name:
@@ -52,6 +48,38 @@ func WorkloadOf(processPath, commandLine string) string {
 		parts = append(parts, target)
 	}
 	return strings.Join(parts, " ")
+}
+
+// executableOf is the reported executable path as WorkloadOf compares it -
+// lower-cased, forward slashes, no " (deleted)" - and its base name.
+func executableOf(processPath string) (path, base string) {
+	path = strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(processPath, "\\", "/")), " (deleted)")
+	base = filepath.Base(path)
+	if base == "." || base == "/" {
+		return "", ""
+	}
+	return path, base
+}
+
+// vouchedWorkload is the workload the known-workload entries are asked about
+// for a process, given the attribution status its agent reported.
+//
+// An installed program is known by its path, and a path the agent could not
+// match to the file that runs (path_mismatch) names nothing: a program
+// bind-mounted over a listed path would otherwise borrow that path's entry,
+// and an AnyOwner entry for a path reaches every destination. So such a
+// process has no workload to vouch for it. An interpreter's workload is its
+// base name and its own command line, which any process can already claim
+// without forging a path - a copy of anything named python3 gets it - and the
+// tuning gives it the narrower reach for that reason, so path_mismatch takes
+// nothing further from it.
+func vouchedWorkload(processPath, commandLine, attributionStatus string) string {
+	if attributionStatus == pathMismatch {
+		if _, base := executableOf(processPath); interpreterFamily(base) == "" {
+			return ""
+		}
+	}
+	return WorkloadOf(processPath, commandLine)
 }
 
 // interpreterFamily groups the interpreters whose command lines WorkloadOf can

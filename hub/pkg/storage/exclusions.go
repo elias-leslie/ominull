@@ -114,14 +114,14 @@ func exclusionRange(v string) (netip.Prefix, bool) {
 	return netip.PrefixFrom(addr, addr.BitLen()), true
 }
 
-// sameProcess compares exact paths. Windows paths compare without case, as
-// the filesystem does; Unix paths compare byte for byte.
 // AttributionPathMismatch is the attribution status an agent reports when the
 // path the kernel gives for a process's executable does not name, on the host,
 // the file that runs (a user namespace bind mount over a listed path, a
 // container's own path).
 const AttributionPathMismatch = "path_mismatch"
 
+// sameProcess compares exact paths. Windows paths compare without case, as
+// the filesystem does; Unix paths compare byte for byte.
 func sameProcess(want, got string) bool {
 	want, got = normalizeProcessPath(want), normalizeProcessPath(got)
 	if windowsDrivePath.MatchString(want) {

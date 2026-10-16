@@ -77,10 +77,11 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 	for _, a := range sorted {
 		ev := replayEvidence(a.Evidence)
 		workload := WorkloadOf(a.ProcessPath, ev.CommandLine)
+		vouched := vouchedWorkload(a.ProcessPath, ev.CommandLine, ev.Attribution)
 		d := ReplayDecision{ID: a.ID, Kept: true}
 		switch a.AnomalyType {
 		case "OFF_HOURS_ACTIVITY":
-			if k, ok := t.KnownService(workload, ev.Owner, ev.Tenancy); ok {
+			if k, ok := t.KnownService(vouched, ev.Owner, ev.Tenancy); ok {
 				d = ReplayDecision{ID: a.ID, Reason: "known service, runs around the clock: " + k.Reason}
 				break
 			}
@@ -106,7 +107,7 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 			} else if owner == "" {
 				key = "firstseen|" + a.TenantID + "|unattributed|" + a.EndpointID
 			}
-			if k, ok := t.KnownWorkloadFor(workload, ev.ASN, ev.Owner, ev.Tenancy); ok {
+			if k, ok := t.KnownWorkloadFor(vouched, ev.ASN, ev.Owner, ev.Tenancy); ok {
 				d = ReplayDecision{ID: a.ID, Reason: "known workload: " + k.Reason}
 				armed := false
 				for _, m := range []map[string]time.Time{lastNovel, lastSilenced} {
@@ -183,6 +184,7 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 
 type replayFields struct {
 	CommandLine string
+	Attribution string
 	ASN         string
 	Owner       string
 	Tenancy     string
@@ -191,6 +193,7 @@ type replayFields struct {
 func replayEvidence(raw string) replayFields {
 	var f struct {
 		CommandLine string `json:"command_line"`
+		Attribution string `json:"attribution_status"`
 		ASN         string `json:"destination_asn"`
 		Owner       string `json:"destination_owner"`
 		Tenancy     string `json:"destination_tenancy"`
@@ -198,5 +201,5 @@ func replayEvidence(raw string) replayFields {
 	if strings.TrimSpace(raw) != "" {
 		_ = json.Unmarshal([]byte(raw), &f)
 	}
-	return replayFields{CommandLine: f.CommandLine, ASN: strings.TrimSpace(f.ASN), Owner: strings.ToLower(strings.TrimSpace(f.Owner)), Tenancy: strings.TrimSpace(f.Tenancy)}
+	return replayFields{CommandLine: f.CommandLine, Attribution: strings.TrimSpace(f.Attribution), ASN: strings.TrimSpace(f.ASN), Owner: strings.ToLower(strings.TrimSpace(f.Owner)), Tenancy: strings.TrimSpace(f.Tenancy)}
 }

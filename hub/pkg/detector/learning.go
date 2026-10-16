@@ -62,8 +62,13 @@ func (e *Engine) observeForLearning(ev storage.Event, ep storage.Endpoint, geo t
 
 	// A program is known by where it is installed and a network by its AS
 	// number, the forms the tuning matches; a name stands in only for an
-	// owner nobody has numbered.
+	// owner nobody has numbered. A path its agent could not match to the file
+	// that runs (path_mismatch) is no program's: learning it would propose a
+	// quiet process or pair for whatever was bind-mounted over that path.
 	proc := storage.ProcessPathKey(ev.ProcessPath)
+	if ev.AttributionStatus == pathMismatch {
+		proc = ""
+	}
 	if proc == "" {
 		proc = "unknown"
 	}

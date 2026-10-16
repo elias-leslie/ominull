@@ -290,3 +290,41 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 		t.Fatalf("before/after = %d/%d, want 7/4", res.Before, res.After)
 	}
 }
+
+// A process whose agent reported path_mismatch has no workload when it would be
+// known by its path, and keeps an interpreter's, which is read from its own
+// command line rather than the path. Replay judges a recorded finding the same
+// way, from the attribution status in its evidence.
+func TestAPathMismatchHasNoPathWorkload(t *testing.T) {
+	if w := vouchedWorkload("/usr/local/bin/synctool", "synctool --push", pathMismatch); w != "" {
+		t.Fatalf("a path_mismatch program was given the workload %q", w)
+	}
+	if w := vouchedWorkload("/usr/local/bin/synctool", "synctool --push", "authoritative"); w != "/usr/local/bin/synctool" {
+		t.Fatalf("an attributed program's workload is %q", w)
+	}
+	if w := vouchedWorkload("/usr/bin/python3", "python3 /srv/app/worker.py", pathMismatch); w != "python3 /srv/app/worker.py" {
+		t.Fatalf("an interpreter's workload under path_mismatch is %q", w)
+	}
+
+	tu := storage.DefaultDetectionTuning()
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool"}}
+	tu, err := storage.PrepareDetectionTuning(tu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 7, 3, 0, 0, 0, time.UTC)
+	ev := func(status string) string {
+		return fmt.Sprintf(`{"attribution_status":%q,"destination_owner":"DigitalOcean, LLC","destination_asn":"AS14061","destination_tenancy":"hosting"}`, status)
+	}
+	res := Replay([]storage.AnomalyAlert{
+		{ID: "real", TenantID: "default", AnomalyType: "NOVEL_DESTINATION", EndpointID: "e", ProcessPath: "/usr/local/bin/synctool", Evidence: ev("authoritative"), Timestamp: at},
+		{ID: "forged", TenantID: "default", AnomalyType: "NOVEL_DESTINATION", EndpointID: "f", ProcessPath: "/usr/local/bin/synctool", Evidence: ev("path_mismatch"), Timestamp: at.Add(2 * time.Hour)},
+	}, tu)
+	kept := map[string]bool{}
+	for _, d := range res.Decisions {
+		kept[d.ID] = d.Kept
+	}
+	if kept["real"] || !kept["forged"] {
+		t.Fatalf("replay kept real=%v forged=%v, want false/true", kept["real"], kept["forged"])
+	}
+}

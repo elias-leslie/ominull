@@ -1009,3 +1009,34 @@ func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
 		t.Fatal("a program shown at the excluded path but running another file was excluded")
 	}
 }
+
+// A known workload for an installed program names it by path too, and an
+// AnyOwner entry for a path reaches every destination, rented compute
+// included. So a program bind-mounted over the listed path, which the agent
+// reports as path_mismatch, is not known by it: its first connection to a
+// hosting network is still a first-seen finding, while the real program's is
+// not.
+func TestAKnownPathWorkloadDoesNotVouchForAPathMismatch(t *testing.T) {
+	run := func(status string) int {
+		engine, store := noiseEngine(t)
+		tuning := store.GetDetectionTuning()
+		tuning.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool"}}
+		if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+			t.Fatalf("saving tuning: %v", err)
+		}
+		engine.Evaluate(storage.Event{
+			TenantID: "default", EndpointID: "linux-sync", Timestamp: time.Now().UTC(),
+			Action: "PERMIT", Direction: "OUTBOUND",
+			// 159.65.0.5 is DigitalOcean: rented compute, never seen before.
+			DstIP: "159.65.0.5", DstPort: 443, BytesOut: 200,
+			ProcessPath: "/usr/local/bin/synctool", UserIdentity: "kasadis", AttributionStatus: status,
+		})
+		return len(anomaliesOfType(t, store, "NOVEL_DESTINATION"))
+	}
+	if n := run("authoritative"); n != 0 {
+		t.Fatalf("the known tool's first connection raised %d first-seen finding(s)", n)
+	}
+	if n := run("path_mismatch"); n != 1 {
+		t.Fatalf("a program shown at the known tool's path but running another file raised %d first-seen finding(s), want 1", n)
+	}
+}

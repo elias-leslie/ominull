@@ -212,6 +212,52 @@ func TestRentedComputeNeverBecomesALearnedPair(t *testing.T) {
 	}
 }
 
+// A path the agent could not match to the file that runs names no program, so
+// learning records neither the program nor a pair for it: a proposal argued
+// from it would vouch for whatever was bind-mounted over that path. What the
+// estate did - the hour, the port, the network - is still counted.
+func TestAPathMismatchIsNeverLearnedAsAProgram(t *testing.T) {
+	engine, store := noiseEngine(t)
+	if err := store.UpsertEndpoint(storage.Endpoint{
+		ID: "linux-06", TenantID: "default", LocationID: "loc-home", Hostname: "linux-06",
+		OS: "Linux", RoleTag: "workstation", Status: "online",
+		LastSeenAt: time.Now().UTC(), CreatedAt: time.Now().UTC().Add(-30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	window, err := store.CreateLearningWindow(storage.LearningWindow{
+		TenantID: "default", ScopeType: storage.LearningScopeEndpoint, ScopeID: "linux-06", StartedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+
+	now := time.Now().UTC()
+	ep, _ := store.GetEndpoint("linux-06")
+	for i := 0; i < 5; i++ {
+		engine.observeForLearning(storage.Event{
+			TenantID: "default", EndpointID: "linux-06", Direction: "OUTBOUND",
+			DstIP: "1.1.1.1", DstPort: 443, ProcessPath: "/opt/google/chrome/chrome", AttributionStatus: pathMismatch,
+		}, *ep, threatintel.GeoRecord{ASN: "AS13335", Org: "Cloudflare, Inc.", Tenancy: storage.TenancySharedCDN}, 14, now)
+	}
+	engine.flushLearning()
+
+	obs, err := store.ListLearningObservations(window.ID, "")
+	if err != nil {
+		t.Fatalf("listing: %v", err)
+	}
+	seen := map[string]int64{}
+	for _, o := range obs {
+		if o.Kind == storage.LearnProcess || o.Kind == storage.LearnPair {
+			t.Fatalf("a path_mismatch process was learned as %s %q", o.Kind, o.Key)
+		}
+		seen[o.Kind+":"+o.Key] += o.Count
+	}
+	if seen[storage.LearnPort+":443"] != 5 || seen[storage.LearnOwner+":as13335"] != 5 || seen[storage.LearnHour+":14"] != 5 {
+		t.Fatalf("the conversation itself was not counted: %v", seen)
+	}
+}
+
 // A window over the whole estate holds behavioural findings only. A
 // threat-list match and a sensitive-port egress are floors: they page inside
 // a window as they do outside it, so even an approved window cannot hide them.
