@@ -369,7 +369,7 @@ func TestNightshiftFeedV2CarriesTypedRecordsWithVerifiedOutcomes(t *testing.T) {
 	if err := store.AcknowledgeAnomaly(add("linux-plain", "NOVEL_COUNTRY", now)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AcknowledgeAnomaliesBatch([]string{add("linux-plain", "ENDPOINT_SILENT", now)}); err != nil {
+	if _, err := store.AcknowledgeFindings("", []string{add("linux-plain", "ENDPOINT_SILENT", now)}, false); err != nil {
 		t.Fatal(err)
 	}
 	// Acked unread, found malicious later: the verdict still lands.

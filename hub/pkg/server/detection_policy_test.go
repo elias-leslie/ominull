@@ -725,3 +725,94 @@ func TestOpeningALearningWindowWaitsForTheOwner(t *testing.T) {
 		t.Fatalf("notes = %v", kinds)
 	}
 }
+
+// Acknowledging or deleting findings hides them from the feed's open counts,
+// so the detection-policy note counts every one, and a tenant key cannot reach
+// another tenant's finding by id.
+func TestAcknowledgedAndDeletedFindingsShowOnTheFeedNote(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	for _, tn := range []storage.Tenant{{ID: "t-alpha", Name: "Alpha", APIKey: "key-alpha", CreatedAt: now}, {ID: "t-beta", Name: "Beta", APIKey: "key-beta", CreatedAt: now}} {
+		if err := store.CreateTenant(tn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range []storage.AnomalyAlert{
+		{ID: "a1", TenantID: "t-alpha", AnomalyType: "C2_BEACONING", Severity: "HIGH"},
+		{ID: "b1", TenantID: "t-beta", AnomalyType: "THREAT_INTEL_MATCH", Severity: "CRITICAL"},
+		{ID: "b2", TenantID: "t-beta", AnomalyType: "NOVEL_DESTINATION", Severity: "MEDIUM"},
+	} {
+		a.Hostname, a.Title, a.Timestamp = "h", "x", now
+		if err := store.CreateAnomalyAlert(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post := func(key, path, body string) map[string]any {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.Header.Set("X-API-Key", key)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d %s", path, body, w.Code, w.Body.String())
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	note := func() feedFinding {
+		t.Helper()
+		findings, err := srv.detectionPolicySection(time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range findings {
+			if f.FindingInfo["uid"] == "ominull.detection.changes" {
+				return f
+			}
+		}
+		t.Fatal("no detection policy note")
+		return feedFinding{}
+	}
+	acked := func(id string) bool {
+		a, err := store.GetAnomalyAlert(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.Acknowledged
+	}
+
+	// Another tenant's finding by id is out of reach, and nothing is noted.
+	if out := post("key-alpha", "/api/v1/anomalies/acknowledge", `{"ids":["b1"]}`); out["acknowledged"] != float64(0) || acked("b1") {
+		t.Fatalf("tenant alpha acknowledged beta's finding: %v", out)
+	}
+	if f := note(); f.StatusID != ocsfStatusResolved {
+		t.Fatalf("nothing was acknowledged yet the note says %+v", f)
+	}
+	if out := post("mock_admin_token", "/api/v1/anomalies/acknowledge", `{"ids":["a1","b1"]}`); out["acknowledged"] != float64(2) {
+		t.Fatalf("admin acknowledge = %v", out)
+	}
+	f := note()
+	dismissed, _ := f.Unmapped["dismissed"].([]map[string]any)
+	if f.StatusID != ocsfStatusNew || len(dismissed) != 1 ||
+		!strings.Contains(f.Message, "2 findings acknowledged (2 HIGH or CRITICAL)") ||
+		!strings.Contains(dismissed[0]["change"].(string), "C2_BEACONING, THREAT_INTEL_MATCH") ||
+		!strings.Contains(dismissed[0]["change"].(string), "credential api-key (unverified)") {
+		t.Fatalf("note after acknowledging = %+v", f)
+	}
+	// A repeat acknowledges nothing new and adds nothing; all, then clear, are counted.
+	post("mock_admin_token", "/api/v1/anomalies/acknowledge", `{"id":"a1"}`)
+	if out := post("mock_admin_token", "/api/v1/anomalies/acknowledge", `{"all":true}`); out["acknowledged"] != float64(1) {
+		t.Fatalf("acknowledge all = %v", out)
+	}
+	if out := post("mock_admin_token", "/api/v1/anomalies/clear", `{}`); out["deleted"] != float64(3) {
+		t.Fatalf("clear = %v", out)
+	}
+	f = note()
+	dismissed, _ = f.Unmapped["dismissed"].([]map[string]any)
+	if len(dismissed) != 3 || f.Message != "3 findings acknowledged (2 HIGH or CRITICAL) and 3 acknowledged findings deleted in the last 24 h" {
+		t.Fatalf("note after clearing = %q %v", f.Message, dismissed)
+	}
+}

@@ -165,6 +165,36 @@ func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID st
 		how, strings.ReplaceAll(c.policy, "_", " "), c.op, c.wording, credentialOf(r)))
 }
 
+// Acknowledging or deleting findings takes them out of the Nightshift feed's
+// open counts, so each one is recorded and the feed's detection-policy note
+// counts them: a finding hidden before the feed read it still shows there.
+const (
+	findingsAcknowledgedAudit = "FINDINGS_ACKNOWLEDGED"
+	findingsClearedAudit      = "FINDINGS_CLEARED"
+)
+
+func (s *Server) auditDismissal(r *http.Request, action, verb string, d storage.Dismissal) {
+	if d.Count == 0 {
+		return
+	}
+	types := ""
+	if len(d.HighTypes) > 0 {
+		types = " (" + strings.Join(d.HighTypes, ", ") + ")"
+	}
+	s.audit(r, action, "findings", fmt.Sprintf("%s %s, %d HIGH or CRITICAL%s; credential %s (unverified)",
+		verb, plural(d.Count, "finding", "findings"), d.High, types, credentialOf(r)))
+}
+
+// dismissalCounts reads back what auditDismissal wrote: findings and how many
+// of them were HIGH or CRITICAL.
+func dismissalCounts(details, verb string) (n, high int) {
+	_, _ = fmt.Sscanf(details, verb+" %d", &n)
+	if i := strings.Index(details, ", "); i >= 0 {
+		_, _ = fmt.Sscanf(details[i+2:], "%d", &high)
+	}
+	return n, high
+}
+
 // tuningChange judges a tuning write. Both sides are compared as saved,
 // without the bookkeeping fields.
 func tuningChange(op string, before, after storage.DetectionTuning) policyChange {
@@ -489,14 +519,38 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 		changes = append(changes, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "target": e.Resource, "change": e.Details})
 	}
-	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "changes": changes}
-	if len(changes) == 0 {
+	dismissed := []map[string]any{}
+	acked, deleted, high := 0, 0, 0
+	for _, kind := range []struct{ action, verb string }{{findingsAcknowledgedAudit, "acknowledged"}, {findingsClearedAudit, "deleted"}} {
+		page, err := s.store.AuditHistory("", 50, "", storage.AuditFilter{Action: kind.action, From: now.Add(-feedAnomalyWindow)})
+		if err != nil {
+			return out, err
+		}
+		for _, e := range page.Entries {
+			n, h := dismissalCounts(e.Details, kind.verb)
+			if kind.action == findingsAcknowledgedAudit {
+				acked, high = acked+n, high+h
+			} else {
+				deleted += n
+			}
+			dismissed = append(dismissed, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
+		}
+	}
+	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "changes": changes, "dismissed": dismissed}
+	if len(changes) == 0 && len(dismissed) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
 		return out, nil
 	}
-	msg := fmt.Sprintf("%s in the last 24 h (%d loosened with the owner's approval, %d tightened)",
-		plural(len(changes), "detection policy change", "detection policy changes"), loosened, len(changes)-loosened)
-	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped))
+	var parts []string
+	if len(changes) > 0 {
+		parts = append(parts, fmt.Sprintf("%s in the last 24 h (%d loosened with the owner's approval, %d tightened)",
+			plural(len(changes), "detection policy change", "detection policy changes"), loosened, len(changes)-loosened))
+	}
+	if len(dismissed) > 0 {
+		parts = append(parts, fmt.Sprintf("%s acknowledged (%d HIGH or CRITICAL) and %d acknowledged findings deleted in the last 24 h",
+			plural(acked, "finding", "findings"), high, deleted))
+	}
+	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil
 }

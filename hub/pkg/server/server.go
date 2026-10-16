@@ -3163,24 +3163,25 @@ func (s *Server) handleAcknowledgeAnomaly(w http.ResponseWriter, r *http.Request
 	}
 
 	tenantID := s.tenantFromRequest(r)
-	var err error
-	if req.All {
-		err = s.store.AcknowledgeAllAnomalies(tenantID)
-	} else if len(req.IDs) > 0 {
-		err = s.store.AcknowledgeAnomaliesBatch(req.IDs)
-	} else if req.ID != "" {
-		err = s.store.AcknowledgeAnomaly(req.ID)
-	} else {
+	var ids []string
+	switch {
+	case req.All:
+	case len(req.IDs) > 0:
+		ids = req.IDs
+	case req.ID != "":
+		ids = []string{req.ID}
+	default:
 		http.Error(w, "missing id, ids, or all parameter", http.StatusBadRequest)
 		return
 	}
-
+	done, err := s.store.AcknowledgeFindings(tenantID, ids, req.All)
+	s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", done)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged"})
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged", "acknowledged": done.Count})
 }
 
 func (s *Server) handleClearAnomalies(w http.ResponseWriter, r *http.Request) {
@@ -3188,13 +3189,14 @@ func (s *Server) handleClearAnomalies(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	tenantID := s.tenantFromRequest(r)
-	if err := s.store.ClearAcknowledgedAnomalies(tenantID); err != nil {
+	done, err := s.store.ClearAcknowledgedAnomalies(s.tenantFromRequest(r))
+	s.auditDismissal(r, findingsClearedAudit, "deleted", done)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "cleared"})
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "cleared", "deleted": done.Count})
 }
 
 /* 7. NETWORK ASSET DISCOVERY & EXTENSIBLE SCANNER HANDLERS */

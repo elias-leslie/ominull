@@ -2123,55 +2123,110 @@ func (s *Store) AcknowledgeAnomaly(id string) error {
 	return err
 }
 
-func (s *Store) AcknowledgeAnomaliesBatch(ids []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Dismissal counts the findings one acknowledge or clear took out of the
+// open list: an operator, a tenant key or an agent holding the admin key can
+// otherwise hide a finding before the Nightshift feed has read it.
+type Dismissal struct {
+	Count int
+	// High counts the HIGH and CRITICAL findings among them; HighTypes names
+	// their types, sorted, each once.
+	High      int
+	HighTypes []string
+}
 
-	if len(ids) == 0 {
-		return nil
+func (d *Dismissal) add(severity, anomalyType string, n int) {
+	d.Count += n
+	if severity != "HIGH" && severity != "CRITICAL" {
+		return
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ?")
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, id := range ids {
-		if _, err := stmt.Exec(id); err != nil {
-			return err
+	d.High += n
+	for _, t := range d.HighTypes {
+		if t == anomalyType {
+			return
 		}
 	}
-	return tx.Commit()
+	d.HighTypes = append(d.HighTypes, anomalyType)
+	sort.Strings(d.HighTypes)
 }
 
-func (s *Store) AcknowledgeAllAnomalies(tenantID string) error {
+// AcknowledgeFindings acknowledges the open findings named by ids, or every
+// open finding when all is set, and returns what it acknowledged. Only
+// findings of tenantID are touched when it is set, by id as well as in bulk.
+func (s *Store) AcknowledgeFindings(tenantID string, ids []string, all bool) (Dismissal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if tenantID != "" {
-		_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE tenant_id = ?", tenantID)
-		return err
+	var out Dismissal
+	tx, err := s.db.Begin()
+	if err != nil {
+		return out, err
 	}
-	_, err := s.db.Exec("UPDATE anomaly_alerts SET acknowledged = 1")
-	return err
+	defer tx.Rollback()
+	scope, args := "", []any{}
+	if tenantID != "" {
+		scope, args = " AND tenant_id = ?", []any{tenantID}
+	}
+	if all {
+		rows, err := tx.Query("SELECT severity, anomaly_type, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0"+scope+
+			" GROUP BY severity, anomaly_type", args...)
+		if err != nil {
+			return out, err
+		}
+		for rows.Next() {
+			var sev, typ string
+			var n int
+			if err := rows.Scan(&sev, &typ, &n); err != nil {
+				rows.Close()
+				return out, err
+			}
+			out.add(sev, typ, n)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return out, err
+		}
+		if _, err := tx.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE acknowledged = 0"+scope, args...); err != nil {
+			return out, err
+		}
+		return out, tx.Commit()
+	}
+	for _, id := range ids {
+		var sev, typ string
+		err := tx.QueryRow("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ? AND acknowledged = 0"+scope+
+			" RETURNING severity, anomaly_type", append([]any{id}, args...)...).Scan(&sev, &typ)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return out, err
+		}
+		out.add(sev, typ, 1)
+	}
+	return out, tx.Commit()
 }
 
-func (s *Store) ClearAcknowledgedAnomalies(tenantID string) error {
+// ClearAcknowledgedAnomalies deletes the acknowledged findings, of tenantID
+// only when it is set, and returns what it deleted.
+func (s *Store) ClearAcknowledgedAnomalies(tenantID string) (Dismissal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	var out Dismissal
+	scope, args := "", []any{}
 	if tenantID != "" {
-		_, err := s.db.Exec("DELETE FROM anomaly_alerts WHERE acknowledged = 1 AND tenant_id = ?", tenantID)
-		return err
+		scope, args = " AND tenant_id = ?", []any{tenantID}
 	}
-	_, err := s.db.Exec("DELETE FROM anomaly_alerts WHERE acknowledged = 1")
-	return err
+	rows, err := s.db.Query("DELETE FROM anomaly_alerts WHERE acknowledged = 1"+scope+" RETURNING severity, anomaly_type", args...)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sev, typ string
+		if err := rows.Scan(&sev, &typ); err != nil {
+			return out, err
+		}
+		out.add(sev, typ, 1)
+	}
+	return out, rows.Err()
 }
 
 /* THREAT INTEL */
