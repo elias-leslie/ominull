@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -814,5 +815,65 @@ func TestAcknowledgedAndDeletedFindingsShowOnTheFeedNote(t *testing.T) {
 	dismissed, _ = f.Unmapped["dismissed"].([]map[string]any)
 	if len(dismissed) != 3 || f.Message != "3 findings acknowledged (2 HIGH or CRITICAL) and 3 acknowledged findings deleted in the last 24 h" {
 		t.Fatalf("note after clearing = %q %v", f.Message, dismissed)
+	}
+}
+
+func feedNote(t *testing.T, srv *Server, uid string) feedFinding {
+	t.Helper()
+	findings, err := srv.detectionPolicySection(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.FindingInfo["uid"] == uid {
+			return f
+		}
+	}
+	t.Fatalf("no %s note", uid)
+	return feedFinding{}
+}
+
+// The note counts every acknowledgement in the window, not one page of them,
+// so a HIGH acknowledgement followed by many small ones is still counted and
+// still listed.
+func TestEveryDismissalInTheWindowIsCounted(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	seed := func(id, typ, sev string) {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "default", AnomalyType: typ, Severity: sev,
+			Hostname: "h", Title: "x", Timestamp: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ack := func(id string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/anomalies/acknowledge", strings.NewReader(`{"id":"`+id+`"}`))
+		r.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("acknowledge %s = %d %s", id, w.Code, w.Body.String())
+		}
+	}
+	seed("crit", "THREAT_INTEL_MATCH", "CRITICAL")
+	ack("crit")
+	for i := 0; i < 60; i++ {
+		id := fmt.Sprintf("low-%02d", i)
+		seed(id, "NOVEL_DESTINATION", "LOW")
+		ack(id)
+	}
+	f := feedNote(t, srv, "ominull.detection.changes")
+	if !strings.HasPrefix(f.Message, "61 findings acknowledged (1 HIGH or CRITICAL)") {
+		t.Fatalf("note = %q", f.Message)
+	}
+	dismissed, _ := f.Unmapped["dismissed"].([]map[string]any)
+	listed := false
+	for _, d := range dismissed {
+		listed = listed || strings.Contains(d["change"].(string), "THREAT_INTEL_MATCH")
+	}
+	if !listed || len(dismissed) != feedDismissedListShown || f.Unmapped["dismissed_omitted"] != 61-feedDismissedListShown {
+		t.Fatalf("listed the CRITICAL row = %v, %d rows, %v omitted", listed, len(dismissed), f.Unmapped["dismissed_omitted"])
 	}
 }

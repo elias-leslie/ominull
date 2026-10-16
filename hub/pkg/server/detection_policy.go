@@ -185,6 +185,32 @@ func (s *Server) auditDismissal(r *http.Request, action, verb string, d storage.
 		verb, plural(d.Count, "finding", "findings"), d.High, types, credentialOf(r)))
 }
 
+// The dismissal list on the feed note: every HIGH or CRITICAL row up to the
+// larger bound, then the newest others up to the smaller.
+const (
+	feedDismissedListShown = 50
+	feedDismissedListMax   = 500
+	feedAuditPagesMax      = 200
+)
+
+// auditWindow reads every audit row of one action since from, newest first,
+// following the pages; complete is false only past feedAuditPagesMax pages.
+func (s *Server) auditWindow(action string, from time.Time) (entries []storage.AuditEntry, complete bool, err error) {
+	cursor := ""
+	for i := 0; i < feedAuditPagesMax; i++ {
+		page, err := s.store.AuditHistory("", 1000, cursor, storage.AuditFilter{Action: action, From: from})
+		if err != nil {
+			return entries, false, err
+		}
+		entries = append(entries, page.Entries...)
+		if page.Next == "" {
+			return entries, true, nil
+		}
+		cursor = page.Next
+	}
+	return entries, false, nil
+}
+
 // dismissalCounts reads back what auditDismissal wrote: findings and how many
 // of them were HIGH or CRITICAL.
 func dismissalCounts(details, verb string) (n, high int) {
@@ -519,24 +545,48 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 		changes = append(changes, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "target": e.Resource, "change": e.Details})
 	}
+	// Every dismissal row in the window is counted, not one page of them: the
+	// console acknowledges one finding per request, so a HIGH acknowledgement
+	// followed by many small ones would otherwise drop out of the totals. The
+	// list keeps every row that dismissed a HIGH or CRITICAL finding and fills
+	// up with the newest of the rest.
 	dismissed := []map[string]any{}
-	acked, deleted, high := 0, 0, 0
+	acked, deleted, high, rows, omitted := 0, 0, 0, 0, 0
+	partial := false
+	var rest []map[string]any
 	for _, kind := range []struct{ action, verb string }{{findingsAcknowledgedAudit, "acknowledged"}, {findingsClearedAudit, "deleted"}} {
-		page, err := s.store.AuditHistory("", 50, "", storage.AuditFilter{Action: kind.action, From: now.Add(-feedAnomalyWindow)})
+		entries, complete, err := s.auditWindow(kind.action, now.Add(-feedAnomalyWindow))
 		if err != nil {
 			return out, err
 		}
-		for _, e := range page.Entries {
+		partial = partial || !complete
+		for _, e := range entries {
 			n, h := dismissalCounts(e.Details, kind.verb)
 			if kind.action == findingsAcknowledgedAudit {
 				acked, high = acked+n, high+h
 			} else {
 				deleted += n
 			}
-			dismissed = append(dismissed, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
+			rows++
+			row := map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details}
+			if h > 0 && len(dismissed) < feedDismissedListMax {
+				dismissed = append(dismissed, row)
+			} else {
+				rest = append(rest, row)
+			}
 		}
 	}
+	for _, row := range rest {
+		if len(dismissed) >= feedDismissedListShown {
+			break
+		}
+		dismissed = append(dismissed, row)
+	}
+	omitted = rows - len(dismissed)
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "changes": changes, "dismissed": dismissed}
+	if omitted > 0 {
+		unmapped["dismissed_omitted"] = omitted
+	}
 	if len(changes) == 0 && len(dismissed) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
@@ -548,8 +598,12 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 			plural(len(changes), "detection policy change", "detection policy changes"), loosened, len(changes)-loosened))
 	}
 	if len(dismissed) > 0 {
-		parts = append(parts, fmt.Sprintf("%s acknowledged (%d HIGH or CRITICAL) and %d acknowledged findings deleted in the last 24 h",
-			plural(acked, "finding", "findings"), high, deleted))
+		atLeast := ""
+		if partial {
+			atLeast = "at least "
+		}
+		parts = append(parts, fmt.Sprintf("%s%s acknowledged (%d HIGH or CRITICAL) and %d acknowledged findings deleted in the last 24 h",
+			atLeast, plural(acked, "finding", "findings"), high, deleted))
 	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil
