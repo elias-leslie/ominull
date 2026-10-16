@@ -601,8 +601,15 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		return out, err
 	}
 	if len(issued) > 0 {
-		rows := make([]map[string]any, 0, len(issued))
-		for _, e := range issued {
+		// Newest first and capped like the dismissed list, so issuing keys in a
+		// loop cannot push the feed past its byte budget.
+		shown := issued
+		if len(shown) > feedDismissedListShown {
+			shown = shown[:feedDismissedListShown]
+			unmapped["relay_key_issued_omitted"] = len(issued) - len(shown)
+		}
+		rows := make([]map[string]any, 0, len(shown))
+		for _, e := range shown {
 			rows = append(rows, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
 		}
 		unmapped["relay_key_issued"] = rows

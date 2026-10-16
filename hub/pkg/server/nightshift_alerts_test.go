@@ -510,3 +510,36 @@ func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
 		t.Fatalf("relay_key_last_issued without a relay-key closure = %v", f.Unmapped["relay_key_last_issued"])
 	}
 }
+
+// Issuing relay keys in a loop cannot grow the note without bound: the list
+// keeps the newest issuances, says how many it left out, and the message
+// still gives the full count.
+func TestRelayKeyIssuanceListIsCapped(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	total := feedDismissedListShown + 7
+	for i := 0; i < total; i++ {
+		if err := store.RecordAudit(storage.AuditEntry{ID: fmt.Sprintf("issue-%03d", i), Username: "admin", Action: relayKeyIssuedAudit,
+			Resource: "nightshift", Details: "Issued the Nightshift approval relay key",
+			Timestamp: now.Add(-time.Duration(total-i) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := feedNote(t, srv, "ominull.detection.changes")
+	issued, _ := f.Unmapped["relay_key_issued"].([]map[string]any)
+	if len(issued) != feedDismissedListShown {
+		t.Fatalf("relay_key_issued has %d rows, want %d", len(issued), feedDismissedListShown)
+	}
+	if got := f.Unmapped["relay_key_issued_omitted"]; fmt.Sprint(got) != "7" {
+		t.Fatalf("relay_key_issued_omitted = %v, want 7", got)
+	}
+	newest := now.Add(-time.Minute).Format(time.RFC3339)
+	if issued[0]["at"] != newest {
+		t.Fatalf("first listed issuance at %v, want the newest %s", issued[0]["at"], newest)
+	}
+	if !strings.Contains(f.Message, fmt.Sprintf("issued %d times in the last 24 h", total)) {
+		t.Fatalf("message = %q, want the full count %d", f.Message, total)
+	}
+}
