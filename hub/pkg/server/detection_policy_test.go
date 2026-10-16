@@ -877,3 +877,36 @@ func TestEveryDismissalInTheWindowIsCounted(t *testing.T) {
 		t.Fatalf("listed the CRITICAL row = %v, %d rows, %v omitted", listed, len(dismissed), f.Unmapped["dismissed_omitted"])
 	}
 }
+
+// A failed acknowledgement rolls back, so it writes no FINDINGS_ACKNOWLEDGED
+// row and the feed note does not count or list a dismissal that never happened.
+func TestAFailedAcknowledgementIsNotNoted(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	for _, id := range []string{"f1", "f2"} {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "default", AnomalyType: "C2_BEACONING",
+			Severity: "HIGH", Hostname: "h", Title: "x", Timestamp: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER reject_f2_ack BEFORE UPDATE ON anomaly_alerts WHEN OLD.id = 'f2'
+		BEGIN SELECT RAISE(ABORT, 'rejected test acknowledgement'); END`); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"ids":["f1","f2"]}`, `{"all":true}`} {
+		if w := adminPost(srv, "/api/v1/anomalies/acknowledge", body, ""); w.Code != http.StatusInternalServerError {
+			t.Fatalf("%s: rejected acknowledgement = %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	page, err := store.AuditHistory("", 100, "", storage.AuditFilter{Action: findingsAcknowledgedAudit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 0 {
+		t.Fatalf("a rolled-back acknowledgement was recorded: %+v", page.Entries)
+	}
+	if f := feedNote(t, srv, "ominull.detection.changes"); f.StatusID != ocsfStatusResolved {
+		t.Fatalf("nothing was acknowledged yet the note says %+v", f)
+	}
+}

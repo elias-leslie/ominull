@@ -197,3 +197,37 @@ func TestBandwidthTimelineMeasuresTrafficRatherThanInventingIt(t *testing.T) {
 		t.Errorf("the timeline shows %d blocked flows and the summary %d; the chart contradicts the figure above it", blocks, sum.TotalBlocks)
 	}
 }
+
+// An acknowledgement is all or nothing: when a later finding fails, the earlier
+// ones roll back, and nothing is returned for a caller to record as acknowledged.
+func TestAFailedAcknowledgementReturnsNothing(t *testing.T) {
+	store := newTestStore(t)
+	for _, id := range []string{"f1", "f2"} {
+		if err := store.CreateAnomalyAlert(AnomalyAlert{ID: id, TenantID: "default", EndpointID: "ws", Hostname: "ws",
+			AnomalyType: "C2_BEACONING", Severity: "HIGH", Title: "x", Timestamp: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_f2_ack BEFORE UPDATE ON anomaly_alerts WHEN OLD.id = 'f2'
+		BEGIN SELECT RAISE(ABORT, 'rejected test acknowledgement'); END`); err != nil {
+		t.Fatal(err)
+	}
+	for _, all := range []bool{false, true} {
+		done, err := store.AcknowledgeFindings("", []string{"f1", "f2"}, all)
+		if err == nil {
+			t.Fatalf("all=%v: the rejected acknowledgement succeeded", all)
+		}
+		if done.Count != 0 || done.High != 0 || len(done.HighTypes) != 0 {
+			t.Fatalf("all=%v: a failed acknowledgement returned %+v", all, done)
+		}
+		if a, err := store.GetAnomalyAlert("f1"); err != nil || a.Acknowledged {
+			t.Fatalf("all=%v: f1 stayed acknowledged after the rollback (%v)", all, err)
+		}
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER reject_f2_ack`); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := store.AcknowledgeFindings("", []string{"f1", "f2"}, false); err != nil || done.Count != 2 || done.High != 2 {
+		t.Fatalf("acknowledgement after the trigger was dropped = %+v %v", done, err)
+	}
+}

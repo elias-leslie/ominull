@@ -2164,56 +2164,61 @@ func (d *Dismissal) Merge(o Dismissal) {
 // AcknowledgeFindings acknowledges the open findings named by ids, or every
 // open finding when all is set, and returns what it acknowledged. Only
 // findings of tenantID are touched when it is set, by id as well as in bulk.
+// It is all or nothing: on any error nothing was acknowledged and the
+// returned Dismissal is empty, so a caller recording it counts nothing.
 func (s *Store) AcknowledgeFindings(tenantID string, ids []string, all bool) (Dismissal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out Dismissal
 	tx, err := s.db.Begin()
 	if err != nil {
-		return out, err
+		return Dismissal{}, err
 	}
 	defer tx.Rollback()
 	scope, args := "", []any{}
 	if tenantID != "" {
 		scope, args = " AND tenant_id = ?", []any{tenantID}
 	}
+	var done Dismissal
 	if all {
 		rows, err := tx.Query("SELECT severity, anomaly_type, COUNT(*) FROM anomaly_alerts WHERE acknowledged = 0"+scope+
 			" GROUP BY severity, anomaly_type", args...)
 		if err != nil {
-			return out, err
+			return Dismissal{}, err
 		}
 		for rows.Next() {
 			var sev, typ string
 			var n int
 			if err := rows.Scan(&sev, &typ, &n); err != nil {
 				rows.Close()
-				return out, err
+				return Dismissal{}, err
 			}
-			out.add(sev, typ, n)
+			done.add(sev, typ, n)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return out, err
+			return Dismissal{}, err
 		}
 		if _, err := tx.Exec("UPDATE anomaly_alerts SET acknowledged = 1 WHERE acknowledged = 0"+scope, args...); err != nil {
-			return out, err
+			return Dismissal{}, err
 		}
-		return out, tx.Commit()
+	} else {
+		for _, id := range ids {
+			var sev, typ string
+			err := tx.QueryRow("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ? AND acknowledged = 0"+scope+
+				" RETURNING severity, anomaly_type", append([]any{id}, args...)...).Scan(&sev, &typ)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return Dismissal{}, err
+			}
+			done.add(sev, typ, 1)
+		}
 	}
-	for _, id := range ids {
-		var sev, typ string
-		err := tx.QueryRow("UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ? AND acknowledged = 0"+scope+
-			" RETURNING severity, anomaly_type", append([]any{id}, args...)...).Scan(&sev, &typ)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return out, err
-		}
-		out.add(sev, typ, 1)
+	if err := tx.Commit(); err != nil {
+		return Dismissal{}, err
 	}
-	return out, tx.Commit()
+	return done, nil
 }
 
 // ClearAcknowledgedAnomalies deletes the acknowledged findings, of tenantID
