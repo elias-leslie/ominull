@@ -229,6 +229,53 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 	}
 }
 
+// runtimeVendors are the runtimes' own services: a runtime talking to its
+// maker is the runtime working, not a new sink.
+var runtimeVendors = map[string]struct {
+	name    string
+	domains []string
+}{
+	"codex":  {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
+	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"}},
+}
+
+// RuntimeVendor names the maker of an agent runtime (a name from
+// agent_runtimes, "claude") when name is one of that maker's own service
+// domains, or "".
+func RuntimeVendor(runtime, name string) string {
+	v, ok := runtimeVendors[strings.ToLower(strings.TrimSpace(runtime))]
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if !ok || name == "" {
+		return ""
+	}
+	for _, d := range v.domains {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return v.name
+		}
+	}
+	return ""
+}
+
+// runtimeToOwnVendor reports a flow from an agent runtime's own executable to
+// its maker's service: Claude Code sending a conversation to api.anthropic.com.
+// Those uploads are megabytes whenever a large context is sent, so a
+// per-connection volume baseline reads every long session as exfiltration;
+// the runtime's volume is judged per hour against its own history
+// (AGENT_UPLOAD_VOLUME) instead. Not when the agent could not match the
+// reported path to the file that runs (path_mismatch), and not on a shared CDN
+// or rented compute address, where the name is borrowed from whatever any
+// client last resolved there and can be another site's.
+func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event, geo threatintel.GeoRecord) bool {
+	if !cfg.AgentEgressOn || ev.AttributionStatus == pathMismatch {
+		return false
+	}
+	if t := strings.TrimSpace(geo.Tenancy); t == storage.TenancyHosting || t == storage.TenancySharedCDN {
+		return false
+	}
+	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
+	return runtime != "" && RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) != ""
+}
+
 func firstNonEmpty(v ...string) string {
 	for _, s := range v {
 		if strings.TrimSpace(s) != "" {

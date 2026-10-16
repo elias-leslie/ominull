@@ -206,10 +206,16 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "AGENT_NEW_DESTINATION":
 		name := firstName(ev.SNI, ev.Domain, titleDestination(a.Title))
 		out.What = fmt.Sprintf("%s on %s reached %s for the first time", who, host, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
-		if vendor := vendorOf(proc, name); vendor != "" {
+		// Claude Code's native build runs as its version number, so the
+		// runtime comes from the tuning's agent_runtimes, not the base name.
+		runtime := tuning.AgentRuntimeOf(a.ProcessPath)
+		if runtime == "" {
+			runtime = proc
+		}
+		if vendor := detector.RuntimeVendor(runtime, name); vendor != "" {
 			// A cause, not an explanation: on a shared CDN address the name
 			// can be any other site's.
-			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)
+			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", runtime, name, vendor)
 		}
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
@@ -320,30 +326,6 @@ var probeShape = regexp.MustCompile(`^(?:\S*/)?(?:ba|z)?sh -c '?(?:timeout \d+ )
 
 func connectProbe(cmd string) bool {
 	return probeShape.MatchString(strings.Join(strings.Fields(cmd), " "))
-}
-
-// vendors are the runtimes' own services: a runtime fetching from its maker
-// is the runtime working, not a new sink.
-var vendors = map[string]struct {
-	name    string
-	domains []string
-}{
-	"codex":  {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
-	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"}},
-}
-
-func vendorOf(proc, name string) string {
-	v, ok := vendors[strings.ToLower(proc)]
-	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	if !ok || name == "" {
-		return ""
-	}
-	for _, d := range v.domains {
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return v.name
-		}
-	}
-	return ""
 }
 
 func firstName(v ...string) string {

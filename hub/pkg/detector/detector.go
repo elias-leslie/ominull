@@ -602,7 +602,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			bwValue /= seconds
 		}
 	}
-	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys {
+	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys &&
+		!runtimeToOwnVendor(cfg, ev, geo) {
 		bwKey := fmt.Sprintf("%q:%q:%d:%q", ev.EndpointID, cleanPath, ev.Protocol, ev.Observation.ByteBasis)
 		e.mu.Lock()
 		stats := e.bwTracker.get(bwKey, func() *bandwidthStats { return &bandwidthStats{} })

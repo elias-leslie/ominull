@@ -228,6 +228,14 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 		codex.Expected != "" || !strings.Contains(codex.Cause, "OpenAI") {
 		t.Fatalf("codex = %+v", codex)
 	}
+	// Claude Code's native build runs as its version number; the runtime comes
+	// from agent_runtimes, so its own service is still named as the cause.
+	claude := describeAlert(storage.AnomalyAlert{ID: "n", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "davion-sidarli",
+		ProcessPath: "/home/u/.local/share/claude/versions/2.1.301", DstIP: "160.79.104.10", DstPort: 443,
+		Evidence: `{"domain":"api.anthropic.com"}`}, storage.DefaultDetectionTuning())
+	if claude.Expected != "" || claude.Cause != "Probably claude itself: api.anthropic.com is Anthropic's own service" {
+		t.Fatalf("native claude = %+v", claude)
+	}
 
 	// A real bypass (curl to a DoH service) is not a connection test, and an
 	// agent running it still asks, saying who and why.

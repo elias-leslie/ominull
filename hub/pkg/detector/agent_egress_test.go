@@ -193,3 +193,58 @@ func TestANameOnSharedHostingIsKeyedWithItsOwner(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Claude Code sends each turn's whole context to api.anthropic.com, a few
+// megabytes whenever a session is long, and its native build runs as its
+// version number. Production raised seven CRITICAL "far more data than usual"
+// pages in a day for exactly that. The runtime's own maker is judged by the
+// runtime's hourly volume, not the per-connection spike; any other process,
+// any other destination, and a path the agent could not match still are.
+func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
+	const claude = "/home/kasadis/.local/share/claude/versions/2.1.301"
+	spike := func(t *testing.T, ev storage.Event) []storage.AnomalyAlert {
+		t.Helper()
+		engine, store := noiseEngine(t)
+		now := time.Now().UTC()
+		for i := 0; i < 40; i++ {
+			base := ev
+			base.Timestamp, base.BytesOut = now.Add(time.Duration(i)*time.Second), 2000+int64(i)
+			engine.Evaluate(base)
+		}
+		ev.Timestamp, ev.BytesOut = now.Add(time.Minute), 150*1024*1024
+		engine.Evaluate(ev)
+		return anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
+	}
+	flow := func(path, ip, domain string) storage.Event {
+		return storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
+			DstIP: ip, DstPort: 443, Domain: domain, ProcessPath: path}
+	}
+
+	own := flow(claude, "160.79.104.10", "api.anthropic.com")
+	if got := spike(t, own); len(got) != 0 {
+		t.Fatalf("claude uploading to its own API raised %d bandwidth alert(s): %q", len(got), got[0].Title)
+	}
+	// Its volume is still judged, against its own hours.
+	engine, store := noiseEngine(t)
+	own.Timestamp, own.BytesOut = time.Now().UTC(), 150*1024*1024
+	engine.Evaluate(own)
+	if got := anomaliesOfType(t, store, "AGENT_UPLOAD_VOLUME"); len(got) != 1 {
+		t.Fatalf("150 MB in an hour from claude raised %d upload-volume alerts, want 1", len(got))
+	}
+
+	mismatch := flow(claude, "160.79.104.10", "api.anthropic.com")
+	mismatch.AttributionStatus = pathMismatch
+	for name, ev := range map[string]storage.Event{
+		"runtime to elsewhere":     flow(claude, "198.51.100.9", "paste.example.net"),
+		"runtime with no name":     flow(claude, "198.51.100.9", ""),
+		"other process to the API": flow("/usr/bin/curl", "160.79.104.10", "api.anthropic.com"),
+		"unmatched path":           mismatch,
+		"look-alike name":          flow(claude, "198.51.100.9", "anthropic.com.example.net"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := spike(t, ev); len(got) != 1 {
+				t.Fatalf("%s raised %d bandwidth alerts, want 1", name, len(got))
+			}
+		})
+	}
+}
