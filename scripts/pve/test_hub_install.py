@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -19,7 +20,9 @@ assert _spec is not None
 hi = importlib.util.module_from_spec(_spec)
 _loader.exec_module(hi)
 
-# pct inside the fixture: state.json holds the installed version; dpkg -i reads the pushed package.
+# pct inside the fixture: state.json holds the installed version and its dpkg status; dpkg -i reads
+# the pushed package. dpkg_fails names the status a failed dpkg -i leaves behind (once); dpkg_leaves
+# the status a dpkg -i that exits 0 leaves.
 FAKE_PCT = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
@@ -36,14 +39,17 @@ argv = args[3:]
 if argv[0] == "dpkg-query":
     if state.get("installed") is None:
         sys.exit(1)
-    print("install ok installed " + state["installed"], end="")
+    print(state.get("status", "install ok installed") + " " + state["installed"], end="")
 elif argv[:2] == ["dpkg", "-i"]:
-    if state.get("dpkg_fails"):
-        sys.exit(1)
     version = subprocess.run(["dpkg-deb", "--field", str(state_dir / "pushed.deb"), "Version"],
                              capture_output=True, text=True, check=True).stdout.strip()
+    failure = state.pop("dpkg_fails", None)
+    if failure is True:
+        sys.exit(1)
     state["installed"] = version
+    state["status"] = failure or state.pop("dpkg_leaves", "install ok installed")
     (state_dir / "state.json").write_text(json.dumps(state))
+    sys.exit(1 if failure else 0)
 elif argv[0] == "ss":
     print("LISTEN 0 4096 *:9443 *:*")
 elif argv[0] in {"rm", "systemctl"}:
@@ -236,6 +242,93 @@ class HubInstallTests(unittest.TestCase):
             self.install("1.8.68", self.signed(deb, "1.8.68"))
         self.assertEqual(self.pin.read_bytes(), self.keys["release"][1])
         self.assertIn(["exec", "150", "--", "rm", "-f", "--", hi.GUEST_DEB], self.calls())
+
+
+    def test_failed_postinst_leaves_a_floor_a_signed_fix_forward_can_clear(self):
+        self.set_state(installed="1.8.67", dpkg_fails="install ok half-configured")
+        broken = self.deb("1.8.68")
+        with self.assertRaisesRegex(hi.Refused, "dpkg -i failed"):
+            self.install("1.8.68", self.signed(broken, "1.8.68"))
+        # The key still reports, so deploy-hub.sh --check and the release preflight pass.
+        self.assertEqual(hi.run(["version"], io.BytesIO())["state"], "half-configured")
+        self.assertEqual(hi.run(["version"], io.BytesIO())["installed"], "1.8.68")
+        (self.state / "calls.log").unlink()
+        old = self.deb("1.8.67")
+        self.assert_refused("older than the installed hub 1.8.68", "1.8.67", self.signed(old, "1.8.67"))
+        # A signed reinstall of the same version (a fix built as 1.8.69 would pass the same floor).
+        self.assertEqual(self.install("1.8.68", self.signed(broken, "1.8.68"))["previous"], "1.8.68")
+        self.assertEqual(hi.run(["version"], io.BytesIO())["state"], "installed")
+
+    def test_reinstreq_package_takes_a_newer_fix_and_odd_states_fail_closed(self):
+        self.set_state(installed="1.8.68", status="install reinstreq half-installed")
+        deb = self.deb("1.8.69")
+        self.assertEqual(self.install("1.8.69", self.signed(deb, "1.8.69"))["installed"], "1.8.69")
+        self.set_state(installed="1.8.67", status="deinstall ok config-files")
+        self.assertIsNone(hi.run(["version"], io.BytesIO())["installed"])
+        for status in ("install ok weird", "install bad installed", "install ok installed 1.8.67 extra"):
+            self.set_state(installed="1.8.67", status=status)
+            with self.subTest(status=status), self.assertRaisesRegex(hi.Refused, "installed hub state"):
+                hi.run(["version"], io.BytesIO())
+
+    def test_a_dpkg_that_leaves_the_package_unconfigured_is_not_an_install(self):
+        self.set_state(installed="1.8.67", dpkg_leaves="install ok unpacked")
+        deb = self.deb("1.8.68")
+        with self.assertRaisesRegex(hi.Refused, "installed version"):
+            self.install("1.8.68", self.signed(deb, "1.8.68"))
+
+    def huge_header(self, kind):
+        """A tar whose first header is a pax (x) or GNU long-name (L) record claiming 400 MiB."""
+        info = tarfile.TarInfo("././@LongLink" if kind == tarfile.GNUTYPE_LONGNAME else "pax")
+        info.type, info.size = kind, 400 * 1024 * 1024
+        return info.tobuf(format=tarfile.GNU_FORMAT if kind == tarfile.GNUTYPE_LONGNAME else tarfile.USTAR_FORMAT)
+
+    def test_oversized_pax_or_long_name_header_is_refused_before_it_is_buffered(self):
+        for kind in (tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME):
+            stream = Endless(self.huge_header(kind))
+            with self.subTest(kind=kind), self.assertRaisesRegex(hi.Refused, "larger than allowed"):
+                hi.run(["install", "1.8.68"], stream)
+            self.assertLess(stream.sent, 2 * hi.HEADER_SLACK)
+            self.assertEqual(list(self.work.glob("install-*")), [])
+            self.assertEqual(self.calls(), [])
+
+    def test_a_stalled_sender_is_dropped_and_frees_the_lock(self):
+        deb = self.deb("1.8.68")
+        files = self.signed(deb, "1.8.68")
+        with patch.object(hi, "RECEIVE_SECONDS", 1):
+            started = time.monotonic()
+            with self.assertRaisesRegex(hi.Refused, "not received within 1 s"):
+                hi.run(["install", "1.8.68"], Stalled(self.stream(files).getvalue()[:700]))
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(list(self.work.glob("install-*")), [])
+        self.assertEqual(self.install("1.8.68", files)["installed"], "1.8.68")
+
+
+class Endless:
+    """prefix, then zeros forever; counts what the reader took."""
+
+    def __init__(self, prefix):
+        self.prefix, self.sent = prefix, 0
+
+    def read(self, size=-1):
+        assert size is not None and size >= 0, "unbounded read"
+        start = self.sent
+        self.sent += size
+        head = self.prefix[start:start + size]
+        return head + b"\0" * (size - len(head))
+
+
+class Stalled:
+    """prefix, then a sender that never sends again."""
+
+    def __init__(self, prefix):
+        self.prefix = prefix
+
+    def read(self, size=-1):
+        if self.prefix:
+            head, self.prefix = self.prefix[:size], self.prefix[size:]
+            return head
+        time.sleep(60)
+        return b""
 
 
 if __name__ == "__main__":

@@ -344,6 +344,14 @@ scripts/test-package-lifecycle.sh
 scripts/release.sh --version "$(scripts/version.sh show)" --canary <linux-id>,<windows-id>
 ```
 
+The hub is installed through Proxmox's hub-install key (`scripts/deploy-hub.sh`,
+installed on Proxmox by root with `scripts/pve/install.sh`). Every hub release,
+`--hub-only` included, needs `OMINULL_HUB_URL`, `OMINULL_ADMIN_KEY` and the hub
+CA, because `release.sh` asks the key which hub is installed before it builds
+or signs anything. Until the key is installed, set
+`OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh` to deploy through the owner's
+root alias as before.
+
 The release workflow checks the isolated package lifecycle, deploys the hub
 first, rolls retained Linux and Windows canaries, waits for native package
 provenance, then rolls the rest. Production credentials and topology come from

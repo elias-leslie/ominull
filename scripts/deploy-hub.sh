@@ -29,6 +29,7 @@ HUB_CA="${OMINULL_HUB_CA:-/etc/ominull/ca.crt}"
 if [ "${1:-}" = --check ]; then
     if ! installed="$(ssh "${ssh_opts[@]}" -- "${ALIAS}" version)"; then
         echo "[-] The hub-install key (${ALIAS}) does not answer; root installs it with scripts/pve/install.sh." >&2
+        echo "    Until then, release with OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh (the owner's root alias)." >&2
         exit 1
     fi
     echo "[*] Hub install key answers: ${installed}"

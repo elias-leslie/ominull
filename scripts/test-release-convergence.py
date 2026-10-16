@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shlex
 import subprocess
+import tempfile
 import threading
 import unittest
 
@@ -259,6 +260,38 @@ class ReleaseConvergence(unittest.TestCase):
         result, requests = self.release([status()], canary=" , ")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(method == "POST" for method, _ in requests))
+
+
+class HubPreflight(unittest.TestCase):
+    """release.sh asks the hub-install key before building; a failure names the interim deploy hook."""
+
+    def preflight(self, override):
+        source = Path(__file__).with_name("release.sh").read_text()
+        start = source.index('if [ "${DO_HUB}" -eq 1 ]; then\n    [ -x "${DEPLOY_CMD}" ]')
+        block = source[start:source.index('if [ -n "${VERSION}" ]; then', start)]
+        with tempfile.TemporaryDirectory() as temp:
+            hook, log = Path(temp) / "deploy-hub.sh", Path(temp) / "calls"
+            hook.write_text('#!/bin/sh\necho "$@" >> "%s"\n[ "$1" != --check ]\n' % log)
+            hook.chmod(0o755)
+            script = "set -euo pipefail\nDO_HUB=1\nDEPLOY_CMD=%s\n" % shlex.quote(str(hook))
+            if override:
+                script += "OMINULL_DEPLOY_CMD=%s\n" % shlex.quote(str(hook))
+            result = subprocess.run(["bash", "-c", script + block + "echo built"], capture_output=True, text=True,
+                                    timeout=10)
+            return result, log.read_text() if log.exists() else ""
+
+    def test_a_key_that_does_not_answer_stops_before_the_build_and_names_the_interim_hook(self):
+        result, calls = self.preflight(override=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(calls, "--check\n")
+        self.assertNotIn("built", result.stdout)
+        self.assertIn("OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh", result.stderr)
+
+    def test_an_explicit_deploy_hook_skips_the_key_check(self):
+        result, calls = self.preflight(override=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(calls, "")
+        self.assertIn("built", result.stdout)
 
 
 if __name__ == "__main__":

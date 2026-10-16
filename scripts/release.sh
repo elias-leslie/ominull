@@ -54,8 +54,11 @@ if [ "${DO_HUB}" -eq 1 ]; then
     }
     # Before anything is built or signed: a hub-install key that does not answer
     # would leave a signed release with nowhere to go.
-    if [ -z "${OMINULL_DEPLOY_CMD:-}" ]; then
-        "${DEPLOY_CMD}" --check
+    # It needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY and the hub CA, --hub-only included.
+    if [ -z "${OMINULL_DEPLOY_CMD:-}" ] && ! "${DEPLOY_CMD}" --check; then
+        echo "[-] Nothing was built or signed. Until root has installed the hub-install key" >&2
+        echo "    (scripts/pve/install.sh), deploy the old way: OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh" >&2
+        exit 1
     fi
 fi
 

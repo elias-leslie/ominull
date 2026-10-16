@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -42,7 +43,13 @@ VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0
 MAX_PACKAGE = 256 * 1024 * 1024
 MAX_SIGNATURE = 4096
 MAX_PIN = 4096
+# Bytes the stream may deliver beyond a member's own data: its padding plus the next
+# header (or the end blocks). A ustar or GNU header is 512 bytes; tarfile reads 10 KiB records.
+HEADER_SLACK = 64 * 1024
+RECEIVE_SECONDS = 600
 READY_SECONDS = 60
+# dpkg states in which the package's files are (partly) on disk: its version is the floor.
+PRESENT = {"installed", "half-installed", "unpacked", "half-configured", "triggers-awaited", "triggers-pending"}
 OWNER = 0  # Only root may name the release key or hold the work directory.
 
 
@@ -108,26 +115,81 @@ def as_tuple(version):
     return tuple(int(part) for part in match.groups())
 
 
-def installed_version():
-    """The hub version in CT 150, or None when no hub package is installed."""
+def installed_state():
+    """(version, dpkg state) of the hub in CT 150; version is None when no hub files are installed.
+
+    A failed maintainer script leaves the package half-configured, unpacked or
+    half-installed. Its version still counts as the floor, so a signed release
+    of the same or a newer version can fix it forward through this key.
+    """
     result = in_guest("dpkg-query", "-W", "-f=${Status} ${Version}", "ominull-hub", timeout=30)
-    text = result.stdout.decode(errors="replace").strip()
-    if result.returncode != 0 or not text.startswith("install ok installed "):
-        need(result.returncode != 0 or text.startswith(("deinstall ", "unknown ", "purge ")), "installed hub state")
-        return None
-    version = text.removeprefix("install ok installed ")
-    as_tuple(version)
-    return version
+    if result.returncode != 0:
+        return None, "not-installed"
+    words = result.stdout.decode(errors="replace").split()
+    need(len(words) in (3, 4) and words[0] in {"install", "hold", "deinstall", "purge", "unknown"}
+         and words[1] in {"ok", "reinstreq"}, "installed hub state")
+    state = words[2]
+    if state in {"not-installed", "config-files"}:
+        return None, state
+    need(state in PRESENT and len(words) == 4, "installed hub state")
+    as_tuple(words[3])
+    return words[3], state
+
+
+def installed_version():
+    return installed_state()[0]
+
+
+class Bounded:
+    """stdin that delivers at most the bytes allowed so far.
+
+    tarfile reads a pax or GNU long-name header whole, into memory, before
+    receive() sees the member; this refuses such a header after HEADER_SLACK.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.allow(0)
+
+    def allow(self, size):
+        self.left = size + HEADER_SLACK
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = self.left + 1
+        data = self.stream.read(min(size, self.left + 1))
+        self.left -= len(data)
+        need(self.left >= 0, "tar header or member larger than allowed")
+        return data
+
+
+def timed_out(signum, frame):
+    raise Refused("stream not received within %d s" % RECEIVE_SECONDS)
 
 
 def receive(stream, directory, names):
-    """Write exactly the expected regular files from the tar on stream."""
+    """Write exactly the expected regular files from the tar on stream.
+
+    Bounded per member (Bounded) and timed: a stalled sender would otherwise
+    hold WORK/.lock and refuse every later install.
+    """
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.alarm(RECEIVE_SECONDS)
+    try:
+        return receive_members(Bounded(stream), directory, names)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def receive_members(stream, directory, names):
     seen = {}
     limits = {name: (MAX_PACKAGE if name.endswith(".deb") else MAX_SIGNATURE) for name in names}
     with tarfile.open(fileobj=stream, mode="r|") as archive:
         for member in archive:
             need(member.name in limits and member.name not in seen, "unexpected member: " + member.name)
             need(member.isreg() and 0 < member.size <= limits[member.name], "member type or size: " + member.name)
+            stream.allow(member.size)
             source = archive.extractfile(member)
             need(source is not None, "member: " + member.name)
             path = directory / member.name
@@ -226,7 +288,7 @@ def install(version, stream):
             finally:
                 in_guest("rm", "-f", "--", GUEST_DEB, timeout=30)
             need(installed.returncode == 0, "dpkg -i failed")
-            need(installed_version() == version, "installed version")
+            need(installed_state() == (version, "installed"), "installed version")
             rotated = next_pin is not None and next_pin != key
             if rotated:
                 write_pin(next_pin)
@@ -238,7 +300,8 @@ def install(version, stream):
 
 
 def report():
-    return {"installed": installed_version(), "pin_sha256": hashlib.sha256(pinned()).hexdigest()}
+    version, state = installed_state()
+    return {"installed": version, "state": state, "pin_sha256": hashlib.sha256(pinned()).hexdigest()}
 
 
 def run(words, stream):
