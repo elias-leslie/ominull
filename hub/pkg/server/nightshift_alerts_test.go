@@ -422,7 +422,13 @@ func TestRelayAlertVerdict(t *testing.T) {
 		t.Fatal("an alert outside the feed window was confirmed")
 	}
 	// The answer closed a HIGH finding, so the detection-policy note counts it.
-	if f := feedNote(t, srv, "ominull.detection.changes"); !strings.HasPrefix(f.Message, "1 finding acknowledged (1 HIGH or CRITICAL)") {
+	// It names the relay key that closed it, not an unknown credential.
+	f := feedNote(t, srv, "ominull.detection.changes")
+	if !strings.HasPrefix(f.Message, "1 finding acknowledged (1 HIGH or CRITICAL)") {
 		t.Fatalf("note after the owner's answer = %q", f.Message)
+	}
+	dismissed, _ := f.Unmapped["dismissed"].([]map[string]any)
+	if len(dismissed) != 1 || !strings.Contains(dismissed[0]["change"].(string), "credential relay-key (unverified)") {
+		t.Fatalf("dismissed after the owner's answer = %v", dismissed)
 	}
 }

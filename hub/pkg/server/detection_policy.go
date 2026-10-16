@@ -74,11 +74,12 @@ func (c policyChange) payload() ([]byte, error) {
 	})
 }
 
-// credentialOf names how the caller authenticated. Unverified: whoever holds
-// the admin key can present any of these.
+// credentialOf names how the caller authenticated; relay-key is Nightshift's
+// approval relay, which closes findings when the owner answers there.
+// Unverified: whoever holds the admin key can present any of these.
 func credentialOf(r *http.Request) string {
 	switch m := r.Header.Get("X-Auth-Method"); m {
-	case "api-key", "jwt", "console":
+	case "api-key", "jwt", "console", "relay-key":
 		return m
 	}
 	return "unknown"
