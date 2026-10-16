@@ -124,6 +124,10 @@ def installed_state():
     """
     result = in_guest("dpkg-query", "-W", "-f=${Status} ${Version}", "ominull-hub", timeout=30)
     if result.returncode != 0:
+        # Only dpkg-query's own "not known" answer means no hub. Any other failure
+        # (a database error, pct exec 255, a locked CT) must not lift the floor.
+        need(result.returncode == 1 and b"no packages found matching ominull-hub" in result.stderr,
+             "installed hub state")
         return None, "not-installed"
     words = result.stdout.decode(errors="replace").split()
     need(len(words) in (3, 4) and words[0] in {"install", "hold", "deinstall", "purge", "unknown"}

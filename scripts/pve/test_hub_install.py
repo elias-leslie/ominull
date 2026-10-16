@@ -37,7 +37,10 @@ if args[:2] == ["push", "150"]:
 assert args[:3] == ["exec", "150", "--"], args
 argv = args[3:]
 if argv[0] == "dpkg-query":
+    if "query_fails" in state:
+        sys.exit(state["query_fails"])
     if state.get("installed") is None:
+        print("dpkg-query: no packages found matching ominull-hub", file=sys.stderr)
         sys.exit(1)
     print(state.get("status", "install ok installed") + " " + state["installed"], end="")
 elif argv[:2] == ["dpkg", "-i"]:
@@ -269,6 +272,23 @@ class HubInstallTests(unittest.TestCase):
             self.set_state(installed="1.8.67", status=status)
             with self.subTest(status=status), self.assertRaisesRegex(hi.Refused, "installed hub state"):
                 hi.run(["version"], io.BytesIO())
+
+    def test_a_failed_state_query_keeps_the_floor(self):
+        # pct exec 255 (CT locked or down) or dpkg-query 2 (database error) is not "no hub":
+        # an older signed package must not install through it.
+        old = self.deb("1.8.60")
+        files = self.signed(old, "1.8.60")
+        for code in (255, 2, 1):
+            self.set_state(installed="1.8.67", query_fails=code)
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(hi.Refused, "installed hub state"):
+                    hi.run(["version"], io.BytesIO())
+                self.assert_refused("installed hub state", "1.8.60", files)
+                self.assertFalse(any(call[0] == "push" for call in self.calls()))
+        # dpkg-query's own "no packages found" answer is a CT without a hub: a first install proceeds.
+        self.set_state(installed=None)
+        self.assertEqual(hi.run(["version"], io.BytesIO())["state"], "not-installed")
+        self.assertEqual(self.install("1.8.60", files)["previous"], None)
 
     def test_a_dpkg_that_leaves_the_package_unconfigured_is_not_an_install(self):
         self.set_state(installed="1.8.67", dpkg_leaves="install ok unpacked")
