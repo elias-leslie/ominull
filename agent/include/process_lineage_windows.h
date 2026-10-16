@@ -6,7 +6,8 @@
  * - Parent PID and parent instance ID tracking without false tree invention
  * - Command line extraction via NtQueryInformationProcess (ProcessCommandLineInformation)
  * - User token identity resolution (OpenProcessToken, LookupAccountSidA)
- * - 512-entry user-space LRU executable SHA-256 cache keyed on (volume_serial, file_index, file_size, last_write_time)
+ * - 512-entry user-space LRU executable SHA-256 cache keyed on (volume_serial, file_index, file_size, last_write_time, usn);
+ *   a file on a volume without a change journal is hashed every time
  * - Real-time ETW Process Provider initialization with graceful snapshot fallback
  * - Explicit attribution status semantics (authoritative, inferred_cached, race_suspected, permission_denied, unknown)
  * - Zero-allocation JSON escaping helper
@@ -60,6 +61,7 @@ typedef struct {
     uint64_t file_index;
     uint64_t file_size;
     FILETIME last_write_time;
+    uint64_t usn;
     char sha256_hex[65];
     uint64_t last_used;
     bool valid;
@@ -276,6 +278,27 @@ static inline bool ProcessLineageWin_ReadUser(HANDLE hProc, DWORD pid, char* out
     return ok;
 }
 
+/* The file's last update sequence number in the volume's change journal, or 0
+ * when the volume keeps none. Only the file system moves it, on any change.
+ * The owner of a file can set LastWriteTime and ChangeTime back through
+ * SetFileInformationByHandle after rewriting it in place at the same size, so
+ * those alone cannot tell a cached build from its replacement. */
+static uint64_t (*g_WinUsnForTesting)(HANDLE) = NULL; /* Wine keeps no journal; tests stand one in */
+
+static inline uint64_t ProcessLineageWin_FileUsn(HANDLE hFile) {
+    if (g_WinUsnForTesting) return g_WinUsnForTesting(hFile);
+    union {
+        USN_RECORD record;
+        BYTE raw[sizeof(USN_RECORD) + MAX_PATH * sizeof(WCHAR)];
+    } out;
+    DWORD got = 0;
+    if (!DeviceIoControl(hFile, FSCTL_READ_FILE_USN_DATA, NULL, 0, &out, sizeof(out), &got, NULL) ||
+        got < sizeof(USN_RECORD) || out.record.MajorVersion != 2 || out.record.Usn <= 0) {
+        return 0;
+    }
+    return (uint64_t)out.record.Usn;
+}
+
 /* Computes or looks up executable SHA-256 with 512-entry LRU cache */
 static inline bool ProcessLineageWin_HashExecutable(const WCHAR* wExePath, char* outHex, size_t maxLen, char* outStatus, size_t statusLen) {
     if (!outHex || maxLen < 65 || !outStatus || statusLen == 0) return false;
@@ -317,11 +340,12 @@ static inline bool ProcessLineageWin_HashExecutable(const WCHAR* wExePath, char*
         return false;
     }
 
-    // 1. Check LRU Cache
+    // 1. Check LRU Cache (only where the change journal can vouch for the file)
+    uint64_t usn = ProcessLineageWin_FileUsn(hFile);
     uint64_t nowAccess = ++g_WinHashAccessCounter;
-    for (size_t i = 0; i < WIN_HASH_CACHE_CAP; i++) {
+    for (size_t i = 0; usn != 0 && i < WIN_HASH_CACHE_CAP; i++) {
         WIN_HASH_CACHE_ENTRY* entry = &g_WinHashCache[i];
-        if (entry->valid && entry->volume_serial == fi.dwVolumeSerialNumber &&
+        if (entry->valid && entry->usn == usn && entry->volume_serial == fi.dwVolumeSerialNumber &&
             entry->file_index == fileIndex && entry->file_size == fileSize &&
             entry->last_write_time.dwLowDateTime == fi.ftLastWriteTime.dwLowDateTime &&
             entry->last_write_time.dwHighDateTime == fi.ftLastWriteTime.dwHighDateTime) {
@@ -361,6 +385,11 @@ static inline bool ProcessLineageWin_HashExecutable(const WCHAR* wExePath, char*
     Response_SHA256_Final(&ctx, hash);
     Response_BytesToHex(hash, 32, outHex);
 
+    if (usn == 0) {
+        snprintf(outStatus, statusLen, "authoritative");
+        return true;
+    }
+
     // 3. Store in LRU Cache
     size_t targetSlot = 0;
     uint64_t oldest = UINT64_MAX;
@@ -381,6 +410,7 @@ static inline bool ProcessLineageWin_HashExecutable(const WCHAR* wExePath, char*
     slot->file_index = fileIndex;
     slot->file_size = fileSize;
     slot->last_write_time = fi.ftLastWriteTime;
+    slot->usn = usn;
     snprintf(slot->sha256_hex, sizeof(slot->sha256_hex), "%s", outHex);
     slot->last_used = nowAccess;
 

@@ -52,6 +52,11 @@ typedef struct {
     ino_t ino;
     off_t size;
     time_t mtime;
+    /* The status-change time, which only the kernel sets: an owner can put
+     * mtime back with touch after rewriting the file in place at the same
+     * size, but any write moves ctime. */
+    int64_t ctime_sec;
+    int64_t ctime_nsec;
     char sha256_hex[65];
     uint64_t last_used;
     bool valid;
@@ -515,12 +520,13 @@ static inline bool ProcessLineage_HashExecutable(uint32_t pid, char* outHex, siz
         return false;
     }
 
-    // 1. Check LRU Cache by dev + ino + size + mtime
+    // 1. Check LRU Cache by dev + ino + size + mtime + ctime
     uint64_t nowAccess = ++g_LinuxHashAccessCounter;
     for (size_t i = 0; i < LINUX_HASH_CACHE_CAP; i++) {
         LINUX_HASH_CACHE_ENTRY* entry = &g_LinuxHashCache[i];
         if (entry->valid && entry->dev == st.st_dev && entry->ino == st.st_ino &&
-            entry->size == st.st_size && entry->mtime == st.st_mtime) {
+            entry->size == st.st_size && entry->mtime == st.st_mtime &&
+            entry->ctime_sec == (int64_t)st.st_ctim.tv_sec && entry->ctime_nsec == (int64_t)st.st_ctim.tv_nsec) {
             close(fd);
             entry->last_used = nowAccess;
             snprintf(outHex, maxLen, "%s", entry->sha256_hex);
@@ -581,6 +587,8 @@ static inline bool ProcessLineage_HashExecutable(uint32_t pid, char* outHex, siz
     slot->ino = st.st_ino;
     slot->size = st.st_size;
     slot->mtime = st.st_mtime;
+    slot->ctime_sec = (int64_t)st.st_ctim.tv_sec;
+    slot->ctime_nsec = (int64_t)st.st_ctim.tv_nsec;
     snprintf(slot->sha256_hex, sizeof(slot->sha256_hex), "%s", outHex);
     slot->last_used = nowAccess;
 

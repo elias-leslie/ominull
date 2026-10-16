@@ -288,6 +288,29 @@ static void test_executable_hashing_and_lru(void) {
     check(strcmp(hitStatus, "inferred_cached") == 0, "Subsequent status is 'inferred_cached'", hitStatus);
     check(strcmp(hitHex, expectedHex) == 0, "Cached SHA-256 matches expected digest", hitHex);
 
+    // 2b. Rewritten in place at the same size with its mtime put back (touch -r):
+    // the cache must not hand back the old build's hash.
+    struct stat before;
+    check(stat(binPath, &before) == 0, "Sample binary stat succeeds", NULL);
+    usleep(20000);
+    fp = fopen(binPath, "r+b");
+    if (!fp) { perror("fopen sample_bin r+"); exit(1); }
+    const char swapped[] = "OMINULL_TEST_EXECUTABLE_BINARY_PAYLOAD_V2";
+    fwrite(swapped, 1, sizeof(swapped), fp);
+    fclose(fp);
+    struct timespec times[2] = { before.st_atim, before.st_mtim };
+    check(utimensat(AT_FDCWD, binPath, times, 0) == 0, "Restoring the old mtime succeeds", NULL);
+    char swapHex[65] = {0};
+    char swapStatus[32] = {0};
+    ok = ProcessLineage_HashExecutable(100, swapHex, sizeof(swapHex), swapStatus, sizeof(swapStatus));
+    check(ok, "Rewritten executable hash succeeded", swapHex);
+    check(strcmp(swapStatus, "authoritative") == 0, "A rewrite with the mtime put back is hashed again", swapStatus);
+    check(strcmp(swapHex, expectedHex) != 0, "The rewritten build gets its own hash", swapHex);
+    fp = fopen(binPath, "wb");
+    if (!fp) { perror("fopen sample_bin restore"); exit(1); }
+    fwrite(binContent, 1, sizeof(binContent), fp);
+    fclose(fp);
+
     // 3. Missing Executable (race_suspected)
     char raceHex[65] = {0};
     char raceStatus[32] = {0};

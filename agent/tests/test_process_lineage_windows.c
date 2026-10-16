@@ -101,6 +101,13 @@ static void test_self_process_inspection(void) {
           "Cached SHA-256 matches initial hash", enr2.executable_sha256);
 }
 
+/* A stand-in change journal: the file system moves a file's USN on any write. */
+static uint64_t g_fakeUsn = 7;
+static uint64_t fake_usn(HANDLE h) {
+    (void)h;
+    return g_fakeUsn;
+}
+
 static void test_executable_hashing_and_lru(void) {
     printf("[*] Testing Executable Hashing & Win32 LRU Cache...\n");
     ProcessLineageWin_ResetCache();
@@ -144,6 +151,35 @@ static void test_executable_hashing_and_lru(void) {
     check(ok, "Cached Win32 hash succeeded", hitHex);
     check(strcmp(hitStatus, "inferred_cached") == 0, "Subsequent status is 'inferred_cached'", hitStatus);
     check(strcmp(hitHex, expectedHex) == 0, "Cached SHA-256 matches expected digest", hitHex);
+
+    // 2b. Rewritten in place at the same size with LastWriteTime and ChangeTime put
+    // back: the journal moved, so the cache must not hand back the old build's hash.
+    HANDLE hs = CreateFileW(wSample, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    FILE_BASIC_INFO basic;
+    check(hs != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(hs, FileBasicInfo, &basic, sizeof(basic)),
+          "Sample file times read", NULL);
+    const char swapped[] = "OMINULL_WIN32_SAMPLE_EXECUTABLE_CONTENT_2027";
+    DWORD wrote = 0;
+    check(WriteFile(hs, swapped, sizeof(swapped), &wrote, NULL) && wrote == sizeof(swapped), "Sample rewritten in place", NULL);
+    check(SetFileInformationByHandle(hs, FileBasicInfo, &basic, sizeof(basic)), "Old file times put back", NULL);
+    CloseHandle(hs);
+    g_fakeUsn++;
+    char swapHex[65] = {0};
+    char swapStatus[32] = {0};
+    ok = ProcessLineageWin_HashExecutable(wSample, swapHex, sizeof(swapHex), swapStatus, sizeof(swapStatus));
+    check(ok && strcmp(swapStatus, "authoritative") == 0, "A rewrite with its times put back is hashed again", swapStatus);
+    check(strcmp(swapHex, expectedHex) != 0, "The rewritten build gets its own hash", swapHex);
+
+    // 2c. Without a change journal nothing is cached.
+    g_fakeUsn = 0;
+    ProcessLineageWin_HashExecutable(wSample, swapHex, sizeof(swapHex), swapStatus, sizeof(swapStatus));
+    ok = ProcessLineageWin_HashExecutable(wSample, swapHex, sizeof(swapHex), swapStatus, sizeof(swapStatus));
+    check(ok && strcmp(swapStatus, "authoritative") == 0, "No journal: every lookup is hashed", swapStatus);
+    g_fakeUsn = 7;
+    fp = fopen(sampleFile, "wb");
+    if (!fp) { perror("fopen sample restore"); exit(1); }
+    fwrite(content, 1, sizeof(content), fp);
+    fclose(fp);
 
     // 3. Non-existent executable (race_suspected)
     char missingHex[65] = {0};
@@ -266,6 +302,7 @@ static void test_etw_lifecycle(void) {
 int main(void) {
     printf("=== Ominull Windows Endpoint Process Lineage & Hashing Test Suite ===\n");
 
+    g_WinUsnForTesting = fake_usn;
     test_boot_id();
     test_self_process_inspection();
     test_executable_hashing_and_lru();
