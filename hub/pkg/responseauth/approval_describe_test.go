@@ -103,3 +103,36 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 		}
 	}
 }
+
+// A learning window is shown by scope and length, and its target must name
+// the same scope.
+func TestDescribeALearningWindow(t *testing.T) {
+	window := func(after string) []byte {
+		return []byte(`{"after":` + after + `,"before":null,"op":"open","policy":"learning_window"}`)
+	}
+	action, summary, err := describeApproval(ActionKindDetection, window(`{"hours":2160,"note":"","scope_id":"","scope_label":"every host in every tenant","scope_type":"tenant"}`), []string{"learning:tenant:"}, "admin")
+	if err != nil || action != "Open a learning window" || summary != "every host in every tenant for 90 days; holds beacon, volume and agent egress findings" {
+		t.Fatalf("estate window action %q summary %q err %v", action, summary, err)
+	}
+	if _, summary, err = describeApproval(ActionKindDetection, window(`{"hours":1,"scope_id":"ep-1","scope_label":"web","scope_type":"endpoint","tenant_id":"default"}`), []string{"learning:endpoint:ep-1"}, "admin"); err != nil ||
+		summary != "endpoint ep-1 (web) for 1 hour; holds beacon, volume and agent egress findings; tenant_id default" {
+		t.Fatalf("host window summary %q err %v", summary, err)
+	}
+	for name, c := range map[string]struct {
+		after, target string
+	}{
+		"other scope":   {`{"hours":2,"scope_id":"ep-1","scope_type":"endpoint"}`, "learning:endpoint:ep-2"},
+		"too long":      {`{"hours":2161,"scope_id":"","scope_type":"tenant"}`, "learning:tenant:"},
+		"no length":     {`{"scope_id":"","scope_type":"tenant"}`, "learning:tenant:"},
+		"part hour":     {`{"hours":1.5,"scope_id":"","scope_type":"tenant"}`, "learning:tenant:"},
+		"unnamed host":  {`{"hours":2,"scope_id":"","scope_type":"endpoint"}`, "learning:endpoint:"},
+		"unknown scope": {`{"hours":2,"scope_id":"x","scope_type":"fleet"}`, "learning:fleet:x"},
+	} {
+		if _, _, err := describeApproval(ActionKindDetection, window(c.after), []string{c.target}, "admin"); err == nil {
+			t.Errorf("%s: described", name)
+		}
+	}
+	if _, _, err := describeApproval(ActionKindDetection, []byte(`{"after":{"hours":2,"scope_id":"","scope_type":"tenant"},"before":{"a":1},"op":"open","policy":"learning_window"}`), []string{"learning:tenant:"}, "admin"); err == nil {
+		t.Error("a window opened over a saved one was described")
+	}
+}

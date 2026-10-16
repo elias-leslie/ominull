@@ -199,8 +199,8 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason |
 | `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked waits for the owner's tap (202, kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
-| `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint |
-| `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled |
+| `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint; opening waits for the owner's tap (202, `learning_window` `open`, target `learning:<scope_type>:<scope_id>`; an empty tenant scope is every host in every tenant). A window holds only beacon, volume and agent egress findings; threat-intel matches, sensitive ports, sweeps, resolver bypass and silence still page |
+| `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled; applies at once with a Nightshift note |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
 | `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
 | `/api/v1/topology/workspace` | GET | grouped communication data with stable asset IDs and observed domain/process evidence |

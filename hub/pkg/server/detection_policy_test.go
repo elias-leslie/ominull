@@ -656,3 +656,72 @@ func TestParkingOrRetiringAHostWaitsForTheOwner(t *testing.T) {
 		t.Fatalf("notes = %v", kinds)
 	}
 }
+
+// Opening a learning window holds the behavioural findings of every host it
+// covers, so with the admin key alone it only asks. An estate-wide window
+// says so in words, the approval binds its scope and length, and closing it
+// needs nobody.
+func TestOpeningALearningWindowWaitsForTheOwner(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-1", TenantID: "default", Hostname: "web", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	learning := func() bool {
+		_, on := store.LearningWindowFor(storage.Endpoint{ID: "ep-1", TenantID: "default"})
+		return on
+	}
+
+	estate := `{"scope_type":"tenant","days":90}`
+	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, ""))
+	if p.Action != "Open a learning window" || len(p.Targets) != 1 || p.Targets[0] != "learning:tenant:" ||
+		p.Summary != "every host in every tenant for 90 days; holds beacon, volume and agent egress findings" {
+		t.Fatalf("estate window approval = %+v", p)
+	}
+	if learning() {
+		t.Fatal("the window opened before the owner approved")
+	}
+	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, p.ApprovalID); w.Code != http.StatusForbidden || learning() {
+		t.Fatalf("ungranted approval = %d %s", w.Code, w.Body.String())
+	}
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	// The approval is for this window: not a longer one, not another scope.
+	for _, other := range []string{`{"scope_type":"tenant","days":89}`, `{"scope_type":"tenant","scope_id":"t-02","days":90}`} {
+		if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", other, p.ApprovalID); w.Code != http.StatusForbidden || learning() {
+			t.Fatalf("approval spent on %s = %d %s", other, w.Code, w.Body.String())
+		}
+	}
+	w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, p.ApprovalID)
+	if w.Code != http.StatusOK || !learning() {
+		t.Fatalf("approved window = %d %s", w.Code, w.Body.String())
+	}
+	var opened struct {
+		Window storage.LearningWindow `json:"window"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &opened)
+	if d := time.Until(opened.Window.EndsAt); d < 89*24*time.Hour || d > 90*24*time.Hour {
+		t.Fatalf("window ends in %v, want 90 days", d)
+	}
+
+	// One host for two hours names the host; a note is a label.
+	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"endpoint","scope_id":"ep-1","hours":2,"note":"new host"}`, ""))
+	if p.Targets[0] != "learning:endpoint:ep-1" || p.Summary != "endpoint ep-1 (web) for 2 hours; holds beacon, volume and agent egress findings; note new host" {
+		t.Fatalf("host window approval = %+v", p)
+	}
+	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"location","days":7}`, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("a location window naming no location = %d %s", w.Code, w.Body.String())
+	}
+
+	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows/close", `{"id":"`+opened.Window.ID+`"}`, ""); w.Code != http.StatusOK || learning() {
+		t.Fatalf("close = %d %s", w.Code, w.Body.String())
+	}
+	var kinds []string
+	for _, n := range policyNotes(t, store) {
+		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
+	}
+	if len(kinds) != 2 || kinds[0] != "tightened learning window close" ||
+		!strings.HasPrefix(kinds[1], "loosened (learning_window) with owner approval") {
+		t.Fatalf("notes = %v", kinds)
+	}
+}

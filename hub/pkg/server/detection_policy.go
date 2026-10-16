@@ -2,8 +2,9 @@ package server
 
 // One choke point for every write to detection policy: tuning saves, the
 // shipped-values reset, "Expected" on a finding, learning proposals, the
-// exclusions, and each host's presence and retirement (which decide whether
-// the silence floor reports it). Each change is compared field by field with what is saved now.
+// exclusions, each host's presence and retirement (which decide whether
+// the silence floor reports it), and opening a learning window (which holds
+// the behavioural findings of every host it covers). Each change is compared field by field with what is saved now.
 // One that only tightens applies at once and leaves a note for Nightshift. One
 // that loosens anything waits for the owner's passkey tap, through the same
 // response-authority approval isolation uses: the admin key, a console session
@@ -35,9 +36,9 @@ const policyChangedAudit = "DETECTION_POLICY_CHANGED"
 
 // policyChange is one write to detection policy, judged before it is applied.
 type policyChange struct {
-	policy  string // "detection_tuning", "exclusion" or "endpoint_watch"
+	policy  string // "detection_tuning", "exclusion", "endpoint_watch" or "learning_window"
 	op      string // see responseauth's detectionPolicyOps
-	target  string // "detection:tuning", "exclusion:<id>" or "endpoint:<id>"
+	target  string // "detection:tuning", "exclusion:<id>", "endpoint:<id>" or "learning:<scope_type>:<scope_id>"
 	before  any    // the saved policy (nil for a new exclusion)
 	after   any    // the policy the change would save
 	loosens []string

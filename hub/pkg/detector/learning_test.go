@@ -211,3 +211,43 @@ func TestRentedComputeNeverBecomesALearnedPair(t *testing.T) {
 		t.Fatalf("the program was not counted: %+v", procs)
 	}
 }
+
+// A window over the whole estate holds behavioural findings only. A
+// threat-list match and a sensitive-port egress are floors: they page inside
+// a window as they do outside it, so even an approved window cannot hide them.
+func TestALearningWindowNeverHoldsTheFloor(t *testing.T) {
+	engine, store := noiseEngine(t)
+	if err := store.UpsertEndpoint(storage.Endpoint{
+		ID: "linux-03", TenantID: "default", LocationID: "loc-home", Hostname: "linux-03",
+		OS: "Linux", RoleTag: "workstation", Status: "online",
+		LastSeenAt: time.Now().UTC(), CreatedAt: time.Now().UTC().Add(-30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateLearningWindow(storage.LearningWindow{
+		TenantID: "default", ScopeType: storage.LearningScopeTenant, StartedBy: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, learning := store.LearningWindowFor(storage.Endpoint{ID: "linux-03", TenantID: "default"}); !learning {
+		t.Fatal("the estate-wide window does not cover the host")
+	}
+	now := time.Now().UTC()
+	flow := func(dst string, port uint16, ioc *storage.IOC) storage.Event {
+		return storage.Event{TenantID: "default", EndpointID: "linux-03", Timestamp: now, Action: "PERMIT",
+			Direction: "OUTBOUND", DstIP: dst, DstPort: port, BytesOut: 800, ProcessPath: "/usr/bin/curl", ThreatMatch: ioc}
+	}
+	engine.Evaluate(flow("185.220.101.5", 443, &storage.IOC{Value: "185.220.101.5", Source: "test-feed", ThreatType: "c2", Confidence: 100, Active: true}))
+	engine.Evaluate(flow("159.65.0.10", 445, nil))
+	for _, kind := range []string{"THREAT_INTEL_MATCH", "SENSITIVE_PORT_EGRESS"} {
+		got := anomaliesOfType(t, store, kind)
+		if len(got) != 1 || got[0].HeldReason != "" {
+			t.Fatalf("%s inside a learning window = %+v, want one finding that pages", kind, got)
+		}
+	}
+	for kind := range learningHolds {
+		if TierFor(kind) == storage.TierHunt {
+			t.Fatalf("%s is a hunt lead and is held as one already", kind)
+		}
+	}
+}

@@ -79,16 +79,51 @@ func (s *Server) handleLearningWindows(w http.ResponseWriter, r *http.Request) {
 		if window.ScopeType == "" {
 			window.ScopeType = storage.LearningScopeEndpoint
 		}
+		switch window.ScopeType {
+		case storage.LearningScopeTenant, storage.LearningScopeLocation, storage.LearningScopeEndpoint:
+		default:
+			writeJSONError(w, http.StatusBadRequest, "a learning window is scoped to a tenant, a location or an endpoint")
+			return
+		}
+		if window.ScopeType != storage.LearningScopeTenant && window.ScopeID == "" {
+			writeJSONError(w, http.StatusBadRequest, "a "+window.ScopeType+" window has to name which one")
+			return
+		}
 		// Seven days is the low end of what every new-terms and dry-run
 		// allowlisting guide recommends, and it is what an operator who gave no
-		// duration almost certainly meant.
+		// duration almost certainly meant. The length is fixed here, in whole
+		// hours, so the owner approves the window that will be opened.
+		hours := 7 * 24
 		switch {
 		case req.Hours > 0:
-			window.EndsAt = time.Now().UTC().Add(time.Duration(req.Hours) * time.Hour)
+			hours = req.Hours
 		case req.Days > 0:
-			window.EndsAt = time.Now().UTC().Add(time.Duration(req.Days) * 24 * time.Hour)
+			hours = req.Days * 24
 		}
+		hours = min(max(hours, 1), 90*24)
 		window.ScopeLabel = s.describeScope(window)
+
+		// Opening a window holds the behavioural findings of every host it
+		// covers, so it goes through the detection-policy choke point and
+		// always waits for the owner's tap.
+		after := map[string]interface{}{
+			"scope_type": window.ScopeType, "scope_id": window.ScopeID, "scope_label": window.ScopeLabel,
+			"hours": hours, "note": window.Note,
+		}
+		if window.TenantID != "" {
+			after["tenant_id"] = window.TenantID
+		}
+		change := policyChange{policy: "learning_window", op: "open",
+			target: "learning:" + window.ScopeType + ":" + window.ScopeID,
+			before: nil, after: after, loosens: []string{"learning_window"},
+			wording: fmt.Sprintf("opened a learning window over %s %s for %d hours", window.ScopeType, window.ScopeLabel, hours)}
+		s.policyMu.Lock()
+		defer s.policyMu.Unlock()
+		approvalID, ok := s.policyApproved(w, r, change)
+		if !ok {
+			return
+		}
+		window.EndsAt = time.Now().UTC().Add(time.Duration(hours) * time.Hour)
 
 		saved, err := s.store.CreateLearningWindow(window)
 		if err != nil {
@@ -98,6 +133,10 @@ func (s *Server) handleLearningWindows(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "LEARNING_WINDOW_OPENED", "detection",
 			fmt.Sprintf("opened a learning window over %s %s until %s",
 				saved.ScopeType, saved.ScopeLabel, saved.EndsAt.Format(time.RFC3339)))
+		if window.Note != "" {
+			change.wording += ": " + window.Note
+		}
+		s.notePolicyChange(r, change, approvalID)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"window": saved, "open": true})
 
 	default:
@@ -134,6 +173,10 @@ func (s *Server) handleCloseLearningWindow(w http.ResponseWriter, r *http.Reques
 	}
 	s.audit(r, "LEARNING_WINDOW_CLOSED", "detection",
 		fmt.Sprintf("closed learning window %s as %s", req.ID, status))
+	// Closing only tightens: findings page again. It needs nobody, and the
+	// owner's feed lists it.
+	s.notePolicyChange(r, policyChange{policy: "learning_window", op: "close",
+		target: "learning:" + strings.TrimSpace(req.ID), wording: "closed learning window " + strings.TrimSpace(req.ID) + " as " + status}, "")
 	writeJSON(w, http.StatusOK, map[string]interface{}{"id": req.ID, "status": status})
 }
 
@@ -298,7 +341,7 @@ func (s *Server) describeScope(w storage.LearningWindow) string {
 		}
 	case storage.LearningScopeTenant:
 		if w.ScopeID == "" {
-			return "the whole estate"
+			return "every host in every tenant"
 		}
 		return w.ScopeID
 	}

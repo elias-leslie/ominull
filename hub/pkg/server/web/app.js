@@ -6245,7 +6245,7 @@
     var scope = h("select", {}, 
       h("option", { value: "endpoint", text: "One endpoint" }),
       h("option", { value: "location", text: "A location" }),
-      h("option", { value: "tenant", text: "The whole estate" }));
+      h("option", { value: "tenant", text: "Every endpoint" }));
     var target = h("select", {});
     var note = h("input", { type: "text", placeholder: "Why this window is open" });
     var days = h("input", { type: "number", value: "7", min: "1", max: "90" });
@@ -6262,14 +6262,14 @@
           target.appendChild(h("option", { value: l.id, text: l.name || l.id }));
         });
       } else {
-        target.appendChild(h("option", { value: "", text: "every endpoint" }));
+        target.appendChild(h("option", { value: "", text: "Every endpoint in every tenant" }));
       }
     }
     scope.addEventListener("change", fillTargets);
     fillTargets();
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "note", text: "While this window is open, findings for the endpoints it covers are recorded and held rather than raised. They stay readable under HELD on the alerts page, and the silence detector is deliberately not exempt: a host going dark during its baseline period is exactly when you want to know." }),
+      h("p", { cls: "note", text: "While this window is open, beacon, volume and agent egress findings for the endpoints it covers are recorded and held rather than raised. They stay readable under HELD on the alerts page. Threat-list matches, sensitive ports, sweeps, resolver bypass and silence still raise: a host going dark or reaching a known-bad address during its baseline period is exactly when you want to know." }),
       h("div", { cls: "form-row" },
         h("label", { cls: "field" }, h("span", { text: "Scope" }), scope),
         h("label", { cls: "field" }, h("span", { text: "Which" }), target)),
@@ -6282,16 +6282,18 @@
         cls: "btn btn-primary", type: "button", text: "Open",
         on: {
           click: function () {
-            request("/api/v1/learning/windows", "POST", {
+            var n = Number(days.value) || 7;
+            var which = target.value ? (target.options[target.selectedIndex] || {}).text || target.value : "every endpoint in every tenant";
+            ownerApproved("/api/v1/learning/windows", {
               scope_type: scope.value,
               scope_id: target.value,
-              days: Number(days.value) || 7,
+              days: n,
               note: note.value
-            }).then(function () {
-              toast("Learning window open \u2014 findings for that scope are being held", "ok");
+            }, { label: "Open a learning window over " + which + " for " + n + (n === 1 ? " day" : " days"), onPending: closeSheet }).then(function () {
+              toast("Learning window open. Its held findings are under HELD.", "ok");
               closeSheet();
               refresh();
-            }).catch(function (e) { toast("Could not open the window: " + e.message, "crit"); });
+            }).catch(function (e) { if (e && e.handled) return; toast("Could not open the window: " + e.message, "crit"); });
           }
         }
       })

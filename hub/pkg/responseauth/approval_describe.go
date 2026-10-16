@@ -306,6 +306,11 @@ var detectionPolicyOps = map[string]map[string]string{
 		"presence": "Expect a host to go quiet",
 		"retire":   "Retire a host",
 	},
+	// A learning window holds the behavioural findings of every host it
+	// covers until it ends. Closing one only tightens and asks nobody.
+	"learning_window": {
+		"open": "Open a learning window",
+	},
 }
 
 // describeDetectionPolicy shows the owner the change field by field, worked
@@ -372,6 +377,9 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		summary, err := fitParts(append([]string{host}, parts...), labels)
 		return action, summary, err
 	}
+	if p.Policy == "learning_window" {
+		return describeLearningWindow(action, before, after, targets[0])
+	}
 	if !strings.HasPrefix(targets[0], "exclusion:") {
 		return "", "", errors.New("an exclusion change targets exclusion:<id>")
 	}
@@ -401,6 +409,64 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		// Saving over an existing exclusion renews or rewrites it.
 		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after, func(k string) bool { return !policyLabels[k] })...)
 		labels = policyDiff(before, after, func(k string) bool { return policyLabels[k] })
+	}
+	summary, err := fitParts(parts, labels)
+	return action, summary, err
+}
+
+// learningWindowHolds is what a learning window holds back, as the hub's
+// detector decides it (detector.learningHolds). Threat-intelligence matches,
+// sensitive ports, sweeps, resolver bypass and silence keep paging.
+const learningWindowHolds = "holds beacon, volume and agent egress findings"
+
+// describeLearningWindow shows a window as the hub would open it: what it
+// covers and for how long. It names its scope in the target, so an approval
+// for one host cannot open a window over the whole estate.
+func describeLearningWindow(action string, before, after map[string]interface{}, target string) (string, string, error) {
+	scopeType, _ := after["scope_type"].(string)
+	scopeID, _ := after["scope_id"].(string)
+	hours, _ := after["hours"].(float64)
+	switch {
+	case before != nil:
+		return "", "", errors.New("opening a learning window carries no saved window")
+	case target != "learning:"+scopeType+":"+scopeID:
+		return "", "", errors.New("a learning window targets learning:<scope_type>:<scope_id> and names the same scope")
+	case scopeType != "tenant" && scopeType != "location" && scopeType != "endpoint":
+		return "", "", errors.New("a learning window is scoped to a tenant, a location or an endpoint")
+	case scopeType != "tenant" && scopeID == "":
+		return "", "", errors.New("a location or endpoint learning window names which one")
+	case hours < 1 || hours > 90*24 || hours != float64(int(hours)):
+		return "", "", errors.New("a learning window lasts a whole number of hours, at most 90 days")
+	}
+	scope := scopeType + " " + scopeID
+	if scopeType == "tenant" && scopeID == "" {
+		scope = "every host in every tenant"
+	}
+	if label, _ := after["scope_label"].(string); label != "" && label != scopeID && scopeID != "" {
+		scope += " (" + label + ")"
+	}
+	n, unit := int(hours), "hour"
+	if n%24 == 0 {
+		n, unit = n/24, "day"
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	length := fmt.Sprintf("for %d %s", n, unit)
+	parts := []string{scope + " " + length, learningWindowHolds}
+	var labels []string
+	for _, k := range sortedKeys(after) {
+		switch k {
+		case "scope_type", "scope_id", "scope_label", "hours":
+		case "note":
+			if v, _ := after[k].(string); v != "" {
+				labels = append(labels, "note "+v)
+			}
+		default:
+			if v := after[k]; v != nil && v != "" {
+				parts = append(parts, k+" "+policyValue(v))
+			}
+		}
 	}
 	summary, err := fitParts(parts, labels)
 	return action, summary, err

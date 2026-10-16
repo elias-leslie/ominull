@@ -1398,7 +1398,8 @@ func (c *APIClient) cmdLearning(args []string) error {
 		if *days > 0 {
 			body["days"] = *days
 		}
-		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/windows", body)
+		// Opening a window holds findings, so it waits for the owner's tap.
+		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/learning/windows", body)
 		if err != nil {
 			return err
 		}

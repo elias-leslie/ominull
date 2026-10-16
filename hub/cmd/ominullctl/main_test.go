@@ -668,7 +668,7 @@ func TestOminullctl_WaitsForTheOwnersApproval(t *testing.T) {
 // Applying learning proposals waits for the owner's tap and then applies;
 // any other command the hub holds for the owner fails instead of reporting
 // the 202 as done.
-func TestOminullctl_LearningApplyWaitsForTheOwner(t *testing.T) {
+func TestOminullctl_LearningOpenAndApplyWaitForTheOwner(t *testing.T) {
 	mux := http.NewServeMux()
 	var sends []string
 	mux.HandleFunc("/api/v1/learning/proposals/apply", func(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +681,18 @@ func TestOminullctl_LearningApplyWaitsForTheOwner(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"applied":["p-1"],"skipped":{}}`))
+	})
+	var opens []string
+	mux.HandleFunc("/api/v1/learning/windows", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := r.Header.Get("X-Approval-ID")
+		opens = append(opens, id)
+		if id == "" {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"approval_id":"ap-2","state":"pending","action":"Open a learning window","summary":"endpoint ep-1 for 7 days"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"window":{"id":"w-2"},"open":true}`))
 	})
 	mux.HandleFunc("/api/v1/learning/windows/close", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
@@ -697,6 +709,12 @@ func TestOminullctl_LearningApplyWaitsForTheOwner(t *testing.T) {
 	}
 	if len(sends) != 2 || sends[0] != "" || sends[1] != "ap-2" {
 		t.Fatalf("sends %v", sends)
+	}
+	if err := client.cmdLearning([]string{"open", "--scope", "endpoint", "--id", "ep-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(opens) != 2 || opens[0] != "" || opens[1] != "ap-2" {
+		t.Fatalf("learning open sends %v", opens)
 	}
 	if _, err := client.doRequest(http.MethodPost, "/api/v1/learning/windows/close", map[string]string{"id": "w-1"}); err == nil || !strings.Contains(err.Error(), "owner's approval") {
 		t.Fatalf("a held request reported success: %v", err)

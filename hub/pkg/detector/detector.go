@@ -237,6 +237,20 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	return false
 }
 
+// learningHolds are the paging detectors a learning window may hold: the
+// behavioural ones whose findings describe how an estate normally works.
+// Threat-intelligence matches, sensitive ports, sweeps and resolver bypass are
+// floors and page inside a window too; a detector added later pages unless it
+// is named here. (Hunt leads are held as hunt leads already.) The owner's
+// approval of a window says the same (responseauth.learningWindowHolds).
+var learningHolds = map[string]bool{
+	"C2_BEACONING":          true,
+	"BANDWIDTH_SPIKE":       true,
+	"CLOUD_STORAGE_EGRESS":  true,
+	"AGENT_NEW_DESTINATION": true,
+	"AGENT_UPLOAD_VOLUME":   true,
+}
+
 // recordAnomaly writes a finding, or holds it.
 //
 // Holding happens here rather than at each detector so that no branch can
@@ -258,7 +272,7 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 	}
 
 	applyTier(&anomaly, ep, e.settings(), func() bool { return e.store.RunsAgentRuntimes(anomaly.TenantID, anomaly.EndpointID) })
-	if anomaly.HeldReason == "" {
+	if anomaly.HeldReason == "" && learningHolds[anomaly.AnomalyType] {
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning
 		}
