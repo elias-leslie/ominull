@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or refresh OmniNull's forced-command keys on davion-gem (idempotent).
 #
-#   sudo scripts/pve/install.sh [--recipient age1...] [--repin-release-key]
+#   sudo scripts/pve/install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF]
 #       as root: the authorized_keys change is an install receipt, not a tripwire ask
 #   scripts/pve/install.sh ...      as the owner: same install, Nightshift then asks about the key change
 #
@@ -18,16 +18,18 @@
 # The owner's PVE ssh alias runs the one install session. Only the committed dispatchers (git HEAD) are installed.
 # The release pin is written from the committed agent/include/release_key.h only when PVE has none yet (or with
 # --repin-release-key, for recovery): afterwards ominull-hub-install moves it itself when a signed rotation release
-# is installed, so re-running this after the rotation commit cannot strand that release.
+# is installed, so re-running this after the rotation commit cannot strand that release. A first install after the
+# rotation commit but before its release must pin the outgoing key: --release-key-ref <commit before the rotation>.
 # The backup dispatcher refuses every backup under its key until a recipient is installed: set backup_ssh_alias in
 # scripts/st_extension/production.local.json only after this ran with --recipient.
 set -euo pipefail
-recipient=""; repin=0
+recipient=""; repin=0; key_ref=HEAD
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --recipient) recipient="${2:?--recipient needs the age1... public key}"; shift 2 ;;
     --repin-release-key) repin=1; shift ;;
-    *) echo "usage: install.sh [--recipient age1...] [--repin-release-key]" >&2; exit 2 ;;
+    --release-key-ref) key_ref="${2:?--release-key-ref needs a commit}"; shift 2 ;;
+    *) echo "usage: install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF]" >&2; exit 2 ;;
   esac
 done
 [ -z "$recipient" ] || [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "--recipient must be one age1... public key" >&2; exit 2; }
@@ -68,11 +70,12 @@ for role in "${ROLES[@]}"; do
   as_admin git -C "$ROOT" show "$head:${SOURCE[$role]}" > "$work/$role"
   echo "Dispatcher ${COMMAND[$role]}: ${SOURCE[$role]} at $head, sha256 $(sha256 "$work/$role")"
 done
-as_admin git -C "$ROOT" show "$head:agent/include/release_key.h" |
+key_commit="$(as_admin git -C "$ROOT" rev-parse --verify "$key_ref^{commit}")"
+as_admin git -C "$ROOT" show "$key_commit:agent/include/release_key.h" |
   sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' |
   sed -E 's/^[[:space:]]*"//; s/\\n".*$//' > "$work/release-public.pem"
-openssl pkey -pubin -noout -in "$work/release-public.pem" 2>/dev/null || { echo "release_key.h at $head holds no public key" >&2; exit 1; }
-echo "Release key pinned at $head: sha256 $(sha256 "$work/release-public.pem") (written only if PVE has none$([ "$repin" = 1 ] && echo '; --repin-release-key: overwritten'))"
+openssl pkey -pubin -noout -in "$work/release-public.pem" 2>/dev/null || { echo "release_key.h at $key_commit holds no public key" >&2; exit 1; }
+echo "Release key pinned at $key_commit: sha256 $(sha256 "$work/release-public.pem") (written only if PVE has none$([ "$repin" = 1 ] && echo '; --repin-release-key: overwritten'))"
 
 as_admin install -d -m 0700 "$KEYDIR"
 declare -A LINE

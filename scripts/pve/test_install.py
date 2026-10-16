@@ -131,6 +131,16 @@ class InstallTests(unittest.TestCase):
         result = self.install("--repin-release-key")
         self.assertIn("release pin written", result.stdout)
         self.assertNotEqual(pin.read_text(), moved)
+        original = pin.read_bytes()
+        # A rotation commit pins a new key; --release-key-ref keeps the outgoing one that signs the rotation release.
+        header = self.repo / "agent/include/release_key.h"
+        header.write_text(header.read_text().replace(original.decode().splitlines()[1], "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUczKMOE8yfDzAWxOC6WPJiSTz/Oo"))
+        git = ["git", "-C", str(self.repo), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid"]
+        subprocess.run([*git, "commit", "-q", "-am", "rotation"], check=True)
+        result = self.install("--repin-release-key", "--release-key-ref", "HEAD~1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pin.read_bytes(), original)
+        self.assertEqual(self.install("--release-key-ref", "no-such-ref").returncode, 128)
 
     def test_recipient_is_installed_and_bad_input_installs_nothing(self):
         recipient = subprocess.run(["age-keygen"], capture_output=True, text=True, check=True).stdout
