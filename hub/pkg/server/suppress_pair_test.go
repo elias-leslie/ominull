@@ -181,6 +181,32 @@ func TestMarkingExpectedTwiceIsIdempotent(t *testing.T) {
 	if !found.Acknowledged {
 		t.Error("the second finding was left open")
 	}
+	// The second press only dismisses a finding, so it is recorded like any
+	// acknowledgement and the Nightshift feed counts it.
+	page, err := store.AuditHistory("", 10, "", storage.AuditFilter{Action: findingsAcknowledgedAudit})
+	if err != nil || len(page.Entries) != 2 {
+		t.Fatalf("acknowledgements recorded = %v %v, want one per press", page.Entries, err)
+	}
+	note := feedNote(t, srv, "ominull.detection.changes")
+	if !strings.Contains(note.Message, "2 findings acknowledged") {
+		t.Fatalf("feed note = %q", note.Message)
+	}
+}
+
+// A finding whose agent saw a different file running than the one at the
+// reported path names a program by a path it did not run, so it vouches for
+// nothing.
+func TestAPathMismatchCannotBeMarkedExpected(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	seedFinding(t, store, "f-10", "/usr/bin/backup-agent", `{"destination_owner":"Acme Vendor","destination_asn":"AS64500","destination_tenancy":"vendor","attribution_status":"path_mismatch"}`)
+
+	if code, body := suppressFinding(t, srv, "f-10"); code != http.StatusBadRequest {
+		t.Fatalf("a path mismatch was vouched for: %d %v", code, body)
+	}
+	if found, _ := store.GetAnomalyAlert("f-10"); found.Acknowledged || len(store.GetDetectionTuning().QuietPairs) != 0 {
+		t.Fatal("a path mismatch was dismissed or written as a pair")
+	}
 }
 
 // A finding whose program is known only by its name - an agent that could not

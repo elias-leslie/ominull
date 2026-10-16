@@ -116,6 +116,12 @@ func exclusionRange(v string) (netip.Prefix, bool) {
 
 // sameProcess compares exact paths. Windows paths compare without case, as
 // the filesystem does; Unix paths compare byte for byte.
+// AttributionPathMismatch is the attribution status an agent reports when the
+// path the kernel gives for a process's executable does not name, on the host,
+// the file that runs (a user namespace bind mount over a listed path, a
+// container's own path).
+const AttributionPathMismatch = "path_mismatch"
+
 func sameProcess(want, got string) bool {
 	want, got = normalizeProcessPath(want), normalizeProcessPath(got)
 	if windowsDrivePath.MatchString(want) {
@@ -128,7 +134,15 @@ func sameProcess(want, got string) bool {
 // the snapshot is the caller's responsibility; this function has no database
 // side effect and can be used for every event in one batch. Rows that fail
 // Problem - expired, unexplained, or broader than they read - never match.
+//
+// An exclusion that names a process names it by path, so a process whose
+// agent found that its reported path is not the file it runs matches none of
+// them; an exclusion with no process still applies to it.
 func MatchesExclusion(ev Event, locationID string, exclusions []Exclusion) bool {
+	evProc := ev.ProcessPath
+	if ev.AttributionStatus == AttributionPathMismatch {
+		evProc = ""
+	}
 	now := time.Now().UTC()
 	for _, ex := range exclusions {
 		if !ex.Active || ex.Problem(now) != "" {
@@ -179,7 +193,7 @@ func MatchesExclusion(ev Event, locationID string, exclusions []Exclusion) bool 
 			continue
 		}
 
-		if proc := exclusionAny(ex.ProcessPath); proc != "" && !sameProcess(proc, ev.ProcessPath) {
+		if proc := exclusionAny(ex.ProcessPath); proc != "" && !sameProcess(proc, evProc) {
 			continue
 		}
 

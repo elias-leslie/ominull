@@ -978,3 +978,34 @@ func TestAPathTheAgentCouldNotMatchToItsFileVouchesForNothing(t *testing.T) {
 		t.Fatal("a program shown at Chrome's path but running another file was vouched for")
 	}
 }
+
+// A process exclusion names its program by path too, so it no more applies to
+// a process whose path the agent could not match to its file than a quiet
+// entry does.
+func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	run := func(status string) int {
+		engine, store := noiseEngine(t)
+		now := time.Now().UTC()
+		if err := store.CreateExclusion(storage.Exclusion{ID: "ex-sync", TenantID: "default", Scope: "global", Name: "sync tool",
+			ProcessPath: "/usr/local/bin/synctool", DstIPRange: "104.16.0.0/16", Reason: "fixture", Active: true,
+			CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 40; i++ {
+			engine.Evaluate(storage.Event{
+				TenantID: "default", EndpointID: "linux-sync", Timestamp: start.Add(time.Duration(i) * time.Minute),
+				Action: "PERMIT", Direction: "OUTBOUND",
+				DstIP: "104.16.0.1", DstPort: 443, BytesOut: 1024,
+				ProcessPath: "/usr/local/bin/synctool", UserIdentity: "kasadis", AttributionStatus: status,
+			})
+		}
+		return len(anomaliesOfType(t, store, "C2_BEACONING"))
+	}
+	if n := run("authoritative"); n != 0 {
+		t.Fatalf("the excluded tool raised %d beacon finding(s)", n)
+	}
+	if n := run("path_mismatch"); n == 0 {
+		t.Fatal("a program shown at the excluded path but running another file was excluded")
+	}
+}

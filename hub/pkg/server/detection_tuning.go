@@ -290,6 +290,11 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 			"this finding has no attributed process, so there is no program to vouch for")
 		return
 	}
+	if evidenceText(finding.Evidence, "attribution_status") == storage.AttributionPathMismatch {
+		writeJSONError(w, http.StatusBadRequest,
+			"the agent found this process running a different file from the one at its reported path, so that path cannot vouch for it")
+		return
+	}
 	if storage.ValidQuietPath(proc) != nil {
 		// A program in a folder any account can write to is vouched for by
 		// the build the finding saw, never by where it sits.
@@ -324,7 +329,12 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 	pair := proc + "@" + owner
 	for _, existing := range before.QuietPairs {
 		if strings.EqualFold(strings.TrimSpace(existing), pair) {
-			_ = s.store.AcknowledgeAnomaly(finding.ID)
+			// Already vouched for: this only dismisses the finding, so it is
+			// recorded and counted on the Nightshift feed like any other.
+			if err := s.acknowledgeFinding(r, finding.ID); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			s.writeSuppressed(w, pair, finding, false)
 			return
 		}
@@ -349,7 +359,7 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 		s.detector.InvalidateTuning()
 	}
 	s.notePolicyChange(r, c, approvalID)
-	if err := s.store.AcknowledgeAnomaly(finding.ID); err != nil {
+	if err := s.acknowledgeFinding(r, finding.ID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -358,6 +368,14 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 			proc, owner, finding.AnomalyType, finding.EndpointID))
 
 	s.writeSuppressed(w, pair, finding, true)
+}
+
+// acknowledgeFinding dismisses one finding the way /anomalies/acknowledge
+// does, with its audit row, so the Nightshift feed counts it.
+func (s *Server) acknowledgeFinding(r *http.Request, id string) error {
+	done, err := s.store.AcknowledgeFindings("", []string{id}, false)
+	s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", done)
+	return err
 }
 
 func (s *Server) writeSuppressed(w http.ResponseWriter, pair string, finding storage.AnomalyAlert, added bool) {

@@ -1304,7 +1304,7 @@ func firstLine(cmd string) string {
 // pathMismatch is the attribution status an agent reports when the path the
 // kernel gives for a process's executable does not name, on the host, the file
 // that runs.
-const pathMismatch = "path_mismatch"
+const pathMismatch = storage.AttributionPathMismatch
 
 // isKnownInfrastructureProcess reports a container runtime or local resolver,
 // by the path it is installed at and the account it runs as, whose job is to

@@ -80,6 +80,16 @@ func TestMatchesExclusionIsExactAndFailsClosed(t *testing.T) {
 	if !MatchesExclusion(ev, "", []Exclusion{scoped}) {
 		t.Fatal("endpoint-scoped exclusion did not match its endpoint")
 	}
+	forged := ev
+	forged.AttributionStatus = AttributionPathMismatch
+	if MatchesExclusion(forged, "", []Exclusion{base}) {
+		t.Fatal("a path the agent could not match to its file matched a process exclusion")
+	}
+	noProcess := base
+	noProcess.ProcessPath = ""
+	if !MatchesExclusion(forged, "", []Exclusion{noProcess}) {
+		t.Fatal("an exclusion that names no process stopped applying to a path mismatch")
+	}
 	winEv := Event{TenantID: "default", ProcessPath: `C:\Program Files\Tool\TOOL.exe`, DstIP: "10.0.0.1"}
 	win := Exclusion{Scope: "global", TenantID: "default", ProcessPath: `c:\program files\tool\tool.exe`,
 		Reason: "tool", Active: true, ExpiresAt: now.Add(time.Hour)}
