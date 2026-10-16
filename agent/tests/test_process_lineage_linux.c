@@ -25,7 +25,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char g_mock_proc_dir[256] = {0};
@@ -636,30 +638,61 @@ static void test_path_names_running(void) {
     check(!ProcessLineage_PathNamesRunning(listed, &stImplant, true), "Another file behind a listed path is a mismatch", NULL);
     // A container's own path names nothing on the host.
     check(!ProcessLineage_PathNamesRunning("/nonexistent/in-container/rclone", &stListed, true), "A path the host lacks is a mismatch", NULL);
-    // Deleted since it started: trusted only in the host's mount namespace.
-    check(ProcessLineage_PathNamesRunning("/opt/google/chrome/chrome (deleted)", &stListed, true), "An upgraded browser left running keeps its path", NULL);
-    check(!ProcessLineage_PathNamesRunning("/usr/bin/dbus-daemon (deleted)", &stImplant, false), "A deleted file in another mount namespace is a mismatch", NULL);
+    // Deleted since it started: trusted only when it ran from the mount that
+    // holds the path in the host's view (here, the mount of the mock tree).
+    char tree[512], gone[600];
+    mock_path(tree, sizeof(tree), "bin");
+    uint64_t treeMount = ProcessLineage_MountId(tree);
+    check(treeMount != 0, "The kernel reports mount ids", NULL);
+    snprintf(gone, sizeof(gone), "%s/upgraded/chrome (deleted)", tree);
+    check(ProcessLineage_PathNamesRunning(gone, &stListed, treeMount), "An upgraded program left running keeps its path", NULL);
+    snprintf(gone, sizeof(gone), "%s (deleted)", listed);
+    check(ProcessLineage_PathNamesRunning(gone, &stListed, treeMount), "A replaced file on the same mount keeps its path", NULL);
+    // A user namespace bind mount over the path, its source then removed: the
+    // running file's mount exists only in that namespace, never the host's.
+    check(!ProcessLineage_PathNamesRunning(gone, &stImplant, treeMount + 7919), "A deleted file on a mount the host lacks is a mismatch", NULL);
+    check(!ProcessLineage_PathNamesRunning("/usr/bin/dbus-daemon (deleted)", &stImplant, 0), "A deleted file whose mount is unknown is a mismatch", NULL);
+    check(!ProcessLineage_PathNamesRunning("dbus-daemon (deleted)", &stImplant, treeMount), "A relative deleted path is a mismatch", NULL);
+    uint64_t rootMount = ProcessLineage_MountId("/");
+    check(ProcessLineage_PathNamesRunning("/nonexistent-ominull/dir/tool (deleted)", &stListed, rootMount), "A removed directory falls back to the mount above it", NULL);
+    check(!ProcessLineage_PathNamesRunning("/nonexistent-ominull/dir/tool (deleted)", &stListed, rootMount + 7919), "and only that mount", NULL);
 
-    // Mount namespaces compared against pid 1's.
-    create_file("ns-host", "h", 1);
-    create_file("ns-other", "o", 1);
-    char nsHost[512], nsOther[512], link[1024];
-    mock_path(nsHost, sizeof(nsHost), "ns-host");
-    mock_path(nsOther, sizeof(nsOther), "ns-other");
-    const char* pids[] = {"1", "300", "301"};
-    const char* targets[] = {nsHost, nsHost, nsOther};
-    for (int i = 0; i < 3; i++) {
-        char dir[512];
-        mock_path(dir, sizeof(dir), pids[i]);
-        mkdir(dir, 0755);
-        snprintf(link, sizeof(link), "%s/ns", dir);
-        mkdir(link, 0755);
-        snprintf(link, sizeof(link), "%s/ns/mnt", dir);
-        if (symlink(targets[i], link) != 0) perror("symlink ns");
+    // The real kernel: a copied program, started and then deleted, keeps its path.
+    char sleeper[512];
+    mock_path(sleeper, sizeof(sleeper), "bin/sleeper");
+    int in = open("/bin/sleep", O_RDONLY), out = open(sleeper, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    char buf[65536];
+    ssize_t got;
+    while (in >= 0 && out >= 0 && (got = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, (size_t)got) != got) break;
     }
-    check(ProcessLineage_InHostMountNamespace(300), "Same mount namespace as pid 1", NULL);
-    check(!ProcessLineage_InHostMountNamespace(301), "Another mount namespace", NULL);
-    check(!ProcessLineage_InHostMountNamespace(302), "An unreadable namespace is not the host's", NULL);
+    if (in >= 0) close(in);
+    if (out >= 0) close(out);
+    pid_t child = fork();
+    if (child == 0) {
+        execl(sleeper, "sleeper", "5", (char*)NULL);
+        _exit(127);
+    }
+    char exeLink[64], exe[PATH_MAX];
+    snprintf(exeLink, sizeof(exeLink), "/proc/%d/exe", (int)child);
+    ssize_t n = -1;
+    for (int i = 0; i < 200; i++) {
+        n = readlink(exeLink, exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            if (strcmp(exe, sleeper) == 0) break;
+        }
+        usleep(10000);
+    }
+    unlink(sleeper);
+    n = readlink(exeLink, exe, sizeof(exe) - 1);
+    struct stat liveRunning;
+    bool live = n > 0 && stat(exeLink, &liveRunning) == 0;
+    if (live) exe[n] = '\0';
+    check(live && strstr(exe, " (deleted)") != NULL, "The started copy reads as deleted", live ? exe : "unreadable");
+    check(live && ProcessLineage_PathNamesRunning(exe, &liveRunning, ProcessLineage_MountId(exeLink)), "A deleted program on a host mount keeps its path", NULL);
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
 
     // End to end: a mock exe link reads and stats as the same file, so nothing is flagged.
     make_mock_exe("300", listed);

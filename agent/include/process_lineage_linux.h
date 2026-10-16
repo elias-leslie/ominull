@@ -31,6 +31,10 @@
 #define OMINULL_PROC_ROOT "/proc"
 #endif
 
+#ifndef STATX_MNT_ID
+#define STATX_MNT_ID 0x1000U
+#endif
+
 #define LINUX_HASH_CACHE_CAP 512
 #define LINUX_MAX_HASH_BYTES (64 * 1024 * 1024) // 64 MiB max hash cap
 
@@ -596,31 +600,54 @@ static inline bool ProcessLineage_HashExecutable(uint32_t pid, char* outHex, siz
     return true;
 }
 
-/* Whether exe, the path the kernel reports for a running executable, names in
- * the host's view the file that runs (running, from stat of /proc/PID/exe).
- * A login user can bind-mount any program over a listed path inside a user
- * namespace of its own: /proc/PID/exe then reads as the listed path while the
- * file is another one, or the path names nothing on the host (a container's
- * own path). An executable deleted since it started (a package upgraded under
- * a running program) cannot be compared; it counts only in the host's mount
- * namespace, where no bind mount put it at that path. */
-static inline bool ProcessLineage_PathNamesRunning(const char* exe, const struct stat* running, bool hostMountNamespace) {
-    static const char deleted[] = " (deleted)";
-    size_t len = strlen(exe);
-    if (len > sizeof(deleted) - 1 && strcmp(exe + len - (sizeof(deleted) - 1), deleted) == 0) return hostMountNamespace;
-    struct stat named;
-    return stat(exe, &named) == 0 && named.st_dev == running->st_dev && named.st_ino == running->st_ino;
+/* The id of the mount that holds path's file (following a final link, so
+ * /proc/PID/exe gives the running file's mount), or 0 if the kernel does not
+ * say. Mount ids are unique among the system's live mounts, across namespaces. */
+static inline uint64_t ProcessLineage_MountId(const char* path) {
+    struct statx stx;
+    if (statx(AT_FDCWD, path, 0, STATX_MNT_ID, &stx) != 0) return 0;
+    if (!(stx.stx_mask & STATX_MNT_ID)) {
+        errno = ENOTSUP;
+        return 0;
+    }
+    return stx.stx_mnt_id;
 }
 
-/* Whether pid shares the mount namespace of pid 1 (the host's). */
-static inline bool ProcessLineage_InHostMountNamespace(uint32_t pid) {
-    char suffix[64], path[512];
-    struct stat host, own;
-    ProcessLineage_ProcPath(path, sizeof(path), "1/ns/mnt");
-    if (stat(path, &host) != 0) return false;
-    snprintf(suffix, sizeof(suffix), "%u/ns/mnt", pid);
-    ProcessLineage_ProcPath(path, sizeof(path), suffix);
-    return stat(path, &own) == 0 && own.st_dev == host.st_dev && own.st_ino == host.st_ino;
+/* Whether exe, the path the kernel reports for a running executable, names in
+ * the host's view the file that runs (running and runningMount, from
+ * /proc/PID/exe). A login user can bind-mount any program over a listed path
+ * inside a user namespace of its own: /proc/PID/exe then reads as the listed
+ * path while the file is another one, or the path names nothing on the host (a
+ * container's own path). An executable deleted since it started (a package
+ * upgraded under a running program) cannot be compared by file; it counts only
+ * when it ran from the very mount that holds that path in the agent's (the
+ * host's) view, so a bind mount made in another namespace, whose mount the host
+ * does not have, stays a mismatch even after its source file is removed. */
+static inline bool ProcessLineage_PathNamesRunning(const char* exe, const struct stat* running, uint64_t runningMount) {
+    static const char deleted[] = " (deleted)";
+    size_t len = strlen(exe);
+    if (len > sizeof(deleted) - 1 && strcmp(exe + len - (sizeof(deleted) - 1), deleted) == 0) {
+        char path[PATH_MAX];
+        size_t keep = len - (sizeof(deleted) - 1);
+        if (runningMount == 0 || exe[0] != '/' || keep >= sizeof(path)) return false;
+        memcpy(path, exe, keep);
+        path[keep] = '\0';
+        for (;;) {
+            uint64_t mount = ProcessLineage_MountId(path);
+            if (mount != 0) return mount == runningMount;
+            if (errno != ENOENT && errno != ENOTDIR) return false;
+            char* slash = strrchr(path, '/');
+            if (!slash) return false;
+            if (slash == path) {
+                if (path[1] == '\0') return false;
+                path[1] = '\0';
+            } else {
+                *slash = '\0';
+            }
+        }
+    }
+    struct stat named;
+    return stat(exe, &named) == 0 && named.st_dev == running->st_dev && named.st_ino == running->st_ino;
 }
 
 /* False only when pid's reported executable path is shown not to name the
@@ -633,7 +660,7 @@ static inline bool ProcessLineage_PathIsHostPath(uint32_t pid) {
     struct stat running;
     if (n <= 0 || stat(link, &running) != 0) return true;
     exe[n] = '\0';
-    return ProcessLineage_PathNamesRunning(exe, &running, ProcessLineage_InHostMountNamespace(pid));
+    return ProcessLineage_PathNamesRunning(exe, &running, ProcessLineage_MountId(link));
 }
 
 /* Enriches a process with full lineage and executable hashing */
