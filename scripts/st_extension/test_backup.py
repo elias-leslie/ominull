@@ -578,8 +578,48 @@ class PreparationTests(unittest.TestCase):
         previous = list(self.destination.glob(".previous-*"))
         self.assertEqual(len(previous), 1)
         self.assertEqual(json.loads((previous[0] / "manifest.json").read_text()), prior)
+
+    def test_uncaptured_generations_recover_without_accumulating(self):
+        # The parent captured neither of two fresh generations (live 2026-10-16):
+        # the next unqualified run offers current again instead of refusing forever.
+        prior = self.prepare()
+        self.payload = b"second consistent generation"
+        second = self.prepare()
+        previous = list(self.destination.glob(".previous-*"))
+        self.calls.clear()
+        offered = self.prepare({**REQUEST, "backup_id": "bkp-reoffer"})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(offered["backup_id"], "bkp-reoffer")
+        self.assertEqual(offered["sha256"], second["sha256"])
+        self.assertEqual(offered["reused_from_backup_id"], second["backup_id"])
+        self.assertFalse(offered["capture_fresh"])
+        self.assertEqual(bk._generation(self.destination / "current"), offered)
+        self.assertEqual(list(self.destination.glob(".previous-*")), previous)
+        self.assertEqual(bk._generation(previous[0]), prior)
+        # Once the parent captures current, the older uncaptured generation is
+        # superseded and the next fresh capture proceeds normally.
+        self.payload = b"third consistent generation"
+        third = self.prepare(self.qualified_request(offered))
+        self.assertEqual(third["status"], "completed")
+        self.assertEqual(Path(third["archive_path"]).read_bytes(), self.payload)
+        self.assertFalse(list(self.destination.glob(".previous-*")))
+        self.assertFalse((self.destination / ".retirement.json").exists())
+        markers = [json.loads(path.read_text()) for path in self.destination.glob("retirement-completed-*.json")]
+        self.assertIn(prior["backup_id"], [marker["qualification"]["backup_id"] for marker in markers
+                                           if marker.get("superseded_by") == "bkp-reoffer"])
+
+    def test_superseded_retirement_refuses_a_newer_predecessor(self):
+        prior = self.prepare()
+        self.payload = b"second consistent generation"
+        self.prepare()
+        offered = self.prepare({**REQUEST, "backup_id": "bkp-reoffer"})
+        previous = list(self.destination.glob(".previous-*"))[0]
+        bk._save_json(previous / "manifest.json", {**prior, "completed_at": "2999-01-01T00:00:00+00:00"})
+        self.calls.clear()
         with self.assertRaises(obs.ObservationError):
-            self.prepare()
+            self.prepare(self.qualified_request(offered))
+        self.assertEqual(self.calls, [])
+        self.assertTrue(previous.exists())
 
     def staged_generation(self, payload=b"replacement fixture"):
         staging = self.destination / (".attempt-" + "a" * 32)

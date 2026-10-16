@@ -244,10 +244,13 @@ def retire_qualified_previous():
     if not marker.exists() and not marker.is_symlink():
         return
     state = obs.parse_json(obs.regular_file(marker, private=True).read_bytes())
-    obs.require(isinstance(state, dict) and set(state) == {"previous", "qualification", "size_bytes"}
+    obs.require(isinstance(state, dict) and set(state) in ({"previous", "qualification", "size_bytes"},
+                                                          {"previous", "qualification", "size_bytes", "superseded_by"})
                 and isinstance(state["previous"], str)
                 and type(state["size_bytes"]) is int and state["size_bytes"] > 0
                 and re.fullmatch(r"\.previous-[0-9a-f]{32}", state["previous"]), "backup_retirement_marker")
+    obs.require("superseded_by" not in state or (isinstance(state["superseded_by"], str)
+                and obs.IDENTIFIER.fullmatch(state["superseded_by"])), "backup_retirement_marker")
     # Apply the public contract validation also to durable qualification evidence.
     obs.require(isinstance(state["qualification"], dict), "backup_retirement_marker")
     parse_request(json.dumps({"contract_version": 1, "operation": "prepare_backup", "project": "ominull",
@@ -282,6 +285,37 @@ def retire_qualified_previous():
         _sync_directory(DESTINATION)
     marker.rename(DESTINATION / ("retirement-completed-" + uuid.uuid4().hex + ".json"))
     _sync_directory(DESTINATION)
+
+
+def retire_superseded_previous(current, qualification):
+    """Retire an older generation the parent never captured once current is captured.
+
+    A failed parent capture leaves current unqualified; the next fresh capture
+    then retains that generation as .previous. Once the newer current generation
+    is qualified (captured independently), the older one is superseded.
+    """
+    for previous in sorted(DESTINATION.glob(".previous-*")):
+        obs.require(re.fullmatch(r"\.previous-[0-9a-f]{32}", previous.name) is not None,
+                    "backup_previous_qualification_required")
+        value = _generation(previous)
+        obs.require(value["backup_id"] != current["backup_id"] and value["sha256"] != current["sha256"]
+                    and isinstance(value.get("completed_at"), str) and isinstance(current.get("completed_at"), str)
+                    and value["completed_at"] < current["completed_at"], "backup_previous_qualification_required")
+        _save_json(DESTINATION / ".retirement.json",
+                   {"previous": previous.name, "size_bytes": value["size_bytes"],
+                    "superseded_by": qualification["backup_id"],
+                    "qualification": {**qualification, "backup_id": value["backup_id"], "sha256": value["sha256"]}})
+        retire_qualified_previous()
+
+
+def reoffer_current(request):
+    """Offer the uncaptured current generation again instead of accumulating another."""
+    current = _generation(DESTINATION / "current", verify_hash=True)
+    response = {**current, "backup_id": request["backup_id"],
+                "reused_from_backup_id": current.get("reused_from_backup_id", current["backup_id"]),
+                "capture_fresh": False, "prepared_at": datetime.now(timezone.utc).isoformat()}
+    _save_json(DESTINATION / "current/manifest.json", response)
+    return response
 
 
 def publish(staging, response, qualification=None):
@@ -393,13 +427,18 @@ def prepare(request, root):
         _save_json(DESTINATION / "current/manifest.json", response)
         return response
     # One retained predecessor is enough to recover an interrupted publication.
-    # Never accumulate generations while parent qualification remains pending.
-    obs.require(not any(DESTINATION.glob(".previous-*")), "backup_previous_qualification_required")
+    # Never accumulate generations while parent qualification remains pending:
+    # until the parent captures current, offer it again; once it has, the older
+    # uncaptured predecessor is superseded.
     qualification = request.get("qualified_previous")
     if qualification is not None:
         current = _generation(DESTINATION / "current")
         obs.require(current["backup_id"] == qualification["backup_id"]
                     and current["sha256"] == qualification["sha256"], "backup_retirement_qualification")
+        retire_superseded_previous(current, qualification)
+    elif any(DESTINATION.glob(".previous-*")):
+        return reoffer_current(request)
+    obs.require(not any(DESTINATION.glob(".previous-*")), "backup_previous_qualification_required")
     discard_unverified_attempts(config)
     trim_evidence_markers()
     reusable = _reusable_attempt(digest)
