@@ -233,6 +233,18 @@ func TestOwnersMatchExactlyOrByASNumber(t *testing.T) {
 	if !cfg.IsVouchedPair("/usr/bin/rclone", "", "AS15169", "Google LLC", TenancyVendor) {
 		t.Error("the pair did not vouch for its own conversation")
 	}
+	// The limit of an unpinned pair: it names a path, not a build. Any program a
+	// login user presents at /usr/bin/rclone (a bind mount in a user namespace)
+	// carries that path and is vouched for; only a sha256 pin tells them apart.
+	if !cfg.IsVouchedPair("/usr/bin/rclone", strings.Repeat("ab", 32), "AS15169", "Google LLC", TenancyVendor) {
+		t.Error("an unpinned pair is expected to match any build at its path")
+	}
+	pinned := cfg
+	pinned.QuietPairs = []string{"/usr/bin/rclone sha256:" + strings.Repeat("cd", 32) + "@as15169"}
+	if pinned.IsVouchedPair("/usr/bin/rclone", strings.Repeat("ab", 32), "AS15169", "Google LLC", TenancyVendor) ||
+		!pinned.IsVouchedPair("/usr/bin/rclone", strings.Repeat("cd", 32), "AS15169", "Google LLC", TenancyVendor) {
+		t.Error("a pinned pair did not tell builds at the same path apart")
+	}
 	if cfg.IsVouchedPair("/tmp/rclone", "", "AS15169", "Google LLC", TenancyVendor) ||
 		cfg.IsVouchedPair("/usr/bin/rclone", "", "AS396982", "Google Cloud (customer range)", TenancyHosting) {
 		t.Error("the pair vouched for another program or for rented compute")
@@ -344,8 +356,9 @@ func TestTheStoredRowIsMigratedToPathsAndASNumbers(t *testing.T) {
 	if want := []string{"as13335", "as15169", "as16509", "as20940", "as54113", "as714", "as8075"}; strings.Join(got.QuietOrgs, ",") != strings.Join(want, ",") {
 		t.Errorf("quiet networks = %v, want %v", got.QuietOrgs, want)
 	}
-	if want := []string{"/usr/bin/rclone@as15169"}; strings.Join(got.QuietPairs, ",") != strings.Join(want, ",") {
-		t.Errorf("expected pairs = %v, want %v", got.QuietPairs, want)
+	// rclone never ran from a path a pair could name safely, so its pair is dropped.
+	if len(got.QuietPairs) != 0 {
+		t.Errorf("expected pairs = %v, want none", got.QuietPairs)
 	}
 	owners := map[string]string{}
 	for _, k := range got.KnownWorkloads {

@@ -307,7 +307,9 @@ var legacyQuietProcesses = map[string][]string{
 // legacyQuietPaths are the paths the shipped expected-client and pair names
 // are installed at. A program in a folder any account can write to, such as
 // ~/.local/bin/rclone, is not carried over: by path alone that is whatever
-// was put there last.
+// was put there last. Nor is a path where nothing ran: rclone was never at
+// /usr/bin/rclone, and an unpinned entry there would vouch for whatever a
+// login user presents at that path through a user namespace bind mount.
 var legacyQuietPaths = map[string][]string{
 	"svchost.exe":       {"c:/windows/system32/svchost.exe"},
 	"usocoreworker.exe": {"c:/windows/system32/usocoreworker.exe"},
@@ -332,7 +334,6 @@ var legacyQuietPaths = map[string][]string{
 	"softwareupdated": {"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated"},
 	"chatgpt":         {"/usr/lib/chatgpt/chatgpt"},
 	"claude-desktop":  {"/usr/lib/claude-desktop/claude-desktop"},
-	"rclone":          {"/usr/bin/rclone"},
 }
 
 // legacyQuietOwners are the AS numbers behind the name fragments the shipped
