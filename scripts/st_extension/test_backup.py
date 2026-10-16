@@ -608,6 +608,37 @@ class PreparationTests(unittest.TestCase):
         self.assertIn(prior["backup_id"], [marker["qualification"]["backup_id"] for marker in markers
                                            if marker.get("superseded_by") == "bkp-reoffer"])
 
+    def test_repeated_reoffer_and_interrupted_superseded_retirement_recover(self):
+        # The parent can miss the re-offered generation too (headroom stayed low
+        # for a while), and the superseded removal can be cut off midway.
+        prior = self.prepare()
+        self.payload = b"second consistent generation"
+        second = self.prepare()
+        self.prepare({**REQUEST, "backup_id": "bkp-reoffer-1"})
+        offered = self.prepare({**REQUEST, "backup_id": "bkp-reoffer-2"})
+        self.assertEqual(offered["reused_from_backup_id"], second["backup_id"])
+        self.assertEqual(len(list(self.destination.glob(".previous-*"))), 1)
+        original = Path.unlink
+        def interrupt(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            if path.name == "lxc-150.tar" and path.parent.name.startswith(".previous-"):
+                raise OSError("interrupted superseded retirement")
+            return result
+        self.calls.clear()
+        with patch.object(Path, "unlink", interrupt), self.assertRaises(OSError):
+            self.prepare(self.qualified_request(offered))
+        self.assertEqual(self.calls, [])
+        self.assertTrue((self.destination / ".retirement.json").exists())
+        self.assertEqual(bk._generation(self.destination / "current"), offered)
+        self.payload = b"third consistent generation"
+        third = self.prepare(self.qualified_request(offered))
+        self.assertEqual(Path(third["archive_path"]).read_bytes(), self.payload)
+        self.assertFalse(list(self.destination.glob(".previous-*")))
+        self.assertFalse((self.destination / ".retirement.json").exists())
+        markers = [json.loads(path.read_text()) for path in self.destination.glob("retirement-completed-*.json")]
+        self.assertIn(prior["backup_id"], [marker["qualification"]["backup_id"] for marker in markers
+                                           if marker.get("superseded_by") == "bkp-reoffer-2"])
+
     def test_superseded_retirement_refuses_a_newer_predecessor(self):
         prior = self.prepare()
         self.payload = b"second consistent generation"
