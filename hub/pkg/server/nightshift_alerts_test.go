@@ -421,4 +421,8 @@ func TestRelayAlertVerdict(t *testing.T) {
 	if _, _, _, ok := store.AnomalyResolution("old"); ok {
 		t.Fatal("an alert outside the feed window was confirmed")
 	}
+	// The answer closed a HIGH finding, so the detection-policy note counts it.
+	if f := feedNote(t, srv, "ominull.detection.changes"); !strings.HasPrefix(f.Message, "1 finding acknowledged (1 HIGH or CRITICAL)") {
+		t.Fatalf("note after the owner's answer = %q", f.Message)
+	}
 }

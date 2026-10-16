@@ -125,6 +125,56 @@ func TestResolvingFindingsRecordsWhy(t *testing.T) {
 	}
 }
 
+// Resolving closes findings like acknowledging them, so the Nightshift feed's
+// detection-policy note counts and lists what a resolve closed, by id and in
+// a covered batch; a verdict on a finding already closed adds nothing.
+func TestResolvingFindingsIsCountedOnTheFeedNote(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedNpmFindings(t, store, 3)
+	if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: "crit", TenantID: "default", EndpointID: "e1", AnomalyType: "THREAT_INTEL_MATCH",
+		Severity: "CRITICAL", Title: "known bad", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	tu := store.GetDetectionTuning()
+	tu.KnownWorkloads = npmKnown
+	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(body map[string]any, want int) {
+		t.Helper()
+		w := replayRequest(srv, http.MethodPost, "/api/v1/anomalies/resolve", "mock_admin_token", body)
+		var got struct {
+			Resolved int `json:"resolved"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Resolved != want {
+			t.Fatalf("resolve %v = %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	resolve(map[string]any{"ids": []string{"crit"}, "reason": "checked"}, 1)
+	f := feedNote(t, srv, "ominull.detection.changes")
+	dismissed, _ := f.Unmapped["dismissed"].([]map[string]any)
+	if f.StatusID != ocsfStatusNew || !strings.HasPrefix(f.Message, "1 finding acknowledged (1 HIGH or CRITICAL)") ||
+		len(dismissed) != 1 || !strings.Contains(dismissed[0]["change"].(string), "THREAT_INTEL_MATCH") ||
+		!strings.Contains(dismissed[0]["change"].(string), "credential api-key (unverified)") {
+		t.Fatalf("note after resolving the CRITICAL finding = %q %v", f.Message, dismissed)
+	}
+	resolve(map[string]any{"covered": true}, 3)
+	// The operator's later verdict relabels the closed finding and is not a
+	// second dismissal.
+	resolve(map[string]any{"ids": []string{"crit"}, "reason": "confirmed", "verdict": storage.VerdictMalicious}, 1)
+	f = feedNote(t, srv, "ominull.detection.changes")
+	dismissed, _ = f.Unmapped["dismissed"].([]map[string]any)
+	listed := false
+	for _, d := range dismissed {
+		listed = listed || strings.Contains(d["change"].(string), "THREAT_INTEL_MATCH")
+	}
+	if !strings.HasPrefix(f.Message, "4 findings acknowledged (1 HIGH or CRITICAL)") || !listed || len(dismissed) != 2 {
+		t.Fatalf("note after the covered batch = %q %v", f.Message, dismissed)
+	}
+}
+
 // The console's tuning sheet posts only the fields it shows; saving it must
 // not erase the known workloads it does not show.
 func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {

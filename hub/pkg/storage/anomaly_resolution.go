@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -98,32 +99,37 @@ const resolveChunk = 500
 
 // ResolveAnomalies acknowledges findings and records why, a few hundred per
 // transaction. Only findings of tenantID are touched when it is set. It
-// returns how many findings were open and are now resolved; on an error the
+// returns how many findings were resolved, counting a verdict given to one
+// acknowledged earlier, and the Dismissal of those it took out of the open
+// list, which the caller records like any acknowledgement. On an error the
 // chunks before it stay resolved and are counted.
-func (s *Store) ResolveAnomalies(tenantID string, ids []string, res Resolution) (int, error) {
+func (s *Store) ResolveAnomalies(tenantID string, ids []string, res Resolution) (int, Dismissal, error) {
+	var closed Dismissal
 	res.Reason = strings.TrimSpace(res.Reason)
 	if res.Reason == "" {
-		return 0, errors.New("a resolution needs a reason")
+		return 0, closed, errors.New("a resolution needs a reason")
 	}
 	switch res.Verdict {
 	case "", VerdictBenign, VerdictMalicious:
 	default:
-		return 0, fmt.Errorf("verdict %q is not benign or malicious", res.Verdict)
+		return 0, closed, fmt.Errorf("verdict %q is not benign or malicious", res.Verdict)
 	}
 	total := 0
 	for len(ids) > 0 {
 		chunk := ids[:min(resolveChunk, len(ids))]
 		ids = ids[len(chunk):]
-		n, err := s.resolveAnomalyChunk(tenantID, chunk, res)
+		n, err := s.resolveAnomalyChunk(tenantID, chunk, res, &closed)
 		total += n
 		if err != nil {
-			return total, err
+			return total, closed, err
 		}
 	}
-	return total, nil
+	return total, closed, nil
 }
 
-func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, res Resolution) (int, error) {
+// resolveAnomalyChunk adds the findings it acknowledged to closed only once
+// its transaction has committed.
+func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, res Resolution, closed *Dismissal) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -133,17 +139,21 @@ func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, res Resolutio
 	defer tx.Rollback()
 	now := time.Now().UTC()
 	n := 0
+	var chunk Dismissal
 	for _, id := range ids {
 		q, args := "UPDATE anomaly_alerts SET acknowledged = 1 WHERE id = ? AND acknowledged = 0", []any{id}
 		if tenantID != "" {
 			q += " AND tenant_id = ?"
 			args = append(args, tenantID)
 		}
-		r, err := tx.Exec(q, args...)
-		if err != nil {
+		var sev, typ string
+		err := tx.QueryRow(q+" RETURNING severity, anomaly_type", args...).Scan(&sev, &typ)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return 0, err
 		}
-		if c, _ := r.RowsAffected(); c == 0 {
+		if err == nil {
+			chunk.add(sev, typ, 1)
+		} else {
 			// A finding acknowledged earlier can still be given an operator's
 			// verdict: one acked unread and later found malicious must be
 			// labelled malicious. Tuning never overwrites a closed finding.
@@ -168,7 +178,11 @@ func (s *Store) resolveAnomalyChunk(tenantID string, ids []string, res Resolutio
 		}
 		n++
 	}
-	return n, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	closed.Merge(chunk)
+	return n, nil
 }
 
 // AnomalyResolution returns the recorded reason a finding was closed, if any.

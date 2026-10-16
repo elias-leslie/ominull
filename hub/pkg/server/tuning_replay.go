@@ -144,6 +144,11 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 	reason := strings.TrimSpace(req.Reason)
 	byReason := map[string]int{}
 	truncated := false
+	// Resolving takes findings out of the Nightshift feed's open counts like
+	// acknowledging them does, so what it closed is recorded the same way,
+	// after an error too: the chunks before it stay closed.
+	var closed storage.Dismissal
+	defer func() { s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", closed) }()
 
 	switch {
 	case req.Covered == (len(req.IDs) > 0):
@@ -164,7 +169,8 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusBadRequest, "verdict is benign, malicious, or omitted")
 			return
 		}
-		n, err := s.store.ResolveAnomalies(tenant, req.IDs, storage.Resolution{Reason: reason, By: by, Verdict: req.Verdict, Method: storage.MethodOperator})
+		n, d, err := s.store.ResolveAnomalies(tenant, req.IDs, storage.Resolution{Reason: reason, By: by, Verdict: req.Verdict, Method: storage.MethodOperator})
+		closed = d
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -207,8 +213,9 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 		}
 		sort.Strings(keys)
 		for _, why := range keys {
-			n, err := s.store.ResolveAnomalies(tenant, groups[why], storage.Resolution{Reason: why, By: by, Verdict: storage.VerdictBenign, Method: storage.MethodTuning})
+			n, d, err := s.store.ResolveAnomalies(tenant, groups[why], storage.Resolution{Reason: why, By: by, Verdict: storage.VerdictBenign, Method: storage.MethodTuning})
 			byReason[why] = n
+			closed.Merge(d)
 			if err != nil {
 				s.audit(r, "ANOMALIES_RESOLVED", "anomalies", fmt.Sprintf("resolved %d findings before an error", n))
 				writeJSONError(w, http.StatusInternalServerError, err.Error())

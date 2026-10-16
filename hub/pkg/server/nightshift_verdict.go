@@ -74,13 +74,15 @@ func (s *Server) handleRelayAlertVerdict(w http.ResponseWriter, r *http.Request)
 	}
 	n := 0
 	if len(ids) > 0 {
-		n, err = s.store.ResolveAnomalies("", ids, storage.Resolution{Reason: "Owner answered on Nightshift: that was me",
+		var closed storage.Dismissal
+		n, closed, err = s.store.ResolveAnomalies("", ids, storage.Resolution{Reason: "Owner answered on Nightshift: that was me",
 			By: "owner via Nightshift", Verdict: storage.VerdictBenign, Method: storage.MethodOperator})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "the verdict could not be saved")
 			return
 		}
 		s.audit(r, "NIGHTSHIFT_OWNER_BENIGN", "anomalies", "Owner confirmed benign on Nightshift: "+strings.Join(ids, ", "))
+		s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", closed)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"confirmed": n, "skipped": skipped})
 }

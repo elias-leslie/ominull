@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2146,6 +2147,17 @@ func (d *Dismissal) add(severity, anomalyType string, n int) {
 		}
 	}
 	d.HighTypes = append(d.HighTypes, anomalyType)
+	sort.Strings(d.HighTypes)
+}
+
+func (d *Dismissal) Merge(o Dismissal) {
+	d.Count += o.Count
+	d.High += o.High
+	for _, t := range o.HighTypes {
+		if !slices.Contains(d.HighTypes, t) {
+			d.HighTypes = append(d.HighTypes, t)
+		}
+	}
 	sort.Strings(d.HighTypes)
 }
 

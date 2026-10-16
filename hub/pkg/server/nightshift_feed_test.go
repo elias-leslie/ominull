@@ -332,7 +332,7 @@ func TestNightshiftFeedV2CarriesTypedRecordsWithVerifiedOutcomes(t *testing.T) {
 		return id
 	}
 	resolve := func(id, verdict, method string) {
-		if _, err := store.ResolveAnomalies("", []string{id}, storage.Resolution{Reason: "test", By: "test", Verdict: verdict, Method: method}); err != nil {
+		if _, _, err := store.ResolveAnomalies("", []string{id}, storage.Resolution{Reason: "test", By: "test", Verdict: verdict, Method: method}); err != nil {
 			t.Fatal(err)
 		}
 	}
