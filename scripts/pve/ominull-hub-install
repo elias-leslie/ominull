@@ -1,0 +1,264 @@
+#!/usr/bin/python3 -I
+"""Forced command for OmniNull's hub-install key on the Proxmox host (CT 150).
+
+Installed as /usr/local/sbin/ominull-hub-install by scripts/pve/install.sh and
+bound to one key in /root/.ssh/authorized_keys with restrict,from=,command=. The
+key can install only a hub package signed by the pinned release key:
+
+    version            installed hub version and the pinned key's digest (JSON)
+    install VERSION    read a tar of exactly ominull-hub_VERSION_amd64.deb, its
+                       .sig and its .release.sig on stdin; verify both signatures
+                       against PIN, the package name, version and architecture,
+                       refuse a version older than the installed one, then
+                       dpkg -i it in CT 150 and wait for both units and :9443
+
+The package's postinst publishes the agent packages bundled inside it, so no
+other file reaches the container. A signed hub package carries the release key
+its build pins (usr/share/ominull/release-public.pem); once that package is
+installed it becomes PIN, so a rotation release signed by the outgoing key moves
+this pin the same way it moves every agent's.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+PIN = Path("/etc/ominull-hub-install/release-public.pem")
+WORK = Path("/var/lib/ominull-hub-install")
+GUEST = "150"
+GUEST_DEB = "/root/ominull-hub-install.deb"
+PACKAGE_PIN = "usr/share/ominull/release-public.pem"
+UNITS = ("ominull-response-authority.service", "ominull-hub.service")
+VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
+MAX_PACKAGE = 256 * 1024 * 1024
+MAX_SIGNATURE = 4096
+MAX_PIN = 4096
+READY_SECONDS = 60
+OWNER = 0  # Only root may name the release key or hold the work directory.
+
+
+class Refused(Exception):
+    """A fixed precondition failed; nothing was installed."""
+
+
+def need(condition, why):
+    if not condition:
+        raise Refused(why)
+
+
+def command(*argv, timeout=120, input=None):
+    return subprocess.run(argv, check=False, input=input, stdin=None if input is not None else subprocess.DEVNULL,
+                          capture_output=True, timeout=timeout)
+
+
+def in_guest(*argv, timeout=120):
+    return command("pct", "exec", GUEST, "--", *argv, timeout=timeout)
+
+
+def root_file(path, limit):
+    """Bytes of a root-owned regular file in a root-owned directory nobody else can write."""
+    info, parent = path.lstat(), path.parent.lstat()
+    need(stat.S_ISREG(info.st_mode) and info.st_uid == OWNER and not info.st_mode & 0o022, "ownership: " + str(path))
+    need(stat.S_ISDIR(parent.st_mode) and parent.st_uid == OWNER and not parent.st_mode & 0o022,
+         "ownership: " + str(path.parent))
+    data = path.read_bytes()
+    need(0 < len(data) <= limit, "size: " + str(path))
+    return data
+
+
+def public_key(data):
+    """data when it is exactly one P-256 public key PEM, else refused."""
+    need(re.fullmatch(rb"-----BEGIN PUBLIC KEY-----\n([A-Za-z0-9+/=]{1,76}\n){1,4}-----END PUBLIC KEY-----\n", data)
+         is not None, "release key is not one public key")
+    text = command("openssl", "pkey", "-pubin", "-noout", "-text", input=data, timeout=30)
+    need(text.returncode == 0 and b"prime256v1" in text.stdout, "release key is not P-256")
+    return data
+
+
+def pinned():
+    return public_key(root_file(PIN, MAX_PIN))
+
+
+def verify(key_file, data_file, signature_file):
+    result = command("openssl", "dgst", "-sha256", "-verify", str(key_file), "-signature", str(signature_file),
+                     str(data_file), timeout=120)
+    need(result.returncode == 0, "signature does not verify against the pinned release key: " + data_file.name)
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def as_tuple(version):
+    match = VERSION.fullmatch(version)
+    need(match is not None, "version")
+    return tuple(int(part) for part in match.groups())
+
+
+def installed_version():
+    """The hub version in CT 150, or None when no hub package is installed."""
+    result = in_guest("dpkg-query", "-W", "-f=${Status} ${Version}", "ominull-hub", timeout=30)
+    text = result.stdout.decode(errors="replace").strip()
+    if result.returncode != 0 or not text.startswith("install ok installed "):
+        need(result.returncode != 0 or text.startswith(("deinstall ", "unknown ", "purge ")), "installed hub state")
+        return None
+    version = text.removeprefix("install ok installed ")
+    as_tuple(version)
+    return version
+
+
+def receive(stream, directory, names):
+    """Write exactly the expected regular files from the tar on stream."""
+    seen = {}
+    limits = {name: (MAX_PACKAGE if name.endswith(".deb") else MAX_SIGNATURE) for name in names}
+    with tarfile.open(fileobj=stream, mode="r|") as archive:
+        for member in archive:
+            need(member.name in limits and member.name not in seen, "unexpected member: " + member.name)
+            need(member.isreg() and 0 < member.size <= limits[member.name], "member type or size: " + member.name)
+            source = archive.extractfile(member)
+            need(source is not None, "member: " + member.name)
+            path = directory / member.name
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with os.fdopen(descriptor, "wb") as out:
+                shutil.copyfileobj(source, out, 1024 * 1024)
+            need(path.stat().st_size == member.size, "short member: " + member.name)
+            seen[member.name] = path
+    need(set(seen) == set(names), "missing package or signature")
+    return seen
+
+
+def package_fields(deb):
+    result = command("dpkg-deb", "--field", str(deb), "Package", "Version", "Architecture", timeout=60)
+    need(result.returncode == 0, "package metadata")
+    fields = {}
+    for line in result.stdout.decode(errors="replace").splitlines():
+        key, _, value = line.partition(": ")
+        need(key not in fields, "package metadata")
+        fields[key] = value
+    return fields
+
+
+def package_pin(deb, directory):
+    """The release key the package's build pins, or None for an older package."""
+    tar_path = directory / "data.tar"
+    with tar_path.open("xb") as out:
+        result = subprocess.run(["dpkg-deb", "--fsys-tarfile", str(deb)], stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.DEVNULL, timeout=300, check=False)
+    need(result.returncode == 0, "package data")
+    found = None
+    with tarfile.open(tar_path, "r:") as archive:
+        for member in archive:
+            if member.name.removeprefix("./") != PACKAGE_PIN:
+                continue
+            need(found is None and member.isreg() and 0 < member.size <= MAX_PIN, "package release key")
+            source = archive.extractfile(member)
+            need(source is not None, "package release key")
+            found = public_key(source.read())
+    tar_path.unlink()
+    return found
+
+
+def write_pin(data):
+    temporary = PIN.with_name(PIN.name + ".new")
+    temporary.unlink(missing_ok=True)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    with os.fdopen(descriptor, "wb") as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(temporary, PIN)
+
+
+def wait_ready():
+    deadline = time.monotonic() + READY_SECONDS
+    while True:
+        active = all(in_guest("systemctl", "is-active", "--quiet", unit, timeout=30).returncode == 0 for unit in UNITS)
+        listening = in_guest("ss", "-Hltn", "sport = :9443", timeout=30)
+        if active and listening.returncode == 0 and listening.stdout.strip():
+            return
+        need(time.monotonic() < deadline, "hub not active and listening on :9443 within 60 s")
+        time.sleep(1)
+
+
+def install(version, stream):
+    as_tuple(version)
+    key = pinned()
+    deb_name = "ominull-hub_" + version + "_amd64.deb"
+    names = [deb_name, deb_name + ".sig", deb_name + ".release.sig"]
+    need(WORK.is_dir() and not WORK.is_symlink() and WORK.stat().st_uid == OWNER and stat.S_IMODE(WORK.stat().st_mode) == 0o700,
+         "work directory")
+    with (WORK / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        directory = WORK / ("install-" + secrets.token_hex(8))
+        directory.mkdir(mode=0o700)
+        try:
+            files = receive(stream, directory, names)
+            deb = files[deb_name]
+            key_file = directory / "pin.pem"
+            key_file.write_bytes(key)
+            verify(key_file, deb, files[deb_name + ".sig"])
+            sha = digest(deb)
+            statement = directory / "statement"
+            statement.write_text("OMINULL-RELEASE-V1\npackage=%s\nversion=%s\nsha256=%s\n" % (deb_name, version, sha))
+            verify(key_file, statement, files[deb_name + ".release.sig"])
+            fields = package_fields(deb)
+            need(fields == {"Package": "ominull-hub", "Version": version, "Architecture": "amd64"}, "package identity")
+            previous = installed_version()
+            need(previous is None or as_tuple(version) >= as_tuple(previous), "older than the installed hub " + str(previous))
+            next_pin = package_pin(deb, directory)
+            pushed = command("pct", "push", GUEST, str(deb), GUEST_DEB, "--perms", "0600", timeout=300)
+            need(pushed.returncode == 0, "push to CT " + GUEST)
+            try:
+                installed = in_guest("dpkg", "-i", GUEST_DEB, timeout=600)
+            finally:
+                in_guest("rm", "-f", "--", GUEST_DEB, timeout=30)
+            need(installed.returncode == 0, "dpkg -i failed")
+            need(installed_version() == version, "installed version")
+            rotated = next_pin is not None and next_pin != key
+            if rotated:
+                write_pin(next_pin)
+            wait_ready()
+            return {"installed": version, "previous": previous, "sha256": sha,
+                    "pin_sha256": hashlib.sha256(next_pin if rotated else key).hexdigest(), "pin_rotated": rotated}
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+def report():
+    return {"installed": installed_version(), "pin_sha256": hashlib.sha256(pinned()).hexdigest()}
+
+
+def run(words, stream):
+    if words == ["version"]:
+        return report()
+    need(len(words) == 2 and words[0] == "install", "usage: version | install VERSION")
+    return install(words[1], stream)
+
+
+def main():
+    original = os.environ.get("SSH_ORIGINAL_COMMAND")
+    words = original.split(" ") if original is not None else sys.argv[1:]
+    try:
+        result = run(words, sys.stdin.buffer)
+    except (Refused, OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as exc:
+        print("refused: " + (str(exc) if isinstance(exc, Refused) else type(exc).__name__), file=sys.stderr)
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

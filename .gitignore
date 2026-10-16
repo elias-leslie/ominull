@@ -96,7 +96,7 @@ credentials.json
 secrets.json
 backup-index.json
 
-# Personal / local-only infrastructure tooling (use deploy_remote.sh.example as template)
+# Personal / local-only infrastructure tooling (the hub installs through scripts/deploy-hub.sh)
 .index.yaml
 scripts/deploy_remote.sh
 scripts/connect-linux-shell.sh

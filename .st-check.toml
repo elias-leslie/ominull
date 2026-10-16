@@ -73,6 +73,13 @@ openssl = "/usr/bin/openssl"
 # The backup secret-split tests seal and open a fixture with a throwaway key.
 age = "/usr/bin/age"
 age-keygen = "/usr/bin/age-keygen"
+# The Proxmox installer test runs scripts/pve/install.sh against a bubblewrap stand-in host.
+bwrap = "/usr/bin/bwrap"
+ssh-keygen = "/usr/bin/ssh-keygen"
+base64 = "/usr/bin/base64"
+install = "/usr/bin/install"
+readlink = "/usr/bin/readlink"
+id = "/usr/bin/id"
 
 [[native.stages]]
 id = "go"
@@ -96,6 +103,19 @@ id = "release-scripts"
 kind = "test"
 coverage = "full"
 argv = ["python3", "-m", "unittest", "-v", "scripts/test-release-headers.py", "scripts/test-release-convergence.py", "scripts/router/test-address-filter.py"]
+[native.stages.evidence]
+format = "text"
+source = "combined"
+success_pattern = "^OK( \\(.*\\))?$"
+failure_pattern = "^(FAIL|ERROR): "
+executed_pattern = " \\.\\.\\. (ok|FAIL|ERROR)$"
+
+[[native.stages]]
+id = "pve-dispatch"
+kind = "test"
+coverage = "full"
+cwd = "scripts/pve"
+argv = ["python3", "-m", "unittest", "-v", "test_hub_install", "test_install"]
 [native.stages.evidence]
 format = "text"
 source = "combined"

@@ -8,9 +8,15 @@ archive. The observer also checks its tracked code bytes and executable modes
 against that accepted commit.
 
 The only operation is a read-only production observation. It performs local
-artifact/Git reads, fixed SSH reads through the approved alias into the container
-selected by the protected private configuration,
-and HTTP GETs. It does not deploy, restart, configure, queue work, or reset data.
+artifact/Git reads, fixed SSH reads into the hub container, and HTTP GETs. It
+does not deploy, restart, configure, queue work, or reset data. Every SSH read is
+a verb of `pve_observe_dispatch.py` (unit state, binary and running-process
+digests, the running binary, the hub package version). Root installs that file
+as `/usr/local/sbin/ominull-observe-dispatch` behind a `restrict,command=` key
+(`scripts/pve/install.sh`); `observer_ssh_alias` in this file then names that
+key's alias and only the verb words cross. It reads `/proc/PID/exe` only for the
+unit's current main PID. Without `observer_ssh_alias` the same commands go to
+the container selected by `lxc_id` over `ssh_alias`.
 
 The owner supplies `production.local.json` in the registered project root's
 `scripts/st_extension` directory. This file is ignored, must be owned by the
@@ -24,8 +30,9 @@ observer accepts the file with or without it.
 Every Proxmox-side backup step is a fixed verb of `pve_backup_dispatch.py`.
 Root installs that file as `/usr/local/sbin/ominull-backup-dispatch` behind a
 `restrict,command=` key and the owner's offline age recipient in
-`/etc/ominull-backup/recipient`; then `backup_ssh_alias` in this file names that
-key's SSH alias and only the verb words cross. The dispatcher moves every member
+`/etc/ominull-backup/recipient` (`scripts/pve/install.sh --recipient age1...`);
+then `backup_ssh_alias` in this file names that key's SSH alias and only the
+verb words cross. The dispatcher moves every member
 under `var/lib/ominull-response-authority/`, `etc/ominull/`,
 `var/lib/ominull/evidence/`, `var/lib/ominull/evidence.key` and
 `opt/ominull/bin/certs/*.key` into `secrets.tar.age`, refuses to publish if any

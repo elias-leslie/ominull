@@ -330,11 +330,61 @@ class PackageTests(Fixture):
 class RemoteAndRouteTests(Fixture):
     def test_fixed_ssh_command_cannot_select_host_container_or_mutate(self):
         with patch.object(obs, "run", return_value=b"data") as run:
-            obs.ssh(self.config, "sha256sum -- /opt/ominull/bin/ominull-hub")
-        argv = run.call_args.args[0]
+            obs.ssh(self.config, ["digest", "hub"])
+            obs.ssh(self.config, ["package"])
+        argv = run.call_args_list[0].args[0]
         self.assertEqual(argv[-2], "fixture-alias")
         self.assertEqual(argv[-1], "pct exec 100 -- sha256sum -- /opt/ominull/bin/ominull-hub")
         self.assertIn("ConnectTimeout=5", argv)
+        self.assertEqual(run.call_args_list[1].args[0][-1],
+                         "pct exec 100 -- dpkg-query -W '-f=${Status} ${Version}' ominull-hub")
+        for words in (["digest", "/etc/ominull/admin.key"], ["service", "hub;id"], ["running-binary", "hub", "self"],
+                      ["running-digest", "hub", "1/../../etc/shadow"], ["cat", "hub"], []):
+            with self.subTest(words=words), patch.object(obs, "run") as run, \
+                    self.assertRaisesRegex(obs.ObservationError, "remote_read_invalid"):
+                obs.ssh(self.config, words)
+            run.assert_not_called()
+
+    def test_forced_observer_key_sends_only_the_verb(self):
+        self.config["observer_ssh_alias"] = "ominull-observe"
+        self.write_config()
+        config, _ = obs.load_config(self.root)
+        with patch.object(obs, "run", return_value=b"data") as run:
+            obs.ssh(config, ["running-binary", "authority", "4242"])
+        self.assertEqual(run.call_args.args[0][-2:], ["ominull-observe", "running-binary authority 4242"])
+        for alias in ("-oProxyCommand=x", "a b", ""):
+            self.config["observer_ssh_alias"] = alias
+            self.write_config()
+            with self.subTest(alias=alias), self.assertRaises(obs.ObservationError):
+                obs.load_config(self.root)
+
+    def test_running_evidence_reads_through_verbs(self):
+        digest = "c" * 64
+        evidence = {"package": {"version": "1.8.43"}, "binaries": {
+            role: {"package_sha256": digest, "source_commit": COMMIT} for role in obs.BINARIES}}
+        initial = {"hub": {"pid": 123}, "authority": {"pid": 456}}
+        calls = []
+        def remote(config, words, output_file=None):
+            calls.append(words)
+            if words[0] == "digest":
+                return (digest + "  /opt/ominull/bin/" + obs.BINARIES[words[1]] + "\n").encode()
+            if words[0] == "running-digest":
+                return (digest + "  /proc/" + words[2] + "/exe\n").encode()
+            if words[0] == "running-binary":
+                assert output_file is not None
+                output_file.write(b"binary")
+                return b""
+            if words[0] == "package":
+                return b"install ok installed 1.8.43"
+            raise AssertionError(words)
+        with patch.object(obs, "ssh", side_effect=remote), patch.object(obs, "sha256_file", return_value=digest), \
+                patch.object(obs, "run", return_value=b""), \
+                patch.object(obs, "parse_buildinfo", return_value={"source_commit": COMMIT, "vcs_modified": False}):
+            obs.running_evidence(self.config, evidence, initial, self.root)
+        self.assertEqual(calls, [["digest", "hub"], ["running-digest", "hub", "123"], ["running-binary", "hub", "123"],
+                                 ["digest", "authority"], ["running-digest", "authority", "456"],
+                                 ["running-binary", "authority", "456"], ["package"]])
+
 
     def test_http_routes_require_current_asset_and_anonymous_denial(self):
         script = b"fixture javascript"
@@ -380,6 +430,59 @@ class RemoteAndRouteTests(Fixture):
                 changed = obs.observe(REQUEST, self.root, self.root)
             self.assertEqual(changed["checks"][-1]["state"], "failed")
             self.assertEqual(changed["checks"][-1]["evidence"]["error"], "process_changed_during_observation")
+
+
+class ObserveDispatchTests(unittest.TestCase):
+    def setUp(self):
+        import pve_observe_dispatch as od
+        self.od = od
+
+    def test_verbs_map_to_fixed_reads_in_ct_150(self):
+        od = self.od
+        self.assertEqual(od.command_for(["service", "authority"])[0],
+                         ["systemctl", "show", "ominull-response-authority.service", "--property=" + od.SERVICE_PROPERTIES])
+        self.assertEqual(od.command_for(["digest", "hub"]), (["sha256sum", "--", "/opt/ominull/bin/ominull-hub"], None))
+        self.assertEqual(od.command_for(["running-binary", "hub", "77"]),
+                         (["head", "-c", str(64 * 1024 * 1024 + 1), "--", "/proc/77/exe"], ("ominull-hub", "77")))
+        for words in (["digest"], ["digest", "hub", "extra", "x"], ["digest", "../hub"], ["service", "sshd"],
+                      ["running-digest", "hub", "0"], ["running-digest", "hub", "-1"], ["running-digest", "hub", "12a"],
+                      ["running-binary", "hub", "1 /etc/shadow"], ["package", "hub"], ["exec", "hub"], [""]):
+            with self.subTest(words=words), self.assertRaises(od.Refused):
+                od.command_for(words)
+
+    def run_forced(self, original, main_pid="MainPID=77\n"):
+        od = self.od
+        calls = []
+        def fake(argv, **kwargs):
+            calls.append(argv)
+            if argv[-1] == "--property=MainPID":
+                return subprocess.CompletedProcess(argv, 0, stdout=main_pid)
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": original}), \
+                patch.object(subprocess, "run", side_effect=fake), patch.object(od.sys, "stdout"):
+            code = od.main()
+        return code, calls
+
+    def test_forced_command_runs_only_inside_ct_150_and_confirms_the_main_pid(self):
+        code, calls = self.run_forced("running-binary hub 77")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0], ["pct", "exec", "150", "--", "systemctl", "show", "ominull-hub.service", "--property=MainPID"])
+        self.assertEqual(calls[1][:4], ["pct", "exec", "150", "--"])
+        self.assertEqual(calls[1][4:], ["head", "-c", str(64 * 1024 * 1024 + 1), "--", "/proc/77/exe"])
+        # Another process's executable (an ssh session, a shell) is refused.
+        code, calls = self.run_forced("running-digest hub 78")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(calls), 1)
+        code, calls = self.run_forced("running-digest hub 77", main_pid="MainPID=0\n")
+        self.assertEqual(code, 1)
+
+    def test_forced_command_refuses_shell_and_extra_words(self):
+        for original in ("id", "digest hub; id", "digest hub && cat /etc/ominull/admin.key", "digest  hub",
+                         "digest hub\n", "package\tx", "sha256sum -- /etc/ominull/admin.key", "pct exec 150 -- id", ""):
+            with self.subTest(original=original):
+                code, calls = self.run_forced(original)
+                self.assertEqual(code, 1)
+                self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

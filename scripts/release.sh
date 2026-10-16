@@ -9,7 +9,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HUB_URL="${OMINULL_HUB_URL:-}"
-DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy_remote.sh}"
+# The hub reaches Proxmox only through the hub-install key (scripts/deploy-hub.sh).
+DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy-hub.sh}"
 
 VERSION=""
 SKIP_TESTS=0
@@ -46,6 +47,18 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "${DO_HUB}" -eq 1 ]; then
+    [ -x "${DEPLOY_CMD}" ] || {
+        echo "[-] Deploy hook is missing or not executable: ${DEPLOY_CMD}" >&2
+        exit 1
+    }
+    # Before anything is built or signed: a hub-install key that does not answer
+    # would leave a signed release with nowhere to go.
+    if [ -z "${OMINULL_DEPLOY_CMD:-}" ]; then
+        "${DEPLOY_CMD}" --check
+    fi
+fi
+
 if [ -n "${VERSION}" ]; then
     "${ROOT_DIR}/scripts/version.sh" bump "${VERSION}"
 else
@@ -72,7 +85,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
-        "${ROOT_DIR}/scripts/deploy_remote.sh.example" \
+        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/pve/install.sh" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
         "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
@@ -112,11 +125,6 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then
-    [ -x "${DEPLOY_CMD}" ] || {
-        echo "[-] Deploy hook is missing or not executable: ${DEPLOY_CMD}" >&2
-        echo "    Copy scripts/deploy_remote.sh.example to scripts/deploy_remote.sh and fill only its ignored deployment values." >&2
-        exit 1
-    }
     echo "[*] Building native packages for v${VERSION}."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/build-packages.sh"

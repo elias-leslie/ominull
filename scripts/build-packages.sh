@@ -94,6 +94,18 @@ make_deb() {
             mkdir -p "${root}/lib/systemd/system"
             install -m 0644 "${ROOT_DIR}/packaging/linux/hub/response-authority.service" "${root}/lib/systemd/system/ominull-response-authority.service"
         fi
+        # The release key this build pins, as data. Proxmox's hub-install key
+        # (scripts/pve/ominull-hub-install) moves its pin to it once this signed
+        # package is installed, as a rotation release moves every agent's pin.
+        mkdir -p "${root}/usr/share/ominull"
+        sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' \
+            "${ROOT_DIR}/agent/include/release_key.h" | sed -E 's/^[[:space:]]*"//; s/\\n".*$//' \
+            > "${root}/usr/share/ominull/release-public.pem"
+        chmod 0644 "${root}/usr/share/ominull/release-public.pem"
+        openssl pkey -pubin -noout -in "${root}/usr/share/ominull/release-public.pem" || {
+            echo "[-] agent/include/release_key.h holds no readable release public key." >&2
+            exit 1
+        }
     fi
     install -m 0644 "${ROOT_DIR}/LICENSE" "${root}/usr/share/doc/${package}/LICENSE"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${control}" > "${root}/DEBIAN/control"

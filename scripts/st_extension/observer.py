@@ -24,6 +24,8 @@ import time
 from urllib.parse import urlsplit
 from typing import TypedDict
 
+import pve_observe_dispatch as observe_dispatch
+
 
 POLICY_PATH = "scripts/st_extension/runtime-inputs.json"
 
@@ -135,13 +137,16 @@ def load_config(root, *, require_deployment_inputs=True):
     require(len(raw) <= 16384, "config_too_large")
     config = parse_json(raw)
     # proxmox_node names the hypervisor node the backup extension snapshots on;
-    # backup_ssh_alias, once root installs it, is the forced-command key that
-    # can run only the backup dispatcher (pve_backup_dispatch.py).
+    # backup_ssh_alias and observer_ssh_alias, once root installs them, are the
+    # forced-command keys that can run only the backup dispatcher
+    # (pve_backup_dispatch.py) or the observer's reads (pve_observe_dispatch.py).
     require(isinstance(config, dict) and CONFIG_KEYS <= set(config)
-            and set(config) - CONFIG_KEYS <= {"proxmox_node", "backup_ssh_alias"}, "config_fields")
-    require("backup_ssh_alias" not in config or (
-        isinstance(config["backup_ssh_alias"], str)
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", config["backup_ssh_alias"])), "config_backup_ssh_alias")
+            and set(config) - CONFIG_KEYS <= {"proxmox_node", "backup_ssh_alias", "observer_ssh_alias"},
+            "config_fields")
+    for field in ("backup_ssh_alias", "observer_ssh_alias"):
+        require(field not in config or (
+            isinstance(config[field], str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", config[field])), "config_" + field)
     require(type(config["schema_version"]) is int and config["schema_version"] == 1,
             "config_version")
     require(type(config["lxc_id"]) is int and config["lxc_id"] > 0, "config_target")
@@ -338,11 +343,23 @@ def package_evidence(root, config, accepted, directory):
                 "signature_verified": True}, "binaries": binary_evidence}
 
 
-def ssh(config, command, output_file=None):
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o",
-            "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", config["ssh_alias"],
-            "pct exec " + str(config["lxc_id"]) + " -- " + command]
-    return run(argv, output_file=output_file)
+def ssh(config, words, output_file=None):
+    """One fixed read in the hub container (pve_observe_dispatch verbs).
+
+    Through observer_ssh_alias, the forced-command key, only the words cross;
+    until root installs it the same command goes over ssh_alias.
+    """
+    try:
+        argv, _ = observe_dispatch.command_for(words)
+    except observe_dispatch.Refused as exc:
+        raise ObservationError("remote_read_invalid") from exc
+    if config.get("observer_ssh_alias"):
+        alias, command = config["observer_ssh_alias"], " ".join(words)
+    else:
+        alias, command = config["ssh_alias"], "pct exec " + str(config["lxc_id"]) + " -- " + shlex.join(argv)
+    return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o",
+                "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", alias, command],
+               output_file=output_file)
 
 
 def parse_service(raw):
@@ -364,13 +381,11 @@ def parse_service(raw):
 
 
 def services(config):
-    return {role: parse_service(ssh(config, "systemctl show " + name + ".service "
-            "--property=ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic"))
-            for role, name in BINARIES.items()}
+    return {role: parse_service(ssh(config, ["service", role])) for role in BINARIES}
 
 
-def remote_digest(config, path):
-    raw = ssh(config, "sha256sum -- " + shlex.quote(path))
+def remote_digest(config, words, path):
+    raw = ssh(config, words)
     try:
         parts = raw.decode().split()
         require(len(parts) == 2 and parts[1] == path, "remote_digest_invalid")
@@ -383,14 +398,14 @@ def remote_digest(config, path):
 
 def running_evidence(config, evidence, initial, directory):
     for role, name in BINARIES.items():
-        installed = remote_digest(config, "/opt/ominull/bin/" + name)
-        proc_path = f"/proc/{initial[role]['pid']}/exe"
-        running = remote_digest(config, proc_path)
+        installed = remote_digest(config, ["digest", role], "/opt/ominull/bin/" + name)
+        pid = str(initial[role]["pid"])
+        running = remote_digest(config, ["running-digest", role, pid], f"/proc/{pid}/exe")
         require(installed == running == evidence["binaries"][role]["package_sha256"],
                 "installed_running_package_mismatch")
         fetched = directory / ("running-" + name)
         with fetched.open("wb") as output:
-            ssh(config, f"head -c {MAX_BINARY + 1} -- {proc_path}", output_file=output)
+            ssh(config, ["running-binary", role, pid], output_file=output)
         require(0 < fetched.stat().st_size <= MAX_BINARY and sha256_file(fetched) == running,
                 "running_binary_changed_or_oversized")
         info = parse_buildinfo(run(["go", "version", "-m", str(fetched)]))
@@ -399,7 +414,7 @@ def running_evidence(config, evidence, initial, directory):
         evidence["binaries"][role].update({"installed_sha256": installed,
              "running_sha256": running, "running_source_commit": info["source_commit"],
              "running_vcs_modified": False})
-    status = ssh(config, "dpkg-query -W -f='${Status} ${Version}' ominull-hub").decode().strip()
+    status = ssh(config, ["package"]).decode().strip()
     require(status == "install ok installed " + evidence["package"]["version"],
             "installed_package_version_mismatch")
     return evidence
