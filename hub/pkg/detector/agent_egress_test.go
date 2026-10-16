@@ -224,6 +224,9 @@ func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
 	if got := spike(t, own); len(got) != 0 {
 		t.Fatalf("claude uploading to its own API raised %d bandwidth alert(s): %q", len(got), got[0].Title)
 	}
+	if got := spike(t, flow(claude, "2607:6bc0::10", "api.anthropic.com")); len(got) != 0 {
+		t.Fatalf("claude uploading to its own API over IPv6 raised %d bandwidth alert(s)", len(got))
+	}
 	// Its volume is still judged, against its own hours.
 	engine, store := noiseEngine(t)
 	own.Timestamp, own.BytesOut = time.Now().UTC(), 150*1024*1024
@@ -234,12 +237,19 @@ func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
 
 	mismatch := flow(claude, "160.79.104.10", "api.anthropic.com")
 	mismatch.AttributionStatus = pathMismatch
+	spoofedSNI := flow(claude, "198.51.100.9", "")
+	spoofedSNI.SNI = "api.anthropic.com"
 	for name, ev := range map[string]storage.Event{
 		"runtime to elsewhere":     flow(claude, "198.51.100.9", "paste.example.net"),
 		"runtime with no name":     flow(claude, "198.51.100.9", ""),
 		"other process to the API": flow("/usr/bin/curl", "160.79.104.10", "api.anthropic.com"),
 		"unmatched path":           mismatch,
 		"look-alike name":          flow(claude, "198.51.100.9", "anthropic.com.example.net"),
+		// The SNI is the client's to choose: Anthropic's name on any other
+		// address is not Anthropic's service.
+		"own name, other address": flow(claude, "198.51.100.9", "api.anthropic.com"),
+		"own SNI, other address":  spoofedSNI,
+		"own name, next to range": flow(claude, "160.79.106.10", "api.anthropic.com"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := spike(t, ev); len(got) != 1 {

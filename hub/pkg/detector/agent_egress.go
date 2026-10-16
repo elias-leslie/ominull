@@ -230,13 +230,19 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 }
 
 // runtimeVendors are the runtimes' own services: a runtime talking to its
-// maker is the runtime working, not a new sink.
+// maker is the runtime working, not a new sink. Prefixes are the addresses the
+// maker publishes for that service; only there does the name prove anything.
+// Anthropic's are from platform.claude.com/docs/en/api/ip-addresses
+// (inbound, checked 2026-10-16). OpenAI's API sits behind Cloudflare, an
+// address any site can be fronted from, so codex has none.
 var runtimeVendors = map[string]struct {
-	name    string
-	domains []string
+	name     string
+	domains  []string
+	prefixes []netip.Prefix
 }{
-	"codex":  {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
-	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"}},
+	"codex": {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}, nil},
+	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"},
+		[]netip.Prefix{netip.MustParsePrefix("160.79.104.0/23"), netip.MustParsePrefix("2607:6bc0::/48")}},
 }
 
 // RuntimeVendor names the maker of an agent runtime (a name from
@@ -262,18 +268,29 @@ func RuntimeVendor(runtime, name string) string {
 // per-connection volume baseline reads every long session as exfiltration;
 // the runtime's volume is judged per hour against its own history
 // (AGENT_UPLOAD_VOLUME) instead. Not when the agent could not match the
-// reported path to the file that runs (path_mismatch), and not on a shared CDN
-// or rented compute address, where the name is borrowed from whatever any
-// client last resolved there and can be another site's.
-func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event, geo threatintel.GeoRecord) bool {
+// reported path to the file that runs (path_mismatch), and only when the
+// address is inside the maker's published ranges: the SNI is whatever the
+// client chose to send and the domain is whatever any client last resolved
+// there, so a name alone would let any program called claude upload to its
+// own server under api.anthropic.com.
+func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event) bool {
 	if !cfg.AgentEgressOn || ev.AttributionStatus == pathMismatch {
 		return false
 	}
-	if t := strings.TrimSpace(geo.Tenancy); t == storage.TenancyHosting || t == storage.TenancySharedCDN {
+	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
+	if runtime == "" || RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) == "" {
 		return false
 	}
-	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
-	return runtime != "" && RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) != ""
+	addr, err := netip.ParseAddr(strings.TrimSpace(ev.DstIP))
+	if err != nil {
+		return false
+	}
+	for _, p := range runtimeVendors[runtime].prefixes {
+		if p.Contains(addr.Unmap()) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(v ...string) string {
