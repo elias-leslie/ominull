@@ -555,6 +555,7 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	acked, deleted, high, rows, omitted := 0, 0, 0, 0, 0
 	partial := false
 	var rest []map[string]any
+	relayClosed := 0
 	for _, kind := range []struct{ action, verb string }{{findingsAcknowledgedAudit, "acknowledged"}, {findingsClearedAudit, "deleted"}} {
 		entries, complete, err := s.auditWindow(kind.action, now.Add(-feedAnomalyWindow))
 		if err != nil {
@@ -565,6 +566,9 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 			n, h := dismissalCounts(e.Details, kind.verb)
 			if kind.action == findingsAcknowledgedAudit {
 				acked, high = acked+n, high+h
+				if strings.Contains(e.Details, "credential relay-key ") {
+					relayClosed += n
+				}
 			} else {
 				deleted += n
 			}
@@ -588,7 +592,35 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	if omitted > 0 {
 		unmapped["dismissed_omitted"] = omitted
 	}
-	if len(changes) == 0 && len(dismissed) == 0 {
+	// A closure through the relay key is recorded as the owner's answer, but
+	// any admin-key holder can issue a new key, so each issuance in the window
+	// is listed, and beside relay-key closures so is the issuance of the key
+	// that made them, however old.
+	issued, issuedComplete, err := s.auditWindow(relayKeyIssuedAudit, now.Add(-feedAnomalyWindow))
+	if err != nil {
+		return out, err
+	}
+	if len(issued) > 0 {
+		rows := make([]map[string]any, 0, len(issued))
+		for _, e := range issued {
+			rows = append(rows, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
+		}
+		unmapped["relay_key_issued"] = rows
+	}
+	if relayClosed > 0 {
+		last := issued
+		if len(last) == 0 {
+			page, err := s.store.AuditHistory("", 1, "", storage.AuditFilter{Action: relayKeyIssuedAudit})
+			if err != nil {
+				return out, err
+			}
+			last = page.Entries
+		}
+		if len(last) > 0 {
+			unmapped["relay_key_last_issued"] = map[string]any{"at": last[0].Timestamp.UTC().Format(time.RFC3339), "by": last[0].Username}
+		}
+	}
+	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
 		return out, nil
@@ -605,6 +637,15 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 		parts = append(parts, fmt.Sprintf("%s%s acknowledged (%d HIGH or CRITICAL) and %d acknowledged findings deleted in the last 24 h",
 			atLeast, plural(acked, "finding", "findings"), high, deleted))
+	}
+	if len(issued) > 0 {
+		atLeast := ""
+		if !issuedComplete {
+			atLeast = "at least "
+		}
+		parts = append(parts, fmt.Sprintf("the Nightshift approval relay key was issued %s%s in the last 24 h, last by %s at %s; "+
+			"any admin-key holder can issue it, so a closure through it since then need not be the owner's answer",
+			atLeast, plural(len(issued), "time", "times"), issued[0].Username, issued[0].Timestamp.UTC().Format(time.RFC3339)))
 	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil

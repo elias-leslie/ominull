@@ -431,4 +431,82 @@ func TestRelayAlertVerdict(t *testing.T) {
 	if len(dismissed) != 1 || !strings.Contains(dismissed[0]["change"].(string), "credential relay-key (unverified)") {
 		t.Fatalf("dismissed after the owner's answer = %v", dismissed)
 	}
+	// The relay key was issued in the window by an admin-key holder, so the
+	// note says so beside the closure it made.
+	issued, _ := f.Unmapped["relay_key_issued"].([]map[string]any)
+	if len(issued) != 1 || !strings.Contains(issued[0]["change"].(string), "credential api-key (unverified)") {
+		t.Fatalf("relay key issuance on the note = %v", f.Unmapped["relay_key_issued"])
+	}
+	if !strings.Contains(f.Message, "the Nightshift approval relay key was issued 1 time in the last 24 h") ||
+		!strings.Contains(f.Message, "need not be the owner's answer") {
+		t.Fatalf("note does not name the relay key issuance: %q", f.Message)
+	}
+	if last, _ := f.Unmapped["relay_key_last_issued"].(map[string]any); last["at"] != issued[0]["at"] {
+		t.Fatalf("relay_key_last_issued = %v, want the issuance %v", f.Unmapped["relay_key_last_issued"], issued[0])
+	}
+}
+
+// Reissuing the relay key shows on the detection-policy note on its own, and
+// a relay-key closure names when the key that made it was issued even when
+// that was before the window.
+func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	f := feedNote(t, srv, "ominull.detection.changes")
+	if f.StatusID != ocsfStatusResolved || f.Unmapped["relay_key_issued"] != nil {
+		t.Fatalf("note before any issuance = %+v", f)
+	}
+
+	// An issuance before the window, then a relay-key closure in it.
+	if err := store.RecordAudit(storage.AuditEntry{ID: "old-issue", Username: "admin", Action: relayKeyIssuedAudit,
+		Resource: "nightshift", Details: "Issued the Nightshift approval relay key", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAudit(storage.AuditEntry{ID: "relay-close", Username: "nightshift-relay", Action: findingsAcknowledgedAudit,
+		Resource: "findings", Details: "acknowledged 1 finding, 1 HIGH or CRITICAL (LATERAL_PORT_SWEEP); credential relay-key (unverified)",
+		Timestamp: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	f = feedNote(t, srv, "ominull.detection.changes")
+	last, _ := f.Unmapped["relay_key_last_issued"].(map[string]any)
+	if last["at"] != now.Add(-72*time.Hour).Format(time.RFC3339) || last["by"] != "admin" {
+		t.Fatalf("relay_key_last_issued = %v", f.Unmapped["relay_key_last_issued"])
+	}
+	if f.Unmapped["relay_key_issued"] != nil || strings.Contains(f.Message, "relay key") {
+		t.Fatalf("an issuance outside the window shows as one in it: %q %v", f.Message, f.Unmapped["relay_key_issued"])
+	}
+
+	// A closure by another credential does not bring in the issuance.
+	srv2, store2 := setupTestServer(t)
+	defer store2.Close()
+	if err := store2.RecordAudit(storage.AuditEntry{ID: "old-issue", Username: "admin", Action: relayKeyIssuedAudit,
+		Resource: "nightshift", Details: "Issued", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store2.RecordAudit(storage.AuditEntry{ID: "api-close", Username: "admin", Action: findingsAcknowledgedAudit,
+		Resource: "findings", Details: "acknowledged 1 finding, 0 HIGH or CRITICAL; credential api-key (unverified)",
+		Timestamp: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if f := feedNote(t, srv2, "ominull.detection.changes"); f.Unmapped["relay_key_last_issued"] != nil {
+		t.Fatalf("relay_key_last_issued without a relay-key closure = %v", f.Unmapped["relay_key_last_issued"])
+	}
+
+	// Reissuing with no closure at all still makes the note new and says who.
+	srv3, store3 := setupTestServer(t)
+	defer store3.Close()
+	if w := adminPost(srv3, "/api/v1/integrations/nightshift/approval-key", ``, ""); w.Code != http.StatusOK {
+		t.Fatalf("issue = %d %s", w.Code, w.Body.String())
+	}
+	f = feedNote(t, srv3, "ominull.detection.changes")
+	issued, _ := f.Unmapped["relay_key_issued"].([]map[string]any)
+	if f.StatusID != ocsfStatusNew || len(issued) != 1 ||
+		!strings.HasPrefix(f.Message, "the Nightshift approval relay key was issued 1 time in the last 24 h, last by ") {
+		t.Fatalf("note after a reissue = %d %q %v", f.StatusID, f.Message, issued)
+	}
+	if f.Unmapped["relay_key_last_issued"] != nil {
+		t.Fatalf("relay_key_last_issued without a relay-key closure = %v", f.Unmapped["relay_key_last_issued"])
+	}
 }

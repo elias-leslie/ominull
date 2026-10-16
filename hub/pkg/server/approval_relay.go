@@ -14,6 +14,11 @@ import (
 
 const approvalRelayKeySetting = "nightshift_approval_relay_key_sha256"
 
+// relayKeyIssuedAudit records each issuance. The detection-policy note shows
+// it: any admin-key holder can issue the key, and a closure through it is
+// recorded as the owner's answer.
+const relayKeyIssuedAudit = "APPROVAL_RELAY_KEY_ISSUED"
+
 // approvalRelayAuth admits only the relay key. Unlike the findings feed there
 // is no admin fallback: the relay's whole job is to carry the owner's words,
 // and an admin key is exactly what the approval is meant not to be enough.
@@ -63,7 +68,7 @@ func (s *Server) handleApprovalRelayKey(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "the key could not be saved")
 		return
 	}
-	s.audit(r, "APPROVAL_RELAY_KEY_ISSUED", "nightshift", "Issued the Nightshift approval relay key; any earlier key is revoked")
+	s.audit(r, relayKeyIssuedAudit, "nightshift", "Issued the Nightshift approval relay key; any earlier key is revoked; credential "+credentialOf(r)+" (unverified)")
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]string{"key": key, "route": "/api/v1/integrations/nightshift/approvals"})
 }
