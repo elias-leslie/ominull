@@ -119,11 +119,15 @@ Only accepted while `mode=control`. In `view` mode the hub drops input frames
   TCP backpressure through the hub does not.
 - `input` (JSON text), one event:
   - mouse move/button: `{"type":"input","ev":"mouse","x":<abs 0..65535>,"y":<abs 0..65535>,"buttons":{"l":,"r":,"m":},"monitor":0}`
-    Coordinates are absolute, normalized 0..65535 across the VIRTUAL DESKTOP with
-    the standard mapping `x' = (x - vx) * 65535 / (vw - 1)` (and y), injected with
-    `MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK`, so the agent is resolution-
-    and DPI-agnostic (the helper sets PER_MONITOR_AWARE_V2 first, §6.3).
-  - wheel: `{"type":"input","ev":"wheel","dx":,"dy":,"monitor":0}`
+    `x`/`y` are 0..65535 across the picture of the **active monitor**. The helper
+    maps them into that monitor's rect (`px = mon.x + x*mon.w/65536`) and then
+    to virtual-desktop absolute `x' = (px - vx) * 65535 / (vw - 1)` (same for y),
+    injected with `MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK`, so it is
+    resolution- and DPI-agnostic (the helper sets PER_MONITOR_AWARE_V2 first,
+    §6.3). Tile and `cursor_pos` x/y are monitor-relative pixels.
+  - wheel: `{"type":"input","ev":"wheel","dx":,"dy":,"monitor":0}`, Windows
+    convention: 120 per notch, positive `dy` scrolls up, positive `dx` scrolls
+    right; the helper drops anything outside ±1200.
   - key: `{"type":"input","ev":"key","code":<scancode>,"down":true,"ext":false}`
     Scancodes (not VKs) so layout is the endpoint's; the viewer maps
     `KeyboardEvent.code` -> scancode (noVNC `xtscancodes.js`, MPL-2.0, vendored
