@@ -305,7 +305,11 @@ static void no_secret_text(const char* out) {
 static void test_walk(void) {
     DataInvPolicy p;
     tree_policy(&p);
-    long long t0 = DataInv_NowMs();
+    /* The run starts a second after the tree was written: a file changed in
+     * the same millisecond as a run's start is read again next time by
+     * design (the watermark is strict), which made the incremental check
+     * below fail about one run in five. */
+    long long t0 = DataInv_NowMs() + 1000;
     char* out = run_inproc(&p, NULL, "00000000000000a1", t0);
     no_secret_text(out);
     char* doc = NULL;
