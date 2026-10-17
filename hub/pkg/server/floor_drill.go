@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"ominull/hub/pkg/detector"
@@ -26,6 +27,11 @@ const (
 	floorDrillTick = time.Hour
 )
 
+// floorDrillMu makes each run's read of the policy and write of its outcome
+// one step, so a run that read the policy before a change cannot record its
+// pass over the miss of the run that followed the change.
+var floorDrillMu sync.Mutex
+
 type floorDrillRecord struct {
 	RanAt  time.Time `json:"ran_at"`
 	Cases  int       `json:"cases"`
@@ -35,6 +41,8 @@ type floorDrillRecord struct {
 // runFloorDrill runs the drill against the live tuning and exclusions, judges
 // each case, and records the outcome.
 func (s *Server) runFloorDrill(now time.Time) floorDrillRecord {
+	floorDrillMu.Lock()
+	defer floorDrillMu.Unlock()
 	rec := floorDrillRecord{RanAt: now.UTC()}
 	cases, err := detector.Drill(s.store, now)
 	if err != nil {
@@ -65,6 +73,9 @@ func judgeDrillCase(c detector.DrillCase) string {
 	f, ok := c.Raised()
 	if !ok {
 		return fmt.Sprintf("%s: no %s was raised", c.Rule, c.Want)
+	}
+	if f.HeldReason != "" {
+		return fmt.Sprintf("%s: raised, but held (%s), so it would not reach the feed", c.Rule, f.HeldReason)
 	}
 	if c.WantIsolated && !c.Isolated {
 		return c.Rule + ": raised, but the endpoint was not isolated"

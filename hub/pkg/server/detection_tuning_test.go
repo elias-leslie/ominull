@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func tuningBody(t *testing.T, srv *Server, method, body string) (int, map[string]interface{}) {
@@ -114,11 +115,12 @@ func TestTheShippedThresholdsCanBeRestored(t *testing.T) {
 func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 	t.Parallel()
 	srv, _ := setupTestServer(t)
+	until := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	if code, body := tuningBody(t, srv, http.MethodPost, `{"warmup_hours":48,"quiet_pairs":["/usr/bin/rclone@AS15169"],
-		"known_workloads":[{"workload":"/usr/bin/gh","owner":"AS36459","reason":"cli","expires_at":"2099-01-01T00:00:00Z"},{"workload":"/usr/bin/ssh","owner":"AS36459","reason":"git","expires_at":"2099-01-01T00:00:00Z"}]}`); code != http.StatusOK {
+		"known_workloads":[{"workload":"/usr/bin/gh","owner":"AS36459","reason":"cli","expires_at":"`+until+`"},{"workload":"/usr/bin/ssh","owner":"AS36459","reason":"git","expires_at":"`+until+`"}]}`); code != http.StatusOK {
 		t.Fatalf("first save: %d %v", code, body)
 	}
-	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"AS54113","reason":"x","expires_at":"2099-01-01T00:00:00Z"}]}`)
+	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"AS54113","reason":"x","expires_at":"`+until+`"}]}`)
 	if code != http.StatusOK {
 		t.Fatalf("partial save: %d %v", code, body)
 	}

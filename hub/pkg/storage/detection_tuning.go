@@ -415,12 +415,14 @@ func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
 }
 
 // boundWorkloadExpiry gives each known workload saved before entries had an
-// expiry one at = now + KnownWorkloadMigratedExpiry. An entry that already has
+// expiry one at = now + KnownWorkloadMaxLifetime. An entry that already has
 // an expiry keeps it, so running it twice changes nothing and it never
-// extends one. It returns how many it bounded.
+// extends one. A row an older hub re-saved has lost its expiries and gets
+// fresh ones here: an accepted limit of downgrading. It returns how many it
+// bounded.
 func boundWorkloadExpiry(t DetectionTuning, now time.Time) (DetectionTuning, int) {
 	n := 0
-	until := now.UTC().Add(KnownWorkloadMigratedExpiry).Truncate(time.Second)
+	until := now.UTC().Add(KnownWorkloadMaxLifetime).Truncate(time.Second)
 	out := make([]KnownWorkload, len(t.KnownWorkloads))
 	for i, k := range t.KnownWorkloads {
 		if k.ExpiresAt.IsZero() {
@@ -460,13 +462,14 @@ func (s *Store) migrateSavedTuning(now time.Time) {
 		log.Printf("[+] Detection tuning: quiet lists rewritten as paths and AS numbers (dropped: %s)", strings.Join(dropped, ", "))
 	}
 	if bounded > 0 {
-		log.Printf("[+] Detection tuning: %d known workloads saved without an expiry now expire at %s", bounded, now.UTC().Add(KnownWorkloadMigratedExpiry).Format(time.RFC3339))
+		log.Printf("[+] Detection tuning: %d known workloads saved without an expiry now expire at %s", bounded, now.UTC().Add(KnownWorkloadMaxLifetime).Format(time.RFC3339))
 	}
 }
 
 // CheckNewWorkloadExpiry refuses a known workload a save adds or changes
-// without an expiry in the future. An entry carried over exactly as saved may
-// have expired since; the save then drops it (PrepareDetectionTuning).
+// without an expiry in the future, or with one further out than
+// KnownWorkloadMaxLifetime. An entry carried over exactly as saved may have
+// expired since; the save then drops it (PrepareDetectionTuning).
 func CheckNewWorkloadExpiry(before, after []KnownWorkload, now time.Time) error {
 	saved := map[string]bool{}
 	for _, k := range tidyWorkloads(before) {
@@ -478,6 +481,9 @@ func CheckNewWorkloadExpiry(before, after []KnownWorkload, now time.Time) error 
 		}
 		if !k.ExpiresAt.After(now) {
 			return fmt.Errorf("%w: known workload %q needs an expires_at in the future", ErrInvalidDetectionTuning, k.Workload)
+		}
+		if k.ExpiresAt.After(now.Add(KnownWorkloadMaxLifetime)) {
+			return fmt.Errorf("%w: known workload %q expires_at is more than %d days out; renew it when it nears expiry instead", ErrInvalidDetectionTuning, k.Workload, int(KnownWorkloadMaxLifetime.Hours()/24))
 		}
 	}
 	return nil
@@ -1090,10 +1096,11 @@ func (k KnownWorkload) Key() string {
 	return fmt.Sprintf("%s@%s@%v", k.Workload, k.Owner, k.IncludeRented)
 }
 
-// KnownWorkloadMigratedExpiry is the expiry the upgrade gives each known
-// workload saved before entries had one: bounded, so an entry nobody renews
-// stops vouching.
-const KnownWorkloadMigratedExpiry = 90 * 24 * time.Hour
+// KnownWorkloadMaxLifetime is the longest term a known workload can be added,
+// changed or renewed for, like an exclusion (ExclusionMaxLifetime), and the
+// expiry the upgrade gives each one saved before entries had one: bounded, so
+// an entry nobody renews stops vouching.
+const KnownWorkloadMaxLifetime = 90 * 24 * time.Hour
 
 // AnyOwner is the Owner of a workload known to reach arbitrary destinations.
 const AnyOwner = "*"

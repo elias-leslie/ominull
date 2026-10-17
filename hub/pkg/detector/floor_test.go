@@ -54,13 +54,13 @@ func TestTheFloorClampsAWeakerTuningAndKeepsAStricterOne(t *testing.T) {
 	weak.BandwidthMinSamples = 500
 	weak.WarmupHours = 720
 	weak.AdminFanoutMax = 20
-	weak.BandwidthOn = false
+	weak.BandwidthCooldown = 1440
 	got, notes := ClampToFloor(weak)
-	if !got.SilenceOn || got.SilenceAfterMinutes != 15 || got.BandwidthMinSamples != 20 || got.WarmupHours != 24 || got.AdminFanoutMax != 8 {
+	if !got.SilenceOn || got.SilenceAfterMinutes != 15 || got.BandwidthMinSamples != 20 || got.WarmupHours != 24 || got.AdminFanoutMax != 8 || got.BandwidthCooldown != 5 {
 		t.Fatalf("weaker tuning not clamped: %+v", got)
 	}
 	joined := strings.Join(notes, "\n")
-	for _, field := range []string{"silence_enabled", "silence_after_minutes 600", "bandwidth_min_samples 500", "warmup_hours 720", "admin_fanout_max_hosts 20", "bandwidth_enabled"} {
+	for _, field := range []string{"silence_enabled", "silence_after_minutes 600", "bandwidth_min_samples 500", "warmup_hours 720", "admin_fanout_max_hosts 20", "bandwidth_cooldown_minutes 1440"} {
 		if !strings.Contains(joined, field) {
 			t.Errorf("no note for %s: %v", field, notes)
 		}
@@ -99,5 +99,24 @@ func TestTheEngineRunsTheFloorAndTheBurstSurvivesBandwidthOff(t *testing.T) {
 	})
 	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 1 {
 		t.Fatalf("a ten-megabyte burst with bandwidth off and a long warmup raised %d findings", len(got))
+	}
+}
+
+// The bandwidth burst is floor, so a learning window does not hold it.
+func TestALearningWindowDoesNotHoldTheBurst(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "lin-02", TenantID: "default", Hostname: "lin-02", RoleTag: "server",
+		Status: "online", CreatedAt: now.Add(-30 * 24 * time.Hour), LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateLearningWindow(storage.LearningWindow{TenantID: "default", ScopeType: storage.LearningScopeEndpoint, ScopeID: "lin-02", StartedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "lin-02", Timestamp: now, Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "203.0.113.9", DstPort: 443, BytesOut: 11 << 20, ProcessPath: "/usr/local/bin/uploader"})
+	got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
+	if len(got) != 1 || got[0].HeldReason != "" {
+		t.Fatalf("a burst inside a learning window = %+v", got)
 	}
 }

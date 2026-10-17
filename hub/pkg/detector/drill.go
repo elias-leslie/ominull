@@ -3,7 +3,7 @@ package detector
 import (
 	"fmt"
 	"net/netip"
-	"sync"
+	"sort"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -72,19 +72,13 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, DstIP: dst, DstPort: port, BytesOut: bytes, ProcessPath: proc}
 	}
 	run := func(c DrillCase, tuning storage.DetectionTuning, events []storage.Event) DrillCase {
-		var mu sync.Mutex
+		// EvaluateBatch is synchronous, so the hooks need no lock.
 		e := New(store, nil, func(string, string) error {
-			mu.Lock()
 			c.Isolated = true
-			mu.Unlock()
 			return nil
 		})
 		e.pinned = &tuning
-		e.sink = func(a storage.AnomalyAlert) {
-			mu.Lock()
-			c.Findings = append(c.Findings, a)
-			mu.Unlock()
-		}
+		e.sink = func(a storage.AnomalyAlert) { c.Findings = append(c.Findings, a) }
 		snap := BatchSnapshot{Endpoint: ep, Geo: map[string]threatintel.GeoRecord{}, Exclusions: exclusions, FirstSeen: map[string]bool{}}
 		e.EvaluateBatch(events, snap)
 		c.Tuning = tuning
@@ -106,8 +100,10 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 	}
 	cases = append(cases, run(DrillCase{Rule: "port sweep", Want: "PORT_SCAN_RECON"}, live, sweep))
 
+	// Twice the threshold, so one approved exclusion of a single LAN host
+	// does not read as a blinded rule.
 	var fanout []storage.Event
-	for i := 0; i < lateralHosts; i++ {
+	for i := 0; i < 2*lateralHosts; i++ {
 		fanout = append(fanout, flow(drillProgram+"fanout", lan(200+i), 8080, 60, time.Duration(i)*time.Second))
 	}
 	cases = append(cases, run(DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}, live, fanout))
@@ -126,12 +122,13 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 	admin := live
 	admin.AdminFanoutSources = append(append([]string(nil), live.AdminFanoutSources...), DrillEndpointID)
 	var ssh []storage.Event
-	for i := 0; i < lateralShellHosts; i++ {
+	for i := 0; i < 2*lateralShellHosts; i++ {
+		// SMB first, so every window the sweep is judged in holds it.
 		port := uint16(22)
-		if i == lateralShellHosts-1 {
+		if i == 0 {
 			port = 445
 		}
-		ev := flow("/usr/bin/ssh", lan(230+i), port, 60, time.Duration(i)*time.Second)
+		ev := flow("/usr/bin/ssh", lan(241+i), port, 60, time.Duration(i)*time.Second)
 		ev.Actor = "agent:claude:f100d411"
 		ssh = append(ssh, ev)
 	}
@@ -147,20 +144,34 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 	return cases, nil
 }
 
-// drillLAN returns addresses in the estate's own LAN, the /24 of the first
-// enrolled endpoint with a private IPv4 address, so a container network or
-// exclusion that covers the real LAN covers the drill too.
+// drillLAN returns addresses in the estate's own LAN: the private IPv4 /24
+// holding the most enrolled endpoints (a lab network or a container bridge
+// holds fewer), so a container network or exclusion that covers the real LAN
+// covers the drill too.
 func drillLAN(store *storage.Store) func(host int) string {
 	base := netip.MustParseAddr("192.168.250.0")
+	count := map[netip.Addr]int{}
 	if eps, err := store.ListEndpoints(""); err == nil {
 		for _, ep := range eps {
 			a, err := netip.ParseAddr(ep.IP)
 			if err == nil && a.Is4() && a.IsPrivate() && ep.Status != "retired" {
 				b := a.As4()
-				base = netip.AddrFrom4([4]byte{b[0], b[1], b[2], 0})
-				break
+				count[netip.AddrFrom4([4]byte{b[0], b[1], b[2], 0})]++
 			}
 		}
+	}
+	nets := make([]netip.Addr, 0, len(count))
+	for n := range count {
+		nets = append(nets, n)
+	}
+	sort.Slice(nets, func(i, j int) bool {
+		if count[nets[i]] != count[nets[j]] {
+			return count[nets[i]] > count[nets[j]]
+		}
+		return nets[i].Less(nets[j])
+	})
+	if len(nets) > 0 {
+		base = nets[0]
 	}
 	return func(host int) string {
 		b := base.As4()

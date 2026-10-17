@@ -292,7 +292,7 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 	}
 
 	applyTier(&anomaly, ep, e.settings(), func() bool { return e.store.RunsAgentRuntimes(anomaly.TenantID, anomaly.EndpointID) })
-	if anomaly.HeldReason == "" && learningHolds[anomaly.AnomalyType] {
+	if anomaly.HeldReason == "" && learningHolds[anomaly.AnomalyType] && !strings.Contains(anomaly.Evidence, floorRuleKey) {
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning
 		}
@@ -677,11 +677,16 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					alert.Title = fmt.Sprintf("Outbound rate spike (%s/s)", humanBytes(int64(bwValue)))
 					alert.Description = fmt.Sprintf("Process %s sent %s to %s:%d over the recorded interval, averaging %s/s with a one-second minimum denominator. Baseline: %.0f bytes/s median, %.0f median absolute deviation, %d samples, modified Z %.2f.", procName, humanBytes(ev.BytesOut), ev.DstIP, ev.DstPort, humanBytes(int64(bwValue)), median, mad, samples, zScore)
 				}
+				evidence := ""
+				if burst {
+					evidence = floorRuleEvidence
+				}
 				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 					ID:          alert.ID,
 					TenantID:    ev.TenantID,
 					EndpointID:  ev.EndpointID,
 					Hostname:    endpoint.Hostname,
+					Evidence:    evidence,
 					AnomalyType: "BANDWIDTH_SPIKE",
 					Technique:   "T1030",
 					Severity:    bwSeverity,

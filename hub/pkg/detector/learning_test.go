@@ -31,7 +31,8 @@ func TestFindingsInsideALearningWindowAreHeldNotLost(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		bytes := int64(1500)
 		if i == 39 {
-			bytes = 90 * 1024 * 1024
+			// An outlier under the 10 MB burst floor, which pages anyway.
+			bytes = 8 * 1024 * 1024
 		}
 		engine.Evaluate(storage.Event{
 			TenantID: "default", EndpointID: "linux-01", Timestamp: now.Add(time.Duration(i) * time.Second),
@@ -143,7 +144,8 @@ func TestAnEndpointOutsideAWindowIsStillJudged(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		bytes := int64(1500)
 		if i == 39 {
-			bytes = 90 * 1024 * 1024
+			// An outlier under the 10 MB burst floor, which pages anyway.
+			bytes = 8 * 1024 * 1024
 		}
 		engine.Evaluate(storage.Event{
 			TenantID: "default", EndpointID: "linux-04", Timestamp: now.Add(time.Duration(i) * time.Second),

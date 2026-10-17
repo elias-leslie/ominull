@@ -506,6 +506,11 @@ func TestANewKnownWorkloadNeedsAFutureExpiry(t *testing.T) {
 	if err := CheckNewWorkloadExpiry([]KnownWorkload{old}, []KnownWorkload{stale}, now); err == nil {
 		t.Fatal("a new entry with a past expiry was accepted")
 	}
+	far := live
+	far.ExpiresAt = now.Add(KnownWorkloadMaxLifetime + time.Hour)
+	if err := CheckNewWorkloadExpiry(nil, []KnownWorkload{far}, now); err == nil {
+		t.Fatal("an entry past the longest term was accepted")
+	}
 	renewed := old
 	renewed.ExpiresAt = now.Add(-time.Minute)
 	if err := CheckNewWorkloadExpiry([]KnownWorkload{old}, []KnownWorkload{renewed}, now); err == nil {
@@ -539,7 +544,7 @@ func TestKnownWorkloadsGetABoundedExpiryAtUpgrade(t *testing.T) {
 		t.Fatalf("upgraded row = %+v", got)
 	}
 	gh, ssh := got.KnownWorkloads[0], got.KnownWorkloads[1]
-	if lo, hi := start.Add(KnownWorkloadMigratedExpiry-time.Second), time.Now().UTC().Add(KnownWorkloadMigratedExpiry); gh.ExpiresAt.Before(lo) || gh.ExpiresAt.After(hi) {
+	if lo, hi := start.Add(KnownWorkloadMaxLifetime-time.Second), time.Now().UTC().Add(KnownWorkloadMaxLifetime); gh.ExpiresAt.Before(lo) || gh.ExpiresAt.After(hi) {
 		t.Errorf("an entry without an expiry got %v, want about ninety days out", gh.ExpiresAt)
 	}
 	if !ssh.ExpiresAt.Equal(set) {

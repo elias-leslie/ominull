@@ -47,6 +47,9 @@ const (
 	// floorBandwidthMinSamples is the most transfers a process may need before
 	// its baseline counts (the tuning's bandwidth_min_samples).
 	floorBandwidthMinSamples = 20
+	// floorBandwidthCooldown is the longest one process's bandwidth finding
+	// stays one finding (bandwidth_cooldown_minutes).
+	floorBandwidthCooldown = 5
 	// floorWarmupHours is the longest a new endpoint's behavioural findings,
 	// the bandwidth burst among them, may be held (the tuning's warmup_hours).
 	floorWarmupHours = 24
@@ -70,6 +73,14 @@ const (
 	// floorAdminFanoutMax is the most inventoried hosts one admin ssh fan-out
 	// may reach before the sweep pages anyway (admin_fanout_max_hosts).
 	floorAdminFanoutMax = storage.AdminFanoutMaxDefault
+)
+
+// floorRuleEvidence marks a finding raised by a floor rule inside a detector
+// a learning window may otherwise hold (the bandwidth burst): it pages inside
+// the window like every other floor finding.
+const (
+	floorRuleKey      = `"floor_rule"`
+	floorRuleEvidence = `{"floor_rule":"bandwidth_burst"}`
 )
 
 // sweepCooldown is how long a port or lateral sweep from one process stays one
@@ -96,10 +107,8 @@ func ClampToFloor(t storage.DetectionTuning) (storage.DetectionTuning, []string)
 	}
 	ceiling("silence_after_minutes", &t.SilenceAfterMinutes, floorSilenceMinutes)
 	ceiling("bandwidth_min_samples", &t.BandwidthMinSamples, floorBandwidthMinSamples)
+	ceiling("bandwidth_cooldown_minutes", &t.BandwidthCooldown, floorBandwidthCooldown)
 	ceiling("warmup_hours", &t.WarmupHours, floorWarmupHours)
 	ceiling("admin_fanout_max_hosts", &t.AdminFanoutMax, floorAdminFanoutMax)
-	if !t.BandwidthOn {
-		notes = append(notes, fmt.Sprintf("bandwidth_enabled is off, so only transfers over %d MB are raised", bandwidthBurstBytes>>20))
-	}
 	return t, notes
 }

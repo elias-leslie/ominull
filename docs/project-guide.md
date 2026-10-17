@@ -252,10 +252,11 @@ Detection floor (`hub/pkg/detector/floor.go`). The sensitive ports
 (23/135/445/3389), the bandwidth outlier and 10 MB burst bounds, the port-sweep
 and lateral-sweep thresholds and the longest silence (15 min) are code. Where
 the tuning holds a weaker `silence_after_minutes`, `bandwidth_min_samples`,
-`warmup_hours` or `admin_fanout_max_hosts`, the floor value runs instead and the
+`bandwidth_cooldown_minutes`, `warmup_hours` or `admin_fanout_max_hosts`, the floor value runs instead and the
 feed's detection-policy note says so (`floor_clamped`); a stricter value runs
 as saved. Silence cannot be switched off, and the 10 MB burst is raised with
-`bandwidth_enabled` off.
+`bandwidth_enabled` off and inside a learning window. A known workload's
+`expires_at` is at most 90 days out when added, changed or renewed.
 
 Floor drill (`hub/pkg/detector/drill.go`, `hub/pkg/server/floor_drill.go`). At
 start, weekly and after every applied detection policy change, inside the hub
@@ -267,7 +268,10 @@ on the live tuning and exclusions. It stores no finding and isolates nothing.
 A rule that does not raise, isolate where it should, or that the feed would
 explain away (`Expected`) is a CRITICAL `ominull.detection.drill` on the
 Nightshift feed, as is a drill that has not run for more than eight days; a
-missed drill runs again every hour until it passes.
+missed drill runs again every hour until it passes. The lateral cases use the
+private /24 holding the most enrolled endpoints and twice each threshold. The
+drill sees the tuning and global or tenant-wide exclusions; an exclusion scoped
+to one endpoint, location or process, and a quiet process, are outside it.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence
