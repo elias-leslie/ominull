@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -28,6 +29,7 @@ type CLIConfig struct {
 	HubURL     string
 	APIKey     string
 	APIKeyFile string
+	CAFile     string
 	JSONOutput bool
 	TenantID   string
 	Limit      int
@@ -43,6 +45,10 @@ func main() {
 	if cmd == "help" || cmd == "--help" || cmd == "-h" {
 		printUsage()
 		return
+	}
+
+	if cmd == "__hold" {
+		os.Exit(runHolder())
 	}
 
 	// Handle local setup commands directly before full API client initialization
@@ -104,6 +110,21 @@ func main() {
 		err = client.cmdScripts(rest)
 	case "shell":
 		err = client.cmdShell(rest)
+	case "exec":
+		code, xerr := client.cmdExec(rest)
+		if xerr != nil {
+			fmt.Fprintf(os.Stderr, "ominullctl error: %v\n", xerr)
+			if code == 0 {
+				code = 1
+			}
+		}
+		os.Exit(code)
+	case "put":
+		err = client.cmdPut(rest)
+	case "get":
+		err = client.cmdGet(rest)
+	case "enrol", "enroll":
+		err = client.cmdEnrol(rest)
 	case "software":
 		err = client.cmdSoftware(rest)
 	case "vulnerabilities":
@@ -167,12 +188,19 @@ type APIClient struct {
 }
 
 func newAPIClient(cfg CLIConfig) *APIClient {
-	return &APIClient{
+	c := &APIClient{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 	}
+	if tlsCfg, err := c.tlsConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "ominullctl: hub CA %s unusable: %v\n", cfg.CAFile, err)
+		os.Exit(2)
+	} else if tlsCfg != nil {
+		c.httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg, Proxy: nil}
+	}
+	return c
 }
 
 func parseGlobalFlags(args []string) (CLIConfig, []string) {
@@ -180,6 +208,7 @@ func parseGlobalFlags(args []string) (CLIConfig, []string) {
 	fs := flag.NewFlagSet("ominullctl", flag.ExitOnError)
 	fs.StringVar(&cfg.HubURL, "url", envOr("OMINULL_HUB_URL", defaultHubURL), "Hub API base URL")
 	fs.StringVar(&cfg.APIKeyFile, "api-key-file", envOr("OMINULL_API_KEY_FILE", defaultAdminKeyPath), "Path to API key file")
+	fs.StringVar(&cfg.CAFile, "ca", os.Getenv("OMINULL_HUB_CA"), "PEM CA the hub's TLS certificate chains to (e.g. /etc/ominull/ca.crt)")
 	fs.BoolVar(&cfg.JSONOutput, "json", false, "Emit machine-readable JSON output")
 	fs.StringVar(&cfg.TenantID, "tenant", "default", "Tenant ID context")
 	fs.IntVar(&cfg.Limit, "limit", 50, "Pagination limit")
@@ -226,9 +255,38 @@ func (c *APIClient) ownerApproved(method, endpoint string, body interface{}) ([]
 	}
 	fmt.Fprintf(os.Stderr, "[*] Owner approval needed: %s - %s\n    Approve on the phone (approval %s, expires %s).\n",
 		pending.Action, pending.Summary, pending.ID, pending.ExpiresAt)
+	// Nobody is left to use an approval this process stops waiting for, so
+	// an interrupt or the deadline withdraws it: the owner is never handed a
+	// stale ask.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(stop)
+	withdraw := func(why string) error {
+		_, _, werr := c.doRequestWith(http.MethodDelete, "/api/v1/approvals?id="+url.QueryEscape(pending.ID), nil, nil)
+		if werr != nil {
+			return fmt.Errorf("%s; withdrawing approval %s failed (%v), it lapses at %s", why, pending.ID, werr, pending.ExpiresAt)
+		}
+		return fmt.Errorf("%s; approval %s withdrawn", why, pending.ID)
+	}
+	type pollResult struct {
+		raw []byte
+		err error
+	}
 	deadline := time.Now().Add(16 * time.Minute)
 	for time.Now().Before(deadline) {
-		st, _, err := c.doRequestWith(http.MethodGet, "/api/v1/approvals?wait=10&id="+url.QueryEscape(pending.ID), nil, nil)
+		done := make(chan pollResult, 1)
+		go func() {
+			st, _, err := c.doRequestWith(http.MethodGet, "/api/v1/approvals?wait=10&id="+url.QueryEscape(pending.ID), nil, nil)
+			done <- pollResult{st, err}
+		}()
+		var pr pollResult
+		select {
+		case sig := <-stop:
+			signal.Stop(stop)
+			return nil, withdraw("stopped by " + sig.String())
+		case pr = <-done:
+		}
+		st, err := pr.raw, pr.err
 		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
@@ -245,7 +303,7 @@ func (c *APIClient) ownerApproved(method, endpoint string, body interface{}) ([]
 			return nil, fmt.Errorf("owner approval %s was %s", pending.ID, v.State)
 		}
 	}
-	return nil, fmt.Errorf("no owner decision on approval %s", pending.ID)
+	return nil, withdraw("no owner decision")
 }
 
 func (c *APIClient) doRequestWith(method, endpoint string, body interface{}, headers map[string]string) ([]byte, int, error) {
@@ -1119,10 +1177,18 @@ func (c *APIClient) cmdShell(args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
-	if action == "open" || action == "exec" || action == "attach" {
-		return fmt.Errorf("shell session launch is console-only and requires dual-operator authorization")
+	if action == "exec" || action == "attach" {
+		return fmt.Errorf("use ominullctl exec ENDPOINT -- COMMAND (runs under a held session when shell open made one); attaching an interactive pty is the console's")
 	}
 	switch action {
+	case "open":
+		return c.shellOpen(args[1:])
+	case "end":
+		return shellEnd(args[1:])
+	case "raw":
+		return shellRaw(args[1:])
+	case "ready":
+		return shellReady(args[1:])
 	case "sessions":
 		raw, err := c.doRequest(http.MethodGet, "/api/v1/terminal/sessions", nil)
 		if err != nil {
@@ -1178,7 +1244,7 @@ func (c *APIClient) cmdShell(args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("usage: ominullctl shell sessions|show|close <session_id>")
+		return fmt.Errorf("usage: ominullctl shell open [--ttl 45m] ENDPOINT | shell end ENDPOINT | shell sessions|show|close <session_id>")
 	}
 }
 
@@ -1564,6 +1630,7 @@ Fleet & CyberOps Commands:
   agents versions|update <id|all>         Inspect fleet version currency and publish releases
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
   install reports [list|show]             Inspect bootstrap error reports
+  enrol list|open|close                   LAN self-enrolment windows (open waits for the owner's tap)
 
 Forensics & Response Commands:
   response jobs list|cancel <id>          Inspect and manage durable response jobs
@@ -1571,6 +1638,14 @@ Forensics & Response Commands:
   forensics list|show|verify <manifest>   Manage and verify forensic evidence collections
   scripts list|show|create|update|retire  Manage versioned immutable script library
   shell sessions|show|close <id>          List and close active terminal sessions
+
+Remote Commands (each new session waits for the owner's passkey tap):
+  exec [--timeout S] ENDPOINT -- COMMAND  Run COMMAND (sh on Linux, PowerShell on Windows); prints its
+                                          stdout and stderr and exits with its exit code (- reads stdin)
+  shell open [--ttl 45m] ENDPOINT         One tap, then exec/put/get on ENDPOINT reuse the session
+  shell end ENDPOINT                      End the held session
+  put ENDPOINT LOCAL REMOTE               Copy a small file (up to 2 MiB) to the endpoint
+  get ENDPOINT REMOTE LOCAL|-             Copy a file from the endpoint
   software list                           Inspect authoritative endpoint package inventory
   vulnerabilities list|show|sync          Correlate endpoint packages with NVD/KEV feeds
 
@@ -1582,6 +1657,7 @@ Console & Trust Commands:
 Global Flags:
   --url URL             Hub API URL (default: http://127.0.0.1:9999 or $OMINULL_HUB_URL)
   --api-key-file FILE   API key file (default: /etc/ominull/admin.key or $OMINULL_API_KEY_FILE)
+  --ca FILE             CA certificate for an https hub (default: $OMINULL_HUB_CA)
   --json                Emit versioned JSON output to stdout
   --tenant TENANT_ID    Target tenant scope (default: default)
   --limit N             Page limit for lists (default: 50)

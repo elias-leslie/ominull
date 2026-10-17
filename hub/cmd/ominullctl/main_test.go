@@ -91,14 +91,14 @@ func TestOminullctl_NoPlaintextEnvAPIKey(t *testing.T) {
 func TestOminullctl_ConsoleOnlyMutationsForbidden(t *testing.T) {
 	client := newAPIClient(CLIConfig{})
 
-	// 1. Shell open, exec, attach forbidden
-	for _, subcmd := range []string{"open", "exec", "attach"} {
+	// 1. An interactive pty attach stays the console's; agents use exec.
+	for _, subcmd := range []string{"exec", "attach"} {
 		err := client.cmdShell([]string{subcmd, "ep-1"})
 		if err == nil {
 			t.Fatalf("cmdShell with %q expected error, got nil", subcmd)
 		}
-		if !strings.Contains(err.Error(), "console-only and requires dual-operator authorization") {
-			t.Fatalf("cmdShell with %q expected console-only authorization error, got: %v", subcmd, err)
+		if !strings.Contains(err.Error(), "ominullctl exec ENDPOINT") {
+			t.Fatalf("cmdShell with %q expected a pointer to exec, got: %v", subcmd, err)
 		}
 	}
 

@@ -694,9 +694,13 @@ func (s *Server) resolveMesh(quarantine bool) approvalResolver {
 }
 
 // handleApprovals lets a requester follow its approval: GET ?id=&wait=N
-// long-polls up to N seconds (max 25) for a change from pending.
+// long-polls up to N seconds (max 25) for a change from pending. DELETE ?id=
+// withdraws the caller's own pending approval (a client that stopped waiting
+// must not leave the owner an ask nobody will use): the authority records a
+// deny, which needs no passkey because it only refuses, and the relay closes
+// the owner's notification when the approval leaves the pending list.
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -712,6 +716,10 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	tenantID := s.tenantFromRequest(r)
 	if tenantID == "" {
 		tenantID = "default"
+	}
+	if r.Method == http.MethodDelete {
+		s.withdrawApproval(w, r, id, tenantID)
+		return
 	}
 	wait := parseWait(r.URL.Query().Get("wait"))
 	deadline := time.Now().Add(wait)
@@ -733,6 +741,34 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (s *Server) withdrawApproval(w http.ResponseWriter, r *http.Request, id, tenantID string) {
+	v, err := s.responseAuth.GetApproval(r.Context(), id, tenantID)
+	if err != nil {
+		writeJSONError(w, approvalStatus(err), err.Error())
+		return
+	}
+	requester := s.operatorFromRequest(r)
+	if m := r.Header.Get("X-Auth-Method"); m != "" {
+		requester += " (" + m + ")"
+	}
+	if v.Requester != requester {
+		writeJSONError(w, http.StatusForbidden, "only the requester can withdraw an approval")
+		return
+	}
+	if v.State != responseauth.ApprovalPending {
+		writeJSONError(w, http.StatusConflict, "approval is already "+string(v.State))
+		return
+	}
+	v, err = s.responseAuth.AnswerApproval(r.Context(), &responseauth.ApprovalAnswer{ID: id, Decision: "deny"})
+	if err != nil {
+		writeJSONError(w, approvalStatus(err), err.Error())
+		return
+	}
+	s.approvalWake.notify()
+	s.audit(r, "OWNER_APPROVAL_WITHDRAWN", id, "withdrawn by "+requester+": "+v.Action+" - "+v.Summary)
+	writeJSON(w, http.StatusOK, publicApproval(v))
 }
 
 // handleApprovalRules shows (GET) or removes (DELETE) the owner's approve-all

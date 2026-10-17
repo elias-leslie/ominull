@@ -169,6 +169,32 @@ sudo ominullctl setup-status
 
 For fleet operations and CyberOps control, `ominullctl` reads `OMINULL_HUB_URL`
 and `OMINULL_API_KEY_FILE` (or `--api-key-file /etc/ominull/admin.key`). Never commit credentials.
+An https hub with its own CA takes `--ca` or `OMINULL_HUB_CA` (e.g. `/etc/ominull/ca.crt`).
+
+### Remote commands for agents
+
+Run commands on an enrolled endpoint through the hub's terminal session, over
+the agent's existing outbound channel (no listener on the endpoint, no SSH).
+Every new session waits for the owner's passkey tap, is recorded like a console
+shell, and ends at the hub's limits (60 minutes, 15 idle). Linux runs `/bin/sh`,
+Windows PowerShell (as SYSTEM). Output comes back clean: the command's own
+stdout and stderr, and `exec` exits with the command's exit code.
+
+```bash
+ominullctl exec [--timeout S] ENDPOINT -- 'uname -a'     # one tap, one command, session ends
+ominullctl shell open [--ttl 45m] ENDPOINT               # one tap, then reuse:
+ominullctl exec ENDPOINT -- 'journalctl -u x -n 50'      #   runs in the held session
+ominullctl put ENDPOINT ./fix.sh /tmp/fix.sh             #   files up to 2 MiB
+ominullctl get ENDPOINT /var/log/syslog ./syslog         #   (- for stdout)
+ominullctl shell end ENDPOINT
+ominullctl --json exec ENDPOINT -- CMD                   # {"stdout","stderr","exit"}
+```
+
+A held session lives in a background process with a private socket under
+`$XDG_RUNTIME_DIR/ominull/`. Interrupting a command while it waits for the
+owner withdraws the ask (`DELETE /api/v1/approvals?id=`), so the owner is never
+left a stale one. `ominullctl enrol list|open|close` manages LAN self-enrolment
+windows; opening one waits for the owner's tap.
 
 Protected operator routes use the admin key, a signed console session, native
 OIDC session, or verified Cloudflare Access assertion. Tenant routes remain
@@ -194,6 +220,7 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
+| `/api/v1/approvals` | GET/DELETE | follow an owner approval (`?id=&wait=`); the requester withdraws its own pending one |
 | `/api/v1/approvals/rules` | GET/DELETE | show or remove the approve-all rule for owner-signed rollouts |
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422); the owner's statement opens with the floor drill run against the proposed tuning (`drill_blinds` in the 202: the floor cases it would newly blind) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
