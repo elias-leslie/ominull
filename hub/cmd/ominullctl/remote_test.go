@@ -110,7 +110,7 @@ func TestPowerShellJobQuotesAndChunks(t *testing.T) {
 	}
 	// The child gets PATHEXT and friends (the terminal starts with a minimal
 	// environment), and the ready text is one line, typed once.
-	if !strings.Contains(script, base64.StdEncoding.EncodeToString([]byte("\xef\xbb\xbf"+psEnvPrefix))[:40]) {
+	if !strings.Contains(script, base64.StdEncoding.EncodeToString([]byte("\xef\xbb\xbf" + psEnvPrefix))[:40]) {
 		t.Fatal("PowerShell exec payload lacks the environment prefix")
 	}
 	if r := readyScript(shellPowerShell, nonce); strings.Count(r, "\r") != 1 || !strings.HasSuffix(r, "\r") {
