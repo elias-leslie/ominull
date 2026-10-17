@@ -100,10 +100,18 @@ and package.
 
 - **What is approved**: the response authority sees the exact script payload
   of every run (source, digest, interpreter, parameters, timeout, output
-  bound) and the named hosts. It reads each package's name and risk from the
-  source's own header, checks the digest against the source, and writes the
-  text the owner sees ("Run as SYSTEM on laptop-1: windows-audit (audit), up
-  to 5 min"). Each grant binds one host and one script payload.
+  bound) and the named hosts, and writes the text the owner sees ("Run as
+  SYSTEM on laptop-1: windows-audit (audit), up to 5 min"). Each grant binds
+  one host and one script payload, which must be exactly the bytes
+  `json.Marshal` makes of it.
+- **Which scripts count as packages**: the authority ships with the digest,
+  name and risk of every file in `packages/windows`
+  (`hub/pkg/responseauth/released_packages.json`, kept in step by a test).
+  Only those sources, run by `powershell.exe` with no parameter but `mode`,
+  are packages; the hub's own copy of the header is never trusted. Anything
+  else is shown as "not a released package", asks every time and never gets
+  a rule. So a changed package needs a hub release before a rule can cover it.
+  A run too long to show whole in one ask is refused (split it).
 - **"Approve all like this"** is offered only when every package in the run is
   `safe`. It records the payload digests and hosts; later runs of exactly
   those scripts (or a subset) on those hosts (or a subset) go through with no

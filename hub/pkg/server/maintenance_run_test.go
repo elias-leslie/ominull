@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,11 @@ func TestPackageRunsUnderOwnerApprovalAndSchedule(t *testing.T) {
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	src := `# ominull-package: {"name":"windows-audit","title":"Standards check","description":"d","risk":"safe","reboot":false,"timeout":300}` + "\nWrite-Output '{}'\n"
+	srcRaw, err := os.ReadFile("../../../packages/windows/audit.ps1") // a released package
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(srcRaw)
 	schema := `{"parameters":[{"name":"mode","type":"enum","enum":["audit","enforce"],"default":"audit","required":true}]}`
 	sc, sv, _, err := srv.scriptsStore.SyncScript("default", "windows-audit", "Checks standards.", "powershell.exe", src, schema,
 		`{"package":"windows-audit","title":"Standards check","risk":"safe","timeout":300}`, "ops")

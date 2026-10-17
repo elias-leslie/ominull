@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -13,11 +16,27 @@ import (
 	"ominull/hub/pkg/responseauth"
 )
 
+// packageSource is the released source of a package in packages/windows.
+func packageSource(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "packages", "windows", strings.TrimPrefix(name, "windows-")+".ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// packageItem is the payload of one run of a released package. The risk
+// argument documents what the test expects; it comes from the release list.
 func packageItem(t *testing.T, name, risk, mode string, timeout int) string {
 	t.Helper()
-	src := `# ominull-package: {"name":"` + name + `","title":"T","description":"d","risk":"` + risk + `","reboot":false,"timeout":300}` + "\nWrite-Output 'x'\n"
+	return execItem(t, "s-"+name, packageSource(t, name), mode, timeout)
+}
+
+func execItem(t *testing.T, id, src, mode string, timeout int) string {
+	t.Helper()
 	sum := sha256.Sum256([]byte(src))
-	raw, err := json.Marshal(response.ScriptExecPayload{ScriptID: "s-" + name, ScriptVersion: 1, ScriptDigest: hex.EncodeToString(sum[:]),
+	raw, err := json.Marshal(response.ScriptExecPayload{ScriptID: id, ScriptVersion: 1, ScriptDigest: hex.EncodeToString(sum[:]),
 		Interpreter: "powershell.exe", Source: src, Parameters: map[string]string{"mode": mode}, TimeoutSeconds: timeout, MaxOutputBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -165,5 +184,98 @@ func TestPackageRunRefusesAmbiguousKeys(t *testing.T) {
 		if _, err := auth.RequestApproval(packageRequest([]string{"ep-a"}, bad)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// The authority's list of released packages is exactly packages/windows.
+func TestReleasedPackagesMatchTheRepository(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join("..", "..", "..", "packages", "windows", "*.ps1"))
+	want := map[string]string{}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, _, _ := strings.Cut(string(raw), "\n")
+		var h struct{ Name, Risk string }
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "# ominull-package:")), &h); err != nil {
+			t.Fatal(f, err)
+		}
+		sum := sha256.Sum256(raw)
+		want[hex.EncodeToString(sum[:])] = h.Name + " " + h.Risk
+	}
+	got := responseauth.ReleasedPackages()
+	if len(want) == 0 || fmt.Sprint(want) != fmt.Sprint(got) {
+		var b strings.Builder
+		for d, v := range want {
+			n, r, _ := strings.Cut(v, " ")
+			fmt.Fprintf(&b, "  %q: {\"name\": %q, \"risk\": %q},\n", d, n, r)
+		}
+		t.Fatalf("hub/pkg/responseauth/released_packages.json is out of step with packages/windows; it should hold:\n%s", b.String())
+	}
+}
+
+// The hub cannot pass its own script off as a package: only the released
+// sources count, whatever the submitted header says.
+func TestForgedPackageHeadersAreNotTrusted(t *testing.T) {
+	auth, _, _, _ := newRuleAuthority(t)
+	forged := `# ominull-package: {"name":"windows-audit","title":"T","description":"d","risk":"safe","reboot":false,"timeout":300}` + "\nRemove-Item C:\\ -Recurse\n"
+	v, err := auth.RequestApproval(packageRequest([]string{"ep-a"}, execItem(t, "s-forged", forged, "audit", 300)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statementOffer(t, v) != "" || !strings.Contains(v.Summary, "s-forged (audit), up to 5 min, not a released package") {
+		t.Fatalf("a forged header was trusted: %q %q", statementOffer(t, v), v.Summary)
+	}
+	// A released source with other parameters or another interpreter is not
+	// the released package either.
+	var p response.ScriptExecPayload
+	_ = json.Unmarshal([]byte(packageItem(t, "windows-audit", "safe", "audit", 300)), &p)
+	p.Parameters["extra"] = "1"
+	odd, _ := json.Marshal(p)
+	if v, err := auth.RequestApproval(packageRequest([]string{"ep-b"}, string(odd))); err != nil || statementOffer(t, v) != "" ||
+		!strings.Contains(v.Summary, "not a released package") {
+		t.Fatalf("extra parameters kept package trust: %v %+v", err, v)
+	}
+}
+
+// Only the canonical bytes are accepted, so an agent that searches for the
+// first "source" member reads what the authority read.
+func TestPackageRunRefusesReorderedOrNestedFields(t *testing.T) {
+	auth, _, _, _ := newRuleAuthority(t)
+	item := packageItem(t, "windows-audit", "safe", "audit", 300)
+	evil := "Remove-Item C:\\ -Recurse\n"
+	sum := sha256.Sum256([]byte(evil))
+	nested := fmt.Sprintf(`{"parameters":{"mode":"audit","script_digest":"%s","source":%q},`, hex.EncodeToString(sum[:]), evil)
+	var p response.ScriptExecPayload
+	_ = json.Unmarshal([]byte(item), &p)
+	for name, bad := range map[string]string{
+		"nested first": nested + strings.TrimPrefix(strings.Replace(item, `"parameters":{"mode":"audit"},`, "", 1), "{"),
+		"reordered":    `{"script_version":1,` + strings.Replace(strings.TrimPrefix(item, "{"), `"script_version":1,`, "", 1),
+		"spaced":       strings.Replace(item, `"interpreter":`, `"interpreter": `, 1),
+	} {
+		if bad == item {
+			t.Fatalf("%s: test payload unchanged", name)
+		}
+		if _, err := auth.RequestApproval(packageRequest([]string{"ep-a"}, bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	p.Parameters = map[string]string{"mode": "audit", "source": "x"}
+	reserved, _ := json.Marshal(p)
+	if _, err := auth.RequestApproval(packageRequest([]string{"ep-a"}, string(reserved))); err == nil {
+		t.Error("a parameter named like a payload field was accepted")
+	}
+}
+
+// A run too long to show whole is refused, never shown cut.
+func TestPackageRunTooLongToShowIsRefused(t *testing.T) {
+	auth, _, _, _ := newRuleAuthority(t)
+	var items []string
+	for i := 0; i < 10; i++ {
+		items = append(items, execItem(t, fmt.Sprintf("script-with-a-rather-long-identifier-number-%02d", i), fmt.Sprintf("Write-Output %d\n", i), "audit", 300))
+	}
+	if _, err := auth.RequestApproval(packageRequest([]string{"ep-a"}, items...)); err == nil || !strings.Contains(err.Error(), "split the run") {
+		t.Fatalf("an approval that cannot show every script was accepted: %v", err)
 	}
 }

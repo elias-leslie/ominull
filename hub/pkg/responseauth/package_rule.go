@@ -6,9 +6,16 @@ package responseauth
 // The hub asks with a PackageRunPayload: the exact script payloads the agents
 // will receive (each item is the JSON string an agent digests), the named
 // endpoints, and the route. The authority reads everything the owner sees from
-// those bytes: the package name and risk come from line 1 of each script's own
-// source ("# ominull-package: {...}"), which the script digest binds. On use it
-// signs one grant per endpoint and item, each bound to that item's own digest.
+// those bytes, and the hub cannot vouch for a package: a script counts as a
+// package only when its source digest is one this authority was released with
+// (released_packages.json, generated from packages/windows and checked against
+// it by the tests), run by powershell.exe with no parameter but mode. Its name
+// and risk come from that list, never from the submitted source. Anything else
+// is shown as "not a released package", asks every time and never gets a rule.
+// Each item must be exactly the bytes json.Marshal makes of it (field order,
+// no duplicates or stray members), so an agent's field search and this parse
+// cannot read different values. On use the authority signs one grant per
+// endpoint and item, each bound to that item's own digest.
 //
 // One passkey tap with the decision "rule" on an ask that offers it stores a
 // package rule. While it lives, a later request is approved here without
@@ -17,7 +24,7 @@ package responseauth
 // every endpoint is one the rule names. A new script version, another mode, a
 // longer timeout or another host is a new digest or target and asks again.
 // Only packages whose header says risk "safe" are ever offered or covered;
-// "careful" packages and scripts without a package header ask every time.
+// "careful" packages and scripts that are not released packages ask every time.
 //
 // Like the rollout rule, a package rule ends packageRuleIdle after it was made
 // or last used, every run it approves leaves an audit row here
@@ -27,6 +34,7 @@ package responseauth
 import (
 	"bytes"
 	"crypto/ed25519"
+	_ "embed"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -54,7 +62,6 @@ const (
 	packageMaxGrants   = 100
 	packageMaxPayload  = 512 * 1024
 	packageRulesKept   = 20 // per tenant
-	packageHeaderMagic = "# ominull-package:"
 )
 
 // ErrRuleNotCovered refuses a rule-only request (the hub's schedule) that no
@@ -62,6 +69,39 @@ const (
 var ErrRuleNotCovered = errors.New("no approve-all rule covers this package run")
 
 var packageInterpreters = map[string]bool{"powershell.exe": true, "pwsh.exe": true, "cmd.exe": true, "/bin/sh": true, "/bin/bash": true}
+
+// releasedPackages maps the sha256 of each package source shipped with this
+// release to its name and risk.
+//
+//go:embed released_packages.json
+var releasedPackagesJSON []byte
+
+type releasedPackage struct {
+	Name string `json:"name"`
+	Risk string `json:"risk"`
+}
+
+var releasedPackages = func() map[string]releasedPackage {
+	m := map[string]releasedPackage{}
+	if err := json.Unmarshal(releasedPackagesJSON, &m); err != nil {
+		panic("released_packages.json: " + err.Error())
+	}
+	return m
+}()
+
+// ReleasedPackages is the embedded list (for the tests that keep it in step
+// with packages/windows).
+func ReleasedPackages() map[string]string {
+	out := make(map[string]string, len(releasedPackages))
+	for d, p := range releasedPackages {
+		out[d] = p.Name + " " + p.Risk
+	}
+	return out
+}
+
+// reservedParams are payload field names a parameter may not take.
+var reservedParams = map[string]bool{"script_id": true, "script_version": true, "script_digest": true, "interpreter": true,
+	"source": true, "parameters": true, "timeout_seconds": true, "max_output_bytes": true}
 
 // PackageRunPayload is what the owner approves for a script_exec run.
 type PackageRunPayload struct {
@@ -75,8 +115,8 @@ type PackageItem struct {
 	Raw    string
 	Digest string // sha256 of Raw: the grant's action digest
 	Exec   response.ScriptExecPayload
-	Name   string // package name from the source header, or the script id
-	Risk   string // "safe" | "careful" | "" (no package header)
+	Name   string // released package name, or the script id
+	Risk   string // "safe" | "careful" | "" (not a released package)
 }
 
 // Label names the item for the owner: package (mode).
@@ -91,23 +131,6 @@ func (it PackageItem) Label() string {
 func ItemDigest(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
-}
-
-// packageHeader reads line 1 of a package script.
-func packageHeader(source string) (name, risk string) {
-	line, _, _ := strings.Cut(source, "\n")
-	rest, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), packageHeaderMagic)
-	if !ok {
-		return "", ""
-	}
-	var h struct {
-		Name string `json:"name"`
-		Risk string `json:"risk"`
-	}
-	if json.Unmarshal([]byte(strings.TrimSpace(rest)), &h) != nil {
-		return "", ""
-	}
-	return cleanText(h.Name, 64), h.Risk
 }
 
 // plainKeys requires one JSON value whose object keys are all lower case and
@@ -184,6 +207,9 @@ func parsePackageItem(raw string) (PackageItem, error) {
 	if err := dec.Decode(&it.Exec); err != nil {
 		return it, errors.New("script payload unreadable")
 	}
+	if again, err := json.Marshal(it.Exec); err != nil || string(again) != raw {
+		return it, errors.New("script payload is not in its canonical form")
+	}
 	p := &it.Exec
 	if p.ScriptID == "" || p.ScriptVersion <= 0 || p.Source == "" {
 		return it, errors.New("script payload names no script, version or source")
@@ -201,13 +227,15 @@ func parsePackageItem(raw string) (PackageItem, error) {
 		return it, errors.New("script output bound must be 1 byte to 5 MiB")
 	}
 	for k, v := range p.Parameters {
-		if cleanText(k, 64) != k || len(v) > 256 {
+		if !paramName(k) || reservedParams[k] || len(v) > 256 {
 			return it, errors.New("script parameters are malformed")
 		}
 	}
-	it.Name, it.Risk = packageHeader(p.Source)
-	if it.Name == "" {
-		it.Name = cleanText(p.ScriptID, 64)
+	it.Name = cleanText(p.ScriptID, 64)
+	mode := p.Parameters["mode"]
+	if rp, ok := releasedPackages[strings.ToLower(p.ScriptDigest)]; ok && p.Interpreter == "powershell.exe" &&
+		len(p.Parameters) == 1 && (mode == "audit" || mode == "enforce") {
+		it.Name, it.Risk = rp.Name, rp.Risk
 	}
 	return it, nil
 }
@@ -252,6 +280,30 @@ func ParsePackageRun(payload []byte, targets []string) ([]PackageItem, error) {
 	return items, nil
 }
 
+// paramName is a lower-case identifier of at most 32 characters.
+func paramName(k string) bool {
+	if k == "" || len(k) > 32 || k[0] < 'a' || k[0] > 'z' {
+		return false
+	}
+	for _, c := range k {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// riskNote is what the owner is told about an item that is not a safe package.
+func (it PackageItem) riskNote() string {
+	switch it.Risk {
+	case "safe":
+		return ""
+	case "":
+		return ", not a released package"
+	}
+	return ", " + cleanText(it.Risk, 16)
+}
+
 func describePackageRun(payload []byte, targets []string) (string, string, error) {
 	items, err := ParsePackageRun(payload, targets)
 	if err != nil {
@@ -259,26 +311,24 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 	}
 	parts := make([]string, 0, len(items))
 	for _, it := range items {
-		s := fmt.Sprintf("%s, up to %d min", it.Label(), (it.Exec.TimeoutSeconds+59)/60)
-		if it.Risk != "safe" {
-			if it.Risk == "" {
-				s += ", not a package"
-			} else {
-				s += ", " + cleanText(it.Risk, 16)
-			}
-		}
-		parts = append(parts, s)
+		parts = append(parts, fmt.Sprintf("%s, up to %d min%s", it.Label(), (it.Exec.TimeoutSeconds+59)/60, it.riskNote()))
 	}
 	lead := "Run as SYSTEM on " + listTargets(targets) + ": "
 	full := lead + strings.Join(parts, "; ")
 	if len([]rune(full)) <= approvalMaxSummary {
 		return "Run maintenance", full, nil
 	}
+	// Shorter, but still every script and every risk note; a run that cannot
+	// be shown whole is refused rather than cut.
 	names := make([]string, 0, len(items))
 	for _, it := range items {
-		names = append(names, it.Label())
+		names = append(names, it.Label()+it.riskNote())
 	}
-	return "Run maintenance", fmt.Sprintf("Run %d scripts as SYSTEM on %d host(s): %s", len(items), len(targets), strings.Join(names, ", ")), nil
+	short := fmt.Sprintf("Run %d scripts as SYSTEM on %d host(s): %s", len(items), len(targets), strings.Join(names, "; "))
+	if len([]rune(short)) > approvalMaxSummary {
+		return "", "", errors.New("too many scripts to show in one approval; split the run")
+	}
+	return "Run maintenance", short, nil
 }
 
 // packageRuleCovers says whether a request is one a package rule may cover
