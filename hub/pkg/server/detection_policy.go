@@ -658,7 +658,8 @@ func exclusionView(ex storage.Exclusion, keepID bool) storage.Exclusion {
 }
 
 // detectionPolicySection is the Nightshift feed's view of detection policy: a
-// CRITICAL finding while the saved tuning row is unsound, and an informational
+// CRITICAL finding while the saved tuning row is unsound, another while the
+// floor drill misses or is overdue (floor_drill.go), and an informational
 // note listing the day's changes, each with the credential it came through.
 func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	var out []feedFinding
@@ -671,6 +672,7 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		out = append(out, s.feedFinding(now, invalidUID, invalidTitle, ocsfSevInformational, ocsfStatusResolved,
 			"The saved detection tuning is sound", nil, nil))
 	}
+	out = append(out, s.floorDrillFinding(now))
 
 	page, err := s.store.AuditHistory("", 50, "", storage.AuditFilter{Action: policyChangedAudit, From: now.Add(-feedAnomalyWindow)})
 	if err != nil {

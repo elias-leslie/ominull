@@ -712,6 +712,10 @@ func (s *Server) Start(addr string) error {
 	// themselves are updated on.
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
 	s.detector.Start(context.Background())
+	// The first floor drill runs before the feed is served, so a fresh start
+	// never reports one that has not run yet.
+	s.floorDrillDue(time.Now().UTC())
+	go s.floorDrillLoop()
 	go s.reconcilePendingGrantsLoop()
 	go s.agentRolloutLoop()
 	if s.stopEvidenceRetention == nil {

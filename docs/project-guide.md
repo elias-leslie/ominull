@@ -257,6 +257,17 @@ feed's detection-policy note says so (`floor_clamped`); a stricter value runs
 as saved. Silence cannot be switched off, and the 10 MB burst is raised with
 `bandwidth_enabled` off.
 
+Floor drill (`hub/pkg/detector/drill.go`, `hub/pkg/server/floor_drill.go`). At
+start and then weekly, inside the hub process, synthetic events for each floor
+rule (threat-list match and its isolation, sensitive port, port sweep, lateral
+sweep, bandwidth burst, resolver bypass shaped as a connection test, an agent's
+ssh fan-out that reaches SMB, a host gone quiet) run through a throwaway engine
+on the live tuning and exclusions. It stores no finding and isolates nothing.
+A rule that does not raise, isolate where it should, or that the feed would
+explain away (`Expected`) is a CRITICAL `ominull.detection.drill` on the
+Nightshift feed, as is a drill that has not run for more than eight days; a
+missed drill runs again every hour until it passes.
+
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence
 and return against presence, sweeps, threat intelligence, beaconing, volume,

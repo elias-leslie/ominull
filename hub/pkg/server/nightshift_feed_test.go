@@ -259,6 +259,7 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 	if err := store.TouchRouterSource("gw", "", "ok", now); err != nil {
 		t.Fatal(err)
 	}
+	srv.floorDrillDue(now) // as Start does
 	w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
 	var doc feedDoc
 	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
@@ -269,8 +270,8 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 			t.Fatalf("%s is not resolved on a quiet fleet: %q", f.FindingInfo.UID, f.Message)
 		}
 	}
-	if len(doc.Findings) != 10 {
-		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, agent egress, agents, inventory, router collector, router certificate, detection policy soundness and changes", len(doc.Findings))
+	if len(doc.Findings) != 11 {
+		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, agent egress, agents, inventory, router collector, router certificate, detection policy soundness, floor drill and changes", len(doc.Findings))
 	}
 }
 

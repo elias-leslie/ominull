@@ -83,24 +83,29 @@ func (e *Engine) SweepSilence(now time.Time) {
 		return
 	}
 
-	alwaysOn := time.Duration(cfg.SilenceAfterMinutes) * time.Minute
 	for _, endpoint := range endpoints {
-		if !watchableEndpoint(endpoint) {
-			continue
-		}
-		// A lab guest is off between experiments and an intermittent laptop
-		// is shut most evenings: their absences are not findings, or not yet.
-		threshold, watched := endpoint.QuietAllowance(alwaysOn)
+		quiet, threshold, watched := silentFor(endpoint, cfg, now)
 		if !watched {
 			continue
 		}
-		quiet := now.Sub(endpoint.LastSeenAt)
 		if quiet > threshold {
 			e.reportSilence(endpoint, quiet, threshold, now)
 			continue
 		}
 		e.reportReturn(endpoint, now)
 	}
+}
+
+// silentFor is how long an endpoint has been quiet and how long it may be;
+// watched is false for a host whose silence means nothing.
+func silentFor(endpoint storage.Endpoint, cfg storage.DetectionTuning, now time.Time) (quiet, threshold time.Duration, watched bool) {
+	if !watchableEndpoint(endpoint) {
+		return 0, 0, false
+	}
+	// A lab guest is off between experiments and an intermittent laptop is
+	// shut most evenings: their absences are not findings, or not yet.
+	threshold, watched = endpoint.QuietAllowance(time.Duration(cfg.SilenceAfterMinutes) * time.Minute)
+	return now.Sub(endpoint.LastSeenAt), threshold, watched
 }
 
 // watchableEndpoint excludes the hosts for which silence means nothing.

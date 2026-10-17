@@ -114,6 +114,13 @@ type Engine struct {
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
+
+	// sink, when set, receives findings instead of the store, and no learning
+	// observation is recorded; pinned, when set, is the tuning used. Both are
+	// for the floor drill (drill.go), which evaluates synthetic events through
+	// a throwaway engine and stores nothing.
+	sink   func(storage.AnomalyAlert)
+	pinned *storage.DetectionTuning
 }
 
 // tuningCacheTTL keeps the detector off the database on every packet without
@@ -122,6 +129,9 @@ const tuningCacheTTL = 15 * time.Second
 
 // settings returns the current tuning, re-reading it at most every few seconds.
 func (e *Engine) settings() storage.DetectionTuning {
+	if e.pinned != nil {
+		return *e.pinned
+	}
 	e.mu.Lock()
 	if time.Since(e.tuningAt) < tuningCacheTTL && e.tuningAt.After(time.Time{}) {
 		t := e.tuning
@@ -139,6 +149,14 @@ func (e *Engine) settings() storage.DetectionTuning {
 	e.tuningAt = time.Now()
 	e.mu.Unlock()
 	return t
+}
+
+// alertf logs a finding the engine raised; the floor drill's synthetic
+// findings are not logged as alerts.
+func (e *Engine) alertf(format string, args ...any) {
+	if e.sink == nil {
+		log.Printf(format, args...)
+	}
 }
 
 // InvalidateTuning drops the cache so a save in the console is visible at once.
@@ -278,6 +296,10 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 		if _, learning := e.store.LearningWindowFor(ep); learning {
 			anomaly.HeldReason = storage.HeldLearning
 		}
+	}
+	if e.sink != nil {
+		e.sink(anomaly)
+		return nil
 	}
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
 		log.Printf("[-] anomaly write failed for %s/%s: %v", anomaly.EndpointID, anomaly.Title, err)
@@ -459,7 +481,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[!] DETECTION ALERT [CRITICAL]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, ev.DstIP)
+			e.alertf("[!] DETECTION ALERT [CRITICAL]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, ev.DstIP)
 
 			e.autoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
 		}
@@ -512,7 +534,9 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// While a window is open the estate is being described. The findings below
 	// still run and are still written - recordAnomaly holds them - and this is
 	// the second, much cheaper record that the proposals are argued from.
-	e.observeForLearning(ev, endpoint, geo, hr, now)
+	if e.sink == nil {
+		e.observeForLearning(ev, endpoint, geo, hr, now)
+	}
 
 	// isVouched is the narrower question: this process, to this owner. A quiet
 	// org alone silenced every process on every port to networks that front a
@@ -571,7 +595,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %s:%d", alert.Title, ev.EndpointID, ev.DstIP, ev.DstPort)
+			e.alertf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %s:%d", alert.Title, ev.EndpointID, ev.DstIP, ev.DstPort)
 		}
 	}
 
@@ -669,7 +693,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [%s]: %s on %s -> %d bytes (Z=%.2f over %d samples)", bwSeverity, alert.Title, ev.EndpointID, ev.BytesOut, zScore, samples)
+				e.alertf("[!] ANOMALY ALERT [%s]: %s on %s -> %d bytes (Z=%.2f over %d samples)", bwSeverity, alert.Title, ev.EndpointID, ev.BytesOut, zScore, samples)
 			}
 		}
 	}
@@ -706,7 +730,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %d bytes", title, ev.EndpointID, ev.BytesOut)
+			e.alertf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %d bytes", title, ev.EndpointID, ev.BytesOut)
 		}
 	}
 
@@ -822,10 +846,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [%s]: beaconing %s -> %s:%d (%s)", severity, ev.EndpointID, ev.DstIP, ev.DstPort, bev.Summary())
+				e.alertf("[!] ANOMALY ALERT [%s]: beaconing %s -> %s:%d (%s)", severity, ev.EndpointID, ev.DstIP, ev.DstPort, bev.Summary())
 			}
 		} else if isBeacon && warming {
-			log.Printf("[*] Held a beacon finding on %s -> %s: the endpoint is %s into its %dh learning period (%s)",
+			e.alertf("[*] Held a beacon finding on %s -> %s: the endpoint is %s into its %dh learning period (%s)",
 				ev.EndpointID, ev.DstIP, (time.Duration(cfg.WarmupHours)*time.Hour - warmLeft).Round(time.Minute), cfg.WarmupHours, bev.Summary())
 		}
 	}
@@ -888,7 +912,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[*] ANOMALY ALERT [%s]: First-seen destination %s (%s) contacted by %s", severity, ev.DstIP, describeOwner(geo), ev.EndpointID)
+			e.alertf("[*] ANOMALY ALERT [%s]: First-seen destination %s (%s) contacted by %s", severity, ev.DstIP, describeOwner(geo), ev.EndpointID)
 		}
 	}
 
@@ -948,7 +972,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, procKey)
+				e.alertf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, procKey)
 			}
 		}
 	}
@@ -1009,7 +1033,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		if distinctTargets >= threshold {
 			routine, why = adminFanout(cfg, endpoint, procKey, window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
 			if routine {
-				log.Printf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
+				e.alertf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
 			}
 		}
 		if distinctTargets >= threshold && !routine {
@@ -1050,7 +1074,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					DstPort:     ev.DstPort,
 					Timestamp:   now,
 				})
-				log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on %s (%s) -> %d targets in 60s", alert.Title, ev.EndpointID, procKey, distinctTargets)
+				e.alertf("[!] ANOMALY ALERT [CRITICAL]: %s on %s (%s) -> %d targets in 60s", alert.Title, ev.EndpointID, procKey, distinctTargets)
 			}
 		}
 	}
@@ -1115,7 +1139,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
 			})
-			log.Printf("[!] ANOMALY ALERT [%s]: %s on endpoint %s (%s:%d)", severity, title, alert.EndpointID, ev.DstIP, ev.DstPort)
+			e.alertf("[!] ANOMALY ALERT [%s]: %s on endpoint %s (%s:%d)", severity, title, alert.EndpointID, ev.DstIP, ev.DstPort)
 		}
 	}
 }
@@ -1143,7 +1167,7 @@ func (e *Engine) checkSensitivePort(ev storage.Event, geo threatintel.GeoRecord,
 				Timestamp:   now,
 			}
 			e.recordAnomaly(ev, geo, endpoint, anomaly)
-			log.Printf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
+			e.alertf("[!] ANOMALY ALERT [CRITICAL]: %s on endpoint %s", anomaly.Title, anomaly.EndpointID)
 		}
 	}
 }
