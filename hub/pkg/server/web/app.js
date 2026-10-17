@@ -5674,7 +5674,7 @@
     var open = function () {
       var nets = cidrs.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
       if (!nets.length) { toast("Name at least one network", "warn"); return; }
-      request("/api/v1/enrolment/windows", "POST", {
+      ownerApproved("/api/v1/enrolment/windows", {
         label: label.value.trim(),
         cidrs: nets,
         tenant_id: tenant.value,
@@ -5683,7 +5683,7 @@
         hours: parseFloat(hours.value) || 8,
         max_uses: parseInt(maxUses.value, 10) || 0,
         passcode: passcode.value.trim()
-      }).then(function (res) {
+      }, { label: "Allow agent installs from " + nets.join(", ") }).then(function (res) {
         toast("LAN install access is active", "ok");
         label.value = ""; maxUses.value = ""; passcode.value = "";
         load();

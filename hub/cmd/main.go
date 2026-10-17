@@ -54,6 +54,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", envOr("OMINULL_TLS_CERT", ""), "PEM certificate for the HTTPS listener (default: issued by the hub's own CA)")
 	tlsKey := flag.String("tls-key", envOr("OMINULL_TLS_KEY", ""), "PEM private key for --tls-cert")
 	tlsHosts := flag.String("tls-hosts", envOr("OMINULL_TLS_HOSTS", ""), "Comma-separated extra SANs for the self-issued certificate")
+	portalListen := flag.String("portal-listen", envOr("OMINULL_PORTAL_LISTEN", ""), "Plain-HTTP listen address serving only the self-service install portal, e.g. :80 (empty disables)")
 	consoleTLSListen := flag.String("console-tls-listen", envOr("OMINULL_CONSOLE_TLS_LISTEN", ""), "Dedicated HTTPS listen address for operator console (e.g. :8443)")
 	consoleTLSCert := flag.String("console-tls-cert", envOr("OMINULL_CONSOLE_TLS_CERT", ""), "PEM certificate for the console HTTPS listener")
 	consoleTLSKey := flag.String("console-tls-key", envOr("OMINULL_CONSOLE_TLS_KEY", ""), "PEM private key for --console-tls-cert")
@@ -199,6 +200,7 @@ func main() {
 		})
 	}
 	srv.SetAgentHubURL(*agentHubURL)
+	srv.SetPortalListen(*portalListen)
 	srv.SetSetupPaths(*setupTokenFile, configPath, *dbPath, *adminKeyFile, absBinDir)
 	srv.SetResponseEnabled(*enableResponse)
 	if err := srv.SetAccess(server.AccessOptions{

@@ -304,6 +304,32 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cidrs, err := storage.ParseCIDRs(req.CIDRs)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Opening a window lets machines on those networks enrol themselves with
+	// no credential, so it waits for the owner's passkey tap like every other
+	// action that widens access. Closing one needs nobody. The local first-run
+	// setup session (before any approver can exist) is the one exception.
+	approvalID := ""
+	if _, setup := s.setupCSRF(r); !setup {
+		after := map[string]interface{}{
+			"label": strings.TrimSpace(req.Label), "cidrs": cidrs, "hours": req.Hours,
+			"max_uses": max(req.MaxUses, 0), "passcode": strings.TrimSpace(req.Passcode) != "",
+			"tenant_id": strings.TrimSpace(req.TenantID), "location_id": strings.TrimSpace(req.LocationID),
+			"role": strings.TrimSpace(req.Role),
+		}
+		change := policyChange{policy: "enrolment_window", op: "open", target: "enrolment:window",
+			after: after, loosens: []string{"enrolment_window"},
+			wording: fmt.Sprintf("opened self-service enrolment for %s for %g hours", strings.Join(cidrs, ", "), req.Hours)}
+		var ok bool
+		if approvalID, ok = s.policyApproved(w, r, change); !ok {
+			return
+		}
+	}
+
 	window, err := s.store.CreateEnrolmentWindow(storage.EnrolmentWindow{
 		Label: req.Label, CIDRs: req.CIDRs, TenantID: req.TenantID,
 		LocationID: req.LocationID, Role: req.Role, MaxUses: req.MaxUses,
@@ -319,9 +345,13 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 	if window.MaxUses > 0 {
 		budget = fmt.Sprintf("at most %d", window.MaxUses)
 	}
+	approved := "local first-run setup"
+	if approvalID != "" {
+		approved = "owner approval " + approvalID
+	}
 	s.audit(r, "ENROLMENT_WINDOW_OPENED", window.ID,
-		fmt.Sprintf("Opened self-service enrolment for %s until %s (%s enrolments, passcode: %v)",
-			strings.Join(window.CIDRs, ", "), window.ExpiresAt.Format(time.RFC3339), budget, window.HasPasscode))
+		fmt.Sprintf("Opened self-service enrolment for %s until %s (%s enrolments, passcode: %v) under %s",
+			strings.Join(window.CIDRs, ", "), window.ExpiresAt.Format(time.RFC3339), budget, window.HasPasscode, approved))
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"window":     window,

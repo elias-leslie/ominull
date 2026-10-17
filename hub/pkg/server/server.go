@@ -63,6 +63,10 @@ type Server struct {
 	tlsOpts          TLSOptions
 	consoleTLSServer *http.Server
 	consoleTLSOpts   ConsoleTLSOptions
+	// portalListen serves only the self-service install portal (see
+	// portalMux), e.g. :80 so http://hub.lan/install works without a port.
+	portalListen string
+	portalServer *http.Server
 	// access verifies Cloudflare Access assertions when the hub sits behind
 	// Access. nil means it is not configured, which is the default.
 	access *accessVerifier
@@ -732,8 +736,20 @@ func (s *Server) Start(addr string) error {
 	// whether it was encrypted, never what it is allowed to do - an endpoint
 	// that behaved differently per listener would be a second policy surface
 	// to keep in step with the first.
-	errs := make(chan error, 3)
+	errs := make(chan error, 4)
 	listeners := 0
+
+	if s.portalListen != "" {
+		s.portalServer = &http.Server{
+			Addr:         s.portalListen,
+			Handler:      limitRequestBodies(s.portalMux()),
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
+		log.Printf("[+] Ominull Hub serving the self-service install portal only on %s", s.portalListen)
+		go func() { errs <- s.portalServer.ListenAndServe() }()
+	}
 
 	if s.tlsOpts.Listen != "" {
 		tlsCfg, err := s.tlsConfig()
@@ -1017,7 +1033,33 @@ func (s *Server) Close() error {
 			err = cErr
 		}
 	}
+	if s.portalServer != nil {
+		if pErr := s.portalServer.Close(); err == nil {
+			err = pErr
+		}
+	}
 	return err
+}
+
+// SetPortalListen adds a plain-HTTP listener that serves only the
+// self-service install portal (empty: none).
+func (s *Server) SetPortalListen(addr string) {
+	s.portalListen = strings.TrimSpace(addr)
+}
+
+// portalMux is the whole of what the portal listener answers: the portal page
+// (GET renders, POST spends a window use) and the generic bootstrap scripts,
+// which carry no credential. Everything else, the console and the API
+// included, is a 404 there. The page's commands download from the configured
+// hub address, not from this listener.
+func (s *Server) portalMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/install", s.handleEnrolPortal)
+	mux.HandleFunc("/enrol", s.handleEnrolPortal)
+	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
+	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
+	mux.HandleFunc("/", http.NotFound)
+	return mux
 }
 
 // clientCertCN returns the common name from a client certificate the TLS stack

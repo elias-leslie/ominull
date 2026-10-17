@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ominull/hub/pkg/response"
@@ -350,6 +351,12 @@ var detectionPolicyOps = map[string]map[string]string{
 	"learning_window": {
 		"open": "Open a learning window",
 	},
+	// A self-service enrolment window lets machines on its networks fetch an
+	// agent install with no credential until it expires or is used up.
+	// Closing one only tightens and asks nobody.
+	"enrolment_window": {
+		"open": "Open LAN self-enrolment",
+	},
 }
 
 // describeDetectionPolicy shows the owner the change field by field, worked
@@ -422,6 +429,9 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	}
 	if p.Policy == "learning_window" {
 		return describeLearningWindow(action, before, after, targets[0])
+	}
+	if p.Policy == "enrolment_window" {
+		return describeEnrolmentWindow(action, before, after, targets[0])
 	}
 	if !strings.HasPrefix(targets[0], "exclusion:") {
 		return "", "", errors.New("an exclusion change targets exclusion:<id>")
@@ -669,4 +679,62 @@ func fitParts(parts, labels []string) (string, error) {
 		out += sep + l
 	}
 	return out, nil
+}
+
+// describeEnrolmentWindow shows a self-service enrolment window as the hub
+// would open it: which networks, for how long, how many installs, whether a
+// passcode is asked. The digest binds exactly these fields.
+func describeEnrolmentWindow(action string, before, after map[string]interface{}, target string) (string, string, error) {
+	hours, _ := after["hours"].(float64)
+	uses, _ := after["max_uses"].(float64)
+	passcode, okPass := after["passcode"].(bool)
+	raw, _ := after["cidrs"].([]interface{})
+	cidrs := make([]string, 0, len(raw))
+	for _, c := range raw {
+		if v, ok := c.(string); ok && v != "" {
+			cidrs = append(cidrs, v)
+		}
+	}
+	switch {
+	case before != nil:
+		return "", "", errors.New("opening an enrolment window carries no saved window")
+	case target != "enrolment:window":
+		return "", "", errors.New("an enrolment window targets enrolment:window")
+	case len(cidrs) == 0 || len(cidrs) != len(raw):
+		return "", "", errors.New("an enrolment window names its networks")
+	case hours <= 0 || hours > 168:
+		return "", "", errors.New("an enrolment window lasts more than 0 and at most 168 hours")
+	case uses < 0 || uses != float64(int(uses)) || !okPass:
+		return "", "", errors.New("an enrolment window carries max_uses and passcode")
+	}
+	for k := range after {
+		switch k {
+		case "label", "cidrs", "hours", "max_uses", "passcode", "tenant_id", "location_id", "role":
+		default:
+			return "", "", fmt.Errorf("enrolment window carries an unknown member %q", cleanText(k, 40))
+		}
+	}
+	budget := "no limit on installs"
+	if uses > 0 {
+		budget = fmt.Sprintf("at most %d installs", int(uses))
+	}
+	pass := "no passcode"
+	if passcode {
+		pass = "passcode required"
+	}
+	parts := []string{
+		"unauthenticated agent installs from " + strings.Join(cidrs, ", "),
+		fmt.Sprintf("for %s hours", strconv.FormatFloat(hours, 'f', -1, 64)), budget, pass,
+	}
+	for _, k := range []string{"tenant_id", "location_id", "role"} {
+		if v, _ := after[k].(string); v != "" {
+			parts = append(parts, k+" "+v)
+		}
+	}
+	var labels []string
+	if v, _ := after["label"].(string); v != "" {
+		labels = append(labels, "label "+v)
+	}
+	summary, err := fitParts(parts, labels)
+	return action, summary, err
 }

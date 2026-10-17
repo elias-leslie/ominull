@@ -164,3 +164,27 @@ func TestDescribeDetectionPolicyShowsTheDrill(t *testing.T) {
 		t.Fatal("a drill that is not a list was described")
 	}
 }
+
+// An enrolment window is shown by its networks, length, install budget and
+// passcode; anything else in the payload is refused.
+func TestDescribeAnEnrolmentWindow(t *testing.T) {
+	window := func(after string) []byte {
+		return []byte(`{"after":` + after + `,"before":null,"op":"open","policy":"enrolment_window"}`)
+	}
+	action, summary, err := describeApproval(ActionKindDetection, window(`{"cidrs":["10.0.0.0/24","10.0.1.0/24"],"hours":2,"label":"laptop reinstall","location_id":"","max_uses":2,"passcode":false,"role":"","tenant_id":""}`), []string{"enrolment:window"}, "admin")
+	if err != nil || action != "Open LAN self-enrolment" ||
+		summary != "unauthenticated agent installs from 10.0.0.0/24, 10.0.1.0/24; for 2 hours; at most 2 installs; no passcode; label laptop reinstall" {
+		t.Fatalf("action %q summary %q err %v", action, summary, err)
+	}
+	for name, c := range map[string]struct{ after, target string }{
+		"wrong target":   {`{"cidrs":["10.0.0.0/24"],"hours":2,"max_uses":0,"passcode":true}`, "enrolment:other"},
+		"no networks":    {`{"cidrs":[],"hours":2,"max_uses":0,"passcode":true}`, "enrolment:window"},
+		"too long":       {`{"cidrs":["10.0.0.0/24"],"hours":169,"max_uses":0,"passcode":true}`, "enrolment:window"},
+		"no passcode":    {`{"cidrs":["10.0.0.0/24"],"hours":2,"max_uses":0}`, "enrolment:window"},
+		"unknown member": {`{"cidrs":["10.0.0.0/24"],"hours":2,"max_uses":0,"passcode":true,"code":"x"}`, "enrolment:window"},
+	} {
+		if _, _, err := describeApproval(ActionKindDetection, window(c.after), []string{c.target}, "admin"); err == nil {
+			t.Errorf("%s: described", name)
+		}
+	}
+}
