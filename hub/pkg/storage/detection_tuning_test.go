@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"reflect"
@@ -9,6 +10,9 @@ import (
 	"testing"
 	"time"
 )
+
+// testExpiry is a known workload expiry a month out.
+var testExpiry = time.Now().Add(30 * 24 * time.Hour)
 
 // The console decides whether to say "these settings differ from the shipped
 // values" by comparing the two the hub sends. An unsorted default made every
@@ -251,7 +255,7 @@ func TestOwnersMatchExactlyOrByASNumber(t *testing.T) {
 		cfg.IsVouchedPair("/usr/bin/rclone", "", "AS396982", "Google Cloud (customer range)", TenancyHosting) {
 		t.Error("the pair vouched for another program or for rented compute")
 	}
-	cfg.KnownWorkloads = []KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "GitHub CLI"}}
+	cfg.KnownWorkloads = []KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "GitHub CLI", ExpiresAt: testExpiry}}
 	if _, ok := cfg.KnownWorkloadFor("/usr/bin/gh", "AS36459", "GitHub, Inc.", TenancyVendor); !ok {
 		t.Error("a known workload did not cover its AS")
 	}
@@ -457,5 +461,98 @@ func TestAVendorEntryMayNotVouchForMoreThanOneService(t *testing.T) {
 		if _, err := PrepareDetectionTuning(with(v)); !errors.Is(err, ErrInvalidDetectionTuning) {
 			t.Errorf("%s: err %v, want a refusal", name, err)
 		}
+	}
+}
+
+// A known workload past its expiry, or saved before entries had one, vouches
+// for nothing; a save drops it.
+func TestAnExpiredKnownWorkloadStopsVouching(t *testing.T) {
+	cfg := DefaultDetectionTuning()
+	for _, until := range []time.Time{{}, time.Now().Add(-time.Minute)} {
+		cfg.KnownWorkloads = []KnownWorkload{{Workload: "/usr/bin/gh", Owner: AnyOwner, Reason: "GitHub CLI", ExpiresAt: until}}
+		if _, ok := cfg.KnownWorkloadFor("/usr/bin/gh", "as36459", "GitHub, Inc.", ""); ok {
+			t.Errorf("a workload expiring %v still vouches", until)
+		}
+		if _, ok := cfg.KnownService("/usr/bin/gh", "GitHub, Inc.", ""); ok {
+			t.Errorf("a service expiring %v is still known", until)
+		}
+	}
+	cfg.KnownWorkloads[0].ExpiresAt = testExpiry
+	if _, ok := cfg.KnownWorkloadFor("/usr/bin/gh", "as36459", "GitHub, Inc.", ""); !ok {
+		t.Fatal("a live workload does not vouch")
+	}
+	cfg.KnownWorkloads = append(cfg.KnownWorkloads, KnownWorkload{Workload: "/usr/bin/ssh", Owner: AnyOwner, Reason: "git", ExpiresAt: time.Now().Add(-time.Minute)})
+	got, err := PrepareDetectionTuning(cfg)
+	if err != nil || len(got.KnownWorkloads) != 1 || got.KnownWorkloads[0].Workload != "/usr/bin/gh" {
+		t.Fatalf("a save kept an expired workload: %+v %v", got.KnownWorkloads, err)
+	}
+	cfg.KnownWorkloads[0].ExpiresAt = time.Time{}
+	if _, err := PrepareDetectionTuning(cfg); err == nil {
+		t.Fatal("a workload without an expiry was accepted")
+	}
+}
+
+// A save may carry an expired entry over as it was saved (and drops it), but
+// may not add or change one without an expiry in the future.
+func TestANewKnownWorkloadNeedsAFutureExpiry(t *testing.T) {
+	now := time.Now()
+	old := KnownWorkload{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli", ExpiresAt: now.Add(-time.Hour)}
+	live := KnownWorkload{Workload: "/usr/bin/ssh", Owner: "as36459", Reason: "git", ExpiresAt: now.Add(time.Hour)}
+	if err := CheckNewWorkloadExpiry([]KnownWorkload{old}, []KnownWorkload{old, live}, now); err != nil {
+		t.Fatalf("carrying an entry over: %v", err)
+	}
+	stale := live
+	stale.ExpiresAt = now.Add(-time.Minute)
+	if err := CheckNewWorkloadExpiry([]KnownWorkload{old}, []KnownWorkload{stale}, now); err == nil {
+		t.Fatal("a new entry with a past expiry was accepted")
+	}
+	renewed := old
+	renewed.ExpiresAt = now.Add(-time.Minute)
+	if err := CheckNewWorkloadExpiry([]KnownWorkload{old}, []KnownWorkload{renewed}, now); err == nil {
+		t.Fatal("a changed entry with a past expiry was accepted")
+	}
+}
+
+// The upgrade gives each known workload saved without an expiry one ninety
+// days out, keeps one that has an expiry as it is, and a second start changes
+// nothing.
+func TestKnownWorkloadsGetABoundedExpiryAtUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "expiry.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := time.Now().UTC().Add(10 * 24 * time.Hour).Truncate(time.Second)
+	row := fmt.Sprintf(`{"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli"},{"workload":"/usr/bin/ssh","owner":"as36459","reason":"git","expires_at":%q}]}`, set.Format(time.RFC3339))
+	if _, err := s.db.Exec(`INSERT INTO detection_tuning (id, settings, updated_at, updated_by) VALUES (1, ?, ?, 'admin')`, row, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	start := time.Now().UTC()
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.GetDetectionTuning()
+	if len(got.KnownWorkloads) != 2 || got.UpdatedBy != "upgrade" {
+		t.Fatalf("upgraded row = %+v", got)
+	}
+	gh, ssh := got.KnownWorkloads[0], got.KnownWorkloads[1]
+	if lo, hi := start.Add(KnownWorkloadMigratedExpiry-time.Second), time.Now().UTC().Add(KnownWorkloadMigratedExpiry); gh.ExpiresAt.Before(lo) || gh.ExpiresAt.After(hi) {
+		t.Errorf("an entry without an expiry got %v, want about ninety days out", gh.ExpiresAt)
+	}
+	if !ssh.ExpiresAt.Equal(set) {
+		t.Errorf("an entry with an expiry was moved from %v to %v", set, ssh.ExpiresAt)
+	}
+	s.Close()
+
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if again := s.GetDetectionTuning(); !reflect.DeepEqual(again.KnownWorkloads, got.KnownWorkloads) {
+		t.Fatalf("a second start changed the expiries: %+v", again.KnownWorkloads)
 	}
 }

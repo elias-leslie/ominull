@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
@@ -276,6 +277,8 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 			mid[k] = keptEntries(a[k], b[k])
 		case dir == vendorField:
 			mid[k] = keptVendors(a[k], b[k])
+		case dir == workloadField:
+			mid[k] = keptWorkloads(a[k], b[k])
 		}
 	}
 	var half storage.DetectionTuning
@@ -416,6 +419,51 @@ func keptVendors(before, after any) any {
 	return kept
 }
 
+func workloadList(v any) []storage.KnownWorkload {
+	var out []storage.KnownWorkload
+	raw, _ := json.Marshal(v)
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+// workloadsLoosen reports known workloads that vouch for more than before: a
+// program, owner or reach that was not there, or an expiry moved later. A
+// changed reason alone vouches for nothing new.
+func workloadsLoosen(before, after any) bool {
+	was := map[string]time.Time{}
+	for _, k := range workloadList(before) {
+		was[k.Key()] = k.ExpiresAt
+	}
+	for _, k := range workloadList(after) {
+		until, ok := was[k.Key()]
+		if !ok || k.ExpiresAt.After(until) {
+			return true
+		}
+	}
+	return false
+}
+
+// keptWorkloads is the known workloads before that after still names, each
+// with the earlier of its two expiries: the tightening half of a change.
+func keptWorkloads(before, after any) any {
+	next := map[string]storage.KnownWorkload{}
+	for _, k := range workloadList(after) {
+		next[k.Key()] = k
+	}
+	kept := []storage.KnownWorkload{}
+	for _, k := range workloadList(before) {
+		n, ok := next[k.Key()]
+		if !ok {
+			continue
+		}
+		if n.ExpiresAt.Before(k.ExpiresAt) {
+			k.ExpiresAt = n.ExpiresAt
+		}
+		kept = append(kept, k)
+	}
+	return kept
+}
+
 // changed reports whether a change changes anything at all.
 func (c policyChange) changed() bool {
 	a, _ := json.Marshal(c.before)
@@ -438,6 +486,7 @@ const (
 	anyLoosens                           // any change loosens
 	windowField                          // the off-hours window, judged as a whole
 	vendorField                          // agent runtime vendors: a domain or prefix that was not there loosens
+	workloadField                        // known workloads: a new entry or a later expiry loosens
 )
 
 var tuningDirections = map[string]tuningDirection{
@@ -468,7 +517,7 @@ var tuningDirections = map[string]tuningDirection{
 	"quiet_clients":   addLoosens,
 	"quiet_pairs":     addLoosens,
 	"container_cidrs": addLoosens,
-	"known_workloads": addLoosens,
+	"known_workloads": workloadField,
 
 	"agent_egress_enabled":  offLoosens,
 	"agent_runtimes":        anyLoosens, // a runtime named is also muted where it runs
@@ -524,6 +573,8 @@ func tuningLoosens(before, after storage.DetectionTuning) []string {
 			loose = addsEntries(a[k], b[k])
 		case vendorField:
 			loose = vendorsLoosen(a[k], b[k])
+		case workloadField:
+			loose = workloadsLoosen(a[k], b[k])
 		default:
 			loose = true
 		}
@@ -715,7 +766,28 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 			unmapped["relay_key_last_issued"] = map[string]any{"at": last[0].Timestamp.UTC().Format(time.RFC3339), "by": last[0].Username}
 		}
 	}
-	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 {
+	// The floor runs wherever the saved row is weaker (detector.ClampToFloor),
+	// and a known workload past its expiry stops vouching; neither changes
+	// what the console shows, so both are named here.
+	saved := s.store.GetDetectionTuning()
+	_, clamped := detector.ClampToFloor(saved)
+	if len(clamped) > 0 {
+		unmapped["floor_clamped"] = clamped
+	}
+	var expired []string
+	for _, k := range saved.KnownWorkloads {
+		if k.Expired(now) {
+			expired = append(expired, k.Workload+"@"+k.Owner)
+		}
+	}
+	if len(expired) > 0 {
+		if len(expired) > feedDismissedListShown {
+			unmapped["known_workloads_expired_omitted"] = len(expired) - feedDismissedListShown
+			expired = expired[:feedDismissedListShown]
+		}
+		unmapped["known_workloads_expired"] = expired
+	}
+	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
 		return out, nil
@@ -741,6 +813,12 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		parts = append(parts, fmt.Sprintf("the Nightshift approval relay key was issued %s%s in the last 24 h, last by %s at %s; "+
 			"any admin-key holder can issue it, so a closure through it since then need not be the owner's answer",
 			atLeast, plural(len(issued), "time", "times"), issued[0].Username, issued[0].Timestamp.UTC().Format(time.RFC3339)))
+	}
+	if len(clamped) > 0 {
+		parts = append(parts, "the saved tuning is weaker than the detection floor, which runs instead: "+strings.Join(clamped, "; "))
+	}
+	if n, _ := unmapped["known_workloads_expired_omitted"].(int); len(expired) > 0 {
+		parts = append(parts, fmt.Sprintf("expired known workloads no longer vouch for anything: %d; renew or remove them in the tuning", len(expired)+n))
 	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil

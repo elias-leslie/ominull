@@ -73,7 +73,7 @@ func TestEveryTuningFieldKnowsWhichWayLoosens(t *testing.T) {
 func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 	base := storage.DefaultDetectionTuning()
 	base.QuietOrgs = []string{"as15169", "as8075"}
-	base.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli"}}
+	base.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli", ExpiresAt: testExpiry}}
 	cases := []struct {
 		name   string
 		change func(*storage.DetectionTuning)
@@ -90,9 +90,18 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		// Same length, different contents: one entry swapped for another.
 		{"equal-length swap", func(t *storage.DetectionTuning) { t.QuietOrgs = []string{"as15169", "as16509"} }, []string{"quiet_orgs"}},
 		{"rented workload", func(t *storage.DetectionTuning) {
-			t.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "*", Reason: "cli", IncludeRented: true}}
+			t.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "*", Reason: "cli", ExpiresAt: testExpiry, IncludeRented: true}}
 		}, []string{"known_workloads"}},
 		{"removed workload", func(t *storage.DetectionTuning) { t.KnownWorkloads = nil }, nil},
+		{"workload expiry extended", func(t *storage.DetectionTuning) {
+			t.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli", ExpiresAt: testExpiry.Add(time.Hour)}}
+		}, []string{"known_workloads"}},
+		{"workload expiry shortened", func(t *storage.DetectionTuning) {
+			t.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli", ExpiresAt: testExpiry.Add(-time.Hour)}}
+		}, nil},
+		{"workload reason reworded", func(t *storage.DetectionTuning) {
+			t.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "GitHub CLI", ExpiresAt: testExpiry}}
+		}, nil},
 		{"mixed", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6; t.FirstSeenOn = false }, []string{"first_seen_enabled"}},
 		{"agent runtime removed", func(t *storage.DetectionTuning) { t.AgentRuntimes = t.AgentRuntimes[1:] }, []string{"agent_runtimes"}},
 		{"agent-heavy by observation", func(t *storage.DetectionTuning) { t.AgentHeavyObserved = !t.AgentHeavyObserved }, nil},
@@ -971,4 +980,67 @@ func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 	if !got.InRuntimeVendorRange("claude", netip.MustParseAddr("198.51.100.9")) || got.InRuntimeVendorRange("claude", netip.MustParseAddr("2607:6bc0::1")) {
 		t.Fatalf("saved vendors %+v", got.AgentRuntimeVendors)
 	}
+}
+
+// A known workload needs an expiry in the future when it is added, moving one
+// later waits for the owner while moving another earlier applies at once, and
+// the feed note names expired entries and a saved row weaker than the floor.
+func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	for _, body := range []string{
+		`{"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli"}]}`,
+		`{"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli","expires_at":"2020-01-01T00:00:00Z"}]}`,
+	} {
+		if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "expires_at") {
+			t.Fatalf("%s = %d %s", body, w.Code, w.Body.String())
+		}
+	}
+
+	until := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	saved := storage.DefaultDetectionTuning()
+	saved.KnownWorkloads = []storage.KnownWorkload{
+		{Workload: "/usr/bin/gh", Owner: "as36459", Reason: "cli", ExpiresAt: until},
+		{Workload: "/usr/bin/ssh", Owner: "as36459", Reason: "git", ExpiresAt: until},
+	}
+	if _, err := store.SaveDetectionTuning(saved, "test"); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli","expires_at":%q},{"workload":"/usr/bin/ssh","owner":"as36459","reason":"git","expires_at":%q}]}`,
+		until.Add(-time.Hour).Format(time.RFC3339), until.Add(time.Hour).Format(time.RFC3339))
+	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""))
+	if strings.Join(p.Loosens, ",") != "known_workloads" {
+		t.Fatalf("an extended expiry should wait for the owner: %+v", p)
+	}
+	got := store.GetDetectionTuning().KnownWorkloads
+	if len(got) != 2 || !got[0].ExpiresAt.Equal(until.Add(-time.Hour)) || !got[1].ExpiresAt.Equal(until) {
+		t.Fatalf("the shortened expiry should apply at once and the extended one wait: %+v", got)
+	}
+
+	// A row saved weaker than the floor, holding an expired workload.
+	row := `{"silence_enabled":true,"silence_after_minutes":60,"bandwidth_enabled":true,"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli","expires_at":"2020-01-01T00:00:00Z"}]}`
+	if _, err := store.DB().Exec(`UPDATE detection_tuning SET settings = ? WHERE id = 1`, row); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := srv.detectionPolicySection(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.FindingInfo["uid"] == "ominull.detection.invalid" && f.SeverityID != ocsfSevInformational {
+			t.Fatalf("an expired workload or a value past the floor is not an unsound row: %+v", f)
+		}
+		if f.FindingInfo["uid"] != "ominull.detection.changes" {
+			continue
+		}
+		clamped, _ := f.Unmapped["floor_clamped"].([]string)
+		expired, _ := f.Unmapped["known_workloads_expired"].([]string)
+		if f.StatusID != ocsfStatusNew || len(clamped) != 1 || !strings.Contains(clamped[0], "silence_after_minutes 60") ||
+			len(expired) != 1 || !strings.Contains(f.Message, "detection floor") {
+			t.Fatalf("feed note = %+v", f)
+		}
+		return
+	}
+	t.Fatal("no detection policy note")
 }

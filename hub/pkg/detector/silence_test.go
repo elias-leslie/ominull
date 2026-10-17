@@ -116,21 +116,27 @@ func TestRetiredAndEnrollingHostsAreNotExpectedToReport(t *testing.T) {
 	}
 }
 
-func TestTheThresholdIsTheOperatorsToSet(t *testing.T) {
-	engine, store := silentEngine(t)
-	now := time.Now().UTC()
-	addEndpoint(t, store, "linux-slow", now.Add(-20*time.Minute))
-
-	tuning := storage.DefaultDetectionTuning()
-	tuning.SilenceAfterMinutes = 60
-	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
-		t.Fatalf("saving tuning: %v", err)
-	}
-	engine.InvalidateTuning()
-
-	engine.SweepSilence(now)
-	if got := anomaliesOfType(t, store, "ENDPOINT_SILENT"); len(got) != 0 {
-		t.Fatalf("twenty minutes of silence fired against a sixty-minute threshold: %d findings", len(got))
+// The operator may shorten the silence threshold, never lengthen it past the
+// floor: a sixty-minute row still reports a host quiet for twenty minutes.
+func TestTheSilenceThresholdTightensButNeverPassesTheFloor(t *testing.T) {
+	for _, c := range []struct {
+		minutes int
+		quiet   time.Duration
+		want    int
+	}{{5, 8 * time.Minute, 1}, {60, 20 * time.Minute, 1}, {15, 10 * time.Minute, 0}} {
+		engine, store := silentEngine(t)
+		now := time.Now().UTC()
+		addEndpoint(t, store, "linux-slow", now.Add(-c.quiet))
+		tuning := storage.DefaultDetectionTuning()
+		tuning.SilenceAfterMinutes = c.minutes
+		if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+			t.Fatalf("saving tuning: %v", err)
+		}
+		engine.InvalidateTuning()
+		engine.SweepSilence(now)
+		if got := anomaliesOfType(t, store, "ENDPOINT_SILENT"); len(got) != c.want {
+			t.Errorf("%v of silence against a %d-minute setting raised %d findings, want %d", c.quiet, c.minutes, len(got), c.want)
+		}
 	}
 }
 

@@ -111,7 +111,11 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "silence detection is part of the floor and cannot be switched off: a host that stops reporting blinds every other detector")
 			return
 		}
-		after, err := storage.PrepareDetectionTuning(req)
+		err = storage.CheckNewWorkloadExpiry(before.KnownWorkloads, req.KnownWorkloads, time.Now())
+		var after storage.DetectionTuning
+		if err == nil {
+			after, err = storage.PrepareDetectionTuning(req)
+		}
 		if err == nil {
 			err = vendorRangesOwned(after)
 		}
@@ -235,7 +239,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 			if k.IncludeRented {
 				w += "+rented"
 			}
-			out = append(out, w)
+			out = append(out, w+" until "+k.ExpiresAt.UTC().Format(time.RFC3339))
 		}
 		return out
 	}

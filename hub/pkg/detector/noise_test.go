@@ -1020,7 +1020,7 @@ func TestAKnownPathWorkloadDoesNotVouchForAPathMismatch(t *testing.T) {
 	run := func(status string) int {
 		engine, store := noiseEngine(t)
 		tuning := store.GetDetectionTuning()
-		tuning.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool"}}
+		tuning.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool", ExpiresAt: testExpiry}}
 		if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
 			t.Fatalf("saving tuning: %v", err)
 		}

@@ -216,7 +216,7 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 
 Known workloads (`known_workloads` in the tuning) name a program whose outbound
-conversations are its job, as `{workload, owner, reason}`. A workload is the
+conversations are its job, as `{workload, owner, reason, expires_at}`. A workload is the
 lower-cased executable path for most programs (`/opt/google/chrome/chrome`)
 and, for an interpreter, the interpreter plus what it runs (`python3.13
 /srv/app/.venv/bin/python -m app.worker`). `*` in a pattern spans part of one
@@ -230,19 +230,32 @@ not know make the workload `<interpreter> -c`, which is never known. The
 command line arrives as one string and is split on spaces, so an argument that
 itself contains a space can shift what is read as the program; like the
 command line being the process's own account of itself, that is an accepted
-limit of the identity, not proof. Owner is a substring of the network owner, which never
+limit of the identity, not proof. Owner is the network's AS number or exact name, which never
 covers rented compute or an unnamed address, or `*` for a program whose
 destinations are arbitrary by design. For an installed program `*` covers
 every destination; for an interpreter it stops at rented compute and unnamed
 addresses unless the entry sets `include_rented`, because an interpreter's
 workload is read from its own command line and a process can imitate one. A
-reason is required. A known workload silences only the novelty findings (new
+reason is required, and so is an `expires_at` in the future when an entry is
+added or changed: past it the entry vouches for nothing, the next save drops
+it, and the Nightshift feed's detection-policy note lists it. Moving an expiry
+later loosens (owner approval); moving it earlier tightens. Entries saved
+before expiries existed were given one 90 days out at upgrade. A known workload silences only the novelty findings (new
 destination, interpreter egress) and, for an owner-`*` entry, off-hours;
 beaconing, upload volume and threat-intelligence matches still judge it.
 Novelty and off-hours findings fold to one per program and counterparty per
 first-seen cooldown. Check a change with the replay route before saving it:
 `cut` is the best case, and `worst_cut` allows for findings that a silenced
 one kept folded live and that were therefore never recorded (`may_surface`).
+
+Detection floor (`hub/pkg/detector/floor.go`). The sensitive ports
+(23/135/445/3389), the bandwidth outlier and 10 MB burst bounds, the port-sweep
+and lateral-sweep thresholds and the longest silence (15 min) are code. Where
+the tuning holds a weaker `silence_after_minutes`, `bandwidth_min_samples`,
+`warmup_hours` or `admin_fanout_max_hosts`, the floor value runs instead and the
+feed's detection-policy note says so (`floor_clamped`); a stricter value runs
+as saved. Silence cannot be switched off, and the 10 MB burst is raised with
+`bandwidth_enabled` off.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence

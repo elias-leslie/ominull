@@ -130,7 +130,9 @@ func (e *Engine) settings() storage.DetectionTuning {
 	}
 	e.mu.Unlock()
 
-	t := e.store.GetDetectionTuning()
+	// The floor (floor.go) runs wherever the saved row is weaker; the
+	// Nightshift feed's detection-policy note names each such place.
+	t, _ := ClampToFloor(e.store.GetDetectionTuning())
 
 	e.mu.Lock()
 	e.tuning = t
@@ -618,11 +620,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// and nothing about that is exfiltration. An operator who has vouched
 		// for a network has already answered this question, and a megabyte is
 		// the smallest transfer worth waking someone for.
-		outlier := baselined && zScore > 3.5 && bwValue > 1024*1024 && !isVouched
+		outlier := cfg.BandwidthOn && baselined && zScore > bandwidthOutlierZ && bwValue > bandwidthOutlierBytes && !isVouched
 		// A burst large enough to matter on its own account, reported even
 		// without a baseline - but as the weaker finding it is, because with no
-		// baseline there is nothing to say it is unusual for this process.
-		burst := bwValue > 10*1024*1024
+		// baseline there is nothing to say it is unusual for this process. It
+		// is part of the floor, so bandwidth_enabled does not switch it off.
+		burst := bwValue > bandwidthBurstBytes
 		if outlier || burst {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
 			// The severity follows the evidence rather than the detector's
@@ -630,10 +633,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			// far past that, against a real baseline, is the finding this
 			// detector was written for.
 			bwSeverity := "HIGH"
-			if outlier && zScore > 8 {
+			if outlier && zScore > bandwidthCriticalZ {
 				bwSeverity = "CRITICAL"
 			}
-			if cfg.BandwidthOn && !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
+			if !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -901,7 +904,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		var recent []portAccess
 		seenPorts := make(map[uint16]bool)
 		for _, p := range history {
-			if now.Sub(p.t) <= 10*time.Second {
+			if now.Sub(p.t) <= portSweepWindow {
 				recent = append(recent, p)
 				seenPorts[p.port] = true
 			}
@@ -912,13 +915,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		distinctCount := len(seenPorts)
 		e.mu.Unlock()
 
-		portThreshold := 30
+		portThreshold := portSweepPorts
 		if isInteractiveShell {
-			portThreshold = 15
+			portThreshold = portSweepShellPorts
 		}
 		if distinctCount >= portThreshold {
 			alertKey := fmt.Sprintf("portsweep:%s:%s", ev.EndpointID, procKey)
-			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
+			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
@@ -965,7 +968,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		}
 		// Clean targets older than 60 seconds
 		for ip, t := range targetMap {
-			if now.Sub(t.at) > 60*time.Second {
+			if now.Sub(t.at) > lateralWindow {
 				delete(targetMap, ip)
 			}
 		}
@@ -989,17 +992,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// which is early evening in the Americas.
 		isWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
-		// Thresholds:
-		// - Interactive shell / script interpreter (cmd.exe, powershell, python, bash, nmap): >= 6 distinct LAN hosts (or >= 3 off-hours)
-		// - Standard compiled app: >= 20 distinct LAN hosts (or >= 10 off-hours)
-		threshold := 20
+		// The thresholds are the floor (floor.go): fewer hosts for a shell or
+		// interpreter (cmd.exe, powershell, python, bash, nmap), fewer again
+		// off-hours on a workstation.
+		threshold := lateralHosts
 		if isInteractiveShell {
-			threshold = 6
+			threshold = lateralShellHosts
 			if isOffHours && isWorkstation {
-				threshold = 3
+				threshold = lateralShellHostsOffHours
 			}
 		} else if isOffHours && isWorkstation {
-			threshold = 10
+			threshold = lateralHostsOffHours
 		}
 
 		routine, why := false, ""
@@ -1017,7 +1020,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			if len(floor) > 0 {
 				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
 			}
-			if !e.shouldSuppressAlert(alertKey, 10*time.Minute) {
+			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
 				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
 					"sweep_actor": sweepActor(window), "floor_ports": floor})
 				alert := storage.Alert{

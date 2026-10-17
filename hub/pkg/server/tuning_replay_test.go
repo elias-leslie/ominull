@@ -13,6 +13,9 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
+// testExpiry is a known workload expiry a month out.
+var testExpiry = time.Now().Add(30 * 24 * time.Hour)
+
 func replayRequest(srv *Server, method, path, key string, body any) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
 	if body != nil {
@@ -49,7 +52,7 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	return at
 }
 
-var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
+var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
 
 func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 	t.Parallel()

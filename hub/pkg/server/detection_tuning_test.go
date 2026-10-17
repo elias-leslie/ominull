@@ -115,10 +115,10 @@ func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 	t.Parallel()
 	srv, _ := setupTestServer(t)
 	if code, body := tuningBody(t, srv, http.MethodPost, `{"warmup_hours":48,"quiet_pairs":["/usr/bin/rclone@AS15169"],
-		"known_workloads":[{"workload":"/usr/bin/gh","owner":"AS36459","reason":"cli"},{"workload":"/usr/bin/ssh","owner":"AS36459","reason":"git"}]}`); code != http.StatusOK {
+		"known_workloads":[{"workload":"/usr/bin/gh","owner":"AS36459","reason":"cli","expires_at":"2099-01-01T00:00:00Z"},{"workload":"/usr/bin/ssh","owner":"AS36459","reason":"git","expires_at":"2099-01-01T00:00:00Z"}]}`); code != http.StatusOK {
 		t.Fatalf("first save: %d %v", code, body)
 	}
-	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"AS54113","reason":"x"}]}`)
+	code, body := tuningBody(t, srv, http.MethodPost, `{"known_workloads":[{"workload":"/usr/bin/curl","owner":"AS54113","reason":"x","expires_at":"2099-01-01T00:00:00Z"}]}`)
 	if code != http.StatusOK {
 		t.Fatalf("partial save: %d %v", code, body)
 	}

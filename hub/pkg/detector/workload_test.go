@@ -8,6 +8,9 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
+// testExpiry is a known workload expiry a month out.
+var testExpiry = time.Now().Add(30 * 24 * time.Hour)
+
 func TestWorkloadNamesWhatAnInterpreterRuns(t *testing.T) {
 	cases := []struct{ path, cmd, want string }{
 		{"/usr/bin/curl", "curl -fsSL https://example.com", "/usr/bin/curl"},
@@ -74,7 +77,7 @@ func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
 	engine, store := noiseEngine(t)
 	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
 		tu.KnownWorkloads = []storage.KnownWorkload{{
-			Workload: "python3.13 /srv/releases/*/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "market-data worker",
+			Workload: "python3.13 /srv/releases/*/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "market-data worker", ExpiresAt: testExpiry,
 		}}
 	})
 	now := time.Now().UTC()
@@ -105,7 +108,7 @@ func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
 // rented compute is not, because anyone can rent a machine in that range.
 func TestANamedOwnerNeverCoversRentedCompute(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
 		t.Fatal(err)
@@ -129,8 +132,8 @@ func TestANamedOwnerNeverCoversRentedCompute(t *testing.T) {
 func TestAnyOwnerForAnInterpreterStopsAtRentedCompute(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
 	tu.KnownWorkloads = []storage.KnownWorkload{
-		{Workload: "python3.13 /srv/app/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "worker"},
-		{Workload: "/opt/google/chrome/chrome", Owner: storage.AnyOwner, Reason: "browser"},
+		{Workload: "python3.13 /srv/app/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "worker", ExpiresAt: testExpiry},
+		{Workload: "/opt/google/chrome/chrome", Owner: storage.AnyOwner, Reason: "browser", ExpiresAt: testExpiry},
 	}
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
@@ -154,7 +157,7 @@ func TestAnyOwnerForAnInterpreterStopsAtRentedCompute(t *testing.T) {
 		t.Fatal("include_rented should widen an interpreter's AnyOwner to rented compute")
 	}
 	// "*" never crosses a space, so it cannot swallow the next argument.
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /srv/tool/bin/*", Owner: storage.AnyOwner, Reason: "tools"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /srv/tool/bin/*", Owner: storage.AnyOwner, Reason: "tools", ExpiresAt: testExpiry}}
 	tu, _ = storage.PrepareDetectionTuning(tu)
 	if _, ok := tu.KnownWorkloadFor("node /srv/tool/bin/a b", "", "Example", ""); ok {
 		t.Fatal("a wildcard crossed an argument boundary")
@@ -163,7 +166,7 @@ func TestAnyOwnerForAnInterpreterStopsAtRentedCompute(t *testing.T) {
 
 func TestAKnownServiceIsJudgedWithTheSameReach(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "python3.13 -m app.worker", Owner: storage.AnyOwner, Reason: "worker"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "python3.13 -m app.worker", Owner: storage.AnyOwner, Reason: "worker", ExpiresAt: testExpiry}}
 	tu, _ = storage.PrepareDetectionTuning(tu)
 	if _, ok := tu.KnownService("python3.13 -m app.worker", "Example Bank", ""); !ok {
 		t.Fatal("a service to a named network should be known")
@@ -177,20 +180,20 @@ func TestKnownWorkloadsNeedAReasonAndNeverCoverInlineCode(t *testing.T) {
 	_, store := noiseEngine(t)
 	for _, k := range []storage.KnownWorkload{
 		{Workload: "python3 -m app", Owner: "*"},
-		{Workload: "*", Owner: "*", Reason: "everything"},
-		{Workload: "python3 /venv/bin/python -c", Owner: "*", Reason: "inline"},
-		{Workload: "python3 -m app", Owner: "", Reason: "no owner"},
-		{Workload: "*/curl", Owner: "*", Reason: "leading wildcard"},
-		{Workload: "python3.13", Owner: "*", Reason: "a bare interpreter"},
-		{Workload: "python3.13 *", Owner: "*", Reason: "an interpreter running anything"},
-		{Workload: "python3 -m app", Owner: "cloudflare", Reason: "rented", IncludeRented: true},
-		{Workload: "python3.13 -m *", Owner: "*", Reason: "every module"},
-		{Workload: "java -jar *.jar", Owner: "*", Reason: "every jar"},
-		{Workload: "node npm ci", Owner: "cloudflare", Reason: "named only by argv[0]"},
-		{Workload: "python3 script.py", Owner: "*", Reason: "a relative script"},
-		{Workload: "python3 /srv/app/*", Owner: "*", Reason: "any script in a directory"},
-		{Workload: "python3.13 /*/*/*.py", Owner: "*", Reason: "any script three deep"},
-		{Workload: "python3 -m a*", Owner: "*", Reason: "a module prefix"},
+		{Workload: "*", Owner: "*", Reason: "everything", ExpiresAt: testExpiry},
+		{Workload: "python3 /venv/bin/python -c", Owner: "*", Reason: "inline", ExpiresAt: testExpiry},
+		{Workload: "python3 -m app", Owner: "", Reason: "no owner", ExpiresAt: testExpiry},
+		{Workload: "*/curl", Owner: "*", Reason: "leading wildcard", ExpiresAt: testExpiry},
+		{Workload: "python3.13", Owner: "*", Reason: "a bare interpreter", ExpiresAt: testExpiry},
+		{Workload: "python3.13 *", Owner: "*", Reason: "an interpreter running anything", ExpiresAt: testExpiry},
+		{Workload: "python3 -m app", Owner: "cloudflare", Reason: "rented", ExpiresAt: testExpiry, IncludeRented: true},
+		{Workload: "python3.13 -m *", Owner: "*", Reason: "every module", ExpiresAt: testExpiry},
+		{Workload: "java -jar *.jar", Owner: "*", Reason: "every jar", ExpiresAt: testExpiry},
+		{Workload: "node npm ci", Owner: "cloudflare", Reason: "named only by argv[0]", ExpiresAt: testExpiry},
+		{Workload: "python3 script.py", Owner: "*", Reason: "a relative script", ExpiresAt: testExpiry},
+		{Workload: "python3 /srv/app/*", Owner: "*", Reason: "any script in a directory", ExpiresAt: testExpiry},
+		{Workload: "python3.13 /*/*/*.py", Owner: "*", Reason: "any script three deep", ExpiresAt: testExpiry},
+		{Workload: "python3 -m a*", Owner: "*", Reason: "a module prefix", ExpiresAt: testExpiry},
 	} {
 		tu := store.GetDetectionTuning()
 		tu.KnownWorkloads = []storage.KnownWorkload{k}
@@ -229,8 +232,8 @@ func TestAKnownServiceIsNotOffHours(t *testing.T) {
 	engine, store, night := offHoursEngine(t)
 	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
 		tu.KnownWorkloads = []storage.KnownWorkload{
-			{Workload: "node /usr/local/bin/corepack", Owner: storage.AnyOwner, Reason: "registry service"},
-			{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"},
+			{Workload: "node /usr/local/bin/corepack", Owner: storage.AnyOwner, Reason: "registry service", ExpiresAt: testExpiry},
+			{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry},
 		}
 	})
 	// A tool known only for one owner is not a service: a build at night is news.
@@ -273,7 +276,7 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 		{ID: "g", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl z", "GitHub, Inc."), Timestamp: at.Add(2 * time.Hour)},
 	}
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
 	tu, _ = storage.PrepareDetectionTuning(tu)
 	res := Replay(alerts, tu)
 	kept := map[string]bool{}
@@ -307,7 +310,7 @@ func TestAPathMismatchHasNoPathWorkload(t *testing.T) {
 	}
 
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool"}}
+	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool", ExpiresAt: testExpiry}}
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
 		t.Fatal(err)

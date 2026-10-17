@@ -288,7 +288,7 @@ func (s *Store) initDetectionTuningSchema() error {
 	if err != nil {
 		return err
 	}
-	s.migrateLegacyQuietLists()
+	s.migrateSavedTuning(time.Now().UTC())
 	return nil
 }
 
@@ -414,26 +414,73 @@ func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
 	return t.normalised(), dropped
 }
 
-// migrateLegacyQuietLists rewrites the stored row once, on the first start
-// that matches by path and AS number. A row it cannot save is left as it is:
-// its old entries match nothing now, which is quieter for nobody.
-func (s *Store) migrateLegacyQuietLists() {
+// boundWorkloadExpiry gives each known workload saved before entries had an
+// expiry one at = now + KnownWorkloadMigratedExpiry. An entry that already has
+// an expiry keeps it, so running it twice changes nothing and it never
+// extends one. It returns how many it bounded.
+func boundWorkloadExpiry(t DetectionTuning, now time.Time) (DetectionTuning, int) {
+	n := 0
+	until := now.UTC().Add(KnownWorkloadMigratedExpiry).Truncate(time.Second)
+	out := make([]KnownWorkload, len(t.KnownWorkloads))
+	for i, k := range t.KnownWorkloads {
+		if k.ExpiresAt.IsZero() {
+			k.ExpiresAt = until
+			n++
+		}
+		out[i] = k
+	}
+	t.KnownWorkloads = out
+	return t, n
+}
+
+// migrateSavedTuning rewrites the stored row once, on the first start that
+// matches by path and AS number, and on the first start that requires known
+// workloads to expire. A row it cannot save is left as it is: its old quiet
+// entries match nothing now, and its known workloads without an expiry vouch
+// for nothing, which is quieter for nobody (DetectionTuningProblem reports
+// the row on the Nightshift feed).
+func (s *Store) migrateSavedTuning(now time.Time) {
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM detection_tuning WHERE id = 1`).Scan(&exists); err != nil || exists == 0 {
 		return
 	}
 	before := s.GetDetectionTuning()
 	after, dropped := migrateQuietLists(before)
+	after, bounded := boundWorkloadExpiry(after, now)
 	was, _ := json.Marshal(quietListsOf(before))
-	now, _ := json.Marshal(quietListsOf(after))
-	if string(was) == string(now) {
+	is, _ := json.Marshal(quietListsOf(after))
+	if string(was) == string(is) {
 		return
 	}
 	if _, err := s.SaveDetectionTuning(after, "upgrade"); err != nil {
-		log.Printf("[-] Detection tuning: quiet lists could not be rewritten as paths and AS numbers, old entries now match nothing: %v", err)
+		log.Printf("[-] Detection tuning: the saved row could not be upgraded (quiet lists as paths and AS numbers, known workloads with an expiry); old quiet entries and known workloads without an expiry now match nothing: %v", err)
 		return
 	}
-	log.Printf("[+] Detection tuning: quiet lists rewritten as paths and AS numbers (dropped: %s)", strings.Join(dropped, ", "))
+	if len(dropped) > 0 {
+		log.Printf("[+] Detection tuning: quiet lists rewritten as paths and AS numbers (dropped: %s)", strings.Join(dropped, ", "))
+	}
+	if bounded > 0 {
+		log.Printf("[+] Detection tuning: %d known workloads saved without an expiry now expire at %s", bounded, now.UTC().Add(KnownWorkloadMigratedExpiry).Format(time.RFC3339))
+	}
+}
+
+// CheckNewWorkloadExpiry refuses a known workload a save adds or changes
+// without an expiry in the future. An entry carried over exactly as saved may
+// have expired since; the save then drops it (PrepareDetectionTuning).
+func CheckNewWorkloadExpiry(before, after []KnownWorkload, now time.Time) error {
+	saved := map[string]bool{}
+	for _, k := range tidyWorkloads(before) {
+		saved[k.Key()+"@"+k.ExpiresAt.Format(time.RFC3339)] = true
+	}
+	for _, k := range tidyWorkloads(after) {
+		if saved[k.Key()+"@"+k.ExpiresAt.Format(time.RFC3339)] {
+			continue
+		}
+		if !k.ExpiresAt.After(now) {
+			return fmt.Errorf("%w: known workload %q needs an expires_at in the future", ErrInvalidDetectionTuning, k.Workload)
+		}
+	}
+	return nil
 }
 
 func quietListsOf(t DetectionTuning) []any {
@@ -506,11 +553,19 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 		t.ContainerCIDRs[i] = p.Masked().String()
 	}
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
+	live := make([]KnownWorkload, 0, len(t.KnownWorkloads))
+	now := time.Now()
 	for _, k := range t.KnownWorkloads {
 		if err := k.validate(); err != nil {
 			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
 		}
+		// An expired entry vouches for nothing; a save drops it, which only
+		// tightens.
+		if !k.Expired(now) {
+			live = append(live, k)
+		}
 	}
+	t.KnownWorkloads = live
 	if err := t.validQuietLists(); err != nil {
 		return t, err
 	}
@@ -1011,12 +1066,34 @@ func (t DetectionTuning) IsVouchedPair(path, sha, asn, org, tenancy string) bool
 // for a program whose job is those destinations - a crawler fetching sites
 // hosted on cloud machines, a worker reading data providers with no
 // registered name - and its reason should say so.
+//
+// ExpiresAt is when the entry stops vouching. A new entry needs one in the
+// future; an entry without one, or past it, vouches for nothing. Moving it
+// later loosens detection and waits for the owner; moving it earlier tightens.
 type KnownWorkload struct {
-	Workload      string `json:"workload"`
-	Owner         string `json:"owner"`
-	Reason        string `json:"reason"`
-	IncludeRented bool   `json:"include_rented,omitempty"`
+	Workload      string    `json:"workload"`
+	Owner         string    `json:"owner"`
+	Reason        string    `json:"reason"`
+	IncludeRented bool      `json:"include_rented,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at"`
 }
+
+// Expired reports an entry that no longer vouches: past its expiry, or saved
+// before entries had one.
+func (k KnownWorkload) Expired(now time.Time) bool {
+	return !now.Before(k.ExpiresAt)
+}
+
+// Key names an entry without its reason and expiry: the same
+// program, owner and reach.
+func (k KnownWorkload) Key() string {
+	return fmt.Sprintf("%s@%s@%v", k.Workload, k.Owner, k.IncludeRented)
+}
+
+// KnownWorkloadMigratedExpiry is the expiry the upgrade gives each known
+// workload saved before entries had one: bounded, so an entry nobody renews
+// stops vouching.
+const KnownWorkloadMigratedExpiry = 90 * 24 * time.Hour
 
 // AnyOwner is the Owner of a workload known to reach arbitrary destinations.
 const AnyOwner = "*"
@@ -1061,6 +1138,9 @@ func (k KnownWorkload) validate() error {
 	if strings.TrimSpace(k.Reason) == "" {
 		return fmt.Errorf("known workload %q needs a reason", k.Workload)
 	}
+	if k.ExpiresAt.IsZero() {
+		return fmt.Errorf("known workload %q needs an expires_at, the time it stops vouching", k.Workload)
+	}
 	if isInlineWorkload(k.Workload) {
 		return fmt.Errorf("known workload %q is inline code, which is never a known program", k.Workload)
 	}
@@ -1097,7 +1177,7 @@ func isPathWorkload(w string) bool {
 }
 
 func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	out := make([]KnownWorkload, 0, len(in))
 	for _, k := range in {
 		k.Workload = strings.Join(strings.Fields(k.Workload), " ")
@@ -1106,11 +1186,21 @@ func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
 		}
 		k.Owner = strings.ToLower(strings.TrimSpace(k.Owner))
 		k.Reason = strings.TrimSpace(k.Reason)
-		key := fmt.Sprintf("%s@%s@%v", k.Workload, k.Owner, k.IncludeRented)
-		if k.Workload == "" || seen[key] {
+		if !k.ExpiresAt.IsZero() {
+			k.ExpiresAt = k.ExpiresAt.UTC().Truncate(time.Second)
+		}
+		if k.Workload == "" {
 			continue
 		}
-		seen[key] = true
+		// One entry per program, owner and reach; a duplicate keeps the later
+		// expiry, so the judgment of a change sees everything it vouches for.
+		if i, dup := seen[k.Key()]; dup {
+			if k.ExpiresAt.After(out[i].ExpiresAt) {
+				out[i].ExpiresAt = k.ExpiresAt
+			}
+			continue
+		}
+		seen[k.Key()] = len(out)
 		out = append(out, k)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1161,8 +1251,9 @@ func (t DetectionTuning) KnownWorkloadFor(workload, asn, org, tenancy string) (K
 		return KnownWorkload{}, false
 	}
 	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
+	now := time.Now()
 	for _, k := range t.KnownWorkloads {
-		if !matchWorkload(k.Workload, workload) {
+		if k.Expired(now) || !matchWorkload(k.Workload, workload) {
 			continue
 		}
 		if k.Owner == AnyOwner && k.coversAnywhere(workload, named) {
@@ -1192,8 +1283,9 @@ func (t DetectionTuning) KnownService(workload, org, tenancy string) (KnownWorkl
 		return KnownWorkload{}, false
 	}
 	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
+	now := time.Now()
 	for _, k := range t.KnownWorkloads {
-		if k.Owner == AnyOwner && matchWorkload(k.Workload, workload) && k.coversAnywhere(workload, named) {
+		if !k.Expired(now) && k.Owner == AnyOwner && matchWorkload(k.Workload, workload) && k.coversAnywhere(workload, named) {
 			return k, true
 		}
 	}
