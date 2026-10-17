@@ -171,6 +171,9 @@ jobs:
       - name: Execute fixtures on Windows
         shell: pwsh
         run: ./scripts/test-native-windows.ps1
+      - name: Windows maintenance package checks
+        shell: pwsh
+        run: ./packages/windows/tests/test-packages.ps1
 
   build-packages:
     name: Cross-Platform Release Packaging
