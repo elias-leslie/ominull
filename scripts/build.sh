@@ -44,6 +44,7 @@ gcc -Wall -Wextra -Wformat=2 -O2 \
   -I"$ROOT_DIR/agent/include" \
   "$ROOT_DIR/agent/linux/main.c" -lbpf -lcurl -o "$BUILD_DIR/ominulld"
 file "$BUILD_DIR/ominulld"
+echo "[*] Linux agent needs glibc $("$ROOT_DIR/scripts/check-agent-glibc.sh" "$BUILD_DIR/ominulld") (must run on Debian 12, glibc 2.36)."
 
 echo "[*] Compiling Linux hub, control CLI, and response authority..."
 (cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$VERSION" -o "$BUILD_DIR/ominull-hub" ./cmd)

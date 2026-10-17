@@ -125,6 +125,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_script_exec_linux" "${ROOT_DIR}/agent/tests/test_script_exec_linux.c"
     "${ROOT_DIR}/build/test_script_exec_linux"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_agent_update_linux" "${ROOT_DIR}/agent/tests/test_agent_update_linux.c"
+    "${ROOT_DIR}/build/test_agent_update_linux"
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then
@@ -134,6 +137,13 @@ if [ "${DO_HUB}" -eq 1 ]; then
     echo "[*] Signing native packages for v${VERSION}."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/sign-release.sh"
+    # A fresh install verifies the published package with the key the hub's
+    # bootstrap embeds, not the one the running agents pin. A rotation release
+    # signed only with the outgoing key left every new install refusing the
+    # package (1.8.71); this gate is never skipped.
+    echo "[*] Verifying the published packages as a fresh install will."
+    (cd "${ROOT_DIR}/hub" && OMINULL_FRESH_INSTALL_DIST="${ROOT_DIR}/dist" OMINULL_RELEASE_VERSION="${VERSION}" \
+        go test -count=1 -run TestPublishedPackagesVerifyForFreshInstall ./pkg/bootstrap)
     echo "[*] Verifying native package lifecycle in an isolated root."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"

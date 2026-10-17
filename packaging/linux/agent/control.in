@@ -3,6 +3,7 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: amd64
+Pre-Depends: libc6 (>= @LIBC_MIN@)
 Depends: libcurl4 | libcurl3, libbpf1, openssl, iptables
 Maintainer: Ominull Project <secops@example.invalid>
 Description: Ominull Linux network telemetry and threat nullification agent

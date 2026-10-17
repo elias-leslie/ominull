@@ -1,6 +1,13 @@
 /* Several agent headers need GNU extensions (pipe2, SCHED_IDLE, close_range);
  * defining it before the first libc header is the only place it takes effect. */
 #define _GNU_SOURCE
+/* The agent runs on glibc 2.36 (Debian 12). With _GNU_SOURCE, glibc 2.38+
+ * headers redirect strtol/sscanf and friends to __isoc23_* symbols that only
+ * exist in 2.38, so a build on a newer host would not start there. Keep the
+ * classic symbols; scripts/check-agent-glibc.sh gates the result. */
+#include <features.h>
+#undef __GLIBC_USE_C2X_STRTOL
+#define __GLIBC_USE_C2X_STRTOL 0
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -41,6 +48,7 @@
 #include "../include/data_inventory_linux.h"
 #include "../include/gzip_encode.h"
 #include "../include/upload_queue.h"
+#include "../include/agent_update_linux.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -2500,6 +2508,14 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
         return;
     }
+    /* An update that installed but did not run here was rolled back; a newer
+     * release is needed, not another try of this one. */
+    char failedMark[192];
+    snprintf(failedMark, sizeof(failedMark), "%s/failed-%s", OMINULL_UPDATE_DIR, version);
+    if (access(failedMark, F_OK) == 0) {
+        if (attempts == 1) printf("[!] Agent v%s was rolled back on this host after it failed to run; waiting for a newer release.\n", version);
+        return;
+    }
     /* Never backwards: an older signed package is still validly signed, so
      * only the version check keeps a hub from downgrading this host to a
      * release with a known hole. */
@@ -2569,29 +2585,15 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
     char curlSec[HUB_CURL_ARGS_LEN];
     HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
 
-    char script[5120];
-    int n = snprintf(script, sizeof(script),
-        "#!/bin/sh\n"
-        "set -e\n"
-        "D=%s\n"
-        "exec >>/var/log/ominull-update.log 2>&1\n"
-        "echo \"=== $(date -u '+%%Y-%%m-%%dT%%H:%%M:%%SZ') updating to v%s ===\"\n"
-        "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
-        "curl -fsSL %s -m 300 -o \"$D/agent.deb\" \"%s%s\"\n"
-        "curl -fsSL %s -m 60 -o \"$D/agent.deb.sig\" \"%s%s\"\n"
-        "echo \"%s  $D/agent.deb\" | sha256sum -c -\n"
-        "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/agent.deb.sig\" \"$D/agent.deb\"\n"
-        "base64 -d \"$D/release.sig.b64\" > \"$D/release.sig\"\n"
-        "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/release.sig\" \"$D/release.statement\"\n"
-        "echo \"[+] v%s verified against the pinned release key; installing\"\n"
-        "dpkg -i \"$D/agent.deb\"\n"
-        "rm -f \"$D/agent.deb\" \"$D/agent.deb.sig\"\n"
-        "systemctl restart ominull-agent.service\n",
-        OMINULL_UPDATE_DIR, version,
-        curlSec, config->hub_url, pkgPath,
-        curlSec, config->hub_url, sigPath,
-        sha256, version);
-    if (n < 0 || n >= (int)sizeof(script)) {
+    char script[8192];
+    AgentUpdateScript spec = {
+        .dir = OMINULL_UPDATE_DIR, .binary = "/opt/ominull/bin/ominulld",
+        .log_path = "/var/log/ominull-update.log", .unit = "ominull-agent.service",
+        .version = version, .curl_args = curlSec, .hub_url = config->hub_url,
+        .pkg_path = pkgPath, .sig_path = sigPath, .sha256 = sha256, .settle_seconds = 45,
+    };
+    int n = AgentUpdate_BuildScript(&spec, script, sizeof(script));
+    if (n < 0) {
         printf("[!] Rejected agent update v%s: updater script would be truncated.\n", version);
         return;
     }
@@ -3393,6 +3395,12 @@ static void TickDataInventory(const LINUX_AGENT_CONFIG* config) {
 
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    /* The self-updater runs this on a freshly installed binary before it
+     * restarts into it: a binary the host's loader cannot start fails here. */
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("%s\n", OMINULL_LINUX_AGENT_VERSION);
+        return 0;
+    }
 	if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
 		fprintf(stderr, "[-] Could not initialize in-process TLS transport.\n");
 		return 1;

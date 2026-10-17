@@ -18,7 +18,7 @@ if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-for tool in gcc x86_64-w64-mingw32-gcc go dpkg-deb wixl; do
+for tool in gcc x86_64-w64-mingw32-gcc go dpkg-deb wixl objdump; do
     command -v "${tool}" >/dev/null || {
         echo "[-] Required build tool is missing: ${tool}" >&2
         exit 1
@@ -108,7 +108,14 @@ make_deb() {
         }
     fi
     install -m 0644 "${ROOT_DIR}/LICENSE" "${root}/usr/share/doc/${package}/LICENSE"
-    sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${control}" > "${root}/DEBIAN/control"
+    # Pre-Depends, not Depends: dpkg checks it before unpacking, so a host with
+    # an older libc refuses the package instead of getting a binary that cannot
+    # start (Depends is only checked at configure, after the files are in place).
+    local libc_min=""
+    if [ "${name}" = "ominull-agent" ]; then
+        libc_min="$("${ROOT_DIR}/scripts/check-agent-glibc.sh" "${binary}")"
+    fi
+    sed -e "s/@VERSION@/${VERSION}/g" -e "s/@LIBC_MIN@/${libc_min}/g" "${ROOT_DIR}/${control}" > "${root}/DEBIAN/control"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${preinst}" > "${root}/DEBIAN/preinst"
     chmod 0755 "${root}/DEBIAN/preinst"
     sed "s/@VERSION@/${VERSION}/g" "${ROOT_DIR}/${postinst}" > "${root}/DEBIAN/postinst"
