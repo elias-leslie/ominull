@@ -47,6 +47,11 @@ type policyChange struct {
 	// tightenedFirst is the tightening half of a mixed change, already
 	// saved, so the owner is asked about the loosening alone.
 	tightenedFirst string
+	// drill is the floor drill run against the policy the change would save:
+	// the floor cases it would blind (empty when none). drilled says the drill
+	// ran; only tuning and exclusion changes reach the floor rules.
+	drill   []string
+	drilled bool
 }
 
 // payload is what the authority digests and describes. Both sides build it
@@ -69,10 +74,69 @@ func (c policyChange) payload() ([]byte, error) {
 	if after, err = canonicalJSON(after); err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]interface{}{
+	body := map[string]interface{}{
 		"policy": c.policy, "op": c.op,
 		"before": json.RawMessage(before), "after": json.RawMessage(after),
-	})
+	}
+	if c.drilled {
+		// The owner sees what the change would blind before tapping.
+		body["drill"] = append([]string{}, c.drill...)
+	}
+	return json.Marshal(body)
+}
+
+// drillProposed runs the floor drill against the policy a change would save
+// and lists the floor cases it would blind that the saved policy does not
+// (one already blinded is a CRITICAL on the feed of its own). Run again when
+// the approved change is retried, it gives the same answer unless the policy
+// around it moved, and then the digest no longer matches and the owner is
+// asked again.
+func (s *Server) drillProposed(c policyChange) ([]string, bool) {
+	now := time.Now().UTC()
+	var cases []detector.DrillCase
+	var err error
+	switch after := c.after.(type) {
+	case storage.DetectionTuning:
+		cases, err = detector.DrillWith(s.store, now, &after, nil)
+	case storage.Exclusion:
+		var live []storage.Exclusion
+		if live, err = s.store.ListExclusions("default"); err != nil {
+			break
+		}
+		if after.ID == "" {
+			after.ID = "new"
+		}
+		after.Active, after.CreatedAt = true, now
+		proposed := make([]storage.Exclusion, 0, len(live)+1)
+		for _, ex := range live {
+			if ex.ID != after.ID {
+				proposed = append(proposed, ex)
+			}
+		}
+		cases, err = detector.DrillWith(s.store, now, nil, append(proposed, after))
+	default:
+		return nil, false
+	}
+	var current []detector.DrillCase
+	if err == nil {
+		current, err = detector.Drill(s.store, now)
+	}
+	if err != nil {
+		return []string{"the drill could not run"}, true
+	}
+	already := map[string]bool{}
+	for _, dc := range current {
+		if judgeDrillCase(dc) != "" {
+			already[dc.Rule] = true
+		}
+	}
+	missed := []string{}
+	for _, dc := range cases {
+		if !already[dc.Rule] && judgeDrillCase(dc) != "" {
+			missed = append(missed, dc.Rule)
+		}
+	}
+	return missed, true
 }
 
 // credentialOf names how the caller authenticated; relay-key is Nightshift's
@@ -98,6 +162,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 			"this change loosens detection ("+strings.Join(c.loosens, ", ")+"), which needs the owner's approval, and the response authority that asks for it is not available")
 		return "", false
 	}
+	c.drill, c.drilled = s.drillProposed(c)
 	payload, err := c.payload()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "the change could not be described: "+err.Error())
@@ -133,6 +198,9 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 		}
 		if c.tightenedFirst != "" {
 			body["tightened_now"] = c.tightenedFirst
+		}
+		if c.drilled {
+			body["drill_blinds"] = c.drill
 		}
 		writeJSON(w, http.StatusAccepted, body)
 		return "", false

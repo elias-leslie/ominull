@@ -194,7 +194,7 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
-| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422) |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422); the owner's statement opens with the floor drill run against the proposed tuning (`drill_blinds` in the 202: the floor cases it would newly blind) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the Nightshift feed's detection-policy note, like an acknowledgement |
@@ -287,6 +287,14 @@ runtime or interpreter, resolver bypass. A case it cannot match is skipped (a
 port sweep under an exclusion for one port, a lateral sweep under a public or
 too small range or inside a container network, the sweeps for a program the
 code exempts), and so is the burst, which an exclusion may cover by design.
+A loosening tuning save or exclusion that waits for the owner is drilled
+before it is applied: the 202 carries `drill_blinds`, the floor cases the
+proposed policy would blind that the saved one does not, and the owner's
+statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...") or with
+"floor drill: blinds no floor rule". The approved retry drills again, so a
+policy that moved in between changes the digest and the owner is asked again.
+Presence, retirement and learning windows reach no floor rule the drill runs,
+so their statements carry no drill.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence

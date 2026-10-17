@@ -136,3 +136,23 @@ func TestDescribeALearningWindow(t *testing.T) {
 		t.Error("a window opened over a saved one was described")
 	}
 }
+
+// The hub's floor drill against the proposed policy leads the statement: what
+// the change would blind, or that it blinds nothing. A payload without one
+// reads as before.
+func TestDescribeDetectionPolicyShowsTheDrill(t *testing.T) {
+	tuning := []string{"detection:tuning"}
+	for _, c := range []struct{ drill, want string }{
+		{`[]`, "floor drill: blinds no floor rule; quiet_orgs +as3"},
+		{`["bandwidth burst"]`, "BLINDS 1 FLOOR CASE: bandwidth burst; quiet_orgs +as3"},
+		{`["lateral sweep","port sweep","port sweep by quiet process /usr/sbin/chronyd"]`, "BLINDS 3 FLOOR CASES: lateral sweep, port sweep and 1 more; quiet_orgs +as3"},
+	} {
+		payload := []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":` + c.drill + `,"op":"save","policy":"detection_tuning"}`)
+		if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || summary != c.want {
+			t.Fatalf("drill %s: summary %q err %v", c.drill, summary, err)
+		}
+	}
+	if _, _, err := describeApproval(ActionKindDetection, []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":"none","op":"save","policy":"detection_tuning"}`), tuning, "admin"); err == nil {
+		t.Fatal("a drill that is not a list was described")
+	}
+}

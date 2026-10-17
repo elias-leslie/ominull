@@ -283,9 +283,42 @@ type detectionPolicyPayload struct {
 	Op     string          `json:"op"`
 	Before json.RawMessage `json:"before"`
 	After  json.RawMessage `json:"after"`
+	// Drill, when present, is the hub's floor drill run against the policy
+	// the change would save: the floor cases it would blind.
+	Drill *[]string `json:"drill"`
 }
 
-var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": true, "after": true}
+var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": true, "after": true, "drill": true}
+
+// drillPart is the floor drill's verdict as the first part of the owner's
+// statement, short enough to leave the change itself room: the first two
+// cases it would blind, then how many more.
+func drillPart(drill *[]string) []string {
+	if drill == nil {
+		return nil
+	}
+	cases := *drill
+	if len(cases) == 0 {
+		return []string{"floor drill: blinds no floor rule"}
+	}
+	const show = 2
+	names := make([]string, 0, show)
+	for i, c := range cases {
+		if i == show {
+			break
+		}
+		names = append(names, cleanText(c, 48))
+	}
+	part := fmt.Sprintf("BLINDS %d FLOOR CASE", len(cases))
+	if len(cases) != 1 {
+		part += "S"
+	}
+	part += ": " + strings.Join(names, ", ")
+	if len(cases) > show {
+		part += fmt.Sprintf(" and %d more", len(cases)-show)
+	}
+	return []string{part}
+}
 
 // detectionPolicyOps names each change the hub can ask for, by policy.
 var detectionPolicyOps = map[string]map[string]string{
@@ -333,6 +366,10 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	if !ok {
 		return "", "", fmt.Errorf("%q %q is not a detection policy change", cleanText(p.Policy, 40), cleanText(p.Op, 40))
 	}
+	if p.Drill != nil && len(*p.Drill) > 256 {
+		return "", "", errors.New("detection policy drill lists more cases than a drill runs")
+	}
+	drill := drillPart(p.Drill)
 	var before, after map[string]interface{}
 	if err := decodeJSON(p.After, &after); err != nil || after == nil {
 		return "", "", errors.New("detection policy payload must carry the policy after the change")
@@ -353,7 +390,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		if len(parts) == 0 {
 			return "", "", errors.New("this tuning change changes nothing")
 		}
-		summary, err := fitParts(parts, nil)
+		summary, err := fitParts(append(drill, parts...), nil)
 		return action, summary, err
 	}
 	if p.Policy == "endpoint_watch" {
@@ -410,7 +447,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after, func(k string) bool { return !policyLabels[k] })...)
 		labels = policyDiff(before, after, func(k string) bool { return policyLabels[k] })
 	}
-	summary, err := fitParts(parts, labels)
+	summary, err := fitParts(append(drill, parts...), labels)
 	return action, summary, err
 }
 

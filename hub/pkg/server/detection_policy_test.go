@@ -591,7 +591,7 @@ func TestAMixedSaveIsAskedAboutOnlyItsLoosening(t *testing.T) {
 	}
 	swap, _ := json.Marshal(map[string]any{"quiet_orgs": []string{orgs[0], "as64500"}})
 	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""))
-	if p.Summary != "quiet_orgs +as64500" {
+	if p.Summary != "floor drill: blinds no floor rule; quiet_orgs +as64500" {
 		t.Fatalf("swap summary %q", p.Summary)
 	}
 	if len(store.GetDetectionTuning().QuietOrgs) != 1 {
@@ -1043,4 +1043,37 @@ func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 		return
 	}
 	t.Fatal("no detection policy note")
+}
+
+// A loosening change waiting for the owner carries the floor drill run against
+// the policy it would save, so the owner sees what it blinds before tapping:
+// an exclusion over an internet range blinds the 10 MB burst, a container
+// network over the LAN blinds the lateral sweeps; a case already blinded is
+// not counted again. The approved retry runs the same drill and applies;
+// nothing changes before the tap.
+func TestTheOwnerSeesWhatALooseningChangeWouldBlind(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	expires := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	body := `{"name":"uploads","dst_ip_range":"203.0.113.0/24","reason":"backup target","expires_at":"` + expires + `"}`
+	w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, "")
+	p := mustPend(t, w)
+	if !strings.HasPrefix(p.Summary, "BLINDS 1 FLOOR CASE: bandwidth burst; ") || !strings.Contains(w.Body.String(), `"drill_blinds":["bandwidth burst"]`) {
+		t.Fatalf("exclusion approval = %q %s", p.Summary, w.Body.String())
+	}
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, p.ApprovalID); w.Code != http.StatusCreated {
+		t.Fatalf("approved create = %d %s", w.Code, w.Body.String())
+	}
+
+	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""))
+	// The burst the live exclusion already blinds is not this change's; the
+	// quiet processes' lateral sweeps are.
+	if !strings.HasPrefix(p.Summary, "BLINDS 12 FLOOR CASES: lateral sweep, agent ssh fan-out reaching a floor port and 10 more; container_cidrs +192.168.250.0/24") {
+		t.Fatalf("tuning approval = %q", p.Summary)
+	}
+	if len(store.GetDetectionTuning().ContainerCIDRs) != 0 {
+		t.Fatal("the container network applied before the owner approved it")
+	}
 }
