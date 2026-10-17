@@ -16,11 +16,15 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// syncRealPackage puts a released package from packages/windows into the
-// library the way ominullctl scripts sync does.
+// syncRealPackage puts a released package from packages/windows (or, for a
+// "linux/x.sh" file, packages/linux) into the library the way ominullctl
+// scripts sync does.
 func syncRealPackage(t *testing.T, srv *Server, file string) (*scripts.Script, *scripts.PackageHeader) {
 	t.Helper()
-	raw, err := os.ReadFile("../../../packages/windows/" + file)
+	if !strings.Contains(file, "/") {
+		file = "windows/" + file
+	}
+	raw, err := os.ReadFile("../../../packages/" + file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +34,8 @@ func syncRealPackage(t *testing.T, srv *Server, file string) (*scripts.Script, *
 	}
 	schema, _ := json.Marshal(h.Schema())
 	meta, _ := json.Marshal(map[string]interface{}{"package": h.Name, "title": h.Title, "category": h.Category,
-		"interval": h.Interval, "risk": h.Risk, "reboot": h.Reboot, "timeout": h.Timeout})
-	sc, _, _, err := srv.scriptsStore.SyncScript("default", h.Name, h.Description, "powershell.exe", string(raw), string(schema), string(meta), "ops")
+		"interval": h.Interval, "risk": h.Risk, "reboot": h.Reboot, "timeout": h.Timeout, "platform": h.PlatformName(), "role": h.Role})
+	sc, _, _, err := srv.scriptsStore.SyncScript("default", h.Name, h.Description, h.Interpreter(), string(raw), string(schema), string(meta), "ops")
 	if err != nil {
 		t.Fatal(err)
 	}

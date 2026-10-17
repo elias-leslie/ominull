@@ -7,8 +7,9 @@ packages but small: a handful of machines, one owner, no new stores.
 ## Model
 
 - **Catalog = the script library.** The source of truth is
-  `packages/windows/*.ps1` in this repository. `ominullctl scripts sync
-  packages/windows` makes the hub's library match it: a package is created on
+  `packages/windows/*.ps1` and `packages/linux/*.sh` in this repository.
+  `ominullctl scripts sync packages/windows` (and `packages/linux`) makes the
+  hub's library match it: a package is created on
   first sync, gets a new immutable version only when its source (sha256) or
   parameter schema changed, and its description and metadata are updated in
   place. Re-running the sync is free.
@@ -18,7 +19,11 @@ packages but small: a handful of machines, one owner, no new stores.
   package may need one), `timeout` (seconds, at most 3600) and `interval`
   (the default schedule: `hourly`, `daily` or `weekly`). The sync reads it from
   line 1 of each script:
-  `# ominull-package: {"name","title","description","category","risk","reboot","timeout","interval","params"}`.
+  `# ominull-package: {"name","title","description","category","risk","reboot","timeout","interval","params"}`,
+  optionally followed by `"platform"` (`windows`, the default, run by
+  `powershell.exe`; or `linux`, run by `/bin/sh` as root, file extension
+  `.sh`) and `"role"` (`maintenance_mode`, below). A package runs only on
+  hosts of its platform.
   Security compliance packages are the same system with `category:
   "security"`; none ship yet.
 - **Execution = an ordinary `script_exec` job**, signed and approved like any
@@ -111,6 +116,37 @@ All six are `maintenance`. Every package but audit also takes `idle_minutes`
 | `windows-performance` | safe | 300 s | weekly | Game Mode on, background game recording off by policy; hardware-accelerated GPU scheduling only when its careful step is on (reboot). | `game_mode`, `block_game_recording`, `gpu_scheduling` (careful, off) |
 | `windows-audit` | safe | 300 s | daily | Read-only controls: BitLocker, Defender, firewall, update age, free disk, TPM, Secure Boot, pending reboot; `ok` or `drift`. | `signature_max_days`, `update_max_days`, `disk_min_free_pct`, `disk_min_free_gb` |
 
+### Maintenance mode
+
+`windows-maintenance-mode` and `linux-maintenance-mode` (role
+`maintenance_mode`, safe, parameter `hours` 1-24, default 6) keep a machine
+awake while maintenance runs. The role means the hub never schedules them and
+the asset card shows them as one line ("Maintenance mode: On, kept awake
+until ... / Turn off", or "Off / Turn on for 6 hours") instead of a package
+row. The state is the latest run: its result carries
+`detail.maintenance_mode {on, until}`, and an end time already past reads as
+off. How long it lasts is the package's `hours` setting (fleet default and
+per-machine override, as for any package; "How long..." on the card).
+
+- **Windows**: enforce saves the active plan's sleep-after and
+  hibernate-after values (AC and DC) once in
+  `ProgramData\OminullMaintenance\state\windows-maintenance-mode.json`, sets
+  them to 0 and registers a one-off SYSTEM task (`\Ominull\OminullMaintenanceModeEnd`,
+  start when available) that puts them back at the end time, or at the next
+  start if the machine was off then. Enforce again moves the end time and
+  keeps the first saved values. Revert puts them back now; audit reports and
+  reads `drift` if an end time passed without the values coming back. If the
+  operator saved a `powercfg /query` dump at `state\power-before.txt` earlier,
+  its values are the ones saved (once; the file is renamed `.imported`).
+- **Linux**: enforce starts a transient systemd unit
+  (`ominull-maintenance-mode`, `RuntimeMaxSec` = hours) holding a
+  `systemd-inhibit --what=sleep:idle` lock, so systemd itself lets go at the
+  end time. Enforce again replaces it with the new end; revert stops it.
+  Hosts without systemd answer `na`.
+
+Turning it on or off from the card is an ordinary run (enforce / revert),
+so it asks on the phone; an audit does not.
+
 ## Settings
 
 One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
@@ -187,9 +223,10 @@ gets a Nightshift push and taps once, and the repeated call (with
   grant binds one host and one script payload, which must be exactly the
   bytes `json.Marshal` makes of it.
 - **Which scripts count as packages**: the authority ships with the digest,
-  name and risk of every file in `packages/windows`
+  name and risk of every file in `packages/windows` and `packages/linux`
   (`hub/pkg/responseauth/released_packages.json`, kept in step by a test).
-  Only those sources, run by `powershell.exe` with `mode` plus exactly the
+  Only those sources, run by their platform's interpreter (`powershell.exe`
+  or `/bin/sh`) with `mode` plus exactly the
   parameters their (trusted) header declares, each valid, are packages; the
   hub's own copy of the header is never trusted. Anything else is shown as
   "not a released package", asks every time and never gets a rule. So a
@@ -215,7 +252,8 @@ gets a Nightshift push and taps once, and the repeated call (with
 ## Schedule
 
 Every 5 minutes (and right after a settings change) the hub walks each
-package × online Windows host with the effective settings. A package is due
+package × online host of its platform with the effective settings
+(maintenance mode excepted: it never runs on a schedule). A package is due
 on a host when it and its category are on there, the host is online (seen in
 the last 30 s), no run of it is open there, its last success (`ok`, `fixed`,
 `drift`) is older than the interval and its last attempt is at least an hour
@@ -242,7 +280,8 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
 
 ## Running a package
 
-1. Sync: `ominullctl scripts sync packages/windows` (admin key).
+1. Sync: `ominullctl scripts sync packages/windows` and
+   `ominullctl scripts sync packages/linux` (admin key).
 2. `ominullctl maint run HOST PKG... --mode audit|enforce|revert` runs with
    the host's effective settings, asks the owner when needed, waits for each
    job and prints one line per package: `HOST PKG {result line}`.
@@ -263,8 +302,15 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
 - `packages/windows/tests/run.sh` (pwsh from `PATH` or `$OMINULL_PWSH`) parses
   each script, rejects PowerShell 7-only syntax and forbidden operations, and
   unit-tests parameters, the result line, controls, `na`, careful gating,
-  revert recording and restoring, and the preflight rules; the Windows CI job
-  runs it.
+  revert recording and restoring, the preflight rules and maintenance mode
+  (powercfg parsing, enforce/extend/revert/audit, expiry, the saved dump);
+  the Windows CI job runs it.
+- `ominullctl` tests also run each `packages/linux/*.sh` under `sh -n`, a
+  read-only audit (one result line, exit code matching the state) and a bad
+  parameter (fails before changing anything).
+- `hub/pkg/server/maintenance_mode_test.go`: each platform gets its own
+  package, the card state from the latest run, expiry, a Linux audit without a
+  tap and the schedule never running maintenance mode.
 - `hub/pkg/scripts/package_params_test.go`: header parsing, parameter checks,
   change summaries and settings resolution including expiry.
 - `hub/pkg/responseauth/package_rule_test.go`: baseline, rule coverage and

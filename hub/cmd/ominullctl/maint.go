@@ -222,9 +222,28 @@ func (c *APIClient) maintStatus(endpoint string) error {
 				CompletedAt *time.Time `json:"completed_at"`
 			} `json:"last"`
 		} `json:"packages"`
+		MaintenanceMode *struct {
+			Package string     `json:"package"`
+			On      bool       `json:"on"`
+			Until   *time.Time `json:"until"`
+			Pending string     `json:"pending"`
+			Hours   int        `json:"hours"`
+		} `json:"maintenance_mode"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return fmt.Errorf("unreadable answer: %s", strings.TrimSpace(string(raw)))
+	}
+	if m := out.MaintenanceMode; m != nil {
+		switch {
+		case m.Pending == "check":
+			fmt.Printf("maintenance mode: being checked (%s)\n", m.Package)
+		case m.Pending != "":
+			fmt.Printf("maintenance mode: turning %s (%s)\n", m.Pending, m.Package)
+		case m.On && m.Until != nil:
+			fmt.Printf("maintenance mode: on until %s (off: ominullctl maint run %s %s --mode revert)\n", m.Until.Local().Format("Mon 15:04"), endpoint, m.Package)
+		default:
+			fmt.Printf("maintenance mode: off (on for %dh: ominullctl maint run %s %s --mode enforce)\n", m.Hours, endpoint, m.Package)
+		}
 	}
 	if len(out.Packages) == 0 {
 		fmt.Println("No maintenance packages fit this host.")

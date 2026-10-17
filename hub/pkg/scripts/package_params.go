@@ -88,6 +88,43 @@ type PackageHeader struct {
 	Timeout     int            `json:"timeout"`
 	Interval    string         `json:"interval"` // default schedule: hourly | daily | weekly
 	Params      []PackageParam `json:"params"`
+	// Platform is where the package runs: windows (the default) or linux.
+	Platform string `json:"platform,omitempty"`
+	// Role marks a package the hub gives a job beyond a scheduled check:
+	// maintenance_mode keeps a machine awake (enforce on, revert off, audit
+	// reports) and its state is shown and switched on its own.
+	Role string `json:"role,omitempty"`
+}
+
+// PackagePlatforms maps each platform a package may name to the interpreter
+// its runs use and the endpoint OS text that marks a host of that platform.
+var PackagePlatforms = map[string]struct{ Interpreter, OS string }{
+	"windows": {Interpreter: "powershell.exe", OS: "windows"},
+	"linux":   {Interpreter: "/bin/sh", OS: "linux"},
+}
+
+// PackageRoles are the roles a header may name.
+var PackageRoles = map[string]bool{"maintenance_mode": true}
+
+// RoleMaintenanceMode is the role of the keep-awake package.
+const RoleMaintenanceMode = "maintenance_mode"
+
+// PlatformName is the header's platform, windows when unset.
+func (h *PackageHeader) PlatformName() string {
+	if h.Platform == "" {
+		return "windows"
+	}
+	return h.Platform
+}
+
+// Interpreter is what the package's runs are executed with.
+func (h *PackageHeader) Interpreter() string {
+	return PackagePlatforms[h.PlatformName()].Interpreter
+}
+
+// RunsOn says whether a host reporting this OS text runs the package.
+func (h *PackageHeader) RunsOn(osText string) bool {
+	return strings.Contains(strings.ToLower(osText), PackagePlatforms[h.PlatformName()].OS)
 }
 
 var (
@@ -133,6 +170,10 @@ func ParsePackageHeader(source string) (*PackageHeader, error) {
 		return nil, fmt.Errorf("timeout must be 1-%d seconds", MaxTimeoutSeconds)
 	case len(h.Params) > maxPackageParams:
 		return nil, fmt.Errorf("at most %d params", maxPackageParams)
+	case h.Platform != "" && PackagePlatforms[h.Platform].Interpreter == "":
+		return nil, errors.New("platform must be windows or linux")
+	case h.Role != "" && !PackageRoles[h.Role]:
+		return nil, errors.New("role must be maintenance_mode or left out")
 	}
 	if _, ok := RecurrenceInterval(h.Interval); !ok {
 		return nil, errors.New("interval must be hourly, daily or weekly")

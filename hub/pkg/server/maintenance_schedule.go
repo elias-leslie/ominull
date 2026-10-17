@@ -154,7 +154,7 @@ func (s *Server) runMaintenanceSchedules(now time.Time) {
 	tenants := map[string][]*storage.Endpoint{}
 	for i := range eps {
 		ep := eps[i]
-		if ep.Status == "retired" || !strings.Contains(strings.ToLower(ep.OS), "windows") {
+		if ep.Status == "retired" {
 			continue
 		}
 		t := ep.TenantID
@@ -203,11 +203,15 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		return err
 	}
 	for _, d := range defs {
-		if !windowsInterpreter(d.Script.Interpreter) {
+		// Maintenance mode is switched on for a while, never on a schedule.
+		if d.Script.Interpreter != d.Header.Interpreter() || d.Header.Role == scripts.RoleMaintenanceMode {
 			continue
 		}
 		groups := map[string]*pendingAsk{} // item digest -> run
 		for _, ep := range eps {
+			if !d.Header.RunsOn(ep.OS) {
+				continue
+			}
 			eff := st.Effective(d.Header, ep.ID)
 			if !eff.Enabled || now.Sub(ep.LastSeenAt) >= endpointOnline {
 				continue

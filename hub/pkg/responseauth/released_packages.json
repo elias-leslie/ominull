@@ -19,6 +19,14 @@
   "name": "windows-cleanup",
   "risk": "safe"
  },
+ "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
+  "name": "linux-maintenance-mode",
+  "risk": "safe"
+ },
+ "f3131ee949640a8cd8b06aa77631c6741e44db4cd0c2781bdac1f5c7eb02b3cd": {
+  "name": "windows-maintenance-mode",
+  "risk": "safe"
+ },
  "fa81d7b0dc4e972b1f73385c9001c7a0e9f4628d090de76b173c1a0d769b9bfb": {
   "name": "windows-performance",
   "risk": "safe"

@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $Dir = Split-Path -Parent $PSScriptRoot
-$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit'
+$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode'
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Passed = 0
 function Check([string]$What, [bool]$Ok) {
@@ -62,7 +62,9 @@ foreach ($n in $Names) {
         Check "$n header risk" (@('safe', 'careful') -contains $meta.risk)
         Check "$n header reboot is bool" ($meta.reboot -is [bool])
         Check "$n header timeout 1..3600" (($meta.timeout -is [long] -or $meta.timeout -is [int]) -and $meta.timeout -ge 1 -and $meta.timeout -le 3600)
-        Check "$n header key order" ((@($meta.PSObject.Properties.Name) -join ',') -eq 'name,title,description,category,risk,reboot,timeout,interval,params')
+        Check "$n header key order" ((@($meta.PSObject.Properties.Name) -join ',') -match '^name,title,description,category,risk,reboot,timeout,interval,params(,platform)?(,role)?$')
+        if ($meta.PSObject.Properties.Name -contains 'platform') { Check "$n header platform" ($meta.platform -ceq 'windows') }
+        if ($meta.PSObject.Properties.Name -contains 'role') { Check "$n header role" ($meta.role -ceq 'maintenance_mode' -and $n -eq 'maintenance-mode') }
         Check "$n header category" (@('maintenance', 'security') -contains $meta.category)
         Check "$n header interval" (@('hourly', 'daily', 'weekly') -contains $meta.interval)
         $headers[$n] = $meta
@@ -458,6 +460,68 @@ foreach ($n in 'cleanup', 'updates') {
         Check 'debloat: Appx calls run with the package TEMP, restored after' ($script:seen[0] -eq "$tmp\tmp" -and [Environment]::GetEnvironmentVariable('TEMP') -eq $oldTemp)
         $Detail = [ordered]@{}; $script:states = @($dirty, $dirty); Invoke-Package
         Check 'debloat: drift after the test is failed' ($script:State -eq 'failed')
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# Maintenance mode: powercfg parsing, enforce/extend/revert/audit with stand-ins.
+& {
+    . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'maintenance-mode.ps1'))))
+    $q = "Power Setting GUID: 29f6c1db-86da-48c5-9fdb-f2b67b1f44da  (Sleep after)`n  Minimum Possible Setting: 0x00000000`n  Maximum Possible Setting: 0xffffffff`n" +
+        "  Possible Settings increment: 0x00000001`n  Possible Settings units: Seconds`nCurrent AC Power Setting Index: 0x00000708`nCurrent DC Power Setting Index: 0x0000012c"
+    $v = ConvertFrom-PowerQuery $q
+    Check 'mm: query gives AC then DC' ($v.Count -eq 2 -and $v[0] -eq 1800 -and $v[1] -eq 300)
+    Check 'mm: query without values is null' ($null -eq (ConvertFrom-PowerQuery 'Power Setting GUID: 29f6c1db-86da-48c5-9fdb-f2b67b1f44da'))
+    $h = $q.Replace('29f6c1db-86da-48c5-9fdb-f2b67b1f44da', '9d7815a6-7ee4-497e-8888-515a05f02364').Replace('0x00000708', '0x00002a30').Replace('0x0000012c', '0x00000e10')
+    $d = ConvertFrom-PowerDump ("Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)`n" + $q + "`n" + $h)
+    Check 'mm: saved dump split by setting' ($d['standby.ac'] -eq 1800 -and $d['standby.dc'] -eq 300 -and $d['hibernate.ac'] -eq 10800 -and $d['hibernate.dc'] -eq 3600)
+    Check 'mm: dump missing a setting is null' ($null -eq (ConvertFrom-PowerDump $q))
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "ominull-test-mm-$PID"; $script:Root = $tmp; $Pkg = 'windows-maintenance-mode'; $Opt = @{ hours = 6 }
+    New-Item -ItemType Directory -Force -Path "$tmp\state" | Out-Null
+    $script:pw = [ordered]@{ 'standby.ac' = 1800; 'standby.dc' = 300; 'hibernate.ac' = 10800; 'hibernate.dc' = 3600 }; $script:task = $null; $script:restored = 0
+    function Get-ActiveScheme { '381b4222-f694-41f0-9685-ff5bb260df2e' }
+    function Get-PowerValues($Scheme) { $o = [ordered]@{}; foreach ($k in $script:pw.Keys) { $o[$k] = $script:pw[$k] }; $o }
+    function Set-PowerValues($Scheme, $Values) { foreach ($e in $Values.GetEnumerator()) { $script:pw[$e.Key] = $e.Value } }
+    function Register-EndTask([datetime]$Until) { $script:task = $Until }
+    function Restore-Power { $script:restored++; $s = Get-Content -LiteralPath (Get-StateFile) -Raw | ConvertFrom-Json
+        foreach ($p in $s.saved.PSObject.Properties) { $script:pw[$p.Name] = $p.Value }; Remove-Item -LiteralPath (Get-StateFile); $script:task = $null; , @('x') }
+    try {
+        $Changed = New-Object System.Collections.Generic.List[string]; $Detail = [ordered]@{}; $Mode = 'enforce'
+        Invoke-Package
+        $st = Get-Content -LiteralPath (Get-StateFile) -Raw | ConvertFrom-Json
+        Check 'mm: enforce turns sleep off' ($script:State -eq 'fixed' -and -not (@($script:pw.Values) | Where-Object { $_ -ne 0 }) -and $Detail.maintenance_mode.on)
+        Check 'mm: enforce saves the values before' ($st.saved.'standby.ac' -eq 1800 -and $st.saved.'hibernate.dc' -eq 3600)
+        Check 'mm: end task at now + hours' ($script:task -and [math]::Abs(($script:task - [datetime]::UtcNow.AddHours(6)).TotalMinutes) -lt 1)
+        $Opt = @{ hours = 12 }; $Changed.Clear(); $Detail = [ordered]@{}; Invoke-Package
+        $st = Get-Content -LiteralPath (Get-StateFile) -Raw | ConvertFrom-Json
+        Check 'mm: enforce again extends and keeps the first saved values' ($script:State -eq 'fixed' -and $st.saved.'standby.ac' -eq 1800 -and $Changed[0] -match '^extended' -and
+            [math]::Abs(($script:task - [datetime]::UtcNow.AddHours(12)).TotalMinutes) -lt 1)
+        $Mode = 'audit'; $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: audit reports on and until' ($script:State -eq 'ok' -and $Detail.maintenance_mode.on -and [bool]$Detail.maintenance_mode.until)
+        $Mode = 'revert'; $Changed.Clear(); $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: revert puts the values back' ($script:State -eq 'fixed' -and $script:pw['standby.ac'] -eq 1800 -and $script:pw['hibernate.dc'] -eq 3600 -and -not (Test-Path -LiteralPath (Get-StateFile)))
+        $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: revert when off is ok' ($script:State -eq 'ok' -and -not $Detail.maintenance_mode.on)
+        $Mode = 'audit'; $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: audit when off' ($script:State -eq 'ok' -and -not $Detail.maintenance_mode.on)
+        # An end that passed while the machine was off: audit flags it, enforce ends it first.
+        @{ scheme = 'x'; saved = @{ 'standby.ac' = 900 }; since = '2026-10-01T00:00:00.0000000Z'; until = '2026-10-01T06:00:00.0000000Z' } | ConvertTo-Json | Set-Content -LiteralPath (Get-StateFile)
+        $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: audit flags an expired mode not yet ended' ($script:State -eq 'drift' -and -not $Detail.maintenance_mode.on)
+        $Mode = 'enforce'; $Opt = @{ hours = 6 }; $Changed.Clear(); $Detail = [ordered]@{}; $n0 = $script:restored; Invoke-Package
+        Check 'mm: enforce ends an expired mode, then starts afresh' ($script:restored -eq $n0 + 1 -and $Changed[0] -match 'expired' -and $script:State -eq 'fixed')
+        $Mode = 'revert'; $Detail = [ordered]@{}; Invoke-Package
+        # The operator's earlier power-before.txt wins over the current (already zero) values.
+        $script:pw = [ordered]@{ 'standby.ac' = 0; 'standby.dc' = 0; 'hibernate.ac' = 0; 'hibernate.dc' = 0 }
+        Set-Content -LiteralPath "$tmp\state\power-before.txt" -Value ("Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20`n" + $q + "`n" + $h)
+        $Mode = 'enforce'; $Changed.Clear(); $Detail = [ordered]@{}; Invoke-Package
+        $st = Get-Content -LiteralPath (Get-StateFile) -Raw | ConvertFrom-Json
+        Check 'mm: saved power-before.txt is imported once' ($Detail.saved_from -eq 'power-before.txt' -and $st.saved.'standby.ac' -eq 1800 -and
+            -not (Test-Path -LiteralPath "$tmp\state\power-before.txt") -and (Test-Path -LiteralPath "$tmp\state\power-before.txt.imported"))
+        $Mode = 'revert'; $Detail = [ordered]@{}; Invoke-Package
+        Check 'mm: revert after import restores the operator values' ($script:pw['standby.ac'] -eq 1800 -and $script:pw['hibernate.ac'] -eq 10800)
+        function Set-PowerValues($Scheme, $Values) { throw 'denied' }
+        $Mode = 'enforce'; $Detail = [ordered]@{}; $threw = $false; try { Invoke-Package } catch { $threw = $true }
+        Check 'mm: a failed enforce restores and leaves no state' ($threw -and -not (Test-Path -LiteralPath (Get-StateFile)) -and $null -eq $script:task)
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

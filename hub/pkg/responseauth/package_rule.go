@@ -278,11 +278,13 @@ func parsePackageItem(raw string) (PackageItem, error) {
 	}
 	it.Name = cleanText(p.ScriptID, 64)
 	rp, ok := releasedPackages[strings.ToLower(p.ScriptDigest)]
-	if !ok || p.Interpreter != "powershell.exe" {
+	if !ok {
 		return it, nil
 	}
+	// The released header names the platform, and so the one interpreter its
+	// runs may use (powershell.exe on Windows, /bin/sh on Linux).
 	h, err := scripts.ParsePackageHeader(p.Source)
-	if err != nil || h.Name != rp.Name || h.Risk != rp.Risk {
+	if err != nil || h.Name != rp.Name || h.Risk != rp.Risk || p.Interpreter != h.Interpreter() {
 		return it, nil
 	}
 	if err := h.CheckRun(p.Parameters); err != nil {

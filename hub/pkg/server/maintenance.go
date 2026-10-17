@@ -46,6 +46,7 @@ type packageStatus struct {
 	Interpreter    string      `json:"interpreter"`
 	Risk           string      `json:"risk"`
 	Category       string      `json:"category"` // maintenance | security
+	Role           string      `json:"role,omitempty"`
 	RebootPossible bool        `json:"reboot_possible"`
 	Timeout        int         `json:"timeout"`
 	LatestVersion  int         `json:"latest_version"`
@@ -175,7 +176,7 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		}
 		st := packageStatus{
 			ScriptID: sc.ID, Name: sc.Name, Title: meta.Title, Description: sc.Description, Interpreter: sc.Interpreter,
-			Risk: meta.Risk, Category: packageCategory(meta.Category), RebootPossible: meta.Reboot, Timeout: meta.Timeout, LatestVersion: sc.LatestVersion,
+			Risk: meta.Risk, Category: packageCategory(meta.Category), Role: meta.Role, RebootPossible: meta.Reboot, Timeout: meta.Timeout, LatestVersion: sc.LatestVersion,
 		}
 		if st.Title == "" {
 			st.Title = sc.Name
@@ -186,7 +187,8 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		out = append(out, st)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"packages": out})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"packages": out,
+		"maintenance_mode": s.maintenanceModeFor(tenantID, epID, ep.OS, latest, now)})
 }
 
 // packageStateLabel says a package run's state in words and its tone.
@@ -251,7 +253,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	compliance := map[string]map[string]int{} // category -> pass/fail
 	libraries := map[string][]*scripts.Script{}
 	for _, ep := range eps {
-		if ep.Status == "retired" || !strings.Contains(strings.ToLower(ep.OS), "windows") {
+		if ep.Status == "retired" {
 			continue
 		}
 		list, ok := libraries[ep.TenantID]

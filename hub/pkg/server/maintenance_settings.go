@@ -87,6 +87,8 @@ type settingsPackageView struct {
 	Title       string                    `json:"title"`
 	Description string                    `json:"description"`
 	Category    string                    `json:"category"`
+	Platform    string                    `json:"platform"`
+	Role        string                    `json:"role,omitempty"`
 	Risk        string                    `json:"risk"`
 	Reboot      bool                      `json:"reboot"`
 	Version     int                       `json:"version"`
@@ -175,7 +177,7 @@ func (s *Server) getMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 	for _, d := range defs {
 		h := d.Header
 		v := settingsPackageView{ScriptID: d.Script.ID, Name: h.Name, Title: h.Title, Description: h.Description,
-			Category: h.Category, Risk: h.Risk, Reboot: h.Reboot, Version: d.Version.Version, Interval: h.Interval,
+			Category: h.Category, Platform: h.PlatformName(), Role: h.Role, Risk: h.Risk, Reboot: h.Reboot, Version: d.Version.Version, Interval: h.Interval,
 			Fleet: rowPtr(st, h.Name, ""), FleetEff: st.Effective(h, "")}
 		for i := range h.Params {
 			p := &h.Params[i]

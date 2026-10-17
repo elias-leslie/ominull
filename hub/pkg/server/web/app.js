@@ -1201,9 +1201,22 @@
   }
 
   /* Windows hosts show the maintenance packages, one per state the card draws. */
+  /* Demo maintenance mode per endpoint: { until: ms } while on. */
+  var DEMO_MAINT_MODE = {};
+  function demoMaintMode(ep, platform) {
+    var cur = DEMO_MAINT_MODE[ep];
+    var on = !!(cur && cur.until > Date.now());
+    var hours = parseInt(((demoMaintSettings("?endpoint_id=" + ep).packages.filter(function (p) { return p.role; })[0] || {}).effective || { params: {} }).params.hours || "6", 10);
+    return { script_id: "demo-" + platform + "-maintenance-mode", package: platform + "-maintenance-mode", on: on, hours: hours,
+      until: on ? new Date(cur.until).toISOString() : undefined };
+  }
   function demoMaintenance(path) {
     var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
     var host = arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === ep; })[0];
+    if (host && /linux/i.test(host.os || "")) {
+      return { packages: [{ script_id: "demo-linux-maintenance-mode", name: "linux-maintenance-mode", title: "Maintenance mode", role: "maintenance_mode",
+        interpreter: "/bin/sh", risk: "safe", timeout: 60, latest_version: 1, last: null }], maintenance_mode: demoMaintMode(ep, "linux") };
+    }
     if (!host || !/windows/i.test(host.os || "")) return { packages: [] };
     function pkg(name, title, desc, risk, timeout, last) {
       return { script_id: "demo-" + name, name: name, title: title, description: desc, interpreter: "powershell.exe",
@@ -1228,8 +1241,9 @@
       pkg("windows-debloat", "Remove bundled apps", "Removes a fixed list of bundled and sponsored apps.", "careful", 900, null),
       pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
       pkg("windows-privacy", "Privacy", "Sets telemetry, advertising, suggestions, Copilot and Recall policies.", "safe", 300, run("ok", "audit", 2880)),
-      pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null }))
-    ] };
+      pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null })),
+      Object.assign(pkg("windows-maintenance-mode", "Maintenance mode", "Keeps the computer awake while maintenance runs.", "safe", 120, null), { role: "maintenance_mode" })
+    ], maintenance_mode: demoMaintMode(ep, "windows") };
   }
 
   /* Maintenance settings for the demo console: the packages above with a
@@ -1262,7 +1276,9 @@
       ["windows-debloat", "Remove bundled apps", "maintenance", "careful", "weekly", [["apps", "list", "Microsoft.BingNews,*CandyCrush*", null, null, "Apps to remove."]]],
       ["windows-performance", "Gaming performance", "maintenance", "safe", "weekly", [["game_mode", "bool", "true", null, null, "Turn on Game Mode."], ["disable_vbs", "bool", "false", null, null, "Turn off virtualization-based security (careful)."]]],
       ["windows-privacy", "Privacy", "maintenance", "safe", "weekly", []],
-      ["windows-updates", "Windows updates", "maintenance", "safe", "daily", [["exclude", "list", "Firmware", null, null, "Update classes never installed."]]]
+      ["windows-updates", "Windows updates", "maintenance", "safe", "daily", [["exclude", "list", "Firmware", null, null, "Update classes never installed."]]],
+      ["windows-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before the machine's own sleep settings come back"]], "maintenance_mode", "windows"],
+      ["linux-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before sleep is allowed again"]], "maintenance_mode", "linux"]
     ];
     function eff(name, defaults, scopeEp) {
       var f = DEMO_MAINT_ROWS[name + "|"] || {}, e = scopeEp ? (DEMO_MAINT_ROWS[name + "|" + scopeEp] || {}) : {};
@@ -1281,7 +1297,7 @@
           return { name: p[0], type: p[1], default: p[2], min: p[3], max: p[4], max_items: p[1] === "list" ? 32 : undefined, description: p[5], careful: p[0] === "disable_vbs" };
         });
         var fe = eff(d[0], defaults, ""); delete fe.params.__interval;
-        var out = { script_id: "demo-" + d[0], name: d[0], title: d[1], description: "", category: d[2], risk: d[3], version: 3,
+        var out = { script_id: "demo-" + d[0], name: d[0], title: d[1], description: "", category: d[2], risk: d[3], version: 3, role: d[6], platform: d[7] || "windows",
           default_interval: d[4], params: params, fleet: DEMO_MAINT_ROWS[d[0] + "|"] || null, fleet_effective: fe };
         if (ep) { out.endpoint = DEMO_MAINT_ROWS[d[0] + "|" + ep] || null; out.effective = eff(d[0], defaults, ep); delete out.effective.params.__interval; }
         return out;
@@ -1488,6 +1504,15 @@
         if (body[k] !== undefined) { DEMO_TERMINAL_LIMITS.limits[k] = body[k]; DEMO_TERMINAL_LIMITS.saved = true; }
       });
       return Object.assign(demoTerminalLimits(), { changed: JSON.stringify(DEMO_TERMINAL_LIMITS.limits) !== before || !!body.reset });
+    }
+    if (base === "/api/v1/maintenance/run") {
+      var mm = /-maintenance-mode$/.test((body.packages || [])[0] || "");
+      (body.endpoint_ids || []).forEach(function (id) {
+        if (!mm) return;
+        if (body.mode === "enforce") DEMO_MAINT_MODE[id] = { until: Date.now() + demoMaintMode(id, "windows").hours * 3600000 };
+        else if (body.mode === "revert") delete DEMO_MAINT_MODE[id];
+      });
+      return { jobs: (body.endpoint_ids || []).map(function (id) { return { endpoint_id: id, package: (body.packages || [])[0], job_id: "demo-job-" + Date.now() }; }) };
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
@@ -9207,9 +9232,9 @@
   function loadMaintenance(epID) {
     var cur = state.maintenanceByEndpoint[epID];
     if (cur && cur.loading) return;
-    state.maintenanceByEndpoint[epID] = { loading: true, at: Date.now(), packages: cur && cur.packages };
+    state.maintenanceByEndpoint[epID] = { loading: true, at: Date.now(), packages: cur && cur.packages, mode: cur && cur.mode };
     request("/api/v1/maintenance?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
-      state.maintenanceByEndpoint[epID] = { at: Date.now(), packages: arrayOf(d && d.packages) };
+      state.maintenanceByEndpoint[epID] = { at: Date.now(), packages: arrayOf(d && d.packages), mode: (d && d.maintenance_mode) || null };
       if (state.routeKey) renderRoute();
     }).catch(function (e) {
       state.maintenanceByEndpoint[epID] = { at: Date.now(), error: (e && e.message) || "request failed" };
@@ -9235,7 +9260,7 @@
       return isWindows ? card("Maintenance and security", emptyBox("No maintenance packages in the script library yet."), null, true) : null;
     }
     /* A run in flight changes on the agent's schedule, not ours: re-read while one is open. */
-    var open = all.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); });
+    var open = all.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); }) || !!(m.mode && m.mode.pending);
     if (open && !m.loading && Date.now() - m.at > 10000) loadMaintenance(ep.id);
     var sw = state.maintSettingsByEndpoint[ep.id];
     if (!sw || (!sw.loading && !sw.data && !sw.error)) loadMaintSettings(ep.id);
@@ -9243,8 +9268,10 @@
     var byName = {};
     arrayOf(settings && settings.packages).forEach(function (p) { byName[p.name] = p; });
 
+    /* A host whose only package is maintenance mode (Linux today) shows just that line. */
+    if (!all.some(function (p) { return !p.role; })) return card("Maintenance and security", maintModeLine(m.mode, asset, byName), null, true);
     var tab = state.maintCardTab || "maintenance";
-    var pkgs = all.filter(function (p) { return (p.category || "maintenance") === tab; });
+    var pkgs = all.filter(function (p) { return !p.role && (p.category || "maintenance") === tab; });
     var pass = 0, fail = 0;
     pkgs.forEach(function (p) { if (p.last) { pass += p.last.pass || 0; fail += p.last.fail || 0; } });
     var cat = arrayOf(settings && settings.categories).filter(function (c) { return c.name === tab; })[0];
@@ -9297,9 +9324,10 @@
       h("option", { value: "on", text: "On for this machine", selected: cat.endpoint === true }),
       h("option", { value: "off", text: "Off for this machine", selected: cat.endpoint === false })) : null;
     return card("Maintenance and security", h("div", {},
+      maintModeLine(m.mode, asset, byName),
       h("div", { cls: "card-body uf uf-wrap uf-g1" },
         maintTabs(tab, function (id) { state.maintCardTab = id; renderRoute(); }),
-        h("span", { cls: "fill" }),
+        h("span", { cls: "u-grow" }),
         maintCompliance(pass, fail),
         catSel ? h("label", { cls: "uf uf-g1" }, h("span", { cls: "dim-2", text: "Scheduled runs" }), catSel) : null,
         catNote,
@@ -9307,6 +9335,46 @@
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
         : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."),
       h("div", { cls: "card-body pending", text: "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking; anything else asks you to approve on your phone. Packages never reboot the machine." })), null, true);
+  }
+
+  /* Maintenance mode: keeps the machine awake while maintenance runs (sleep
+     and idle actions off) until an end time, when the machine lets go by
+     itself. Turning it on or off is a run of its package (enforce / revert);
+     how long it lasts is that package's hours setting. */
+  function maintModeLine(mode, asset, byName) {
+    if (!mode) return null;
+    var name = asset.name;
+    var s = byName && byName[mode.package];
+    var status, action = null;
+    if (mode.pending) {
+      status = h("span", { role: "status", text: mode.pending === "on" ? "Turning on…" : mode.pending === "off" ? "Turning off…" : "Checking…" });
+    } else if (mode.on) {
+      var until = parseTime(mode.until);
+      status = h("span", {}, chip("warn", "On"), h("span", { text: " Kept awake until " + (until ? until.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "the end time") }));
+      action = h("button", { cls: "btn mini", type: "button", text: "Turn off", disabled: READ_ONLY || !IS_ADMIN, "aria-label": "Turn off maintenance mode on " + name,
+        on: { click: function () { maintModeRun(mode, asset, "revert"); } } });
+    } else {
+      var failed = mode.last && (mode.last.state === "failed" || mode.last.state === "no_result");
+      status = h("span", {}, h("span", { text: "Off" }),
+        failed ? h("span", { cls: "dim-2", text: " · last try failed" + (mode.last.reason ? ": " + mode.last.reason : "") }) : null);
+      action = h("button", { cls: "btn mini", type: "button", text: "Turn on for " + spanWords((mode.hours || 6) * 3600), disabled: READ_ONLY || !IS_ADMIN,
+        "aria-label": "Turn on maintenance mode on " + name + " for " + spanWords((mode.hours || 6) * 3600),
+        on: { click: function () { maintModeRun(mode, asset, "enforce"); } } });
+    }
+    return h("div", { cls: "card-body" },
+      h("div", { cls: "uf uf-wrap uf-g1" },
+        h("b", { text: "Maintenance mode" }), status, h("span", { cls: "u-grow" }), action,
+        s ? h("button", { cls: "btn mini", type: "button", text: "How long…", "aria-label": "How long maintenance mode lasts on " + name,
+          on: { click: function () { openMaintSettingsSheet(mode.package, asset.endpoint.id, name); } } }) : null),
+      h("div", { cls: "dim-2 u-mt1", text: "Keeps it awake for long jobs: no sleep or hibernate until the end time, then its own settings come back by themselves." }));
+  }
+
+  function maintModeRun(mode, asset, how) {
+    var on = how === "enforce";
+    var label = (on ? "Turn on maintenance mode for " + spanWords((mode.hours || 6) * 3600) : "Turn off maintenance mode") + " on " + asset.name;
+    ownerApproved("/api/v1/maintenance/run", { endpoint_ids: [asset.endpoint.id], packages: [mode.package], mode: how }, { label: label })
+      .then(function () { toast((on ? "Turning on" : "Turning off") + " maintenance mode on " + asset.name, "ok"); loadMaintenance(asset.endpoint.id); })
+      .catch(function (e) { if (e && e.handled) return; toast("Maintenance mode not changed: " + e.message, "crit"); });
   }
 
   /* ------------------------------------------------- maintenance settings
@@ -9446,23 +9514,24 @@
           on: { click: function () { save(change, name); } } }) : null;
       }
       var rows = [];
+      var scheduled = !pkg.role; /* maintenance mode is turned on by hand or by a playbook, never on a schedule */
       var enabledSet = row.enabled !== undefined && row.enabled !== null;
       var enabledBox = h("input", { type: "checkbox", "data-field": "enabled", checked: !!eff.package_enabled, disabled: !editable,
         "aria-label": "Run " + pkg.title + " on a schedule", on: { change: function (e) { save({ enabled: e.target.checked }, "enabled"); } } });
-      rows.push([h("b", { text: "Scheduled" }), enabledBox,
+      if (scheduled) rows.push([h("b", { text: "Scheduled" }), enabledBox,
         origin(enabledSet, epID ? "fleet default (" + (up && up.package_enabled ? "on" : "off") + ")" : "default (off)"),
         resetBtn(enabledSet, "scheduled", { enabled: null }, "enabled")]);
       var modeSet = !!row.mode;
       var modeSel = h("select", { "data-field": "mode", disabled: !editable, "aria-label": "Mode for " + pkg.title,
         on: { change: function (e) { save({ mode: e.target.value }, "mode"); } } },
         MAINT_MODES.map(function (m) { return h("option", { value: m[0], text: m[1], selected: eff.mode === m[0] }); }));
-      rows.push([h("b", { text: "Mode" }), modeSel, origin(modeSet, epID ? "fleet default (" + (up ? up.mode : "audit") + ")" : "default (audit)"),
+      if (scheduled) rows.push([h("b", { text: "Mode" }), modeSel, origin(modeSet, epID ? "fleet default (" + (up ? up.mode : "audit") + ")" : "default (audit)"),
         resetBtn(modeSet, "mode", { mode: null }, "mode")]);
       var intSet = !!row.interval;
       var intSel = h("select", { "data-field": "interval", disabled: !editable, "aria-label": "How often " + pkg.title + " runs",
         on: { change: function (e) { save({ interval: e.target.value }, "interval"); } } },
         MAINT_INTERVALS.map(function (m) { return h("option", { value: m[0], text: m[1], selected: eff.interval === m[0] }); }));
-      rows.push([h("b", { text: "How often" }), intSel,
+      if (scheduled) rows.push([h("b", { text: "How often" }), intSel,
         origin(intSet, epID ? "fleet default (" + maintIntervalLabel(up ? up.interval : pkg.default_interval) + ")" : "default (" + maintIntervalLabel(pkg.default_interval) + ")"),
         resetBtn(intSet, "how often", { interval: null }, "interval")]);
       arrayOf(pkg.params).forEach(function (p) {
@@ -9499,7 +9568,8 @@
         ]);
       });
       holder.appendChild(stackOnPhone(simpleTable(["Setting", "Value", "Comes from", ""], rows, { sortable: false })));
-      holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. Switching to enforce, turning on a careful package or step, or changing a setting asks you to approve on your phone before the next run. Turning a package off or back to audit never asks." }));
+      if (!scheduled) holder.appendChild(h("p", { cls: "pending", text: "Takes effect the next time maintenance mode is turned on. Saving runs nothing by itself." }));
+      else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. Switching to enforce, turning on a careful package or step, or changing a setting asks you to approve on your phone before the next run. Turning a package off or back to audit never asks." }));
       if (epID && editable && (pkg.endpoint && (pkg.endpoint.enabled !== undefined || pkg.endpoint.mode || pkg.endpoint.interval || pkg.endpoint.params))) {
         holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Use the fleet defaults for this machine",
           on: { click: function () { save({ reset: true }); } } })));
@@ -9598,14 +9668,15 @@
     var head = h("div", { cls: "card-body stack" },
       maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
       h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: (tab === "security" ? "Run scheduled security packages" : "Run scheduled maintenance packages") + " across the fleet" })),
-      h("p", { cls: "pending", text: "Fleet defaults for every Windows machine. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }));
+      h("p", { cls: "pending", text: "Fleet defaults for every machine the package fits (Windows or Linux). A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }));
     var rows = pkgs.map(function (p) {
       var eff = p.fleet_effective || {};
       var changed = maintChangedCount(p, eff);
       return [
-        h("div", {}, h("b", { text: p.title }), p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
+        h("div", {}, h("b", { text: p.title }), p.platform === "linux" ? h("span", { cls: "u-ml2" }, chip("idle", "Linux")) : null,
+          p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
           h("div", { cls: "dim-2", text: p.description || "" })),
-        maintEffectiveText(eff),
+        p.role ? h("span", { cls: "dim-2", text: "Turned on from a machine's page" }) : maintEffectiveText(eff),
         changed ? changed + " changed" : h("span", { cls: "dim-2", text: "defaults" }),
         "v" + p.version,
         h("button", { cls: "btn mini", type: "button", text: IS_ADMIN ? "Edit…" : "View…", "aria-label": "Settings for " + p.title,

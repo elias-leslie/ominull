@@ -4487,6 +4487,7 @@ input[type="url"] {
 .uf-wrap { flex-wrap: wrap; }
 .uf-between { justify-content: space-between; }
 .uf-col { display: flex; flex-direction: column; }
+.u-grow { flex: 1; }
 .uf-g1 { gap: var(--s-1); }
 .uf-g2 { gap: 6px; }
 .uf-g3 { gap: var(--s-2); }

@@ -22,6 +22,8 @@ type PackageMeta struct {
 	Risk     string `json:"risk,omitempty"`     // safe | careful
 	Reboot   bool   `json:"reboot,omitempty"`   // the package may need a reboot
 	Timeout  int    `json:"timeout,omitempty"`
+	Platform string `json:"platform,omitempty"` // windows | linux ("" reads as windows)
+	Role     string `json:"role,omitempty"`     // maintenance_mode, or empty
 }
 
 // Package returns the script's package metadata, or nil when it is not a package.

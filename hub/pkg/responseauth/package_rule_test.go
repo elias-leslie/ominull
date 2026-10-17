@@ -17,10 +17,15 @@ import (
 	"ominull/hub/pkg/scripts"
 )
 
-// packageSource is the released source of a package in packages/windows.
+// packageSource is the released source of a package in packages/windows or
+// packages/linux.
 func packageSource(t *testing.T, name string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "packages", "windows", strings.TrimPrefix(name, "windows-")+".ps1"))
+	dir, ext, base := "windows", ".ps1", strings.TrimPrefix(name, "windows-")
+	if b, ok := strings.CutPrefix(name, "linux-"); ok {
+		dir, ext, base = "linux", ".sh", b
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "packages", dir, base+ext))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,9 +220,12 @@ func TestPackageRunRefusesAmbiguousKeys(t *testing.T) {
 	}
 }
 
-// The authority's list of released packages is exactly packages/windows.
+// The authority's list of released packages is exactly packages/windows and
+// packages/linux.
 func TestReleasedPackagesMatchTheRepository(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join("..", "..", "..", "packages", "windows", "*.ps1"))
+	linux, _ := filepath.Glob(filepath.Join("..", "..", "..", "packages", "linux", "*.sh"))
+	files = append(files, linux...)
 	want := map[string]string{}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
@@ -239,7 +247,7 @@ func TestReleasedPackagesMatchTheRepository(t *testing.T) {
 			n, r, _ := strings.Cut(v, " ")
 			fmt.Fprintf(&b, "  %q: {\"name\": %q, \"risk\": %q},\n", d, n, r)
 		}
-		t.Fatalf("hub/pkg/responseauth/released_packages.json is out of step with packages/windows; it should hold:\n%s", b.String())
+		t.Fatalf("hub/pkg/responseauth/released_packages.json is out of step with packages/; it should hold:\n%s", b.String())
 	}
 }
 
