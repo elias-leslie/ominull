@@ -79,6 +79,9 @@ type Server struct {
 	// policy to saving the new one (detection_policy.go), so two saves cannot
 	// interleave and an approval is spent against the policy it was asked on.
 	policyMu sync.Mutex
+	// rolloutProvenanceSince: rollout/canary -> first unclean provenance report.
+	rolloutProvenanceMu    sync.Mutex
+	rolloutProvenanceSince map[string]time.Time
 	// evidenceStore manages encrypted forensic collections
 	evidenceStore *evidence.Store
 	// stopEvidenceRetention ends the hourly evidence prune started by Start.

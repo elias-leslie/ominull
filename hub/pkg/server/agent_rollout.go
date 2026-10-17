@@ -27,6 +27,12 @@ const (
 	rolloutCanaryDeadline = 30 * time.Minute
 	rolloutOnlineWithin   = 2 * time.Minute
 	rolloutTick           = 15 * time.Second
+	// rolloutProvenanceGrace is how long a canary already on the version may
+	// report unclean provenance before that halts the rollout. The package's
+	// own postinst restarts the agent while dpkg is still configuring it, so
+	// the first telemetry from the new binary can carry a stale package
+	// answer until the updater's restart a few seconds later.
+	rolloutProvenanceGrace = 3 * time.Minute
 )
 
 // scheduleAgentUpdates queues version for every endpoint want selects (and
@@ -213,13 +219,39 @@ func (s *Server) canaryHealth(ro storage.AgentRollout, now time.Time) (bool, str
 			return false, "canary " + id + " runs v" + ep.DriverVersion + ", newer than v" + ro.Version
 		}
 		if reason := provenanceIssue(*ep, ro.Version); reason != "" {
+			if s.provenanceIssueSince(ro.ID+"/"+id, now) < rolloutProvenanceGrace {
+				return false, ""
+			}
 			return false, "canary " + id + " runs v" + ep.DriverVersion + " but fails the native provenance check: " + reason
 		}
+		s.provenanceIssueCleared(ro.ID + "/" + id)
 		if now.Sub(ep.LastSeenAt) > rolloutOnlineWithin {
 			return false, ""
 		}
 	}
 	return true, ""
+}
+
+// provenanceIssueSince records when a canary was first seen at the version
+// with unclean provenance and returns how long that has lasted.
+func (s *Server) provenanceIssueSince(key string, now time.Time) time.Duration {
+	s.rolloutProvenanceMu.Lock()
+	defer s.rolloutProvenanceMu.Unlock()
+	if s.rolloutProvenanceSince == nil {
+		s.rolloutProvenanceSince = map[string]time.Time{}
+	}
+	first, ok := s.rolloutProvenanceSince[key]
+	if !ok {
+		s.rolloutProvenanceSince[key] = now
+		return 0
+	}
+	return now.Sub(first)
+}
+
+func (s *Server) provenanceIssueCleared(key string) {
+	s.rolloutProvenanceMu.Lock()
+	delete(s.rolloutProvenanceSince, key)
+	s.rolloutProvenanceMu.Unlock()
 }
 
 // releaseAgentRollout queues the held endpoints and delivers their grants,

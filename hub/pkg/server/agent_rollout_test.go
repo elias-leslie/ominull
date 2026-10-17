@@ -154,6 +154,16 @@ func TestStagedRolloutReleasesAfterHealthyCanary(t *testing.T) {
 	if queued("fleet-a") {
 		t.Fatal("released before the canary updated")
 	}
+	// The new binary's first report races dpkg (stale package answer); the
+	// updater's restart a moment later reports clean provenance.
+	if err := db.UpsertEndpoint(storage.Endpoint{ID: "canary", TenantID: "default", Hostname: "canary", OS: "Linux", DriverVersion: "1.2.0",
+		UpdateCapability: "deb", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "mismatch"}); err != nil {
+		t.Fatal(err)
+	}
+	s.advanceAgentRollouts(time.Now())
+	if ros, _ := db.AgentRollouts(false, 5); len(ros) != 1 || ros[0].State == "halted" {
+		t.Fatalf("a transient provenance mismatch halted the rollout: %+v", ros)
+	}
 	healthyCanary(t, s, "canary", "1.2.0")
 	s.advanceAgentRollouts(time.Now())
 	if !queued("fleet-a") || !queued("fleet-b") {
@@ -193,7 +203,14 @@ func TestStagedRolloutHaltsOnBadCanary(t *testing.T) {
 		UpdateCapability: "deb", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "unmanaged"}); err != nil {
 		t.Fatal(err)
 	}
-	s.advanceAgentRollouts(time.Now())
+	// A first unclean report is the package's own restart racing dpkg: wait.
+	now := time.Now()
+	s.advanceAgentRollouts(now)
+	if ros, _ := db.AgentRollouts(false, 5); len(ros) != 1 || ros[0].State == "halted" {
+		t.Fatalf("one unclean provenance report halted the rollout: %+v", ros)
+	}
+	// Still unclean after the grace period: halt.
+	s.advanceAgentRollouts(now.Add(rolloutProvenanceGrace + time.Second))
 	if job, _ := db.GetAgentUpdateJob("fleet-a"); job != nil {
 		t.Fatal("a canary failing provenance released the fleet")
 	}

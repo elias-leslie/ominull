@@ -2984,6 +2984,14 @@ static void ReplayQueuedTelemetry(const LINUX_AGENT_CONFIG* config, const char* 
 }
 
 static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVENT* flows, size_t flowCount) {
+    /* The package's postinst restarts the agent while dpkg is still
+     * configuring it, so the startup answer can be stale. Ask again, at most
+     * once a minute, until the package manager agrees with this binary. */
+    static time_t provenanceCheckedAt;
+    if (strcmp(config->provenance_status, "native") != 0 && time(NULL) - provenanceCheckedAt >= 60) {
+        provenanceCheckedAt = time(NULL);
+        DetectPackageProvenance(config);
+    }
     /* Checked before the batch is built, not after it fails: the payload and
      * the header that authenticates it are the things being protected. */
     if (!HubTransportReady(config)) return;
