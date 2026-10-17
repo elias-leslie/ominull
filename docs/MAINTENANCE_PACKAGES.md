@@ -230,7 +230,7 @@ ask is not asked again for 24 hours, or until the settings change.
 
 ## Nightshift feed
 
-The existing findings feed (`/api/v1/nightshift/feed`) carries two records:
+The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries two records:
 
 - `ominull.maintenance`: critical (pushes) when the latest run of any package
   on any host failed or returned no result line, with counts in the message
