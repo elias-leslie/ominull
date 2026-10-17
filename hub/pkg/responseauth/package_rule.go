@@ -34,9 +34,9 @@ package responseauth
 import (
 	"bytes"
 	"crypto/ed25519"
-	_ "embed"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -55,13 +55,13 @@ import (
 
 const (
 	// PackageRunRoute is the hub route a package run approval belongs to.
-	PackageRunRoute    = "/api/v1/maintenance/run"
-	packageRuleOffer   = "packages" // ApprovalStatement.Offer
-	packageRuleIdle    = 90 * 24 * time.Hour
-	packageMaxItems    = 10
-	packageMaxGrants   = 100
-	packageMaxPayload  = 512 * 1024
-	packageRulesKept   = 20 // per tenant
+	PackageRunRoute   = "/api/v1/maintenance/run"
+	packageRuleOffer  = "packages" // ApprovalStatement.Offer
+	packageRuleIdle   = 90 * 24 * time.Hour
+	packageMaxItems   = 10
+	packageMaxGrants  = 100
+	packageMaxPayload = 512 * 1024
+	packageRulesKept  = 20 // per tenant
 )
 
 // ErrRuleNotCovered refuses a rule-only request (the hub's schedule) that no
