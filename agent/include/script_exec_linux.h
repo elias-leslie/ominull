@@ -53,7 +53,7 @@ static const char* g_script_exec_state_dir = OMINULL_SCRIPT_STATE_DIR;
 #define SCRIPT_EXEC_MAX_SOURCE_BYTES  65536  // 64 KiB
 #define SCRIPT_EXEC_MAX_PARAMS_BYTES  16384  // 16 KiB
 #define SCRIPT_EXEC_DEFAULT_TIMEOUT   60     // 60 seconds
-#define SCRIPT_EXEC_MAX_TIMEOUT       300    // 300 seconds
+#define SCRIPT_EXEC_MAX_TIMEOUT       3600   // 1 hour (hub: scripts.MaxTimeoutSeconds)
 #define SCRIPT_EXEC_DEFAULT_MAX_OUT   1048576 // 1 MiB
 #define SCRIPT_EXEC_MAX_MAX_OUT       5242880 // 5 MiB
 #define SCRIPT_EXEC_MAX_PARAM_COUNT   64

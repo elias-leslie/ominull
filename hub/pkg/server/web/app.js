@@ -1195,6 +1195,31 @@
     return a;
   }
 
+  /* Windows hosts show the maintenance packages, one per state the card draws. */
+  function demoMaintenance(path) {
+    var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
+    var host = arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === ep; })[0];
+    if (!host || !/windows/i.test(host.os || "")) return { packages: [] };
+    function pkg(name, title, desc, risk, timeout, last) {
+      return { script_id: "demo-" + name, name: name, title: title, description: desc, interpreter: "powershell.exe",
+        risk: risk, reboot_possible: true, timeout: timeout, latest_version: 3, last: last };
+    }
+    function run(state, mode, ago, extra) {
+      var r = { job_id: "demo-job-" + state, job_state: "succeeded", state: state, mode: mode, reboot: false, changed: [],
+        requested_at: new Date(Date.now() - ago * 60000).toISOString(), completed_at: new Date(Date.now() - ago * 60000 + 90000).toISOString() };
+      Object.keys(extra || {}).forEach(function (k) { r[k] = extra[k]; });
+      return r;
+    }
+    return { packages: [
+      pkg("windows-audit", "Standards check", "Checks BitLocker, Defender, firewall, updates, disk space, TPM and Secure Boot.", "safe", 300, run("drift", "audit", 30)),
+      pkg("windows-cleanup", "Cleanup", "Clears old temp files, update downloads, crash dumps and superseded components.", "safe", 3600, run("fixed", "enforce", 300, { reboot: true, changed: ["windows_temp 812 MB", "component_store"] })),
+      pkg("windows-debloat", "Remove bundled apps", "Removes a fixed list of bundled and sponsored apps.", "careful", 900, null),
+      pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
+      pkg("windows-privacy", "Privacy", "Sets telemetry, advertising, suggestions, Copilot and Recall policies.", "safe", 300, run("ok", "audit", 2880)),
+      pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null }))
+    ] };
+  }
+
   function demoResponse(path, method, body) {
     if (!DEMO_CACHE) DEMO_CACHE = demoData();
     var base = path.split("?")[0];
@@ -1218,6 +1243,7 @@
         if (base === "/api/v1/learning/windows") { resolve({ windows: [] }); return; }
         if (base === "/api/v1/learning/proposals") { resolve({ window: "demo-window", proposals: [] }); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
+        if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);

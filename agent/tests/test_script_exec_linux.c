@@ -113,6 +113,12 @@ static void test_payload_parser(void) {
         expect("param[0] name matches", strcmp(params.params[0].name, "opt") == 0);
         expect("param[0] value matches", strcmp(params.params[0].value, "val") == 0);
     }
+
+    /* Maintenance packages run for up to an hour; past that the default applies. */
+    const char* hour = "{\"script_id\":\"s\",\"interpreter\":\"/bin/sh\",\"source\":\"true\",\"timeout_seconds\": 3600}";
+    expect("an hour-long timeout is accepted", ScriptExec_ParsePayload(hour, &params) && params.timeout_seconds == 3600);
+    const char* over = "{\"script_id\":\"s\",\"interpreter\":\"/bin/sh\",\"source\":\"true\",\"timeout_seconds\": 3601}";
+    expect("a timeout over an hour falls back to the default", ScriptExec_ParsePayload(over, &params) && params.timeout_seconds == SCRIPT_EXEC_DEFAULT_TIMEOUT);
 }
 
 /* 5. Test Contained Execution - Simple Command */

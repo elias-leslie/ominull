@@ -2667,6 +2667,62 @@ static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
  * Next-Gen Response Dispatcher & Execution (Slice 1D.1)
  * ------------------------------------------------------------------------- */
 
+/* RunScriptJobWorker runs one script job to completion inside a detached
+ * worker process and posts its result to the hub. */
+static int RunScriptJobWorker(const LINUX_AGENT_CONFIG* config, const char* job_id, const char* lease_id,
+                              ScriptExecParams* params) {
+    static char output_buf[65536];
+    bool truncated = false;
+    bool timed_out = false;
+    int64_t duration_ms = 0;
+
+    int exit_code = ScriptExec_RunContained(
+        params,
+        job_id,
+        output_buf,
+        sizeof(output_buf),
+        &truncated,
+        &timed_out,
+        &duration_ms
+    );
+
+    const char* state = (exit_code == 0) ? "succeeded" : "failed";
+    const char* error_code = timed_out ? "TIMED_OUT" : "";
+
+    char* escaped_out = ScriptExec_EscapeJSON(output_buf);
+    size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
+    char* res_body = (char*)malloc(body_sz);
+    bool posted = false;
+    if (res_body) {
+        snprintf(res_body, body_sz,
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
+            job_id, lease_id, state, exit_code, (long long)duration_ms,
+            (escaped_out ? ",\"stdout\":\"" : ""),
+            (escaped_out ? escaped_out : ""),
+            (escaped_out ? "\"" : ""),
+            (error_code[0] ? ",\"error_code\":\"" : ""),
+            (error_code[0] ? error_code : ""),
+            (error_code[0] ? "\"" : ""));
+        char res_url[sizeof(config->hub_url) + 64];
+        snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            char res_resp[1024] = {0};
+            HUB_RESPONSE_BUFFER response = { .data = res_resp, .cap = sizeof(res_resp), .len = 0, .overflow = false };
+            struct curl_slist* headers = SetupHubCurl(curl, config, res_url, res_body, strlen(res_body), NULL, &response, 30000L);
+            if (headers) {
+                posted = curl_easy_perform(curl) == CURLE_OK;
+                curl_slist_free_all(headers);
+            }
+            curl_easy_cleanup(curl);
+        }
+        free(res_body);
+    }
+    if (escaped_out) free(escaped_out);
+    if (!posted) fprintf(stderr, "[!] Could not post the result of script job %s\n", job_id);
+    return posted ? 0 : 1;
+}
+
 static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* respJson) {
     if (!config || !respJson) return;
 
@@ -2887,44 +2943,25 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 continue;
             }
 
-            char output_buf[65536] = {0};
-            bool truncated = false;
-            bool timed_out = false;
-            int64_t duration_ms = 0;
-
-            int exit_code = ScriptExec_RunContained(
-                &params,
-                offer->job_id,
-                output_buf,
-                sizeof(output_buf),
-                &truncated,
-                &timed_out,
-                &duration_ms
-            );
-
-            const char* state = (exit_code == 0) ? "succeeded" : "failed";
-            const char* error_code = timed_out ? "TIMED_OUT" : "";
-
-            char* escaped_out = ScriptExec_EscapeJSON(output_buf);
-            size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
-            char* res_body = (char*)malloc(body_sz);
-            if (res_body) {
-                snprintf(res_body, body_sz,
-                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
-                    offer->job_id, offer->lease_id, state, exit_code, (long long)duration_ms,
-                    (escaped_out ? ",\"stdout\":\"" : ""),
-                    (escaped_out ? escaped_out : ""),
-                    (escaped_out ? "\"" : ""),
-                    (error_code[0] ? ",\"error_code\":\"" : ""),
-                    (error_code[0] ? error_code : ""),
-                    (error_code[0] ? "\"" : ""));
-                char res_url[sizeof(config->hub_url) + 64];
-                snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
-                char res_resp[1024] = {0};
-                RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
-                free(res_body);
+            /* A script may run for up to an hour (maintenance packages), so it
+               runs in a detached worker (double fork, like a terminal session)
+               and the heartbeat loop carries on. The worker posts the result
+               on a curl handle of its own: the daemon's cached connection is
+               not shared across fork. */
+            pid_t mid_pid = fork();
+            if (mid_pid == 0) {
+                pid_t worker_pid = fork();
+                if (worker_pid == 0) {
+                    for (int fd = 3; fd < 1024; fd++) {
+                        close(fd);
+                    }
+                    _exit(RunScriptJobWorker(config, offer->job_id, offer->lease_id, &params));
+                }
+                _exit(worker_pid < 0 ? 1 : 0);
             }
-            if (escaped_out) free(escaped_out);
+            if (mid_pid > 0) {
+                while (waitpid(mid_pid, NULL, 0) < 0 && errno == EINTR) { }
+            }
         }
         // Unknown action kinds are ignored: no execution, no synthesis of success
     }

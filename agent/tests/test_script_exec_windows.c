@@ -132,6 +132,14 @@ static void test_payload_parsing(void) {
         "\"source\":\"echo evil\""
         "}";
     expect("reject disallowed interpreter in payload", !ScriptExec_ParsePayloadWin(evil_json, &params));
+
+    /* Maintenance packages run for up to an hour; past that the default applies. */
+    expect("an hour-long timeout is accepted",
+        ScriptExec_ParsePayloadWin("{\"script_id\":\"s\",\"interpreter\":\"cmd.exe\",\"source\":\"echo\",\"timeout_seconds\":3600}", &params) &&
+        params.timeout_seconds == 3600);
+    expect("a timeout over an hour falls back to the default",
+        ScriptExec_ParsePayloadWin("{\"script_id\":\"s\",\"interpreter\":\"cmd.exe\",\"source\":\"echo\",\"timeout_seconds\":3601}", &params) &&
+        params.timeout_seconds == SCRIPT_EXEC_DEFAULT_TIMEOUT);
 }
 
 static void test_cmd_simple_exec(void) {
