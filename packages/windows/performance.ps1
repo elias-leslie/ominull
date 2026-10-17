@@ -6,8 +6,10 @@ $Pkg = 'windows-performance'
 # Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
 # agent's own folder (never touched). Stdout carries only the final JSON line.
 function Initialize-Env {
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = 'C:\Windows'; $env:SystemRoot = $sr }
+    $sys = [Environment]::SystemDirectory
+    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
     if (-not $env:windir) { $env:windir = $sr }
+    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
     $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
     if (-not $env:ProgramData) { $env:ProgramData = $pd }
     if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }

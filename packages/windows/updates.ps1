@@ -1,4 +1,4 @@
-# ominull-package: {"name":"windows-updates","title":"Windows updates","description":"Installs pending Windows and driver updates, skipping previews, optional and feature updates, and reports whether a restart is needed.","risk":"safe","reboot":true,"timeout":3600}
+# ominull-package: {"name":"windows-updates","title":"Windows updates","description":"Installs pending Windows and driver updates, skipping previews, optional and feature updates and firmware, and reports whether a restart is needed.","risk":"safe","reboot":true,"timeout":3600}
 $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $WarningPreference = 'SilentlyContinue'
 $VerbosePreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-updates'
@@ -6,8 +6,10 @@ $Pkg = 'windows-updates'
 # Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
 # agent's own folder (never touched). Stdout carries only the final JSON line.
 function Initialize-Env {
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = 'C:\Windows'; $env:SystemRoot = $sr }
+    $sys = [Environment]::SystemDirectory
+    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
     if (-not $env:windir) { $env:windir = $sr }
+    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
     $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
     if (-not $env:ProgramData) { $env:ProgramData = $pd }
     if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }
@@ -132,6 +134,8 @@ function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detai
 function Test-Wanted($Update) {
     if ($Update.Title -match 'Preview' -or $Update.Title -match 'Feature update') { return $false }
     if ($Update.BrowseOnly) { return $false }
+    # Firmware (BIOS/EC) flashes are careful: listed under not_offered for the owner, never installed here.
+    if ($Update.Type -eq 2 -and $Update.DriverClass -eq 'Firmware') { return $false }
     foreach ($c in $Update.Categories) {
         if ($c.Name -eq 'Upgrades' -or $c.CategoryID -eq 'e6cf1350-c01b-414d-a61f-263d14d133b4') { return $false }
     }

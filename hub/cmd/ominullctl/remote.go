@@ -619,10 +619,21 @@ func heldSocket(endpoint string) string {
 	return filepath.Join(heldDir(), unsafeName.ReplaceAllString(endpoint, "_")+".sock")
 }
 
+// heldEndedMarker records why a held session ended without shell end.
+func heldEndedMarker(endpoint string) string {
+	return heldSocket(endpoint) + ".ended"
+}
+
 // heldCall sends one job to a held session; ok is false when none is held.
 func heldCall(endpoint string, job remoteJob) (remoteResult, bool, error) {
 	conn, err := net.Dial("unix", heldSocket(endpoint))
 	if err != nil {
+		// A held session that ended on its own must not turn the next exec
+		// into a fresh owner tap the owner did not expect.
+		if why, rerr := os.ReadFile(heldEndedMarker(endpoint)); rerr == nil {
+			_ = os.Remove(heldEndedMarker(endpoint))
+			return remoteResult{}, true, fmt.Errorf("the held session to %s ended (%s); open a new one with ominullctl shell open %s", endpoint, strings.TrimSpace(string(why)), endpoint)
+		}
 		return remoteResult{}, false, nil
 	}
 	defer conn.Close()
@@ -689,13 +700,21 @@ func runHolder() int {
 		return 1
 	}
 	defer os.Remove(sock)
+	marker := heldEndedMarker(spec.Session.Endpoint)
+	_ = os.Remove(marker)
 	stop := make(chan struct{})
 	var once sync.Once
 	end := func() { once.Do(func() { close(stop); ln.Close() }) }
+	endFor := func(why string) {
+		_ = os.WriteFile(marker, []byte(why+"\n"), 0o600)
+		end()
+	}
 	go func() {
 		select {
 		case <-time.After(spec.TTL):
+			endFor("its time limit passed")
 		case <-rs.ended:
+			endFor("the hub closed it")
 		case <-stop:
 		}
 		end()
@@ -735,7 +754,7 @@ func runHolder() int {
 			}
 			_ = json.NewEncoder(conn).Encode(res)
 			if err != nil && strings.Contains(err.Error(), "within") {
-				end() // a command that did not finish leaves the shell busy
+				endFor("a command did not finish in time and left the shell busy")
 			}
 		}()
 	}
