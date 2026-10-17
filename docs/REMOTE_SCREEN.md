@@ -138,14 +138,15 @@ Only accepted while `mode=control`. In `view` mode the hub drops input frames
 
 ### 4.4 Frame schema ownership
 
-The screen frame/input schema lives in one shared header
-`agent/include/screen_frame.h` (parser + builders, same style as
-`terminal_frame.h`: bounded, no reads past length, ASCII-only). The hub relay
-treats agent->operator binary as opaque passthrough and only parses the JSON
-control frames it must police (monitor switch echo is not policed; `input`
-frames are dropped in view mode). The viewer and the agent must agree on this
-header's JSON shapes; the Go side re-declares only the control frames it
-inspects.
+The screen frame/input schema is parsed in **three places**: the Rust helper
+(full parse of operator->helper control+input frames, and it builds the
+agent->operator frames), the **TS viewer** (builds operator frames, parses
+agent frames), and the **Go hub**, which parses only the JSON control frames it
+must police (`input` dropped in view mode; `close`). The C agent parses nothing
+beyond the pipe length-prefix framing (§6.5), so there is **no C `screen_frame.h`
+parser** — the schema is owned by the Rust crate's `wire` module and mirrored by
+the viewer and by the small Go control-frame subset. Keep one canonical table of
+message shapes in this doc (§4.1/§4.2); the three implementations cite it.
 
 ## 5. Hub relay generalization
 
@@ -175,7 +176,38 @@ endpoint, grant id, duration — same shape as the terminal audit lines.
 The agent runs as SYSTEM in session 0 and cannot capture or inject input in the
 interactive desktop from there. So the terminal-style in-process worker is wrong
 for screen; instead the agent **launches a helper process in the active console
-session** and relays for it (or the helper dials the hub itself; see §6.5).
+session** and relays bytes for it over a pipe (§6.5).
+
+**The helper is a separate Rust binary, not C** (coordinator decision,
+2026-10-17). It runs as SYSTEM, including on the secure desktop, and it parses
+input/control messages that arrive from the network, so memory safety matters
+most exactly there. It is a separate process regardless, so there is no FFI with
+the agent. The C agent stays minimal: it launches the helper in the console
+session with the duplicated SYSTEM token + session id and shuttles bytes between
+the hub WebSocket and the helper's pipe/stdio, doing **no message parsing beyond
+length-prefix framing** (§6.5).
+
+### 6.0 Rust crate layout, toolchain, supply chain
+
+- Crate at `agent/windows/screen_helper/` (Cargo workspace member or standalone;
+  keep it out of any download-at-build path). Binary name e.g.
+  `ominull-screen-helper.exe`.
+- Use Microsoft's `windows` crate for DXGI Desktop Duplication, WIC JPEG,
+  `SendInput`, and desktop switching (`OpenInputDesktop`/`SetThreadDesktop`).
+- Target **x86_64-pc-windows-gnu** with the mingw toolchain already on this host
+  (`rustup target add x86_64-pc-windows-gnu` if missing; cargo/rustc are
+  installed). This matches how the Windows agent cross-compiles.
+- Supply chain: minimal crates, **exact versions pinned in Cargo.lock**,
+  **vendored** (`cargo vendor`), `cargo-audit` clean, **no `build.rs` network
+  access or downloads**.
+- The helper binary is **signed and digest-pinned in the agent release** exactly
+  like the agent binary (add it to the release artifact set and the version /
+  digest sites; signing is an owner-tap step via Nightshift).
+- **Lay the capture + input backend behind a trait** (e.g. `ScreenBackend`:
+  `monitors()`, `capture_tiles(dirty) -> Vec<Tile>`, `inject(input)`,
+  `follow_input_desktop()`) with a Windows DXGI/GDI implementation now, so the
+  Linux X11 backend (`x11rb` XShm/XTest, §10) drops in later without touching the
+  protocol, framing, or session loop.
 
 ### 6.1 Launching into the console session
 
@@ -226,19 +258,29 @@ frame and the viewer shows "Ctrl+Alt+Del is blocked by policy on this machine".
 Note in the helper: do not try to enable the policy ourselves (that is a machine
 policy change; out of scope for a session).
 
-### 6.5 Helper <-> hub
+### 6.5 Helper <-> hub (decided: agent relays bytes over a pipe)
 
-Two options; pick at implementation time and record which:
-- **(A) Helper dials the hub directly** (like the ConPTY worker dials via
-  WinHTTP WebSocket). Simplest reuse of the existing agent WS client; the helper
-  gets the session_id+token passed on its command line / via a pipe from the
-  agent. Preferred unless token handling across the process boundary is awkward.
-- **(B) Agent keeps the WS, pipes frames to/from the helper** over an anonymous
-  pipe. Keeps the single dial-out in the agent but doubles the copy.
+The **agent keeps the single hub WebSocket dial-out** (as the ConPTY worker does
+via WinHTTP WebSocket) and **relays bytes to/from the helper over an anonymous
+pipe / the helper's stdio**. The agent does no message parsing beyond framing:
 
-Either way: **the helper exits when the session ends or the agent dies** (job
-object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, like the ConPTY worker, so a
-dead agent tears the helper down). Only one helper per endpoint at a time.
+- WS -> helper: each WebSocket message the agent receives (text control frame or
+  binary input — operator side is small) is written to the helper's input pipe
+  as a **length-prefixed frame**: `u8 kind (0=text,1=binary)` + `u32le len` +
+  `len` bytes. The helper parses the JSON/bytes.
+- helper -> WS: the helper writes the same length-prefixed framing on its output
+  pipe; the agent reads a frame and sends it as the matching WebSocket message
+  type (text for JSON control, binary for a JPEG tile). This keeps the "one
+  binary message per tile, header then bytes" contract (§4.1) — the header is a
+  text frame, the tile is a binary frame, back to back.
+
+The helper gets its `session_id`, `mode`, and the geometry it needs on the
+command line / an initial control frame; the connect token never reaches the
+helper (the agent holds the WS). **The helper exits when the session ends or the
+agent dies**: launch it inside a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (as the ConPTY worker does), so a dead agent
+tears the helper down, and close its pipes on session end. Only one helper per
+endpoint at a time.
 
 ### 6.6 Capabilities & versions
 
