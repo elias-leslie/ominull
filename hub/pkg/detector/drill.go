@@ -3,7 +3,9 @@ package detector
 import (
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -17,7 +19,9 @@ import (
 // therefore runs, inside its own process, one synthetic event or burst per
 // floor rule through a throwaway engine that reads the live tuning (with the
 // floor applied, as the live engine does) and the live exclusions, and checks
-// that each still raises. The throwaway engine stores no finding, records no
+// that each still raises. The sweeps run again as each quiet process, and the
+// floor cases again inside each exclusion scoped to one endpoint, location or
+// program. The throwaway engine stores no finding, records no
 // learning observation and isolates nothing: its isolate hook only notes that
 // it was asked. The server judges the result and reports a miss, or a drill
 // that has stopped running, on the Nightshift feed (server/floor_drill.go).
@@ -58,11 +62,25 @@ const drillProgram = "/usr/local/libexec/ominull-floor-drill/"
 
 // Drill runs every floor case against the store's live tuning and exclusions.
 func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
-	exclusions, err := store.ListExclusions(drillTenant)
-	if err != nil {
-		return nil, fmt.Errorf("read exclusions: %w", err)
+	return DrillWith(store, now, nil, nil)
+}
+
+// DrillWith runs every floor case against a proposed policy: tuning, when not
+// nil, instead of the saved tuning, and exclusions, when not nil, instead of
+// the saved ones. An owner approval shows what a loosening change would blind
+// before it is applied.
+func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTuning, exclusions []storage.Exclusion) ([]DrillCase, error) {
+	if exclusions == nil {
+		var err error
+		if exclusions, err = store.ListExclusions(drillTenant); err != nil {
+			return nil, fmt.Errorf("read exclusions: %w", err)
+		}
 	}
-	live, _ := ClampToFloor(store.GetDetectionTuning())
+	saved := store.GetDetectionTuning()
+	if tuning != nil {
+		saved = *tuning
+	}
+	live, _ := ClampToFloor(saved)
 	lan := drillLAN(store)
 	ep := storage.Endpoint{ID: DrillEndpointID, TenantID: drillTenant, Hostname: DrillEndpointID, RoleTag: "server",
 		Status: "online", CreatedAt: now.Add(-30 * 24 * time.Hour), LastSeenAt: now}
@@ -71,7 +89,7 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 		return storage.Event{TenantID: drillTenant, EndpointID: DrillEndpointID, Timestamp: now.Add(at),
 			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, DstIP: dst, DstPort: port, BytesOut: bytes, ProcessPath: proc}
 	}
-	run := func(c DrillCase, tuning storage.DetectionTuning, events []storage.Event) DrillCase {
+	runAt := func(c DrillCase, ep storage.Endpoint, location string, tuning storage.DetectionTuning, events []storage.Event) DrillCase {
 		// EvaluateBatch is synchronous, so the hooks need no lock.
 		e := New(store, nil, func(string, string) error {
 			c.Isolated = true
@@ -79,10 +97,13 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 		})
 		e.pinned = &tuning
 		e.sink = func(a storage.AnomalyAlert) { c.Findings = append(c.Findings, a) }
-		snap := BatchSnapshot{Endpoint: ep, Geo: map[string]threatintel.GeoRecord{}, Exclusions: exclusions, FirstSeen: map[string]bool{}}
+		snap := BatchSnapshot{Endpoint: ep, Geo: map[string]threatintel.GeoRecord{}, Exclusions: exclusions, FirstSeen: map[string]bool{}, LocationID: location}
 		e.EvaluateBatch(events, snap)
 		c.Tuning = tuning
 		return c
+	}
+	run := func(c DrillCase, tuning storage.DetectionTuning, events []storage.Event) DrillCase {
+		return runAt(c, ep, "", tuning, events)
 	}
 
 	var cases []DrillCase
@@ -141,7 +162,163 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 		silent.Findings = []storage.AnomalyAlert{{EndpointID: DrillEndpointID, AnomalyType: silenceAnomalyType, Severity: "HIGH"}}
 	}
 	cases = append(cases, silent)
+
+	// A quiet process silences neither sweep: each entry's sweeps are run as
+	// the process it matches. An installed resolver or container runtime
+	// listed there is exempt from the sweeps in code, not by the entry.
+	for _, entry := range live.QuietProcesses {
+		path, sha, user := storage.QuietProcessSample(entry)
+		if isKnownInfrastructureProcess(path, user) {
+			continue
+		}
+		as := func(ev storage.Event) storage.Event {
+			ev.ProcessPath, ev.ExecutableSHA256, ev.UserIdentity = path, sha, user
+			return ev
+		}
+		var ports, hosts []storage.Event
+		for _, ev := range sweep {
+			ports = append(ports, as(ev))
+		}
+		for _, ev := range fanout {
+			hosts = append(hosts, as(ev))
+		}
+		cases = append(cases,
+			run(DrillCase{Rule: "port sweep by quiet process " + path, Want: "PORT_SCAN_RECON"}, live, ports),
+			run(DrillCase{Rule: "lateral sweep by quiet process " + path, Want: "LATERAL_PORT_SWEEP"}, live, hosts))
+	}
+
+	// An exclusion scoped to one endpoint, location or program is outside the
+	// cases above, which come from no listed program on an unenrolled host. Each
+	// one gets the floor cases its traffic could meet - from its endpoint, at
+	// its location, by its program, to its range and port - wherever the case
+	// can be built to match it. The burst is left out: an exclusion may cover a
+	// program's uploads (detector.go).
+	for _, ex := range exclusions {
+		if !ex.Active || ex.Problem(now) != "" || !(ex.Scope == "endpoint" || ex.Scope == "location" || ex.ProcessPath != "") {
+			continue
+		}
+		cases = append(cases, drillExclusion(ex, ep, lan, live, runAt)...)
+	}
 	return cases, nil
+}
+
+// drillExclusion builds the floor cases one scoped exclusion's traffic could
+// meet, each made only of events the exclusion matches; a case that cannot be
+// built that way (a sweep across ports under an exclusion for one port, a
+// lateral sweep under a public or small range) is left out.
+func drillExclusion(ex storage.Exclusion, ep storage.Endpoint, lan func(int) string, tuning storage.DetectionTuning,
+	run func(DrillCase, storage.Endpoint, string, storage.DetectionTuning, []storage.Event) DrillCase) []DrillCase {
+	location := ""
+	switch ex.Scope {
+	case "endpoint":
+		ep.ID, ep.Hostname = ex.ScopeValue, ex.ScopeValue
+	case "location":
+		location = ex.ScopeValue
+	}
+	proto := uint8(6)
+	switch strings.ToLower(strings.TrimSpace(ex.Protocol)) {
+	case "udp":
+		proto = 17
+	case "icmp":
+		return nil // no ports: none of the cases can match it
+	}
+	prefix, ranged := ex.DstPrefix()
+	// dests returns n destinations of the kind a case needs (private or
+	// public): inside the exclusion's range when it names one, else own(i).
+	dests := func(n int, private bool, own func(int) string) ([]string, bool) {
+		out := make([]string, 0, n)
+		if !ranged {
+			for i := 0; i < n; i++ {
+				out = append(out, own(i))
+			}
+			return out, true
+		}
+		a := prefix.Addr()
+		if prefix.Bits() < a.BitLen() {
+			a = a.Next() // past the network address
+		}
+		for i := 0; i < n; i++ {
+			if !a.IsValid() || !prefix.Contains(a) || isPrivateIP(a.String()) != private {
+				return nil, false
+			}
+			out = append(out, a.String())
+			a = a.Next()
+		}
+		return out, true
+	}
+	public := func(addr string) func(int) string { return func(int) string { return addr } }
+	path := func(own string) string {
+		if ex.ProcessPath != "" {
+			return ex.ProcessPath
+		}
+		return drillProgram + own
+	}
+	flow := func(proc, to string, port uint16, bytes int64, offset time.Duration) storage.Event {
+		return storage.Event{TenantID: drillTenant, EndpointID: ep.ID, Timestamp: ep.LastSeenAt.Add(offset), Action: "PERMIT",
+			Direction: "OUTBOUND", Protocol: proto, DstIP: to, DstPort: port, BytesOut: bytes, ProcessPath: proc, UserIdentity: "root"}
+	}
+	add := func(cases []DrillCase, c DrillCase, events []storage.Event) []DrillCase {
+		c.Rule += " under exclusion " + ex.ID
+		return append(cases, run(c, ep, location, tuning, events))
+	}
+	// An installed container runtime or resolver is exempt from the sweeps in
+	// code, whatever the exclusion says.
+	infra := ex.ProcessPath != "" && isKnownInfrastructureProcess(ex.ProcessPath, "root")
+	var cases []DrillCase
+
+	if to, ok := dests(1, false, public("203.0.113.66")); ok {
+		port := ex.Port
+		if port == 0 {
+			port = 443
+		}
+		ti := flow(path("implant"), to[0], port, 600, 0)
+		kind := "ipv4"
+		if netip.MustParseAddr(to[0]).Is6() {
+			kind = "ipv6"
+		}
+		ti.ThreatMatch = &storage.IOC{Value: to[0], Type: kind, Source: "floor-drill", ThreatType: "c2", Confidence: 100, Active: true}
+		cases = add(cases, DrillCase{Rule: "threat-list match", Want: "THREAT_INTEL_MATCH", WantIsolated: true}, []storage.Event{ti})
+	}
+	if to, ok := dests(1, false, public("203.0.113.67")); ok && (ex.Port == 0 || FloorPort(int(ex.Port))) {
+		port := ex.Port
+		if port == 0 {
+			port = 445
+		}
+		cases = add(cases, DrillCase{Rule: "sensitive port", Want: "SENSITIVE_PORT_EGRESS"}, []storage.Event{flow(path("smb"), to[0], port, 600, 0)})
+	}
+	if to, ok := dests(1, false, public("203.0.113.68")); ok && ex.Port == 0 && !infra {
+		var sweep []storage.Event
+		for i := 0; i < portSweepPorts; i++ {
+			sweep = append(sweep, flow(path("scanner"), to[0], uint16(2000+i), 60, time.Duration(i)*100*time.Millisecond))
+		}
+		cases = add(cases, DrillCase{Rule: "port sweep", Want: "PORT_SCAN_RECON"}, sweep)
+	}
+	// Twice the threshold of hosts, on SMB unless the exclusion names a port.
+	// A container network is outside the lateral rule by design; the
+	// estate-wide case shows one laid over the LAN.
+	if to, ok := dests(2*lateralHosts, true, func(i int) string { return lan(200 + i) }); ok && !infra && !tuning.IsContainerAddress(to[0]) {
+		port := ex.Port
+		if port == 0 {
+			port = 445
+		}
+		var fanout []storage.Event
+		for i, host := range to {
+			fanout = append(fanout, flow(path("fanout"), host, port, 60, time.Duration(i)*time.Second))
+		}
+		cases = add(cases, DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}, fanout)
+	}
+	// The resolver bypass is judged for agent runtimes and interpreters only.
+	resolver := ex.ProcessPath
+	if resolver == "" {
+		resolver = "/usr/bin/bash"
+	}
+	name := filepath.Base(strings.ReplaceAll(resolver, "\\", "/"))
+	google := netip.MustParseAddr("8.8.8.8")
+	if (!ranged || prefix.Contains(google)) && (ex.Port == 0 || ex.Port == 53) &&
+		(tuning.AgentRuntimeOf(resolver) != "" || isInterpreterOrShell(name)) {
+		cases = add(cases, DrillCase{Rule: "resolver bypass", Want: "AGENT_DNS_BYPASS"}, []storage.Event{flow(resolver, google.String(), 53, 512, 0)})
+	}
+	return cases
 }
 
 // drillLAN returns addresses in the estate's own LAN: the private IPv4 /24

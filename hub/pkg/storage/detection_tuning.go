@@ -976,6 +976,18 @@ func IsServiceAccount(user, account string) bool {
 	return account != "" && u == strings.ToLower(account)
 }
 
+// QuietProcessSample is a process a quiet-process entry matches: its path with
+// each "*" filled in, the hash it pins and the account it names (root when it
+// names none). The floor drill runs its sweeps as this process.
+func QuietProcessSample(entry string) (path, sha, user string) {
+	q := splitQuietPath(entry)
+	user = "root"
+	if q.hasAccount {
+		user = q.account
+	}
+	return strings.ReplaceAll(q.pattern, "*", "floor-drill"), q.sha, user
+}
+
 // IsQuietProcess matches the process's installed path, and the account it
 // runs as: the system's, or the one the entry names.
 func (t DetectionTuning) IsQuietProcess(path, sha, user string) bool {

@@ -276,9 +276,17 @@ A rule that does not raise, isolate where it should, or that the feed would
 explain away (`Expected`) is a CRITICAL `ominull.detection.drill` on the
 Nightshift feed, as is a drill that has not run for more than eight days; a
 missed drill runs again every hour until it passes. The lateral cases use the
-private /24 holding the most enrolled endpoints and twice each threshold. The
-drill sees the tuning and global or tenant-wide exclusions; an exclusion scoped
-to one endpoint, location or process, and a quiet process, are outside it.
+private /24 holding the most enrolled endpoints and twice each threshold. Both
+sweeps run again as each quiet process (path with `*` filled in, its pinned
+hash, its account or root), except a resolver or container runtime the code
+already exempts. Each active exclusion scoped to one endpoint, location or
+program gets the floor cases its own traffic could make, from its endpoint, at
+its location, by its program, inside its range and on its port: threat-list
+match, sensitive port, port sweep, lateral sweep on SMB and, for an agent
+runtime or interpreter, resolver bypass. A case it cannot match is skipped (a
+port sweep under an exclusion for one port, a lateral sweep under a public or
+too small range or inside a container network, the sweeps for a program the
+code exempts), and so is the burst, which an exclusion may cover by design.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence

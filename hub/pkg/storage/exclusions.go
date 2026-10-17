@@ -98,6 +98,16 @@ func exactProcessPath(p string) bool {
 	return false
 }
 
+// DstPrefix is the destination range an exclusion names; false when it names
+// none (any destination) or one that does not parse.
+func (ex Exclusion) DstPrefix() (netip.Prefix, bool) {
+	dst := exclusionAny(ex.DstIPRange)
+	if dst == "" {
+		return netip.Prefix{}, false
+	}
+	return exclusionRange(dst)
+}
+
 func exclusionRange(v string) (netip.Prefix, bool) {
 	if strings.Contains(v, "/") {
 		prefix, err := netip.ParsePrefix(v)

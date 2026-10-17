@@ -59,9 +59,9 @@ func (s *Server) runFloorDrill(now time.Time) floorDrillRecord {
 		log.Printf("[-] Detection floor drill: the outcome could not be recorded: %v", err)
 	}
 	if len(rec.Missed) > 0 {
-		log.Printf("[!] Detection floor drill missed %d of %d floor rules: %s", len(rec.Missed), rec.Cases, strings.Join(rec.Missed, "; "))
+		log.Printf("[!] Detection floor drill missed %d of %d floor cases: %s", len(rec.Missed), rec.Cases, strings.Join(rec.Missed, "; "))
 	} else {
-		log.Printf("[+] Detection floor drill: all %d floor rules raised", rec.Cases)
+		log.Printf("[+] Detection floor drill: all %d floor cases raised", rec.Cases)
 	}
 	return rec
 }
@@ -124,7 +124,7 @@ func (s *Server) floorDrillFinding(now time.Time) feedFinding {
 			"The weekly detection floor drill has never run on this hub, so nothing shows that the floor detectors still raise", nil, nil)
 	case len(rec.Missed) > 0:
 		return s.feedFinding(now, uid, title, ocsfSevCritical, ocsfStatusNew,
-			fmt.Sprintf("The detection floor drill missed %d of %d floor rules, so a real one would go unreported: %s. A tuning or exclusion change is the likely cause; check the day's detection policy changes",
+			fmt.Sprintf("The detection floor drill missed %d of %d floor cases, so a real one would go unreported: %s. A tuning or exclusion change is the likely cause; check the day's detection policy changes",
 				len(rec.Missed), rec.Cases, strings.Join(rec.Missed, "; ")),
 			nil, map[string]any{"ran_at": rec.RanAt.Format(time.RFC3339), "missed": rec.Missed})
 	case now.Sub(rec.RanAt) > floorDrillOverdue:
@@ -133,6 +133,6 @@ func (s *Server) floorDrillFinding(now time.Time) feedFinding {
 			nil, map[string]any{"ran_at": rec.RanAt.Format(time.RFC3339)})
 	}
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-		fmt.Sprintf("The detection floor drill raised all %d floor rules at %s", rec.Cases, rec.RanAt.Format(time.RFC3339)),
+		fmt.Sprintf("The detection floor drill raised all %d floor cases at %s", rec.Cases, rec.RanAt.Format(time.RFC3339)),
 		nil, map[string]any{"ran_at": rec.RanAt.Format(time.RFC3339)})
 }
