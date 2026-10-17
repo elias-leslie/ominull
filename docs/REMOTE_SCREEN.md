@@ -1,14 +1,16 @@
 # Ominull Remote Screen Control
 
 Status: design for v1 (Windows first, Linux designed, built after). This note is
-the contract the three build tracks (Windows agent helper, hub relay/approval,
-console viewer) work against in parallel. Keep it short and current; code is the
+the contract the three build tracks (Windows agent helper, hub relay/approval +
+ominullctl, native Rust viewer) work against in parallel. Keep it short and current; code is the
 source of truth once it lands.
 
 ## 1. What this is
 
-See and control the screen of an enrolled endpoint from the Ominull console,
-the same way the terminal already works: the owner taps one approval on their
+See and control the screen of an enrolled endpoint in a **native desktop viewer**
+(owner decision: no in-browser viewer; the website only has a launch button),
+or drive it from `ominullctl` for agents acting on the owner's request, the same
+way the terminal already works: the owner taps one approval on their
 phone, a session opens over the existing hub relay, it is audited, and it ends
 at the hub's session limits. No new listening port on the endpoint (the agent
 dials out), no third-party remote tool, no second control channel. A new action
@@ -29,8 +31,8 @@ session is live.
 | Session store/limits | `terminal.Manager`, `terminal.Limits` (1.8.77) | screen sessions share the same Limits and per-endpoint/tenant caps |
 | Offer to agent | durable response job, heartbeat delivery | same; payload `{"session_id","mode","connect_token"}` |
 | Agent worker | `Terminal_RunWindowsWorker` (ConPTY) | `Screen_RunWindowsWorker` (capture/input helper), same WS dial-out |
-| Console page | `web-src/terminal.ts` -> `terminal.js` | `web-src/screen.ts` -> `screen.js`, new build.cjs entry |
-| CLI | `ominullctl shell open` | `ominullctl screen open ENDPOINT` prints viewer URL |
+| Viewer | `web-src/terminal.ts` (browser) | **native Rust app** `screen/viewer` (`ominull-screen`), sharing `screen/wire` with the helper; console has only an asset-card "Remote screen" button that launches it via `ominull-screen://` (§9) |
+| CLI | `ominullctl shell open` (held session, .ended marker) | `ominullctl screen open` (viewer) + held agent session with `shot/click/type/key/...` (§8) |
 
 Generalize where it is cheap: the WS attach handlers, token hashing, session
 caps, sweeper, and audit are shared. The frame payloads differ (binary image
@@ -39,12 +41,15 @@ screen-specific (§4).
 
 ## 3. Session lifecycle & auth
 
-1. Operator (console or `ominullctl`) POSTs `/api/v1/screen/sessions`
+1. Operator (console button or `ominullctl`) POSTs `/api/v1/screen/sessions`
    `{endpoint_id, mode}` where `mode` is `control` (default) or `view`.
 2. Hub `resolveScreen` builds the approval and returns 202 until the owner taps.
    Approval text, plain owner words, includes duration and mode:
    - control: `See and control the screen on <label>, up to <duration>, for <operator>`
    - view: `Watch the screen on <label> (no control), up to <duration>, for <operator>`
+   - api-key caller (an agent via ominullctl): `An agent (admin key) will see
+     and control the screen on <label>, up to <duration>` (view: `...will see
+     the screen...`), so the owner always knows who controls it.
    - if "ask the person first" is on for the machine: append
      `the person at the keyboard is asked to allow it first`.
 3. On tap the authority signs an EndpointGrant V2, kind `screen_session`,
@@ -53,13 +58,26 @@ screen-specific (§4).
    to the owner only, mirroring terminal).
 4. Hub creates the session in the shared manager (own token for the agent, own
    operator token minted apart), writes a durable response job with payload
-   `{"session_id","mode","connect_token"}`, sets the one-use HttpOnly attach
-   cookie on `/api/v1/screen/ws/` for the browser.
+   `{"session_id","mode","connect_token"}`. There is **no cookie**. The operator
+   credential is a one-use token: returned in the body to an api-key caller
+   (ominullctl), or, for the console button, exchanged for a **launch code**
+   (§9.2) the native viewer redeems once.
 5. Agent picks up the offer on heartbeat, verifies the grant against the pinned
    tenant key for this endpoint and kind, checks the replay cache, ACKs, and
    dials `wss://<hub>/api/v1/screen/ws/agent?session_id=&endpoint_id=&token=`.
-6. Operator browser dials `/api/v1/screen/ws/operator?session_id=...` with the
-   cookie token. Relay pairs them. Session goes active.
+6. The native viewer or `ominull-screen ctl` dials
+   `/api/v1/screen/ws/operator?session_id=...` with header `X-Screen-Token`
+   (one-use; `POST /api/v1/screen/sessions/attach` rotates it for the next
+   attach). Requests carrying an `Origin` header are rejected, so no web page
+   can drive a session. Relay pairs them. Session goes active.
+   **Attachments:** one *control* attachment plus any number of *watch*
+   (view-only) attachments on the same session (`POST
+   /api/v1/screen/sessions/watch` -> token or launch code), so the owner can
+   watch an agent-controlled session live. The hub drops input from watchers,
+   forwards acks from exactly one *pacer* (the control attachment if connected,
+   else the oldest watcher), fans tiles out to all attachments (dropping stale
+   tiles per slow watcher), and sends the agent `pause` only when no attachment
+   remains. Every attach/detach is audited.
 7. Ends on: operator close, agent/helper exit, endpoint session end, idle
    timeout, max duration, or hub shutdown. Same states as terminal
    (`waiting/connecting/active/detached/closing/closed/...`). Detach keeps the
@@ -106,6 +124,9 @@ generalize it, see §5).
   position/visibility updates (cheap, frequent).
 - `resized` (JSON text): monitor geometry changed, carries a new `monitors` list.
 - `sas_unavailable` (JSON text): SendSAS refused by policy (§6.4).
+- `desktop` (JSON text): `{"type":"desktop","name":"user|secure|lock","signed_in":true}`
+  sent in/after `hello` and on every input-desktop switch (used by `screen info`
+  and the consent rule in §7).
 - `bye` (JSON text): `{"type":"bye","reason":"..."}` then close.
 
 ### 4.2 Operator -> agent
@@ -172,14 +193,15 @@ detach, pause, session end) so no key is left stuck down on the endpoint.
 
 The screen frame/input schema is parsed in **three places**: the Rust helper
 (full parse of operator->helper control+input frames, and it builds the
-agent->operator frames), the **TS viewer** (builds operator frames, parses
-agent frames), and the **Go hub**, which parses only the JSON control frames it
+agent->operator frames), the **native viewer / ctl** (`screen/viewer`, same
+`screen-wire` crate: builds operator frames, parses agent frames), and the
+**Go hub**, which parses only the JSON control frames it
 must police (`input` dropped in view mode; `close`). The hub treats every
 agent->operator binary message as opaque (the fixed binary tile/cursor header is
 not parsed by Go). The C agent parses nothing beyond the pipe length-prefix
 framing (§6.5), so there is **no C `screen_frame.h` parser** — the schema is
-owned by the Rust crate's `wire` module and mirrored by the viewer and by the
-small Go control-frame subset. Keep one canonical table of message shapes in
+owned by the `screen/wire` crate (shared by helper and viewer, no mirror) plus
+the small Go control-frame subset the hub polices. Keep one canonical table of message shapes in
 this doc (§4.1/§4.2); the three implementations cite it.
 
 ## 5. Hub relay generalization
@@ -223,9 +245,11 @@ length-prefix framing** (§6.5).
 
 ### 6.0 Rust crate layout, toolchain, supply chain
 
-- Crate at `agent/windows/screen_helper/` (Cargo workspace member or standalone;
-  keep it out of any download-at-build path). Binary name e.g.
-  `ominull-screen-helper.exe`.
+- Crates under `screen/`: `screen/wire` (lib `screen-wire`: message types,
+  binary headers, pipe framing, validation; platform-neutral), `screen/helper`
+  (`ominull-screen-helper.exe`), `screen/viewer` (`ominull-screen`, §9). Helper
+  and viewer each have their own Cargo.lock + vendor dir and depend on wire by
+  path. Nothing downloads at build time.
 - Use Microsoft's `windows` crate **0.62.x** (or `windows-sys` **0.61.x**) for
   DXGI Desktop Duplication, WIC JPEG, `SendInput`, and desktop switching
   (`OpenInputDesktop`/`SetThreadDesktop`) — all MIT/Apache. JPEG via WIC, or
@@ -359,7 +383,7 @@ endpoint at a time.
 
 - Windows agent reports `"screen":{"input":true}` in its response capabilities
   JSON (alongside `terminal`). Hub `parseResponseCapabilities` learns a new
-  `Screen` bool / struct; `screenAvailable` gates the console button and
+  `Screen` bool / struct; it gates the console's "Remote screen" button and
   `resolveScreen` refuses an endpoint that does not report it (same shape as the
   terminal "endpoint reports no terminal capability" refusal, and the same
   no-response-key refusal).
@@ -400,10 +424,15 @@ endpoint at a time.
   approval explicitly carried "nobody at the keyboard" wording (a distinct
   approval text and grant mode). This stops a silent unattended takeover being
   the default behavior of the consent setting.
-- **Operator WebSocket Origin check.** The operator WS is cookie-authenticated,
-  so the hub MUST verify the `Origin` header on it (CSWSH; MeshCentral
-  CVE-2024-26135). No screen route is reachable unauthenticated (ScreenConnect
-  CVE-2024-1709 class).
+- **No browser on the operator socket.** Operator auth is a one-use header
+  token, never a cookie, and the hub rejects any operator WS upgrade carrying an
+  `Origin` header (CSWSH; MeshCentral CVE-2024-26135). No screen route is
+  reachable unauthenticated (ScreenConnect CVE-2024-1709 class); the launch-code
+  redeem is authenticated by the code itself (§9.2).
+- **Agent control is visible and audited.** The banner shows for agent control
+  too; the approval names the agent; the owner can watch live; the hub audits
+  each agent input (kind + coordinates; typed text by length only, never content;
+  mouse moves not logged individually).
 - **View-only mode.** `mode=view` grant; hub drops operator input; agent ignores
   input even if one slipped through (grant says view).
 - **No pixel recording by default.** Unlike terminal (which records frames to
@@ -417,52 +446,91 @@ endpoint at a time.
 
 ## 8. ominullctl
 
-`ominullctl screen open ENDPOINT [--view] [--ttl DUR]`:
-- POSTs `/api/v1/screen/sessions` (202 until the owner taps, like `shell open`),
-  then prints the console viewer URL
-  `https://<hub>/console#screen=<session_id>` (or the dedicated viewer page
-  path) for the owner to open in a browser. The approval is the phone tap; the
-  owner views in the browser. ominullctl does not render pixels.
-- `--view` requests view-only; `--ttl` requests a shorter session (clamped to
-  the hub max, like shell).
+### 8.1 Owner viewing
 
-## 9. Console viewer page
+`ominullctl screen open ENDPOINT [--view] [--ttl DUR] [--viewer PATH]` asks for
+the owner tap (202 until approved, like `shell open`), creates the session, then
+starts `ominull-screen` (`--viewer`, else next to ominullctl, else PATH) and
+writes **one JSON line on its stdin**:
+`{"hub_url","ca_pem","session_id","token","mode","host"}`. The token never goes
+in argv or env. If the viewer is missing, ominullctl says so and deletes the
+session so it does not hold a slot.
 
-New server-rendered page like the terminal page (`terminal_page.go` ->
-`screen_page.go`, template registered in `pages.go`), script `web-src/screen.ts`
-bundled to `screen.js` via a new `build.cjs` entry.
+### 8.2 Agent control (held session)
 
-- Layered `<canvas>` (Guacamole `Display.js` model): a base canvas for tiles and
-  a top canvas for the cursor. Decode each binary tile with
-  `createImageBitmap(blob)` and `drawImage` at the tile's header x/y; a keyframe
-  tile repaints its region.
-- **Cursor** is drawn by the viewer from the cursor-shape / `cursor_pos`
-  messages (it is never in the image). Build an ImageBitmap from the shape
-  (handle color / mono / masked formats) and draw it at the position minus the
-  hotspot.
-- **Flow control:** after each `frame_end`, send an `ack` (§4.2). Do not let the
-  agent outrun the viewer; the ack window bounds latency.
-- Capture mouse/keyboard on the canvas; translate the pointer to normalized
-  0..65535 virtual-desktop coords for the active monitor; send `input` frames.
-  Keys: map `KeyboardEvent.code` to scancode via **noVNC `xtscancodes.js`
-  (MPL-2.0, vendored unmodified as its own file with a NOTICE entry)**; send a
-  `text` event for phone/IME input (`beforeinput`/composition). **Release all
-  keys up on blur, detach, and End** (mirror the agent-side release). Pointer
-  lock optional.
-- Monitor picker (from `hello.monitors`), view-only toggle (disabled if the
-  grant is view), an End button, and **viewer buttons for Ctrl+Alt+Del, Win,
-  Alt+Tab and Esc** (these are swallowed or reserved by the browser/OS, so
-  buttons are the reliable path; the **Keyboard Lock API** captures Win/Alt+Tab/
-  Esc directly only in fullscreen Chromium — use it when available, buttons
-  otherwise). Show a plain notice on `sas_unavailable`.
-- Quality/fps control for phone / slow tunnel; works at phone width (the
-  console is already responsive — match terminal.ts's layout approach).
-- Launch from the asset card next to the terminal action (app.js: add a "Control
-  screen..." / "Watch screen..." menu item beside "Open a terminal...", gated on
-  `state.screenAvailable` + endpoint capability; this is the only app.js edit,
-  done by the integrator).
-- UI copy follows the product copy profile; verify rendered at desktop and phone
-  width headless (design-evidence-review).
+For agents acting when the owner asks ("show me", "click this"). Same held-
+session model as `shell open`: one owner tap, reused for the session's life, and
+the same `.ended` marker semantics, so a session that ended makes the next
+command fail with "open a new one" instead of silently filing a new ask.
+
+```
+ominullctl screen hold ENDPOINT [--view] [--ttl DUR]   # one tap; approval names the agent
+ominullctl screen info  ENDPOINT                        # monitors, sizes, desktop (user/secure/lock)
+ominullctl screen shot  ENDPOINT [--monitor N] -o file.png   # one full frame, cursor composited
+ominullctl screen click ENDPOINT X Y [--button left|right|middle] [--double]
+ominullctl screen move  ENDPOINT X Y
+ominullctl screen drag  ENDPOINT X1 Y1 X2 Y2
+ominullctl screen scroll ENDPOINT X Y DY
+ominullctl screen type  ENDPOINT "text"                 # Unicode text events
+ominullctl screen key   ENDPOINT ctrl+alt+del|win+r|enter|...
+ominullctl screen watch ENDPOINT                        # owner watches live, view-only
+ominullctl screen end   ENDPOINT
+```
+
+Coordinates are pixels in the screenshot of the chosen monitor (`--monitor`,
+default the primary); they are converted to the 0..65535 wire units for that
+monitor. `ctrl+alt+del` sends the `sas` request (§6.4); other combos become
+scancode down/up sequences. Each command rotates the operator token (`/attach`),
+spawns `ominull-screen ctl <action>` with the handshake on stdin, which connects,
+waits for a keyframe when it needs one, performs the action, and detaches (the
+session stays live between commands; the agent pauses capture while nothing is
+attached). The wire schema lives only in Rust; ominullctl does approval, held
+state, markers and process plumbing. `ominullctl help screen` carries this usage
+for agents.
+
+## 9. Native viewer (`screen/viewer`, binary `ominull-screen`)
+
+### 9.1 Viewer
+
+Rust, sharing `screen-wire` with the helper. winit for windowing and input,
+softbuffer for blitting decoded tiles, a pure-Rust JPEG decoder, tungstenite +
+rustls with the hub CA pinned. Linux x86_64 first (X11 and Wayland), Windows too.
+
+- Windowed and true fullscreen (F11 and a toolbar toggle); scale-to-fit and 1:1.
+- Monitor picker, view-only toggle (forced on for a view grant or a watch
+  attachment), end session.
+- Full keyboard capture while focused via the platform keyboard grab (Win,
+  Alt+Tab, Esc go to the remote); a release-grab hotkey always shown on screen;
+  a toolbar button and hotkey for Ctrl+Alt+Del (`sas`); all keys up on focus
+  loss, release-grab, view-only and end.
+- Cursor drawn from `cursor_shape` + `cursor_pos`; an `ack` for every `frame_end`.
+- `ctl` subcommand (§8.2): headless, no window; same connection code.
+
+### 9.2 Console launch (the only screen UI in the website)
+
+The asset card has a **"Remote screen"** button (when the endpoint reports the
+screen capability). It runs the normal owner approval, then asks the hub for a
+**launch code**: high-entropy, **one use, 60 s expiry, bound to the session and
+the operator**. The console opens
+`ominull-screen://open?hub=<hub origin>&session=<id>&code=<launch code>`.
+The viewer checks that `hub` is one it is configured for (it refuses any other),
+then redeems the code once over TLS (`POST /api/v1/screen/launch/redeem
+{session_id, code}` -> operator token, unauthenticated except by the code,
+rate-limited). A second redeem, an expired code, or a code for another session
+fails and is audited. The operator token never appears in the URL or argv.
+
+If the scheme is not registered, the button's sheet shows the exact
+`ominullctl screen open <endpoint>` command instead (the console cannot reliably
+detect a handler, so the command is always shown as the fallback).
+
+Scheme registration is part of installing the viewer:
+- Linux (user level): `scripts/install-screen-viewer.sh` puts `ominull-screen`
+  in `~/.local/bin`, a `.desktop` file in `~/.local/share/applications` with
+  `MimeType=x-scheme-handler/ominull-screen`, runs
+  `xdg-mime default ominull-screen.desktop x-scheme-handler/ominull-screen`, and
+  writes the viewer config (hub origin + CA PEM) to `~/.config/ominull/screen.json`.
+- Windows: `HKCU\Software\Classes\ominull-screen` (URL Protocol, shell\open\command
+  -> `"...\ominull-screen.exe" "%1"`), via a small PowerShell installer.
 
 ## 10. Linux (design only; build after Windows works)
 
@@ -494,8 +562,11 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
   mode digest. A stolen operator token only attaches to an already-approved
   session and expires with it; the agent token is separate and single-dial.
 - The hub never exposes relay tokens to logs (terminal's zero-exposure invariant
-  applies). The operator token reaches the browser only as an HttpOnly cookie on
-  the ws path.
+  applies). The operator token never appears in a URL, argv or env: ominullctl
+  hands it to the viewer on stdin; the console path carries only a 60 s one-use
+  launch code, redeemed once over TLS (a second redeem fails and is audited).
+- The viewer only connects to hubs in its own config (installed with the hub's
+  CA), so a crafted `ominull-screen://` link cannot point it at another server.
 - Input injection is the sharp edge: it is gated by (1) a live approved grant,
   (2) mode=control, (3) the helper only running during a paired session, (4) the
   visible banner. There is no API to inject input outside a session.
