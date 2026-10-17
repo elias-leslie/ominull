@@ -97,6 +97,7 @@ type Server struct {
 	// terminalDefaults are the startup remote shell limits; saved ones win.
 	terminalDefaults terminal.Limits
 	terminalLimitsMu sync.Mutex
+	catalogMu        sync.Mutex // software removal catalog read-modify-write
 	// scriptsStore manages versioned immutable scripts
 	scriptsStore *scripts.Store
 	// vulnStore manages installed software inventory and vulnerability correlation
@@ -3892,6 +3893,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/scripts/schedules", s.authMiddleware(s.responseGate(s.handleScriptSchedules)))
 	mux.HandleFunc("/api/v1/maintenance", s.authMiddleware(s.responseGate(s.handleMaintenance)))
 	mux.HandleFunc("/api/v1/maintenance/settings", s.authMiddleware(s.responseGate(s.handleMaintenanceSettings)))
+	mux.HandleFunc("/api/v1/maintenance/catalog", s.authMiddleware(s.responseGate(s.handleSoftwareCatalog)))
 	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)

@@ -12,12 +12,12 @@ function Initialize-Env {
   foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
   $script:Root = Join-Path $pd 'OminullMaintenance'
 }
-# audit reports, enforce changes, revert restores recorded first-seen values.
+# audit reports, enforce changes, revert restores first-seen values.
 function Get-Mode([string]$Primary, [string]$Fallback) {
   $v = "$Primary".Trim(); if (-not $v) { $v = "$Fallback".Trim() }
   if ('enforce', 'revert' -ccontains $v) { $v } else { 'audit' }
 }
-# Tunables are params declared on line 1; a run sets OMINULL_PARAM_<NAME>. A bad value fails the run.
+# Params are declared on line 1, set as OMINULL_PARAM_<NAME>; a bad value fails the run.
 function ConvertFrom-PkgParam($Def, [string]$V) {
   $n = "param $($Def.name)"; $x = 0L
   switch ($Def.type) {
@@ -29,6 +29,7 @@ function ConvertFrom-PkgParam($Def, [string]$V) {
       foreach ($i in $l) { if ($i -cnotmatch '^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}\z' -or $i.Trim() -cne $i -or $seen[$i.ToLower()]) { throw "$n has a bad or repeated item '$i'" }; $seen[$i.ToLower()] = 1 }
       if ($l.Count -le $Def.max_items -and $V.Length -le 1024) { return , $l }
     }
+    'catalog' { if ($V.Length -le 12288) { try { return , @((ConvertFrom-Json $V) | % { $_ }) } catch {} } }
   }
   throw "$n is not a valid $($Def.type)"
 }
@@ -36,7 +37,9 @@ function Get-PkgParams([string]$Path) {
   $o = @{}
   foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
     $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
-    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } else { "$($d.default)" } }
+    # The agent cuts a variable at 2047 bytes; a catalog comes whole in the signed parameters file.
+    if ($d.type -eq 'catalog') { $v = $(if ($env:OMINULL_PARAMS_FILE) { (Get-Content -LiteralPath $env:OMINULL_PARAMS_FILE -Raw | ConvertFrom-Json).($d.name) }) }
+    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } elseif ($d.type -eq 'catalog') { '[]' } else { "$($d.default)" } }
     $o[$d.name] = ConvertFrom-PkgParam $d $v
   }
   $o

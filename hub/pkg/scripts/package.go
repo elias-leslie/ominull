@@ -396,7 +396,7 @@ func (st Settings) Effective(h *PackageHeader, endpointID string) EffectiveSetti
 			e.Interval = *r.Interval
 		}
 		for k, v := range r.Params {
-			if p := h.Param(k); p != nil && p.Check(v) == nil {
+			if p := h.Param(k); p != nil && p.Type != "catalog" && p.Check(v) == nil {
 				e.Params[k] = v
 			}
 		}

@@ -358,6 +358,10 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("%s has no setting %q", h.Name, k))
 				return
 			}
+			if p.Type == "catalog" {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("%s comes from the software catalog (PUT /api/v1/maintenance/catalog), not a setting", k))
+				return
+			}
 			if raw == nil || string(*raw) == "null" {
 				delete(next, k)
 				continue

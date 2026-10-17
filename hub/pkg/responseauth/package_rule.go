@@ -132,12 +132,16 @@ type PackageItem struct {
 }
 
 // Baseline: a safe released package in audit mode with every parameter at
-// its default.
+// its default. A catalog parameter is hub data an audit only reads by, so
+// any valid catalog keeps an audit a baseline run.
 func (it PackageItem) Baseline() bool {
 	if it.Header == nil || it.Risk != "safe" || it.Exec.Parameters["mode"] != "audit" {
 		return false
 	}
 	for k, v := range it.Header.Defaults() {
+		if p := it.Header.Param(k); p != nil && p.Type == "catalog" {
+			continue
+		}
 		if it.Exec.Parameters[k] != v {
 			return false
 		}
@@ -271,21 +275,44 @@ func parsePackageItem(raw string) (PackageItem, error) {
 	if p.MaxOutputBytes < 1 || p.MaxOutputBytes > 5*1024*1024 {
 		return it, errors.New("script output bound must be 1 byte to 5 MiB")
 	}
+	// A value is at most 1 KiB, except a catalog param of a released
+	// package (checked below against its trusted header): up to 12 KiB, all
+	// params together within what agents take.
+	var long []string
+	total := 0
 	for k, v := range p.Parameters {
-		if !paramName(k) || reservedParams[k] || len(v) > 1024 {
+		total += len(k) + len(v)
+		if !paramName(k) || reservedParams[k] || len(v) > 12*1024 {
 			return it, errors.New("script parameters are malformed")
 		}
+		if len(v) > 1024 {
+			long = append(long, k)
+		}
+	}
+	if total > 15*1024 {
+		return it, errors.New("script parameters are malformed")
+	}
+	malformedUnlessCatalog := func(h *scripts.PackageHeader) error {
+		for _, k := range long {
+			if h == nil || h.Param(k) == nil || h.Param(k).Type != "catalog" {
+				return errors.New("script parameters are malformed")
+			}
+		}
+		return nil
 	}
 	it.Name = cleanText(p.ScriptID, 64)
 	rp, ok := releasedPackages[strings.ToLower(p.ScriptDigest)]
 	if !ok {
-		return it, nil
+		return it, malformedUnlessCatalog(nil)
 	}
 	// The released header names the platform, and so the one interpreter its
 	// runs may use (powershell.exe on Windows, /bin/sh on Linux).
 	h, err := scripts.ParsePackageHeader(p.Source)
 	if err != nil || h.Name != rp.Name || h.Risk != rp.Risk || p.Interpreter != h.Interpreter() {
-		return it, nil
+		return it, malformedUnlessCatalog(nil)
+	}
+	if err := malformedUnlessCatalog(h); err != nil {
+		return it, err
 	}
 	if err := h.CheckRun(p.Parameters); err != nil {
 		return it, fmt.Errorf("%s: %v", h.Name, err)

@@ -228,7 +228,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 				continue
 			}
 			params := eff.RunParams("")
-			if d.Header.CheckRun(params) != nil {
+			if s.fillCatalogParams(d.Header, params) != nil || d.Header.CheckRun(params) != nil {
 				continue
 			}
 			raw, err := packageItem(d.Script, d.Version, params, d.Header.Timeout, packageMaxOutput)

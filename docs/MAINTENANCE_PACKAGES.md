@@ -49,7 +49,8 @@ packages but small: a handful of machines, one owner, no new stores.
   `{"name","type","default","description"}` plus, by type, `min`/`max`
   (`int`, required), `values` (`enum`), `max_items` (`list`, required) and
   `careful` (`bool` only, default must be `false`). Types are `int`, `bool`,
-  `enum` and `list`. A run sets each one as `OMINULL_PARAM_<NAME>`; on the
+  `enum`, `list` and `catalog` (see Software removal; its default is `[]`
+  and the hub fills it on every run, so it has no setting). A run sets each one as `OMINULL_PARAM_<NAME>`; on the
   wire an int is decimal, a bool `true`/`false`, a list is its items joined
   by `,` (`-` for an empty list), each item matching
   `^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}$`, no duplicates. Scripts read
@@ -86,7 +87,7 @@ packages but small: a handful of machines, one owner, no new stores.
   is on battery, or, for updates and cleanup, Windows Update is installing.
   Audit runs are never skipped.
 - Packages never reboot; they report `reboot` and Windows active hours handle it.
-- Each script stays under 16 KiB and runs on Windows PowerShell 5.1.
+- Each script stays under 24 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.
 
 ## Windows safety rules
 
@@ -104,7 +105,7 @@ packages but small: a handful of machines, one owner, no new stores.
 
 ## Packages
 
-All six are `maintenance`. Every package but audit also takes `idle_minutes`
+All seven are `maintenance`. Every package but audit also takes `idle_minutes`
 (15) and all take `log_keep` (20).
 
 | Package | Risk | Timeout | Every | What enforce does | Parameters |
@@ -115,6 +116,7 @@ All six are `maintenance`. Every package but audit also takes `idle_minutes`
 | `windows-debloat` | careful | 900 s | weekly | Removes the listed bundled apps for all users and from the image; drops sponsored apps from the image; disables the listed services. Xbox, Store, GPU and OEM tools stay. | `remove_apps`, `deprovision_apps`, `services` |
 | `windows-performance` | safe | 300 s | weekly | Game Mode on, background game recording off by policy; hardware-accelerated GPU scheduling only when its careful step is on (reboot). | `game_mode`, `block_game_recording`, `gpu_scheduling` (careful, off) |
 | `windows-audit` | safe | 300 s | daily | Read-only controls: BitLocker, Defender, firewall, update age, free disk, TPM, Secure Boot, pending reboot; `ok` or `drift`. | `signature_max_days`, `update_max_days`, `disk_min_free_pct`, `disk_min_free_gb` |
+| `windows-software-removal` | careful | 3600 s | weekly | Uninstalls programs and Store apps in the hub's software catalog with their official uninstallers; see below. | `categories`, `keep`, `close_running`, `uninstall_timeout`, `catalog` |
 
 ### Maintenance mode
 
@@ -146,6 +148,56 @@ per-machine override, as for any package; "How long..." on the card).
 
 Turning it on or off from the card is an ordinary run (enforce / revert),
 so it asks on the phone; an audit does not.
+
+### Software removal
+
+`windows-software-removal` uninstalls third-party software the hub's
+**software catalog** names. It is careful, so every run (audit too) asks on
+the phone, and the approval names the catalog's size.
+
+- **Catalog.** One settings row (`maintenance.software_catalog`); a hub that
+  never saved one uses the list shipped in
+  `hub/pkg/scripts/software_catalog_seed.json` (games, game add-ons and
+  launchers, manufacturer extras, trials, adware). An entry is `id`, `name`,
+  `kind` (`program` from Apps and features, or `appx`), `match` (a wildcard
+  on the display or package name, at least 4 real characters), optional
+  `publisher` (programs), `category`, `method`, optional `flag` and
+  `timeout` (30-1800 s), `risk` and `note`. Methods: `msi` (msiexec /x with
+  the listed product code, silent), `registry` (the program's own quiet or
+  uninstall string plus at most one `flag` from a fixed list such as `/S` or
+  `--force-uninstall`), `appx` (Remove-AppxPackage for all users) and
+  `manual` (never run; reported for someone at the screen).
+- **API.** `GET /api/v1/maintenance/catalog` (any role) returns the entries,
+  whether they were saved here, and the category, method and flag labels.
+  `PUT {"entry":{...}}` (admin) adds or replaces one entry: adding one or
+  changing what it matches or how it is removed asks the owner (the
+  authority writes the statement from the entry); a name or note change goes
+  straight through. `DELETE ?id=` removes one without asking. All are
+  audited as `SOFTWARE_CATALOG_CHANGED`.
+- **Runs carry the catalog.** The hub puts the catalog in force into the
+  run's `catalog` parameter at dispatch (compact JSON, notes dropped, at
+  most 12 KiB), so the run's approval covers the exact entries. Agents cut
+  one environment variable at 2047 bytes, so the package reads catalog
+  parameters from the signed parameters file (`OMINULL_PARAMS_FILE`), not
+  the environment. The hub refuses a run whose parameters would pass the
+  agents' 16 KiB limit.
+- **What a run does.** Lists programs (HKLM 64/32-bit and every loaded
+  user hive) and Store apps, matches them against the catalog entries in
+  `categories`, minus `keep` (ids or name wildcards). It refuses anything
+  Microsoft-published or on its keep list (Windows, runtimes, drivers,
+  Defender, GPU and audio tools, OmniNull) whatever the catalog says.
+  Enforce runs each uninstaller silently and time-boxed (the entry's
+  `timeout` or `uninstall_timeout`), stopping the process tree when it runs
+  over. A program that is running is closed first only as `close_running`
+  allows (`idle` by default: nobody active for `idle_minutes`); otherwise it
+  is deferred to the next run.
+- **Result.** `detail` lists `found`, `kept`, `refused`, `other_categories`
+  (catalog matches outside `categories`), `removed`, `deferred` and
+  `needs_owner` (manual entries, missing or unsafe uninstall commands,
+  failures). Audit: `drift` if anything would be removed, else `ok`.
+  Enforce: `drift` if anything was deferred or needs the owner, `fixed` if
+  something was removed, else `ok`. Revert: `na` (an uninstall cannot be
+  undone).
 
 ## Settings
 
@@ -182,7 +234,10 @@ One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
   version. *Settings…* opens the package's fleet defaults: scheduled, mode,
   how often and each typed parameter, with where each value comes from, the
   default it would go back to, and a reset per row. Changes save as they are
-  made.
+  made. Under the Maintenance tab, the **Software removal catalog** card lists
+  every entry (what it matches, category, how it is removed) with *Add…*,
+  *Edit…* and *Remove*; adding or changing what an entry removes waits for
+  the phone.
 - **Asset view, Maintenance and security card** (Windows hosts), same tabs:
   compliance for the category, the machine's category switch (an override
   asks for a reason and an optional end date), and per package the latest

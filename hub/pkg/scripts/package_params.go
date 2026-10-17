@@ -241,8 +241,13 @@ func (p *PackageParam) defaultWire() (string, error) {
 			}
 		}
 		return JoinList(items), nil
+	case "catalog":
+		if string(raw) != "[]" {
+			return "", errors.New("a catalog's default is [] (the hub fills in its catalog)")
+		}
+		return catalogParamDefault, nil
 	}
-	return "", fmt.Errorf("type %q is not int, bool, enum or list", p.Type)
+	return "", fmt.Errorf("type %q is not int, bool, enum, list or catalog", p.Type)
 }
 
 // DefaultValue is the wire form of the param's default.
@@ -266,6 +271,10 @@ func SplitList(v string) []string {
 
 // Check validates one wire value.
 func (p *PackageParam) Check(v string) error {
+	if p.Type == "catalog" {
+		_, err := ParseCatalogWire(v)
+		return err
+	}
 	if len(v) > maxPackageValueLen {
 		return fmt.Errorf("longer than %d characters", maxPackageValueLen)
 	}
@@ -316,6 +325,18 @@ func (p *PackageParam) Check(v string) error {
 	return nil
 }
 
+// CatalogParams names the params the hub fills with its software catalog;
+// settings never set them.
+func (h *PackageHeader) CatalogParams() []string {
+	var out []string
+	for _, p := range h.Params {
+		if p.Type == "catalog" {
+			out = append(out, p.Name)
+		}
+	}
+	return out
+}
+
 // Param finds a declared param.
 func (h *PackageHeader) Param(name string) *PackageParam {
 	for i := range h.Params {
@@ -364,6 +385,15 @@ func (h *PackageHeader) Changes(params map[string]string, short bool) []string {
 	for _, p := range h.Params {
 		v := params[p.Name]
 		if v == p.def {
+			continue
+		}
+		if p.Type == "catalog" {
+			// The catalog is hub data, not a setting: name its size, never its bytes.
+			n := 0
+			if c, err := ParseCatalogWire(v); err == nil {
+				n = len(c)
+			}
+			out = append(out, fmt.Sprintf("%s of %d entries", p.Name, n))
 			continue
 		}
 		if p.Type != "list" {
@@ -431,6 +461,8 @@ func (h *PackageHeader) Schema() ParameterSchema {
 			d.Type, d.EnumValues = "enum", p.Values
 		case "list":
 			d.Type = "list"
+		case "catalog":
+			d.Type = "catalog"
 		}
 		s.Parameters = append(s.Parameters, d)
 	}

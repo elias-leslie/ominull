@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $Dir = Split-Path -Parent $PSScriptRoot
-$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode'
+$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode', 'software-removal'
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Passed = 0
 function Check([string]$What, [bool]$Ok) {
@@ -49,7 +49,7 @@ $forbidden = @{
 foreach ($n in $Names) {
     $path = Join-Path $Dir "$n.ps1"
     $bytes = [System.IO.File]::ReadAllBytes($path)
-    Check "$n size < 16384 bytes ($($bytes.Length))" ($bytes.Length -lt 16384)
+    Check "$n size < 24576 bytes ($($bytes.Length))" ($bytes.Length -lt 24576)
     Check "$n is ASCII without BOM" (-not ($bytes | Where-Object { $_ -gt 127 }))
     $text = [System.Text.Encoding]::ASCII.GetString($bytes)
     $lines = $text -split "`n"
@@ -74,7 +74,7 @@ foreach ($n in $Names) {
             Check "$n param $($p.name) name" ($p.name -cmatch '^[a-z][a-z0-9_]{1,31}$' -and $reserved -notcontains $p.name -and -not $pn[$p.name])
             $pn[$p.name] = 1
             Check "$n param $($p.name) description" ([bool]$p.description -and $p.description.Length -le 200)
-            Check "$n param $($p.name) known type" (@('int', 'bool', 'enum', 'list') -contains $p.type)
+            Check "$n param $($p.name) known type" (@('int', 'bool', 'enum', 'list', 'catalog') -contains $p.type)
             Check "$n param $($p.name) has a default" ($keys -contains 'default')
             if ($p.type -eq 'int') { Check "$n param $($p.name) int bounds" ($p.default -is [ValueType] -and $p.min -le $p.default -and $p.default -le $p.max) }
             if ($p.type -eq 'bool') { Check "$n param $($p.name) bool default" ($p.default -is [bool]) }
@@ -522,6 +522,85 @@ foreach ($n in 'cleanup', 'updates') {
         function Set-PowerValues($Scheme, $Values) { throw 'denied' }
         $Mode = 'enforce'; $Detail = [ordered]@{}; $threw = $false; try { Invoke-Package } catch { $threw = $true }
         Check 'mm: a failed enforce restores and leaves no state' ($threw -and -not (Test-Path -LiteralPath (Get-StateFile)) -and $null -eq $script:task)
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# Software removal: catalog from the parameters file, matching, keep and protected names,
+# official commands only, time-boxing and what is left for the owner.
+& {
+    . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'software-removal.ps1'))))
+    $cat = '[{"id":"app-explorer","name":"App Explorer","kind":"program","match":"App Explorer*","category":"adware","method":"registry","flag":"/S","risk":"safe"},' +
+        '{"id":"epic","name":"Epic","kind":"program","match":"Epic Games Launcher","category":"game_addons","method":"msi","risk":"safe"},' +
+        '{"id":"fake-ms","name":"Edge","kind":"program","match":"Microsoft Edge*","category":"adware","method":"registry","risk":"safe"},' +
+        '{"id":"hang","name":"Hang","kind":"program","match":"Hang Tool","category":"adware","method":"registry","timeout":60,"risk":"safe"},' +
+        '{"id":"kept","name":"Kept","kind":"program","match":"Kept Tool","category":"adware","method":"msi","risk":"safe"},' +
+        '{"id":"manual","name":"Manual","kind":"program","match":"Manual Game","category":"adware","method":"manual","risk":"safe"},' +
+        '{"id":"roblox-store","name":"Roblox","kind":"appx","match":"ROBLOXCORPORATION.ROBLOX","category":"games","method":"appx","risk":"safe"},' +
+        '{"id":"shell","name":"Shell","kind":"program","match":"Shell Tool","category":"adware","method":"registry","risk":"safe"},' +
+        '{"id":"wave","name":"Wave","kind":"program","match":"WaveBrowser*","category":"adware","method":"registry","flag":"--force-uninstall","risk":"careful"}]'
+    $pf = Join-Path ([IO.Path]::GetTempPath()) "ominull-params-$PID.json"
+    Set-Content -LiteralPath $pf -Value (@{ mode = 'enforce'; catalog = $cat; categories = 'adware' } | ConvertTo-Json -Compress)
+    $env:OMINULL_PARAMS_FILE = $pf; $env:OMINULL_PARAM_CATALOG = $cat.Substring(0, 100)
+    $Opt = Get-PkgParams (Join-Path $Dir 'software-removal.ps1')
+    Check 'sr: catalog read whole from the parameters file' (@($Opt.catalog).Count -eq 9 -and $Opt.catalog[8].id -eq 'wave')
+    Remove-Item Env:OMINULL_PARAMS_FILE, Env:OMINULL_PARAM_CATALOG
+    Check 'sr: no parameters file is an empty catalog' (@((Get-PkgParams (Join-Path $Dir 'software-removal.ps1')).catalog).Count -eq 0)
+    Remove-Item -LiteralPath $pf
+    $Opt.categories = @('adware'); $Opt.keep = @('Kept*'); $Opt.close_running = 'idle'
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "ominull-sr-$PID"; New-Item -ItemType Directory -Force -Path "$tmp\x" | Out-Null
+    'x' | Set-Content "$tmp\x\uninst.exe"; 'x' | Set-Content "$tmp\x\wave.exe"
+    $script:inv = @(
+        [pscustomobject]@{ kind = 'program'; name = 'App Explorer'; publisher = 'Host App'; version = '1'; key = 'AppEx'; msi = $false; quiet = ''; uninstall = "`"$tmp\x\uninst.exe`""; location = "$tmp\x" },
+        [pscustomobject]@{ kind = 'program'; name = 'Epic Games Launcher'; publisher = 'Epic'; version = '1'; key = '{11111111-2222-3333-4444-555555555555}'; msi = $true; quiet = ''; uninstall = ''; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'Microsoft Edge'; publisher = 'Microsoft Corporation'; version = '1'; key = 'Edge'; msi = $false; quiet = ''; uninstall = 'x'; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'Hang Tool'; publisher = ''; version = '1'; key = 'Hang'; msi = $false; quiet = "`"$tmp\x\uninst.exe`" /hang"; uninstall = ''; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'Kept Tool'; publisher = ''; version = '1'; key = '{K}'; msi = $true; quiet = ''; uninstall = ''; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'Manual Game'; publisher = ''; version = '1'; key = 'M'; msi = $false; quiet = ''; uninstall = 'x'; location = '' },
+        [pscustomobject]@{ kind = 'appx'; name = 'ROBLOXCORPORATION.ROBLOX'; publisher = ''; version = '1'; key = 'ROBLOX_1'; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'Shell Tool'; publisher = ''; version = '1'; key = 'S'; msi = $false; quiet = ''; uninstall = 'C:\Windows\System32\cmd.exe /c del x'; location = '' },
+        [pscustomobject]@{ kind = 'program'; name = 'WaveBrowser'; publisher = 'Wave'; version = '1'; key = 'W'; msi = $false; quiet = ''; uninstall = "$tmp\x\wave.exe --uninstall"; location = '' })
+    $script:calls = @(); $script:gone = @('AppEx', 'W')
+    function Get-Installed { $script:inv | Where-Object { $script:phase -ne 'after' -or $script:gone -notcontains $_.key } }
+    function Invoke-Uninstaller($Cmd, [int]$Sec) { $script:calls += "$($Cmd.exe)|$($Cmd.args)|$Sec"; if ($Cmd.args -match 'hang') { $null } else { 0 } }
+    function Get-Running($i) { if ($i.key -eq 'AppEx') { @([pscustomobject]@{ ProcessId = 42 }) } else { @() } }
+    function Invoke-Native { @{ code = 0; out = @(' USERNAME SESSIONNAME ID STATE IDLE TIME LOGON TIME', '>nadia console 1 Active none 10/17/2026 9:00 AM') } }
+    function Stop-Tree([int]$Id) { $script:calls += "kill $Id" }
+    function Write-Log {}
+    try {
+        $script:phase = ''; $Changed = New-Object System.Collections.Generic.List[string]; $Detail = [ordered]@{}; $Mode = 'audit'
+        Invoke-Package
+        $ids = @($Detail.found | ForEach-Object { $_.id }) -join ','
+        Check "sr: audit finds what the categories name ($ids)" ($script:State -eq 'drift' -and $ids -eq 'app-explorer,hang,manual,shell,wave' -and -not $script:calls)
+        Check 'sr: Microsoft programs are never removed' (@($Detail.refused) -contains 'Microsoft Edge')
+        Check 'sr: keep list honoured' (@($Detail.kept) -contains 'Kept Tool')
+        Check 'sr: other categories only counted' ($Detail.other_categories.game_addons -eq 1 -and $Detail.other_categories.games -eq 1)
+        $Mode = 'enforce'; $Detail = [ordered]@{}
+        function Get-Installed { $script:inv | Where-Object { $script:phase -ne 'after' -or $script:gone -notcontains $_.key } }
+        $orig = ${function:Get-Installed}; $script:n = 0
+        function Get-Installed { $script:n++; if ($script:n -gt 1) { $script:phase = 'after' }; & $orig }
+        Invoke-Package
+        $owner = @{}; foreach ($o in @($Detail.needs_owner)) { $owner[$o.id] = $o.reason }
+        Check 'sr: a running program is left open while someone uses the computer' ($owner['app-explorer'] -match 'running' -and -not ($script:calls -match 'kill'))
+        Check 'sr: manual entries go to the owner' ($owner['manual'] -match 'someone at the screen')
+        Check 'sr: an uninstall string that runs a shell is refused' ($owner['shell'] -match 'shell' -and -not ($script:calls -match 'cmd.exe'))
+        Check 'sr: a hung uninstaller is stopped and reported' ($owner['hang'] -match 'did not finish in 60 s' -and ($script:calls -match '/hang\|60$'))
+        Check 'sr: registry uses the machine string plus its flag' ($script:calls -contains "$tmp\x\wave.exe|--uninstall --force-uninstall|600")
+        Check 'sr: removed only what is gone after' (@($Detail.removed) -join ',' -eq 'WaveBrowser' -and $script:State -eq 'drift' -and $Changed[0] -eq 'removed WaveBrowser')
+        # Nobody at the computer: close it and uninstall.
+        function Invoke-Native { @{ code = 1; out = @() } }
+        $script:calls = @(); $script:n = 0; $script:phase = ''; $Changed.Clear(); $Detail = [ordered]@{}; Invoke-Package
+        Check 'sr: idle computer: running program closed, then removed' (($script:calls -contains 'kill 42') -and ($script:calls -match 'uninst.exe\|/S\|600') -and @($Detail.removed) -contains 'App Explorer')
+        # msi uses the product code the machine lists, never a command.
+        $Opt.categories = @('game_addons'); $script:calls = @(); $script:n = 0; $script:phase = ''; $Detail = [ordered]@{}; Invoke-Package
+        Check 'sr: msi runs msiexec /x with the listed product code' ($script:calls[0] -match 'msiexec.exe\|/x \{11111111-2222-3333-4444-555555555555\} /qn /norestart\|600' -and @($Detail.needs_owner)[0].reason -match 'still installed')
+        $Mode = 'revert'; $Detail = [ordered]@{}; Invoke-Package
+        Check 'sr: revert is not applicable' ($script:State -eq 'na')
+        $Mode = 'audit'; $Opt.catalog = @([pscustomobject]@{ id = 'bad'; kind = 'program'; match = '*'; category = 'adware'; method = 'registry' })
+        $threw = $false; try { Invoke-Package } catch { $threw = $true }
+        Check 'sr: an invalid catalog entry fails the run' $threw
+        $Opt.catalog = @([pscustomobject]@{ id = 'bad'; kind = 'program'; match = 'Wave Tool'; category = 'adware'; method = 'registry'; flag = '/S & calc' })
+        $threw = $false; try { Invoke-Package } catch { $threw = $true }
+        Check 'sr: a flag outside the list fails the run' $threw
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

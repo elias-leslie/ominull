@@ -138,6 +138,13 @@ func TestRemoteRefusesPlainHTTPOffHost(t *testing.T) {
 // operator socket is a shell (here a local sh standing in for the agent).
 func fakeHub(t *testing.T) (*httptest.Server, func() string) {
 	t.Helper()
+	return fakeHubDropping(t, nil)
+}
+
+// fakeHubDropping is fakeHub whose operator connection is cut, with no close
+// frame, when drop closes: what a laptop changing networks looks like.
+func fakeHubDropping(t *testing.T, drop <-chan struct{}) (*httptest.Server, func() string) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []string
 	note := func(s string) { mu.Lock(); seen = append(seen, s); mu.Unlock() }
@@ -187,6 +194,9 @@ func fakeHub(t *testing.T) (*httptest.Server, func() string) {
 			return
 		}
 		defer func() { _ = sh.Process.Kill(); _ = sh.Wait() }()
+		if drop != nil {
+			go func() { <-drop; _ = conn.UnderlyingConn().Close() }()
+		}
 		var wmu sync.Mutex
 		go func() {
 			buf := make([]byte, 4096)
@@ -319,5 +329,73 @@ func TestHeldSessionLivesAsLongAsTheHubSays(t *testing.T) {
 	old.ExpiresAt = time.Now().Add(-time.Minute)
 	if d := old.lifetime(time.Now()); d != 0 {
 		t.Fatalf("expired session: %s", d)
+	}
+}
+
+// A held session whose connection drops (no close frame) leaves the ended
+// marker, so the next exec errors instead of asking the owner again.
+func TestHeldSessionDropLeavesTheEndedMarker(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	drop := make(chan struct{})
+	hub, seen := fakeHubDropping(t, drop)
+	defer hub.Close()
+	c := newAPIClient(CLIConfig{HubURL: hub.URL, APIKey: "test"})
+	s, err := c.openSession("ep-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(heldDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan string, 1)
+	done := make(chan int, 1)
+	go func() {
+		done <- holdServe(holdSpec{Hub: hub.URL, Session: *s, TTL: time.Hour}, func(m string) { ready <- m })
+	}()
+	if m := <-ready; !strings.HasPrefix(m, "ok ") {
+		t.Fatalf("holder: %s", m)
+	}
+	if res, held, err := heldCall("ep-1", remoteJob{Op: "exec", Command: "echo up", Timeout: 10}); !held || err != nil || !strings.Contains(string(res.Stdout), "up") {
+		t.Fatalf("held exec: %v %v %q", held, err, res.Stdout)
+	}
+	close(drop)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the holder kept running after its connection dropped")
+	}
+	if _, err := os.Stat(heldSocket("ep-1")); !os.IsNotExist(err) {
+		t.Fatalf("socket left behind: %v", err)
+	}
+	why, err := os.ReadFile(heldEndedMarker("ep-1"))
+	if err != nil || !strings.Contains(string(why), "closed it") {
+		t.Fatalf("marker: %q %v", why, err)
+	}
+	before := seen()
+	if _, held, err := heldCall("ep-1", remoteJob{Op: "exec", Command: "echo again", Timeout: 10}); !held || err == nil || !strings.Contains(err.Error(), "ended") {
+		t.Fatalf("next exec after a drop: held=%v err=%v", held, err)
+	}
+	if seen() != before {
+		t.Fatalf("a dropped held session led to a new owner ask: %s", seen())
+	}
+	// shell end leaves no marker.
+	hub2, _ := fakeHub(t)
+	defer hub2.Close()
+	s2, err := newAPIClient(CLIConfig{HubURL: hub2.URL, APIKey: "test"}).openSession("ep-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready2 := make(chan string, 1)
+	done2 := make(chan int, 1)
+	go func() {
+		done2 <- holdServe(holdSpec{Hub: hub2.URL, Session: *s2, TTL: time.Hour}, func(m string) { ready2 <- m })
+	}()
+	<-ready2
+	if _, _, err := heldCall("ep-1", remoteJob{Op: "end"}); err != nil {
+		t.Fatal(err)
+	}
+	<-done2
+	if _, err := os.Stat(heldEndedMarker("ep-1")); !os.IsNotExist(err) {
+		t.Fatal("shell end left an ended marker")
 	}
 }

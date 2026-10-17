@@ -15,7 +15,7 @@ func TestRepositoryPackagesParse(t *testing.T) {
 	linux, _ := filepath.Glob("../../../packages/linux/*.sh")
 	files = append(files, linux...)
 	want := map[string]bool{"windows-updates": true, "windows-cleanup": true, "windows-privacy": true,
-		"windows-debloat": true, "windows-performance": true, "windows-audit": true, "windows-maintenance-mode": true,
+		"windows-debloat": true, "windows-performance": true, "windows-audit": true, "windows-maintenance-mode": true, "windows-software-removal": true,
 		"linux-maintenance-mode": true}
 	for _, f := range files {
 		h, _, err := readPackage(f)
@@ -49,7 +49,7 @@ func TestReadPackageRejects(t *testing.T) {
 		"range":     "# ominull-package: " + strings.Replace(good, `"default":14`, `"default":400`, 1) + "\n",
 		"reserved":  "# ominull-package: " + strings.Replace(good, `"age_days"`, `"path"`, 1) + "\n",
 		"nodesc":    "# ominull-package: " + strings.Replace(good, `"Age in days."`, `""`, 1) + "\n",
-		"oversized": "# ominull-package: " + good + "\n" + strings.Repeat("#", 16*1024),
+		"oversized": "# ominull-package: " + good + "\n" + strings.Repeat("#", 24*1024),
 	} {
 		p := filepath.Join(dir, name+".ps1")
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {

@@ -120,6 +120,9 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 		var params map[string]string
 		for _, id := range req.EndpointIDs {
 			p := settings.Effective(h, id).RunParams(req.Mode)
+			if err := s.fillCatalogParams(h, p); err != nil {
+				return nil, nil, err
+			}
 			if params != nil && !sameParams(params, p) {
 				return nil, nil, fmt.Errorf("%s has different settings on these hosts; run them separately", sc.Name)
 			}

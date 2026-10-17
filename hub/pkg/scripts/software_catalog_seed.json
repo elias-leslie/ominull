@@ -1,0 +1,21 @@
+[
+ {"id": "acer-jumpstart", "name": "Acer Jumpstart", "kind": "program", "match": "Acer Jumpstart*", "category": "oem_bloat", "method": "msi", "risk": "safe"},
+ {"id": "acer-ueip", "name": "Acer User Experience Improvement Program", "kind": "program", "match": "*User Experience Improvement Program*", "publisher": "Acer*", "category": "oem_bloat", "method": "msi", "risk": "safe"},
+ {"id": "app-explorer", "name": "App Explorer", "kind": "program", "match": "App Explorer*", "category": "adware", "method": "registry", "flag": "/S", "risk": "safe", "note": "Per-user install (Host App Service)"},
+ {"id": "epic-games-launcher", "name": "Epic Games Launcher", "kind": "program", "match": "Epic Games Launcher", "category": "game_addons", "method": "msi", "risk": "safe", "note": "Remove Epic games first; their folders stay behind otherwise"},
+ {"id": "epic-online-services", "name": "Epic Online Services", "kind": "program", "match": "Epic Online Services*", "category": "game_addons", "method": "msi", "timeout": 1200, "risk": "careful", "note": "Ran past 10 minutes as SYSTEM on one laptop"},
+ {"id": "epic-prerequisites", "name": "Epic Games Launcher Prerequisites", "kind": "program", "match": "Epic Games Launcher Prerequisites*", "category": "game_addons", "method": "msi", "risk": "safe"},
+ {"id": "expressvpn", "name": "ExpressVPN", "kind": "program", "match": "ExpressVPN*", "category": "trialware", "method": "registry", "flag": "/quiet /norestart", "risk": "safe"},
+ {"id": "fortnite", "name": "Fortnite", "kind": "program", "match": "Fortnite*", "category": "games", "method": "manual", "risk": "safe", "note": "Uninstall from the Epic Games Launcher"},
+ {"id": "imposter-among-space-run", "name": "Imposter Among Space Run", "kind": "appx", "match": "*.ImposterAmongSpaceRun", "category": "games", "method": "appx", "risk": "safe"},
+ {"id": "overwolf", "name": "Overwolf", "kind": "program", "match": "Overwolf", "category": "game_addons", "method": "registry", "flag": "/S", "risk": "safe", "note": "Removes Overwolf apps with it"},
+ {"id": "paper-io", "name": "Paper.io games", "kind": "appx", "match": "*.Paper.io*", "category": "games", "method": "appx", "risk": "safe"},
+ {"id": "riot-client", "name": "Riot Client", "kind": "program", "match": "Riot Client", "category": "game_addons", "method": "registry", "risk": "safe", "note": "Remove Riot games first"},
+ {"id": "riot-vanguard", "name": "Riot Vanguard", "kind": "program", "match": "Riot Vanguard", "category": "game_addons", "method": "registry", "risk": "careful", "note": "Kernel anti-cheat; may need a reboot"},
+ {"id": "roblox-player", "name": "Roblox Player", "kind": "program", "match": "Roblox Player*", "category": "games", "method": "registry", "risk": "safe"},
+ {"id": "roblox-store", "name": "Roblox (Store app)", "kind": "appx", "match": "ROBLOXCORPORATION.ROBLOX", "category": "games", "method": "appx", "risk": "safe"},
+ {"id": "roblox-studio", "name": "Roblox Studio", "kind": "program", "match": "Roblox Studio*", "category": "games", "method": "registry", "risk": "safe"},
+ {"id": "valorant", "name": "VALORANT", "kind": "program", "match": "VALORANT", "category": "games", "method": "registry", "risk": "safe", "note": "Its uninstall string runs the Riot Client"},
+ {"id": "wavebrowser", "name": "WaveBrowser", "kind": "program", "match": "WaveBrowser*", "category": "adware", "method": "registry", "flag": "--force-uninstall", "risk": "careful", "note": "Often installs per user; may leave its updater"},
+ {"id": "xsplit", "name": "XSplit", "kind": "program", "match": "XSplit*", "category": "game_addons", "method": "msi", "risk": "safe"}
+]

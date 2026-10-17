@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -693,6 +694,14 @@ func runHolder() int {
 		report("error: " + err.Error())
 		return 1
 	}
+	return holdServe(spec, report)
+}
+
+// holdServe attaches the session and serves jobs until it ends. Every way it
+// ends other than shell end leaves the ended marker (with the reason) before
+// the socket goes, so the next exec says so instead of asking the owner for
+// a fresh session nobody expected.
+func holdServe(spec holdSpec, report func(string)) int {
 	c := newAPIClient(CLIConfig{HubURL: spec.Hub, CAFile: spec.CAFile})
 	tlsCfg, err := c.tlsConfig()
 	if err != nil {
@@ -723,16 +732,53 @@ func runHolder() int {
 	stop := make(chan struct{})
 	var once sync.Once
 	end := func() { once.Do(func() { close(stop); ln.Close() }) }
-	endFor := func(why string) {
-		_ = os.WriteFile(marker, []byte(why+"\n"), 0o600)
+	var whyMu sync.Mutex
+	why, byUser := "", false
+	setWhy := func(w string) {
+		whyMu.Lock()
+		if why == "" {
+			why = w
+		}
+		whyMu.Unlock()
+	}
+	endFor := func(w string) {
+		setWhy(w)
 		end()
 	}
+	// Runs before the socket is removed (deferred later, so earlier).
+	defer func() {
+		r := recover()
+		if r != nil {
+			setWhy(fmt.Sprintf("the session holder failed: %v", r))
+		}
+		whyMu.Lock()
+		w, user := why, byUser
+		whyMu.Unlock()
+		if !user {
+			if w == "" {
+				w = "the session holder stopped"
+			}
+			_ = os.WriteFile(marker, []byte(w+"\n"), 0o600)
+		}
+		if r != nil {
+			panic(r)
+		}
+	}()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	defer signal.Stop(sigs)
 	go func() {
 		select {
 		case <-time.After(spec.TTL):
 			endFor("its time limit passed")
 		case <-rs.ended:
-			endFor("the hub closed it")
+			w := "the hub or the endpoint closed it"
+			if rs.why != "" {
+				w += ": " + rs.why
+			}
+			endFor(w)
+		case sig := <-sigs:
+			endFor("the session holder was stopped (" + sig.String() + ")")
 		case <-stop:
 		}
 		end()
@@ -762,6 +808,9 @@ func runHolder() int {
 				return
 			}
 			if job.Op == "end" {
+				whyMu.Lock()
+				byUser = true
+				whyMu.Unlock()
 				_ = json.NewEncoder(conn).Encode(remoteResult{})
 				end()
 				return

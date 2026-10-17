@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"ominull/hub/pkg/scripts"
 	"sort"
 	"strconv"
 	"strings"
@@ -404,6 +405,12 @@ var detectionPolicyOps = map[string]map[string]string{
 	"terminal_limits": {
 		"raise": "Raise remote shell limits",
 	},
+	// The software removal catalog: which programs a removal package may
+	// uninstall and how. Deleting an entry only tightens and asks nobody.
+	"software_catalog": {
+		"add":    "Add to the software removal catalog",
+		"change": "Change a software removal catalog entry",
+	},
 }
 
 // describeDetectionPolicy shows the owner the change field by field, worked
@@ -485,6 +492,10 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 			return "", "", errors.New("a remote shell limits change targets terminal:limits and carries the limits in force")
 		}
 		summary, err := TerminalLimitsWording(before, after)
+		return action, summary, err
+	}
+	if p.Policy == "software_catalog" {
+		summary, err := SoftwareCatalogWording(targets[0], before, after)
 		return action, summary, err
 	}
 	if !strings.HasPrefix(targets[0], "exclusion:") {
@@ -831,4 +842,44 @@ func TerminalLimitsWording(before, after map[string]interface{}) (string, error)
 		return "", errors.New("this remote shell limits change changes nothing")
 	}
 	return "Remote shell: " + strings.Join(parts, "; "), nil
+}
+
+// SoftwareCatalogWording is the owner's statement for a catalog entry added
+// or changed: the whole entry as the removal package will read it, and for a
+// change what differs. The entry must be valid, so nothing the hub sends can
+// widen it past the catalog rules. The hub uses it for its audit row.
+func SoftwareCatalogWording(target string, before, after map[string]interface{}) (string, error) {
+	entry := func(m map[string]interface{}) (*scripts.CatalogEntry, error) {
+		raw, _ := json.Marshal(m)
+		var e scripts.CatalogEntry
+		if err := decodeJSON(raw, &e); err != nil {
+			return nil, errors.New("a catalog entry carries only the catalog fields")
+		}
+		if err := e.Validate(); err != nil {
+			return nil, err
+		}
+		return &e, nil
+	}
+	a, err := entry(after)
+	if err != nil {
+		return "", err
+	}
+	if target != "catalog:"+a.ID {
+		return "", errors.New("a catalog change targets catalog:<id> of the entry it saves")
+	}
+	if before == nil {
+		return fitParts([]string{"Software removal catalog: add " + a.Describe()}, nil)
+	}
+	b, err := entry(before)
+	if err != nil {
+		return "", err
+	}
+	if b.ID != a.ID {
+		return "", errors.New("a catalog change keeps the entry's id")
+	}
+	parts := policyDiff(before, after, func(k string) bool { return k != "note" && k != "name" })
+	if len(parts) == 0 {
+		return "", errors.New("this catalog change changes nothing the removal package reads")
+	}
+	return fitParts(append([]string{"Software removal catalog: " + a.Describe()}, parts...), nil)
 }

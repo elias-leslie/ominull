@@ -26,7 +26,7 @@ var (
 // ParameterDef defines a strongly-typed parameter in a script version schema.
 type ParameterDef struct {
 	Name        string   `json:"name"`
-	Type        string   `json:"type"` // "string", "number", "integer", "boolean", "enum", "list"
+	Type        string   `json:"type"` // "string", "number", "integer", "boolean", "enum", "list", "catalog"
 	Description string   `json:"description,omitempty"`
 	Required    bool     `json:"required,omitempty"`
 	Default     string   `json:"default,omitempty"`
@@ -43,6 +43,8 @@ func (p ParameterDef) packageParam() *PackageParam {
 	pp := &PackageParam{Name: p.Name, Min: p.Min, Max: p.Max, MaxItems: p.MaxItems}
 	if p.Type == "integer" {
 		pp.Type = "int"
+	} else if p.Type == "catalog" {
+		pp.Type = "catalog"
 	} else {
 		pp.Type = "list"
 	}
@@ -93,7 +95,7 @@ func ValidateSchema(rawJSON string) (*ParameterSchema, error) {
 					return nil, fmt.Errorf("%w: parameter %q default %q is not a valid number", ErrInvalidSchema, p.Name, p.Default)
 				}
 			}
-		case "integer", "list":
+		case "integer", "list", "catalog":
 			if p.Type == "integer" && (p.Min == nil || p.Max == nil || *p.Min > *p.Max) {
 				return nil, fmt.Errorf("%w: parameter %q integer needs min <= max", ErrInvalidSchema, p.Name)
 			}
@@ -131,7 +133,7 @@ func ValidateSchema(rawJSON string) (*ParameterSchema, error) {
 				return nil, fmt.Errorf("%w: parameter %q default %q is not in enum_values", ErrInvalidSchema, p.Name, p.Default)
 			}
 		default:
-			return nil, fmt.Errorf("%w: parameter %q unsupported type %q (allowed: string, number, integer, boolean, enum, list)", ErrInvalidSchema, p.Name, p.Type)
+			return nil, fmt.Errorf("%w: parameter %q unsupported type %q (allowed: string, number, integer, boolean, enum, list, catalog)", ErrInvalidSchema, p.Name, p.Type)
 		}
 	}
 
@@ -185,7 +187,7 @@ func ValidateParameters(schema *ParameterSchema, values map[string]string) error
 			if _, err := strconv.ParseFloat(val, 64); err != nil {
 				return fmt.Errorf("%w: parameter %q value %q is not a valid number", ErrInvalidParameter, p.Name, val)
 			}
-		case "integer", "list":
+		case "integer", "list", "catalog":
 			if err := p.packageParam().Check(val); err != nil {
 				return fmt.Errorf("%w: parameter %q: %v", ErrInvalidParameter, p.Name, err)
 			}

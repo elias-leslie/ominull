@@ -488,6 +488,7 @@
     maintenanceByEndpoint: {},
     maintSettingsByEndpoint: {},
     maintSettings: null,
+    maintCatalog: null,
     maintTab: "maintenance",
     maintCardTab: "maintenance",
     /* The hub has kept a rolling communication profile per endpoint since the
@@ -1256,6 +1257,15 @@
     saved: false,
     bounds: { min_duration_seconds: 300, max_duration_seconds: 86400, min_idle_seconds: 60, min_per_endpoint: 1, max_per_endpoint: 10, min_per_tenant: 1, max_per_tenant: 50 }
   };
+  /* A few entries of the catalog shipped in hub/pkg/scripts/software_catalog_seed.json. */
+  var DEMO_CATALOG = {
+    entries: [{"id": "acer-jumpstart", "name": "Acer Jumpstart", "kind": "program", "match": "Acer Jumpstart*", "category": "oem_bloat", "method": "msi", "risk": "safe"}, {"id": "fortnite", "name": "Fortnite", "kind": "program", "match": "Fortnite*", "category": "games", "method": "manual", "risk": "safe", "note": "Uninstall from the Epic Games Launcher"}, {"id": "overwolf", "name": "Overwolf", "kind": "program", "match": "Overwolf", "category": "game_addons", "method": "registry", "flag": "/S", "risk": "safe", "note": "Removes Overwolf apps with it"}, {"id": "riot-vanguard", "name": "Riot Vanguard", "kind": "program", "match": "Riot Vanguard", "category": "game_addons", "method": "registry", "risk": "careful", "note": "Kernel anti-cheat; may need a reboot"}, {"id": "roblox-store", "name": "Roblox (Store app)", "kind": "appx", "match": "ROBLOXCORPORATION.ROBLOX", "category": "games", "method": "appx", "risk": "safe"}, {"id": "wavebrowser", "name": "WaveBrowser", "kind": "program", "match": "WaveBrowser*", "category": "adware", "method": "registry", "flag": "--force-uninstall", "risk": "careful", "note": "Often installs per user; may leave its updater"}],
+    saved: false,
+    categories: { games: "Games", game_addons: "Game add-ons and launchers", oem_bloat: "Manufacturer extras", trialware: "Trials", adware: "Adware and unwanted browsers" },
+    methods: { program: { msi: "Windows Installer (msiexec /x, silent)", registry: "the program's own uninstaller", manual: "needs someone at the screen" },
+      appx: { appx: "remove the Store app for all users", manual: "needs someone at the screen" } },
+    flags: ["/S", "/SILENT", "/VERYSILENT /NORESTART", "/quiet", "/quiet /norestart", "/uninstall /quiet", "-uninstall", "--uninstall", "--force-uninstall"]
+  };
   function demoTerminalLimits() {
     return JSON.parse(JSON.stringify(DEMO_TERMINAL_LIMITS));
   }
@@ -1276,6 +1286,7 @@
       ["windows-debloat", "Remove bundled apps", "maintenance", "careful", "weekly", [["apps", "list", "Microsoft.BingNews,*CandyCrush*", null, null, "Apps to remove."]]],
       ["windows-performance", "Gaming performance", "maintenance", "safe", "weekly", [["game_mode", "bool", "true", null, null, "Turn on Game Mode."], ["disable_vbs", "bool", "false", null, null, "Turn off virtualization-based security (careful)."]]],
       ["windows-privacy", "Privacy", "maintenance", "safe", "weekly", []],
+      ["windows-software-removal", "Software removal", "maintenance", "careful", "weekly", [["categories", "list", "adware,oem_bloat,trialware", null, null, "Catalog categories to remove (games, game_addons, oem_bloat, trialware, adware)"], ["catalog", "catalog", "[]", null, null, "The software catalog, filled in by the hub"]]],
       ["windows-updates", "Windows updates", "maintenance", "safe", "daily", [["exclude", "list", "Firmware", null, null, "Update classes never installed."]]],
       ["windows-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before the machine's own sleep settings come back"]], "maintenance_mode", "windows"],
       ["linux-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before sleep is allowed again"]], "maintenance_mode", "linux"]
@@ -1331,6 +1342,7 @@
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
+        if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1513,6 +1525,14 @@
         else if (body.mode === "revert") delete DEMO_MAINT_MODE[id];
       });
       return { jobs: (body.endpoint_ids || []).map(function (id) { return { endpoint_id: id, package: (body.packages || [])[0], job_id: "demo-job-" + Date.now() }; }) };
+    }
+    if (base === "/api/v1/maintenance/catalog") {
+      var drop = method === "DELETE" ? decodeURIComponent((path.split("id=")[1] || "").split("&")[0]) : body.entry.id;
+      DEMO_CATALOG.entries = DEMO_CATALOG.entries.filter(function (e) { return e.id !== drop; });
+      if (method !== "DELETE") DEMO_CATALOG.entries.push(body.entry);
+      DEMO_CATALOG.entries.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
+      DEMO_CATALOG.saved = true;
+      return Object.assign(JSON.parse(JSON.stringify(DEMO_CATALOG)), { changed: true });
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
@@ -9540,7 +9560,16 @@
         var inherited = epID && up && up.params ? up.params[p.name] : p.default;
         var send = function (v) { var ch = { params: {} }; ch.params[p.name] = v; save(ch, p.name); };
         var input;
-        if (p.type === "bool") {
+        if (p.type === "catalog") {
+          var n = arrayOf(state.maintCatalog && state.maintCatalog.entries).length;
+          rows.push([
+            h("div", {}, h("b", { text: p.name.replace(/_/g, " ") }), h("div", { cls: "dim-2", text: p.description })),
+            h("span", { text: state.maintCatalog && !state.maintCatalog.error ? n + " entries" : "—" }),
+            h("span", { cls: "dim-2", text: "the software removal catalog, edited on the Maintenance page; every run takes it as it is then" }),
+            null
+          ]);
+          return;
+        } else if (p.type === "bool") {
           input = h("input", { type: "checkbox", "data-field": p.name, checked: cur === "true", disabled: !editable, "aria-label": p.description,
             on: { change: function (e) { send(e.target.checked ? "true" : "false"); } } });
         } else if (p.type === "enum") {
@@ -9683,11 +9712,140 @@
           on: { click: function () { openMaintSettingsSheet(p.name, "", ""); } } })
       ];
     });
+    var usesCatalog = pkgs.some(function (p) { return arrayOf(p.params).some(function (x) { return x.type === "catalog"; }); });
     view.appendChild(h("div", { cls: "pad stack" },
       card("Package settings", head, null, true),
       card(tab === "security" ? "Security packages" : "Maintenance packages",
         pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
-          : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true)));
+          : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true),
+      usesCatalog ? maintCatalogCard() : null));
+  }
+
+  /* The software removal catalog: what Software removal may uninstall and
+     how. Adding an entry or changing what one removes asks the owner on
+     their phone; a name or note change and removing an entry do not. */
+  function maintCatalogCard() {
+    var c = state.maintCatalog;
+    var actions = IS_ADMIN && c && !c.error ? [h("button", { cls: "btn mini", type: "button", text: "Add…",
+      on: { click: function () { openMaintCatalogSheet(null); } } })] : null;
+    if (!c) return card("Software removal catalog", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Loading the catalog…" })), actions, true);
+    if (c.error) return card("Software removal catalog", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Catalog unavailable: " + c.error })), null, true);
+    var cats = c.categories || {}, methods = c.methods || {};
+    var rows = arrayOf(c.entries).map(function (e) {
+      var how = (methods[e.kind] || {})[e.method] || e.method;
+      return [
+        h("div", {}, h("b", { text: e.name }), e.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
+          e.note ? h("div", { cls: "dim-2", text: e.note }) : null),
+        h("div", {}, h("span", { text: (e.kind === "appx" ? "Store app " : "Program ") + "\u201c" + e.match + "\u201d" }),
+          e.publisher ? h("div", { cls: "dim-2", text: "publisher \u201c" + e.publisher + "\u201d" }) : null),
+        cats[e.category] || e.category,
+        h("div", {}, h("span", { text: how }), e.flag ? h("div", { cls: "dim-2 mono", text: e.flag }) : null,
+          e.timeout ? h("div", { cls: "dim-2", text: "up to " + Math.round(e.timeout / 60) + " min" }) : null),
+        IS_ADMIN ? h("div", { cls: "uf uf-g1" },
+          h("button", { cls: "btn mini", type: "button", text: "Edit…", "aria-label": "Edit " + e.name, on: { click: function () { openMaintCatalogSheet(e); } } }),
+          h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove " + e.name + " from the catalog", on: { click: function () { maintCatalogRemove(e); } } }))
+          : null
+      ];
+    });
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "Software removal uninstalls only what matches an entry here, in the categories a machine's settings pick, using the entry's own uninstall method. Adding an entry or changing what one removes asks you on your phone." + (c.saved ? "" : " This is the list shipped with the hub; nothing has been changed yet.") }));
+    body.appendChild(rows.length ? stackOnPhone(simpleTable(["Software", "Matches", "Category", "How it is removed", ""], rows, { sortable: false }))
+      : emptyBox("The catalog is empty, so Software removal finds nothing to remove."));
+    return card("Software removal catalog", body, actions, true);
+  }
+
+  /* The page skips a rebuild while focus is inside it; a catalog change is
+     the operator's own, so redraw anyway. */
+  function maintCatalogRedraw() {
+    if (state.section !== "maintenance") return;
+    $("view").dataset.section = "";
+    renderBody();
+  }
+
+  function maintCatalogRemove(e) {
+    confirmSheet({
+      title: "Remove " + e.name + " from the catalog?",
+      consequence: "Software removal leaves it alone from the next run. Nothing already removed comes back.",
+      confirmLabel: "Remove",
+      onConfirm: function () { maintCatalogDelete(e); }
+    });
+  }
+
+  function maintCatalogDelete(e) {
+    request("/api/v1/maintenance/catalog?id=" + encodeURIComponent(e.id), "DELETE").then(function (d) {
+      state.maintCatalog = d || state.maintCatalog; maintCatalogRedraw(); toast("Removed " + e.name, "ok");
+    }, function (err) { toast("Not removed: " + err.message, "crit"); });
+  }
+
+  function openMaintCatalogSheet(entry) {
+    var c = state.maintCatalog || {};
+    var cats = c.categories || {}, methods = c.methods || {};
+    var e = entry || { id: "", name: "", kind: "program", match: "", publisher: "", category: "adware", method: "registry", flag: "", timeout: 0, risk: "safe", note: "" };
+    function field(label, el, hint) {
+      return h("label", { cls: "field" }, h("span", { text: label }), el, hint ? h("span", { cls: "dim-2", text: hint }) : null);
+    }
+    var name = h("input", { type: "text", maxlength: "120", value: e.name, "aria-label": "Name" });
+    var id = h("input", { type: "text", maxlength: "48", value: e.id, disabled: !!entry, "aria-label": "Id" });
+    var idTouched = !!entry;
+    id.addEventListener("input", function () { idTouched = true; });
+    name.addEventListener("input", function () {
+      if (!idTouched) id.value = name.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    });
+    var kind = h("select", { "aria-label": "Kind" },
+      h("option", { value: "program", text: "Program (Apps and features)", selected: e.kind === "program" }),
+      h("option", { value: "appx", text: "Store app", selected: e.kind === "appx" }));
+    var match = h("input", { type: "text", maxlength: "100", value: e.match, "aria-label": "Matches" });
+    var publisher = h("input", { type: "text", maxlength: "100", value: e.publisher || "", "aria-label": "Publisher" });
+    var category = h("select", { "aria-label": "Category" }, Object.keys(cats).sort().map(function (k) {
+      return h("option", { value: k, text: cats[k], selected: e.category === k });
+    }));
+    var method = h("select", { "aria-label": "How it is removed" });
+    var flag = h("select", { "aria-label": "Silent switch" }, [h("option", { value: "", text: "none (the program's quiet uninstall string)", selected: !e.flag })]
+      .concat(arrayOf(c.flags).map(function (f) { return h("option", { value: f, text: f, selected: e.flag === f }); })));
+    var timeout = h("input", { type: "number", min: "30", max: "1800", step: "30", value: e.timeout || "", placeholder: "the run's setting", "aria-label": "Time limit in seconds" });
+    var careful = h("input", { type: "checkbox", checked: e.risk === "careful", "aria-label": "Careful" });
+    var note = h("input", { type: "text", maxlength: "120", value: e.note || "", "aria-label": "Note" });
+    var pubRow = field("Publisher (optional)", publisher, "Only programs whose publisher matches too, e.g. Acer*");
+    var flagRow = field("Silent switch", flag, "Added to the program's own uninstall command");
+    function syncKind() {
+      var opts = methods[kind.value] || {};
+      var want = Object.keys(opts).indexOf(method.value) >= 0 ? method.value : (Object.keys(opts).indexOf(e.method) >= 0 ? e.method : Object.keys(opts)[0]);
+      clear(method);
+      Object.keys(opts).sort().forEach(function (k) { method.appendChild(h("option", { value: k, text: opts[k], selected: k === want })); });
+      pubRow.hidden = kind.value !== "program";
+      flagRow.hidden = method.value !== "registry";
+    }
+    kind.addEventListener("change", syncKind);
+    method.addEventListener("change", syncKind);
+    syncKind();
+    var save = h("button", { cls: "btn btn-primary", type: "button", text: entry ? "Save" : "Add", on: { click: function () {
+      var out = { id: id.value.trim(), name: name.value.trim(), kind: kind.value, match: match.value.trim(), category: category.value,
+        method: method.value, risk: careful.checked ? "careful" : "safe" };
+      if (kind.value === "program" && publisher.value.trim()) out.publisher = publisher.value.trim();
+      if (method.value === "registry" && flag.value) out.flag = flag.value;
+      if (timeout.value) out.timeout = parseInt(timeout.value, 10);
+      if (note.value.trim()) out.note = note.value.trim();
+      if (!out.name || !out.match) { toast("Give it a name and what it matches.", "warn"); (out.name ? match : name).focus(); return; }
+      save.disabled = true;
+      ownerApproved("/api/v1/maintenance/catalog", { entry: out }, { method: "PUT", label: (entry ? "Change " : "Add ") + out.name + " in the software removal catalog",
+        onPending: function () { closeSheet(); } })
+        .then(function (d) { closeSheet(); if (d && d.entries) state.maintCatalog = d; maintCatalogRedraw(); toast(d && d.changed === false ? "Nothing changed" : "Saved", "ok"); })
+        .catch(function (err) { save.disabled = false; if (err && err.handled) return; toast("Not saved: " + err.message, "crit"); });
+    } } });
+    openSheet(entry ? "Edit " + entry.name : "Add to the software removal catalog", h("div", { cls: "stack" },
+      field("Name", name),
+      field("Id", id, entry ? "Fixed once added" : "Lower-case letters, digits and -"),
+      h("div", { cls: "form-row" }, field("Kind", kind), field("Category", category)),
+      field("Matches", match, "The name as Apps and features (or the Store package name) shows it; * matches anything. At least 4 real characters."),
+      pubRow,
+      field("How it is removed", method),
+      flagRow,
+      h("div", { cls: "form-row" }, field("Time limit, seconds (optional)", timeout),
+        h("label", { cls: "uf uf-g1" }, careful, h("span", { text: "Careful: removing it can break something (an anti-cheat driver, a game\u2019s services); flagged here and in the approval" }))),
+      field("Note (optional)", note),
+      h("p", { cls: "pending", text: "Adding an entry or changing what it matches or how it is removed asks you to approve on your phone first. Every run of Software removal asks you first. Whatever the catalog says, it never removes Microsoft programs, drivers, runtimes, Defender or OmniNull." })),
+      [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    name.focus();
   }
 
   function renderRoute() {
@@ -10832,6 +10990,8 @@
     }
     if (state.section === "maintenance") {
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
+      jobs.push(request("/api/v1/maintenance/catalog").then(function (d) { state.maintCatalog = d || null; },
+        function (e) { state.maintCatalog = { error: (e && e.message) || "request failed" }; }));
     }
     if (state.section === "forensics") {
       jobs.push(request("/api/v1/evidence/bundles").then(function (d) { state.evidenceBundles = arrayOf(d && d.bundles || d); }).catch(function () {}));
