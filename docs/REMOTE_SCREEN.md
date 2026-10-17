@@ -477,9 +477,15 @@ ominullctl screen watch ENDPOINT                        # owner watches live, vi
 ominullctl screen end   ENDPOINT
 ```
 
-Coordinates are pixels in the screenshot of the chosen monitor (`--monitor`,
-default the primary); they are converted to the 0..65535 wire units for that
-monitor. `ctrl+alt+del` sends the `sas` request (§6.4); other combos become
+Screenshots are made for LLM agents: `screen shot` downscales the monitor to a
+max long edge (`--max-edge`, default 1280, settable in ominullctl's config) and
+prints JSON on stdout: `{"path","width","height","scale","monitor",
+"monitor_width","monitor_height"}`. Action coordinates (`click/move/drag/scroll`)
+are pixels in that same downscaled screenshot space for the chosen monitor
+(`--monitor`, default the primary). The scale is deterministic,
+`scale = min(1, max_edge / max(monitor_w, monitor_h))`, so each stateless action
+recomputes it from the monitor size and the same `--max-edge`, then converts to
+the 0..65535 wire units for that monitor. `ctrl+alt+del` sends the `sas` request (§6.4); other combos become
 scancode down/up sequences. Each command rotates the operator token (`/attach`),
 spawns `ominull-screen ctl <action>` with the handshake on stdin, which connects,
 waits for a keyframe when it needs one, performs the action, and detaches (the
