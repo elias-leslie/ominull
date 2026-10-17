@@ -3,6 +3,7 @@ package scripts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"time"
 )
 
@@ -17,6 +18,15 @@ type Script struct {
 	Retired       bool      `json:"retired"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// Metadata is a small JSON object; maintenance packages keep their
+	// package name, title, risk, reboot and timeout here (see PackageMeta).
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+func (sc *Script) setMetadata(raw string) {
+	if raw != "" {
+		sc.Metadata = json.RawMessage(raw)
+	}
 }
 
 // ScriptVersion represents an immutable, content-hashed version of a script.

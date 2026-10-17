@@ -15,7 +15,25 @@ import (
 
 const (
 	MaxScriptSourceBytes = 65536 // 64 KiB source code bound
+
+	// DefaultTimeoutSeconds and MaxTimeoutSeconds bound a script run. The agents
+	// enforce the same ceiling (SCRIPT_EXEC_MAX_TIMEOUT); maintenance packages
+	// such as Windows updates need most of an hour.
+	DefaultTimeoutSeconds = 60
+	MaxTimeoutSeconds     = 3600
+
+	// MaxMetadataBytes bounds a script's metadata object (package risk,
+	// reboot and timeout).
+	MaxMetadataBytes = 4096
 )
+
+// ClampTimeout returns t when it is within (0, MaxTimeoutSeconds], else the default.
+func ClampTimeout(t int) int {
+	if t <= 0 || t > MaxTimeoutSeconds {
+		return DefaultTimeoutSeconds
+	}
+	return t
+}
 
 var (
 	ErrNotFound             = errors.New("script not found")
@@ -26,6 +44,7 @@ var (
 	ErrScheduleNotFound     = errors.New("script schedule not found")
 	ErrEmptyTargetEndpoints = errors.New("schedule must target explicit endpoints; empty target list forbidden")
 	ErrInvalidRecurrence    = errors.New("invalid recurrence; must be hourly, daily, or weekly")
+	ErrInvalidMetadata      = errors.New("script metadata must be a JSON object of at most 4 KiB")
 
 	AllowedInterpreters = map[string]bool{
 		"/bin/sh":        true,
@@ -65,7 +84,8 @@ func (s *Store) migrate() error {
 		latest_version INTEGER DEFAULT 1,
 		retired INTEGER DEFAULT 0,
 		created_at TIMESTAMP NOT NULL,
-		updated_at TIMESTAMP NOT NULL
+		updated_at TIMESTAMP NOT NULL,
+		metadata_json TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_scripts_tenant ON scripts(tenant_id);
 
@@ -102,8 +122,36 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_script_schedules_tenant ON script_schedules(tenant_id);
 	`
-	_, err := s.db.Exec(query)
-	return err
+	if _, err := s.db.Exec(query); err != nil {
+		return err
+	}
+	// Libraries created before scripts carried metadata.
+	if _, err := s.db.Exec(`ALTER TABLE scripts ADD COLUMN metadata_json TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
+// normalizeMetadata checks that raw is empty or a JSON object within
+// MaxMetadataBytes and returns its compact form.
+func normalizeMetadata(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > MaxMetadataBytes {
+		return "", ErrInvalidMetadata
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || obj == nil {
+		return "", ErrInvalidMetadata
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", ErrInvalidMetadata
+	}
+	return string(out), nil
 }
 
 // CreateScript registers a new immutable script definition and version 1.
@@ -289,10 +337,11 @@ func (s *Store) GetScript(tenantID, scriptID string) (*Script, error) {
 
 	var sc Script
 	var ret int
+	var meta string
 	err := s.db.QueryRow(`
-		SELECT id, tenant_id, name, description, interpreter, latest_version, retired, created_at, updated_at
+		SELECT id, tenant_id, name, description, interpreter, latest_version, retired, created_at, updated_at, metadata_json
 		FROM scripts WHERE id = ?
-	`, scriptID).Scan(&sc.ID, &sc.TenantID, &sc.Name, &sc.Description, &sc.Interpreter, &sc.LatestVersion, &ret, &sc.CreatedAt, &sc.UpdatedAt)
+	`, scriptID).Scan(&sc.ID, &sc.TenantID, &sc.Name, &sc.Description, &sc.Interpreter, &sc.LatestVersion, &ret, &sc.CreatedAt, &sc.UpdatedAt, &meta)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -303,6 +352,7 @@ func (s *Store) GetScript(tenantID, scriptID string) (*Script, error) {
 		return nil, ErrTenantMismatch
 	}
 	sc.Retired = (ret == 1)
+	sc.setMetadata(meta)
 	return &sc, nil
 }
 
@@ -351,7 +401,7 @@ func (s *Store) ListScripts(tenantID string) ([]*Script, error) {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, tenant_id, name, description, interpreter, latest_version, retired, created_at, updated_at
+		SELECT id, tenant_id, name, description, interpreter, latest_version, retired, created_at, updated_at, metadata_json
 		FROM scripts WHERE tenant_id = ? ORDER BY name ASC
 	`, tenantID)
 	if err != nil {
@@ -363,10 +413,12 @@ func (s *Store) ListScripts(tenantID string) ([]*Script, error) {
 	for rows.Next() {
 		var sc Script
 		var ret int
-		if err := rows.Scan(&sc.ID, &sc.TenantID, &sc.Name, &sc.Description, &sc.Interpreter, &sc.LatestVersion, &ret, &sc.CreatedAt, &sc.UpdatedAt); err != nil {
+		var meta string
+		if err := rows.Scan(&sc.ID, &sc.TenantID, &sc.Name, &sc.Description, &sc.Interpreter, &sc.LatestVersion, &ret, &sc.CreatedAt, &sc.UpdatedAt, &meta); err != nil {
 			return nil, err
 		}
 		sc.Retired = (ret == 1)
+		sc.setMetadata(meta)
 		list = append(list, &sc)
 	}
 	return list, nil
@@ -475,9 +527,7 @@ func (s *Store) CreateSchedule(
 	if recurrence == "" {
 		recurrence = "daily"
 	}
-	if timeout <= 0 || timeout > 300 {
-		timeout = 60
-	}
+	timeout = ClampTimeout(timeout)
 	if maxOutput <= 0 || maxOutput > 5242880 {
 		maxOutput = 1048576
 	}

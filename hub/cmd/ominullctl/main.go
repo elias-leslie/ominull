@@ -901,6 +901,8 @@ func (c *APIClient) cmdScripts(args []string) error {
 		return fmt.Errorf("script execution and scheduling are console-only and require dual-operator authorization")
 	}
 	switch action {
+	case "sync":
+		return c.cmdScriptsSync(args[1:])
 	case "list":
 		raw, err := c.doRequest(http.MethodGet, "/api/v1/scripts", nil)
 		if err != nil {
@@ -1168,7 +1170,7 @@ func (c *APIClient) cmdScripts(args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("usage: ominullctl scripts list|show|create|update|retire")
+		return fmt.Errorf("usage: ominullctl scripts list|show|create|update|retire|sync")
 	}
 }
 
@@ -1637,6 +1639,7 @@ Forensics & Response Commands:
   response-auth status|recovery-token     Inspect Response Authority and issue emergency recovery
   forensics list|show|verify <manifest>   Manage and verify forensic evidence collections
   scripts list|show|create|update|retire  Manage versioned immutable script library
+  scripts sync DIR       Sync maintenance packages (DIR/*.ps1) into the library; unchanged ones are skipped
   shell sessions|show|close <id>          List and close active terminal sessions
 
 Remote Commands (each new session waits for the owner's passkey tap):

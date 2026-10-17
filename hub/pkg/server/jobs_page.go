@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/scripts"
 )
 
 // /console/jobs lists the response jobs the hub has dispatched to agents
@@ -173,12 +175,29 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 			return body
 		}
 		body.View = s.buildJobView(job, host(job.EndpointID), stamp, body.CanAct)
+		if meta := s.packageForJob(job); meta != nil {
+			addPackageResult(body.View, job, meta, now)
+		}
 		return body
 	}
 
 	jobs, err := s.responseStore.ListJobs("default", "", jobsListLimit)
 	if err != nil {
 		body.Problems = append(body.Problems, "Response jobs could not be read: "+err.Error())
+	}
+	// Package runs are named by their package, not just "Script".
+	packages := map[string]string{}
+	if s.scriptsStore != nil {
+		if list, err := s.scriptsStore.ListScripts("default"); err == nil {
+			for _, sc := range list {
+				if meta := sc.Package(); meta != nil {
+					packages[sc.ID] = meta.Title
+					if meta.Title == "" {
+						packages[sc.ID] = sc.Name
+					}
+				}
+			}
+		}
 	}
 	for _, j := range jobs {
 		if jobInFlight(j.State) {
@@ -190,9 +209,18 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 			continue
 		}
 		label, tone := jobStateLabel(j.State)
+		action := jobActionName(j.Kind)
+		if j.Kind == response.ActionKindScriptExec && len(packages) > 0 {
+			if p, ok := scriptJobPayload(j); ok && packages[p.ScriptID] != "" {
+				action = packages[p.ScriptID] + " package"
+				if !jobInFlight(j.State) {
+					label, tone = packageStateLabel(derivePackageRun(j, now).State)
+				}
+			}
+		}
 		body.Rows = append(body.Rows, jobRow{
 			ID: j.ID, Short: shortJobID(j.ID), HostID: j.EndpointID, Host: host(j.EndpointID),
-			Action: jobActionName(j.Kind), Who: j.RequestedBy, When: stamp(j.RequestedAt),
+			Action: action, Who: j.RequestedBy, When: stamp(j.RequestedAt),
 			Label: label, Tone: tone, ErrorCode: j.ErrorCode, Attempt: j.Attempt,
 		})
 	}
@@ -288,4 +316,42 @@ func jobStepDetail(details string) string {
 		return ""
 	}
 	return details
+}
+
+// addPackageResult names a package run and puts what its result line says
+// (state, reboot, changes) at the top of the job's details.
+func addPackageResult(v *jobView, job *response.JobRecord, meta *scripts.PackageMeta, now time.Time) {
+	v.Action = meta.Title + " package"
+	run := derivePackageRun(job, now)
+	var meta2 []jobMeta
+	if run.Mode != "" {
+		meta2 = append(meta2, jobMeta{"Mode", run.Mode})
+	}
+	if !jobInFlight(job.State) {
+		v.Label, v.Tone = packageStateLabel(run.State)
+		meta2 = append(meta2, jobMeta{"Result", v.Label})
+		if run.Reason != "" {
+			meta2 = append(meta2, jobMeta{"Why", run.Reason})
+		}
+		reboot := "No"
+		if run.Reboot {
+			reboot = "Yes"
+		}
+		meta2 = append(meta2, jobMeta{"Reboot needed", reboot})
+		if len(run.Changed) > 0 {
+			changed := run.Changed
+			more := ""
+			if len(changed) > 12 {
+				more = fmt.Sprintf(" and %d more", len(changed)-12)
+				changed = changed[:12]
+			}
+			meta2 = append(meta2, jobMeta{"Changed", strings.Join(changed, ", ") + more})
+		}
+	}
+	// After Host and Action.
+	n := 2
+	if len(v.Meta) < n {
+		n = len(v.Meta)
+	}
+	v.Meta = append(append(append([]jobMeta{}, v.Meta[:n]...), meta2...), v.Meta[n:]...)
 }

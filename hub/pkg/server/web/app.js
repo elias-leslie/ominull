@@ -483,6 +483,8 @@
 
     // Phase 7: Software Inventory & Vulnerability Correlation
     softwareByEndpoint: {},
+    /* Maintenance packages per endpoint: {at, packages} or {at, error}. */
+    maintenanceByEndpoint: {},
     /* The hub has kept a rolling communication profile per endpoint since the
        first release and the console never read it, so "what does this host
        normally talk to" could only be answered by scrolling raw flows. */
@@ -7536,7 +7538,7 @@
     openSheet(headTitle, body, foot, "sheet-wide");
   }
 
-  function openScriptRunSheet(script, initialVersion) {
+  function openScriptRunSheet(script, initialVersion, endpointId) {
     if (!script) return;
     if (script.retired) {
       toast("Cannot execute retired script.", "crit");
@@ -7588,9 +7590,12 @@
         h("label", { "for": "sched-target-" + ep.id, text: " " + label })
       ));
     });
+    if (endpointId) singleEndpointSel.value = endpointId;
 
     // Execution Bounds
-    var timeoutInput = h("input", { id: "run-script-timeout", type: "number", min: "1", max: "300", value: "60" });
+    /* A maintenance package says how long it may take (Windows updates need most of an hour). */
+    var pkgTimeout = script.metadata && Number(script.metadata.timeout);
+    var timeoutInput = h("input", { id: "run-script-timeout", type: "number", min: "1", max: "3600", value: String(pkgTimeout > 0 && pkgTimeout <= 3600 ? pkgTimeout : 60) });
     var maxOutputSel = h("select", { id: "run-script-max-output" });
     [
       { val: "1048576", label: "1 MiB (Default)" },
@@ -7747,7 +7752,7 @@
 
       if (!state.responseSession || !ephemeralResponseKey) {
         openUnlockResponseSheet(function () {
-          openScriptRunSheet(script, vNum);
+          openScriptRunSheet(script, vNum, singleEndpointSel.value);
         });
         return;
       }
@@ -7873,7 +7878,7 @@
       paramFormContainer,
       h("hr", { cls: "line" }),
       h("div", { cls: "form-row stack-s" },
-        labelFor("Execution Timeout (seconds, 1-300):", timeoutInput),
+        labelFor("Execution Timeout (seconds, 1-3600):", timeoutInput),
         timeoutInput
       ),
       h("div", { cls: "form-row stack-s" },
@@ -8866,6 +8871,7 @@
         state.softwareByEndpoint[epID] = (d && d.packages) || [];
         if (state.routeKey) renderRoute();
       }).catch(function () {});
+      loadMaintenance(epID);
       request("/api/v1/network-profiles?level=endpoint&id=" + encodeURIComponent(epID)).then(function (d) {
         state.profilesByEndpoint[epID] = arrayOf(d);
         if (state.routeKey) renderRoute();
@@ -8965,6 +8971,72 @@
       body.appendChild(h("p", { cls: "pending", text: "Showing the " + shown.length + " busiest of " + profiles.length + " profiled conversations." }));
     }
     return card("What this host talks to", body, null, true);
+  }
+
+  /* Maintenance packages (packages/ in the repo, synced into the script
+     library) and the latest run of each on this host. The hub derives the
+     state from the job; nothing else is stored. */
+  function loadMaintenance(epID) {
+    var cur = state.maintenanceByEndpoint[epID];
+    if (cur && cur.loading) return;
+    state.maintenanceByEndpoint[epID] = { loading: true, at: Date.now(), packages: cur && cur.packages };
+    request("/api/v1/maintenance?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
+      state.maintenanceByEndpoint[epID] = { at: Date.now(), packages: arrayOf(d && d.packages) };
+      if (state.routeKey) renderRoute();
+    }).catch(function (e) {
+      state.maintenanceByEndpoint[epID] = { at: Date.now(), error: (e && e.message) || "request failed" };
+      if (state.routeKey) renderRoute();
+    });
+  }
+
+  var MAINT_STATES = {
+    ok: ["ok", "Nothing to change"], fixed: ["ok", "Fixed"], drift: ["warn", "Needs changes"],
+    failed: ["crit", "Failed"], skipped: ["idle", "Skipped"], running: ["warn", "Running"],
+    waiting: ["idle", "Waiting for the agent"], cancelled: ["idle", "Cancelled"], no_result: ["crit", "No result came back"]
+  };
+
+  function maintenanceCard(asset) {
+    var ep = asset.endpoint;
+    var m = state.maintenanceByEndpoint[ep.id];
+    var isWindows = /windows/i.test(ep.os || "");
+    if (!m || (m.loading && !m.packages)) return isWindows ? card("Maintenance", h("p", { role: "status", text: "Reading maintenance runs\u2026" }), null, true) : null;
+    if (m.error) return card("Maintenance", h("p", { role: "status", text: "Maintenance status unavailable: " + m.error }), null, true);
+    var pkgs = m.packages || [];
+    if (!pkgs.length) {
+      return isWindows ? card("Maintenance", emptyBox("No maintenance packages in the script library yet."), null, true) : null;
+    }
+    /* A run in flight changes on the agent's schedule, not ours: re-read while one is open. */
+    var open = pkgs.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); });
+    if (open && !m.loading && Date.now() - m.at > 10000) loadMaintenance(ep.id);
+
+    var rows = pkgs.map(function (p) {
+      var last = p.last;
+      var result;
+      if (!last) {
+        result = h("span", { cls: "dim-2", text: "Never run" });
+      } else {
+        var st = MAINT_STATES[last.state] || MAINT_STATES.failed;
+        result = h("div", { cls: "uf uf-wrap uf-g1" },
+          h("a", { href: "/console/jobs?id=" + encodeURIComponent(last.job_id) }, chip(st[0], st[1])),
+          last.mode ? h("span", { cls: "dim-2", text: last.mode }) : null,
+          last.reason ? h("span", { cls: "dim-2", text: "\u00b7 " + last.reason }) : null,
+          last.changed && last.changed.length ? h("span", { cls: "dim-2", text: "\u00b7 " + last.changed.length + " changed" }) : null);
+      }
+      var finished = last && last.completed_at ? parseTime(last.completed_at) : null;
+      return [
+        h("div", {}, h("b", { text: p.title }), p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
+          h("div", { cls: "dim-2", text: p.description || "" })),
+        result,
+        last ? stamp(finished || parseTime(last.requested_at)) : h("span", { cls: "dim-2", text: "\u2014" }),
+        last && !last.completed_at ? h("span", { cls: "dim-2", text: "\u2014" }) : last ? (last.reboot ? chip("warn", "Yes") : "No") : h("span", { cls: "dim-2", text: "\u2014" }),
+        h("button", { cls: "btn mini", type: "button", text: "Run\u2026", "aria-label": "Run " + p.title + " on " + asset.name, on: { click: function () {
+          openScriptRunSheet({ id: p.script_id, name: p.name, interpreter: p.interpreter, latest_version: p.latest_version, metadata: { timeout: p.timeout } }, p.latest_version, ep.id);
+        } } })
+      ];
+    });
+    return card("Maintenance", h("div", { cls: "stack" },
+      simpleTable(["Package", "Last result", "When", "Reboot needed", ""], rows, { sortable: false }),
+      h("p", { cls: "pending", text: "Audit only reports what would change; enforce makes the changes. Each run needs your passkey. Packages never reboot the machine." })), null, true);
   }
 
   function renderRoute() {
@@ -9067,6 +9139,7 @@
     flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
+      ep ? maintenanceCard(asset) : null,
       ep ? baselineEndpointCard(asset) : null,
       ep ? commProfileCard(asset) : null,
       ep ? softwareInventoryCard(asset) : null,

@@ -88,6 +88,10 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 			Interpreter         string `json:"interpreter"`
 			Source              string `json:"source"`
 			ParameterSchemaJSON string `json:"parameter_schema_json"`
+			// Sync upserts by name: a version is appended only when the
+			// source or schema changed (ominullctl scripts sync).
+			Sync     bool            `json:"sync,omitempty"`
+			Metadata json.RawMessage `json:"metadata,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -97,6 +101,20 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		operatorID := s.operatorFromRequest(r)
 		if operatorID == "" {
 			operatorID = "operator"
+		}
+
+		if req.Sync {
+			sc, sv, action, err := s.scriptsStore.SyncScript(tenantID, req.Name, req.Description, req.Interpreter, req.Source, req.ParameterSchemaJSON, string(req.Metadata), operatorID)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "failed to sync script: "+err.Error())
+				return
+			}
+			if action != "unchanged" {
+				s.audit(r, "SCRIPT_SYNCED", sc.ID, fmt.Sprintf("Synced script %s: %s v%d (digest: %s)", sc.Name, action, sv.Version, sv.DigestSHA256))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"action": action, "script": sc, "version": sv})
+			return
 		}
 
 		if req.ID != "" {
@@ -273,10 +291,7 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bound execution parameters
-	timeout := req.TimeoutSeconds
-	if timeout <= 0 || timeout > 300 {
-		timeout = 60
-	}
+	timeout := scripts.ClampTimeout(req.TimeoutSeconds)
 	maxOutput := req.MaxOutputBytes
 	if maxOutput <= 0 || maxOutput > 5242880 {
 		maxOutput = 1048576
@@ -415,10 +430,7 @@ func (s *Server) handleScriptsDigest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	timeout := req.TimeoutSeconds
-	if timeout <= 0 || timeout > 300 {
-		timeout = 60
-	}
+	timeout := scripts.ClampTimeout(req.TimeoutSeconds)
 	maxOutput := req.MaxOutputBytes
 	if maxOutput <= 0 || maxOutput > 5242880 {
 		maxOutput = 1048576
