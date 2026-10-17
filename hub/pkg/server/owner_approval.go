@@ -790,8 +790,27 @@ func (s *Server) handleApprovalRules(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, approvalStatus(err), err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+		pkgs, err := s.responseAuth.PackageRules(r.Context(), tenantID)
+		if err != nil {
+			writeJSONError(w, approvalStatus(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules, "package_rules": pkgs})
 	case http.MethodDelete:
+		if r.URL.Query().Get("kind") == "packages" {
+			// One package rule (?id=) or all of them.
+			id := r.URL.Query().Get("id")
+			n, err := s.responseAuth.ForgetPackageRule(r.Context(), tenantID, id, s.operatorFromRequest(r))
+			if err != nil {
+				writeJSONError(w, approvalStatus(err), err.Error())
+				return
+			}
+			if n > 0 {
+				s.audit(r, rolloutRuleRemovedAudit, tenantID, fmt.Sprintf("Removed %d approve-all rule(s) for maintenance packages; those runs ask the owner again; credential %s", n, credentialOf(r)))
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"removed": n > 0, "count": n})
+			return
+		}
 		had, err := s.responseAuth.ForgetRolloutRule(r.Context(), tenantID, s.operatorFromRequest(r))
 		if err != nil {
 			writeJSONError(w, approvalStatus(err), err.Error())

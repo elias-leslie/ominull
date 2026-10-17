@@ -108,6 +108,8 @@ func main() {
 		err = client.cmdForensics(rest)
 	case "scripts":
 		err = client.cmdScripts(rest)
+	case "maint":
+		err = client.cmdMaint(rest)
 	case "shell":
 		err = client.cmdShell(rest)
 	case "exec":
@@ -1631,6 +1633,10 @@ Fleet & CyberOps Commands:
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
   agents versions|update <id|all>         Inspect fleet version currency and publish releases
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
+  maint run ENDPOINT PKG... --mode M      Run maintenance packages (waits for the owner's tap or package rule)
+  maint status ENDPOINT                   Latest result of each package on a host
+  maint schedule ENDPOINT PKG --every R   Run a package hourly|daily|weekly while a package rule covers it
+  maint rules|forget-rule [ID]            Show or remove approve-all rules for maintenance packages
   install reports [list|show]             Inspect bootstrap error reports
   enrol list|open|close                   LAN self-enrolment windows (open waits for the owner's tap)
 

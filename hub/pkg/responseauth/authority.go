@@ -62,6 +62,7 @@ type Authority struct {
 	enfClock    *enforcementClock             // strictly ordered enforcement grant times
 	trustEpochs *trustEpochs                  // trust bundle epoch per tenant
 	rollouts    *rolloutRules                 // approve-all rules for owner-signed rollouts
+	packages    *packageRules                 // approve-all rules for maintenance package runs
 	releaseKey  []byte                        // release public key PEM override (tests)
 	startedAt   time.Time
 }
@@ -140,6 +141,7 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 		enfClock:    newEnforcementClock(cfg.StateDir),
 		trustEpochs: newTrustEpochs(cfg.StateDir, cfg.TrustEpochFloor),
 		rollouts:    newRolloutRules(cfg.StateDir),
+		packages:    newPackageRules(cfg.StateDir),
 	}
 
 	// 1. Load keys from durable store

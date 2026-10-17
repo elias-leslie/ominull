@@ -132,3 +132,59 @@ func (s *Store) setDescriptionAndMetadata(tenantID, scriptID, description, meta 
 		description, meta, time.Now().UTC(), scriptID, tenantID)
 	return err
 }
+
+// RecurrenceInterval is how often a schedule's package should succeed.
+func RecurrenceInterval(recurrence string) (time.Duration, bool) {
+	switch recurrence {
+	case "hourly":
+		return time.Hour, true
+	case "daily":
+		return 24 * time.Hour, true
+	case "weekly":
+		return 7 * 24 * time.Hour, true
+	}
+	return 0, false
+}
+
+// ActiveSchedules lists every tenant's active schedules.
+func (s *Store) ActiveSchedules() ([]*ScriptSchedule, error) {
+	s.mu.Lock()
+	var tenants []string
+	rows, err := s.db.Query(`SELECT DISTINCT tenant_id FROM script_schedules WHERE status = 'active'`)
+	if err == nil {
+		for rows.Next() {
+			var t string
+			if rows.Scan(&t) == nil {
+				tenants = append(tenants, t)
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var out []*ScriptSchedule
+	for _, t := range tenants {
+		list, err := s.ListSchedules(t)
+		if err != nil {
+			return nil, err
+		}
+		for _, sc := range list {
+			if sc.Status == "active" {
+				out = append(out, sc)
+			}
+		}
+	}
+	return out, nil
+}
+
+// CountScheduleRuns adds n dispatched runs to a schedule.
+func (s *Store) CountScheduleRuns(tenantID, scheduleID string, n int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE script_schedules SET runs_count = runs_count + ?, updated_at = ? WHERE tenant_id = ? AND id = ?`,
+		n, time.Now().UTC(), tenantID, scheduleID)
+	return err
+}

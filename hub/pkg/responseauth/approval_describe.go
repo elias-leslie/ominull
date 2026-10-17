@@ -123,6 +123,9 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 	if kind == ActionKindDetection {
 		return describeDetectionPolicy(payload, targets)
 	}
+	if kind == response.ActionKindScriptExec {
+		return describePackageRun(payload, targets)
+	}
 
 	var p routedPayload
 	var top map[string]json.RawMessage

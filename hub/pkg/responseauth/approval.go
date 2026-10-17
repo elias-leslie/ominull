@@ -113,6 +113,10 @@ type ApprovalRequestInput struct {
 	// Release is the signed agent packages an agent update installs; it is
 	// read only to decide whether a rollout rule covers the request.
 	Release []ReleaseEvidence `json:"release,omitempty"`
+	// RuleOnly asks for a package run that a live package rule covers and
+	// nothing else: an uncovered request is refused (ErrRuleNotCovered)
+	// without recording or asking anyone. The hub's schedule uses it.
+	RuleOnly bool `json:"rule_only,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -303,7 +307,8 @@ func sortedUnique(in []string) []string {
 
 func approvalKindAllowed(k response.ActionKind) bool {
 	switch k {
-	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, ActionKindDetection, response.ActionKindTerminalSession:
+	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, ActionKindDetection, response.ActionKindTerminalSession,
+		response.ActionKindScriptExec:
 		return true
 	}
 	return false
@@ -332,15 +337,26 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			return nil, fmt.Errorf("invalid target %q", t)
 		}
 	}
-	if len(in.Payload) == 0 || len(in.Payload) > approvalMaxPayload || !json.Valid(in.Payload) {
-		return nil, errors.New("approval payload must be valid JSON up to 16 KiB")
+	maxPayload := approvalMaxPayload
+	if in.Kind == response.ActionKindScriptExec {
+		// A package run carries the script sources the agents will run.
+		maxPayload = packageMaxPayload
+	}
+	if len(in.Payload) == 0 || len(in.Payload) > maxPayload || !json.Valid(in.Payload) {
+		return nil, fmt.Errorf("approval payload must be valid JSON up to %d KiB", maxPayload/1024)
+	}
+	if in.RuleOnly && in.Kind != response.ActionKindScriptExec {
+		return nil, errors.New("only a package run can be asked for under a rule alone")
 	}
 	if strings.Contains(in.TenantID, "#") {
 		return nil, errors.New("invalid tenant ID")
 	}
 	// Agents act on these payloads themselves, so the owner must see what
 	// the agent will read: one canonical reading, no case-variant keys.
-	if in.Kind != response.ActionKindTerminalSession {
+	// A package run's items are the exact bytes agents digest (the hub's
+	// field order, not sorted), so it is held to lower-case, unique keys
+	// (plainKeys) instead of the canonical form.
+	if in.Kind != response.ActionKindTerminalSession && in.Kind != response.ActionKindScriptExec {
 		if err := strictPayload(in.Payload); err != nil {
 			return nil, fmt.Errorf("approval payload refused: %w", err)
 		}
@@ -352,6 +368,17 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	if _, err := a.approvalsReady(); err != nil {
 		return nil, err
+	}
+	// A package run of safe packages: approved now under a live package rule
+	// (no rate limit: the owner already approved exactly these runs), or
+	// offered one.
+	pkgDigests, pkgLabels, pkgErr := packageRuleCovers(in, targets)
+	pkgRuleID, pkgAuto := "", false
+	if pkgErr == nil {
+		pkgRuleID, pkgAuto = a.packages.match(in.TenantID, pkgDigests, targets, time.Now())
+	}
+	if in.RuleOnly && !pkgAuto {
+		return nil, ErrRuleNotCovered
 	}
 	digest := sha256.Sum256(in.Payload)
 	ttl := approvalDefaultTTL
@@ -373,7 +400,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	recent := b.created[in.TenantID]
 	pending += b.reserved[in.TenantID]
-	if pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour {
+	if !pkgAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
 		b.mu.Unlock()
 		a.auditApproval(in.TenantID, in.Requester, "approval_refused", string(in.Kind), "", "", "denied", ErrApprovalRateLimit.Error())
 		return nil, ErrApprovalRateLimit
@@ -381,12 +408,15 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// Take both slots now, under the same lock as the check: concurrent
 	// callers must not all pass on the same stale counts. The hourly slot is
 	// spent even if signing fails below; the pending slot is handed back.
-	b.created[in.TenantID] = append(recent, now)
-	b.reserved[in.TenantID]++
+	reserved := !pkgAuto
+	if reserved {
+		b.created[in.TenantID] = append(recent, now)
+		b.reserved[in.TenantID]++
+	}
 	b.mu.Unlock()
 	inserted := false
 	defer func() {
-		if !inserted {
+		if !inserted && reserved {
 			b.mu.Lock()
 			b.unreserveLocked(in.TenantID)
 			b.mu.Unlock()
@@ -409,6 +439,16 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	if covered {
 		rule, auto = a.rollouts.use(in.TenantID, version, now)
 	}
+	var pkgRule PackageRule
+	if pkgAuto {
+		var ok bool
+		if pkgRule, ok = a.packages.use(in.TenantID, pkgRuleID, pkgDigests, targets, now); !ok {
+			// The rule ended or could not record its use between match
+			// and here. Nothing was reserved, so nothing is asked either.
+			return nil, ErrRuleNotCovered
+		}
+		evidence = "packages " + strings.Join(pkgLabels, ", ")
+	}
 	stmt := ApprovalStatement{
 		V:         1,
 		ID:        hex.EncodeToString(idBytes),
@@ -424,6 +464,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	if covered && !auto {
 		stmt.Offer = rolloutRuleOffer
+	}
+	if pkgErr == nil && !pkgAuto {
+		stmt.Offer = packageRuleOffer
 	}
 	stmtJSON, err := json.Marshal(stmt)
 	if err != nil {
@@ -460,15 +503,20 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			Offer:     stmt.Offer,
 		},
 	}
-	if auto {
+	if auto || pkgAuto {
 		t := now.UTC()
 		useBy := t.Add(approvalUseWindow)
 		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
 		rec.view.Method, rec.view.ApproverID = "rule", rule.ApproverID
+		if pkgAuto {
+			rec.view.ApproverID = pkgRule.ApproverID
+		}
 	}
 	b.mu.Lock()
 	b.items[stmt.ID] = rec
-	b.unreserveLocked(in.TenantID)
+	if reserved {
+		b.unreserveLocked(in.TenantID)
+	}
 	inserted = true
 	view := rec.view
 	b.mu.Unlock()
@@ -482,6 +530,11 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
 			fmt.Sprintf("approved without asking under the approve-all rule the owner made %s (approval %s, approver %s): %s%s",
 				time.Unix(rule.Created, 0).UTC().Format(time.RFC3339), rule.ApprovalID, rule.ApproverID, evidence, note))
+	}
+	if pkgAuto {
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			fmt.Sprintf("approved without asking under the package rule the owner made %s (approval %s, approver %s): %s",
+				time.Unix(pkgRule.Created, 0).UTC().Format(time.RFC3339), pkgRule.ID, pkgRule.ApproverID, evidence))
 	}
 	return &view, nil
 }
@@ -704,7 +757,7 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 		b.mu.Unlock()
 		return &v, fmt.Errorf("approval is already %s", v.State)
 	}
-	if ans.Decision == "rule" && r.stmt.Offer != rolloutRuleOffer {
+	if ans.Decision == "rule" && r.stmt.Offer != rolloutRuleOffer && r.stmt.Offer != packageRuleOffer {
 		b.mu.Unlock()
 		return nil, errors.New("this approval offers no approve-all rule")
 	}
@@ -740,7 +793,9 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 	v, payload := r.view, r.payload
 	b.mu.Unlock()
 	a.auditApproval(v.TenantID, v.Requester, "approval_"+string(v.State), v.Kind, strings.Join(v.Targets, ","), v.ID, "success", "method="+method+" approver="+approverID)
-	if ans.Decision == "rule" {
+	if ans.Decision == "rule" && r.stmt.Offer == packageRuleOffer {
+		a.createPackageRule(v, r.stmt.Targets, payload, approverID, t)
+	} else if ans.Decision == "rule" {
 		// The owner's one tap: this rollout is approved either way; the rule
 		// covers later rollouts of owner-signed releases (rollout_rule.go).
 		rule := &RolloutRule{TenantID: v.TenantID, Created: t.Unix(), ApproverID: approverID, ApprovalID: v.ID, Version: rolloutVersion(payload)}
@@ -790,6 +845,9 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 	requester, stmt, payload := r.stmt.Requester, r.stmt, r.payload
 	b.mu.Unlock()
 
+	if req.Kind == response.ActionKindScriptExec {
+		return a.signPackageGrants(req, requester, stmt, payload, targets, now)
+	}
 	if req.Kind == ActionKindDetection {
 		// The hub applies a detection-policy change itself; no agent acts on
 		// it, so there is nothing to sign beyond spending the approval.

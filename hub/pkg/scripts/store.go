@@ -527,6 +527,9 @@ func (s *Store) CreateSchedule(
 	if recurrence == "" {
 		recurrence = "daily"
 	}
+	if _, ok := RecurrenceInterval(recurrence); !ok {
+		return nil, ErrInvalidRecurrence
+	}
 	timeout = ClampTimeout(timeout)
 	if maxOutput <= 0 || maxOutput > 5242880 {
 		maxOutput = 1048576

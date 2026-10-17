@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -209,4 +210,91 @@ func windowsInterpreter(interp string) bool {
 		return true
 	}
 	return false
+}
+
+// maintenanceFindings is the Nightshift feed's maintenance record. A package
+// whose latest run on a host failed or never answered needs the owner: that
+// is the one finding raised to critical (Nightshift pushes it). A schedule
+// waiting for an approve-all tap is a medium finding on the board; reboots
+// needed and changes waiting in audit runs are counts in the resolved record.
+func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
+	const uid, title = "ominull.maintenance", "Maintenance packages"
+	const schedUID, schedTitle = "ominull.maintenance.schedule", "Scheduled maintenance"
+	if s.scriptsStore == nil || s.responseStore == nil {
+		return []feedFinding{s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, "Maintenance packages are not set up", nil, nil)}, nil
+	}
+	eps, err := s.store.ListEndpoints("")
+	if err != nil {
+		return nil, err
+	}
+	type failure struct {
+		Endpoint string    `json:"endpoint"`
+		Package  string    `json:"package"`
+		State    string    `json:"state"`
+		Reason   string    `json:"reason,omitempty"`
+		At       time.Time `json:"at"`
+	}
+	var failures []failure
+	var failed []feedResource
+	reboot := []string{}
+	drift, runs := 0, 0
+	libraries := map[string][]*scripts.Script{}
+	for _, ep := range eps {
+		if ep.Status == "retired" || !strings.Contains(strings.ToLower(ep.OS), "windows") {
+			continue
+		}
+		list, ok := libraries[ep.TenantID]
+		if !ok {
+			if list, err = s.scriptsStore.ListScripts(ep.TenantID); err != nil {
+				return nil, err
+			}
+			libraries[ep.TenantID] = list
+		}
+		latest, err := s.responseStore.LatestScriptJobs(ep.TenantID, ep.ID)
+		if err != nil {
+			return nil, err
+		}
+		hostFailed := false
+		for _, sc := range list {
+			job := latest[sc.ID]
+			if sc.Package() == nil || job == nil {
+				continue
+			}
+			run := derivePackageRun(job, now)
+			runs++
+			switch run.State {
+			case "failed", "no_result":
+				failures = append(failures, failure{Endpoint: ep.Hostname, Package: sc.Name, State: run.State, Reason: run.Reason, At: job.RequestedAt})
+				hostFailed = true
+			case "drift":
+				drift++
+			}
+			if run.Reboot && run.CompletedAt != nil {
+				reboot = append(reboot, ep.Hostname+": "+sc.Name)
+			}
+		}
+		if hostFailed {
+			failed = append(failed, feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID})
+		}
+	}
+	unmapped := map[string]any{"latest_runs": runs, "needs_changes": drift, "reboot_needed": reboot}
+	var out []feedFinding
+	if len(failures) > 0 {
+		if len(failures) > 20 {
+			failures = failures[:20]
+		}
+		unmapped["failures"] = failures
+		out = append(out, s.feedFinding(now, uid, title, ocsfSevCritical, ocsfStatusNew,
+			fmt.Sprintf("%s failed on %s", plural(len(failures), "maintenance package run", "maintenance package runs"), plural(len(failed), "host", "hosts")), failed, unmapped))
+	} else {
+		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			fmt.Sprintf("No failed maintenance runs (%d latest, %d need a reboot)", runs, len(reboot)), nil, unmapped))
+	}
+	if blocks := s.maintBlocks.list(); len(blocks) > 0 {
+		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevMedium, ocsfStatusNew,
+			plural(len(blocks), "scheduled package waits", "scheduled packages wait")+" for an approve-all tap", nil, map[string]any{"waiting": blocks}))
+	} else {
+		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevInformational, ocsfStatusResolved, "No scheduled package is waiting", nil, nil))
+	}
+	return out, nil
 }

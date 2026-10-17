@@ -18,7 +18,9 @@ packages but small: a handful of machines, one owner, no new stores.
   most 3600). The sync reads it from line 1 of each script:
   `# ominull-package: {"name","title","description","risk","reboot","timeout"}`.
 - **Execution = an ordinary `script_exec` job**, signed and approved like any
-  other script run (browser session plus passkey).
+  other script run: from the console (browser session plus passkey), or from
+  `ominullctl maint run` and the schedule through the owner's Nightshift tap
+  (see "Owner approval and the package rule").
 - **State = the latest job.** Nothing is stored per (host, package); the hub
   derives the current state from the newest job of each package on read.
 
@@ -88,12 +90,67 @@ agent runs each script job in a detached worker so heartbeats continue; the
 Windows agent runs it on a worker thread. Agents older than the 3600 s cap
 treat a larger timeout as the 60 s default.
 
+## Owner approval and the package rule
+
+`POST /api/v1/maintenance/run` (`{"endpoint_ids","packages","mode"}`, admin
+key) goes through the hub's owner-approval gate like rollouts: the first call
+answers 202 with an approval id, the owner gets a Nightshift push and taps
+once, and the repeated call (with `X-Approval-ID`) creates one job per host
+and package.
+
+- **What is approved**: the response authority sees the exact script payload
+  of every run (source, digest, interpreter, parameters, timeout, output
+  bound) and the named hosts. It reads each package's name and risk from the
+  source's own header, checks the digest against the source, and writes the
+  text the owner sees ("Run as SYSTEM on laptop-1: windows-audit (audit), up
+  to 5 min"). Each grant binds one host and one script payload.
+- **"Approve all like this"** is offered only when every package in the run is
+  `safe`. It records the payload digests and hosts; later runs of exactly
+  those scripts (or a subset) on those hosts (or a subset) go through with no
+  tap and are not held to the hourly approval limit. A new package version,
+  another mode, timeout or host is a new digest or target and asks again.
+  `careful` packages never get a rule: every run asks. A rule ends after 90
+  days unused; `ominullctl maint rules` lists them and `maint forget-rule
+  [ID]` removes one or all.
+- Nightshift accepts these statements (kind `script_exec`, offer `packages`)
+  from executor release 5d4e7248bcba on.
+
+## Schedule
+
+`ominullctl maint schedule HOST[,HOST] PKG --every hourly|daily|weekly
+[--mode audit|enforce]` adds a `script_schedules` row with the same timeout
+and output bound as `maint run`, so the scheduled run is the same payload a
+rule covers. Every 5 minutes the hub walks active schedules of package
+scripts: a package is due on a host when the host is online (seen in the last
+30 s), no run of it is open there, its last success (`ok`, `fixed`, `drift`)
+is older than the interval and its last attempt is at least an hour old. A
+laptop that was off simply catches up the next time it is online. Grants are
+signed at dispatch for the due, online hosts only.
+
+The schedule asks the authority rule-only: a run no rule covers is refused
+without filing an ask, so nothing pushes from the schedule. It waits and is
+listed in the Nightshift feed instead.
+
+## Nightshift feed
+
+The existing findings feed (`/api/v1/nightshift/feed`) carries two records:
+
+- `ominull.maintenance`: critical (pushes) when the latest run of any package
+  on any host failed or returned no result line, with counts in the message
+  and the failures in `unmapped`; otherwise informational and resolved, with
+  the latest runs, hosts that need changes and hosts that need a reboot.
+- `ominull.maintenance.schedule`: medium (board only) while a schedule is
+  waiting for a rule, resolved otherwise.
+
 ## Running a package
 
 1. Sync: `ominullctl scripts sync packages/windows` (admin key).
-2. Console → the host's asset view → Maintenance → *Run…* on a package.
-3. Pick `audit` first; review the result on the jobs page; run `enforce` when
-   the changes are wanted. Each run asks for the passkey.
+2. `ominullctl maint run HOST PKG... --mode audit` asks the owner (or runs at
+   once under a rule), waits for each job and prints one line per package:
+   `HOST PKG {result line}`. `--no-wait` returns after the jobs are created.
+   `ominullctl maint status HOST` prints where each package stands.
+3. Or from the console: the host's asset view → Maintenance → *Run…*.
+4. Pick `audit` first; run `enforce` when the changes are wanted.
 
 ## Tests
 
@@ -101,9 +158,12 @@ treat a larger timeout as the 60 s default.
 - `packages/windows/tests/run.sh` (pwsh from `PATH` or `$OMINULL_PWSH`) parses
   each script, rejects PowerShell 7-only syntax and forbidden operations, and
   unit-tests the result line and preflight rules; the Windows CI job runs it.
+- `hub/pkg/responseauth/package_rule_test.go`: rule coverage, careful
+  packages, per-script grants, tampered or ambiguous payloads.
+- `hub/pkg/server/maintenance_run_test.go`: the run route under approval and
+  rule, the schedule's due logic and rule-only dispatch, the feed records.
 
 ## Later (not built)
 
-Approval rules covering a batch of package runs, a schedule loop over
-`script_schedules`, a Nightshift findings record, and tagging detector events
-raised during a run.
+Tagging detector events raised while a package runs ("during maintenance"):
+the agent has to mark the job's process tree, which needs an agent release.

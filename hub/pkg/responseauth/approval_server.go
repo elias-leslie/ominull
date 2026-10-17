@@ -29,6 +29,8 @@ func approvalErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrApprovalRateLimit):
 		return http.StatusTooManyRequests
+	case errors.Is(err, ErrRuleNotCovered):
+		return http.StatusConflict
 	case errors.Is(err, ErrApprovalTooLong):
 		return http.StatusUnprocessableEntity
 	case errors.Is(err, ErrNoApprovers):
@@ -45,7 +47,8 @@ func (s *Server) registerApprovalRoutes(mux *http.ServeMux) {
 			return
 		}
 		var in ApprovalRequestInput
-		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&in); err != nil {
+		// A package run carries its script sources (packageMaxPayload).
+		if err := json.NewDecoder(io.LimitReader(r.Body, packageMaxPayload+64*1024)).Decode(&in); err != nil {
 			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
@@ -94,7 +97,12 @@ func (s *Server) registerApprovalRoutes(mux *http.ServeMux) {
 			writeAuthorityJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
-		writeAuthorityJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+		pkgs, err := s.auth.PackageRules(r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeAuthorityJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, map[string]interface{}{"rules": rules, "package_rules": pkgs})
 	})
 	mux.HandleFunc("/v1/approvals/rules/forget", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -104,9 +112,20 @@ func (s *Server) registerApprovalRoutes(mux *http.ServeMux) {
 		var req struct {
 			TenantID string `json:"tenant_id"`
 			By       string `json:"by"`
+			Kind     string `json:"kind"` // "" rollouts, "packages"
+			ID       string `json:"id"`   // one package rule; "" all of them
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4*1024)).Decode(&req); err != nil {
 			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		if req.Kind == "packages" {
+			n, err := s.auth.ForgetPackageRule(req.TenantID, req.ID, req.By)
+			if err != nil {
+				writeAuthorityJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+				return
+			}
+			writeAuthorityJSON(w, http.StatusOK, map[string]interface{}{"removed": n > 0, "count": n})
 			return
 		}
 		had, err := s.auth.ForgetRolloutRule(req.TenantID, req.By)
@@ -144,6 +163,8 @@ type ApprovalClient interface {
 	ConsumeApproval(ctx context.Context, req *ApprovalConsumeRequest) ([]*response.EndpointGrant, error)
 	RolloutRules(ctx context.Context, tenantID string) ([]RolloutRuleView, error)
 	ForgetRolloutRule(ctx context.Context, tenantID, by string) (bool, error)
+	PackageRules(ctx context.Context, tenantID string) ([]PackageRuleView, error)
+	ForgetPackageRule(ctx context.Context, tenantID, id, by string) (int, error)
 }
 
 // ApprovalError carries the authority's status for a refused approval call.
@@ -254,6 +275,27 @@ func (c *UDSClient) ForgetRolloutRule(ctx context.Context, tenantID, by string) 
 	return out.Removed, nil
 }
 
+func (c *UDSClient) PackageRules(ctx context.Context, tenantID string) ([]PackageRuleView, error) {
+	var out struct {
+		Rules []PackageRuleView `json:"package_rules"`
+	}
+	if err := c.approvalCall(ctx, http.MethodGet, "/v1/approvals/rules?"+url.Values{"tenant_id": {tenantID}}.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Rules, nil
+}
+
+func (c *UDSClient) ForgetPackageRule(ctx context.Context, tenantID, id, by string) (int, error) {
+	var out struct {
+		Count int `json:"count"`
+	}
+	body := map[string]string{"tenant_id": tenantID, "by": by, "kind": "packages", "id": id}
+	if err := c.approvalCall(ctx, http.MethodPost, "/v1/approvals/rules/forget", body, &out); err != nil {
+		return 0, err
+	}
+	return out.Count, nil
+}
+
 func asApprovalError(err error) error {
 	if err == nil {
 		return nil
@@ -293,6 +335,16 @@ func (c *InProcessClient) RolloutRules(_ context.Context, tenantID string) ([]Ro
 func (c *InProcessClient) ForgetRolloutRule(_ context.Context, tenantID, by string) (bool, error) {
 	ok, err := c.auth.ForgetRolloutRule(tenantID, by)
 	return ok, asApprovalError(err)
+}
+
+func (c *InProcessClient) PackageRules(_ context.Context, tenantID string) ([]PackageRuleView, error) {
+	r, err := c.auth.PackageRules(tenantID)
+	return r, asApprovalError(err)
+}
+
+func (c *InProcessClient) ForgetPackageRule(_ context.Context, tenantID, id, by string) (int, error) {
+	n, err := c.auth.ForgetPackageRule(tenantID, id, by)
+	return n, asApprovalError(err)
 }
 
 var _ ApprovalClient = (*UDSClient)(nil)

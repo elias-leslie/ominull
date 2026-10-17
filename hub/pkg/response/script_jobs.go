@@ -45,3 +45,44 @@ func (s *Store) LatestScriptJobs(tenantID, endpointID string) (map[string]*JobRe
 	}
 	return out, nil
 }
+
+// ScriptJobs returns one endpoint's newest script_exec jobs of one script,
+// newest first.
+func (s *Store) ScriptJobs(tenantID, endpointID, scriptID string, limit int) ([]*JobRecord, error) {
+	s.mu.Lock()
+	rows, err := s.db.Query(`
+		SELECT id FROM response_jobs
+		WHERE tenant_id = ? AND endpoint_id = ? AND kind = ? AND json_valid(request_json)
+		  AND json_extract(json_extract(request_json, '$.payload'), '$.script_id') = ?
+		ORDER BY requested_at DESC LIMIT ?
+	`, tenantID, endpointID, string(ActionKindScriptExec), scriptID, limit)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			s.mu.Unlock()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*JobRecord, 0, len(ids))
+	for _, id := range ids {
+		job, err := s.GetJob(tenantID, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, nil
+}

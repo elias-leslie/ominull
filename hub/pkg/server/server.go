@@ -78,6 +78,8 @@ type Server struct {
 	responseStore *response.Store
 	// responseAuth communicates with the Response Authority daemon
 	responseAuth responseauth.Client
+	// maintBlocks is why scheduled package runs could not run (Nightshift feed).
+	maintBlocks  maintenanceBlocks
 	approvalWake approvalNotifier
 	// policyMu serialises detection-policy writes from reading the saved
 	// policy to saving the new one (detection_policy.go), so two saves cannot
@@ -725,6 +727,7 @@ func (s *Server) Start(addr string) error {
 	go s.floorDrillLoop()
 	go s.reconcilePendingGrantsLoop()
 	go s.agentRolloutLoop()
+	go s.maintenanceScheduleLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
@@ -3883,6 +3886,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/scripts/digest", s.authMiddleware(s.responseGate(s.handleScriptsDigest)))
 	mux.HandleFunc("/api/v1/scripts/schedules", s.authMiddleware(s.responseGate(s.handleScriptSchedules)))
 	mux.HandleFunc("/api/v1/maintenance", s.authMiddleware(s.responseGate(s.handleMaintenance)))
+	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))
