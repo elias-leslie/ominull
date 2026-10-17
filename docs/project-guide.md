@@ -481,6 +481,11 @@ See [`docs/AGENT_TLS.md`](../docs/AGENT_TLS.md),
 [`docs/SETUP.md`](../docs/SETUP.md), and
 [`docs/CLOUDFLARE.md`](../docs/CLOUDFLARE.md).
 
+Maintenance packages (Windows updates, cleanup, privacy, debloat, performance
+and a standards check, run as approved script jobs with a Maintenance card on
+the asset view) are described in
+[`docs/MAINTENANCE_PACKAGES.md`](../docs/MAINTENANCE_PACKAGES.md).
+
 Proposed future forensics and remote-response work is tracked in
 [`docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md`](../docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md).
 It does not describe current release behavior.
