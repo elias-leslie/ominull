@@ -194,6 +194,7 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
+| `/api/v1/approvals/rules` | GET/DELETE | show or remove the approve-all rule for owner-signed rollouts |
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422); the owner's statement opens with the floor drill run against the proposed tuning (`drill_blinds` in the 202: the floor cases it would newly blind) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
@@ -427,6 +428,17 @@ endpoints. A canary that fails the provenance check, or is not healthy within
 30 minutes, halts the rollout and nothing more is queued. `update-status`
 lists the last rollouts under `staged_rollouts`. A hub without staged rollouts
 gets the older two-approval sequence.
+
+The ask for a rollout of an owner-signed release (every agent package's
+release statement verifies under the release key the authority pins) offers
+"Approve all like this". With that one passkey tap the response authority keeps
+a rule: later rollouts of owner-signed releases are approved without asking,
+as long as a rollout to more than one endpoint names canaries. Nothing else is
+covered (signing, trust bundles, key rotation, detection policy, isolation,
+enrolment, terminals). The rule ends 90 days after its last use, every rollout
+it approves is an `OWNER_APPROVAL_AUTO` audit row, the Nightshift feed's
+detection-policy note lists it with a busy-week flag, and
+`ominullctl agents forget-rule` removes it.
 
 Official protocol and provider references:
 

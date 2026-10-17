@@ -18,6 +18,7 @@ package server
 // hub identity.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -878,7 +879,11 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 		unmapped["known_workloads_expired"] = expired
 	}
-	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 {
+	// The owner's approve-all rule for owner-signed agent rollouts is named
+	// while it lives, with each rollout it approved in the window, so it can
+	// be seen and removed (DELETE /api/v1/approvals/rules).
+	rulesPart, rulesShown := s.rolloutRulesNote(now, unmapped)
+	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 && !rulesShown {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
 		return out, nil
@@ -911,6 +916,49 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	if n, _ := unmapped["known_workloads_expired_omitted"].(int); len(expired) > 0 {
 		parts = append(parts, fmt.Sprintf("expired known workloads no longer vouch for anything: %d; renew or remove them in the tuning", len(expired)+n))
 	}
+	if rulesPart != "" {
+		parts = append(parts, rulesPart)
+	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil
+}
+
+// rolloutRulesNote describes the live approve-all rollout rules and the
+// rollouts approved without asking in the feed window, adding both to
+// unmapped. It reports whether there was anything to say.
+func (s *Server) rolloutRulesNote(now time.Time, unmapped map[string]any) (string, bool) {
+	if s.responseAuth == nil {
+		return "", false
+	}
+	var parts []string
+	rules, err := s.responseAuth.RolloutRules(context.Background(), "")
+	if err != nil {
+		unmapped["rollout_rules_error"] = err.Error()
+		parts = append(parts, "the approve-all rule for agent rollouts could not be read: "+err.Error())
+	}
+	for _, r := range rules {
+		p := fmt.Sprintf("agent rollouts of releases you signed run without asking (canaries first) under the approve-all rule made %s; %d this week; it ends %s unless used; remove it with ominullctl agents forget-rule",
+			r.CreatedAt.Format("2006-01-02"), r.Week, r.EndsAt.Format("2006-01-02"))
+		if r.Spike {
+			p += "; BUSY WEEK: far more rollouts than usual"
+		}
+		parts = append(parts, p)
+	}
+	if len(rules) > 0 {
+		unmapped["rollout_rules"] = rules
+	}
+	auto, _, err := s.auditWindow(autoApprovedAudit, now.Add(-feedAnomalyWindow))
+	if err == nil && len(auto) > 0 {
+		shown := auto
+		if len(shown) > feedDismissedListShown {
+			shown = shown[:feedDismissedListShown]
+		}
+		rows := make([]map[string]any, 0, len(shown))
+		for _, e := range shown {
+			rows = append(rows, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
+		}
+		unmapped["rollouts_auto_approved"] = rows
+		parts = append(parts, fmt.Sprintf("%s approved without asking in the last 24 h", plural(len(auto), "agent rollout", "agent rollouts")))
+	}
+	return strings.Join(parts, "; "), len(parts) > 0
 }

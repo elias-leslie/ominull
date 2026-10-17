@@ -93,6 +93,11 @@ type ApprovalStatement struct {
 	Digest    string   `json:"digest"`
 	Created   int64    `json:"created"`
 	Expires   int64    `json:"expires"`
+	// Offer "rollouts": the owner may answer "rule" (Approve all like this)
+	// and approve later rollouts of owner-signed releases without asking
+	// (rollout_rule.go). Only an agent update of an owner-signed release
+	// carries it.
+	Offer string `json:"offer,omitempty"`
 }
 
 // ApprovalRequestInput is what the hub asks for.
@@ -105,6 +110,9 @@ type ApprovalRequestInput struct {
 	Targets    []string            `json:"targets"`
 	Payload    json.RawMessage     `json:"payload"`
 	TTLSeconds int64               `json:"ttl_seconds,omitempty"`
+	// Release is the signed agent packages an agent update installs; it is
+	// read only to decide whether a rollout rule covers the request.
+	Release []ReleaseEvidence `json:"release,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -127,7 +135,8 @@ type ApprovalView struct {
 	Challenge  string        `json:"challenge"` // hex sha256 of prefix || statement
 	SignerKey  string        `json:"signer_key_id"`
 	ApproverID string        `json:"approver_id,omitempty"`
-	Method     string        `json:"method,omitempty"`
+	Method     string        `json:"method,omitempty"` // passkey | rule | unverified
+	Offer      string        `json:"offer,omitempty"`
 }
 
 // ApprovalAssertion is the owner's WebAuthn assertion, all base64url.
@@ -141,7 +150,7 @@ type ApprovalAssertion struct {
 // ApprovalAnswer carries the owner's decision.
 type ApprovalAnswer struct {
 	ID        string             `json:"id"`
-	Decision  string             `json:"decision"` // approve | deny
+	Decision  string             `json:"decision"` // approve | deny | rule (approve, and approve all like this)
 	Assertion *ApprovalAssertion `json:"assertion,omitempty"`
 }
 
@@ -388,6 +397,18 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	if _, err := rand.Read(idBytes); err != nil {
 		return nil, err
 	}
+	// A rollout of an owner-signed release: approved now under the tenant's
+	// rule, or offered one.
+	evidence, covered := "", false
+	ev, version, err := a.rolloutRuleCovers(in, targets)
+	if err == nil {
+		evidence, covered = ev, true
+	}
+	var rule RolloutRule
+	auto := false
+	if covered {
+		rule, auto = a.rollouts.use(in.TenantID, version, now)
+	}
 	stmt := ApprovalStatement{
 		V:         1,
 		ID:        hex.EncodeToString(idBytes),
@@ -400,6 +421,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		Digest:    hex.EncodeToString(digest[:]),
 		Created:   now.Unix(),
 		Expires:   now.Add(ttl).Unix(),
+	}
+	if covered && !auto {
+		stmt.Offer = rolloutRuleOffer
 	}
 	stmtJSON, err := json.Marshal(stmt)
 	if err != nil {
@@ -433,7 +457,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			Signature: hex.EncodeToString(sig),
 			Challenge: hex.EncodeToString(ch[:]),
 			SignerKey: keyID,
+			Offer:     stmt.Offer,
 		},
+	}
+	if auto {
+		t := now.UTC()
+		useBy := t.Add(approvalUseWindow)
+		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
+		rec.view.Method, rec.view.ApproverID = "rule", rule.ApproverID
 	}
 	b.mu.Lock()
 	b.items[stmt.ID] = rec
@@ -442,6 +473,16 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	view := rec.view
 	b.mu.Unlock()
 	a.auditApproval(in.TenantID, in.Requester, "approval_requested", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success", stmt.Action+": "+stmt.Summary)
+	if auto {
+		_, spike := ruleWeek(&rule, now)
+		note := ""
+		if spike {
+			note = "; busy week: far more rollouts than usual"
+		}
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			fmt.Sprintf("approved without asking under the approve-all rule the owner made %s (approval %s, approver %s): %s%s",
+				time.Unix(rule.Created, 0).UTC().Format(time.RFC3339), rule.ApprovalID, rule.ApproverID, evidence, note))
+	}
 	return &view, nil
 }
 
@@ -630,8 +671,8 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 	if ans == nil || ans.ID == "" {
 		return nil, ErrApprovalNotFound
 	}
-	if ans.Decision != "approve" && ans.Decision != "deny" {
-		return nil, errors.New("decision must be approve or deny")
+	if ans.Decision != "approve" && ans.Decision != "deny" && ans.Decision != "rule" {
+		return nil, errors.New("decision must be approve, deny or rule")
 	}
 	approvers, aErr := a.approvals.loadApprovers()
 	now := time.Now()
@@ -648,9 +689,13 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 		b.mu.Unlock()
 		return &v, fmt.Errorf("approval is already %s", v.State)
 	}
+	if ans.Decision == "rule" && r.stmt.Offer != rolloutRuleOffer {
+		b.mu.Unlock()
+		return nil, errors.New("this approval offers no approve-all rule")
+	}
 	method := "unverified"
 	var approverID string
-	if ans.Decision == "approve" || ans.Assertion != nil {
+	if ans.Decision != "deny" || ans.Assertion != nil {
 		if aErr != nil {
 			b.mu.Unlock()
 			return nil, aErr
@@ -670,16 +715,27 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 	r.view.DecidedAt = &t
 	r.view.Method = method
 	r.view.ApproverID = approverID
-	if ans.Decision == "approve" {
+	if ans.Decision != "deny" {
 		r.view.State = ApprovalApproved
 		useBy := t.Add(approvalUseWindow)
 		r.view.UseBy = &useBy
 	} else {
 		r.view.State = ApprovalDenied
 	}
-	v := r.view
+	v, payload := r.view, r.payload
 	b.mu.Unlock()
 	a.auditApproval(v.TenantID, v.Requester, "approval_"+string(v.State), v.Kind, strings.Join(v.Targets, ","), v.ID, "success", "method="+method+" approver="+approverID)
+	if ans.Decision == "rule" {
+		// The owner's one tap: this rollout is approved either way; the rule
+		// covers later rollouts of owner-signed releases (rollout_rule.go).
+		rule := &RolloutRule{TenantID: v.TenantID, Created: t.Unix(), ApproverID: approverID, ApprovalID: v.ID, Version: rolloutVersion(payload)}
+		if err := a.rollouts.create(rule); err != nil {
+			a.auditApproval(v.TenantID, v.Requester, "rollout_rule_not_saved", v.Kind, "", v.ID, "error", err.Error())
+		} else {
+			a.auditApproval(v.TenantID, v.Requester, "rollout_rule_created", v.Kind, "", v.ID, "success",
+				"approve-all rule: agent rollouts of releases signed with the pinned release key, staged canaries first, approved without asking; ends 90 days after its last use; approver "+approverID)
+		}
+	}
 	return &v, nil
 }
 

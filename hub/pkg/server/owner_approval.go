@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +41,12 @@ import (
 )
 
 const approvalHeader = "X-Approval-ID"
+
+// autoApprovedAudit is one rollout the authority approved without asking,
+// under the owner's approve-all rule for owner-signed releases.
+const autoApprovedAudit = "OWNER_APPROVAL_AUTO"
+
+const rolloutRuleRemovedAudit = "OWNER_APPROVAL_RULE_REMOVED"
 
 type grantsCtxKey struct{}
 
@@ -72,6 +81,10 @@ type approvalPlan struct {
 	Targets []string
 	Payload []byte // the digested action; nil means route + canonical body + targets
 	Body    []byte // replaces the request body (digested and handed on) when set
+	// Release is the signed agent packages an agent update installs. The
+	// authority approves an owner-signed rollout under the owner's
+	// approve-all rule when it verifies them, and otherwise asks.
+	Release []responseauth.ReleaseEvidence
 	// OnRequested is told the approval id once one is created for this plan.
 	OnRequested func(approvalID string)
 }
@@ -209,7 +222,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		if id == "" {
 			v, err := s.responseAuth.RequestApproval(r.Context(), &responseauth.ApprovalRequestInput{
 				TenantID: tenantID, Requester: requester, Kind: plan.Kind, Action: plan.Action,
-				Summary: plan.Summary, Targets: plan.Targets, Payload: payload,
+				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
 			})
 			if err != nil {
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
@@ -220,17 +233,25 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				plan.OnRequested(v.ID)
 			}
 			s.approvalWake.notify()
-			s.audit(r, "OWNER_APPROVAL_REQUESTED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s): %s", plan.Action, v.ID, plan.Summary))
-			writeJSON(w, http.StatusAccepted, map[string]interface{}{
-				"approval_id": v.ID,
-				"state":       v.State,
-				"action":      v.Action,
-				"summary":     v.Summary,
-				"targets":     v.Targets,
-				"expires_at":  v.ExpiresAt,
-				"next":        "The owner approves on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
-			})
-			return
+			if v.State == responseauth.ApprovalApproved && v.Method == "rule" {
+				// The authority approved it under the owner's approve-all rule
+				// (an owner-signed agent rollout); it is spent below like any
+				// approval, and the authority still checks it there.
+				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking under the owner's approve-all rule for owner-signed rollouts: %s", plan.Action, v.ID, plan.Summary))
+				id = v.ID
+			} else {
+				s.audit(r, "OWNER_APPROVAL_REQUESTED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s): %s", plan.Action, v.ID, plan.Summary))
+				writeJSON(w, http.StatusAccepted, map[string]interface{}{
+					"approval_id": v.ID,
+					"state":       v.State,
+					"action":      v.Action,
+					"summary":     v.Summary,
+					"targets":     v.Targets,
+					"expires_at":  v.ExpiresAt,
+					"next":        "The owner approves on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
+				})
+				return
+			}
 		}
 		sum := sha256.Sum256(payload)
 		grants, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{
@@ -621,7 +642,26 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 			s.endpointLabels(canary), len(sortedTargets(targets))-len(canary), version, int(rolloutCanaryDeadline/time.Minute))
 	}
 	return &approvalPlan{Kind: responseauth.ActionKindAgentUpdate, Action: "Update agents",
-		Summary: summary, Targets: targets, Body: newBody}, true
+		Summary: summary, Targets: targets, Body: newBody, Release: s.releaseEvidence(version)}, true
+}
+
+// releaseEvidence is the published agent packages of version with their
+// release signatures, for the authority to verify; nil when any is missing
+// (the rollout is then asked for as before).
+func (s *Server) releaseEvidence(version string) []responseauth.ReleaseEvidence {
+	var out []responseauth.ReleaseEvidence
+	for _, pkg := range []string{"deb", "windows-native"} {
+		name, sha, ok := s.signedAgentPackage(version, pkg)
+		if !ok {
+			return nil
+		}
+		sig, err := os.ReadFile(filepath.Join(s.binaryDir, name+".release.sig"))
+		if err != nil || len(sig) == 0 || len(sig) > 512 {
+			return nil
+		}
+		out = append(out, responseauth.ReleaseEvidence{Package: name, SHA256: sha, Sig: base64.StdEncoding.EncodeToString(sig)})
+	}
+	return out
 }
 
 func (s *Server) resolveMesh(quarantine bool) approvalResolver {
@@ -692,6 +732,41 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
+	}
+}
+
+// handleApprovalRules shows (GET) or removes (DELETE) the owner's approve-all
+// rule for owner-signed agent rollouts. Removing only narrows what runs
+// without asking, so the admin credential is enough.
+func (s *Server) handleApprovalRules(w http.ResponseWriter, r *http.Request) {
+	if s.responseAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
+		return
+	}
+	tenantID := s.tenantFromRequest(r)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	switch r.Method {
+	case http.MethodGet:
+		rules, err := s.responseAuth.RolloutRules(r.Context(), tenantID)
+		if err != nil {
+			writeJSONError(w, approvalStatus(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+	case http.MethodDelete:
+		had, err := s.responseAuth.ForgetRolloutRule(r.Context(), tenantID, s.operatorFromRequest(r))
+		if err != nil {
+			writeJSONError(w, approvalStatus(err), err.Error())
+			return
+		}
+		if had {
+			s.audit(r, rolloutRuleRemovedAudit, tenantID, "Removed the approve-all rule for owner-signed agent rollouts; rollouts ask the owner again; credential "+credentialOf(r))
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"removed": had})
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 

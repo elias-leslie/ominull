@@ -84,6 +84,38 @@ func (s *Server) registerApprovalRoutes(mux *http.ServeMux) {
 		}
 		writeAuthorityJSON(w, http.StatusOK, v)
 	})
+	mux.HandleFunc("/v1/approvals/rules", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeAuthorityJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		rules, err := s.auth.RolloutRules(r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeAuthorityJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+	})
+	mux.HandleFunc("/v1/approvals/rules/forget", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAuthorityJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		var req struct {
+			TenantID string `json:"tenant_id"`
+			By       string `json:"by"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4*1024)).Decode(&req); err != nil {
+			writeAuthorityJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		had, err := s.auth.ForgetRolloutRule(req.TenantID, req.By)
+		if err != nil {
+			writeAuthorityJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAuthorityJSON(w, http.StatusOK, map[string]bool{"removed": had})
+	})
 	mux.HandleFunc("/v1/approvals/consume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeAuthorityJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -110,6 +142,8 @@ type ApprovalClient interface {
 	PendingApprovals(ctx context.Context) ([]ApprovalView, error)
 	AnswerApproval(ctx context.Context, ans *ApprovalAnswer) (*ApprovalView, error)
 	ConsumeApproval(ctx context.Context, req *ApprovalConsumeRequest) ([]*response.EndpointGrant, error)
+	RolloutRules(ctx context.Context, tenantID string) ([]RolloutRuleView, error)
+	ForgetRolloutRule(ctx context.Context, tenantID, by string) (bool, error)
 }
 
 // ApprovalError carries the authority's status for a refused approval call.
@@ -200,6 +234,26 @@ func (c *UDSClient) ConsumeApproval(ctx context.Context, req *ApprovalConsumeReq
 	return out.Grants, nil
 }
 
+func (c *UDSClient) RolloutRules(ctx context.Context, tenantID string) ([]RolloutRuleView, error) {
+	var out struct {
+		Rules []RolloutRuleView `json:"rules"`
+	}
+	if err := c.approvalCall(ctx, http.MethodGet, "/v1/approvals/rules?"+url.Values{"tenant_id": {tenantID}}.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Rules, nil
+}
+
+func (c *UDSClient) ForgetRolloutRule(ctx context.Context, tenantID, by string) (bool, error) {
+	var out struct {
+		Removed bool `json:"removed"`
+	}
+	if err := c.approvalCall(ctx, http.MethodPost, "/v1/approvals/rules/forget", map[string]string{"tenant_id": tenantID, "by": by}, &out); err != nil {
+		return false, err
+	}
+	return out.Removed, nil
+}
+
 func asApprovalError(err error) error {
 	if err == nil {
 		return nil
@@ -229,6 +283,16 @@ func (c *InProcessClient) AnswerApproval(_ context.Context, ans *ApprovalAnswer)
 func (c *InProcessClient) ConsumeApproval(_ context.Context, req *ApprovalConsumeRequest) ([]*response.EndpointGrant, error) {
 	g, err := c.auth.ConsumeApproval(req)
 	return g, asApprovalError(err)
+}
+
+func (c *InProcessClient) RolloutRules(_ context.Context, tenantID string) ([]RolloutRuleView, error) {
+	r, err := c.auth.RolloutRules(tenantID)
+	return r, asApprovalError(err)
+}
+
+func (c *InProcessClient) ForgetRolloutRule(_ context.Context, tenantID, by string) (bool, error) {
+	ok, err := c.auth.ForgetRolloutRule(tenantID, by)
+	return ok, asApprovalError(err)
 }
 
 var _ ApprovalClient = (*UDSClient)(nil)

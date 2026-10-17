@@ -557,7 +557,23 @@ func (c *APIClient) cmdAgents(args []string) error {
 		})
 		return nil
 	}
-	return fmt.Errorf("usage: ominullctl agents versions|update")
+	if args[0] == "rule" || args[0] == "forget-rule" {
+		// The owner's approve-all rule for owner-signed rollouts: shown, or
+		// removed (removing only narrows; the admin key is enough).
+		method := http.MethodGet
+		if args[0] == "forget-rule" {
+			method = http.MethodDelete
+		}
+		raw, err := c.doRequest(method, "/api/v1/approvals/rules", nil)
+		if err != nil {
+			return err
+		}
+		var res interface{}
+		_ = json.Unmarshal(raw, &res)
+		c.printOutput(res, func() { fmt.Println(string(raw)) })
+		return nil
+	}
+	return fmt.Errorf("usage: ominullctl agents versions|update|rule|forget-rule")
 }
 
 func (c *APIClient) cmdInstall(args []string) error {
@@ -1546,6 +1562,7 @@ Fleet & CyberOps Commands:
   learning proposals|apply                Read what a window learned and apply named proposals
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
   agents versions|update <id|all>         Inspect fleet version currency and publish releases
+  agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
   install reports [list|show]             Inspect bootstrap error reports
 
 Forensics & Response Commands:

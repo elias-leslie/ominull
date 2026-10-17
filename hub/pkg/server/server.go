@@ -3744,6 +3744,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.ownerApproved(s.resolveBulkIsolation(true), s.handleBulkIsolate)))
 	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.ownerApproved(s.resolveBulkIsolation(false), s.handleBulkUnisolate)))
 	mux.HandleFunc("/api/v1/approvals", s.authMiddleware(s.handleApprovals))
+	mux.HandleFunc("/api/v1/approvals/rules", s.authMiddleware(requireAdmin(s.handleApprovalRules)))
 	mux.HandleFunc("/api/v1/events", s.deviceOrLegacyMiddleware(s.handleEvents))
 
 	// 4. Exclusions, traffic profiles, detection, analytics, DNS, and threat intel.
