@@ -50,7 +50,8 @@ if "-i" in args:
     sys.exit(255)
 alias = args[0]
 assert alias == "proxmox-gem" and args[1:3] == ["bash", "-s"], args
-sys.exit(sandbox(["bash", "-s", *args[3:]]))
+# Like sshd: the remote arguments arrive joined with spaces and the login shell re-splits them.
+sys.exit(sandbox(["bash", "-c", " ".join(args[1:])]))
 '''
 
 FAKE_PVE_BIN = {

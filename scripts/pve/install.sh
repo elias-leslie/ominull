@@ -100,9 +100,10 @@ if [ "$(id -u)" = 0 ] && [ -d /usr/local/lib/nightshift-exec/current/nightshift 
 fi
 
 b64() { base64 -w0 < "$1"; }
-# One session: ssh re-splits remote arguments, so the files and key lines travel base64-encoded.
+# One session: ssh joins the remote arguments with spaces for the remote shell to re-split, so the files and key
+# lines travel base64-encoded and the recipient carries a prefix (an empty argument would vanish and shift the rest).
 as_admin ssh "$PVE" bash -s -- "$(b64 "$work/backup")" "$(b64 "$work/observe")" "$(b64 "$work/hub-install")" \
-  "$(b64 "$work/release-public.pem")" "$repin" "$recipient" \
+  "$(b64 "$work/release-public.pem")" "$repin" "r$recipient" \
   "$(printf '%s' "${LINE[backup]}" | base64 -w0)" "$(printf '%s' "${LINE[observe]}" | base64 -w0)" \
   "$(printf '%s' "${LINE[hub-install]}" | base64 -w0)" > "$work/pve-install.out" <<'REMOTE'
 set -euo pipefail
@@ -116,7 +117,7 @@ for role in "${roles[@]}"; do
   re='^restrict,from="[0-9.]+",command="'"${command[$role]}"'" ssh-ed25519 [A-Za-z0-9+/]{68} ominull-'"$role"'$'
   [[ ${line[$role]} =~ $re ]] || { echo "refusing a malformed ominull-$role key line; nothing installed" >&2; exit 1; }
 done
-recipient="$6"
+recipient="${6#r}"
 if [ -n "$recipient" ]; then
   [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "refusing a malformed recipient; nothing installed" >&2; exit 1; }
   command -v age >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends age >/dev/null
