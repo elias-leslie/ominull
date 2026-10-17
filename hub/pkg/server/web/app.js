@@ -43,6 +43,7 @@
     { id: "topology", label: "Topology" },
     { id: "traffic", label: "Traffic" },
     { id: "policy", label: "Policy" },
+    { id: "maintenance", label: "Maintenance" },
     { id: "alerts", label: "Alerts" },
     { id: "response", label: "Response" },
     { id: "forensics", label: "Forensics" },
@@ -485,6 +486,10 @@
     softwareByEndpoint: {},
     /* Maintenance packages per endpoint: {at, packages} or {at, error}. */
     maintenanceByEndpoint: {},
+    maintSettingsByEndpoint: {},
+    maintSettings: null,
+    maintTab: "maintenance",
+    maintCardTab: "maintenance",
     /* The hub has kept a rolling communication profile per endpoint since the
        first release and the console never read it, so "what does this host
        normally talk to" could only be answered by scrolling raw flows. */
@@ -1211,13 +1216,66 @@
       return r;
     }
     return { packages: [
-      pkg("windows-audit", "Standards check", "Checks BitLocker, Defender, firewall, updates, disk space, TPM and Secure Boot.", "safe", 300, run("drift", "audit", 30)),
+      pkg("windows-audit", "Standards check", "Checks BitLocker, Defender, firewall, updates, disk space, TPM and Secure Boot.", "safe", 300, run("drift", "audit", 30, { pass: 5, fail: 1, controls: [
+        { id: "bitlocker", expected: "on", actual: "on", state: "pass", risk: "safe" },
+        { id: "defender_realtime", expected: "on", actual: "on", state: "pass", risk: "safe" },
+        { id: "firewall_profiles", expected: "all on", actual: "all on", state: "pass", risk: "safe" },
+        { id: "update_age_days", expected: "<= 14", actual: "22", state: "fail", risk: "safe" },
+        { id: "free_disk_percent", expected: ">= 15", actual: "41", state: "pass", risk: "safe" },
+        { id: "secure_boot", expected: "on", actual: "on", state: "pass", risk: "safe" },
+        { id: "tpm", expected: "present", actual: "not reported", state: "na", risk: "safe" }] })),
       pkg("windows-cleanup", "Cleanup", "Clears old temp files, update downloads, crash dumps and superseded components.", "safe", 3600, run("fixed", "enforce", 300, { reboot: true, changed: ["windows_temp 812 MB", "component_store"] })),
       pkg("windows-debloat", "Remove bundled apps", "Removes a fixed list of bundled and sponsored apps.", "careful", 900, null),
       pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
       pkg("windows-privacy", "Privacy", "Sets telemetry, advertising, suggestions, Copilot and Recall policies.", "safe", 300, run("ok", "audit", 2880)),
       pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null }))
     ] };
+  }
+
+  /* Maintenance settings for the demo console: the packages above with a
+     few typed settings, one fleet change and one machine override. */
+  var DEMO_MAINT_ROWS = null;
+  function demoMaintSettings(path) {
+    var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
+    if (!DEMO_MAINT_ROWS) {
+      DEMO_MAINT_ROWS = {
+        "windows-cleanup|": { enabled: true, params: { age_days: "30" } },
+        "windows-audit|": { enabled: true }
+      };
+      var win = arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return /windows/i.test(e.os || ""); })[0];
+      if (win) DEMO_MAINT_ROWS["windows-cleanup|" + win.id] = { mode: "enforce", reason: "Small disk, clean weekly", expires_at: new Date(Date.now() + 10 * 86400000).toISOString() };
+    }
+    var defs = [
+      ["windows-audit", "Standards check", "maintenance", "safe", "daily", [["min_free_percent", "int", "15", 1, 90, "Free disk below this percent is a failure."], ["max_update_age_days", "int", "14", 1, 120, "Days since the last update before it fails."]]],
+      ["windows-cleanup", "Cleanup", "maintenance", "safe", "weekly", [["age_days", "int", "14", 1, 365, "Delete temp files older than this many days."], ["compact_store", "bool", "true", null, null, "Compact the component store after cleaning."]]],
+      ["windows-debloat", "Remove bundled apps", "maintenance", "careful", "weekly", [["apps", "list", "Microsoft.BingNews,*CandyCrush*", null, null, "Apps to remove."]]],
+      ["windows-performance", "Gaming performance", "maintenance", "safe", "weekly", [["game_mode", "bool", "true", null, null, "Turn on Game Mode."], ["disable_vbs", "bool", "false", null, null, "Turn off virtualization-based security (careful)."]]],
+      ["windows-privacy", "Privacy", "maintenance", "safe", "weekly", []],
+      ["windows-updates", "Windows updates", "maintenance", "safe", "daily", [["exclude", "list", "Firmware", null, null, "Update classes never installed."]]]
+    ];
+    function eff(name, defaults, scopeEp) {
+      var f = DEMO_MAINT_ROWS[name + "|"] || {}, e = scopeEp ? (DEMO_MAINT_ROWS[name + "|" + scopeEp] || {}) : {};
+      var params = {};
+      Object.keys(defaults).forEach(function (k) { params[k] = defaults[k]; });
+      [f, e].forEach(function (r) { Object.keys(r.params || {}).forEach(function (k) { params[k] = r.params[k]; }); });
+      var on = e.enabled !== undefined ? e.enabled : !!f.enabled;
+      return { enabled: on, package_enabled: on, category_enabled: true, mode: e.mode || f.mode || "audit", interval: e.interval || f.interval || defaults.__interval, params: params };
+    }
+    return {
+      categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
+      packages: defs.map(function (d) {
+        var defaults = { __interval: d[4] };
+        var params = d[5].map(function (p) {
+          defaults[p[0]] = p[2];
+          return { name: p[0], type: p[1], default: p[2], min: p[3], max: p[4], max_items: p[1] === "list" ? 32 : undefined, description: p[5], careful: p[0] === "disable_vbs" };
+        });
+        var fe = eff(d[0], defaults, ""); delete fe.params.__interval;
+        var out = { script_id: "demo-" + d[0], name: d[0], title: d[1], description: "", category: d[2], risk: d[3], version: 3,
+          default_interval: d[4], params: params, fleet: DEMO_MAINT_ROWS[d[0] + "|"] || null, fleet_effective: fe };
+        if (ep) { out.endpoint = DEMO_MAINT_ROWS[d[0] + "|" + ep] || null; out.effective = eff(d[0], defaults, ep); delete out.effective.params.__interval; }
+        return out;
+      })
+    };
   }
 
   function demoResponse(path, method, body) {
@@ -1244,6 +1302,7 @@
         if (base === "/api/v1/learning/proposals") { resolve({ window: "demo-window", proposals: [] }); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
+        if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1410,6 +1469,15 @@
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
       DEMO_CACHE["/api/v1/hierarchy"] = demoRebuildHierarchy();
     };
+    if (base === "/api/v1/maintenance/settings") {
+      demoMaintSettings("");
+      var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
+      var row = body.reset ? {} : (DEMO_MAINT_ROWS[key] || {});
+      ["enabled", "mode", "interval", "reason", "expires_at"].forEach(function (k) { if (body[k] !== undefined) { if (body[k] === null) delete row[k]; else row[k] = body[k]; } });
+      Object.keys(body.params || {}).forEach(function (k) { row.params = row.params || {}; if (body.params[k] === null) delete row.params[k]; else row.params[k] = body.params[k]; });
+      DEMO_MAINT_ROWS[key] = row;
+      return demoMaintSettings(body.endpoint_id ? "?endpoint_id=" + body.endpoint_id : "");
+    }
     if (base === "/api/v1/scanner/scan") {
       var sid = "scan-" + Date.now();
       DEMO_JOBS[sid] = { started: Date.now(), subnet: (body && body.subnet) || "10.0.4.0/24", profile: (body && body.profile) || "standard" };
@@ -9018,25 +9086,38 @@
   var MAINT_STATES = {
     ok: ["ok", "Nothing to change"], fixed: ["ok", "Fixed"], drift: ["warn", "Needs changes"],
     failed: ["crit", "Failed"], skipped: ["idle", "Skipped"], running: ["warn", "Running"],
-    waiting: ["idle", "Waiting for the agent"], cancelled: ["idle", "Cancelled"], no_result: ["crit", "No result came back"]
+    waiting: ["idle", "Waiting for the agent"], cancelled: ["idle", "Cancelled"], no_result: ["crit", "No result came back"],
+    na: ["idle", "Not applicable"]
   };
 
   function maintenanceCard(asset) {
     var ep = asset.endpoint;
     var m = state.maintenanceByEndpoint[ep.id];
     var isWindows = /windows/i.test(ep.os || "");
-    if (!m || (m.loading && !m.packages)) return isWindows ? card("Maintenance", h("p", { role: "status", text: "Reading maintenance runs\u2026" }), null, true) : null;
-    if (m.error) return card("Maintenance", h("p", { role: "status", text: "Maintenance status unavailable: " + m.error }), null, true);
-    var pkgs = m.packages || [];
-    if (!pkgs.length) {
-      return isWindows ? card("Maintenance", emptyBox("No maintenance packages in the script library yet."), null, true) : null;
+    if (!m || (m.loading && !m.packages)) return isWindows ? card("Maintenance and security", h("p", { role: "status", text: "Reading maintenance runs…" }), null, true) : null;
+    if (m.error) return card("Maintenance and security", h("p", { role: "status", text: "Maintenance status unavailable: " + m.error }), null, true);
+    var all = m.packages || [];
+    if (!all.length) {
+      return isWindows ? card("Maintenance and security", emptyBox("No maintenance packages in the script library yet."), null, true) : null;
     }
     /* A run in flight changes on the agent's schedule, not ours: re-read while one is open. */
-    var open = pkgs.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); });
+    var open = all.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); });
     if (open && !m.loading && Date.now() - m.at > 10000) loadMaintenance(ep.id);
+    var sw = state.maintSettingsByEndpoint[ep.id];
+    if (!sw || (!sw.loading && !sw.data && !sw.error)) loadMaintSettings(ep.id);
+    var settings = sw && sw.data;
+    var byName = {};
+    arrayOf(settings && settings.packages).forEach(function (p) { byName[p.name] = p; });
+
+    var tab = state.maintCardTab || "maintenance";
+    var pkgs = all.filter(function (p) { return (p.category || "maintenance") === tab; });
+    var pass = 0, fail = 0;
+    pkgs.forEach(function (p) { if (p.last) { pass += p.last.pass || 0; fail += p.last.fail || 0; } });
+    var cat = arrayOf(settings && settings.categories).filter(function (c) { return c.name === tab; })[0];
 
     var rows = pkgs.map(function (p) {
       var last = p.last;
+      var s = byName[p.name];
       var result;
       if (!last) {
         result = h("span", { cls: "dim-2", text: "Never run" });
@@ -9045,24 +9126,363 @@
         result = h("div", { cls: "uf uf-wrap uf-g1" },
           h("a", { href: "/console/jobs?id=" + encodeURIComponent(last.job_id) }, chip(st[0], st[1])),
           last.mode ? h("span", { cls: "dim-2", text: last.mode }) : null,
-          last.reason ? h("span", { cls: "dim-2", text: "\u00b7 " + last.reason }) : null,
-          last.changed && last.changed.length ? h("span", { cls: "dim-2", text: "\u00b7 " + last.changed.length + " changed" }) : null);
+          last.reason ? h("span", { cls: "dim-2", text: "· " + last.reason }) : null,
+          last.changed && last.changed.length ? h("span", { cls: "dim-2", text: "· " + last.changed.length + " changed" }) : null,
+          (last.controls && last.controls.length) ? h("button", { cls: "btn mini", type: "button", text: "Controls", "aria-label": "Controls checked by " + p.title,
+            on: { click: function () { openSheet(p.title + " on " + asset.name, h("div", { cls: "stack" }, maintCompliance(last.pass || 0, last.fail || 0), maintControlsTable(last.controls)),
+              [h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } })]); } } }) : null,
+          maintCompliance(last.pass || 0, last.fail || 0));
       }
       var finished = last && last.completed_at ? parseTime(last.completed_at) : null;
+      var schedule = s ? h("div", {}, h("span", { text: maintEffectiveText(s.effective) }),
+        s.effective && maintChangedCount(s, s.effective) ? h("span", { cls: "dim-2", text: " · " + maintChangedCount(s, s.effective) + " changed" }) : null,
+        maintOverrideNote(s.endpoint)) : h("span", { cls: "dim-2", text: sw && sw.error ? "unavailable" : "…" });
       return [
         h("div", {}, h("b", { text: p.title }), p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
           h("div", { cls: "dim-2", text: p.description || "" })),
         result,
-        last ? stamp(finished || parseTime(last.requested_at)) : h("span", { cls: "dim-2", text: "\u2014" }),
-        last && !last.completed_at ? h("span", { cls: "dim-2", text: "\u2014" }) : last ? (last.reboot ? chip("warn", "Yes") : "No") : h("span", { cls: "dim-2", text: "\u2014" }),
-        h("button", { cls: "btn mini", type: "button", text: "Run\u2026", "aria-label": "Run " + p.title + " on " + asset.name, on: { click: function () {
-          openScriptRunSheet({ id: p.script_id, name: p.name, interpreter: p.interpreter, latest_version: p.latest_version, metadata: { timeout: p.timeout } }, p.latest_version, ep.id);
-        } } })
+        last ? stamp(finished || parseTime(last.requested_at)) : h("span", { cls: "dim-2", text: "—" }),
+        last && !last.completed_at ? h("span", { cls: "dim-2", text: "—" }) : last ? (last.reboot ? chip("warn", "Yes") : "No") : h("span", { cls: "dim-2", text: "—" }),
+        schedule,
+        h("div", { cls: "row-acts" },
+          h("button", { cls: "btn mini", type: "button", text: "Run…", disabled: READ_ONLY, "aria-label": "Run " + p.title + " on " + asset.name,
+            on: { click: function () { openMaintRunSheet(p, asset); } } }),
+          s ? h("button", { cls: "btn mini", type: "button", text: "Settings…", "aria-label": "Settings for " + p.title + " on " + asset.name,
+            on: { click: function () { openMaintSettingsSheet(p.name, ep.id, asset.name); } } }) : null)
       ];
     });
-    return card("Maintenance", h("div", {},
-      simpleTable(["Package", "Last result", "When", "Reboot needed", ""], rows, { sortable: false }),
-      h("div", { cls: "card-body pending", text: "Audit only reports what would change; enforce makes the changes. Each run needs your passkey. Packages never reboot the machine." })), null, true);
+    var catNote = null;
+    if (cat && cat.enabled === false) catNote = h("span", { cls: "dim-2", text: tab === "security" ? "Scheduled security runs are off for this machine" : "Scheduled maintenance runs are off for this machine" });
+    var catSel = cat && IS_ADMIN ? h("select", { "aria-label": "Scheduled " + tab + " runs on " + asset.name, on: { change: function (e) {
+      var v = e.target.value;
+      if (v === "") { putMaintSetting({ category: tab, endpoint_id: ep.id, reset: true }, function () { renderRoute(); }); return; }
+      e.target.value = cat.endpoint === undefined || cat.endpoint === null ? "" : cat.endpoint ? "on" : "off";
+      openMaintCategorySheet(tab, v === "on", asset);
+    } } },
+      h("option", { value: "", text: "Fleet default (" + (cat.fleet_enabled ? "on" : "off") + ")", selected: cat.endpoint === undefined || cat.endpoint === null }),
+      h("option", { value: "on", text: "On for this machine", selected: cat.endpoint === true }),
+      h("option", { value: "off", text: "Off for this machine", selected: cat.endpoint === false })) : null;
+    return card("Maintenance and security", h("div", {},
+      h("div", { cls: "card-body uf uf-wrap uf-g1" },
+        maintTabs(tab, function (id) { state.maintCardTab = id; renderRoute(); }),
+        h("span", { cls: "fill" }),
+        maintCompliance(pass, fail),
+        catSel ? h("label", { cls: "uf uf-g1" }, h("span", { cls: "dim-2", text: "Scheduled runs" }), catSel) : null,
+        catNote,
+        cat ? maintOverrideNote(cat.override) : null),
+      pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
+        : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."),
+      h("div", { cls: "card-body pending", text: "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking; anything else asks you to approve on your phone. Packages never reboot the machine." })), null, true);
+  }
+
+  /* ------------------------------------------------- maintenance settings
+     One settings model for maintenance and security packages: a fleet
+     default per package (on/off, mode, how often, settings) that a machine
+     can override with a reason and an optional expiry, plus a per-category
+     switch. Saving never runs anything by itself: the schedule runs the
+     effective settings, and a run that needs the owner (enforce, a careful
+     package or step, changed settings) asks on the phone first. */
+  var MAINT_CATEGORIES = [
+    { id: "maintenance", label: "Maintenance" },
+    { id: "security", label: "Security" }
+  ];
+  var MAINT_INTERVALS = [["hourly", "Hourly"], ["daily", "Daily"], ["weekly", "Weekly"]];
+  var MAINT_MODES = [["audit", "Audit"], ["enforce", "Enforce"]];
+
+  function maintSettingsUrl(epID) {
+    return "/api/v1/maintenance/settings" + (epID ? "?endpoint_id=" + encodeURIComponent(epID) : "");
+  }
+
+  function loadMaintSettings(epID) {
+    var cur = state.maintSettingsByEndpoint[epID];
+    if (cur && cur.loading) return;
+    state.maintSettingsByEndpoint[epID] = { loading: true, data: cur && cur.data };
+    request(maintSettingsUrl(epID)).then(function (d) {
+      state.maintSettingsByEndpoint[epID] = { data: d || null, at: Date.now() };
+      if (state.routeKey) renderRoute();
+    }).catch(function (e) {
+      state.maintSettingsByEndpoint[epID] = { error: (e && e.message) || "request failed", at: Date.now() };
+      if (state.routeKey) renderRoute();
+    });
+  }
+
+  /* One PUT; the answer is the whole settings view for that scope. */
+  function putMaintSetting(change, after) {
+    return request("/api/v1/maintenance/settings", "PUT", change).then(function (d) {
+      if (change.endpoint_id) state.maintSettingsByEndpoint[change.endpoint_id] = { data: d, at: Date.now() };
+      else state.maintSettings = d;
+      if (after) after(d);
+      return d;
+    }).catch(function (e) {
+      toast("Not saved: " + ((e && e.message) || "request failed"), "crit");
+      throw e;
+    });
+  }
+
+  function maintTabs(current, onPick) {
+    return h("div", { cls: "uf uf-g1", role: "tablist", "aria-label": "Package category" }, MAINT_CATEGORIES.map(function (c) {
+      var on = c.id === current;
+      return h("button", { cls: "btn mini" + (on ? " btn-primary" : ""), type: "button", role: "tab", "aria-selected": on ? "true" : "false",
+        text: c.label, on: { click: function () { onPick(c.id); } } });
+    }));
+  }
+
+  function maintIntervalLabel(v) {
+    var m = MAINT_INTERVALS.filter(function (x) { return x[0] === v; })[0];
+    return m ? m[1] : v;
+  }
+
+  /* What a package runs as, in one line: "Daily, audit" or "Off". */
+  function maintEffectiveText(eff) {
+    if (!eff) return "—";
+    if (!eff.enabled) return eff.package_enabled && !eff.category_enabled ? "Off (category off)" : "Off";
+    return maintIntervalLabel(eff.interval) + ", " + eff.mode;
+  }
+
+  function maintChangedCount(pkg, eff) {
+    return arrayOf(pkg.params).filter(function (p) { return eff && eff.params && eff.params[p.name] !== p.default; }).length;
+  }
+
+  function maintDateText(iso) {
+    var d = parseTime(iso);
+    return d ? d.toLocaleDateString() : iso;
+  }
+
+  /* The override note for one machine: reason, and expiry or expired. */
+  function maintOverrideNote(row) {
+    if (!row || (!row.reason && !row.expires_at)) return null;
+    var expired = row.expires_at && parseTime(row.expires_at) <= new Date();
+    var bits = [];
+    if (row.reason) bits.push(row.reason);
+    if (row.expires_at) bits.push((expired ? "expired " : "until ") + maintDateText(row.expires_at));
+    return h("div", { cls: "dim-2" }, expired ? chip("warn", "Override expired") : chip("idle", "Override"),
+      h("span", { cls: "u-ml2", text: bits.join(" · ") }));
+  }
+
+  /* The settings editor for one package, fleet-wide (epID "") or for one
+     machine. Every field shows its value in force and where it comes from;
+     "Reset" goes back to the default one level up. */
+  function openMaintSettingsSheet(pkgName, epID, hostName) {
+    var holder = h("div", { cls: "stack" });
+    function view() {
+      var d = epID ? (state.maintSettingsByEndpoint[epID] || {}).data : state.maintSettings;
+      return d ? arrayOf(d.packages).filter(function (p) { return p.name === pkgName; })[0] : null;
+    }
+    var reasonIn = h("input", { type: "text", maxlength: "300", placeholder: "Why this machine differs", "aria-label": "Reason for the override" });
+    var expiresIn = h("input", { type: "date", "aria-label": "Override ends on" });
+    function save(change, focusName) {
+      change.package = pkgName;
+      if (epID) {
+        change.endpoint_id = epID;
+        var reason = reasonIn.value.trim();
+        if (!reason && !change.reset) { toast("Say why this machine differs from the fleet default first.", "warn"); reasonIn.focus(); return; }
+        if (reason) change.reason = reason;
+        if (expiresIn.value) change.expires_at = expiresIn.value;
+      }
+      putMaintSetting(change, function () {
+        draw(focusName);
+        if (epID) loadMaintenance(epID); else renderBody();
+        toast("Saved", "ok");
+      }).catch(function () { draw(focusName); });
+    }
+    function draw(focusName) {
+      var pkg = view();
+      clear(holder);
+      if (!pkg) { holder.appendChild(emptyBox("This package is no longer in the library.")); return; }
+      var row = (epID ? pkg.endpoint : pkg.fleet) || {};
+      var eff = (epID ? pkg.effective : pkg.fleet_effective) || {};
+      var up = epID ? pkg.fleet_effective : null; /* what Reset falls back to */
+      var editable = IS_ADMIN;
+      if (epID) {
+        if (row.reason) reasonIn.value = row.reason;
+        if (row.expires_at && !expiresIn.value) expiresIn.value = String(row.expires_at).slice(0, 10);
+        holder.appendChild(h("div", { cls: "form-row" },
+          h("label", { cls: "field" }, h("span", { text: "Reason (required for an override)" }), reasonIn),
+          h("label", { cls: "field" }, h("span", { text: "Ends on (optional)" }), expiresIn)));
+        var note = maintOverrideNote(row);
+        if (note) holder.appendChild(note);
+      }
+      /* Where the value in force comes from; a value set at this level also
+         names what Reset would go back to. */
+      function origin(set, fallbackText) {
+        return h("span", { cls: "dim-2", text: set ? (epID ? "set for this machine; " : "fleet setting; ") + fallbackText : fallbackText });
+      }
+      function resetBtn(set, label, change, name) {
+        return set && editable ? h("button", { cls: "btn mini", type: "button", text: "Reset", "aria-label": "Reset " + label,
+          on: { click: function () { save(change, name); } } }) : null;
+      }
+      var rows = [];
+      var enabledSet = row.enabled !== undefined && row.enabled !== null;
+      var enabledBox = h("input", { type: "checkbox", "data-field": "enabled", checked: !!eff.package_enabled, disabled: !editable,
+        "aria-label": "Run " + pkg.title + " on a schedule", on: { change: function (e) { save({ enabled: e.target.checked }, "enabled"); } } });
+      rows.push([h("b", { text: "Scheduled" }), enabledBox,
+        origin(enabledSet, epID ? "fleet default (" + (up && up.package_enabled ? "on" : "off") + ")" : "default (off)"),
+        resetBtn(enabledSet, "scheduled", { enabled: null }, "enabled")]);
+      var modeSet = !!row.mode;
+      var modeSel = h("select", { "data-field": "mode", disabled: !editable, "aria-label": "Mode for " + pkg.title,
+        on: { change: function (e) { save({ mode: e.target.value }, "mode"); } } },
+        MAINT_MODES.map(function (m) { return h("option", { value: m[0], text: m[1], selected: eff.mode === m[0] }); }));
+      rows.push([h("b", { text: "Mode" }), modeSel, origin(modeSet, epID ? "fleet default (" + (up ? up.mode : "audit") + ")" : "default (audit)"),
+        resetBtn(modeSet, "mode", { mode: null }, "mode")]);
+      var intSet = !!row.interval;
+      var intSel = h("select", { "data-field": "interval", disabled: !editable, "aria-label": "How often " + pkg.title + " runs",
+        on: { change: function (e) { save({ interval: e.target.value }, "interval"); } } },
+        MAINT_INTERVALS.map(function (m) { return h("option", { value: m[0], text: m[1], selected: eff.interval === m[0] }); }));
+      rows.push([h("b", { text: "How often" }), intSel,
+        origin(intSet, epID ? "fleet default (" + maintIntervalLabel(up ? up.interval : pkg.default_interval) + ")" : "default (" + maintIntervalLabel(pkg.default_interval) + ")"),
+        resetBtn(intSet, "how often", { interval: null }, "interval")]);
+      arrayOf(pkg.params).forEach(function (p) {
+        var cur = eff.params ? eff.params[p.name] : p.default;
+        var set = !!(row.params && row.params[p.name] !== undefined);
+        var inherited = epID && up && up.params ? up.params[p.name] : p.default;
+        var send = function (v) { var ch = { params: {} }; ch.params[p.name] = v; save(ch, p.name); };
+        var input;
+        if (p.type === "bool") {
+          input = h("input", { type: "checkbox", "data-field": p.name, checked: cur === "true", disabled: !editable, "aria-label": p.description,
+            on: { change: function (e) { send(e.target.checked ? "true" : "false"); } } });
+        } else if (p.type === "enum") {
+          input = h("select", { "data-field": p.name, disabled: !editable, "aria-label": p.description, on: { change: function (e) { send(e.target.value); } } },
+            arrayOf(p.values).map(function (v) { return h("option", { value: v, text: v, selected: cur === v }); }));
+        } else if (p.type === "int") {
+          input = h("input", { type: "number", "data-field": p.name, value: cur, min: p.min, max: p.max, step: "1", disabled: !editable, "aria-label": p.description,
+            on: { change: function (e) { if (e.target.value !== "") send(String(parseInt(e.target.value, 10))); } } });
+        } else {
+          input = h("textarea", { "data-field": p.name, rows: "2", disabled: !editable, "aria-label": p.description + " (comma separated)",
+            text: cur === "-" ? "" : String(cur || "").split(",").join(", "),
+            on: { change: function (e) {
+              var items = e.target.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+              send(items.length ? items.join(",") : "-");
+            } } });
+        }
+        var defText = p.type === "list" ? (inherited === "-" ? "none" : String(inherited).split(",").join(", ")) : inherited;
+        var bounds = p.type === "int" ? " (" + p.min + "–" + p.max + ")" : p.type === "list" ? " (up to " + p.max_items + ")" : "";
+        rows.push([
+          h("div", {}, h("b", { text: p.name.replace(/_/g, " ") }), p.careful ? h("span", { cls: "u-ml2" }, chip("warn", "careful step")) : null,
+            h("div", { cls: "dim-2", text: p.description + bounds })),
+          input,
+          origin(set, (epID ? "fleet default: " : "default: ") + defText),
+          resetBtn(set, p.name, (function () { var ch = { params: {} }; ch.params[p.name] = null; return ch; })(), p.name)
+        ]);
+      });
+      holder.appendChild(stackOnPhone(simpleTable(["Setting", "Value", "Comes from", ""], rows, { sortable: false })));
+      holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. Switching to enforce, turning on a careful package or step, or changing a setting asks you to approve on your phone before the next run. Turning a package off or back to audit never asks." }));
+      if (epID && editable && (pkg.endpoint && (pkg.endpoint.enabled !== undefined || pkg.endpoint.mode || pkg.endpoint.interval || pkg.endpoint.params))) {
+        holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Use the fleet defaults for this machine",
+          on: { click: function () { save({ reset: true }); } } })));
+      }
+      if (focusName) {
+        var el = holder.querySelector('[data-field="' + focusName + '"]');
+        if (el) el.focus();
+      }
+    }
+    draw();
+    openSheet((view() ? view().title : pkgName) + (epID ? " on " + (hostName || epID) : " — fleet defaults"), holder,
+      [h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } })], null,
+      { guardDirty: false }); /* every change is saved as it is made */
+  }
+
+  /* A machine's category switch: an override, so it takes a reason. */
+  function openMaintCategorySheet(category, on, asset) {
+    var reason = h("input", { type: "text", maxlength: "300", "aria-label": "Reason" });
+    var ends = h("input", { type: "date", "aria-label": "Ends on" });
+    var label = (on ? "Turn on" : "Turn off") + " scheduled " + category + " runs on " + asset.name;
+    var save = h("button", { cls: "btn btn-primary", type: "button", text: on ? "Turn on" : "Turn off", on: { click: function () {
+      if (!reason.value.trim()) { toast("Say why this machine differs from the fleet default.", "warn"); reason.focus(); return; }
+      var change = { category: category, endpoint_id: asset.endpoint.id, enabled: on, reason: reason.value.trim() };
+      if (ends.value) change.expires_at = ends.value;
+      putMaintSetting(change, function () { requestCloseSheet(); renderRoute(); toast("Saved", "ok"); }).catch(function () {});
+    } } });
+    openSheet(label, h("div", { cls: "stack" },
+      h("label", { cls: "field" }, h("span", { text: "Reason" }), reason),
+      h("label", { cls: "field" }, h("span", { text: "Ends on (optional; then the fleet default applies again)" }), ends)),
+      [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    reason.focus();
+  }
+
+  /* Run one package now on one machine with its effective settings, behind
+     the owner's tap (a baseline audit goes straight through). */
+  function openMaintRunSheet(pkg, asset) {
+    var mode = h("select", { "aria-label": "Mode" },
+      h("option", { value: "audit", text: "Audit — report what would change" }),
+      h("option", { value: "enforce", text: "Enforce — make the changes" }),
+      h("option", { value: "revert", text: "Revert — restore what it changed first" }));
+    var go = h("button", { cls: "btn btn-primary", type: "button", text: "Run", disabled: READ_ONLY, on: { click: function () {
+      var m = mode.value;
+      go.disabled = true;
+      ownerApproved("/api/v1/maintenance/run", { endpoint_ids: [asset.endpoint.id], packages: [pkg.name], mode: m },
+        { label: "Run " + pkg.title + " (" + m + ") on " + asset.name, onPending: function () { requestCloseSheet(); } })
+        .then(function () { requestCloseSheet(); toast(pkg.title + " sent to " + asset.name, "ok"); loadMaintenance(asset.endpoint.id); })
+        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+    } } });
+    openSheet("Run " + pkg.title + " on " + asset.name, h("div", { cls: "stack" },
+      h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
+      h("p", { cls: "pending", text: "Runs with this machine's settings. An audit with default settings goes straight through; anything else asks you to approve on your phone." })),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+  }
+
+  /* Pass/fail of the controls a run checked, for one package or a category. */
+  function maintCompliance(pass, fail) {
+    if (!(pass + fail)) return null;
+    var pct = Math.round(100 * pass / (pass + fail));
+    return chip(fail ? "warn" : "ok", pct + "% (" + pass + " of " + (pass + fail) + " controls)");
+  }
+
+  /* A phone cannot show five columns side by side, and a sideways scroll hid
+     the value a row is about. These tables fold each row into a wrapped block
+     below 640px instead (app.css .tbl-stack). */
+  function stackOnPhone(wrap) {
+    wrap.classList.add("tbl-stack");
+    var names = Array.prototype.map.call(wrap.querySelectorAll("thead th"), function (th) { return th.textContent; });
+    Array.prototype.forEach.call(wrap.querySelectorAll("tbody tr.row"), function (tr) {
+      Array.prototype.forEach.call(tr.children, function (td, i) {
+        if (i > 0 && names[i]) td.setAttribute("data-label", names[i]);
+      });
+    });
+    return wrap;
+  }
+
+  function maintControlsTable(controls) {
+    var CONTROL_STATES = { pass: ["ok", "Pass"], fixed: ["ok", "Fixed"], fail: ["crit", "Fail"], na: ["idle", "Not applicable"] };
+    return simpleTable(["Control", "Reference", "Expected", "Found", "Result"], arrayOf(controls).map(function (c) {
+      var st = CONTROL_STATES[c.state] || ["idle", c.state];
+      return [h("div", {}, h("b", { text: c.id }), c.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null),
+        c.cis || "—", c.expected || "—", c.actual || "—", chip(st[0], st[1])];
+    }), { sortable: true, key: "maint-controls" });
+  }
+
+  function renderMaintenanceSection() {
+    var view = $("view");
+    /* Same as Access: a poll must not rebuild under an open control. */
+    if (view.dataset.section === "maintenance" && view.firstChild && view.contains(document.activeElement)) return;
+    clear(view);
+    var d = state.maintSettings;
+    var tab = state.maintTab || "maintenance";
+    var cat = arrayOf(d && d.categories).filter(function (c) { return c.name === tab; })[0] || { fleet_enabled: true };
+    var pkgs = arrayOf(d && d.packages).filter(function (p) { return (p.category || "maintenance") === tab; });
+    var catBox = h("input", { type: "checkbox", checked: !!cat.fleet_enabled, disabled: !IS_ADMIN, "aria-label": "Run scheduled " + tab + " packages",
+      on: { change: function (e) { putMaintSetting({ category: tab, enabled: e.target.checked }, function () { renderBody(); }); } } });
+    var head = h("div", { cls: "card-body stack" },
+      maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
+      h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: (tab === "security" ? "Run scheduled security packages" : "Run scheduled maintenance packages") + " across the fleet" })),
+      h("p", { cls: "pending", text: "Fleet defaults for every Windows machine. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }));
+    var rows = pkgs.map(function (p) {
+      var eff = p.fleet_effective || {};
+      var changed = maintChangedCount(p, eff);
+      return [
+        h("div", {}, h("b", { text: p.title }), p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
+          h("div", { cls: "dim-2", text: p.description || "" })),
+        maintEffectiveText(eff),
+        changed ? changed + " changed" : h("span", { cls: "dim-2", text: "defaults" }),
+        "v" + p.version,
+        h("button", { cls: "btn mini", type: "button", text: IS_ADMIN ? "Edit…" : "View…", "aria-label": "Settings for " + p.title,
+          on: { click: function () { openMaintSettingsSheet(p.name, "", ""); } } })
+      ];
+    });
+    view.appendChild(h("div", { cls: "pad stack" },
+      card("Package settings", head, null, true),
+      card(tab === "security" ? "Security packages" : "Maintenance packages",
+        pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
+          : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true)));
   }
 
   function renderRoute() {
@@ -9920,6 +10340,7 @@
       access: ["/api/v1/operators", "/api/v1/device-auth/credentials"],
       forensics: ["/api/v1/evidence/bundles", "/api/v1/vulnerabilities"],
       response: ["/api/v1/response/jobs", "/api/v1/terminal/sessions"],
+      maintenance: ["/api/v1/maintenance/settings"],
       audit: ["/api/v1/audit/logs"]
     };
     return state.demo ? [] : (requirements[state.section] || []).filter(function (prefix) {
@@ -9979,6 +10400,7 @@
     else if (state.section === "forensics") renderForensics();
     else if (state.section === "audit") renderAudit();
     else if (state.section === "access") renderAccess();
+    else if (state.section === "maintenance") renderMaintenanceSection();
     else renderAssets();
 
     if (!state.demo) {
@@ -10202,6 +10624,9 @@
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts/schedules").then(function (d) { state.scriptSchedules = arrayOf(d && d.schedules || d); }).catch(function () {}));
+    }
+    if (state.section === "maintenance") {
+      jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
     }
     if (state.section === "forensics") {
       jobs.push(request("/api/v1/evidence/bundles").then(function (d) { state.evidenceBundles = arrayOf(d && d.bundles || d); }).catch(function () {}));

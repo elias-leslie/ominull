@@ -28,6 +28,15 @@
   {{end}}
 </section>
 
+{{if .Controls}}
+<section class="card page-card">
+  <h3>Controls checked</h3>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>Control</th><th>Reference</th><th>Expected</th><th>Found</th><th>Result</th></tr></thead>
+    <tbody>{{range .Controls}}<tr><td><b>{{.ID}}</b>{{if .Careful}} <span class="st" data-state="warn">careful</span>{{end}}</td><td>{{if .CIS}}{{.CIS}}{{else}}—{{end}}</td><td>{{if .Expected}}{{.Expected}}{{else}}—{{end}}</td><td>{{if .Actual}}{{.Actual}}{{else}}—{{end}}</td><td><span class="st" data-state="{{.Tone}}">{{.Label}}</span></td></tr>{{end}}</tbody>
+  </table></div>
+</section>
+{{end}}
 <section class="card page-card">
   <h3>Output{{if .Stdout}}<span class="fill"></span><button class="btn mini" type="button" data-copy="job-stdout">Copy</button>{{end}}</h3>
   {{if .Stdout}}<pre class="job-output-console" id="job-stdout">{{.Stdout}}</pre>

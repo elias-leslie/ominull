@@ -31,13 +31,19 @@ func TestRepositoryPackagesParse(t *testing.T) {
 func TestReadPackageRejects(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	good := `{"name":"x","title":"X","description":"Does x.","risk":"safe","reboot":false,"timeout":300}`
+	good := `{"name":"x","title":"X","description":"Does x.","category":"maintenance","risk":"safe","reboot":false,"timeout":300,"interval":"daily",` +
+		`"params":[{"name":"age_days","type":"int","default":14,"min":1,"max":365,"description":"Age in days."}]}`
 	for name, body := range map[string]string{
 		"noheader":  "Write-Output 1\n",
 		"badrisk":   "# ominull-package: " + strings.Replace(good, `"safe"`, `"wild"`, 1) + "\n",
 		"timeout":   "# ominull-package: " + strings.Replace(good, `300`, `7200`, 1) + "\n",
 		"unknown":   "# ominull-package: " + strings.Replace(good, `"risk"`, `"extra":1,"risk"`, 1) + "\n",
 		"bom":       "\xef\xbb\xbf# ominull-package: " + good + "\n",
+		"category":  "# ominull-package: " + strings.Replace(good, `"maintenance"`, `"other"`, 1) + "\n",
+		"interval":  "# ominull-package: " + strings.Replace(good, `"daily"`, `"monthly"`, 1) + "\n",
+		"range":     "# ominull-package: " + strings.Replace(good, `"default":14`, `"default":400`, 1) + "\n",
+		"reserved":  "# ominull-package: " + strings.Replace(good, `"age_days"`, `"path"`, 1) + "\n",
+		"nodesc":    "# ominull-package: " + strings.Replace(good, `"Age in days."`, `""`, 1) + "\n",
 		"oversized": "# ominull-package: " + good + "\n" + strings.Repeat("#", 16*1024),
 	} {
 		p := filepath.Join(dir, name+".ps1")

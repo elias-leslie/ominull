@@ -233,7 +233,13 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				plan.OnRequested(v.ID)
 			}
 			s.approvalWake.notify()
-			if v.State == responseauth.ApprovalApproved && v.Method == "rule" {
+			if v.State == responseauth.ApprovalApproved && v.Method == "baseline" {
+				// A released maintenance package auditing with every default
+				// changes nothing; the authority approves it without asking
+				// and still checks it when it is spent below.
+				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking: a default audit of released packages: %s", plan.Action, v.ID, plan.Summary))
+				id = v.ID
+			} else if v.State == responseauth.ApprovalApproved && v.Method == "rule" {
 				// The authority approved it under the owner's approve-all rule
 				// (an owner-signed agent rollout); it is spent below like any
 				// approval, and the authority still checks it there.

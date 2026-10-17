@@ -372,9 +372,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// A package run of safe packages: approved now under a live package rule
 	// (no rate limit: the owner already approved exactly these runs), or
 	// offered one.
+	// A baseline run (safe released packages, audit, default settings) needs
+	// no tap at all.
 	pkgDigests, pkgLabels, pkgErr := packageRuleCovers(in, targets)
 	pkgRuleID, pkgAuto := "", false
-	if pkgErr == nil {
+	pkgBaseline := pkgErr == nil && packageBaseline(in, targets)
+	if pkgBaseline {
+		pkgAuto = true
+	} else if pkgErr == nil {
 		pkgRuleID, pkgAuto = a.packages.match(in.TenantID, pkgDigests, targets, time.Now())
 	}
 	if in.RuleOnly && !pkgAuto {
@@ -440,7 +445,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		rule, auto = a.rollouts.use(in.TenantID, version, now)
 	}
 	var pkgRule PackageRule
-	if pkgAuto {
+	if pkgBaseline {
+		evidence = "baseline audit " + strings.Join(pkgLabels, ", ")
+	} else if pkgAuto {
 		var ok bool
 		if pkgRule, ok = a.packages.use(in.TenantID, pkgRuleID, pkgDigests, targets, now); !ok {
 			// The rule ended or could not record its use between match
@@ -511,6 +518,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		if pkgAuto {
 			rec.view.ApproverID = pkgRule.ApproverID
 		}
+		if pkgBaseline {
+			rec.view.Method, rec.view.ApproverID = "baseline", ""
+		}
 	}
 	b.mu.Lock()
 	b.items[stmt.ID] = rec
@@ -531,7 +541,10 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			fmt.Sprintf("approved without asking under the approve-all rule the owner made %s (approval %s, approver %s): %s%s",
 				time.Unix(rule.Created, 0).UTC().Format(time.RFC3339), rule.ApprovalID, rule.ApproverID, evidence, note))
 	}
-	if pkgAuto {
+	if pkgBaseline {
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			"approved without asking: released safe packages in audit mode with their default settings ("+evidence+")")
+	} else if pkgAuto {
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
 			fmt.Sprintf("approved without asking under the package rule the owner made %s (approval %s, approver %s): %s",
 				time.Unix(pkgRule.Created, 0).UTC().Format(time.RFC3339), pkgRule.ID, pkgRule.ApproverID, evidence))

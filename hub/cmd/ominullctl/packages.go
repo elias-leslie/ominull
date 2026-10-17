@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,7 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
+
+	"ominull/hub/pkg/scripts"
 )
 
 // Maintenance packages live in the repository (packages/windows/*.ps1). Line 1
@@ -18,54 +18,26 @@ import (
 // source changed, so re-running the sync is free.
 
 const (
-	packageHeaderPrefix = "# ominull-package:"
 	// A script_exec approval carries the source; keep packages well inside it.
 	maxPackageBytes = 16 * 1024
 )
 
-// packageParamSchema is every package's one parameter: audit reports drift,
-// enforce fixes it.
-const packageParamSchema = `{"parameters":[{"name":"mode","type":"enum","enum":["audit","enforce"],"enum_values":["audit","enforce"],"default":"audit","required":true,"description":"audit reports what would change; enforce makes the changes"}]}`
-
-type packageHeader struct {
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Risk        string `json:"risk"`
-	Reboot      bool   `json:"reboot"`
-	Timeout     int    `json:"timeout"`
-}
-
-// readPackage reads and checks one package file.
-func readPackage(path string) (packageHeader, string, error) {
-	var h packageHeader
+// readPackage reads and checks one package file (header contract:
+// hub/pkg/scripts/package_params.go).
+func readPackage(path string) (*scripts.PackageHeader, string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return h, "", err
+		return nil, "", err
 	}
 	if len(raw) >= maxPackageBytes {
-		return h, "", fmt.Errorf("%s is %d bytes; packages must stay under %d", path, len(raw), maxPackageBytes)
+		return nil, "", fmt.Errorf("%s is %d bytes; packages must stay under %d", path, len(raw), maxPackageBytes)
 	}
 	if bytes.HasPrefix(raw, []byte("\xef\xbb\xbf")) {
-		return h, "", fmt.Errorf("%s starts with a byte-order mark", path)
+		return nil, "", fmt.Errorf("%s starts with a byte-order mark", path)
 	}
-	line, _, _ := bufio.NewReader(bytes.NewReader(raw)).ReadLine()
-	rest, ok := strings.CutPrefix(string(line), packageHeaderPrefix)
-	if !ok {
-		return h, "", fmt.Errorf("%s: line 1 must start with %q", path, packageHeaderPrefix)
-	}
-	dec := json.NewDecoder(strings.NewReader(rest))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&h); err != nil {
-		return h, "", fmt.Errorf("%s: package header: %v", path, err)
-	}
-	switch {
-	case h.Name == "" || h.Title == "" || h.Description == "":
-		return h, "", fmt.Errorf("%s: package header needs name, title and description", path)
-	case h.Risk != "safe" && h.Risk != "careful":
-		return h, "", fmt.Errorf("%s: risk must be safe or careful", path)
-	case h.Timeout < 1 || h.Timeout > 3600:
-		return h, "", fmt.Errorf("%s: timeout must be 1-3600 seconds", path)
+	h, err := scripts.ParsePackageHeader(string(raw))
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %v", path, err)
 	}
 	return h, string(raw), nil
 }
@@ -95,11 +67,13 @@ func (c *APIClient) cmdScriptsSync(args []string) error {
 			return err
 		}
 		meta, _ := json.Marshal(map[string]interface{}{
-			"package": h.Name, "title": h.Title, "risk": h.Risk, "reboot": h.Reboot, "timeout": h.Timeout,
+			"package": h.Name, "title": h.Title, "category": h.Category, "interval": h.Interval, "risk": h.Risk,
+			"reboot": h.Reboot, "timeout": h.Timeout,
 		})
+		schema, _ := json.Marshal(h.Schema())
 		raw, err := c.doRequest(http.MethodPost, "/api/v1/scripts", map[string]interface{}{
 			"sync": true, "name": h.Name, "description": h.Description, "interpreter": "powershell.exe",
-			"source": source, "parameter_schema_json": packageParamSchema, "metadata": json.RawMessage(meta),
+			"source": source, "parameter_schema_json": string(schema), "metadata": json.RawMessage(meta),
 		})
 		if err != nil {
 			return fmt.Errorf("sync %s: %w", h.Name, err)

@@ -1023,6 +1023,16 @@ th.c-menu {
   width: 34px;
 }
 
+@media (max-width: 640px) {
+  .tbl-stack table { min-width: 0; }
+  .tbl-stack thead { display: none; }
+  .tbl-stack tr.row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--s-3); padding: 8px var(--s-2); border-bottom: 1px solid var(--line); }
+  .tbl-stack tbody td { display: block; padding: 0; border: 0; white-space: normal; }
+  .tbl-stack tbody td:first-child { flex-basis: 100%; }
+  .tbl-stack tbody td:empty { display: none; }
+  .tbl-stack tbody td[data-label]::before { content: attr(data-label) ": "; color: var(--ink-3); }
+}
+
 tbody td {
   padding: 6px var(--s-3);
   border-bottom: 1px solid var(--line);

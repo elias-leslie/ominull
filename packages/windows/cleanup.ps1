@@ -1,245 +1,209 @@
-# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports and update caches, then compacts the component store.","risk":"safe","reboot":true,"timeout":3600}
-$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $WarningPreference = 'SilentlyContinue'
-$VerbosePreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'
+# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports and update caches, then compacts the component store.","category":"maintenance","risk":"safe","reboot":true,"timeout":3600,"interval":"weekly","params":[{"name":"temp_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete Windows Temp files older than this many days"},{"name":"minidump_days","type":"int","default":14,"min":1,"max":3650,"description":"Delete crash minidumps older than this many days"},{"name":"memory_dump_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete the full memory dump once it is this many days old"},{"name":"error_report_days","type":"int","default":30,"min":1,"max":3650,"description":"Delete Windows error reports older than this many days"},{"name":"update_download_days","type":"int","default":0,"min":0,"max":3650,"description":"Delete Windows Update download cache files older than this many days"},{"name":"min_reclaim_mb","type":"int","default":100,"min":0,"max":1048576,"description":"Clean only when at least this many MB can be freed (or the component store needs it)"},{"name":"component_store","type":"bool","default":true,"description":"Compact the component store when Windows recommends it"},{"name":"service_stop_seconds","type":"int","default":60,"min":5,"max":600,"description":"How long to wait for Windows Update to stop before clearing its download cache"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+$ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
-# Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
-# agent's own folder (never touched). Stdout carries only the final JSON line.
+# Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
 function Initialize-Env {
-    $sys = [Environment]::SystemDirectory
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
-    if (-not $env:windir) { $env:windir = $sr }
-    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
-    $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
-    if (-not $env:ProgramData) { $env:ProgramData = $pd }
-    if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }
-    $pf = [Environment]::GetFolderPath('ProgramFiles')
-    if (-not $env:ProgramFiles) { $env:ProgramFiles = $pf }
-    if (-not ${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} = [Environment]::GetFolderPath('ProgramFilesX86') }
-    if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }
-    if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData') }
-    if (-not $env:APPDATA) { $env:APPDATA = [Environment]::GetFolderPath('ApplicationData') }
-    if (-not $env:USERPROFILE) { $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile') }
-    if (-not $env:PSModulePath) { $env:PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
-    $script:Root = Join-Path $pd 'OminullMaintenance'
+  $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
+  $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
+    ProgramFiles = $pf; 'ProgramFiles(x86)' = (& $f 'ProgramFilesX86'); COMPUTERNAME = [Environment]::MachineName
+    LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
+    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
+  foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $script:Root = Join-Path $pd 'OminullMaintenance'
 }
+# audit reports, enforce changes, revert restores recorded first-seen values.
 function Get-Mode([string]$Primary, [string]$Fallback) {
-    $v = $Primary; if (-not $v) { $v = $Fallback }
-    if ($v -and $v.Trim() -eq 'enforce') { 'enforce' } else { 'audit' }
+  $v = "$Primary".Trim(); if (-not $v) { $v = "$Fallback".Trim() }
+  if ('enforce', 'revert' -ccontains $v) { $v } else { 'audit' }
 }
-function Start-Log {
-    $d = Join-Path $script:Root 'logs'; New-Item -ItemType Directory -Force -Path $d | Out-Null
-    Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip 19 |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    $script:LogFile = Join-Path $d ('{0}-{1}.log' -f $Pkg, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# Tunables are params declared on line 1; a run sets OMINULL_PARAM_<NAME>. A bad value fails the run.
+function ConvertFrom-PkgParam($Def, [string]$V) {
+  $n = "param $($Def.name)"; $x = 0L
+  switch ($Def.type) {
+    'int' { if ($V -match '^-?\d{1,18}\z' -and [int64]::TryParse($V, [ref]$x) -and "$x" -ceq $V -and $x -ge $Def.min -and $x -le $Def.max) { return $x } }
+    'bool' { if ('true', 'false' -ccontains $V) { return $V -ceq 'true' } }
+    'enum' { if (@($Def.values) -ccontains $V) { return $V } }
+    'list' {
+      $l = [string[]]@(); if ($V -cne '-') { $l = [string[]]($V -split ',') }; $seen = @{}
+      foreach ($i in $l) { if ($i -cnotmatch '^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}\z' -or $i.Trim() -cne $i -or $seen[$i.ToLower()]) { throw "$n has a bad or repeated item '$i'" }; $seen[$i.ToLower()] = 1 }
+      if ($l.Count -le $Def.max_items -and $V.Length -le 1024) { return , $l }
+    }
+  }
+  throw "$n is not a valid $($Def.type)"
 }
-function Write-Log([string]$Message) {
-    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value ('{0} {1}' -f (Get-Date -Format s), $Message) -Encoding UTF8 } catch {} }
+function Get-PkgParams([string]$Path) {
+  $o = @{}
+  foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
+    $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
+    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } else { "$($d.default)" } }
+    $o[$d.name] = ConvertFrom-PkgParam $d $v
+  }
+  $o
 }
-# First-seen values only: a later run never overwrites what the machine had before.
-function Save-Original($Values) {
-    try {
-        $f = Join-Path $script:Root "state\$Pkg-original.json"; $cur = [ordered]@{}; $add = $false
-        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cur[$_.Name] = $_.Value } }
-        foreach ($k in $Values.Keys) { if (-not $cur.Contains($k)) { $cur[$k] = $Values[$k]; $add = $true } }
-        if ($add) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $f) | Out-Null
-            ConvertTo-Json $cur -Depth 5 | Set-Content -LiteralPath $f -Encoding UTF8
-        }
-    } catch { Write-Log "original-values save failed: $_" }
+function Start-Log([int]$Keep) {
+  $d = "$($script:Root)\logs"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip ([math]::Max(0, $Keep - 1)) | Remove-Item -Force -ErrorAction SilentlyContinue
+  $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
+function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
-    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
-    @{ code = $c; out = $o }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  @{ code = $c; out = $o }
 }
-# quser IDLE TIME: "." / "none" = active now, "5" minutes, "1:05" h:mm, "2+03:04" d+h:mm.
+# quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
 function ConvertFrom-QuserIdle([string]$Idle) {
-    if ($Idle -match '^(\d+)\+(\d+):(\d+)$') { return [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] }
-    if ($Idle -match '^(\d+):(\d+)$') { return [int]$matches[1] * 60 + [int]$matches[2] }
-    if ($Idle -match '^\d+$') { return [int]$Idle }
-    0
+  if ($Idle -match '^(?:(\d+)\+)?(?:(\d+):)?(\d+)$') { [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] } else { 0 }
 }
-function Test-UserActive([string[]]$Lines) {
-    foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt 15) { return $true } }
-    $false
+function Test-UserActive([string[]]$Lines, [int]$IdleMinutes) {
+  foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt $IdleMinutes) { return $true } }
+  $false
 }
-# Game install folders. Launchers that sit in the tray (Steam, Epic, Riot Client,
-# Battle.net, EA app) live elsewhere and do not count.
+# Game folders; tray launchers (Steam, Epic, Riot Client, Battle.net, EA app) do not count.
 function Test-GamePath([string]$Path) {
-    if (-not $Path) { return $false }
-    $rules = '\\steamapps\\common\\', '\\Epic Games\\(?!Launcher\\)', '\\Riot Games\\(?!Riot Client\\)', '\\XboxGames\\',
-        '\\EA Games\\', '\\Ubisoft Game Launcher\\games\\', '\\GOG Galaxy\\Games\\', '\\WindowsApps\\Microsoft\.Minecraft',
-        '\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\'
-    foreach ($r in $rules) { if ($Path -match $r) { return $true } }
-    $false
+  $Path -and ($Path -match '\\steamapps\\common\\|\\Epic Games\\(?!Launcher\\|Epic Online Services\\)|\\Riot Games\\(?!Riot Client\\)|\\XboxGames\\|\\EA Games\\|\\Ubisoft Game Launcher\\games\\|\\GOG Galaxy\\Games\\|\\WindowsApps\\Microsoft\.Minecraft|\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\')
 }
-function Test-OnBattery($Batteries) {
-    foreach ($b in @($Batteries)) { if ($b -and [int]$b.BatteryStatus -eq 1) { return $true } }
-    $false
-}
-function Get-PreflightReason([bool]$CheckUpdates) {
-    $q = Invoke-Native 'quser.exe' @()
-    if ($q.code -ge 0 -and (Test-UserActive $q.out)) { return 'someone is using the computer' }
-    foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
-        if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
-    }
-    if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
-    if ($CheckUpdates) {
-        if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
-        try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
-    }
-    $null
-}
-function Test-PendingReboot {
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-}
-function Get-Reg([string]$Path, [string]$Name) {
-    try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null }
-}
-function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-    New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
-}
-# The Default user's hive: what every new profile starts from.
-function Mount-DefaultHive {
-    $root = 'Registry::HKEY_USERS\OminullDefault'
-    if (Test-Path $root) { Dismount-DefaultHive }
-    $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default
-    $r = Invoke-Native 'reg.exe' @('load', 'HKU\OminullDefault', (Join-Path $dir 'NTUSER.DAT'))
-    if ($r.code -ne 0) { throw "could not load the Default user hive: $($r.out -join ' ')" }
-    $root
-}
-# A hive left loaded would lock the Default profile, so unloading is retried.
-function Dismount-DefaultHive {
-    for ($i = 0; $i -lt 5; $i++) {
-        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-        $r = Invoke-Native 'reg.exe' @('unload', 'HKU\OminullDefault')
-        if ($r.code -eq 0) { return }
-        Start-Sleep -Seconds 2
-    }
-    throw "the Default user hive could not be unloaded: $($r.out -join ' ')"
+function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
+function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+  $q = Invoke-Native 'quser.exe' @()
+  if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
+  foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
+    if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
+  }
+  if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
+  if ($CheckUpdates) {
+    if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
+    try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
+  }
 }
 function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detail) {
-    if (@('ok', 'fixed', 'drift', 'failed', 'skipped') -notcontains $State) { $State = 'failed' }
-    if ($null -eq $Changed) { $Changed = @() }
-    $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = $Detail }) -Compress -Depth 6
-    if ($j.Length -gt 12000) { $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = @{ truncated = $true } }) -Compress -Depth 3 }
-    $j -replace "[`r`n]", ' '
+  if ('ok', 'fixed', 'drift', 'failed', 'skipped', 'na' -notcontains $State) { $State = 'failed' }
+  $r = [ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = @($Changed | Where-Object { $_ }); detail = $Detail }
+  $j = ConvertTo-Json $r -Compress -Depth 6
+  if ($j.Length -gt 12000) { $r.detail = @{ truncated = $true }; $j = ConvertTo-Json $r -Compress -Depth 3 }
+  $j -replace "[`r`n]", ' '
 }
 # --- prelude end ---
+# --- package temp begin (shared; tests compare) ---
+# DISM and Appx calls failed with "The system cannot find the path specified" for every package while
+# the after-test was clean; the agent's TEMP is the likely cause. They get a package-owned folder,
+# set only around the call; the agent's own folder is never touched.
+function Invoke-InPkgTemp([scriptblock]$Block) {
+  $t = "$($script:Root)\tmp"; New-Item -ItemType Directory -Force -Path $t | Out-Null
+  $old = @{}; foreach ($v in 'TEMP', 'TMP') { $old[$v] = [Environment]::GetEnvironmentVariable($v); [Environment]::SetEnvironmentVariable($v, $t) }
+  try { & $Block } finally { foreach ($v in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($v, $old[$v]) } }
+}
+# --- package temp end ---
 # The only places this package deletes from. Nothing under Users, the Recycle Bin,
 # the agent's TEMP folder or ProgramData\Ominull is ever listed.
 function Get-Targets {
-    $sr = $env:SystemRoot; $pd = $env:ProgramData
-    @(
-        @{ id = 'windows_temp'; path = "$sr\Temp"; days = 7 },
-        @{ id = 'minidumps'; path = "$sr\Minidump"; days = 14 },
-        @{ id = 'memory_dump'; path = "$sr\MEMORY.DMP"; days = 7 },
-        @{ id = 'error_reports_archive'; path = "$pd\Microsoft\Windows\WER\ReportArchive"; days = 30 },
-        @{ id = 'error_reports_queue'; path = "$pd\Microsoft\Windows\WER\ReportQueue"; days = 30 },
-        @{ id = 'update_downloads'; path = "$sr\SoftwareDistribution\Download"; days = 0 }
-    )
+  $sr = $env:SystemRoot; $pd = $env:ProgramData
+  @(
+    @{ id = 'windows_temp'; path = "$sr\Temp"; days = $Opt.temp_days },
+    @{ id = 'minidumps'; path = "$sr\Minidump"; days = $Opt.minidump_days },
+    @{ id = 'memory_dump'; path = "$sr\MEMORY.DMP"; days = $Opt.memory_dump_days },
+    @{ id = 'error_reports_archive'; path = "$pd\Microsoft\Windows\WER\ReportArchive"; days = $Opt.error_report_days },
+    @{ id = 'error_reports_queue'; path = "$pd\Microsoft\Windows\WER\ReportQueue"; days = $Opt.error_report_days },
+    @{ id = 'update_downloads'; path = "$sr\SoftwareDistribution\Download"; days = $Opt.update_download_days }
+  )
 }
 function Test-Allowed([string]$Path) {
-    $p = $Path.TrimEnd('\') + '\'
-    if ($p -match '\\Users\\|\\Ominull\\|\$Recycle\.Bin') { return $false }
-    $p.StartsWith("$($env:SystemRoot)\", 'OrdinalIgnoreCase') -or $p.StartsWith("$($env:ProgramData)\Microsoft\Windows\WER\", 'OrdinalIgnoreCase')
+  $p = $Path.TrimEnd('\') + '\'
+  if ($p -match '\\Users\\|\\Ominull\\|\$Recycle\.Bin') { return $false }
+  $p.StartsWith("$($env:SystemRoot)\", 'OrdinalIgnoreCase') -or $p.StartsWith("$($env:ProgramData)\Microsoft\Windows\WER\", 'OrdinalIgnoreCase')
 }
 # Files older than the cutoff. Junctions and symlinks are never followed.
 function Get-OldFiles([string]$Path, [datetime]$Cutoff) {
-    $out = New-Object System.Collections.Generic.List[System.IO.FileInfo]
-    if (-not (Test-Allowed $Path)) { return ,$out }
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        $f = [System.IO.FileInfo]$Path; if ($f.LastWriteTime -lt $Cutoff) { $out.Add($f) }; return ,$out
+  $out = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+  if (-not (Test-Allowed $Path)) { return ,$out }
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    $f = [System.IO.FileInfo]$Path; if ($f.LastWriteTime -lt $Cutoff) { $out.Add($f) }; return ,$out
+  }
+  $root = [System.IO.DirectoryInfo]$Path
+  if (-not $root.Exists -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return ,$out }
+  $stack = New-Object System.Collections.Stack; $stack.Push($root)
+  while ($stack.Count) {
+    $d = $stack.Pop()
+    try { $items = $d.GetFileSystemInfos() } catch { continue }
+    foreach ($i in $items) {
+      if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+      if ($i -is [System.IO.DirectoryInfo]) { $stack.Push($i) } elseif ($i.LastWriteTime -lt $Cutoff) { $out.Add($i) }
     }
-    $root = [System.IO.DirectoryInfo]$Path
-    if (-not $root.Exists -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return ,$out }
-    $stack = New-Object System.Collections.Stack; $stack.Push($root)
-    while ($stack.Count) {
-        $d = $stack.Pop()
-        try { $items = $d.GetFileSystemInfos() } catch { continue }
-        foreach ($i in $items) {
-            if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-            if ($i -is [System.IO.DirectoryInfo]) { $stack.Push($i) } elseif ($i.LastWriteTime -lt $Cutoff) { $out.Add($i) }
-        }
-    }
-    ,$out
+  }
+  ,$out
 }
 function Measure-Targets {
-    $m = [ordered]@{}
-    foreach ($t in Get-Targets) {
-        $files = Get-OldFiles $t.path (Get-Date).AddDays(-$t.days)
-        $sum = 0; foreach ($f in $files) { $sum += $f.Length }
-        $m[$t.id] = $sum
-    }
-    $do = "$($env:SystemRoot)\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"
-    $sum = 0; if (Test-Path -LiteralPath $do) { foreach ($f in (Get-OldFiles $do (Get-Date).AddDays(1))) { $sum += $f.Length } }
-    $m['delivery_optimization'] = $sum
-    $m
+  $m = [ordered]@{}
+  foreach ($t in Get-Targets) {
+    $files = Get-OldFiles $t.path (Get-Date).AddDays(-$t.days)
+    $sum = 0; foreach ($f in $files) { $sum += $f.Length }
+    $m[$t.id] = $sum
+  }
+  $do = "$($env:SystemRoot)\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"
+  $sum = 0; if (Test-Path -LiteralPath $do) { foreach ($f in (Get-OldFiles $do (Get-Date).AddDays(1))) { $sum += $f.Length } }
+  $m['delivery_optimization'] = $sum
+  $m
 }
 function Test-ComponentCleanup {
-    $r = Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore', '/English')
-    Write-Log "dism analyze exit $($r.code)"
-    [bool]($r.out | Where-Object { $_ -match 'Component Store Cleanup Recommended\s*:\s*Yes' })
+  $r = Invoke-InPkgTemp { Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore', '/English') }
+  Write-Log "dism analyze exit $($r.code)"
+  [bool]($r.out | Where-Object { $_ -match 'Component Store Cleanup Recommended\s*:\s*Yes' })
 }
 function Remove-Old($Target) {
-    $freed = 0
-    foreach ($f in (Get-OldFiles $Target.path (Get-Date).AddDays(-$Target.days))) {
-        $len = $f.Length
-        try { Remove-Item -LiteralPath $f.FullName -Force; $freed += $len } catch { Write-Log "kept (in use): $($f.FullName)" }
-    }
-    $freed
+  $freed = 0
+  foreach ($f in (Get-OldFiles $Target.path (Get-Date).AddDays(-$Target.days))) {
+    $len = $f.Length
+    try { Remove-Item -LiteralPath $f.FullName -Force; $freed += $len } catch { Write-Log "kept (in use): $($f.FullName)" }
+  }
+  $freed
 }
 function Invoke-Package {
-    $before = Measure-Targets; $total = 0; foreach ($v in $before.Values) { $total += $v }
-    $dism = Test-ComponentCleanup
-    $Detail.reclaimable_bytes = $before; $Detail.component_cleanup_recommended = $dism
-    Write-Log "reclaimable=$total component_cleanup=$dism"
-    if ($total -lt 100MB -and -not $dism) { $script:State = 'ok'; return }
-    if ($Mode -ne 'enforce') { $script:State = 'drift'; return }
-    $why = Get-PreflightReason $true
-    if ($why) { $script:State = 'skipped'; $Detail.reason = $why; return }
+  if ($Mode -eq 'revert') { $script:State = 'na'; $Detail.reason = 'cleanup only deletes files'; return }
+  $before = Measure-Targets; $total = 0; foreach ($v in $before.Values) { $total += $v }
+  $dism = $Opt.component_store -and (Test-ComponentCleanup)
+  $Detail.reclaimable_bytes = $before; $Detail.component_cleanup_recommended = $dism
+  Write-Log "reclaimable=$total component_cleanup=$dism"
+  if ($total -lt $Opt.min_reclaim_mb * 1MB -and -not $dism) { $script:State = 'ok'; return }
+  if ($Mode -ne 'enforce') { $script:State = 'drift'; return }
+  $why = Get-PreflightReason $true $Opt.idle_minutes
+  if ($why) { $script:State = 'skipped'; $Detail.reason = $why; return }
 
-    $freed = [ordered]@{}; $errors = @()
-    foreach ($t in Get-Targets) {
-        if ($before[$t.id] -le 0) { continue }
-        if ($t.id -eq 'update_downloads') {
-            $svc = Get-Service wuauserv; $wasRunning = $svc.Status -eq 'Running'
-            try {
-                if ($wasRunning) { Stop-Service wuauserv -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60)) }
-                $freed[$t.id] = Remove-Old $t
-            } catch { $errors += "update downloads: $_" }
-            finally { if ($wasRunning) { Start-Service wuauserv -ErrorAction SilentlyContinue } }
-        } else { $freed[$t.id] = Remove-Old $t }
-        if ($freed[$t.id] -gt 0) { $Changed.Add("$($t.id) $([math]::Round($freed[$t.id] / 1MB)) MB") }
-    }
-    if ($before['delivery_optimization'] -gt 0 -and (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) {
-        try { Delete-DeliveryOptimizationCache -Force | Out-Null; $freed['delivery_optimization'] = $before['delivery_optimization']; $Changed.Add('delivery_optimization') }
-        catch { $errors += "delivery optimization: $_" }
-    }
-    if ($dism) {
-        Write-Log 'dism StartComponentCleanup'
-        $r = Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/StartComponentCleanup', '/Quiet', '/NoRestart')
-        $Detail.component_cleanup_exit = $r.code
-        if ($r.code -eq 0 -or $r.code -eq 3010) { $Changed.Add('component_store') } else { $errors += "DISM exit $($r.code)" }
-        if ($r.code -eq 3010) { $script:Reboot = $true }
-    }
-    $Detail.freed_bytes = $freed
-    $Detail.remaining_bytes = Measure-Targets
-    if ($errors.Count) { $Detail.errors = $errors; $script:State = 'failed' } else { $script:State = 'fixed' }
+  $freed = [ordered]@{}; $errors = @()
+  foreach ($t in Get-Targets) {
+    if ($before[$t.id] -le 0) { continue }
+    if ($t.id -eq 'update_downloads') {
+      $svc = Get-Service wuauserv; $wasRunning = $svc.Status -eq 'Running'
+      try {
+        if ($wasRunning) { Stop-Service wuauserv -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds($Opt.service_stop_seconds)) }
+        $freed[$t.id] = Remove-Old $t
+      } catch { $errors += "update downloads: $_" }
+      finally { if ($wasRunning) { Start-Service wuauserv -ErrorAction SilentlyContinue } }
+    } else { $freed[$t.id] = Remove-Old $t }
+    if ($freed[$t.id] -gt 0) { $Changed.Add("$($t.id) $([math]::Round($freed[$t.id] / 1MB)) MB") }
+  }
+  if ($before['delivery_optimization'] -gt 0 -and (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) {
+    try { Delete-DeliveryOptimizationCache -Force | Out-Null; $freed['delivery_optimization'] = $before['delivery_optimization']; $Changed.Add('delivery_optimization') }
+    catch { $errors += "delivery optimization: $_" }
+  }
+  if ($dism) {
+    Write-Log 'dism StartComponentCleanup'
+    $r = Invoke-InPkgTemp { Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/StartComponentCleanup', '/Quiet', '/NoRestart') }
+    $Detail.component_cleanup_exit = $r.code
+    if ($r.code -eq 0 -or $r.code -eq 3010) { $Changed.Add('component_store') } else { $errors += "DISM exit $($r.code)" }
+    if ($r.code -eq 3010) { $script:Reboot = $true }
+  }
+  $Detail.freed_bytes = $freed
+  $Detail.remaining_bytes = Measure-Targets
+  if ($errors.Count) { $Detail.errors = $errors; $script:State = 'failed' } else { $script:State = 'fixed' }
 }
 $Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false
 try {
-    Initialize-Env; Start-Log
-    $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
-    Invoke-Package
-} catch {
-    $State = 'failed'; $m = "$_"; if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
-    $Detail.error = $m; Write-Log "error: $_ $($_.ScriptStackTrace)"
-}
+  Initialize-Env; $Opt = Get-PkgParams $PSCommandPath; Start-Log $Opt.log_keep
+  $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
+  Invoke-Package
+} catch { $State = 'failed'; $Detail.error = "$_".Substring(0, [math]::Min(400, "$_".Length)); Write-Log "error: $_ $($_.ScriptStackTrace)" }
 try { $json = Format-Result $State $Reboot $Changed.ToArray() $Detail }
 catch { $State = 'failed'; $json = '{"v":1,"state":"failed","reboot":false,"changed":[],"detail":{"error":"result could not be encoded"}}' }
 Write-Log "result $json"

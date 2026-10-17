@@ -506,6 +506,12 @@ func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		// Fail-closed gate: static API keys cannot create schedules
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot schedule scripts; an active console response session is required")
+			return
+		}
+
 		var req struct {
 			ScriptID        string                    `json:"script_id"`
 			Version         int                       `json:"version"`
@@ -529,18 +535,6 @@ func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
 		if req.ScriptID == "" || req.Version <= 0 || len(req.TargetEndpoints) == 0 {
 			writeJSONError(w, http.StatusBadRequest, "missing script_id, version, or target_endpoints")
 			return
-		}
-
-		// Fail-closed gate: static API keys cannot schedule scripts. A
-		// maintenance package is the exception: its schedule runs only what
-		// the owner's package rule already covers (a passkey tap), so the
-		// schedule itself grants nothing.
-		if r.Header.Get("X-Auth-Method") == "api-key" {
-			sc, err := s.scriptsStore.GetScript(tenantID, req.ScriptID)
-			if err != nil || sc.Package() == nil {
-				writeJSONError(w, http.StatusForbidden, "static API keys cannot schedule scripts; an active console response session is required")
-				return
-			}
 		}
 
 		operatorID := s.operatorFromRequest(r)

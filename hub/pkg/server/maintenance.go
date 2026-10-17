@@ -21,16 +21,21 @@ import (
 const packageRunGrace = 10 * time.Minute
 
 type packageRun struct {
-	JobID       string     `json:"job_id"`
-	JobState    string     `json:"job_state"`
-	State       string     `json:"state"` // ok|fixed|drift|failed|skipped, or running|waiting|cancelled|no_result
-	Reboot      bool       `json:"reboot"`
-	Changed     []string   `json:"changed,omitempty"`
-	Reason      string     `json:"reason,omitempty"` // a skipped or failed package's own reason
-	Mode        string     `json:"mode,omitempty"`
-	Version     int        `json:"version,omitempty"`
-	RequestedAt time.Time  `json:"requested_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	JobID    string   `json:"job_id"`
+	JobState string   `json:"job_state"`
+	State    string   `json:"state"` // ok|fixed|drift|failed|skipped|na, or running|waiting|cancelled|no_result
+	Reboot   bool     `json:"reboot"`
+	Changed  []string `json:"changed,omitempty"`
+	Reason   string   `json:"reason,omitempty"` // a skipped or failed package's own reason
+	Mode     string   `json:"mode,omitempty"`
+	Version  int      `json:"version,omitempty"`
+	// Controls is the run's per-control results (detail.controls); Pass and
+	// Fail count them for compliance (pass/(pass+fail); na counts for neither).
+	Controls    []scripts.Control `json:"controls,omitempty"`
+	Pass        int               `json:"pass,omitempty"`
+	Fail        int               `json:"fail,omitempty"`
+	RequestedAt time.Time         `json:"requested_at"`
+	CompletedAt *time.Time        `json:"completed_at,omitempty"`
 }
 
 type packageStatus struct {
@@ -40,6 +45,7 @@ type packageStatus struct {
 	Description    string      `json:"description"`
 	Interpreter    string      `json:"interpreter"`
 	Risk           string      `json:"risk"`
+	Category       string      `json:"category"` // maintenance | security
 	RebootPossible bool        `json:"reboot_possible"`
 	Timeout        int         `json:"timeout"`
 	LatestVersion  int         `json:"latest_version"`
@@ -86,6 +92,8 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 		if json.Unmarshal([]byte(job.ResultJSON), &res) == nil {
 			if pr, ok := scripts.ParsePackageResult(res.Stdout); ok {
 				run.State, run.Reboot, run.Changed = pr.State, pr.Reboot, pr.Changed
+				run.Controls = pr.Controls()
+				run.Pass, run.Fail = scripts.Compliance(run.Controls)
 				var d struct{ Reason, Error string }
 				if json.Unmarshal(pr.Detail, &d) == nil {
 					run.Reason = d.Reason
@@ -167,7 +175,7 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		}
 		st := packageStatus{
 			ScriptID: sc.ID, Name: sc.Name, Title: meta.Title, Description: sc.Description, Interpreter: sc.Interpreter,
-			Risk: meta.Risk, RebootPossible: meta.Reboot, Timeout: meta.Timeout, LatestVersion: sc.LatestVersion,
+			Risk: meta.Risk, Category: packageCategory(meta.Category), RebootPossible: meta.Reboot, Timeout: meta.Timeout, LatestVersion: sc.LatestVersion,
 		}
 		if st.Title == "" {
 			st.Title = sc.Name
@@ -192,6 +200,8 @@ func packageStateLabel(state string) (string, string) {
 		return "Needs changes", "warn"
 	case "skipped":
 		return "Skipped", "idle"
+	case "na":
+		return "Not applicable", "idle"
 	case "running":
 		return "Running", "warn"
 	case "waiting":
@@ -238,6 +248,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	var failed []feedResource
 	reboot := []string{}
 	drift, runs := 0, 0
+	compliance := map[string]map[string]int{} // category -> pass/fail
 	libraries := map[string][]*scripts.Script{}
 	for _, ep := range eps {
 		if ep.Status == "retired" || !strings.Contains(strings.ToLower(ep.OS), "windows") {
@@ -269,6 +280,14 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 			case "drift":
 				drift++
 			}
+			if len(run.Controls) > 0 {
+				cat := packageCategory(sc.Package().Category)
+				if compliance[cat] == nil {
+					compliance[cat] = map[string]int{}
+				}
+				compliance[cat]["pass"] += run.Pass
+				compliance[cat]["fail"] += run.Fail
+			}
 			if run.Reboot && run.CompletedAt != nil {
 				reboot = append(reboot, ep.Hostname+": "+sc.Name)
 			}
@@ -277,7 +296,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 			failed = append(failed, feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID})
 		}
 	}
-	unmapped := map[string]any{"latest_runs": runs, "needs_changes": drift, "reboot_needed": reboot}
+	unmapped := map[string]any{"latest_runs": runs, "needs_changes": drift, "reboot_needed": reboot, "compliance": compliance}
 	var out []feedFinding
 	if len(failures) > 0 {
 		if len(failures) > 20 {
@@ -292,9 +311,18 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	}
 	if blocks := s.maintBlocks.list(); len(blocks) > 0 {
 		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevMedium, ocsfStatusNew,
-			plural(len(blocks), "scheduled package waits", "scheduled packages wait")+" for an approve-all tap", nil, map[string]any{"waiting": blocks}))
+			plural(len(blocks), "scheduled package run is", "scheduled package runs are")+" waiting (approval or a declined ask)", nil, map[string]any{"waiting": blocks}))
 	} else {
 		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevInformational, ocsfStatusResolved, "No scheduled package is waiting", nil, nil))
 	}
 	return out, nil
+}
+
+// packageCategory reads a package's category; packages synced before
+// categories existed are maintenance.
+func packageCategory(c string) string {
+	if c == "security" {
+		return c
+	}
+	return "maintenance"
 }

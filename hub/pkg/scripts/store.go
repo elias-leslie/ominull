@@ -125,6 +125,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(query); err != nil {
 		return err
 	}
+	if err := s.initSettings(); err != nil {
+		return err
+	}
 	// Libraries created before scripts carried metadata.
 	if _, err := s.db.Exec(`ALTER TABLE scripts ADD COLUMN metadata_json TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {

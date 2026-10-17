@@ -9,9 +9,16 @@ package responseauth
 // those bytes, and the hub cannot vouch for a package: a script counts as a
 // package only when its source digest is one this authority was released with
 // (released_packages.json, generated from packages/windows and checked against
-// it by the tests), run by powershell.exe with no parameter but mode. Its name
-// and risk come from that list, never from the submitted source. Anything else
-// is shown as "not a released package", asks every time and never gets a rule.
+// it by the tests), run by powershell.exe. Its header (line 1 of that released
+// source) then declares its category, risk and typed parameters; a run must
+// carry mode and exactly those parameters, each within its declared bounds,
+// and the owner is shown every value that differs from its default. Anything
+// else is shown as "not a released package", asks every time and never gets a
+// rule. The hub's own copy of package metadata is never trusted.
+//
+// A run whose every item is a safe released package in audit mode with every
+// parameter at its default is approved without asking ("baseline"): audit
+// changes nothing and the released defaults are what the owner shipped.
 // Each item must be exactly the bytes json.Marshal makes of it (field order,
 // no duplicates or stray members), so an agent's field search and this parse
 // cannot read different values. On use the authority signs one grant per
@@ -22,7 +29,9 @@ package responseauth
 // asking when every item's digest is one the rule names (so the script source,
 // interpreter, parameters, timeout and output bound are all the same bytes) and
 // every endpoint is one the rule names. A new script version, another mode, a
-// longer timeout or another host is a new digest or target and asks again.
+// longer timeout, other settings or another host is a new digest or target and
+// asks again. A rule that covers an enforce run also covers the same run in
+// audit mode, so switching back to audit never asks.
 // Only packages whose header says risk "safe" are ever offered or covered;
 // "careful" packages and scripts that are not released packages ask every time.
 //
@@ -51,6 +60,7 @@ import (
 
 	"github.com/google/uuid"
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/scripts"
 )
 
 const (
@@ -115,8 +125,43 @@ type PackageItem struct {
 	Raw    string
 	Digest string // sha256 of Raw: the grant's action digest
 	Exec   response.ScriptExecPayload
-	Name   string // released package name, or the script id
-	Risk   string // "safe" | "careful" | "" (not a released package)
+	Name   string                 // released package name, or the script id
+	Risk   string                 // "safe" | "careful" | "" (not a released package)
+	Header *scripts.PackageHeader // the released source's header; nil otherwise
+	Steps  []string               // careful steps this run turns on
+}
+
+// Baseline: a safe released package in audit mode with every parameter at
+// its default.
+func (it PackageItem) Baseline() bool {
+	if it.Header == nil || it.Risk != "safe" || it.Exec.Parameters["mode"] != "audit" {
+		return false
+	}
+	for k, v := range it.Header.Defaults() {
+		if it.Exec.Parameters[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// auditTwin is the digest of the same run in audit mode: a rule that covers
+// an enforce run also covers auditing with the same settings.
+func (it PackageItem) auditTwin() (string, bool) {
+	if it.Exec.Parameters["mode"] != "enforce" {
+		return "", false
+	}
+	p := it.Exec
+	p.Parameters = make(map[string]string, len(it.Exec.Parameters))
+	for k, v := range it.Exec.Parameters {
+		p.Parameters[k] = v
+	}
+	p.Parameters["mode"] = "audit"
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", false
+	}
+	return ItemDigest(string(raw)), true
 }
 
 // Label names the item for the owner: package (mode).
@@ -227,15 +272,27 @@ func parsePackageItem(raw string) (PackageItem, error) {
 		return it, errors.New("script output bound must be 1 byte to 5 MiB")
 	}
 	for k, v := range p.Parameters {
-		if !paramName(k) || reservedParams[k] || len(v) > 256 {
+		if !paramName(k) || reservedParams[k] || len(v) > 1024 {
 			return it, errors.New("script parameters are malformed")
 		}
 	}
 	it.Name = cleanText(p.ScriptID, 64)
-	mode := p.Parameters["mode"]
-	if rp, ok := releasedPackages[strings.ToLower(p.ScriptDigest)]; ok && p.Interpreter == "powershell.exe" &&
-		len(p.Parameters) == 1 && (mode == "audit" || mode == "enforce") {
-		it.Name, it.Risk = rp.Name, rp.Risk
+	rp, ok := releasedPackages[strings.ToLower(p.ScriptDigest)]
+	if !ok || p.Interpreter != "powershell.exe" {
+		return it, nil
+	}
+	h, err := scripts.ParsePackageHeader(p.Source)
+	if err != nil || h.Name != rp.Name || h.Risk != rp.Risk {
+		return it, nil
+	}
+	if err := h.CheckRun(p.Parameters); err != nil {
+		return it, fmt.Errorf("%s: %v", h.Name, err)
+	}
+	it.Name, it.Risk, it.Header = h.Name, h.Risk, h
+	// Turning on a careful step makes the run careful: asked every time,
+	// never covered by a rule.
+	if it.Steps = h.CarefulSteps(p.Parameters); len(it.Steps) > 0 {
+		it.Risk = "careful"
 	}
 	return it, nil
 }
@@ -301,7 +358,38 @@ func (it PackageItem) riskNote() string {
 	case "":
 		return ", not a released package"
 	}
+	if len(it.Steps) > 0 && it.Header != nil && it.Header.Risk == "safe" {
+		return ", careful steps " + strings.Join(it.Steps, ", ")
+	}
 	return ", " + cleanText(it.Risk, 16)
+}
+
+// settingsNote names the parameters that differ from the package defaults.
+func (it PackageItem) settingsNote(short bool) string {
+	if it.Header == nil {
+		return ""
+	}
+	if ch := it.Header.Changes(it.Exec.Parameters, short); len(ch) > 0 {
+		return ", settings " + strings.Join(ch, ", ")
+	}
+	return ""
+}
+
+// packageBaseline says whether every item of a run is a baseline run.
+func packageBaseline(in *ApprovalRequestInput, targets []string) bool {
+	if in.Kind != response.ActionKindScriptExec {
+		return false
+	}
+	items, err := ParsePackageRun(in.Payload, targets)
+	if err != nil {
+		return false
+	}
+	for _, it := range items {
+		if !it.Baseline() {
+			return false
+		}
+	}
+	return true
 }
 
 func describePackageRun(payload []byte, targets []string) (string, string, error) {
@@ -311,22 +399,23 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 	}
 	parts := make([]string, 0, len(items))
 	for _, it := range items {
-		parts = append(parts, fmt.Sprintf("%s, up to %d min%s", it.Label(), (it.Exec.TimeoutSeconds+59)/60, it.riskNote()))
+		parts = append(parts, fmt.Sprintf("%s, up to %d min%s%s", it.Label(), (it.Exec.TimeoutSeconds+59)/60, it.riskNote(), it.settingsNote(false)))
 	}
 	lead := "Run as SYSTEM on " + listTargets(targets) + ": "
 	full := lead + strings.Join(parts, "; ")
 	if len([]rune(full)) <= approvalMaxSummary {
 		return "Run maintenance", full, nil
 	}
-	// Shorter, but still every script and every risk note; a run that cannot
-	// be shown whole is refused rather than cut.
+	// Shorter, but still every script, every risk note and every changed
+	// value in full (two runs that differ must never read the same); a run
+	// that cannot be shown whole is refused rather than cut.
 	names := make([]string, 0, len(items))
 	for _, it := range items {
-		names = append(names, it.Label()+it.riskNote())
+		names = append(names, it.Label()+it.riskNote()+it.settingsNote(false))
 	}
 	short := fmt.Sprintf("Run %d scripts as SYSTEM on %d host(s): %s", len(items), len(targets), strings.Join(names, "; "))
 	if len([]rune(short)) > approvalMaxSummary {
-		return "", "", errors.New("too many scripts to show in one approval; split the run")
+		return "", "", errors.New("too much to show in one approval; run fewer packages at once or change fewer settings at a time")
 	}
 	return "Run maintenance", short, nil
 }
@@ -606,9 +695,17 @@ func (a *Authority) createPackageRule(v ApprovalView, targets []string, payload 
 		return
 	}
 	rule := &PackageRule{ID: v.ID, TenantID: v.TenantID, Created: now.Unix(), ApproverID: approverID, Endpoints: append([]string(nil), targets...)}
+	seen := map[string]bool{}
 	for _, it := range items {
-		rule.Items = append(rule.Items, it.Digest)
-		rule.Labels = append(rule.Labels, it.Label())
+		if !seen[it.Digest] {
+			seen[it.Digest] = true
+			rule.Items = append(rule.Items, it.Digest)
+		}
+		if twin, ok := it.auditTwin(); ok && !seen[twin] {
+			seen[twin] = true
+			rule.Items = append(rule.Items, twin)
+		}
+		rule.Labels = append(rule.Labels, it.Label()+it.settingsNote(true))
 	}
 	sort.Strings(rule.Items)
 	if err := a.packages.create(rule, now); err != nil {

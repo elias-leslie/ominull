@@ -1,212 +1,197 @@
-# ominull-package: {"name":"windows-debloat","title":"Remove bundled apps","description":"Removes a fixed list of bundled Microsoft extras and stops sponsored apps from installing for new users; never touches the Store, Xbox, drivers or OEM tools.","risk":"careful","reboot":false,"timeout":900}
-$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $WarningPreference = 'SilentlyContinue'
-$VerbosePreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'
+# ominull-package: {"name":"windows-debloat","title":"Remove bundled apps","description":"Removes a listed set of bundled Microsoft extras and stops sponsored apps from installing for new users; never touches the Store, Xbox, drivers or OEM tools.","category":"maintenance","risk":"careful","reboot":false,"timeout":900,"interval":"weekly","params":[{"name":"remove_apps","type":"list","default":["Clipchamp.Clipchamp","Microsoft.BingNews","Microsoft.BingWeather","Microsoft.GetHelp","Microsoft.Getstarted","Microsoft.MicrosoftSolitaireCollection","Microsoft.People","Microsoft.WindowsFeedbackHub","Microsoft.ZuneMusic","Microsoft.ZuneVideo","MicrosoftTeams","Microsoft.Todos","Microsoft.MixedReality.Portal","Microsoft.SkypeApp","Microsoft.Microsoft3DViewer","Microsoft.MicrosoftOfficeHub","Microsoft.549981C3F5F10","Microsoft.BingSearch"],"max_items":64,"description":"Bundled apps removed for every user and from the image new profiles get (package names; * matches any text)"},{"name":"deprovision_apps","type":"list","default":["7EE7776C.LinkedInforWindows","SpotifyAB.SpotifyMusic","BytedancePte.Ltd.TikTok","Disney.37853FC22B2CE","king.com.CandyCrushSaga","king.com.CandyCrushSodaSaga","king.com.CandyCrushFriends","Facebook.Facebook","AmazonVideo.PrimeVideo","MSTeams"],"max_items":64,"description":"Sponsored apps dropped from the image; copies someone installed are reported, not removed"},{"name":"services","type":"list","default":["RetailDemo","MapsBroker","Fax","WMPNetworkSvc"],"max_items":32,"description":"Services disabled and stopped"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+$ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-debloat'
 # --- prelude begin (identical in every package; tests compare) ---
-# Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
-# agent's own folder (never touched). Stdout carries only the final JSON line.
+# Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
 function Initialize-Env {
-    $sys = [Environment]::SystemDirectory
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
-    if (-not $env:windir) { $env:windir = $sr }
-    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
-    $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
-    if (-not $env:ProgramData) { $env:ProgramData = $pd }
-    if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }
-    $pf = [Environment]::GetFolderPath('ProgramFiles')
-    if (-not $env:ProgramFiles) { $env:ProgramFiles = $pf }
-    if (-not ${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} = [Environment]::GetFolderPath('ProgramFilesX86') }
-    if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }
-    if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData') }
-    if (-not $env:APPDATA) { $env:APPDATA = [Environment]::GetFolderPath('ApplicationData') }
-    if (-not $env:USERPROFILE) { $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile') }
-    if (-not $env:PSModulePath) { $env:PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
-    $script:Root = Join-Path $pd 'OminullMaintenance'
+  $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
+  $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
+    ProgramFiles = $pf; 'ProgramFiles(x86)' = (& $f 'ProgramFilesX86'); COMPUTERNAME = [Environment]::MachineName
+    LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
+    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
+  foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $script:Root = Join-Path $pd 'OminullMaintenance'
 }
+# audit reports, enforce changes, revert restores recorded first-seen values.
 function Get-Mode([string]$Primary, [string]$Fallback) {
-    $v = $Primary; if (-not $v) { $v = $Fallback }
-    if ($v -and $v.Trim() -eq 'enforce') { 'enforce' } else { 'audit' }
+  $v = "$Primary".Trim(); if (-not $v) { $v = "$Fallback".Trim() }
+  if ('enforce', 'revert' -ccontains $v) { $v } else { 'audit' }
 }
-function Start-Log {
-    $d = Join-Path $script:Root 'logs'; New-Item -ItemType Directory -Force -Path $d | Out-Null
-    Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip 19 |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    $script:LogFile = Join-Path $d ('{0}-{1}.log' -f $Pkg, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# Tunables are params declared on line 1; a run sets OMINULL_PARAM_<NAME>. A bad value fails the run.
+function ConvertFrom-PkgParam($Def, [string]$V) {
+  $n = "param $($Def.name)"; $x = 0L
+  switch ($Def.type) {
+    'int' { if ($V -match '^-?\d{1,18}\z' -and [int64]::TryParse($V, [ref]$x) -and "$x" -ceq $V -and $x -ge $Def.min -and $x -le $Def.max) { return $x } }
+    'bool' { if ('true', 'false' -ccontains $V) { return $V -ceq 'true' } }
+    'enum' { if (@($Def.values) -ccontains $V) { return $V } }
+    'list' {
+      $l = [string[]]@(); if ($V -cne '-') { $l = [string[]]($V -split ',') }; $seen = @{}
+      foreach ($i in $l) { if ($i -cnotmatch '^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}\z' -or $i.Trim() -cne $i -or $seen[$i.ToLower()]) { throw "$n has a bad or repeated item '$i'" }; $seen[$i.ToLower()] = 1 }
+      if ($l.Count -le $Def.max_items -and $V.Length -le 1024) { return , $l }
+    }
+  }
+  throw "$n is not a valid $($Def.type)"
 }
-function Write-Log([string]$Message) {
-    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value ('{0} {1}' -f (Get-Date -Format s), $Message) -Encoding UTF8 } catch {} }
+function Get-PkgParams([string]$Path) {
+  $o = @{}
+  foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
+    $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
+    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } else { "$($d.default)" } }
+    $o[$d.name] = ConvertFrom-PkgParam $d $v
+  }
+  $o
 }
-# First-seen values only: a later run never overwrites what the machine had before.
-function Save-Original($Values) {
-    try {
-        $f = Join-Path $script:Root "state\$Pkg-original.json"; $cur = [ordered]@{}; $add = $false
-        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cur[$_.Name] = $_.Value } }
-        foreach ($k in $Values.Keys) { if (-not $cur.Contains($k)) { $cur[$k] = $Values[$k]; $add = $true } }
-        if ($add) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $f) | Out-Null
-            ConvertTo-Json $cur -Depth 5 | Set-Content -LiteralPath $f -Encoding UTF8
-        }
-    } catch { Write-Log "original-values save failed: $_" }
+function Start-Log([int]$Keep) {
+  $d = "$($script:Root)\logs"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip ([math]::Max(0, $Keep - 1)) | Remove-Item -Force -ErrorAction SilentlyContinue
+  $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
+function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
-    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
-    @{ code = $c; out = $o }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  @{ code = $c; out = $o }
 }
-# quser IDLE TIME: "." / "none" = active now, "5" minutes, "1:05" h:mm, "2+03:04" d+h:mm.
+# quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
 function ConvertFrom-QuserIdle([string]$Idle) {
-    if ($Idle -match '^(\d+)\+(\d+):(\d+)$') { return [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] }
-    if ($Idle -match '^(\d+):(\d+)$') { return [int]$matches[1] * 60 + [int]$matches[2] }
-    if ($Idle -match '^\d+$') { return [int]$Idle }
-    0
+  if ($Idle -match '^(?:(\d+)\+)?(?:(\d+):)?(\d+)$') { [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] } else { 0 }
 }
-function Test-UserActive([string[]]$Lines) {
-    foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt 15) { return $true } }
-    $false
+function Test-UserActive([string[]]$Lines, [int]$IdleMinutes) {
+  foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt $IdleMinutes) { return $true } }
+  $false
 }
-# Game install folders. Launchers that sit in the tray (Steam, Epic, Riot Client,
-# Battle.net, EA app) live elsewhere and do not count.
+# Game folders; tray launchers (Steam, Epic, Riot Client, Battle.net, EA app) do not count.
 function Test-GamePath([string]$Path) {
-    if (-not $Path) { return $false }
-    $rules = '\\steamapps\\common\\', '\\Epic Games\\(?!Launcher\\)', '\\Riot Games\\(?!Riot Client\\)', '\\XboxGames\\',
-        '\\EA Games\\', '\\Ubisoft Game Launcher\\games\\', '\\GOG Galaxy\\Games\\', '\\WindowsApps\\Microsoft\.Minecraft',
-        '\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\'
-    foreach ($r in $rules) { if ($Path -match $r) { return $true } }
-    $false
+  $Path -and ($Path -match '\\steamapps\\common\\|\\Epic Games\\(?!Launcher\\|Epic Online Services\\)|\\Riot Games\\(?!Riot Client\\)|\\XboxGames\\|\\EA Games\\|\\Ubisoft Game Launcher\\games\\|\\GOG Galaxy\\Games\\|\\WindowsApps\\Microsoft\.Minecraft|\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\')
 }
-function Test-OnBattery($Batteries) {
-    foreach ($b in @($Batteries)) { if ($b -and [int]$b.BatteryStatus -eq 1) { return $true } }
-    $false
-}
-function Get-PreflightReason([bool]$CheckUpdates) {
-    $q = Invoke-Native 'quser.exe' @()
-    if ($q.code -ge 0 -and (Test-UserActive $q.out)) { return 'someone is using the computer' }
-    foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
-        if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
-    }
-    if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
-    if ($CheckUpdates) {
-        if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
-        try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
-    }
-    $null
-}
-function Test-PendingReboot {
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-}
-function Get-Reg([string]$Path, [string]$Name) {
-    try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null }
-}
-function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-    New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
-}
-# The Default user's hive: what every new profile starts from.
-function Mount-DefaultHive {
-    $root = 'Registry::HKEY_USERS\OminullDefault'
-    if (Test-Path $root) { Dismount-DefaultHive }
-    $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default
-    $r = Invoke-Native 'reg.exe' @('load', 'HKU\OminullDefault', (Join-Path $dir 'NTUSER.DAT'))
-    if ($r.code -ne 0) { throw "could not load the Default user hive: $($r.out -join ' ')" }
-    $root
-}
-# A hive left loaded would lock the Default profile, so unloading is retried.
-function Dismount-DefaultHive {
-    for ($i = 0; $i -lt 5; $i++) {
-        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-        $r = Invoke-Native 'reg.exe' @('unload', 'HKU\OminullDefault')
-        if ($r.code -eq 0) { return }
-        Start-Sleep -Seconds 2
-    }
-    throw "the Default user hive could not be unloaded: $($r.out -join ' ')"
+function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
+function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+  $q = Invoke-Native 'quser.exe' @()
+  if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
+  foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
+    if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
+  }
+  if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
+  if ($CheckUpdates) {
+    if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
+    try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
+  }
 }
 function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detail) {
-    if (@('ok', 'fixed', 'drift', 'failed', 'skipped') -notcontains $State) { $State = 'failed' }
-    if ($null -eq $Changed) { $Changed = @() }
-    $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = $Detail }) -Compress -Depth 6
-    if ($j.Length -gt 12000) { $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = @{ truncated = $true } }) -Compress -Depth 3 }
-    $j -replace "[`r`n]", ' '
+  if ('ok', 'fixed', 'drift', 'failed', 'skipped', 'na' -notcontains $State) { $State = 'failed' }
+  $r = [ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = @($Changed | Where-Object { $_ }); detail = $Detail }
+  $j = ConvertTo-Json $r -Compress -Depth 6
+  if ($j.Length -gt 12000) { $r.detail = @{ truncated = $true }; $j = ConvertTo-Json $r -Compress -Depth 3 }
+  $j -replace "[`r`n]", ' '
 }
 # --- prelude end ---
-# Microsoft's bundled extras: removed for every user and from the image new profiles get.
-function Get-RemoveList {
-    'Clipchamp.Clipchamp', 'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.GetHelp', 'Microsoft.Getstarted',
-    'Microsoft.MicrosoftSolitaireCollection', 'Microsoft.People', 'Microsoft.WindowsFeedbackHub', 'Microsoft.ZuneMusic',
-    'Microsoft.ZuneVideo', 'MicrosoftTeams', 'Microsoft.Todos', 'Microsoft.MixedReality.Portal', 'Microsoft.SkypeApp',
-    'Microsoft.Microsoft3DViewer', 'Microsoft.MicrosoftOfficeHub', 'Microsoft.549981C3F5F10', 'Microsoft.BingSearch'
+# --- package temp begin (shared; tests compare) ---
+# DISM and Appx calls failed with "The system cannot find the path specified" for every package while
+# the after-test was clean; the agent's TEMP is the likely cause. They get a package-owned folder,
+# set only around the call; the agent's own folder is never touched.
+function Invoke-InPkgTemp([scriptblock]$Block) {
+  $t = "$($script:Root)\tmp"; New-Item -ItemType Directory -Force -Path $t | Out-Null
+  $old = @{}; foreach ($v in 'TEMP', 'TMP') { $old[$v] = [Environment]::GetEnvironmentVariable($v); [Environment]::SetEnvironmentVariable($v, $t) }
+  try { & $Block } finally { foreach ($v in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($v, $old[$v]) } }
 }
-# Sponsored third-party apps: dropped from the image so new profiles never get them, but a
-# copy someone installed and may use (Spotify, new Teams for school) is reported, not removed.
-function Get-DeprovisionList {
-    '7EE7776C.LinkedInforWindows', 'SpotifyAB.SpotifyMusic', 'BytedancePte.Ltd.TikTok', 'Disney.37853FC22B2CE',
-    'king.com.CandyCrushSaga', 'king.com.CandyCrushSodaSaga', 'king.com.CandyCrushFriends', 'Facebook.Facebook',
-    'AmazonVideo.PrimeVideo', 'MSTeams'
+# --- package temp end ---
+# --- original values begin (shared; tests compare) ---
+# First-seen values, recorded before enforce changes them, never overwritten.
+function Get-Original {
+  $o = [ordered]@{}; $f = "$($script:Root)\state\$Pkg-original.json"
+  if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $o[$_.Name] = $_.Value } }
+  $o
 }
-# Never removed, whatever a list says: Store, Xbox and gaming, drivers' and OEM tools, runtimes.
+function Save-Original($Values) {
+  $o = Get-Original; $n = $o.Count; foreach ($k in $Values.Keys) { if (-not $o.Contains($k)) { $o[$k] = $Values[$k] } }
+  if ($o.Count -gt $n) { New-Item -ItemType Directory -Force -Path "$($script:Root)\state" | Out-Null; ConvertTo-Json $o -Depth 5 | Set-Content -LiteralPath "$($script:Root)\state\$Pkg-original.json" -Encoding UTF8 }
+}
+# revert: HKLM:|DefaultUser\key\name = DWORD ($null: absent), service:<name> = StartMode/State; others are kept.
+function Invoke-Revert([string]$HiveRoot) {
+  $done = @(); $keep = @(); $err = @()
+  foreach ($e in (Get-Original).GetEnumerator()) {
+    $k = $e.Key
+    try {
+      if ($k -match '^service:(.+)$') {
+        $n = $matches[1]; $m, $r = "$($e.Value)" -split '/'
+        Set-Service -Name $n -StartupType ($m -replace '^Auto$', 'Automatic'); if ($r -eq 'Running') { Start-Service -Name $n }
+      } elseif ($k -match '^(HKLM:|DefaultUser)\\') { Restore-Reg $k $e.Value $HiveRoot } else { $keep += $k; continue }
+      $done += $k; $Changed.Add("restored $k")
+    } catch { $err += "$k : $_" }
+  }
+  $Detail.restored = $done; $Detail.not_restorable = $keep
+  $script:State = $(if ($err) { $Detail.errors = $err; 'failed' } elseif ($done) { 'fixed' } else { 'ok' })
+}
+# --- original values end ---
+# --- protected services begin (shared; tests compare) ---
+# Never disabled, whatever a list says: Defender, firewall, Windows Update, Store, Xbox,
+# GPU/OEM and audio services, core Windows services and the OmniNull agent.
+function Test-ProtectedService([string]$Name) {
+  $Name -match 'WinDefend|WdNis|WdFilter|WdBoot|Sense|SecurityHealth|wscsvc|MDCore|mpssvc|BFE|wuauserv|UsoSvc|WaaSMedic|BITS|DoSvc|TrustedInstaller|msiserver|CryptSvc|InstallService|ClipSVC|AppXSvc|LicenseManager|StorSvc|Xbl|Xbox|Gaming|GameInput|NVIDIA|NVDisplay|AMD|Radeon|Intel|Realtek|ASUS|Armoury|Lenovo|Dell|\bHP|Omen|Razer|Dolby|Nahimic|Audio|RpcSs|RpcEptMapper|DcomLaunch|EventLog|Winmgmt|Dhcp|Dnscache|LanmanWorkstation|PlugPlay|Power|ProfSvc|Schedule|SamSs|LSM|gpsvc|nsi|NlaSvc|netprofm|Ominull|OmniNull'
+}
+# --- protected services end ---
+# The lists are params. Never removed, whatever a list says: Store, Xbox and gaming,
+# drivers' and OEM tools, runtimes.
 function Test-Protected([string]$Name) {
-    $Name -match 'Store|Xbox|Gaming|DesktopAppInstaller|Terminal|VCLibs|UI\.Xaml|NET\.Native|WindowsAppRuntime|SecHealth|NVIDIA|AMD|Radeon|Intel|Realtek|ASUS|Armoury|ROG\b|Lenovo|Vantage|MSI|MICRO-STAR|Dell|\bHP|Omen|Acer|Predator|Razer|Alienware|Dolby|Nahimic|DTS'
+  $Name -match 'Store|Xbox|Gaming|DesktopAppInstaller|Terminal|VCLibs|UI\.Xaml|NET\.Native|WindowsAppRuntime|SecHealth|NVIDIA|AMD|Radeon|Intel|Realtek|ASUS|Armoury|ROG\b|Lenovo|Vantage|MSI|MICRO-STAR|Dell|\bHP|Omen|Acer|Predator|Razer|Alienware|Dolby|Nahimic|DTS'
 }
-$ServiceNames = 'RetailDemo', 'MapsBroker', 'Fax', 'WMPNetworkSvc'
 function Get-State {
-    $prov = @(Get-AppxProvisionedPackage -Online)
-    $s = [ordered]@{ remove = @(); deprovision = @(); kept_user_installed = @(); services = [ordered]@{} }
-    foreach ($n in Get-RemoveList) {
-        if (Test-Protected $n) { continue }
-        foreach ($p in @(Get-AppxPackage -AllUsers -Name $n)) { $s.remove += $p.PackageFullName }
-        foreach ($p in @($prov | Where-Object { $_.DisplayName -eq $n })) { $s.deprovision += $p.PackageName }
+  # Names may hold * (needs 4+ other characters); every matched name is checked again.
+  $prov = @(Get-AppxProvisionedPackage -Online); $inst = @(Get-AppxPackage -AllUsers)
+  $s = [ordered]@{ remove = @(); deprovision = @(); kept_user_installed = @(); services = [ordered]@{}; refused = @() }
+  foreach ($n in @(@($Opt.remove_apps) + @($Opt.deprovision_apps) | Sort-Object -Unique)) {
+    if ((Test-Protected $n) -or ($n -replace '\*').Length -lt 4) { $s.refused += $n; continue }
+    $rm = @($Opt.remove_apps) -contains $n
+    foreach ($p in @($inst | Where-Object { $_.Name -like $n })) {
+      if (Test-Protected $p.Name) { $s.refused += $p.Name } elseif ($rm) { $s.remove += $p.PackageFullName } else { $s.kept_user_installed += $p.Name }
     }
-    foreach ($n in Get-DeprovisionList) {
-        if (Test-Protected $n) { continue }
-        foreach ($p in @($prov | Where-Object { $_.DisplayName -eq $n })) { $s.deprovision += $p.PackageName }
-        foreach ($p in @(Get-AppxPackage -AllUsers -Name $n)) { $s.kept_user_installed += $p.Name }
-    }
-    foreach ($n in $ServiceNames) {
-        $svc = Get-CimInstance Win32_Service -Filter "Name='$n'" -ErrorAction SilentlyContinue
-        if ($svc -and ($svc.StartMode -ne 'Disabled' -or $svc.State -ne 'Stopped')) { $s.services[$n] = "$($svc.StartMode)/$($svc.State)" }
-    }
-    $s
+    foreach ($p in @($prov | Where-Object { $_.DisplayName -like $n })) { if (Test-Protected $p.DisplayName) { $s.refused += $p.DisplayName } else { $s.deprovision += $p.PackageName } }
+  }
+  foreach ($k in 'remove', 'deprovision', 'kept_user_installed', 'refused') { $s[$k] = @($s[$k] | Sort-Object -Unique) }
+  foreach ($n in $Opt.services) {
+    if (Test-ProtectedService $n) { $s.refused += "service:$n"; continue }
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$n'" -ErrorAction SilentlyContinue
+    if ($svc -and ($svc.StartMode -ne 'Disabled' -or $svc.State -ne 'Stopped')) { $s.services[$n] = "$($svc.StartMode)/$($svc.State)" }
+  }
+  $s
 }
 function Get-DriftCount($State) { $State.remove.Count + $State.deprovision.Count + $State.services.Count }
 function Invoke-Package {
-    $st = Get-State
-    $Detail.found = $st
-    Write-Log "remove=$($st.remove -join ',') deprovision=$($st.deprovision -join ',') services=$($st.services.Keys -join ',')"
-    if ((Get-DriftCount $st) -eq 0) { $script:State = 'ok'; return }
-    if ($Mode -ne 'enforce') { $script:State = 'drift'; return }
-    $why = Get-PreflightReason $false
-    if ($why) { $script:State = 'skipped'; $Detail.reason = $why; return }
-    $prior = [ordered]@{}
-    foreach ($f in $st.remove) { $prior["appx:$f"] = 'installed' }
-    foreach ($f in $st.deprovision) { $prior["provisioned:$f"] = 'provisioned' }
-    foreach ($k in $st.services.Keys) { $prior["service:$k"] = $st.services[$k] }
-    Save-Original $prior
-    $errors = @()
-    foreach ($f in $st.remove) {
-        try { Remove-AppxPackage -Package $f -AllUsers; $Changed.Add("removed $f") } catch { $errors += "$f : $_" }
-    }
-    foreach ($f in $st.deprovision) {
-        try { Remove-AppxProvisionedPackage -Online -PackageName $f | Out-Null; $Changed.Add("deprovisioned $f") } catch { $errors += "$f : $_" }
-    }
-    foreach ($n in $st.services.Keys) {
-        try { Set-Service -Name $n -StartupType Disabled; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue; $Changed.Add("service:$n=Disabled") }
-        catch { $errors += "service $n : $_" }
-    }
-    $after = Get-State
-    $Detail.after = $after
-    if ($errors.Count -or (Get-DriftCount $after) -gt 0) { $script:State = 'failed'; $Detail.errors = @($errors | ForEach-Object { "$_".Substring(0, [math]::Min(200, "$_".Length)) }) }
-    else { $script:State = 'fixed' }
+  if ($Mode -eq 'revert') { Invoke-Revert ''; return }
+  $st = Get-State
+  $Detail.found = $st
+  Write-Log "remove=$($st.remove -join ',') deprovision=$($st.deprovision -join ',') services=$($st.services.Keys -join ',')"
+  if ((Get-DriftCount $st) -eq 0) { $script:State = 'ok'; return }
+  if ($Mode -ne 'enforce') { $script:State = 'drift'; return }
+  $why = Get-PreflightReason $false $Opt.idle_minutes
+  if ($why) { $script:State = 'skipped'; $Detail.reason = $why; return }
+  $prior = [ordered]@{}
+  foreach ($f in $st.remove) { $prior["appx:$f"] = 'installed' }
+  foreach ($f in $st.deprovision) { $prior["provisioned:$f"] = 'provisioned' }
+  foreach ($k in $st.services.Keys) { $prior["service:$k"] = $st.services[$k] }
+  Save-Original $prior
+  $errors = New-Object 'System.Collections.Generic.List[string]'
+  Invoke-InPkgTemp {
+    foreach ($f in $st.remove) { try { Remove-AppxPackage -Package $f -AllUsers; $Changed.Add("removed $f") } catch { $errors.Add("$f : $_") } }
+    foreach ($f in $st.deprovision) { try { Remove-AppxProvisionedPackage -Online -PackageName $f | Out-Null; $Changed.Add("deprovisioned $f") } catch { $errors.Add("$f : $_") } }
+  }
+  foreach ($n in $st.services.Keys) {
+    try { Set-Service -Name $n -StartupType Disabled; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue; $Changed.Add("service:$n=Disabled") }
+    catch { $errors.Add("service $n : $_") }
+  }
+  # The after-test decides: errors with nothing left over are warnings.
+  $after = Get-State
+  $Detail.after = $after
+  if ($errors.Count) { $Detail.warnings = @($errors | ForEach-Object { "$_".Substring(0, [math]::Min(200, "$_".Length)) }) }
+  $script:State = $(if ((Get-DriftCount $after) -gt 0) { 'failed' } else { 'fixed' })
 }
 $Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false
 try {
-    Initialize-Env; Start-Log
-    $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
-    Invoke-Package
-} catch {
-    $State = 'failed'; $m = "$_"; if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
-    $Detail.error = $m; Write-Log "error: $_ $($_.ScriptStackTrace)"
-}
+  Initialize-Env; $Opt = Get-PkgParams $PSCommandPath; Start-Log $Opt.log_keep
+  $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
+  Invoke-Package
+} catch { $State = 'failed'; $Detail.error = "$_".Substring(0, [math]::Min(400, "$_".Length)); Write-Log "error: $_ $($_.ScriptStackTrace)" }
 try { $json = Format-Result $State $Reboot $Changed.ToArray() $Detail }
 catch { $State = 'failed'; $json = '{"v":1,"state":"failed","reboot":false,"changed":[],"detail":{"error":"result could not be encoded"}}' }
 Write-Log "result $json"

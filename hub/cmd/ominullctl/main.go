@@ -1635,7 +1635,9 @@ Fleet & CyberOps Commands:
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
   maint run ENDPOINT PKG... --mode M      Run maintenance packages (waits for the owner's tap or package rule)
   maint status ENDPOINT                   Latest result of each package on a host
-  maint schedule ENDPOINT PKG --every R   Run a package hourly|daily|weekly while a package rule covers it
+  maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
+  maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
+                                          Change a fleet default or a host override
   maint rules|forget-rule [ID]            Show or remove approve-all rules for maintenance packages
   install reports [list|show]             Inspect bootstrap error reports
   enrol list|open|close                   LAN self-enrolment windows (open waits for the owner's tap)

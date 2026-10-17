@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -10,13 +12,62 @@ import (
 
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
 )
 
-// A package run asks the owner once; the "approve all like this" answer
-// makes later identical runs (by hand or by schedule) go through without a
-// tap, while the schedule never asks for anything the rule does not cover.
-func TestPackageRunsUnderOwnerApprovalAndSchedule(t *testing.T) {
+// syncRealPackage puts a released package from packages/windows into the
+// library the way ominullctl scripts sync does.
+func syncRealPackage(t *testing.T, srv *Server, file string) (*scripts.Script, *scripts.PackageHeader) {
+	t.Helper()
+	raw, err := os.ReadFile("../../../packages/windows/" + file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := scripts.ParsePackageHeader(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, _ := json.Marshal(h.Schema())
+	meta, _ := json.Marshal(map[string]interface{}{"package": h.Name, "title": h.Title, "category": h.Category,
+		"interval": h.Interval, "risk": h.Risk, "reboot": h.Reboot, "timeout": h.Timeout})
+	sc, _, _, err := srv.scriptsStore.SyncScript("default", h.Name, h.Description, "powershell.exe", string(raw), string(schema), string(meta), "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sc, h
+}
+
+func adminPut(srv *Server, path, body string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, adminRequest(http.MethodPut, path, body))
+	srv.maintBlocks.kicks.Wait() // the pass a settings change starts runs at the real time
+	return w
+}
+
+// finishJobs completes every offered job on an endpoint with an ok result.
+func finishJobs(t *testing.T, srv *Server, ep string) int {
+	t.Helper()
+	offers, err := srv.responseStore.OfferPendingJobs("default", ep, 20, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range offers {
+		if err := srv.responseStore.AcknowledgeJob("default", ep, o.JobID, o.LeaseID, true, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.responseStore.CompleteJob("default", ep, o.JobID, o.LeaseID, &response.JobResult{
+			JobID: o.JobID, LeaseID: o.LeaseID, State: response.StateSucceeded, Stdout: `{"v":1,"state":"ok","reboot":false,"changed":[]}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return len(offers)
+}
+
+// Package runs: a baseline audit needs no tap, enforce asks once and the
+// "approve all like this" answer covers it (and auditing with the same
+// settings) from then on.
+func TestPackageRunsUnderOwnerApproval(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -26,36 +77,18 @@ func TestPackageRunsUnderOwnerApprovalAndSchedule(t *testing.T) {
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	srcRaw, err := os.ReadFile("../../../packages/windows/audit.ps1") // a released package
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(srcRaw)
-	schema := `{"parameters":[{"name":"mode","type":"enum","enum":["audit","enforce"],"default":"audit","required":true}]}`
-	sc, sv, _, err := srv.scriptsStore.SyncScript("default", "windows-audit", "Checks standards.", "powershell.exe", src, schema,
-		`{"package":"windows-audit","title":"Standards check","risk":"safe","timeout":300}`, "ops")
-	if err != nil {
-		t.Fatal(err)
-	}
+	syncRealPackage(t, srv, "audit.ps1")
 
-	body := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/run", body, ""))
-	v, err := owner.auth.GetApproval(id, "")
-	if err != nil || v.Kind != string(response.ActionKindScriptExec) || !strings.Contains(v.Summary, "windows-audit (audit)") {
-		t.Fatalf("approval: %v %+v", err, v)
-	}
-	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: id, Decision: "rule", Assertion: owner.approver.Assert(v.Challenge, "rule")}); err != nil {
-		t.Fatal(err)
-	}
-	w := adminPost(srv, "/api/v1/maintenance/run", body, id)
+	audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
+	w := adminPost(srv, "/api/v1/maintenance/run", audit, "")
 	if w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+		t.Fatalf("a baseline audit should run without a tap: %d %s", w.Code, w.Body.String())
 	}
 	var out struct {
 		Jobs []packageRunJob `json:"jobs"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	if len(out.Jobs) != 1 || out.Jobs[0].EndpointID != "ep-lap" || out.Jobs[0].Package != "windows-audit" {
+	if len(out.Jobs) != 1 || out.Jobs[0].Package != "windows-audit" {
 		t.Fatalf("jobs: %s", w.Body.String())
 	}
 	job, err := srv.responseStore.GetJob("default", out.Jobs[0].JobID)
@@ -70,35 +103,40 @@ func TestPackageRunsUnderOwnerApprovalAndSchedule(t *testing.T) {
 		t.Fatalf("the job's grant must bind its own payload: %v %+v", err, req.Grant)
 	}
 
-	// The same run again goes through under the rule, without a tap.
-	if w := adminPost(srv, "/api/v1/maintenance/run", body, ""); w.Code != http.StatusCreated {
-		t.Fatalf("covered run should not ask: %d %s", w.Code, w.Body.String())
+	enforce := strings.Replace(audit, `"audit"}`, `"enforce"}`, 1)
+	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/run", enforce, ""))
+	v, err := owner.auth.GetApproval(id, "")
+	if err != nil || v.Kind != string(response.ActionKindScriptExec) || !strings.Contains(v.Summary, "windows-audit (enforce)") {
+		t.Fatalf("approval: %v %+v", err, v)
 	}
+	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: id, Decision: "rule", Assertion: owner.approver.Assert(v.Challenge, "rule")}); err != nil {
+		t.Fatal(err)
+	}
+	if w := adminPost(srv, "/api/v1/maintenance/run", enforce, id); w.Code != http.StatusCreated {
+		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	}
+	if w := adminPost(srv, "/api/v1/maintenance/run", enforce, ""); w.Code != http.StatusCreated {
+		t.Fatalf("a covered run should not ask: %d %s", w.Code, w.Body.String())
+	}
+}
 
-	// Let both jobs finish cleanly, then schedule the package daily.
-	offers, err := srv.responseStore.OfferPendingJobs("default", "ep-lap", 4, time.Minute)
-	if err != nil || len(offers) != 2 {
-		t.Fatalf("offer: %v %d", err, len(offers))
-	}
-	for _, o := range offers {
-		if err := srv.responseStore.AcknowledgeJob("default", "ep-lap", o.JobID, o.LeaseID, true, ""); err != nil {
+// The schedule runs effective settings: enabling a safe package in audit
+// mode needs no tap; changed settings ask once and run after the tap; a
+// category switch turns a package off without asking.
+func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.responseEnabled = true
+	owner := ownerOf(t, srv)
+	now := time.Now().UTC()
+	online := func(at time.Time) {
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: at}); err != nil {
 			t.Fatal(err)
 		}
-		if err := srv.responseStore.CompleteJob("default", "ep-lap", o.JobID, o.LeaseID, &response.JobResult{
-			JobID: o.JobID, LeaseID: o.LeaseID, State: response.StateSucceeded, Stdout: `{"v":1,"state":"ok","reboot":false,"changed":[]}`}); err != nil {
-			t.Fatal(err)
-		}
 	}
-	sched, err := srv.scriptsStore.CreateSchedule("default", sc.ID, sv.Version, []string{"ep-lap"}, map[string]string{"mode": "audit"},
-		"daily", now.Add(-time.Minute), nil, 0, 300, packageMaxOutput, "ops")
-	if err != nil {
-		t.Fatal(err)
-	}
-	enforce, err := srv.scriptsStore.CreateSchedule("default", sc.ID, sv.Version, []string{"ep-lap"}, map[string]string{"mode": "enforce"},
-		"daily", now.Add(-time.Minute), nil, 0, 300, packageMaxOutput, "ops")
-	if err != nil {
-		t.Fatal(err)
-	}
+	online(now)
+	sc, h := syncRealPackage(t, srv, "audit.ps1")
 	countJobs := func() int {
 		jobs, err := srv.responseStore.ScriptJobs("default", "ep-lap", sc.ID, 50)
 		if err != nil {
@@ -106,44 +144,118 @@ func TestPackageRunsUnderOwnerApprovalAndSchedule(t *testing.T) {
 		}
 		return len(jobs)
 	}
-	srv.runMaintenanceSchedules(now)
-	if n := countJobs(); n != 2 {
-		t.Fatalf("a package that just succeeded is not due: %d jobs", n)
-	}
 
-	// A day later, with the laptop online, the audit schedule runs under
-	// the rule; the enforce one is not covered and waits without asking.
-	later := now.Add(25 * time.Hour)
-	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: later}); err != nil {
-		t.Fatal(err)
+	// Off by default: nothing runs.
+	srv.runMaintenanceSchedules(now)
+	if n := countJobs(); n != 0 {
+		t.Fatalf("a package nobody enabled ran: %d", n)
 	}
-	srv.runMaintenanceSchedules(later)
-	if n := countJobs(); n != 3 {
-		t.Fatalf("the due audit run was not dispatched: %d jobs", n)
+	// Settings are validated.
+	for body, want := range map[string]int{
+		`{"package":"windows-audit","mode":"sometimes"}`:             http.StatusBadRequest,
+		`{"package":"windows-audit","params":{"no_such":"1"}}`:       http.StatusBadRequest,
+		`{"category":"security","mode":"enforce"}`:                   http.StatusBadRequest,
+		`{"package":"windows-nothing","enabled":true}`:               http.StatusBadRequest,
+		`{"package":"windows-audit","enabled":true,"every":"daily"}`: http.StatusBadRequest,
+	} {
+		if w := adminPut(srv, "/api/v1/maintenance/settings", body); w.Code != want {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if w := adminPut(srv, "/api/v1/maintenance/settings", `{"package":"windows-audit","enabled":true}`); w.Code != http.StatusOK {
+		t.Fatalf("enable: %d %s", w.Code, w.Body.String())
+	}
+	srv.runMaintenanceSchedules(now)
+	if n := countJobs(); n != 1 {
+		t.Fatalf("an enabled baseline audit should run at once: %d jobs", n)
 	}
 	if p := owner.auth.PendingApprovals(); len(p) != 0 {
-		t.Fatalf("the schedule asked the owner: %+v", p)
+		t.Fatalf("a baseline audit asked the owner: %+v", p)
 	}
-	blocks := srv.maintBlocks.list()
-	if len(blocks) != 1 || blocks[0].Package != "windows-audit (enforce)" {
-		t.Fatalf("the uncovered schedule should be reported waiting: %+v", blocks)
+	srv.runMaintenanceSchedules(now.Add(time.Minute))
+	if n := countJobs(); n != 1 {
+		t.Fatalf("a second run started while one is open: %d", n)
 	}
-	got, _ := srv.scriptsStore.GetSchedule("default", sched.ID)
-	if got.RunsCount != 1 {
-		t.Fatalf("runs counted: %d", got.RunsCount)
-	}
-	if got, _ := srv.scriptsStore.GetSchedule("default", enforce.ID); got.RunsCount != 0 {
-		t.Fatalf("the uncovered schedule ran: %d", got.RunsCount)
-	}
-	// The new run is open: not due again until it finishes.
-	srv.runMaintenanceSchedules(later.Add(2 * time.Hour))
-	if n := countJobs(); n != 3 {
-		t.Fatalf("a second run started while one is open: %d jobs", n)
+	finishJobs(t, srv, "ep-lap")
+	srv.runMaintenanceSchedules(now.Add(2 * time.Hour))
+	if n := countJobs(); n != 1 {
+		t.Fatalf("a package that just succeeded is not due: %d", n)
 	}
 
+	// A host override that changes a setting asks the owner once.
+	var p *scripts.PackageParam
+	for i := range h.Params {
+		if h.Params[i].Type == "int" {
+			p = &h.Params[i]
+			break
+		}
+	}
+	if p == nil {
+		t.Fatal("windows-audit declares no int setting to change")
+	}
+	val := *p.Min
+	if fmt.Sprint(val) == p.DefaultValue() {
+		val = *p.Max
+	}
+	noReason := fmt.Sprintf(`{"package":"windows-audit","endpoint_id":"ep-lap","params":{%q:"%d"}}`, p.Name, val)
+	if w := adminPut(srv, "/api/v1/maintenance/settings", noReason); w.Code != http.StatusBadRequest {
+		t.Fatalf("an override without a reason: %d %s", w.Code, w.Body.String())
+	}
+	body := fmt.Sprintf(`{"package":"windows-audit","endpoint_id":"ep-lap","params":{%q:"%d"},"reason":"tested on this laptop"}`, p.Name, val)
+	w := adminPut(srv, "/api/v1/maintenance/settings?endpoint_id=ep-lap", body)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), fmt.Sprintf("%q:\"%d\"", p.Name, val)) {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	later := now.Add(25 * time.Hour)
+	online(later)
+	srv.runMaintenanceSchedules(later)
+	pending := owner.auth.PendingApprovals()
+	if countJobs() != 1 || len(pending) != 1 || !strings.Contains(pending[0].Summary, p.Name) {
+		t.Fatalf("changed settings should ask once, showing the change: %d jobs %+v", countJobs(), pending)
+	}
+	// The laptop drops off and comes back: the same ask is still the one.
+	online(later.Add(-time.Hour))
+	srv.runMaintenanceSchedules(later.Add(time.Minute))
+	online(later.Add(2 * time.Minute))
+	srv.runMaintenanceSchedules(later.Add(2 * time.Minute))
+	if p := owner.auth.PendingApprovals(); len(p) != 1 {
+		t.Fatalf("the schedule asked twice: %d", len(p))
+	}
 	findings, err := srv.maintenanceFindings(later)
-	if err != nil || len(findings) != 2 || findings[1].SeverityID != ocsfSevMedium || findings[0].SeverityID != ocsfSevInformational {
-		t.Fatalf("feed: %v %+v", err, findings)
+	if err != nil || len(findings) != 2 || findings[1].SeverityID != ocsfSevMedium {
+		t.Fatalf("a waiting run should show on the board: %v %+v", err, findings)
+	}
+	ask := pending[0]
+	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: ask.ID, Decision: "approve", Assertion: owner.approver.Assert(ask.Challenge, "approve")}); err != nil {
+		t.Fatal(err)
+	}
+	srv.runMaintenanceSchedules(later.Add(2*time.Minute + 10*time.Second))
+	if n := countJobs(); n != 2 {
+		t.Fatalf("the approved run was not dispatched: %d", n)
+	}
+	finishJobs(t, srv, "ep-lap")
+
+	// The category switch turns it off on this host without asking.
+	if w := adminPut(srv, "/api/v1/maintenance/settings", `{"category":"maintenance","endpoint_id":"ep-lap","enabled":false,"reason":"on loan"}`); w.Code != http.StatusOK {
+		t.Fatalf("category: %d %s", w.Code, w.Body.String())
+	}
+	muchLater := later.Add(50 * time.Hour)
+	online(muchLater)
+	srv.runMaintenanceSchedules(muchLater)
+	if n := countJobs(); n != 2 || len(owner.auth.PendingApprovals()) != 0 {
+		t.Fatalf("a switched-off category ran or asked: %d", n)
+	}
+	var view struct {
+		Categories []struct {
+			Name string `json:"name"`
+			On   *bool  `json:"enabled"`
+		} `json:"categories"`
+	}
+	rw := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rw, adminRequest(http.MethodGet, "/api/v1/maintenance/settings?endpoint_id=ep-lap", ""))
+	_ = json.Unmarshal(rw.Body.Bytes(), &view)
+	if len(view.Categories) != 2 || view.Categories[0].Name != "maintenance" || view.Categories[0].On == nil || *view.Categories[0].On {
+		t.Fatalf("settings view: %s", rw.Body.String())
 	}
 }
 

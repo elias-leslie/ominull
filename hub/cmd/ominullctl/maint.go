@@ -3,9 +3,14 @@ package main
 // ominullctl maint: run maintenance packages under the owner's approval and
 // read where each host stands.
 //
-//	maint run ENDPOINT[,ENDPOINT...] PKG... [--mode audit|enforce] [--no-wait]
+//	maint run ENDPOINT[,ENDPOINT...] PKG... [--mode audit|enforce|revert] [--no-wait]
 //	maint status ENDPOINT
-//	maint schedule ENDPOINT[,ENDPOINT...] PKG --every hourly|daily|weekly [--mode audit|enforce]
+//	maint settings [ENDPOINT]
+//	maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode audit|enforce] [--every hourly|daily|weekly]
+//	          [NAME=VALUE ...] [NAME=default ...] [--inherit enabled,mode,every]
+//	          [--reason TEXT] [--until YYYY-MM-DD|never] [--reset]
+//	  A machine override (--endpoint) needs --reason; --until lets it lapse
+//	  back to the fleet default.
 //	maint rules | maint forget-rule [ID]
 
 import (
@@ -20,9 +25,17 @@ import (
 
 func (c *APIClient) cmdMaint(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ominullctl maint run|status|schedule|rules|forget-rule")
+		return fmt.Errorf("usage: ominullctl maint run|status|settings|set|rules|forget-rule")
 	}
 	switch args[0] {
+	case "settings":
+		ep := ""
+		if len(args) > 1 {
+			ep = args[1]
+		}
+		return c.maintSettings(ep)
+	case "set":
+		return c.maintSet(args[1:])
 	case "run":
 		return c.maintRun(args[1:])
 	case "status":
@@ -30,8 +43,6 @@ func (c *APIClient) cmdMaint(args []string) error {
 			return fmt.Errorf("usage: ominullctl maint status ENDPOINT")
 		}
 		return c.maintStatus(args[1])
-	case "schedule":
-		return c.maintSchedule(args[1:])
 	case "rules":
 		raw, err := c.doRequest(http.MethodGet, "/api/v1/approvals/rules", nil)
 		if err != nil {
@@ -67,7 +78,7 @@ func (c *APIClient) cmdMaint(args []string) error {
 		}
 		return err
 	}
-	return fmt.Errorf("usage: ominullctl maint run|status|schedule|rules|forget-rule")
+	return fmt.Errorf("usage: ominullctl maint run|status|settings|set|rules|forget-rule")
 }
 
 // splitMaintArgs separates --mode/--every/--no-wait from positional words.
@@ -93,8 +104,8 @@ func splitMaintArgs(args []string) (pos []string, flags map[string]string, err e
 			pos = append(pos, a)
 		}
 	}
-	if m := flags["mode"]; m != "audit" && m != "enforce" {
-		return nil, nil, fmt.Errorf("--mode must be audit or enforce")
+	if m := flags["mode"]; m != "audit" && m != "enforce" && m != "revert" {
+		return nil, nil, fmt.Errorf("--mode must be audit, enforce or revert")
 	}
 	return pos, flags, nil
 }
@@ -105,7 +116,7 @@ func (c *APIClient) maintRun(args []string) error {
 		return err
 	}
 	if len(pos) < 2 {
-		return fmt.Errorf("usage: ominullctl maint run ENDPOINT[,ENDPOINT...] PKG... [--mode audit|enforce] [--no-wait]")
+		return fmt.Errorf("usage: ominullctl maint run ENDPOINT[,ENDPOINT...] PKG... [--mode audit|enforce|revert] [--no-wait]")
 	}
 	body := map[string]interface{}{"endpoint_ids": strings.Split(pos[0], ","), "packages": pos[1:], "mode": flags["mode"]}
 	raw, err := c.ownerApproved(http.MethodPost, "/api/v1/maintenance/run", body)
@@ -205,6 +216,8 @@ func (c *APIClient) maintStatus(endpoint string) error {
 				Reboot      bool       `json:"reboot"`
 				Changed     []string   `json:"changed"`
 				Version     int        `json:"version"`
+				Pass        int        `json:"pass"`
+				Fail        int        `json:"fail"`
 				RequestedAt time.Time  `json:"requested_at"`
 				CompletedAt *time.Time `json:"completed_at"`
 			} `json:"last"`
@@ -234,6 +247,9 @@ func (c *APIClient) maintStatus(endpoint string) error {
 		if len(l.Changed) > 0 {
 			extra += fmt.Sprintf(" (%d changed)", len(l.Changed))
 		}
+		if l.Pass+l.Fail > 0 {
+			extra += fmt.Sprintf(" (%d of %d controls pass)", l.Pass, l.Pass+l.Fail)
+		}
 		if l.Reboot {
 			extra += " (reboot needed)"
 		}
@@ -242,46 +258,158 @@ func (c *APIClient) maintStatus(endpoint string) error {
 	return nil
 }
 
-func (c *APIClient) maintSchedule(args []string) error {
-	pos, flags, err := splitMaintArgs(args)
+type maintSettingsView struct {
+	Categories []struct {
+		Name    string `json:"name"`
+		FleetOn bool   `json:"fleet_enabled"`
+		On      *bool  `json:"enabled"`
+	} `json:"categories"`
+	Packages []struct {
+		Name     string `json:"name"`
+		Category string `json:"category"`
+		Risk     string `json:"risk"`
+		Params   []struct {
+			Name    string `json:"name"`
+			Default string `json:"default"`
+		} `json:"params"`
+		FleetEff  maintEffective  `json:"fleet_effective"`
+		Effective *maintEffective `json:"effective"`
+	} `json:"packages"`
+}
+
+type maintEffective struct {
+	Enabled  bool              `json:"enabled"`
+	Mode     string            `json:"mode"`
+	Interval string            `json:"interval"`
+	Params   map[string]string `json:"params"`
+}
+
+func (c *APIClient) maintSettings(endpoint string) error {
+	path := "/api/v1/maintenance/settings"
+	if endpoint != "" {
+		path += "?endpoint_id=" + url.QueryEscape(endpoint)
+	}
+	raw, err := c.doRequest(http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 2 || flags["every"] == "" {
-		return fmt.Errorf("usage: ominullctl maint schedule ENDPOINT[,ENDPOINT...] PKG --every hourly|daily|weekly [--mode audit|enforce]")
+	var v maintSettingsView
+	if json.Unmarshal(raw, &v) != nil || c.cfg.JSONOutput {
+		fmt.Println(string(raw))
+		return nil
 	}
-	raw, err := c.doRequest(http.MethodGet, "/api/v1/maintenance?endpoint_id="+url.QueryEscape(strings.Split(pos[0], ",")[0]), nil)
+	for _, cat := range v.Categories {
+		on := cat.FleetOn
+		if cat.On != nil {
+			on = *cat.On
+		}
+		fmt.Printf("@%-19s %s\n", cat.Name, map[bool]string{true: "on", false: "off"}[on])
+	}
+	for _, p := range v.Packages {
+		e := p.FleetEff
+		if p.Effective != nil {
+			e = *p.Effective
+		}
+		state := "off"
+		if e.Enabled {
+			state = "on"
+		}
+		var changed []string
+		for _, d := range p.Params {
+			if val := e.Params[d.Name]; val != d.Default {
+				changed = append(changed, d.Name+"="+val)
+			}
+		}
+		extra := ""
+		if len(changed) > 0 {
+			extra = "  " + strings.Join(changed, " ")
+		}
+		fmt.Printf("%-20s %-11s %-7s %-3s %-7s %-6s%s\n", p.Name, p.Category, p.Risk, state, e.Mode, e.Interval, extra)
+	}
+	return nil
+}
+
+func (c *APIClient) maintSet(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ominullctl maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode audit|enforce] [--every hourly|daily|weekly] [NAME=VALUE ...] [NAME=default ...] [--inherit enabled,mode,every] [--reason TEXT] [--until YYYY-MM-DD|never] [--reset]")
+	}
+	body := map[string]interface{}{}
+	if strings.HasPrefix(args[0], "@") {
+		body["category"] = strings.TrimPrefix(args[0], "@")
+	} else {
+		body["package"] = args[0]
+	}
+	params := map[string]interface{}{}
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		next := func() (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			return args[i], nil
+		}
+		switch a {
+		case "--on", "--off":
+			body["enabled"] = a == "--on"
+		case "--reset":
+			body["reset"] = true
+		case "--endpoint", "--mode", "--every", "--inherit", "--reason", "--until":
+			v, err := next()
+			if err != nil {
+				return err
+			}
+			switch a {
+			case "--endpoint":
+				body["endpoint_id"] = v
+			case "--mode":
+				body["mode"] = v
+			case "--every":
+				body["interval"] = v
+			case "--reason":
+				body["reason"] = v
+			case "--until":
+				if v == "never" {
+					body["expires_at"] = nil
+				} else {
+					body["expires_at"] = v
+				}
+			case "--inherit":
+				for _, f := range strings.Split(v, ",") {
+					switch f {
+					case "enabled", "mode":
+						body[f] = nil
+					case "every", "interval":
+						body["interval"] = nil
+					default:
+						return fmt.Errorf("--inherit takes enabled, mode or every")
+					}
+				}
+			}
+		default:
+			k, v, ok := strings.Cut(a, "=")
+			if !ok || strings.HasPrefix(a, "--") {
+				return fmt.Errorf("unknown argument %s", a)
+			}
+			if v == "default" {
+				params[k] = nil
+			} else {
+				params[k] = v
+			}
+		}
+	}
+	if len(params) > 0 {
+		body["params"] = params
+	}
+	raw, err := c.doRequest(http.MethodPut, "/api/v1/maintenance/settings", body)
 	if err != nil {
 		return err
 	}
-	var st struct {
-		Packages []struct {
-			ScriptID string `json:"script_id"`
-			Name     string `json:"name"`
-			Timeout  int    `json:"timeout"`
-			Version  int    `json:"latest_version"`
-		} `json:"packages"`
+	if c.cfg.JSONOutput {
+		fmt.Println(string(raw))
+		return nil
 	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return err
-	}
-	for _, p := range st.Packages {
-		if p.Name != pos[1] {
-			continue
-		}
-		// Same timeout and output bound as `maint run`, so a run the owner's
-		// package rule covers is the run this schedule asks for.
-		body := map[string]interface{}{
-			"script_id": p.ScriptID, "version": p.Version, "target_endpoints": strings.Split(pos[0], ","),
-			"parameters": map[string]string{"mode": flags["mode"]}, "recurrence": flags["every"],
-			"timeout_seconds": p.Timeout, "max_output_bytes": 1 << 20,
-		}
-		out, err := c.doRequest(http.MethodPost, "/api/v1/scripts/schedules", body)
-		if err == nil {
-			fmt.Println(string(out))
-			fmt.Fprintln(os.Stderr, "[*] Scheduled runs happen only while the owner's approve-all rule covers this exact package run; make one by answering \"Approve all like this\" on a `maint run` ask.")
-		}
-		return err
-	}
-	return fmt.Errorf("no package called %q fits %s", pos[1], pos[0])
+	fmt.Fprintln(os.Stderr, "[*] Saved. Runs that need your approval (enforce, careful packages, changed settings) ask on their next due pass.")
+	ep, _ := body["endpoint_id"].(string)
+	return c.maintSettings(ep)
 }

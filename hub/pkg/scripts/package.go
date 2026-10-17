@@ -15,11 +15,13 @@ import (
 
 // PackageMeta is the metadata object a package script carries.
 type PackageMeta struct {
-	Package string `json:"package"`
-	Title   string `json:"title,omitempty"`
-	Risk    string `json:"risk,omitempty"`   // safe | careful
-	Reboot  bool   `json:"reboot,omitempty"` // the package may need a reboot
-	Timeout int    `json:"timeout,omitempty"`
+	Package  string `json:"package"`
+	Title    string `json:"title,omitempty"`
+	Category string `json:"category,omitempty"` // maintenance | security ("" reads as maintenance)
+	Interval string `json:"interval,omitempty"` // default schedule
+	Risk     string `json:"risk,omitempty"`     // safe | careful
+	Reboot   bool   `json:"reboot,omitempty"`   // the package may need a reboot
+	Timeout  int    `json:"timeout,omitempty"`
 }
 
 // Package returns the script's package metadata, or nil when it is not a package.
@@ -37,13 +39,59 @@ func (sc *Script) Package() *PackageMeta {
 // PackageResult is the one-line JSON a package prints last.
 type PackageResult struct {
 	V       int             `json:"v"`
-	State   string          `json:"state"` // ok | fixed | drift | failed | skipped
+	State   string          `json:"state"` // ok | fixed | drift | failed | skipped | na
 	Reboot  bool            `json:"reboot"`
 	Changed []string        `json:"changed"`
 	Detail  json.RawMessage `json:"detail,omitempty"`
 }
 
-var packageStates = map[string]bool{"ok": true, "fixed": true, "drift": true, "failed": true, "skipped": true}
+var packageStates = map[string]bool{"ok": true, "fixed": true, "drift": true, "failed": true, "skipped": true, "na": true}
+
+// Control is one checked control in a result's detail.controls.
+type Control struct {
+	ID       string `json:"id"`
+	CIS      string `json:"cis,omitempty"` // benchmark reference id only, e.g. "CIS WIN11 1.1.4"
+	Expected string `json:"expected,omitempty"`
+	Actual   string `json:"actual,omitempty"`
+	State    string `json:"state"`          // pass | fail | fixed | na
+	Risk     string `json:"risk,omitempty"` // safe | careful
+}
+
+var controlStates = map[string]bool{"pass": true, "fail": true, "fixed": true, "na": true}
+
+// Controls reads detail.controls, keeping only well-formed entries.
+func (r *PackageResult) Controls() []Control {
+	if r == nil || len(r.Detail) == 0 {
+		return nil
+	}
+	var d struct {
+		Controls []Control `json:"controls"`
+	}
+	if json.Unmarshal(r.Detail, &d) != nil {
+		return nil
+	}
+	out := d.Controls[:0]
+	for _, c := range d.Controls {
+		if c.ID != "" && controlStates[c.State] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Compliance counts controls: passed (pass or fixed) and failed; na counts
+// for neither.
+func Compliance(controls []Control) (pass, fail int) {
+	for _, c := range controls {
+		switch c.State {
+		case "pass", "fixed":
+			pass++
+		case "fail":
+			fail++
+		}
+	}
+	return pass, fail
+}
 
 // ParsePackageResult reads the last non-empty stdout line. A missing or
 // unparseable line is reported as ok=false; callers treat it as failed.
@@ -146,45 +194,230 @@ func RecurrenceInterval(recurrence string) (time.Duration, bool) {
 	return 0, false
 }
 
-// ActiveSchedules lists every tenant's active schedules.
-func (s *Store) ActiveSchedules() ([]*ScriptSchedule, error) {
+// Maintenance settings: one small table keyed by (package, endpoint) where
+// endpoint "" is the fleet default and package "@<category>" holds a
+// category's enable. A NULL field inherits: endpoint -> fleet -> built in
+// (packages off, categories on, mode audit, the header's interval and
+// parameter defaults). Security compliance packages use the same rows.
+
+// CategoryKey is the settings row name of a category.
+func CategoryKey(category string) string { return "@" + category }
+
+// PackageSetting is one row: what a fleet default or an endpoint override sets.
+type PackageSetting struct {
+	Package    string            `json:"package"`
+	EndpointID string            `json:"endpoint_id,omitempty"`
+	Enabled    *bool             `json:"enabled,omitempty"`
+	Mode       *string           `json:"mode,omitempty"`
+	Interval   *string           `json:"interval,omitempty"`
+	Params     map[string]string `json:"params,omitempty"`
+	Reason     string            `json:"reason,omitempty"`     // required on an endpoint override
+	ExpiresAt  *time.Time        `json:"expires_at,omitempty"` // an expired override no longer applies
+	UpdatedAt  time.Time         `json:"updated_at"`
+	UpdatedBy  string            `json:"updated_by,omitempty"`
+}
+
+// Empty: the row overrides nothing.
+func (p *PackageSetting) Empty() bool {
+	return p.Enabled == nil && p.Mode == nil && p.Interval == nil && len(p.Params) == 0
+}
+
+func (s *Store) initSettings() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS maintenance_settings (
+		tenant_id TEXT NOT NULL,
+		package TEXT NOT NULL,
+		endpoint_id TEXT NOT NULL DEFAULT '',
+		enabled INTEGER,
+		mode TEXT,
+		interval TEXT,
+		params_json TEXT NOT NULL DEFAULT '{}',
+		updated_at TIMESTAMP NOT NULL,
+		updated_by TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		expires_at TIMESTAMP,
+		PRIMARY KEY(tenant_id, package, endpoint_id)
+	)`)
+	return err
+}
+
+// ListSettings returns every settings row of a tenant.
+func (s *Store) ListSettings(tenantID string) ([]PackageSetting, error) {
 	s.mu.Lock()
-	var tenants []string
-	rows, err := s.db.Query(`SELECT DISTINCT tenant_id FROM script_schedules WHERE status = 'active'`)
-	if err == nil {
-		for rows.Next() {
-			var t string
-			if rows.Scan(&t) == nil {
-				tenants = append(tenants, t)
-			}
-		}
-		err = rows.Err()
-		rows.Close()
-	}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT package, endpoint_id, enabled, mode, interval, params_json, updated_at, updated_by, reason, expires_at
+		FROM maintenance_settings WHERE tenant_id = ? ORDER BY package, endpoint_id`, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	var out []*ScriptSchedule
-	for _, t := range tenants {
-		list, err := s.ListSchedules(t)
-		if err != nil {
+	defer rows.Close()
+	var out []PackageSetting
+	for rows.Next() {
+		var r PackageSetting
+		var enabled sql.NullInt64
+		var mode, interval sql.NullString
+		var params string
+		var expires sql.NullTime
+		if err := rows.Scan(&r.Package, &r.EndpointID, &enabled, &mode, &interval, &params, &r.UpdatedAt, &r.UpdatedBy, &r.Reason, &expires); err != nil {
 			return nil, err
 		}
-		for _, sc := range list {
-			if sc.Status == "active" {
-				out = append(out, sc)
+		if expires.Valid {
+			t := expires.Time.UTC()
+			r.ExpiresAt = &t
+		}
+		if enabled.Valid {
+			b := enabled.Int64 != 0
+			r.Enabled = &b
+		}
+		if mode.Valid {
+			r.Mode = &mode.String
+		}
+		if interval.Valid {
+			r.Interval = &interval.String
+		}
+		_ = json.Unmarshal([]byte(params), &r.Params)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PutSetting replaces one row (an empty row is removed). Callers validate.
+func (s *Store) PutSetting(tenantID string, r PackageSetting) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.Empty() {
+		_, err := s.db.Exec(`DELETE FROM maintenance_settings WHERE tenant_id = ? AND package = ? AND endpoint_id = ?`,
+			tenantID, r.Package, r.EndpointID)
+		return err
+	}
+	var enabled interface{}
+	if r.Enabled != nil {
+		enabled = 0
+		if *r.Enabled {
+			enabled = 1
+		}
+	}
+	var mode, interval interface{}
+	if r.Mode != nil {
+		mode = *r.Mode
+	}
+	if r.Interval != nil {
+		interval = *r.Interval
+	}
+	params, _ := json.Marshal(r.Params)
+	if r.Params == nil {
+		params = []byte("{}")
+	}
+	var expires interface{}
+	if r.ExpiresAt != nil {
+		expires = r.ExpiresAt.UTC()
+	}
+	_, err := s.db.Exec(`INSERT INTO maintenance_settings (tenant_id, package, endpoint_id, enabled, mode, interval, params_json, updated_at, updated_by, reason, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(tenant_id, package, endpoint_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode,
+		interval = excluded.interval, params_json = excluded.params_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+		reason = excluded.reason, expires_at = excluded.expires_at`,
+		tenantID, r.Package, r.EndpointID, enabled, mode, interval, string(params), time.Now().UTC(), r.UpdatedBy, r.Reason, expires)
+	return err
+}
+
+// EffectiveSetting is what applies to one package on one endpoint (or the fleet).
+type EffectiveSetting struct {
+	Enabled         bool              `json:"enabled"`          // package and category both on
+	PackageEnabled  bool              `json:"package_enabled"`  // the package's own switch
+	CategoryEnabled bool              `json:"category_enabled"` // its category's switch
+	Mode            string            `json:"mode"`
+	Interval        string            `json:"interval"`
+	Params          map[string]string `json:"params"` // every declared param
+}
+
+// Settings indexes a tenant's rows.
+type Settings map[string]map[string]PackageSetting // package -> endpoint ("" fleet) -> row
+
+// IndexSettings builds the index.
+func IndexSettings(rows []PackageSetting) Settings {
+	out := Settings{}
+	for _, r := range rows {
+		if out[r.Package] == nil {
+			out[r.Package] = map[string]PackageSetting{}
+		}
+		out[r.Package][r.EndpointID] = r
+	}
+	return out
+}
+
+// Expired: an override past its expiry, which no longer applies.
+func (p *PackageSetting) Expired(now time.Time) bool {
+	return p.ExpiresAt != nil && !now.Before(*p.ExpiresAt)
+}
+
+// IndexSettings builds the index of the rows in force at now (expired
+// overrides fall back to the fleet default).
+func IndexSettingsAt(rows []PackageSetting, now time.Time) Settings {
+	var live []PackageSetting
+	for _, r := range rows {
+		if !r.Expired(now) {
+			live = append(live, r)
+		}
+	}
+	return IndexSettings(live)
+}
+
+// CategoryEnabled resolves a category's switch for an endpoint ("" = fleet).
+func (st Settings) CategoryEnabled(category, endpointID string) bool {
+	rows := st[CategoryKey(category)]
+	if endpointID != "" {
+		if r, ok := rows[endpointID]; ok && r.Enabled != nil {
+			return *r.Enabled
+		}
+	}
+	if r, ok := rows[""]; ok && r.Enabled != nil {
+		return *r.Enabled
+	}
+	return true
+}
+
+// Effective resolves a package's settings for an endpoint ("" = fleet).
+func (st Settings) Effective(h *PackageHeader, endpointID string) EffectiveSetting {
+	e := EffectiveSetting{Mode: "audit", Interval: h.Interval, Params: h.Defaults()}
+	layers := []PackageSetting{st[h.Name][""]}
+	if endpointID != "" {
+		layers = append(layers, st[h.Name][endpointID])
+	}
+	for _, r := range layers {
+		if r.Enabled != nil {
+			e.PackageEnabled = *r.Enabled
+		}
+		if r.Mode != nil {
+			e.Mode = *r.Mode
+		}
+		if r.Interval != nil {
+			e.Interval = *r.Interval
+		}
+		for k, v := range r.Params {
+			if p := h.Param(k); p != nil && p.Check(v) == nil {
+				e.Params[k] = v
 			}
 		}
 	}
-	return out, nil
+	cat := h.Category
+	if cat == "" {
+		cat = "maintenance"
+	}
+	e.CategoryEnabled = st.CategoryEnabled(cat, endpointID)
+	e.Enabled = e.PackageEnabled && e.CategoryEnabled
+	return e
 }
 
-// CountScheduleRuns adds n dispatched runs to a schedule.
-func (s *Store) CountScheduleRuns(tenantID, scheduleID string, n int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec(`UPDATE script_schedules SET runs_count = runs_count + ?, updated_at = ? WHERE tenant_id = ? AND id = ?`,
-		n, time.Now().UTC(), tenantID, scheduleID)
-	return err
+// RunParams is the parameter map of a run with these settings: mode plus
+// every declared param.
+func (e EffectiveSetting) RunParams(mode string) map[string]string {
+	out := make(map[string]string, len(e.Params)+1)
+	for k, v := range e.Params {
+		out[k] = v
+	}
+	if mode == "" {
+		mode = e.Mode
+	}
+	out["mode"] = mode
+	return out
 }

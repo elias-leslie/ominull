@@ -76,8 +76,8 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 	if len(req.EndpointIDs) == 0 || len(req.Packages) == 0 {
 		return nil, nil, errors.New("name at least one endpoint and one package")
 	}
-	if req.Mode != "audit" && req.Mode != "enforce" {
-		return nil, nil, errors.New("mode must be audit or enforce")
+	if !scripts.RunModes[req.Mode] {
+		return nil, nil, errors.New("mode must be audit, enforce or revert")
 	}
 	windows := map[string]bool{}
 	for _, id := range req.EndpointIDs {
@@ -87,7 +87,10 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 		}
 		windows[id] = strings.Contains(strings.ToLower(ep.OS), "windows")
 	}
-	params := map[string]string{"mode": req.Mode}
+	settings, err := s.maintenanceSettings(tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
 	seen := map[string]bool{}
 	var items []packageRunItem
 	for _, name := range req.Packages {
@@ -108,20 +111,42 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 		if err != nil {
 			return nil, nil, err
 		}
-		schema, err := scripts.ValidateSchema(sv.ParameterSchemaJSON)
+		h, err := scripts.ParsePackageHeader(sv.Source)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("%s: %v", sc.Name, err)
 		}
-		if err := scripts.ValidateParameters(schema, params); err != nil {
+		// One run is one payload on every named host, so the hosts must
+		// share the package's effective settings.
+		var params map[string]string
+		for _, id := range req.EndpointIDs {
+			p := settings.Effective(h, id).RunParams(req.Mode)
+			if params != nil && !sameParams(params, p) {
+				return nil, nil, fmt.Errorf("%s has different settings on these hosts; run them separately", sc.Name)
+			}
+			params = p
+		}
+		if err := h.CheckRun(params); err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", sc.Name, err)
 		}
-		raw, err := packageItem(sc, sv, params, sc.Package().Timeout, packageMaxOutput)
+		raw, err := packageItem(sc, sv, params, h.Timeout, packageMaxOutput)
 		if err != nil {
 			return nil, nil, err
 		}
 		items = append(items, packageRunItem{Raw: raw, Digest: responseauth.ItemDigest(raw), Script: sc, Version: sv.Version})
 	}
 	return &req, items, nil
+}
+
+func sameParams(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 func packageRunPayload(items []packageRunItem, targets []string) []byte {

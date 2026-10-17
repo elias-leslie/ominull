@@ -44,6 +44,13 @@ type jobView struct {
 	HasResult                             bool
 	Stdout, Stderr                        string
 	Steps                                 []jobStep
+	Controls                              []jobControl // a package run's per-control results
+}
+
+// jobControl is one control a package run checked, as the page shows it.
+type jobControl struct {
+	ID, CIS, Expected, Actual, Label, Tone string
+	Careful                                bool
 }
 
 type jobsPageBody struct {
@@ -346,6 +353,23 @@ func addPackageResult(v *jobView, job *response.JobRecord, meta *scripts.Package
 				changed = changed[:12]
 			}
 			meta2 = append(meta2, jobMeta{"Changed", strings.Join(changed, ", ") + more})
+		}
+		if run.Pass+run.Fail > 0 {
+			meta2 = append(meta2, jobMeta{"Compliance", fmt.Sprintf("%d%% (%d of %d controls pass)", 100*run.Pass/(run.Pass+run.Fail), run.Pass, run.Pass+run.Fail)})
+		}
+		for _, c := range run.Controls {
+			jc := jobControl{ID: c.ID, CIS: c.CIS, Expected: c.Expected, Actual: c.Actual, Careful: c.Risk == "careful"}
+			switch c.State {
+			case "pass":
+				jc.Label, jc.Tone = "Pass", "ok"
+			case "fixed":
+				jc.Label, jc.Tone = "Fixed", "ok"
+			case "fail":
+				jc.Label, jc.Tone = "Fail", "crit"
+			default:
+				jc.Label, jc.Tone = "Not applicable", "idle"
+			}
+			v.Controls = append(v.Controls, jc)
 		}
 	}
 	// After Host and Action.

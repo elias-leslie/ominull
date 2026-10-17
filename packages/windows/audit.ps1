@@ -1,192 +1,140 @@
-# ominull-package: {"name":"windows-audit","title":"Standards check","description":"Checks BitLocker, Defender, firewall, update age, free disk space, TPM and Secure Boot without changing anything.","risk":"safe","reboot":false,"timeout":300}
-$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $WarningPreference = 'SilentlyContinue'
-$VerbosePreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'
+# ominull-package: {"name":"windows-audit","title":"Standards check","description":"Checks BitLocker, Defender, firewall, update age, free disk space, TPM and Secure Boot without changing anything.","category":"maintenance","risk":"safe","reboot":false,"timeout":300,"interval":"daily","params":[{"name":"signature_max_days","type":"int","default":3,"min":1,"max":60,"description":"Drift once Defender signatures are this many days old"},{"name":"update_max_days","type":"int","default":35,"min":1,"max":365,"description":"Drift once the last successful Windows Update install is this many days ago"},{"name":"disk_min_free_pct","type":"int","default":15,"min":1,"max":90,"description":"System drive is fine with at least this percent free (or the GB below)"},{"name":"disk_min_free_gb","type":"int","default":20,"min":1,"max":10000,"description":"System drive is fine with at least this many GB free (or the percent above)"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+$ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-audit'
 # --- prelude begin (identical in every package; tests compare) ---
-# Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
-# agent's own folder (never touched). Stdout carries only the final JSON line.
+# Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
 function Initialize-Env {
-    $sys = [Environment]::SystemDirectory
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
-    if (-not $env:windir) { $env:windir = $sr }
-    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
-    $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
-    if (-not $env:ProgramData) { $env:ProgramData = $pd }
-    if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }
-    $pf = [Environment]::GetFolderPath('ProgramFiles')
-    if (-not $env:ProgramFiles) { $env:ProgramFiles = $pf }
-    if (-not ${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} = [Environment]::GetFolderPath('ProgramFilesX86') }
-    if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }
-    if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData') }
-    if (-not $env:APPDATA) { $env:APPDATA = [Environment]::GetFolderPath('ApplicationData') }
-    if (-not $env:USERPROFILE) { $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile') }
-    if (-not $env:PSModulePath) { $env:PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
-    $script:Root = Join-Path $pd 'OminullMaintenance'
+  $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
+  $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
+    ProgramFiles = $pf; 'ProgramFiles(x86)' = (& $f 'ProgramFilesX86'); COMPUTERNAME = [Environment]::MachineName
+    LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
+    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
+  foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $script:Root = Join-Path $pd 'OminullMaintenance'
 }
+# audit reports, enforce changes, revert restores recorded first-seen values.
 function Get-Mode([string]$Primary, [string]$Fallback) {
-    $v = $Primary; if (-not $v) { $v = $Fallback }
-    if ($v -and $v.Trim() -eq 'enforce') { 'enforce' } else { 'audit' }
+  $v = "$Primary".Trim(); if (-not $v) { $v = "$Fallback".Trim() }
+  if ('enforce', 'revert' -ccontains $v) { $v } else { 'audit' }
 }
-function Start-Log {
-    $d = Join-Path $script:Root 'logs'; New-Item -ItemType Directory -Force -Path $d | Out-Null
-    Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip 19 |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    $script:LogFile = Join-Path $d ('{0}-{1}.log' -f $Pkg, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# Tunables are params declared on line 1; a run sets OMINULL_PARAM_<NAME>. A bad value fails the run.
+function ConvertFrom-PkgParam($Def, [string]$V) {
+  $n = "param $($Def.name)"; $x = 0L
+  switch ($Def.type) {
+    'int' { if ($V -match '^-?\d{1,18}\z' -and [int64]::TryParse($V, [ref]$x) -and "$x" -ceq $V -and $x -ge $Def.min -and $x -le $Def.max) { return $x } }
+    'bool' { if ('true', 'false' -ccontains $V) { return $V -ceq 'true' } }
+    'enum' { if (@($Def.values) -ccontains $V) { return $V } }
+    'list' {
+      $l = [string[]]@(); if ($V -cne '-') { $l = [string[]]($V -split ',') }; $seen = @{}
+      foreach ($i in $l) { if ($i -cnotmatch '^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}\z' -or $i.Trim() -cne $i -or $seen[$i.ToLower()]) { throw "$n has a bad or repeated item '$i'" }; $seen[$i.ToLower()] = 1 }
+      if ($l.Count -le $Def.max_items -and $V.Length -le 1024) { return , $l }
+    }
+  }
+  throw "$n is not a valid $($Def.type)"
 }
-function Write-Log([string]$Message) {
-    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value ('{0} {1}' -f (Get-Date -Format s), $Message) -Encoding UTF8 } catch {} }
+function Get-PkgParams([string]$Path) {
+  $o = @{}
+  foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
+    $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
+    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } else { "$($d.default)" } }
+    $o[$d.name] = ConvertFrom-PkgParam $d $v
+  }
+  $o
 }
-# First-seen values only: a later run never overwrites what the machine had before.
-function Save-Original($Values) {
-    try {
-        $f = Join-Path $script:Root "state\$Pkg-original.json"; $cur = [ordered]@{}; $add = $false
-        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cur[$_.Name] = $_.Value } }
-        foreach ($k in $Values.Keys) { if (-not $cur.Contains($k)) { $cur[$k] = $Values[$k]; $add = $true } }
-        if ($add) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $f) | Out-Null
-            ConvertTo-Json $cur -Depth 5 | Set-Content -LiteralPath $f -Encoding UTF8
-        }
-    } catch { Write-Log "original-values save failed: $_" }
+function Start-Log([int]$Keep) {
+  $d = "$($script:Root)\logs"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip ([math]::Max(0, $Keep - 1)) | Remove-Item -Force -ErrorAction SilentlyContinue
+  $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
+function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
-    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
-    @{ code = $c; out = $o }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  @{ code = $c; out = $o }
 }
-# quser IDLE TIME: "." / "none" = active now, "5" minutes, "1:05" h:mm, "2+03:04" d+h:mm.
+# quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
 function ConvertFrom-QuserIdle([string]$Idle) {
-    if ($Idle -match '^(\d+)\+(\d+):(\d+)$') { return [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] }
-    if ($Idle -match '^(\d+):(\d+)$') { return [int]$matches[1] * 60 + [int]$matches[2] }
-    if ($Idle -match '^\d+$') { return [int]$Idle }
-    0
+  if ($Idle -match '^(?:(\d+)\+)?(?:(\d+):)?(\d+)$') { [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] } else { 0 }
 }
-function Test-UserActive([string[]]$Lines) {
-    foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt 15) { return $true } }
-    $false
+function Test-UserActive([string[]]$Lines, [int]$IdleMinutes) {
+  foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt $IdleMinutes) { return $true } }
+  $false
 }
-# Game install folders. Launchers that sit in the tray (Steam, Epic, Riot Client,
-# Battle.net, EA app) live elsewhere and do not count.
+# Game folders; tray launchers (Steam, Epic, Riot Client, Battle.net, EA app) do not count.
 function Test-GamePath([string]$Path) {
-    if (-not $Path) { return $false }
-    $rules = '\\steamapps\\common\\', '\\Epic Games\\(?!Launcher\\)', '\\Riot Games\\(?!Riot Client\\)', '\\XboxGames\\',
-        '\\EA Games\\', '\\Ubisoft Game Launcher\\games\\', '\\GOG Galaxy\\Games\\', '\\WindowsApps\\Microsoft\.Minecraft',
-        '\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\'
-    foreach ($r in $rules) { if ($Path -match $r) { return $true } }
-    $false
+  $Path -and ($Path -match '\\steamapps\\common\\|\\Epic Games\\(?!Launcher\\|Epic Online Services\\)|\\Riot Games\\(?!Riot Client\\)|\\XboxGames\\|\\EA Games\\|\\Ubisoft Game Launcher\\games\\|\\GOG Galaxy\\Games\\|\\WindowsApps\\Microsoft\.Minecraft|\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\')
 }
-function Test-OnBattery($Batteries) {
-    foreach ($b in @($Batteries)) { if ($b -and [int]$b.BatteryStatus -eq 1) { return $true } }
-    $false
-}
-function Get-PreflightReason([bool]$CheckUpdates) {
-    $q = Invoke-Native 'quser.exe' @()
-    if ($q.code -ge 0 -and (Test-UserActive $q.out)) { return 'someone is using the computer' }
-    foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
-        if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
-    }
-    if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
-    if ($CheckUpdates) {
-        if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
-        try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
-    }
-    $null
-}
-function Test-PendingReboot {
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-}
-function Get-Reg([string]$Path, [string]$Name) {
-    try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null }
-}
-function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-    New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
-}
-# The Default user's hive: what every new profile starts from.
-function Mount-DefaultHive {
-    $root = 'Registry::HKEY_USERS\OminullDefault'
-    if (Test-Path $root) { Dismount-DefaultHive }
-    $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default
-    $r = Invoke-Native 'reg.exe' @('load', 'HKU\OminullDefault', (Join-Path $dir 'NTUSER.DAT'))
-    if ($r.code -ne 0) { throw "could not load the Default user hive: $($r.out -join ' ')" }
-    $root
-}
-# A hive left loaded would lock the Default profile, so unloading is retried.
-function Dismount-DefaultHive {
-    for ($i = 0; $i -lt 5; $i++) {
-        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-        $r = Invoke-Native 'reg.exe' @('unload', 'HKU\OminullDefault')
-        if ($r.code -eq 0) { return }
-        Start-Sleep -Seconds 2
-    }
-    throw "the Default user hive could not be unloaded: $($r.out -join ' ')"
+function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
+function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+  $q = Invoke-Native 'quser.exe' @()
+  if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
+  foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
+    if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
+  }
+  if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
+  if ($CheckUpdates) {
+    if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
+    try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
+  }
 }
 function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detail) {
-    if (@('ok', 'fixed', 'drift', 'failed', 'skipped') -notcontains $State) { $State = 'failed' }
-    if ($null -eq $Changed) { $Changed = @() }
-    $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = $Detail }) -Compress -Depth 6
-    if ($j.Length -gt 12000) { $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = @{ truncated = $true } }) -Compress -Depth 3 }
-    $j -replace "[`r`n]", ' '
+  if ('ok', 'fixed', 'drift', 'failed', 'skipped', 'na' -notcontains $State) { $State = 'failed' }
+  $r = [ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = @($Changed | Where-Object { $_ }); detail = $Detail }
+  $j = ConvertTo-Json $r -Compress -Depth 6
+  if ($j.Length -gt 12000) { $r.detail = @{ truncated = $true }; $j = ConvertTo-Json $r -Compress -Depth 3 }
+  $j -replace "[`r`n]", ' '
 }
 # --- prelude end ---
-# Read-only. Each check: ok = $true (meets the standard), $false (drift) or $null (does not apply).
-function Get-CheckState($Checks) {
-    foreach ($c in $Checks.Values) { if ($c.ok -eq $false) { return 'drift' } }
-    'ok'
+# --- reboot check begin (shared; tests compare) ---
+function Test-PendingReboot {
+  (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
+  (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
 }
-function Invoke-Check([scriptblock]$Block) {
-    try { & $Block } catch { [ordered]@{ ok = $false; value = "check failed: $("$_".Substring(0, [math]::Min(160, "$_".Length)))" } }
+# --- reboot check end ---
+# Read-only. One control per check: pass, fail, or na (does not apply here).
+function New-Control($Id, $Expected, $Actual, $State, $Risk = 'safe') { [ordered]@{ id = $Id; expected = "$Expected"; actual = "$Actual"; state = $State; risk = $Risk } }
+function Test-Control([string]$Id, [string]$Expected, [scriptblock]$Block) {
+  try { $a, $ok = & $Block; New-Control $Id $Expected $a $(if ($null -eq $ok) { 'na' } elseif ($ok) { 'pass' } else { 'fail' }) }
+  catch { New-Control $Id $Expected "check failed: $("$_".Substring(0, [math]::Min(160, "$_".Length)))" 'fail' }
 }
+function Get-CheckState($Controls) { if (@($Controls | Where-Object { $_.state -eq 'fail' }).Count) { 'drift' } else { 'ok' } }
 function Invoke-Package {
-    $c = [ordered]@{}
-    $c.bitlocker = Invoke-Check {
-        $v = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
-        if (-not $v) { [ordered]@{ ok = $null; value = 'not available on this edition' } }
-        else { [ordered]@{ ok = ([int]$v.ProtectionStatus -eq 1); value = "protection status $($v.ProtectionStatus)" } }
+  if ($Mode -eq 'revert') { $script:State = 'na'; $Detail.reason = 'audit changes nothing'; return }
+  $Detail.controls = $c = @(
+    Test-Control 'bitlocker' 'system drive protected' {
+      $v = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+      if (-not $v) { 'not available on this edition', $null } else { "protection status $($v.ProtectionStatus)", ([int]$v.ProtectionStatus -eq 1) }
     }
-    $c.defender = Invoke-Check {
-        $m = Get-MpComputerStatus
-        $age = [int]((Get-Date) - $m.AntivirusSignatureLastUpdated).TotalDays
-        [ordered]@{ ok = ($m.AntivirusEnabled -and $m.RealTimeProtectionEnabled -and $age -lt 3); value = "antivirus $($m.AntivirusEnabled), real-time $($m.RealTimeProtectionEnabled), signatures $age days old" }
+    Test-Control 'defender' "antivirus and real-time on, signatures under $($Opt.signature_max_days) days old" {
+      $m = Get-MpComputerStatus; $age = [int]((Get-Date) - $m.AntivirusSignatureLastUpdated).TotalDays
+      "antivirus $($m.AntivirusEnabled), real-time $($m.RealTimeProtectionEnabled), signatures $age days old", [bool]($m.AntivirusEnabled -and $m.RealTimeProtectionEnabled -and $age -lt $Opt.signature_max_days)
     }
-    $c.firewall = Invoke-Check {
-        $off = @(Get-NetFirewallProfile | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
-        [ordered]@{ ok = ($off.Count -eq 0); value = $(if ($off.Count) { "off: $($off -join ', ')" } else { 'all profiles on' }) }
+    Test-Control 'firewall' 'all profiles on' {
+      $off = @(Get-NetFirewallProfile | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
+      $(if ($off.Count) { "off: $($off -join ', ')" } else { 'all profiles on' }), ($off.Count -eq 0)
     }
-    $c.updates = Invoke-Check {
-        $last = (New-Object -ComObject Microsoft.Update.AutoUpdate).Results.LastInstallationSuccessDate
-        $days = [int]((Get-Date) - [datetime]$last).TotalDays
-        [ordered]@{ ok = ($days -lt 35); value = "last successful install $days days ago" }
+    Test-Control 'updates' "last install under $($Opt.update_max_days) days ago" {
+      $days = [int]((Get-Date) - [datetime](New-Object -ComObject Microsoft.Update.AutoUpdate).Results.LastInstallationSuccessDate).TotalDays
+      "last successful install $days days ago", ($days -lt $Opt.update_max_days)
     }
-    $c.disk = Invoke-Check {
-        $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
-        $pct = [math]::Round(100 * $d.FreeSpace / $d.Size, 1); $gb = [math]::Round($d.FreeSpace / 1GB, 1)
-        [ordered]@{ ok = ($pct -ge 15 -or $gb -ge 20); value = "$gb GB free ($pct%)" }
+    Test-Control 'disk' "at least $($Opt.disk_min_free_pct)% or $($Opt.disk_min_free_gb) GB free" {
+      $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
+      $pct = [math]::Round(100 * $d.FreeSpace / $d.Size, 1); $gb = [math]::Round($d.FreeSpace / 1GB, 1)
+      "$gb GB free ($pct%)", ($pct -ge $Opt.disk_min_free_pct -or $gb -ge $Opt.disk_min_free_gb)
     }
-    $c.tpm = Invoke-Check {
-        $t = Get-Tpm
-        [ordered]@{ ok = ($t.TpmPresent -and $t.TpmReady); value = "present $($t.TpmPresent), ready $($t.TpmReady)" }
-    }
-    $c.secure_boot = Invoke-Check {
-        $on = $false; try { $on = [bool](Confirm-SecureBootUEFI) } catch {}
-        [ordered]@{ ok = $on; value = $(if ($on) { 'on' } else { 'off or not UEFI' }) }
-    }
-    $pending = Test-PendingReboot
-    $c.reboot_pending = [ordered]@{ ok = $null; value = $pending }
-    $Detail.checks = $c
-    $script:Reboot = $pending
-    $script:State = Get-CheckState $c
+    Test-Control 'tpm' 'present and ready' { $t = Get-Tpm; "present $($t.TpmPresent), ready $($t.TpmReady)", [bool]($t.TpmPresent -and $t.TpmReady) }
+    Test-Control 'secure_boot' 'on' { $on = $false; try { $on = [bool](Confirm-SecureBootUEFI) } catch {}; $(if ($on) { 'on' } else { 'off or not UEFI' }), $on }
+  )
+  $script:Reboot = $Detail.reboot_pending = Test-PendingReboot
+  $script:State = Get-CheckState $c
 }
 $Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false
 try {
-    Initialize-Env; Start-Log
-    $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
-    Invoke-Package
-} catch {
-    $State = 'failed'; $m = "$_"; if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
-    $Detail.error = $m; Write-Log "error: $_ $($_.ScriptStackTrace)"
-}
+  Initialize-Env; $Opt = Get-PkgParams $PSCommandPath; Start-Log $Opt.log_keep
+  $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
+  Invoke-Package
+} catch { $State = 'failed'; $Detail.error = "$_".Substring(0, [math]::Min(400, "$_".Length)); Write-Log "error: $_ $($_.ScriptStackTrace)" }
 try { $json = Format-Result $State $Reboot $Changed.ToArray() $Detail }
 catch { $State = 'failed'; $json = '{"v":1,"state":"failed","reboot":false,"changed":[],"detail":{"error":"result could not be encoded"}}' }
 Write-Log "result $json"

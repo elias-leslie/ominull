@@ -26,13 +26,27 @@ var (
 // ParameterDef defines a strongly-typed parameter in a script version schema.
 type ParameterDef struct {
 	Name        string   `json:"name"`
-	Type        string   `json:"type"` // "string", "number", "boolean", "enum"
+	Type        string   `json:"type"` // "string", "number", "integer", "boolean", "enum", "list"
 	Description string   `json:"description,omitempty"`
 	Required    bool     `json:"required,omitempty"`
 	Default     string   `json:"default,omitempty"`
 	EnumValues  []string `json:"enum_values,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`
+	Min         *int64   `json:"min,omitempty"`       // integer
+	Max         *int64   `json:"max,omitempty"`       // integer
+	MaxItems    int      `json:"max_items,omitempty"` // list: comma-joined items, "-" when empty
+}
+
+// listParam is the package form of a list or integer definition.
+func (p ParameterDef) packageParam() *PackageParam {
+	pp := &PackageParam{Name: p.Name, Min: p.Min, Max: p.Max, MaxItems: p.MaxItems}
+	if p.Type == "integer" {
+		pp.Type = "int"
+	} else {
+		pp.Type = "list"
+	}
+	return pp
 }
 
 // ParameterSchema wraps a list of parameter definitions.
@@ -79,6 +93,18 @@ func ValidateSchema(rawJSON string) (*ParameterSchema, error) {
 					return nil, fmt.Errorf("%w: parameter %q default %q is not a valid number", ErrInvalidSchema, p.Name, p.Default)
 				}
 			}
+		case "integer", "list":
+			if p.Type == "integer" && (p.Min == nil || p.Max == nil || *p.Min > *p.Max) {
+				return nil, fmt.Errorf("%w: parameter %q integer needs min <= max", ErrInvalidSchema, p.Name)
+			}
+			if p.Type == "list" && (p.MaxItems < 1 || p.MaxItems > maxListItems) {
+				return nil, fmt.Errorf("%w: parameter %q list needs max_items 1-%d", ErrInvalidSchema, p.Name, maxListItems)
+			}
+			if p.Default != "" {
+				if err := p.packageParam().Check(p.Default); err != nil {
+					return nil, fmt.Errorf("%w: parameter %q default: %v", ErrInvalidSchema, p.Name, err)
+				}
+			}
 		case "boolean":
 			if p.Default != "" {
 				d := strings.ToLower(p.Default)
@@ -105,7 +131,7 @@ func ValidateSchema(rawJSON string) (*ParameterSchema, error) {
 				return nil, fmt.Errorf("%w: parameter %q default %q is not in enum_values", ErrInvalidSchema, p.Name, p.Default)
 			}
 		default:
-			return nil, fmt.Errorf("%w: parameter %q unsupported type %q (allowed: string, number, boolean, enum)", ErrInvalidSchema, p.Name, p.Type)
+			return nil, fmt.Errorf("%w: parameter %q unsupported type %q (allowed: string, number, integer, boolean, enum, list)", ErrInvalidSchema, p.Name, p.Type)
 		}
 	}
 
@@ -158,6 +184,10 @@ func ValidateParameters(schema *ParameterSchema, values map[string]string) error
 		case "number":
 			if _, err := strconv.ParseFloat(val, 64); err != nil {
 				return fmt.Errorf("%w: parameter %q value %q is not a valid number", ErrInvalidParameter, p.Name, val)
+			}
+		case "integer", "list":
+			if err := p.packageParam().Check(val); err != nil {
+				return fmt.Errorf("%w: parameter %q: %v", ErrInvalidParameter, p.Name, err)
 			}
 		case "boolean":
 			low := strings.ToLower(val)

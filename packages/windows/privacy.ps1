@@ -1,223 +1,208 @@
-# ominull-package: {"name":"windows-privacy","title":"Privacy","description":"Sets Windows telemetry to the lowest level the edition allows and turns off ads, suggestions, activity history, web search in Start, Copilot and Recall.","risk":"safe","reboot":false,"timeout":300}
-$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $WarningPreference = 'SilentlyContinue'
-$VerbosePreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'
+# ominull-package: {"name":"windows-privacy","title":"Privacy","description":"Sets Windows telemetry to the lowest level the edition allows and turns off ads, suggestions, activity history, web search in Start, Copilot and Recall.","category":"maintenance","risk":"safe","reboot":false,"timeout":300,"interval":"weekly","params":[{"name":"turn_off","type":"list","default":["telemetry","telemetry_services","feedback","ads","suggestions","activity_history","web_search","copilot","recall"],"max_items":9,"description":"Privacy groups to turn off (see the package docs)"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+$ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-privacy'
 # --- prelude begin (identical in every package; tests compare) ---
-# Runs as LocalSystem under the OmniNull agent: stripped environment, TEMP is the
-# agent's own folder (never touched). Stdout carries only the final JSON line.
+# Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
 function Initialize-Env {
-    $sys = [Environment]::SystemDirectory
-    $sr = $env:SystemRoot; if (-not $sr) { $sr = Split-Path $sys; $env:SystemRoot = $sr }
-    if (-not $env:windir) { $env:windir = $sr }
-    if (-not $env:SystemDrive) { $env:SystemDrive = Split-Path -Qualifier $sys }
-    $pd = [Environment]::GetFolderPath('CommonApplicationData'); if (-not $pd) { $pd = "$($env:SystemDrive)\ProgramData" }
-    if (-not $env:ProgramData) { $env:ProgramData = $pd }
-    if (-not $env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE = $pd }
-    $pf = [Environment]::GetFolderPath('ProgramFiles')
-    if (-not $env:ProgramFiles) { $env:ProgramFiles = $pf }
-    if (-not ${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} = [Environment]::GetFolderPath('ProgramFilesX86') }
-    if (-not $env:COMPUTERNAME) { $env:COMPUTERNAME = [Environment]::MachineName }
-    if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData') }
-    if (-not $env:APPDATA) { $env:APPDATA = [Environment]::GetFolderPath('ApplicationData') }
-    if (-not $env:USERPROFILE) { $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile') }
-    if (-not $env:PSModulePath) { $env:PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
-    $script:Root = Join-Path $pd 'OminullMaintenance'
+  $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
+  $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
+    ProgramFiles = $pf; 'ProgramFiles(x86)' = (& $f 'ProgramFilesX86'); COMPUTERNAME = [Environment]::MachineName
+    LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
+    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
+  foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $script:Root = Join-Path $pd 'OminullMaintenance'
 }
+# audit reports, enforce changes, revert restores recorded first-seen values.
 function Get-Mode([string]$Primary, [string]$Fallback) {
-    $v = $Primary; if (-not $v) { $v = $Fallback }
-    if ($v -and $v.Trim() -eq 'enforce') { 'enforce' } else { 'audit' }
+  $v = "$Primary".Trim(); if (-not $v) { $v = "$Fallback".Trim() }
+  if ('enforce', 'revert' -ccontains $v) { $v } else { 'audit' }
 }
-function Start-Log {
-    $d = Join-Path $script:Root 'logs'; New-Item -ItemType Directory -Force -Path $d | Out-Null
-    Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip 19 |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    $script:LogFile = Join-Path $d ('{0}-{1}.log' -f $Pkg, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# Tunables are params declared on line 1; a run sets OMINULL_PARAM_<NAME>. A bad value fails the run.
+function ConvertFrom-PkgParam($Def, [string]$V) {
+  $n = "param $($Def.name)"; $x = 0L
+  switch ($Def.type) {
+    'int' { if ($V -match '^-?\d{1,18}\z' -and [int64]::TryParse($V, [ref]$x) -and "$x" -ceq $V -and $x -ge $Def.min -and $x -le $Def.max) { return $x } }
+    'bool' { if ('true', 'false' -ccontains $V) { return $V -ceq 'true' } }
+    'enum' { if (@($Def.values) -ccontains $V) { return $V } }
+    'list' {
+      $l = [string[]]@(); if ($V -cne '-') { $l = [string[]]($V -split ',') }; $seen = @{}
+      foreach ($i in $l) { if ($i -cnotmatch '^[A-Za-z0-9*][A-Za-z0-9 ._*+()\-]{0,127}\z' -or $i.Trim() -cne $i -or $seen[$i.ToLower()]) { throw "$n has a bad or repeated item '$i'" }; $seen[$i.ToLower()] = 1 }
+      if ($l.Count -le $Def.max_items -and $V.Length -le 1024) { return , $l }
+    }
+  }
+  throw "$n is not a valid $($Def.type)"
 }
-function Write-Log([string]$Message) {
-    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value ('{0} {1}' -f (Get-Date -Format s), $Message) -Encoding UTF8 } catch {} }
+function Get-PkgParams([string]$Path) {
+  $o = @{}
+  foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
+    $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
+    if (-not $v) { $v = if ($d.type -eq 'list') { (@($d.default) -join ',') -replace '^$', '-' } elseif ($d.type -eq 'bool') { "$($d.default)".ToLower() } else { "$($d.default)" } }
+    $o[$d.name] = ConvertFrom-PkgParam $d $v
+  }
+  $o
 }
-# First-seen values only: a later run never overwrites what the machine had before.
-function Save-Original($Values) {
-    try {
-        $f = Join-Path $script:Root "state\$Pkg-original.json"; $cur = [ordered]@{}; $add = $false
-        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cur[$_.Name] = $_.Value } }
-        foreach ($k in $Values.Keys) { if (-not $cur.Contains($k)) { $cur[$k] = $Values[$k]; $add = $true } }
-        if ($add) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $f) | Out-Null
-            ConvertTo-Json $cur -Depth 5 | Set-Content -LiteralPath $f -Encoding UTF8
-        }
-    } catch { Write-Log "original-values save failed: $_" }
+function Start-Log([int]$Keep) {
+  $d = "$($script:Root)\logs"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Get-ChildItem -LiteralPath $d -Filter "$Pkg-*.log" | Sort-Object Name -Descending | Select-Object -Skip ([math]::Max(0, $Keep - 1)) | Remove-Item -Force -ErrorAction SilentlyContinue
+  $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
+function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
-    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
-    @{ code = $c; out = $o }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  @{ code = $c; out = $o }
 }
-# quser IDLE TIME: "." / "none" = active now, "5" minutes, "1:05" h:mm, "2+03:04" d+h:mm.
+# quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
 function ConvertFrom-QuserIdle([string]$Idle) {
-    if ($Idle -match '^(\d+)\+(\d+):(\d+)$') { return [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] }
-    if ($Idle -match '^(\d+):(\d+)$') { return [int]$matches[1] * 60 + [int]$matches[2] }
-    if ($Idle -match '^\d+$') { return [int]$Idle }
-    0
+  if ($Idle -match '^(?:(\d+)\+)?(?:(\d+):)?(\d+)$') { [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] } else { 0 }
 }
-function Test-UserActive([string[]]$Lines) {
-    foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt 15) { return $true } }
-    $false
+function Test-UserActive([string[]]$Lines, [int]$IdleMinutes) {
+  foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt $IdleMinutes) { return $true } }
+  $false
 }
-# Game install folders. Launchers that sit in the tray (Steam, Epic, Riot Client,
-# Battle.net, EA app) live elsewhere and do not count.
+# Game folders; tray launchers (Steam, Epic, Riot Client, Battle.net, EA app) do not count.
 function Test-GamePath([string]$Path) {
-    if (-not $Path) { return $false }
-    $rules = '\\steamapps\\common\\', '\\Epic Games\\(?!Launcher\\)', '\\Riot Games\\(?!Riot Client\\)', '\\XboxGames\\',
-        '\\EA Games\\', '\\Ubisoft Game Launcher\\games\\', '\\GOG Galaxy\\Games\\', '\\WindowsApps\\Microsoft\.Minecraft',
-        '\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\'
-    foreach ($r in $rules) { if ($Path -match $r) { return $true } }
-    $false
+  $Path -and ($Path -match '\\steamapps\\common\\|\\Epic Games\\(?!Launcher\\|Epic Online Services\\)|\\Riot Games\\(?!Riot Client\\)|\\XboxGames\\|\\EA Games\\|\\Ubisoft Game Launcher\\games\\|\\GOG Galaxy\\Games\\|\\WindowsApps\\Microsoft\.Minecraft|\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\')
 }
-function Test-OnBattery($Batteries) {
-    foreach ($b in @($Batteries)) { if ($b -and [int]$b.BatteryStatus -eq 1) { return $true } }
-    $false
-}
-function Get-PreflightReason([bool]$CheckUpdates) {
-    $q = Invoke-Native 'quser.exe' @()
-    if ($q.code -ge 0 -and (Test-UserActive $q.out)) { return 'someone is using the computer' }
-    foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
-        if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
-    }
-    if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
-    if ($CheckUpdates) {
-        if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
-        try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
-    }
-    $null
-}
-function Test-PendingReboot {
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
-    (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-}
-function Get-Reg([string]$Path, [string]$Name) {
-    try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null }
-}
-function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-    New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
-}
-# The Default user's hive: what every new profile starts from.
-function Mount-DefaultHive {
-    $root = 'Registry::HKEY_USERS\OminullDefault'
-    if (Test-Path $root) { Dismount-DefaultHive }
-    $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default
-    $r = Invoke-Native 'reg.exe' @('load', 'HKU\OminullDefault', (Join-Path $dir 'NTUSER.DAT'))
-    if ($r.code -ne 0) { throw "could not load the Default user hive: $($r.out -join ' ')" }
-    $root
-}
-# A hive left loaded would lock the Default profile, so unloading is retried.
-function Dismount-DefaultHive {
-    for ($i = 0; $i -lt 5; $i++) {
-        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-        $r = Invoke-Native 'reg.exe' @('unload', 'HKU\OminullDefault')
-        if ($r.code -eq 0) { return }
-        Start-Sleep -Seconds 2
-    }
-    throw "the Default user hive could not be unloaded: $($r.out -join ' ')"
+function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
+function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+  $q = Invoke-Native 'quser.exe' @()
+  if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
+  foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
+    if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
+  }
+  if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
+  if ($CheckUpdates) {
+    if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
+    try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
+  }
 }
 function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detail) {
-    if (@('ok', 'fixed', 'drift', 'failed', 'skipped') -notcontains $State) { $State = 'failed' }
-    if ($null -eq $Changed) { $Changed = @() }
-    $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = $Detail }) -Compress -Depth 6
-    if ($j.Length -gt 12000) { $j = ConvertTo-Json ([ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = $Changed; detail = @{ truncated = $true } }) -Compress -Depth 3 }
-    $j -replace "[`r`n]", ' '
+  if ('ok', 'fixed', 'drift', 'failed', 'skipped', 'na' -notcontains $State) { $State = 'failed' }
+  $r = [ordered]@{ v = 1; state = $State; reboot = $Reboot; changed = @($Changed | Where-Object { $_ }); detail = $Detail }
+  $j = ConvertTo-Json $r -Compress -Depth 6
+  if ($j.Length -gt 12000) { $r.detail = @{ truncated = $true }; $j = ConvertTo-Json $r -Compress -Depth 3 }
+  $j -replace "[`r`n]", ' '
 }
 # --- prelude end ---
-# Required diagnostic data (1) is the floor on Home/Pro; 0 only exists on Enterprise/Education/IoT.
-function Get-TelemetryFloor([string]$Edition) {
-    if ($Edition -match '^(Enterprise|Education|IoT|ServerRdsh)') { 0 } else { 1 }
+# --- original values begin (shared; tests compare) ---
+# First-seen values, recorded before enforce changes them, never overwritten.
+function Get-Original {
+  $o = [ordered]@{}; $f = "$($script:Root)\state\$Pkg-original.json"
+  if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $o[$_.Name] = $_.Value } }
+  $o
 }
-function Get-MachineSettings([int]$Telemetry) {
-    $p = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows'
-    @(
-        @("$p\DataCollection", 'AllowTelemetry', $Telemetry), @("$p\DataCollection", 'DoNotShowFeedbackNotifications', 1),
-        @("$p\AdvertisingInfo", 'DisabledByGroupPolicy', 1),
-        @("$p\CloudContent", 'DisableWindowsConsumerFeatures', 1), @("$p\CloudContent", 'DisableSoftLanding', 1),
-        @("$p\CloudContent", 'DisableCloudOptimizedContent', 1), @("$p\CloudContent", 'DisableConsumerAccountStateContent', 1),
-        @("$p\System", 'EnableActivityFeed', 0), @("$p\System", 'PublishUserActivities', 0), @("$p\System", 'UploadUserActivities', 0),
-        @("$p\Windows Search", 'DisableWebSearch', 1), @("$p\Windows Search", 'ConnectedSearchUseWeb', 0), @("$p\Windows Search", 'AllowCloudSearch', 0),
-        @("$p\WindowsCopilot", 'TurnOffWindowsCopilot', 1),
-        @("$p\WindowsAI", 'DisableAIDataAnalysis', 1), @("$p\WindowsAI", 'AllowRecallEnablement', 0)
-    )
+function Save-Original($Values) {
+  $o = Get-Original; $n = $o.Count; foreach ($k in $Values.Keys) { if (-not $o.Contains($k)) { $o[$k] = $Values[$k] } }
+  if ($o.Count -gt $n) { New-Item -ItemType Directory -Force -Path "$($script:Root)\state" | Out-Null; ConvertTo-Json $o -Depth 5 | Set-Content -LiteralPath "$($script:Root)\state\$Pkg-original.json" -Encoding UTF8 }
 }
-# Relative to the Default user's hive: only profiles created from now on start with these.
-function Get-UserSettings {
-    $cdm = 'Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
-    @(
-        @('Software\Policies\Microsoft\Windows\CloudContent', 'DisableTailoredExperiencesWithDiagnosticData', 1),
-        @('Software\Policies\Microsoft\Windows\Explorer', 'DisableSearchBoxSuggestions', 1),
-        @('Software\Policies\Microsoft\Windows\WindowsCopilot', 'TurnOffWindowsCopilot', 1),
-        @('Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo', 'Enabled', 0),
-        @($cdm, 'SilentInstalledAppsEnabled', 0), @($cdm, 'SystemPaneSuggestionsEnabled', 0), @($cdm, 'SoftLandingEnabled', 0),
-        @($cdm, 'SubscribedContent-338388Enabled', 0), @($cdm, 'SubscribedContent-338389Enabled', 0),
-        @($cdm, 'SubscribedContent-353694Enabled', 0), @($cdm, 'SubscribedContent-353696Enabled', 0)
-    )
+# revert: HKLM:|DefaultUser\key\name = DWORD ($null: absent), service:<name> = StartMode/State; others are kept.
+function Invoke-Revert([string]$HiveRoot) {
+  $done = @(); $keep = @(); $err = @()
+  foreach ($e in (Get-Original).GetEnumerator()) {
+    $k = $e.Key
+    try {
+      if ($k -match '^service:(.+)$') {
+        $n = $matches[1]; $m, $r = "$($e.Value)" -split '/'
+        Set-Service -Name $n -StartupType ($m -replace '^Auto$', 'Automatic'); if ($r -eq 'Running') { Start-Service -Name $n }
+      } elseif ($k -match '^(HKLM:|DefaultUser)\\') { Restore-Reg $k $e.Value $HiveRoot } else { $keep += $k; continue }
+      $done += $k; $Changed.Add("restored $k")
+    } catch { $err += "$k : $_" }
+  }
+  $Detail.restored = $done; $Detail.not_restorable = $keep
+  $script:State = $(if ($err) { $Detail.errors = $err; 'failed' } elseif ($done) { 'fixed' } else { 'ok' })
 }
-$ServiceNames = 'DiagTrack', 'dmwappushservice'
-function Get-Drift($Settings) {
-    $d = [ordered]@{}
-    foreach ($s in $Settings) { $cur = Get-Reg $s[0] $s[1]; if ("$cur" -ne "$($s[2])") { $d["$($s[0])\$($s[1])"] = $cur } }
-    $d
+# --- original values end ---
+# --- registry helpers begin (shared; tests compare) ---
+function New-Control([string]$Id, $Expected, $Actual, [string]$State, [string]$Risk) {
+  [ordered]@{ id = $Id; expected = "$Expected"; actual = "$Actual"; state = $State; risk = $(if ($Risk) { $Risk } else { 'safe' }) }
 }
-function Get-ServiceDrift {
-    $d = [ordered]@{}
-    foreach ($n in $ServiceNames) {
-        $s = Get-CimInstance Win32_Service -Filter "Name='$n'" -ErrorAction SilentlyContinue
-        if ($s -and ($s.StartMode -ne 'Disabled' -or $s.State -ne 'Stopped')) { $d["service:$n"] = "$($s.StartMode)/$($s.State)" }
+function Get-Reg([string]$Path, [string]$Name) { try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null } }
+function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
+  if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+  New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
+}
+function Restore-Reg([string]$Key, $Value, [string]$HiveRoot) {
+  $null = $Key -match '^(.+)\\([^\\]+)$'; $p = $matches[1] -replace '^DefaultUser', $HiveRoot
+  if ($null -eq $Value) { Remove-ItemProperty -LiteralPath $p -Name $matches[2] -ErrorAction SilentlyContinue } else { Set-RegDword $p $matches[2] $Value }
+}
+# Default user hive (new profiles): one run at a time, mutex held load to unload; never unloads one it didn't load.
+function Mount-DefaultHive([int]$WaitMs = 120000) {
+  $m = New-Object Threading.Mutex($false, 'Global\OminullDefaultHive')
+  try { $got = $m.WaitOne($WaitMs) } catch [Threading.AbandonedMutexException] { $got = $true }
+  if (!$got) { $m.Dispose(); $script:State = 'skipped'; $Detail.reason = 'another package is using the Default user hive'; return }
+  $script:HiveLock = $m; $h = 'Registry::HKEY_USERS\OminullDefault'
+  if (Test-Path $h) { $Detail.hive_preloaded = $true; return $h }
+  $r = Invoke-Native 'reg.exe' @('load', 'HKU\OminullDefault', "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default)\NTUSER.DAT")
+  if ($r.code) { Dismount-DefaultHive; throw "could not load the Default user hive: $($r.out)" }
+  $script:HiveMine = $true; $h
+}
+function Dismount-DefaultHive {
+  if (!($m = $script:HiveLock)) { return }
+  try {
+    for ($i = 0; $script:HiveMine -and $i -lt 5; $i++) {
+      [gc]::Collect(); [gc]::WaitForPendingFinalizers(); $r = Invoke-Native 'reg.exe' @('unload', 'HKU\OminullDefault')
+      if ($r.code) { Start-Sleep 2 } else { $script:HiveMine = $false }
     }
-    $d
+    if ($script:HiveMine) { throw "the Default user hive could not be unloaded: $($r.out)" }
+  } finally { $script:HiveMine = $false; $script:HiveLock = $null; $m.ReleaseMutex(); $m.Dispose() }
 }
-function Get-AllDrift($Machine, $User, $HiveRoot) {
-    $all = [ordered]@{}
-    foreach ($k in (Get-Drift $Machine).GetEnumerator()) { $all[$k.Key] = $k.Value }
-    $u = @($User | ForEach-Object { , @("$HiveRoot\$($_[0])", $_[1], $_[2]) })
-    foreach ($k in (Get-Drift $u).GetEnumerator()) { $all[$k.Key -replace '^Registry::HKEY_USERS\\OminullDefault', 'DefaultUser'] = $k.Value }
-    foreach ($k in (Get-ServiceDrift).GetEnumerator()) { $all[$k.Key] = $k.Value }
-    $all
+# A setting is (path, name, DWORD[, 'careful']); its key names it in originals and controls.
+function Get-Key($s) { "$($s[0])\$($s[1])" -replace '^Registry::HKEY_USERS\\OminullDefault', 'DefaultUser' }
+function Get-Drift($Settings) {
+  $d = [ordered]@{}; foreach ($s in $Settings) { $c = Get-Reg $s[0] $s[1]; if ("$c" -ne "$($s[2])") { $d[(Get-Key $s)] = $c } }; $d
+}
+# Preflight, record originals, apply; the check after decides the state. One control per setting.
+function Invoke-Settings($Settings) {
+  $after = $drift = Get-Drift $Settings; $fixed = @{}; Write-Log "drift: $($drift.Keys -join ', ')"
+  $script:State = $(if (-not $drift.Count) { 'ok' } elseif ($Mode -ne 'enforce') { 'drift' } elseif ($why = Get-PreflightReason $false $Opt.idle_minutes) { $Detail.reason = $why; 'skipped' } else { 'fixed' })
+  if ($State -eq 'fixed') {
+    Save-Original $drift; $w = @()
+    foreach ($s in $Settings) { if ($drift.Contains(($k = Get-Key $s))) { try { Set-RegDword $s[0] $s[1] $s[2]; $fixed[$k] = 1; $Changed.Add("$k=$($s[2])") } catch { $w += "$k : $_" } } }
+    if (($after = Get-Drift $Settings).Count) { $script:State = 'failed' }; if ($w) { $Detail.warnings = $w }
+  }
+  $Detail.controls = @(foreach ($s in $Settings) {
+    $k = Get-Key $s; $a = $after.Contains($k)
+    New-Control $k $s[2] $(if ($a) { $after[$k] } else { $s[2] }) $(if ($a) { 'fail' } elseif ($fixed[$k]) { 'fixed' } else { 'pass' }) $s[3] })
+}
+# --- registry helpers end ---
+# group = key|name|value under the table's root (user: Default hive, new profiles). T = telemetry floor.
+$Cdm = 'Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; $Pol = 'Software\Policies\Microsoft\Windows'
+$Machine = @{ telemetry = 'DataCollection|AllowTelemetry|T'; feedback = 'DataCollection|DoNotShowFeedbackNotifications|1'
+  ads = 'AdvertisingInfo|DisabledByGroupPolicy|1'; copilot = 'WindowsCopilot|TurnOffWindowsCopilot|1'
+  suggestions = @('WindowsConsumerFeatures', 'SoftLanding', 'CloudOptimizedContent', 'ConsumerAccountStateContent' | ForEach-Object { "CloudContent|Disable$_|1" })
+  activity_history = 'System|EnableActivityFeed|0', 'System|PublishUserActivities|0', 'System|UploadUserActivities|0'
+  web_search = 'Windows Search|DisableWebSearch|1', 'Windows Search|ConnectedSearchUseWeb|0', 'Windows Search|AllowCloudSearch|0'
+  recall = 'WindowsAI|DisableAIDataAnalysis|1', 'WindowsAI|AllowRecallEnablement|0' }
+$User = @{ telemetry = "$Pol\CloudContent|DisableTailoredExperiencesWithDiagnosticData|1"; web_search = "$Pol\Explorer|DisableSearchBoxSuggestions|1"
+  copilot = "$Pol\WindowsCopilot|TurnOffWindowsCopilot|1"; ads = 'Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo|Enabled|0'
+  suggestions = @('SilentInstalledApps', 'SystemPaneSuggestions', 'SoftLanding', 338388, 338389, 353694, 353696 |
+    ForEach-Object { "$Cdm|$($_ -replace '^\d', 'SubscribedContent-$0')Enabled|0" }) }
+$Svc = @{ telemetry_services = 'DiagTrack|Start|4', 'dmwappushservice|Start|4' }
+function Get-TelemetryFloor([string]$Edition) { if ($Edition -match '^(Enterprise|Education|IoT|ServerRdsh)') { 0 } else { 1 } }
+function Get-Settings($Table, [string]$Root, [int]$Telemetry, [string[]]$TurnOff) {
+  foreach ($t in $TurnOff) { if (-not ($Machine[$t] -or $User[$t] -or $Svc[$t])) { throw "unknown privacy group '$t'" } }
+  foreach ($e in @($TurnOff | ForEach-Object { $Table[$_] } | Where-Object { $_ })) {
+    $k, $n, $v = $e -split '\|'; , @("$Root\$k", $n, $(if ($v -eq 'T') { $Telemetry } else { [int]$v }))
+  }
 }
 function Invoke-Package {
-    $edition = Get-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID'
-    $machine = Get-MachineSettings (Get-TelemetryFloor $edition)
-    $user = Get-UserSettings
-    $Detail.edition = $edition
-    $hive = Mount-DefaultHive
-    try {
-        $drift = Get-AllDrift $machine $user $hive
-        $Detail.drift = $drift
-        Write-Log "drift: $($drift.Keys -join ', ')"
-        if ($drift.Count -eq 0) { $script:State = 'ok'; return }
-        if ($Mode -ne 'enforce') { $script:State = 'drift'; return }
-        $why = Get-PreflightReason $false
-        if ($why) { $script:State = 'skipped'; $Detail.reason = $why; return }
-        Save-Original $drift
-        $Detail.prior = $drift
-        foreach ($s in $machine) { if ($drift.Contains("$($s[0])\$($s[1])")) { Set-RegDword $s[0] $s[1] $s[2]; $Changed.Add("$($s[0])\$($s[1])=$($s[2])") } }
-        foreach ($s in $user) { $key = "DefaultUser\$($s[0])\$($s[1])"; if ($drift.Contains($key)) { Set-RegDword "$hive\$($s[0])" $s[1] $s[2]; $Changed.Add("$key=$($s[2])") } }
-        foreach ($n in $ServiceNames) {
-            if ($drift.Contains("service:$n")) {
-                Set-Service -Name $n -StartupType Disabled; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue; $Changed.Add("service:$n=Disabled")
-            }
-        }
-        $after = Get-AllDrift $machine $user $hive
-        if ($after.Count) { $script:State = 'failed'; $Detail.still_drifting = $after } else { $script:State = 'fixed' }
-    } finally { Dismount-DefaultHive }
+  if (-not ($hive = Mount-DefaultHive)) { return }
+  try {
+    if ($Mode -eq 'revert') { Invoke-Revert $hive; return }
+    $ed = Get-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID'; $t = Get-TelemetryFloor $ed; $Detail.edition = $ed
+    Invoke-Settings (@(Get-Settings $Machine "HKLM:\$Pol" $t $Opt.turn_off) + @(Get-Settings $User $hive $t $Opt.turn_off) +
+      @(Get-Settings $Svc 'HKLM:\SYSTEM\CurrentControlSet\Services' $t $Opt.turn_off | Where-Object { Test-Path -LiteralPath $_[0] }))
+    foreach ($n in 'DiagTrack', 'dmwappushservice') { if ($Changed -like "*\$n\Start=4") { Stop-Service $n -Force -ErrorAction SilentlyContinue } }
+  } finally { Dismount-DefaultHive }
 }
 $Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false
 try {
-    Initialize-Env; Start-Log
-    $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
-    Invoke-Package
-} catch {
-    $State = 'failed'; $m = "$_"; if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
-    $Detail.error = $m; Write-Log "error: $_ $($_.ScriptStackTrace)"
-}
+  Initialize-Env; $Opt = Get-PkgParams $PSCommandPath; Start-Log $Opt.log_keep
+  $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"
+  Invoke-Package
+} catch { $State = 'failed'; $Detail.error = "$_".Substring(0, [math]::Min(400, "$_".Length)); Write-Log "error: $_ $($_.ScriptStackTrace)" }
 try { $json = Format-Result $State $Reboot $Changed.ToArray() $Detail }
 catch { $State = 'failed'; $json = '{"v":1,"state":"failed","reboot":false,"changed":[],"detail":{"error":"result could not be encoded"}}' }
 Write-Log "result $json"
