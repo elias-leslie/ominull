@@ -135,7 +135,7 @@ func TestRemoteRefusesPlainHTTPOffHost(t *testing.T) {
 
 // fakeHub answers like the hub: the session waits for the owner, then the
 // operator socket is a shell (here a local sh standing in for the agent).
-func fakeHub(t *testing.T) (*httptest.Server, *[]string) {
+func fakeHub(t *testing.T) (*httptest.Server, func() string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string
@@ -216,7 +216,7 @@ func fakeHub(t *testing.T) (*httptest.Server, *[]string) {
 			}
 		}
 	})
-	return httptest.NewServer(mux), &seen
+	return httptest.NewServer(mux), func() string { mu.Lock(); defer mu.Unlock(); return strings.Join(seen, ",") }
 }
 
 // exec opens a session under the owner's approval, runs the command over
@@ -233,8 +233,12 @@ func TestExecRunsThroughAnApprovedTerminalSession(t *testing.T) {
 	if strings.TrimSpace(string(res.Stdout)) != "Linux" || string(res.Stderr) != "oops\n" || res.Exit != 7 {
 		t.Fatalf("result %+v", res)
 	}
-	if strings.Join(*seen, ",") != "asked,opened,closed" {
-		t.Fatalf("hub saw %v", *seen)
+	// The close frame reaches the hub just after the result.
+	for i := 0; i < 100 && seen() != "asked,opened,closed"; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := seen(); got != "asked,opened,closed" {
+		t.Fatalf("hub saw %v", got)
 	}
 	if _, err := c.runJob("nope", remoteJob{Op: "exec", Command: "true"}); err == nil || !strings.Contains(err.Error(), "no endpoint") {
 		t.Fatalf("unknown endpoint: %v", err)
