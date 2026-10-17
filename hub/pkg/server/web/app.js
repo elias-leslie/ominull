@@ -9060,9 +9060,9 @@
         } } })
       ];
     });
-    return card("Maintenance", h("div", { cls: "stack" },
+    return card("Maintenance", h("div", {},
       simpleTable(["Package", "Last result", "When", "Reboot needed", ""], rows, { sortable: false }),
-      h("p", { cls: "pending", text: "Audit only reports what would change; enforce makes the changes. Each run needs your passkey. Packages never reboot the machine." })), null, true);
+      h("div", { cls: "card-body pending", text: "Audit only reports what would change; enforce makes the changes. Each run needs your passkey. Packages never reboot the machine." })), null, true);
   }
 
   function renderRoute() {
