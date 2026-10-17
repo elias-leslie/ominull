@@ -895,6 +895,7 @@ func (c *APIClient) shellOpen(args []string) error {
 	if *ttl <= 0 || *ttl > remoteMaxTTL {
 		*ttl = remoteMaxTTL
 	}
+	_ = os.Remove(heldEndedMarker(endpoint)) // opening a new session is the answer to an ended one
 	if _, held, _ := heldCall(endpoint, remoteJob{Op: "exec", Command: "true", Timeout: 30}); held {
 		fmt.Fprintf(os.Stderr, "[+] A session to %s is already open; ominullctl exec %s -- ... uses it.\n", endpoint, endpoint)
 		return nil
