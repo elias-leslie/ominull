@@ -94,6 +94,9 @@ type Server struct {
 	stopEvidenceRetention chan struct{}
 	// terminalMgr coordinates interactive pseudoterminals and recording
 	terminalMgr *terminal.Manager
+	// terminalDefaults are the startup remote shell limits; saved ones win.
+	terminalDefaults terminal.Limits
+	terminalLimitsMu sync.Mutex
 	// scriptsStore manages versioned immutable scripts
 	scriptsStore *scripts.Store
 	// vulnStore manages installed software inventory and vulnerability correlation
@@ -420,7 +423,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		responseStore:   respStore,
 		responseAuth:    responseauth.NewUDSClient(authSocket),
 		evidenceStore:   evidStore,
-		terminalMgr:     terminal.NewManager(store.DB(), evidStore, 60*time.Minute, 15*time.Minute),
+		terminalMgr:     terminal.NewManager(store.DB(), evidStore, terminal.DefaultMaxDuration, terminal.DefaultIdleTimeout),
 		scriptsStore:    scriptsStore,
 		vulnStore:       vulnStore,
 		responseEnabled: responseEnabled,
@@ -451,6 +454,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		go s.signDetectorIsolation(endpointID, reason)
 		return nil
 	})
+	s.SetTerminalLimits(terminal.Limits{})
 	return s
 }
 
@@ -3873,6 +3877,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveTerminal, s.handleTerminalSessions))))
+	mux.HandleFunc("/api/v1/terminal/limits", s.authMiddleware(s.responseGate(s.handleTerminalLimits)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
 	mux.HandleFunc("/api/v1/terminal/sessions/attach", s.authMiddleware(s.responseGate(s.handleTerminalSessionAttach)))
 	mux.HandleFunc("/api/v1/terminal/sessions/detach", s.authMiddleware(s.responseGate(s.handleTerminalSessionDetach)))

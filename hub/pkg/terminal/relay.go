@@ -317,7 +317,7 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 	}
 	// Attaching is operator activity. Without this a session detached for
 	// fourteen minutes would be swept moments after somebody came back to it.
-	sess.IdleExpiresAt = now.Add(m.idleTimeout)
+	sess.IdleExpiresAt = now.Add(m.idle())
 	idleAt := sess.IdleExpiresAt
 	st := sess.State
 	startedAt := sess.StartedAt

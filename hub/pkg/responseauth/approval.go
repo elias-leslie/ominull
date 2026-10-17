@@ -117,6 +117,10 @@ type ApprovalRequestInput struct {
 	// nothing else: an uncovered request is refused (ErrRuleNotCovered)
 	// without recording or asking anyone. The hub's schedule uses it.
 	RuleOnly bool `json:"rule_only,omitempty"`
+	// SessionSeconds is the longest a requested terminal session may run, as
+	// the hub will hold it. It is shown to the owner and not digested: agents
+	// check a terminal grant against the program alone.
+	SessionSeconds int64 `json:"session_seconds,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -363,6 +367,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	requester := cleanText(in.Requester, 80)
 	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
+	if err == nil && in.Kind == response.ActionKindTerminalSession && in.SessionSeconds != 0 {
+		action, summary, err = describeTerminal(in.Payload, targets, requester, in.SessionSeconds)
+	}
 	if err != nil {
 		return nil, err
 	}

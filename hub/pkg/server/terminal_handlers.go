@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/terminal"
@@ -70,8 +71,9 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		// asked the owner and spent the approval; the grant it produced is
 		// the only authority this session runs under.
 		var req struct {
-			EndpointID string `json:"endpoint_id"`
-			Program    string `json:"program"`
+			EndpointID         string `json:"endpoint_id"`
+			Program            string `json:"program"`
+			MaxDurationSeconds int    `json:"max_duration_seconds"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -94,7 +96,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		session, err := s.terminalMgr.CreateSession(tenantID, req.EndpointID, operatorID, req.Program, grant)
+		session, err := s.terminalMgr.CreateSessionFor(tenantID, req.EndpointID, operatorID, req.Program, grant, s.terminalDuration(req.MaxDurationSeconds))
 		if err != nil {
 			writeJSONError(w, http.StatusConflict, "failed to create terminal session: "+err.Error())
 			return
@@ -594,8 +596,9 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 		return nil, false
 	}
 	var req struct {
-		EndpointID string `json:"endpoint_id"`
-		Program    string `json:"program"`
+		EndpointID         string `json:"endpoint_id"`
+		Program            string `json:"program"`
+		MaxDurationSeconds int    `json:"max_duration_seconds"`
 	}
 	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
 		return nil, false
@@ -604,6 +607,10 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 	if !ok {
 		return nil, false
 	}
+	// The digested payload stays {"program":...}: agents check a terminal
+	// grant against exactly that. The session length is the hub's to
+	// enforce; the authority only shows it to the owner.
+	d := s.terminalDuration(req.MaxDurationSeconds)
 	payload, err := json.Marshal(response.TerminalSessionPayload{Program: program})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -611,9 +618,20 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 	}
 	return &approvalPlan{
 		Kind: response.ActionKindTerminalSession, Action: "Open terminal",
-		Summary: "Interactive " + program + " on " + s.endpointLabels([]string{req.EndpointID}) + ", recorded, for " + s.operatorFromRequest(r),
-		Targets: []string{req.EndpointID}, Payload: payload,
+		Summary: "Interactive " + program + " on " + s.endpointLabels([]string{req.EndpointID}) + ", recorded, up to " + humanDuration(d) + ", for " + s.operatorFromRequest(r),
+		Targets: []string{req.EndpointID}, Payload: payload, SessionSeconds: int64(d / time.Second),
 	}, true
+}
+
+// terminalDuration is the session length a caller asked for, held to the
+// hub's maximum; zero or less asks for the maximum.
+func (s *Server) terminalDuration(seconds int) time.Duration {
+	limit := s.terminalMgr.MaxDuration()
+	d := time.Duration(seconds) * time.Second
+	if d <= 0 || d > limit {
+		return limit
+	}
+	return d
 }
 
 // tailStdout keeps the newest stdout frames whose data adds up to at most n

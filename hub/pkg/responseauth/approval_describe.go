@@ -105,19 +105,58 @@ func listTargets(t []string) string {
 	return strings.Join(t[:show], ", ") + fmt.Sprintf(" and %d more", len(t)-show)
 }
 
+// maxTerminalSessionSeconds is the longest session length the authority will
+// show; the hub's own bound is the same (terminal.LimitBounds).
+const maxTerminalSessionSeconds = 24 * 60 * 60
+
+// describeTerminal shows a terminal request; seconds, when set, is how long
+// the hub will let the session run.
+func describeTerminal(payload []byte, targets []string, requester string, seconds int64) (string, string, error) {
+	var p response.TerminalSessionPayload
+	if err := decodeJSON(payload, &p); err != nil || strings.TrimSpace(p.Program) == "" {
+		return "", "", errors.New("terminal approval payload must name the program")
+	}
+	if len(targets) != 1 {
+		return "", "", errors.New("a terminal approval covers exactly one endpoint")
+	}
+	if seconds < 0 || seconds > maxTerminalSessionSeconds {
+		return "", "", errors.New("a terminal session runs at most 24 hours")
+	}
+	length := ""
+	if seconds > 0 {
+		length = " up to " + spanText(seconds) + ","
+	}
+	return "Open terminal", fmt.Sprintf("Interactive %s on %s, recorded,%s for %s",
+		cleanText(p.Program, 120), targets[0], length, requester), nil
+}
+
+// spanText reads a length of time the way the owner says it: "4 hours",
+// "1 hour 30 minutes", "45 minutes".
+func spanText(seconds int64) string {
+	h, m := seconds/3600, (seconds%3600+59)/60
+	if m == 60 {
+		h, m = h+1, 0
+	}
+	unit := func(n int64, one, many string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return strconv.FormatInt(n, 10) + " " + many
+	}
+	switch {
+	case h > 0 && m > 0:
+		return unit(h, "hour", "hours") + " " + unit(m, "minute", "minutes")
+	case h > 0:
+		return unit(h, "hour", "hours")
+	}
+	return unit(m, "minute", "minutes")
+}
+
 // describeApproval derives the action and summary the owner sees from the
 // digested payload. targets is the sorted, de-duplicated target list.
 func describeApproval(kind response.ActionKind, payload []byte, targets []string, requester string) (string, string, error) {
 	if kind == response.ActionKindTerminalSession {
-		var p response.TerminalSessionPayload
-		if err := decodeJSON(payload, &p); err != nil || strings.TrimSpace(p.Program) == "" {
-			return "", "", errors.New("terminal approval payload must name the program")
-		}
-		if len(targets) != 1 {
-			return "", "", errors.New("a terminal approval covers exactly one endpoint")
-		}
-		return "Open terminal", fmt.Sprintf("Interactive %s on %s, recorded, for %s",
-			cleanText(p.Program, 120), targets[0], requester), nil
+		return describeTerminal(payload, targets, requester, 0)
 	}
 
 	if kind == ActionKindDetection {
@@ -360,6 +399,11 @@ var detectionPolicyOps = map[string]map[string]string{
 	"enrolment_window": {
 		"open": "Open LAN self-enrolment",
 	},
+	// The hub's remote shell limits: session length, idle timeout and how
+	// many sessions may be open. Lowering them only tightens and asks nobody.
+	"terminal_limits": {
+		"raise": "Raise remote shell limits",
+	},
 }
 
 // describeDetectionPolicy shows the owner the change field by field, worked
@@ -435,6 +479,13 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	}
 	if p.Policy == "enrolment_window" {
 		return describeEnrolmentWindow(action, before, after, targets[0])
+	}
+	if p.Policy == "terminal_limits" {
+		if targets[0] != "terminal:limits" || before == nil {
+			return "", "", errors.New("a remote shell limits change targets terminal:limits and carries the limits in force")
+		}
+		summary, err := TerminalLimitsWording(before, after)
+		return action, summary, err
 	}
 	if !strings.HasPrefix(targets[0], "exclusion:") {
 		return "", "", errors.New("an exclusion change targets exclusion:<id>")
@@ -740,4 +791,44 @@ func describeEnrolmentWindow(action string, before, after map[string]interface{}
 	}
 	summary, err := fitParts(parts, labels)
 	return action, summary, err
+}
+
+// terminalLimitFields are the remote shell limits in the order the owner reads
+// them: the largest sane value, how a value is said, and the phrase around it.
+var terminalLimitFields = []struct {
+	key    string
+	max    float64
+	value  func(v float64) string
+	phrase string
+}{
+	{"max_duration_seconds", maxTerminalSessionSeconds, func(v float64) string { return spanText(int64(v)) }, "sessions run up to %s"},
+	{"idle_timeout_seconds", maxTerminalSessionSeconds, func(v float64) string { return spanText(int64(v)) }, "idle sessions end after %s"},
+	{"max_per_endpoint", 100, func(v float64) string { return strconv.Itoa(int(v)) }, "%s open per endpoint"},
+	{"max_per_tenant", 1000, func(v float64) string { return strconv.Itoa(int(v)) }, "%s open in all"},
+}
+
+// TerminalLimitsWording says what a change to the remote shell limits does,
+// one part per changed limit: "Remote shell: sessions run up to 4 hours (was
+// 1 hour)". The hub uses it for its audit row; the authority for the owner.
+func TerminalLimitsWording(before, after map[string]interface{}) (string, error) {
+	for _, m := range []map[string]interface{}{before, after} {
+		if len(m) != len(terminalLimitFields) {
+			return "", errors.New("remote shell limits carry exactly the four limits")
+		}
+	}
+	var parts []string
+	for _, f := range terminalLimitFields {
+		b, okB := before[f.key].(float64)
+		a, okA := after[f.key].(float64)
+		if !okA || !okB || a < 1 || b < 1 || a > f.max || b > f.max || a != float64(int64(a)) || b != float64(int64(b)) {
+			return "", fmt.Errorf("remote shell limit %s must be a whole number from 1 to %d", f.key, int64(f.max))
+		}
+		if a != b {
+			parts = append(parts, fmt.Sprintf(f.phrase, f.value(a))+" (was "+f.value(b)+")")
+		}
+	}
+	if len(parts) == 0 {
+		return "", errors.New("this remote shell limits change changes nothing")
+	}
+	return "Remote shell: " + strings.Join(parts, "; "), nil
 }

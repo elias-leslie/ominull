@@ -1235,6 +1235,17 @@
   /* Maintenance settings for the demo console: the packages above with a
      few typed settings, one fleet change and one machine override. */
   var DEMO_MAINT_ROWS = null;
+  /* Mirrors terminal.DefaultLimits and terminal.LimitBounds in the hub. */
+  var DEMO_TERMINAL_LIMITS = {
+    limits: { max_duration_seconds: 14400, idle_timeout_seconds: 900, max_per_endpoint: 3, max_per_tenant: 8 },
+    defaults: { max_duration_seconds: 14400, idle_timeout_seconds: 900, max_per_endpoint: 3, max_per_tenant: 8 },
+    saved: false,
+    bounds: { min_duration_seconds: 300, max_duration_seconds: 86400, min_idle_seconds: 60, min_per_endpoint: 1, max_per_endpoint: 10, min_per_tenant: 1, max_per_tenant: 50 }
+  };
+  function demoTerminalLimits() {
+    return JSON.parse(JSON.stringify(DEMO_TERMINAL_LIMITS));
+  }
+
   function demoMaintSettings(path) {
     var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
     if (!DEMO_MAINT_ROWS) {
@@ -1303,6 +1314,7 @@
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
+        if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1469,6 +1481,14 @@
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
       DEMO_CACHE["/api/v1/hierarchy"] = demoRebuildHierarchy();
     };
+    if (base === "/api/v1/terminal/limits") {
+      var before = JSON.stringify(DEMO_TERMINAL_LIMITS.limits);
+      if (body.reset) { DEMO_TERMINAL_LIMITS.limits = Object.assign({}, DEMO_TERMINAL_LIMITS.defaults); DEMO_TERMINAL_LIMITS.saved = false; }
+      ["max_duration_seconds", "idle_timeout_seconds", "max_per_endpoint", "max_per_tenant"].forEach(function (k) {
+        if (body[k] !== undefined) { DEMO_TERMINAL_LIMITS.limits[k] = body[k]; DEMO_TERMINAL_LIMITS.saved = true; }
+      });
+      return Object.assign(demoTerminalLimits(), { changed: JSON.stringify(DEMO_TERMINAL_LIMITS.limits) !== before || !!body.reset });
+    }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
       var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
@@ -3594,6 +3614,8 @@
     var statusUrl = "/status";
 
     var links = h("div", { cls: "account-links" },
+      h("button", { cls: "account-link-btn", type: "button", on: { click: function () { closeAccountPop(); openTerminalLimitsSheet(); } } },
+        icon("i-terminal"), h("span", { text: "Remote shell limits" })),
       h("a", { cls: "account-link-btn", href: statusUrl, target: "_blank" },
         icon("i-external"), h("span", { text: "System Status & Diagnostics" })),
       h("a", { cls: "account-link-btn", href: "/install", target: "_blank" },
@@ -3623,6 +3645,118 @@
     document.addEventListener("keydown", pop._trap, true);
     pop.querySelector(FOCUSABLE).focus();
     btn.setAttribute("aria-expanded", "true");
+  }
+
+  /* Remote shell limits (GET/PUT /api/v1/terminal/limits): how long a
+     terminal may run, when an idle one ends, how many may be open. Lowering
+     saves at once; raising waits for the owner's tap, which the hub enforces
+     whatever this sheet decides. */
+  function spanWords(seconds) {
+    var h_ = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60);
+    if (m === 60) { h_ += 1; m = 0; }
+    var unit = function (n, one, many) { return n + " " + (n === 1 ? one : many); };
+    if (h_ && m) return unit(h_, "hour", "hours") + " " + unit(m, "minute", "minutes");
+    if (h_) return unit(h_, "hour", "hours");
+    return unit(m, "minute", "minutes");
+  }
+
+  function openTerminalLimitsSheet() {
+    var holder = h("div", { cls: "stack" }, emptyBox("", "Loading the limits…"));
+    var editable = IS_ADMIN && !READ_ONLY;
+    var saveBtn = h("button", { cls: "btn btn-primary", type: "button", text: "Save", disabled: true });
+    var closeBtn = h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } });
+    var cur = null;
+    var inputs = {};
+    function field(key, label, value, attrs, defText) {
+      var a = { type: "number", step: "1", value: String(value), disabled: !editable, "aria-label": label, "data-field": key,
+        on: { input: refreshNote } };
+      Object.keys(attrs).forEach(function (k) { a[k] = attrs[k]; });
+      inputs[key] = h("input", a);
+      return [h("b", { text: label }), inputs[key], h("span", { cls: "dim-2", text: defText })];
+    }
+    var note = h("p", { cls: "pending" });
+    function wanted() {
+      var hours = parseFloat(inputs.hours.value);
+      return {
+        max_duration_seconds: Math.round(hours * 60) * 60,
+        idle_timeout_seconds: parseInt(inputs.idle.value, 10) * 60,
+        max_per_endpoint: parseInt(inputs.endpoint.value, 10),
+        max_per_tenant: parseInt(inputs.tenant.value, 10)
+      };
+    }
+    function raises(w) {
+      var l = cur.limits;
+      return ["max_duration_seconds", "idle_timeout_seconds", "max_per_endpoint", "max_per_tenant"].some(function (k) { return w[k] > l[k]; });
+    }
+    function changed(w) {
+      var l = cur.limits;
+      return ["max_duration_seconds", "idle_timeout_seconds", "max_per_endpoint", "max_per_tenant"].some(function (k) { return w[k] !== l[k]; });
+    }
+    function refreshNote() {
+      if (!cur || !editable) return;
+      var w = wanted();
+      var bad = Object.keys(w).some(function (k) { return !(w[k] > 0); });
+      saveBtn.disabled = bad || !changed(w);
+      saveBtn.textContent = !bad && raises(w) ? "Save — approve on phone" : "Save";
+      note.textContent = !bad && raises(w)
+        ? "This raises a limit, so the hub asks you to approve it on your phone first. Lowering a limit saves straight away."
+        : "Lowering a limit saves straight away. Raising one asks you to approve it on your phone.";
+    }
+    function send(body, isRaise) {
+      saveBtn.disabled = true;
+      var done = function (d) {
+        if (d && d.limits) { cur = d; draw(); }
+        toast(d && d.changed === false ? "Nothing changed" : "Remote shell limits saved", "ok");
+      };
+      var fail = function (e) { refreshNote(); if (e && e.handled) return; toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); };
+      if (isRaise) {
+        ownerApproved("/api/v1/terminal/limits", body, { method: "PUT", label: "Raise remote shell limits" }).then(done, fail);
+      } else {
+        request("/api/v1/terminal/limits", "PUT", body).then(done, fail);
+      }
+    }
+    function draw() {
+      clear(holder);
+      inputs = {};
+      var l = cur.limits, d = cur.defaults || l, b = cur.bounds || {};
+      holder.appendChild(h("p", { cls: "sub", text: "How long a remote shell may stay open and how many can be open at once. Sessions already open keep the limits they started with." }));
+      var maxH = (b.max_duration_seconds || 86400) / 3600;
+      var rows = [
+        field("hours", "Longest session (hours)", Math.round(l.max_duration_seconds / 36) / 100,
+          { min: "0.25", max: String(maxH), step: "0.25" }, spanWords(d.max_duration_seconds)),
+        field("idle", "End when idle for (minutes)", Math.round(l.idle_timeout_seconds / 60),
+          { min: String((b.min_idle_seconds || 60) / 60), max: String(maxH * 60) }, spanWords(d.idle_timeout_seconds)),
+        field("endpoint", "Open at once on one machine", l.max_per_endpoint,
+          { min: String(b.min_per_endpoint || 1), max: String(b.max_per_endpoint || 10) }, String(d.max_per_endpoint)),
+        field("tenant", "Open at once in total", l.max_per_tenant,
+          { min: String(b.min_per_tenant || 1), max: String(b.max_per_tenant || 50) }, String(d.max_per_tenant))
+      ];
+      holder.appendChild(stackOnPhone(simpleTable(["Limit", "Value", "Startup default"], rows, { sortable: false })));
+      if (editable) {
+        holder.appendChild(note);
+        if (cur.saved) {
+          holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Go back to the startup defaults",
+            on: { click: function () { send({ reset: true }, raises(d)); } } })));
+        }
+      } else {
+        holder.appendChild(h("p", { cls: "pending", text: "Only an admin can change these." }));
+      }
+      refreshNote();
+    }
+    saveBtn.addEventListener("click", function () {
+      var w = wanted();
+      send(w, raises(w));
+    });
+    openSheet("Remote shell limits", holder, editable ? [saveBtn, closeBtn] : [closeBtn], null, { guardDirty: false });
+    request("/api/v1/terminal/limits").then(function (d) {
+      cur = d;
+      draw();
+    }).catch(function (e) {
+      clear(holder);
+      holder.appendChild(emptyBox(e && e.status === 404
+        ? "Remote shells are turned off on this hub, so there are no limits to set."
+        : "Could not load the limits: " + ((e && e.message) || "request failed")));
+    });
   }
 
   function openSweepModal() {

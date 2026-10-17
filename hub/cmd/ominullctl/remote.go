@@ -49,8 +49,8 @@ const (
 	remoteMaxOutput   = 8 << 20          // bytes of stdout+stderr one command may return
 	remoteReadyWait   = 90 * time.Second // agent connect + shell start
 	remoteReadyRetry  = 10 * time.Second
-	remoteDefaultTTL  = 45 * time.Minute
-	remoteMaxTTL      = 60 * time.Minute // the hub ends every session at 60 minutes
+	remoteExecGrace   = 5 * time.Minute  // a one-shot session outlives its command's timeout by this much
+	remoteFallbackTTL = 60 * time.Minute // a hub that reports no expires_at (before 1.8.77) ends sessions at 60 minutes
 	remoteFrameStdin  = "stdin"
 	remoteFrameResize = "resize"
 	remoteFrameClose  = "close"
@@ -469,15 +469,30 @@ func (c *APIClient) tlsConfig() (*tls.Config, error) {
 }
 
 type openedSession struct {
-	SessionID string `json:"session_id"`
-	Token     string `json:"connect_token"`
-	Program   string `json:"program"`
-	Endpoint  string `json:"endpoint_id"`
+	SessionID string    `json:"session_id"`
+	Token     string    `json:"connect_token"`
+	Program   string    `json:"program"`
+	Endpoint  string    `json:"endpoint_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// lifetime is how long the hub keeps the session from now: its expires_at,
+// or the old fixed hour from a hub that does not report one.
+func (s *openedSession) lifetime(now time.Time) time.Duration {
+	if s.ExpiresAt.IsZero() {
+		return remoteFallbackTTL
+	}
+	if d := s.ExpiresAt.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // openSession asks the hub for a terminal on endpoint, waiting for the
-// owner's tap, and returns the session and its one-use operator token.
-func (c *APIClient) openSession(endpoint string) (*openedSession, error) {
+// owner's tap, and returns the session and its one-use operator token. d is
+// how long the session should run; zero asks for the hub's maximum (the hub
+// holds any request to its own limit).
+func (c *APIClient) openSession(endpoint string, d time.Duration) (*openedSession, error) {
 	if err := hubSafe(c.cfg.HubURL); err != nil {
 		return nil, err
 	}
@@ -523,7 +538,10 @@ func (c *APIClient) openSession(endpoint string) (*openedSession, error) {
 	if !found {
 		return nil, fmt.Errorf("no endpoint %q on this hub (ominullctl endpoints lists them)", endpoint)
 	}
-	body := map[string]string{"endpoint_id": endpoint, "program": program}
+	body := map[string]interface{}{"endpoint_id": endpoint, "program": program}
+	if d > 0 {
+		body["max_duration_seconds"] = int64((d + time.Second - 1) / time.Second)
+	}
 	out, err := c.ownerApproved(http.MethodPost, "/api/v1/terminal/sessions", body)
 	if err != nil {
 		return nil, err
@@ -777,7 +795,7 @@ func (c *APIClient) runJob(endpoint string, job remoteJob) (remoteResult, error)
 	if res, held, err := heldCall(endpoint, job); held {
 		return res, err
 	}
-	s, err := c.openSession(endpoint)
+	s, err := c.openSession(endpoint, time.Duration(job.Timeout)*time.Second+remoteExecGrace)
 	if err != nil {
 		return remoteResult{}, err
 	}
@@ -883,17 +901,17 @@ func (c *APIClient) cmdGet(args []string) error {
 // shellOpen: one owner tap, then commands on this endpoint reuse the session.
 func (c *APIClient) shellOpen(args []string) error {
 	fs := flag.NewFlagSet("shell open", flag.ContinueOnError)
-	ttl := fs.Duration("ttl", remoteDefaultTTL, "how long to keep the session (at most 60m; the hub also ends it after 15 idle minutes)")
+	ttl := fs.Duration("ttl", 0, "how long to keep the session, e.g. 90m (default and most: the hub's session limit; the hub also ends an idle session)")
 	debug := fs.Bool("debug", false, "keep the session even if the shell does not answer (for shell raw)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: ominullctl shell open [--ttl 45m] ENDPOINT")
+		return errors.New("usage: ominullctl shell open [--ttl 90m] ENDPOINT")
 	}
 	endpoint := fs.Arg(0)
-	if *ttl <= 0 || *ttl > remoteMaxTTL {
-		*ttl = remoteMaxTTL
+	if *ttl < 0 {
+		*ttl = 0
 	}
 	_ = os.Remove(heldEndedMarker(endpoint)) // opening a new session is the answer to an ended one
 	if _, held, _ := heldCall(endpoint, remoteJob{Op: "exec", Command: "true", Timeout: 30}); held {
@@ -903,11 +921,14 @@ func (c *APIClient) shellOpen(args []string) error {
 	if err := os.MkdirAll(heldDir(), 0o700); err != nil {
 		return err
 	}
-	s, err := c.openSession(endpoint)
+	s, err := c.openSession(endpoint, *ttl)
 	if err != nil {
 		return err
 	}
-	spec, _ := json.Marshal(holdSpec{Hub: c.cfg.HubURL, CAFile: c.cfg.CAFile, Session: *s, TTL: *ttl, Debug: *debug})
+	// The hub decides how long the session lives (its limit may be shorter
+	// than asked); the holder lets go when the hub would end it.
+	hold := s.lifetime(time.Now())
+	spec, _ := json.Marshal(holdSpec{Hub: c.cfg.HubURL, CAFile: c.cfg.CAFile, Session: *s, TTL: hold, Debug: *debug})
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -941,7 +962,7 @@ func (c *APIClient) shellOpen(args []string) error {
 		fmt.Fprintln(os.Stderr, "[!] "+strings.TrimSuffix(line[i+2:], ")"))
 	}
 	fmt.Fprintf(os.Stderr, "[+] Session %s to %s is open for %s. Run: ominullctl exec %s -- COMMAND; end it with ominullctl shell end %s\n",
-		s.SessionID, endpoint, ttl.String(), endpoint, endpoint)
+		s.SessionID, endpoint, hold.Round(time.Minute).String(), endpoint, endpoint)
 	return nil
 }
 

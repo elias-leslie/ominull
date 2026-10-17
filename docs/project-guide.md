@@ -176,19 +176,37 @@ An https hub with its own CA takes `--ca` or `OMINULL_HUB_CA` (e.g. `/etc/ominul
 Run commands on an enrolled endpoint through the hub's terminal session, over
 the agent's existing outbound channel (no listener on the endpoint, no SSH).
 Every new session waits for the owner's passkey tap, is recorded like a console
-shell, and ends at the hub's limits (60 minutes, 15 idle). Linux runs `/bin/sh`,
+shell, and ends at the hub's remote shell limits (by default 4 hours, or 15
+minutes idle; see below). Linux runs `/bin/sh`,
 Windows PowerShell (as SYSTEM). Output comes back clean: the command's own
 stdout and stderr, and `exec` exits with the command's exit code.
 
 ```bash
 ominullctl exec [--timeout S] ENDPOINT -- 'uname -a'     # one tap, one command, session ends
-ominullctl shell open [--ttl 45m] ENDPOINT               # one tap, then reuse:
+ominullctl shell open [--ttl 90m] ENDPOINT               # one tap, then reuse:
 ominullctl exec ENDPOINT -- 'journalctl -u x -n 50'      #   runs in the held session
 ominullctl put ENDPOINT ./fix.sh /tmp/fix.sh             #   files up to 2 MiB
 ominullctl get ENDPOINT /var/log/syslog ./syslog         #   (- for stdout)
 ominullctl shell end ENDPOINT
 ominullctl --json exec ENDPOINT -- CMD                   # {"stdout","stderr","exit"}
 ```
+
+`shell open` asks for the hub's longest session unless `--ttl` asks for less,
+and holds the session until the `expires_at` the hub answers with. A one-shot
+`exec` asks only for its `--timeout` plus five minutes.
+
+The limits (longest session, idle timeout, sessions open per endpoint and in
+total) are set in the console under the account menu, **Remote shell limits**,
+or with `GET`/`PUT /api/v1/terminal/limits`. The hub's flags or environment
+(`--terminal-max-duration`/`OMINULL_TERMINAL_MAX_DURATION`,
+`--terminal-idle-timeout`, `--terminal-max-per-endpoint`,
+`--terminal-max-per-tenant`) are the startup defaults; values saved from the
+console win and survive restarts. Safety bounds: 5 minutes to 24 hours, idle 1
+minute up to the session length, 1 to 10 per endpoint, 1 to 50 in total.
+Lowering a limit applies at once; raising one waits for the owner's tap (the
+owner sees e.g. "Remote shell: sessions run up to 6 hours (was 4 hours)").
+Sessions already open keep the limits they started with, and the owner's tap
+to open a session names its length ("recorded, up to 4 hours").
 
 A held session lives in a background process with a private socket under
 `$XDG_RUNTIME_DIR/ominull/`. Interrupting a command while it waits for the

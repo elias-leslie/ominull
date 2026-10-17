@@ -205,12 +205,17 @@ Terminal sessions follow a strict single-direction state machine:
 ---
 
 ### 3.6 Resource Limits & Throttling (Contract Caps)
-The following resource bounds are hard invariants:
-1. **Per-Endpoint Concurrency:** Maximum **1** active terminal session per endpoint.
-2. **Per-Tenant Concurrency:** Maximum **4** active terminal sessions per tenant.
+The session limits are hub settings (`GET`/`PUT /api/v1/terminal/limits`, the
+console's **Remote shell limits** sheet). Startup flags or environment give the
+defaults; saved values win. Lowering applies at once; raising needs the owner's
+approval. Every value must sit inside the safety bounds below
+(`terminal.LimitBounds`); a new session takes the limits in force when it
+starts.
+1. **Per-Endpoint Concurrency:** default **3** active sessions per endpoint (bounds 1-10).
+2. **Per-Tenant Concurrency:** default **8** active sessions per tenant (bounds 1-50, never fewer than per endpoint).
 3. **Connect Timeout:** **30 seconds** (Session transitions to `failed` if agent does not connect within 30s of issuance).
-4. **Idle Timeout:** **15 minutes** (Session closes if no input/output frames are recorded for 15 minutes).
-5. **Maximum Duration:** **60 minutes** (Hard ceiling; session terminates unconditionally after 1 hour).
+4. **Idle Timeout:** default **15 minutes** without operator input or attach (bounds 1 minute to the maximum duration).
+5. **Maximum Duration:** default **4 hours** (bounds 5 minutes to 24 hours). A create request may ask for less with `max_duration_seconds`; the hub holds it to the maximum and returns the session's `expires_at`. The session terminates unconditionally then. The owner's approval names the length; the signed grant payload stays `{"program":...}`, which is what agents verify.
 6. **Queue Buffer Cap:** Maximum **1 MiB** of queued relay buffer per direction. If an operator or agent sends data faster than the receiver consumes, the connection is throttled; exceeding 1 MiB aborts the session to prevent memory exhaustion.
 
 ---

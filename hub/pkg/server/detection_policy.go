@@ -53,6 +53,16 @@ type policyChange struct {
 	// ran; only tuning and exclusion changes reach the floor rules.
 	drill   []string
 	drilled bool
+	// subject names what the change loosens in the caller's errors and the
+	// 202 body; empty means detection.
+	subject string
+}
+
+func (c policyChange) loosensWhat() string {
+	if c.subject != "" {
+		return c.subject
+	}
+	return "detection"
 }
 
 // payload is what the authority digests and describes. Both sides build it
@@ -178,7 +188,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 	}
 	if s.responseAuth == nil {
 		writeJSONError(w, http.StatusServiceUnavailable,
-			"this change loosens detection ("+strings.Join(c.loosens, ", ")+"), which needs the owner's approval, and the response authority that asks for it is not available")
+			"this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+"), which needs the owner's approval, and the response authority that asks for it is not available")
 		return "", false
 	}
 	c.drill, c.drilled = s.drillProposed(c)
@@ -200,7 +210,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 		})
 		if err != nil {
 			s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", c.target, "detection policy: "+err.Error())
-			writeJSONError(w, approvalStatus(err), "this change loosens detection ("+strings.Join(c.loosens, ", ")+") and the owner's approval could not be requested: "+err.Error())
+			writeJSONError(w, approvalStatus(err), "this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the owner's approval could not be requested: "+err.Error())
 			return "", false
 		}
 		s.approvalWake.notify()
@@ -213,7 +223,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 			"targets":     v.Targets,
 			"loosens":     c.loosens,
 			"expires_at":  v.ExpiresAt,
-			"next":        "This change loosens detection, so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
+			"next":        "This change loosens " + c.loosensWhat() + ", so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
 		}
 		if c.tightenedFirst != "" {
 			body["tightened_now"] = c.tightenedFirst

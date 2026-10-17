@@ -188,3 +188,40 @@ func TestDescribeAnEnrolmentWindow(t *testing.T) {
 		}
 	}
 }
+
+// Remote shell limits and session lengths read the way the owner says them.
+func TestTerminalLengthsAndLimitsInPlainWords(t *testing.T) {
+	for secs, want := range map[int64]string{14400: "4 hours", 3600: "1 hour", 5400: "1 hour 30 minutes", 2700: "45 minutes", 60: "1 minute", 3599: "1 hour"} {
+		if got := spanText(secs); got != want {
+			t.Errorf("spanText(%d) = %q, want %q", secs, got, want)
+		}
+	}
+	_, summary, err := describeTerminal([]byte(`{"program":"powershell.exe"}`), []string{"ep-1"}, "admin", 14400)
+	if err != nil || summary != "Interactive powershell.exe on ep-1, recorded, up to 4 hours, for admin" {
+		t.Fatalf("terminal summary %q err %v", summary, err)
+	}
+	if _, _, err := describeTerminal([]byte(`{"program":"/bin/sh"}`), []string{"ep-1"}, "admin", 25*3600); err == nil {
+		t.Fatal("a 25-hour session was described")
+	}
+	before := map[string]interface{}{"max_duration_seconds": 3600.0, "idle_timeout_seconds": 900.0, "max_per_endpoint": 3.0, "max_per_tenant": 8.0}
+	after := map[string]interface{}{"max_duration_seconds": 14400.0, "idle_timeout_seconds": 1800.0, "max_per_endpoint": 3.0, "max_per_tenant": 10.0}
+	got, err := TerminalLimitsWording(before, after)
+	if err != nil || got != "Remote shell: sessions run up to 4 hours (was 1 hour); idle sessions end after 30 minutes (was 15 minutes); 10 open in all (was 8)" {
+		t.Fatalf("wording %q err %v", got, err)
+	}
+	if _, err := TerminalLimitsWording(before, before); err == nil {
+		t.Fatal("a change that changes nothing was described")
+	}
+	extra := map[string]interface{}{"max_duration_seconds": 14400.0, "idle_timeout_seconds": 900.0, "max_per_endpoint": 3.0, "max_per_tenant": 8.0, "program": "x"}
+	if _, err := TerminalLimitsWording(before, extra); err == nil {
+		t.Fatal("an unknown member was described")
+	}
+	payload, _ := json.Marshal(map[string]interface{}{"policy": "terminal_limits", "op": "raise", "before": before, "after": after})
+	action, summary, err := describeApproval(ActionKindDetection, payload, []string{"terminal:limits"}, "admin")
+	if err != nil || action != "Raise remote shell limits" || summary != got {
+		t.Fatalf("approval %q %q %v", action, summary, err)
+	}
+	if _, _, err := describeApproval(ActionKindDetection, payload, []string{"detection:tuning"}, "admin"); err == nil {
+		t.Fatal("a limits change under another target was described")
+	}
+}

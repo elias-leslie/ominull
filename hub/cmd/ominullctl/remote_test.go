@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -145,10 +146,13 @@ func fakeHub(t *testing.T) (*httptest.Server, func() string) {
 		_, _ = w.Write([]byte(`[{"id":"ep-1","os":"Linux","status":"online","response_capabilities":"{\"terminal\":{\"programs\":[\"/bin/bash\",\"/bin/sh\"]}}"}]`))
 	})
 	mux.HandleFunc("/api/v1/terminal/sessions", func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]string
+		var req map[string]interface{}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req["program"] != "/bin/sh" {
 			t.Errorf("program %q", req["program"])
+		}
+		if d, ok := req["max_duration_seconds"]; ok {
+			note(fmt.Sprintf("for %vs", d))
 		}
 		if r.Header.Get("X-Approval-ID") == "" {
 			note("asked")
@@ -158,7 +162,8 @@ func fakeHub(t *testing.T) (*httptest.Server, func() string) {
 		}
 		note("opened")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"session_id":"ts-1","endpoint_id":"ep-1","program":"/bin/sh","connect_token":"tok"}`))
+		_, _ = fmt.Fprintf(w, `{"session_id":"ts-1","endpoint_id":"ep-1","program":"/bin/sh","connect_token":"tok","expires_at":%q}`,
+			time.Now().Add(4*time.Hour).UTC().Format(time.RFC3339Nano))
 	})
 	mux.HandleFunc("/api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"ap-1","state":"approved"}`))
@@ -233,11 +238,13 @@ func TestExecRunsThroughAnApprovedTerminalSession(t *testing.T) {
 	if strings.TrimSpace(string(res.Stdout)) != "Linux" || string(res.Stderr) != "oops\n" || res.Exit != 7 {
 		t.Fatalf("result %+v", res)
 	}
-	// The close frame reaches the hub just after the result.
-	for i := 0; i < 100 && seen() != "asked,opened,closed"; i++ {
+	// A one-shot session asks only for the command's timeout plus a grace
+	// period; the close frame reaches the hub just after the result.
+	want := "for 330s,asked,for 330s,opened,closed"
+	for i := 0; i < 100 && seen() != want; i++ {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := seen(); got != "asked,opened,closed" {
+	if got := seen(); got != want {
 		t.Fatalf("hub saw %v", got)
 	}
 	if _, err := c.runJob("nope", remoteJob{Op: "exec", Command: "true"}); err == nil || !strings.Contains(err.Error(), "no endpoint") {
@@ -278,5 +285,39 @@ func TestInterruptedWaitWithdrawsTheApproval(t *testing.T) {
 	defer mu.Unlock()
 	if err == nil || !strings.Contains(err.Error(), "withdrawn") || !withdrawn {
 		t.Fatalf("err %v withdrawn %v", err, withdrawn)
+	}
+}
+
+// shell open asks for the hub's maximum unless given --ttl, and holds the
+// session for as long as the hub says it lives (expires_at), not a client cap.
+func TestHeldSessionLivesAsLongAsTheHubSays(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	hub, seen := fakeHub(t)
+	defer hub.Close()
+	c := newAPIClient(CLIConfig{HubURL: hub.URL, APIKey: "test"})
+	s, err := c.openSession("ep-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seen(); got != "asked,opened" {
+		t.Fatalf("a session for the hub's maximum sent a length: %v", got)
+	}
+	if d := s.lifetime(time.Now()); d < 3*time.Hour+59*time.Minute || d > 4*time.Hour {
+		t.Fatalf("held for %s, want the hub's 4h", d)
+	}
+	if _, err := c.openSession("ep-1", 90*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen(); !strings.HasSuffix(got, "for 5400s,opened") {
+		t.Fatalf("--ttl 90m sent %v", got)
+	}
+	// A hub without expires_at keeps the old hour; a past one is over.
+	old := openedSession{}
+	if d := old.lifetime(time.Now()); d != remoteFallbackTTL {
+		t.Fatalf("no expires_at: %s", d)
+	}
+	old.ExpiresAt = time.Now().Add(-time.Minute)
+	if d := old.lifetime(time.Now()); d != 0 {
+		t.Fatalf("expired session: %s", d)
 	}
 }

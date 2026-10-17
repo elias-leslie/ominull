@@ -1248,7 +1248,7 @@ func (c *APIClient) cmdShell(args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("usage: ominullctl shell open [--ttl 45m] ENDPOINT | shell end ENDPOINT | shell sessions|show|close <session_id>")
+		return fmt.Errorf("usage: ominullctl shell open [--ttl 90m] ENDPOINT | shell end ENDPOINT | shell sessions|show|close <session_id>")
 	}
 }
 
@@ -1653,7 +1653,7 @@ Forensics & Response Commands:
 Remote Commands (each new session waits for the owner's passkey tap):
   exec [--timeout S] ENDPOINT -- COMMAND  Run COMMAND (sh on Linux, PowerShell on Windows); prints its
                                           stdout and stderr and exits with its exit code (- reads stdin)
-  shell open [--ttl 45m] ENDPOINT         One tap, then exec/put/get on ENDPOINT reuse the session
+  shell open [--ttl 90m] ENDPOINT         One tap, then exec/put/get on ENDPOINT reuse the session
   shell end ENDPOINT                      End the held session
   put ENDPOINT LOCAL REMOTE               Copy a small file (up to 2 MiB) to the endpoint
   get ENDPOINT REMOTE LOCAL|-             Copy a file from the endpoint

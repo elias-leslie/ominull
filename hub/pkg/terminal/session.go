@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -122,7 +123,9 @@ type Manager struct {
 	evidenceStore     *evidence.Store
 	sessions          map[string]*TerminalSession
 	maxDuration       time.Duration
-	idleTimeout       time.Duration
+	idleTimeout       atomic.Int64 // nanoseconds; read on the frame path without m.mu
+	perEndpoint       int
+	perTenant         int
 	connectTimeout    time.Duration
 	maxRecordingBytes int64
 	stopSweeper       chan struct{}
@@ -130,35 +133,129 @@ type Manager struct {
 	stopSweeperOnce   sync.Once
 }
 
-// Session caps. Several shells on one endpoint (an editor, a log tail, a
-// build) are normal use; the tenant cap bounds the hub's relay load.
+// Default session limits, used until the hub applies its own (SetLimits:
+// startup flags, then the limits saved from the console). Several shells on
+// one endpoint (an editor, a log tail, a build) are normal use; the tenant cap
+// bounds the hub's relay load. Long maintenance work (updates, laptop
+// cleanup) routinely runs past an hour.
 const (
 	MaxSessionsPerEndpoint = 3
 	MaxSessionsPerTenant   = 8
+	DefaultMaxDuration     = 4 * time.Hour
+	DefaultIdleTimeout     = 15 * time.Minute
 )
+
+// Limits are the hub's terminal session limits. Zero fields keep the current
+// value in SetLimits.
+type Limits struct {
+	MaxDuration time.Duration
+	IdleTimeout time.Duration
+	PerEndpoint int
+	PerTenant   int
+}
+
+// DefaultLimits are the limits a hub runs with when nothing is configured.
+func DefaultLimits() Limits {
+	return Limits{MaxDuration: DefaultMaxDuration, IdleTimeout: DefaultIdleTimeout, PerEndpoint: MaxSessionsPerEndpoint, PerTenant: MaxSessionsPerTenant}
+}
+
+// LimitBounds are the safety bounds every configured limit must sit inside,
+// whoever sets it. The idle timeout may not exceed the session's maximum.
+var LimitBounds = struct {
+	MinDuration, MaxDuration time.Duration
+	MinIdle                  time.Duration
+	MinPerEndpoint           int
+	MaxPerEndpoint           int
+	MinPerTenant             int
+	MaxPerTenant             int
+}{
+	MinDuration: 5 * time.Minute, MaxDuration: 24 * time.Hour,
+	MinIdle:        time.Minute,
+	MinPerEndpoint: 1, MaxPerEndpoint: 10,
+	MinPerTenant: 1, MaxPerTenant: 50,
+}
+
+// Validate checks a complete set of limits against LimitBounds.
+func (l Limits) Validate() error {
+	b := LimitBounds
+	switch {
+	case l.MaxDuration < b.MinDuration || l.MaxDuration > b.MaxDuration:
+		return fmt.Errorf("session length must be between %s and %s", b.MinDuration, b.MaxDuration)
+	case l.MaxDuration%time.Minute != 0:
+		return errors.New("session length must be whole minutes")
+	case l.IdleTimeout < b.MinIdle || l.IdleTimeout > l.MaxDuration:
+		return fmt.Errorf("idle timeout must be between %s and the session length", b.MinIdle)
+	case l.IdleTimeout%time.Minute != 0:
+		return errors.New("idle timeout must be whole minutes")
+	case l.PerEndpoint < b.MinPerEndpoint || l.PerEndpoint > b.MaxPerEndpoint:
+		return fmt.Errorf("sessions per endpoint must be between %d and %d", b.MinPerEndpoint, b.MaxPerEndpoint)
+	case l.PerTenant < b.MinPerTenant || l.PerTenant > b.MaxPerTenant:
+		return fmt.Errorf("sessions per tenant must be between %d and %d", b.MinPerTenant, b.MaxPerTenant)
+	case l.PerTenant < l.PerEndpoint:
+		return errors.New("sessions per tenant may not be fewer than sessions per endpoint")
+	}
+	return nil
+}
 
 // NewManager creates a new Terminal Session Manager backed by SQLite.
 func NewManager(db *sql.DB, evidStore *evidence.Store, maxDuration, idleTimeout time.Duration) *Manager {
 	if maxDuration <= 0 {
-		maxDuration = 60 * time.Minute
+		maxDuration = DefaultMaxDuration
 	}
 	if idleTimeout <= 0 {
-		idleTimeout = 15 * time.Minute
+		idleTimeout = DefaultIdleTimeout
 	}
 	m := &Manager{
 		db:                db,
 		evidenceStore:     evidStore,
 		sessions:          make(map[string]*TerminalSession),
 		maxDuration:       maxDuration,
-		idleTimeout:       idleTimeout,
+		perEndpoint:       MaxSessionsPerEndpoint,
+		perTenant:         MaxSessionsPerTenant,
 		connectTimeout:    30 * time.Second,
 		maxRecordingBytes: DefaultMaxSessionRecordingBytes,
 		stopSweeper:       make(chan struct{}),
 		sweeperDone:       make(chan struct{}),
 	}
+	m.idleTimeout.Store(int64(idleTimeout))
 	_ = m.initStore()
 	m.startSweeper(5 * time.Second)
 	return m
+}
+
+// SetLimits applies the hub's configured session limits to new sessions.
+func (m *Manager) SetLimits(l Limits) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if l.MaxDuration > 0 {
+		m.maxDuration = l.MaxDuration
+	}
+	if l.IdleTimeout > 0 {
+		m.idleTimeout.Store(int64(l.IdleTimeout))
+	}
+	if l.PerEndpoint > 0 {
+		m.perEndpoint = l.PerEndpoint
+	}
+	if l.PerTenant > 0 {
+		m.perTenant = l.PerTenant
+	}
+}
+
+// Limits are the limits new sessions get now.
+func (m *Manager) Limits() Limits {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return Limits{MaxDuration: m.maxDuration, IdleTimeout: m.idle(), PerEndpoint: m.perEndpoint, PerTenant: m.perTenant}
+}
+
+// idle is the current idle timeout.
+func (m *Manager) idle() time.Duration { return time.Duration(m.idleTimeout.Load()) }
+
+// MaxDuration is the longest a new session may run.
+func (m *Manager) MaxDuration() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.maxDuration
 }
 
 // SetEvidenceStore configures the evidence store backend for frame encryption.
@@ -276,8 +373,18 @@ func (m *Manager) CreateSession(tenantID, endpointID, operatorID, program string
 	return m.CreateSessionWithID("", "", tenantID, endpointID, operatorID, program, grant)
 }
 
+// CreateSessionFor is CreateSession for a session that ends after d (at most
+// the hub's maximum; zero or less means the maximum).
+func (m *Manager) CreateSessionFor(tenantID, endpointID, operatorID, program string, grant *response.EndpointGrant, d time.Duration) (*TerminalSession, error) {
+	return m.createSession("", "", tenantID, endpointID, operatorID, program, grant, d)
+}
+
 // CreateSessionWithID initializes a new waiting terminal session with explicit IDs and limits enforcement.
 func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, operatorID, program string, grant *response.EndpointGrant) (*TerminalSession, error) {
+	return m.createSession(sessionID, token, tenantID, endpointID, operatorID, program, grant, 0)
+}
+
+func (m *Manager) createSession(sessionID, token, tenantID, endpointID, operatorID, program string, grant *response.EndpointGrant, d time.Duration) (*TerminalSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -289,11 +396,14 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 	if err != nil {
 		return nil, fmt.Errorf("terminal session caps could not be checked: %w", err)
 	}
-	if activeTenant >= MaxSessionsPerTenant {
-		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per tenant (%s)", MaxSessionsPerTenant, tenantID)
+	if activeTenant >= m.perTenant {
+		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per tenant (%s)", m.perTenant, tenantID)
 	}
-	if activeEndpoint >= MaxSessionsPerEndpoint {
-		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per endpoint (%s)", MaxSessionsPerEndpoint, endpointID)
+	if activeEndpoint >= m.perEndpoint {
+		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per endpoint (%s)", m.perEndpoint, endpointID)
+	}
+	if d <= 0 || d > m.maxDuration {
+		d = m.maxDuration
 	}
 
 	if sessionID == "" {
@@ -324,8 +434,8 @@ func (m *Manager) CreateSessionWithID(sessionID, token, tenantID, endpointID, op
 		OperatorToken:     opToken,
 		OperatorTokenHash: HashToken(opToken),
 		CreatedAt:         now,
-		ExpiresAt:         now.Add(m.maxDuration),
-		IdleExpiresAt:     now.Add(m.idleTimeout),
+		ExpiresAt:         now.Add(d),
+		IdleExpiresAt:     now.Add(m.idle()),
 		Grant:             grant,
 		Frames:            make([]TerminalFrame, 0, 128),
 		RecordingState:    "recording",
@@ -439,11 +549,11 @@ func (m *Manager) RecordFrame(sessionID string, frame TerminalFrame) error {
 	   was harmless while a dropped operator socket killed the session and is
 	   not harmless now: a detached `tail -f` or `yes` produces stdout for
 	   ever and would hold a root shell open on a live endpoint until the
-	   60-minute max duration, with nobody watching it. Only frames the
+	   session's max duration, with nobody watching it. Only frames the
 	   operator originates - keystrokes and window resizes - and attaching
 	   count as activity. */
 	if frame.Type == FrameStdin || frame.Type == FrameResize {
-		sess.IdleExpiresAt = now.Add(m.idleTimeout)
+		sess.IdleExpiresAt = now.Add(m.idle())
 	}
 
 	// Counters and the idle deadline reach SQLite on the next sweep (5 s)

@@ -17,6 +17,7 @@ import (
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/setup"
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/terminal"
 )
 
 const banner = `
@@ -69,6 +70,10 @@ func main() {
 	clientCerts := flag.String("client-certs", envOr("OMINULL_CLIENT_CERTS", "optional"), "Agent client-certificate mode: off, optional, or required")
 	setupTokenFile := flag.String("setup-token-file", envOr("OMINULL_SETUP_TOKEN_FILE", "/var/lib/ominull/setup.token"), "Root-only first-run setup token file")
 	enableResponse := flag.Bool("enable-unreleased-response", envBool("OMINULL_ENABLE_UNRELEASED_RESPONSE", false), "Enable unreleased response, evidence, terminal, script, and vulnerability routes (disabled by default)")
+	terminalMaxDuration := flag.Duration("terminal-max-duration", envDuration("OMINULL_TERMINAL_MAX_DURATION", terminal.DefaultMaxDuration), "Longest a remote shell session may run; each session may ask for less")
+	terminalIdleTimeout := flag.Duration("terminal-idle-timeout", envDuration("OMINULL_TERMINAL_IDLE_TIMEOUT", terminal.DefaultIdleTimeout), "End a remote shell session after this long with no activity")
+	terminalPerEndpoint := flag.Int("terminal-max-per-endpoint", envInt("OMINULL_TERMINAL_MAX_PER_ENDPOINT", terminal.MaxSessionsPerEndpoint), "Open remote shell sessions allowed per endpoint")
+	terminalPerTenant := flag.Int("terminal-max-per-tenant", envInt("OMINULL_TERMINAL_MAX_PER_TENANT", terminal.MaxSessionsPerTenant), "Open remote shell sessions allowed per tenant")
 	flag.String("config", configPath, "Package-owned hub environment file")
 	flag.Parse()
 
@@ -183,6 +188,7 @@ func main() {
 		int(retention.FlowRollups.Hours()/24), int(retention.AnomalyCounts.Hours()/24))
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
+	srv.SetTerminalLimits(terminal.Limits{MaxDuration: *terminalMaxDuration, IdleTimeout: *terminalIdleTimeout, PerEndpoint: *terminalPerEndpoint, PerTenant: *terminalPerTenant})
 	srv.SetTLS(server.TLSOptions{
 		Listen:      *tlsListen,
 		CertFile:    *tlsCert,
@@ -357,6 +363,19 @@ func envInt(name string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		log.Printf("[!] Ignoring invalid %s value; using %d.", name, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		log.Printf("[!] Ignoring invalid %s value; using %s.", name, fallback)
 		return fallback
 	}
 	return parsed
