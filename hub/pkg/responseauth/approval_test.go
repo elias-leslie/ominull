@@ -140,6 +140,9 @@ func TestApprovalAssertionChecks(t *testing.T) {
 		"wrong origin": func(ch string) *responseauth.ApprovalAssertion {
 			return ap.AssertWith(ch, "approve", "https://evil.example.invalid", testRP, 0x05)
 		},
+		"desktop origin of another host": func(ch string) *responseauth.ApprovalAssertion {
+			return ap.AssertWith(ch, "approve", "nightshift-desktop://evil.example.invalid", testRP, 0x05)
+		},
 		"wrong rp id": func(ch string) *responseauth.ApprovalAssertion {
 			return ap.AssertWith(ch, "approve", testOrigin, "evil.example.invalid", 0x05)
 		},
@@ -172,6 +175,21 @@ func TestApprovalAssertionChecks(t *testing.T) {
 			// Clean up so the pending cap does not trip later cases.
 			_, _ = auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "deny"})
 		})
+	}
+}
+
+// The Nightshift desktop approver asks the key over USB with its own origin
+// for the same rpID; the pinned key and the challenge still decide.
+func TestApprovalAcceptsNightshiftDesktopOrigin(t *testing.T) {
+	auth, ap := newApprovalAuthority(t)
+	v, err := auth.RequestApproval(isolateRequestFor("ep-desk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := ap.AssertWith(v.Challenge, "approve", "nightshift-desktop://"+testRP, testRP, 0x05)
+	got, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: a})
+	if err != nil || got.State != responseauth.ApprovalApproved {
+		t.Fatalf("desktop-origin approval: %v %v", got, err)
 	}
 }
 

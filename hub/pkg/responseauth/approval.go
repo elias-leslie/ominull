@@ -587,6 +587,21 @@ func unb64url(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
+// NightshiftDesktopOrigin is the clientDataJSON origin Nightshift's desktop
+// approver uses for the approve host rpID: it asks the security key directly
+// over USB (CTAP2), with no browser in between. Accepting it weakens nothing:
+// the origin check only stops another web page from asking for this rpID, and
+// a browser never lets a page claim a non-https origin, while any native CTAP
+// client could put the web origin into clientDataJSON just as easily. The
+// pinned credential, rpIdHash, UP+UV, sign count and the decision-bound
+// challenge still decide.
+func NightshiftDesktopOrigin(rpID string) string {
+	if rpID == "" {
+		return ""
+	}
+	return "nightshift-desktop://" + rpID
+}
+
 // verifyOwnerAssertion checks a WebAuthn assertion strictly against one of
 // the pinned approvers and returns that approver and the new sign count.
 func verifyOwnerAssertion(approvers []Approver, counters map[string]uint32, challengeHex, decision string, as *ApprovalAssertion) (*Approver, uint32, error) {
@@ -623,7 +638,7 @@ func verifyOwnerAssertion(approvers []Approver, counters map[string]uint32, chal
 	if cd.Challenge != want {
 		return nil, 0, errors.New("challenge does not match this approval and decision")
 	}
-	if cd.Origin != ap.Origin {
+	if cd.Origin != ap.Origin && cd.Origin != NightshiftDesktopOrigin(ap.RPID) {
 		return nil, 0, errors.New("origin is not the pinned approval origin")
 	}
 	if cd.CrossOrigin != nil && *cd.CrossOrigin {
