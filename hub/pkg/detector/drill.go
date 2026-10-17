@@ -183,8 +183,8 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 			hosts = append(hosts, as(ev))
 		}
 		cases = append(cases,
-			run(DrillCase{Rule: "port sweep by quiet process " + path, Want: "PORT_SCAN_RECON"}, live, ports),
-			run(DrillCase{Rule: "lateral sweep by quiet process " + path, Want: "LATERAL_PORT_SWEEP"}, live, hosts))
+			run(DrillCase{Rule: "port sweep as " + path + " (" + user + ")", Want: "PORT_SCAN_RECON"}, live, ports),
+			run(DrillCase{Rule: "lateral sweep as " + path + " (" + user + ")", Want: "LATERAL_PORT_SWEEP"}, live, hosts))
 	}
 
 	// An exclusion scoped to one endpoint, location or program is outside the

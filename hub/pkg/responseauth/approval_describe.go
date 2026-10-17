@@ -290,16 +290,26 @@ type detectionPolicyPayload struct {
 
 var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": true, "after": true, "drill": true}
 
-// drillPart is the floor drill's verdict as the first part of the owner's
-// statement, short enough to leave the change itself room: the first two
-// cases it would blind, then how many more.
-func drillPart(drill *[]string) []string {
+// drillLead is the floor drill's verdict, which opens the owner's statement:
+// the full form names the first two cases the change would blind, the short
+// form only counts them. The short form is used when the change itself leaves
+// no room for the full one; the change is never cut for it. The 10 MB burst
+// is not drilled under exclusions or quiet processes, which it yields to by
+// design, so the clean verdict says so.
+func drillLead(drill *[]string) (full, short string) {
 	if drill == nil {
-		return nil
+		return "", ""
 	}
 	cases := *drill
-	if len(cases) == 0 {
-		return []string{"floor drill: blinds no floor rule"}
+	switch {
+	case len(cases) == 0:
+		return "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes)", "floor drill: blinds no floor case"
+	case len(cases) == 1 && cases[0] == "the drill could not run":
+		return "floor drill could not run: what this blinds is unknown", "floor drill could not run"
+	}
+	short = fmt.Sprintf("BLINDS %d FLOOR CASE", len(cases))
+	if len(cases) != 1 {
+		short += "S"
 	}
 	const show = 2
 	names := make([]string, 0, show)
@@ -307,17 +317,13 @@ func drillPart(drill *[]string) []string {
 		if i == show {
 			break
 		}
-		names = append(names, cleanText(c, 48))
+		names = append(names, cleanText(c, 72))
 	}
-	part := fmt.Sprintf("BLINDS %d FLOOR CASE", len(cases))
-	if len(cases) != 1 {
-		part += "S"
-	}
-	part += ": " + strings.Join(names, ", ")
+	full = short + ": " + strings.Join(names, ", ")
 	if len(cases) > show {
-		part += fmt.Sprintf(" and %d more", len(cases)-show)
+		full += fmt.Sprintf(" and %d more", len(cases)-show)
 	}
-	return []string{part}
+	return full, short
 }
 
 // detectionPolicyOps names each change the hub can ask for, by policy.
@@ -369,7 +375,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	if p.Drill != nil && len(*p.Drill) > 256 {
 		return "", "", errors.New("detection policy drill lists more cases than a drill runs")
 	}
-	drill := drillPart(p.Drill)
+	lead, leadShort := drillLead(p.Drill)
 	var before, after map[string]interface{}
 	if err := decodeJSON(p.After, &after); err != nil || after == nil {
 		return "", "", errors.New("detection policy payload must carry the policy after the change")
@@ -390,7 +396,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		if len(parts) == 0 {
 			return "", "", errors.New("this tuning change changes nothing")
 		}
-		summary, err := fitParts(append(drill, parts...), nil)
+		summary, err := fitLead(lead, leadShort, parts, nil)
 		return action, summary, err
 	}
 	if p.Policy == "endpoint_watch" {
@@ -447,7 +453,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after, func(k string) bool { return !policyLabels[k] })...)
 		labels = policyDiff(before, after, func(k string) bool { return policyLabels[k] })
 	}
-	summary, err := fitParts(append(drill, parts...), labels)
+	summary, err := fitLead(lead, leadShort, parts, labels)
 	return action, summary, err
 }
 
@@ -603,6 +609,26 @@ func policyValue(v interface{}) string {
 		return "[" + strings.Join(items, ", ") + "]"
 	}
 	return policyJSON(v)
+}
+
+// fitLead puts the drill's verdict ahead of the change: in full when the
+// change leaves room for it, else in its short form; the change itself must
+// still fit in full beside the short form.
+func fitLead(lead, short string, parts, labels []string) (string, error) {
+	if lead == "" {
+		return fitParts(parts, labels)
+	}
+	joined := 0
+	for i, p := range parts {
+		if i > 0 {
+			joined += 2
+		}
+		joined += len([]rune(cleanText(p, approvalMaxSummary+1)))
+	}
+	if joined+2+len([]rune(lead)) > approvalMaxSummary {
+		lead = short
+	}
+	return fitParts(append([]string{lead}, parts...), labels)
 }
 
 // ErrApprovalTooLong refuses a detection-policy change whose changes do not

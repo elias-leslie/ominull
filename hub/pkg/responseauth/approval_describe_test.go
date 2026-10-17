@@ -143,14 +143,22 @@ func TestDescribeALearningWindow(t *testing.T) {
 func TestDescribeDetectionPolicyShowsTheDrill(t *testing.T) {
 	tuning := []string{"detection:tuning"}
 	for _, c := range []struct{ drill, want string }{
-		{`[]`, "floor drill: blinds no floor rule; quiet_orgs +as3"},
+		{`[]`, "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes); quiet_orgs +as3"},
 		{`["bandwidth burst"]`, "BLINDS 1 FLOOR CASE: bandwidth burst; quiet_orgs +as3"},
-		{`["lateral sweep","port sweep","port sweep by quiet process /usr/sbin/chronyd"]`, "BLINDS 3 FLOOR CASES: lateral sweep, port sweep and 1 more; quiet_orgs +as3"},
+		{`["lateral sweep","port sweep","port sweep as /usr/sbin/chronyd (chrony)"]`, "BLINDS 3 FLOOR CASES: lateral sweep, port sweep and 1 more; quiet_orgs +as3"},
+		{`["the drill could not run"]`, "floor drill could not run: what this blinds is unknown; quiet_orgs +as3"},
 	} {
 		payload := []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":` + c.drill + `,"op":"save","policy":"detection_tuning"}`)
 		if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || summary != c.want {
 			t.Fatalf("drill %s: summary %q err %v", c.drill, summary, err)
 		}
+	}
+	// A change that fits on its own is never refused for the drill: the
+	// verdict shrinks to its count instead.
+	long := `"/usr/lib/` + strings.Repeat("p", 220) + `"`
+	payload := []byte(`{"after":{"quiet_processes":[` + long + `]},"before":{"quiet_processes":[]},"drill":["lateral sweep","port sweep","x"],"op":"save","policy":"detection_tuning"}`)
+	if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || !strings.HasPrefix(summary, "BLINDS 3 FLOOR CASES; quiet_processes +/usr/lib/ppp") {
+		t.Fatalf("long change with drill: summary %q err %v", summary, err)
 	}
 	if _, _, err := describeApproval(ActionKindDetection, []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":"none","op":"save","policy":"detection_tuning"}`), tuning, "admin"); err == nil {
 		t.Fatal("a drill that is not a list was described")

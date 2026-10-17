@@ -122,22 +122,40 @@ func (s *Server) drillProposed(c policyChange) ([]string, bool) {
 		current, err = detector.Drill(s.store, now)
 	}
 	if err != nil {
-		return []string{"the drill could not run"}, true
+		return []string{drillFailed}, true
+	}
+	// A case that raises today and is missing from the proposed run (removing
+	// an agent runtime drops its resolver-bypass case) is blinded too.
+	proposed := map[string]bool{}
+	missed := []string{}
+	for _, dc := range cases {
+		proposed[dc.Rule] = true
 	}
 	already := map[string]bool{}
 	for _, dc := range current {
 		if judgeDrillCase(dc) != "" {
 			already[dc.Rule] = true
+		} else if !proposed[dc.Rule] {
+			missed = append(missed, dc.Rule)
 		}
 	}
-	missed := []string{}
 	for _, dc := range cases {
 		if !already[dc.Rule] && judgeDrillCase(dc) != "" {
 			missed = append(missed, dc.Rule)
 		}
 	}
+	if len(missed) > drillMaxShown {
+		missed = missed[:drillMaxShown]
+	}
 	return missed, true
 }
+
+// drillFailed is the one entry a drill that could not run sends; the
+// authority shows it as such, not as a blinded case.
+const drillFailed = "the drill could not run"
+
+// drillMaxShown is the most cases the authority accepts in one payload.
+const drillMaxShown = 256
 
 // credentialOf names how the caller authenticated; relay-key is Nightshift's
 // approval relay, which closes findings when the owner answers there.

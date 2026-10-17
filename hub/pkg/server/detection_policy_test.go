@@ -591,7 +591,7 @@ func TestAMixedSaveIsAskedAboutOnlyItsLoosening(t *testing.T) {
 	}
 	swap, _ := json.Marshal(map[string]any{"quiet_orgs": []string{orgs[0], "as64500"}})
 	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""))
-	if p.Summary != "floor drill: blinds no floor rule; quiet_orgs +as64500" {
+	if p.Summary != "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes); quiet_orgs +as64500" {
 		t.Fatalf("swap summary %q", p.Summary)
 	}
 	if len(store.GetDetectionTuning().QuietOrgs) != 1 {
@@ -1075,5 +1075,34 @@ func TestTheOwnerSeesWhatALooseningChangeWouldBlind(t *testing.T) {
 	}
 	if len(store.GetDetectionTuning().ContainerCIDRs) != 0 {
 		t.Fatal("the container network applied before the owner approved it")
+	}
+}
+
+// A floor case that raises today and is missing from the proposed run counts
+// as blinded: removing the agent runtime an exclusion's program is drops that
+// program's resolver-bypass case.
+func TestADrillCaseTheChangeDropsCountsAsBlinded(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.CreateExclusion(storage.Exclusion{ID: "ex-agy", TenantID: "default", Scope: "global", Name: "assistant",
+		ProcessPath: "/usr/local/bin/agy", Reason: "test", Active: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	tu := store.GetDetectionTuning()
+	var kept []storage.AgentRuntime
+	for _, rt := range tu.AgentRuntimes {
+		if rt.Path != "agy" {
+			kept = append(kept, rt)
+		}
+	}
+	if len(kept) == len(tu.AgentRuntimes) {
+		t.Fatal("need agy among the shipped agent runtimes")
+	}
+	raw, _ := json.Marshal(map[string]any{"agent_runtimes": kept})
+	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""))
+	if !strings.HasPrefix(p.Summary, "BLINDS 1 FLOOR CASE: resolver bypass under exclusion ex-agy") {
+		t.Fatalf("summary %q", p.Summary)
 	}
 }

@@ -92,7 +92,7 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 		rec := srv.runFloorDrill(now)
 		var got []string
 		for _, m := range rec.Missed {
-			if rule := m[:strings.Index(m, ":")]; !strings.Contains(rule, " by quiet process ") {
+			if rule := m[:strings.Index(m, ": ")]; !strings.HasSuffix(rule, ")") {
 				got = append(got, rule)
 			}
 		}

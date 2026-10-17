@@ -289,9 +289,12 @@ too small range or inside a container network, the sweeps for a program the
 code exempts), and so is the burst, which an exclusion may cover by design.
 A loosening tuning save or exclusion that waits for the owner is drilled
 before it is applied: the 202 carries `drill_blinds`, the floor cases the
-proposed policy would blind that the saved one does not, and the owner's
-statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...") or with
-"floor drill: blinds no floor rule". The approved retry drills again, so a
+proposed policy would blind that the saved one does not (a case that raises
+today and that the proposed policy no longer builds, such as the resolver
+bypass of a removed agent runtime, counts), and the owner's statement opens
+with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...", shortened to the count
+when the change leaves no room) or with "floor drill: blinds no floor case
+(the 10 MB burst yields to exclusions and quiet processes)". The approved retry drills again, so a
 policy that moved in between changes the digest and the owner is asked again.
 Presence, retirement and learning windows reach no floor rule the drill runs,
 so their statements carry no drill.
