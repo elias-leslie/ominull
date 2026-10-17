@@ -173,8 +173,8 @@ type TrustKeys struct {
 // ReleasePublicKeyPEM is the release signing key pinned into every agent
 // (agent/include/release_key.h; release.sh refuses a signing key that differs).
 const ReleasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE71CpMPEGtyUpx3ZSuvcf+YMiwM1F
-0e6k7D05y7jLxXQblk3d7ZirBH3MNJlo7aUbtmlQ2izz/u5wTG2ztJ9TBw==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUczKMOE8yfDzAWxOC6WPJiSTz/Oo
+j/YnhRtusQqVxGVFFgcfxN1KqkCaLO2ZoYokeanZyJXzmJPzbq8woDaXfg==
 -----END PUBLIC KEY-----
 `
 
