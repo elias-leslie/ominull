@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -125,5 +126,20 @@ func TestAnOverdueOrMissedDrillIsHandled(t *testing.T) {
 	srv.floorDrillDue(now)
 	if rec, _ := srv.lastFloorDrill(); !rec.RanAt.Equal(now) || len(rec.Missed) != 0 {
 		t.Fatalf("a missed drill did not run again: %+v", rec)
+	}
+}
+
+// An applied policy change is drilled at once, without waiting for the
+// weekly run.
+func TestAPolicyChangeIsDrilledAtOnce(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.runFloorDrill(time.Now().UTC().Add(-time.Hour))
+	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":12}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("tightening save = %d %s", w.Code, w.Body.String())
+	}
+	if rec, _ := srv.lastFloorDrill(); time.Since(rec.RanAt) > time.Minute {
+		t.Fatalf("the change was not drilled: %+v", rec)
 	}
 }

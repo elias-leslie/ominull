@@ -258,7 +258,8 @@ as saved. Silence cannot be switched off, and the 10 MB burst is raised with
 `bandwidth_enabled` off.
 
 Floor drill (`hub/pkg/detector/drill.go`, `hub/pkg/server/floor_drill.go`). At
-start and then weekly, inside the hub process, synthetic events for each floor
+start, weekly and after every applied detection policy change, inside the hub
+process, synthetic events for each floor
 rule (threat-list match and its isolation, sensitive port, port sweep, lateral
 sweep, bandwidth burst, resolver bypass shaped as a connection test, an agent's
 ssh fan-out that reaches SMB, a host gone quiet) run through a throwaway engine

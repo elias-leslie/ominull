@@ -165,6 +165,9 @@ func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID st
 	}
 	s.audit(r, policyChangedAudit, c.target, fmt.Sprintf("%s %s %s: %s; credential %s (unverified)",
 		how, strings.ReplaceAll(c.policy, "_", " "), c.op, c.wording, credentialOf(r)))
+	// Every applied change is drilled at once, so one that blinds a floor
+	// rule is on the feed now rather than at the next weekly run.
+	s.runFloorDrill(time.Now().UTC())
 }
 
 // Acknowledging or deleting findings takes them out of the Nightshift feed's
