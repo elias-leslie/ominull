@@ -489,9 +489,32 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	e.checkSensitivePort(ev, geo, endpoint, now)
 
+	// The detectors read one cached settings row rather than the numbers that
+	// used to be compiled into them.
+	cfg := e.settings()
+	isOffHours := cfg.IsOffHours(now)
+	isInteractiveShell := isInterpreterOrShell(procName)
+
+	// Both quiet lists are the operator's, held in the database and shown in
+	// the console, not a table compiled into this file.
+	//
+	// They name programs by path, so a process whose agent found that its
+	// reported path is not the file it runs (a user namespace bind mount over a
+	// listed path, a container's own path) matches none of them.
+	quietPath := ev.ProcessPath
+	if ev.AttributionStatus == pathMismatch {
+		quietPath = ""
+	}
+
+	// The sweeps and the resolver bypass are floor rules too: no exclusion or
+	// quiet process silences them.
+	e.checkSweeps(ev, geo, endpoint, cfg, quietPath, isInteractiveShell, isOffHours, now)
+	e.checkResolverBypass(ev, geo, endpoint, cfg, procName, isInteractiveShell, now)
+
 	// Custom exclusions (pinholes and allowlists) apply only from here on. The
-	// threat-list match above and the sensitive-port check are floors: an
-	// exclusion that silenced them would also hide an auto-isolation.
+	// floor rules above stay out of their reach: an exclusion that silenced a
+	// threat-list match would also hide an auto-isolation, and one that
+	// silenced a sweep would hide the intruder mapping the network.
 	if snapshot != nil {
 		if storage.MatchesExclusion(ev, snapshot.LocationID, snapshot.Exclusions) {
 			return
@@ -500,10 +523,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		return
 	}
 
-	// The behavioural detectors below are the ones an operator tunes. They read
-	// one cached settings row rather than the numbers that used to be compiled
-	// into them.
-	cfg := e.settings()
+	// The behavioural detectors below are the ones an operator tunes.
 	warming, warmLeft := warmingUp(endpoint, cfg, now)
 
 	// 2. Diurnal Time-of-Day Hourly Behavioral Profiling & Off-Hours Detection
@@ -513,21 +533,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// use of a workstation was reported as off-hours activity, over and over.
 	// It is now a window in a named zone, and it defaults to the operator's own.
 	hr := now.In(cfg.Location()).Hour()
-	isOffHours := cfg.IsOffHours(now)
 	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
-	isInteractiveShell := isInterpreterOrShell(procName)
-
-	// Both lists are the operator's, held in the database and shown in the
-	// console, not a table compiled into this file.
-	//
-	// They name programs by path, so a process whose agent found that its
-	// reported path is not the file it runs (a user namespace bind mount over a
-	// listed path, a container's own path) matches none of them.
-	quietPath := ev.ProcessPath
-	if ev.AttributionStatus == pathMismatch {
-		quietPath = ""
-	}
 	isTrustedSys := cfg.IsQuietProcess(quietPath, ev.ExecutableSHA256, ev.UserIdentity)
 	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
 
@@ -649,6 +656,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// without a baseline - but as the weaker finding it is, because with no
 		// baseline there is nothing to say it is unusual for this process. It
 		// is part of the floor, so bandwidth_enabled does not switch it off.
+		// Unlike the sweeps, it still yields to a quiet process and an
+		// exclusion: svchost.exe reported exfiltration spikes before the quiet
+		// list gated this detector (Windows Update and Delivery Optimization
+		// upload to the internet in tens of megabytes), and a backup job is
+		// what an exclusion for a program and its storage service is for.
 		burst := bwValue > bandwidthBurstBytes
 		if outlier || burst {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
@@ -918,169 +930,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Timestamp:   now,
 			})
 			e.alertf("[*] ANOMALY ALERT [%s]: First-seen destination %s (%s) contacted by %s", severity, ev.DstIP, describeOwner(geo), ev.EndpointID)
-		}
-	}
-
-	// 6. Rapid Port Sweeps / Reconnaissance (Evaluated per-process)
-	procKey := strings.ToLower(filepath.Base(ev.ProcessPath))
-	if procKey == "" || procKey == "." {
-		procKey = "unknown"
-	}
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isTrustedSys && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
-		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
-		e.mu.Lock()
-		history := e.portHistory[sweepKey]
-		var recent []portAccess
-		seenPorts := make(map[uint16]bool)
-		for _, p := range history {
-			if now.Sub(p.t) <= portSweepWindow {
-				recent = append(recent, p)
-				seenPorts[p.port] = true
-			}
-		}
-		recent = append(recent, portAccess{port: ev.DstPort, t: now})
-		seenPorts[ev.DstPort] = true
-		e.portHistory[sweepKey] = recent
-		distinctCount := len(seenPorts)
-		e.mu.Unlock()
-
-		portThreshold := portSweepPorts
-		if isInteractiveShell {
-			portThreshold = portSweepShellPorts
-		}
-		if distinctCount >= portThreshold {
-			alertKey := fmt.Sprintf("portsweep:%s:%s", ev.EndpointID, procKey)
-			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
-				alert := storage.Alert{
-					ID:          uuid.New().String(),
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Timestamp:   now,
-					Title:       "High-Velocity Port Sweep Detected",
-					Description: fmt.Sprintf("Process %s (PID %d) initiated connections to %d distinct destination ports within 10 seconds.", ev.ProcessPath, ev.ProcessID, distinctCount),
-					Severity:    "HIGH",
-					Mitigated:   false,
-				}
-				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-					ID:          alert.ID,
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Hostname:    endpoint.Hostname,
-					AnomalyType: "PORT_SCAN_RECON",
-					Technique:   "T1046",
-					Severity:    "HIGH",
-					Title:       alert.Title,
-					Description: alert.Description,
-					Details:     fmt.Sprintf("Distinct Ports: %d in 10s window | Process: %s", distinctCount, ev.ProcessPath),
-					ProcessPath: ev.ProcessPath,
-					DstIP:       ev.DstIP,
-					DstPort:     ev.DstPort,
-					Timestamp:   now,
-				})
-				e.alertf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, procKey)
-			}
-		}
-	}
-
-	// 7. Topological Graph Outlier: Internal Lateral Movement / Subnet Fan-Out (Evaluated per-process)
-	destination, _ := netaddr.Parse(ev.DstIP)
-	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
-	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
-		!cfg.IsContainerAddress(ev.DstIP) && !isTrustedSys && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
-
-		e.mu.Lock()
-		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
-		targetMap, exists := e.lateralTargets[lateralKey]
-		if !exists {
-			targetMap = make(map[string]*sweepTarget)
-			e.lateralTargets[lateralKey] = targetMap
-		}
-		// Clean targets older than 60 seconds
-		for ip, t := range targetMap {
-			if now.Sub(t.at) > lateralWindow {
-				delete(targetMap, ip)
-			}
-		}
-		target := targetMap[ev.DstIP]
-		if target == nil {
-			target = &sweepTarget{ports: map[uint16]bool{}, actors: map[string]bool{}}
-			targetMap[ev.DstIP] = target
-		}
-		target.at = now
-		target.ports[ev.DstPort] = true
-		target.actors[ev.Actor] = true
-		distinctTargets := len(targetMap)
-		window := make(map[string]*sweepTarget, len(targetMap))
-		for ip, t := range targetMap {
-			window[ip] = &sweepTarget{at: t.at, ports: maps.Clone(t.ports), actors: maps.Clone(t.actors)}
-		}
-		e.mu.Unlock()
-
-		// Off-hours is the operator's window in the operator's zone (the
-		// tuning), as for every other detector. This used to be 22-05 UTC,
-		// which is early evening in the Americas.
-		isWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
-
-		// The thresholds are the floor (floor.go): fewer hosts for a shell or
-		// interpreter (cmd.exe, powershell, python, bash, nmap), fewer again
-		// off-hours on a workstation.
-		threshold := lateralHosts
-		if isInteractiveShell {
-			threshold = lateralShellHosts
-			if isOffHours && isWorkstation {
-				threshold = lateralShellHostsOffHours
-			}
-		} else if isOffHours && isWorkstation {
-			threshold = lateralHostsOffHours
-		}
-
-		routine, why := false, ""
-		if distinctTargets >= threshold {
-			routine, why = adminFanout(cfg, endpoint, procKey, window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
-			if routine {
-				e.alertf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
-			}
-		}
-		if distinctTargets >= threshold && !routine {
-			// A sweep reaching a floor port has its own cooldown: an earlier
-			// sweep on ordinary ports (explained, a note) cannot hide it.
-			floor := sweepFloorPorts(window)
-			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
-			if len(floor) > 0 {
-				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
-			}
-			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
-				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
-					"sweep_actor": sweepActor(window), "floor_ports": floor})
-				alert := storage.Alert{
-					ID:          uuid.New().String(),
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Timestamp:   now,
-					Title:       fmt.Sprintf("Lateral Port Sweep / Internal Fan-Out (%d Hosts)", distinctTargets),
-					Description: fmt.Sprintf("Process %s on %s initiated rapid internal connection sweep to %d distinct hosts on subnet within 60 seconds.", ev.ProcessPath, ev.EndpointID, distinctTargets),
-					Severity:    "CRITICAL",
-					Mitigated:   false,
-				}
-				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-					ID:          alert.ID,
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Hostname:    endpoint.Hostname,
-					AnomalyType: "LATERAL_PORT_SWEEP",
-					Technique:   "T1021",
-					Severity:    "CRITICAL",
-					Title:       alert.Title,
-					Description: alert.Description,
-					Details:     fmt.Sprintf("Internal Fan-Out: %d unique hosts | Window: 60s | Process: %s | Off-Hours: %t", distinctTargets, ev.ProcessPath, isOffHours),
-					Evidence:    string(sweepEvidence),
-					ProcessPath: ev.ProcessPath,
-					DstIP:       ev.DstIP,
-					DstPort:     ev.DstPort,
-					Timestamp:   now,
-				})
-				e.alertf("[!] ANOMALY ALERT [CRITICAL]: %s on %s (%s) -> %d targets in 60s", alert.Title, ev.EndpointID, procKey, distinctTargets)
-			}
 		}
 	}
 
@@ -1524,4 +1373,175 @@ func (e *Engine) ObservationCoverage() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return map[string]any{"window_capacity": 8192, "bandwidth_windows": len(e.bwTracker.entries), "beacon_windows": len(e.beaconTracker.entries), "bandwidth_evictions": e.bwTracker.evictions, "beacon_evictions": e.beaconTracker.evictions}
+}
+
+// checkSweeps runs the port-sweep and lateral-sweep floor rules. They run
+// before the exclusions and do not consult the quiet-process list: both are
+// operator data, and a sweep is how an intruder maps and moves, whatever the
+// program's path says. Only the installed infrastructure in code (a container
+// runtime, a local resolver, run as its own account) is exempt.
+func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
+	quietPath string, isInteractiveShell, isOffHours bool, now time.Time) {
+	// 6. Rapid Port Sweeps / Reconnaissance (Evaluated per-process)
+	procKey := strings.ToLower(filepath.Base(ev.ProcessPath))
+	if procKey == "" || procKey == "." {
+		procKey = "unknown"
+	}
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
+		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
+		e.mu.Lock()
+		history := e.portHistory[sweepKey]
+		var recent []portAccess
+		seenPorts := make(map[uint16]bool)
+		for _, p := range history {
+			if now.Sub(p.t) <= portSweepWindow {
+				recent = append(recent, p)
+				seenPorts[p.port] = true
+			}
+		}
+		recent = append(recent, portAccess{port: ev.DstPort, t: now})
+		seenPorts[ev.DstPort] = true
+		e.portHistory[sweepKey] = recent
+		distinctCount := len(seenPorts)
+		e.mu.Unlock()
+
+		portThreshold := portSweepPorts
+		if isInteractiveShell {
+			portThreshold = portSweepShellPorts
+		}
+		if distinctCount >= portThreshold {
+			alertKey := fmt.Sprintf("portsweep:%s:%s", ev.EndpointID, procKey)
+			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
+				alert := storage.Alert{
+					ID:          uuid.New().String(),
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Timestamp:   now,
+					Title:       "High-Velocity Port Sweep Detected",
+					Description: fmt.Sprintf("Process %s (PID %d) initiated connections to %d distinct destination ports within 10 seconds.", ev.ProcessPath, ev.ProcessID, distinctCount),
+					Severity:    "HIGH",
+					Mitigated:   false,
+				}
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
+					ID:          alert.ID,
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Hostname:    endpoint.Hostname,
+					AnomalyType: "PORT_SCAN_RECON",
+					Technique:   "T1046",
+					Severity:    "HIGH",
+					Title:       alert.Title,
+					Description: alert.Description,
+					Details:     fmt.Sprintf("Distinct Ports: %d in 10s window | Process: %s", distinctCount, ev.ProcessPath),
+					ProcessPath: ev.ProcessPath,
+					DstIP:       ev.DstIP,
+					DstPort:     ev.DstPort,
+					Timestamp:   now,
+				})
+				e.alertf("[!] DETECTION ALERT [HIGH]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, procKey)
+			}
+		}
+	}
+
+	// 7. Topological Graph Outlier: Internal Lateral Movement / Subnet Fan-Out (Evaluated per-process)
+	destination, _ := netaddr.Parse(ev.DstIP)
+	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
+	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
+		!cfg.IsContainerAddress(ev.DstIP) && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
+
+		e.mu.Lock()
+		lateralKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
+		targetMap, exists := e.lateralTargets[lateralKey]
+		if !exists {
+			targetMap = make(map[string]*sweepTarget)
+			e.lateralTargets[lateralKey] = targetMap
+		}
+		// Clean targets older than 60 seconds
+		for ip, t := range targetMap {
+			if now.Sub(t.at) > lateralWindow {
+				delete(targetMap, ip)
+			}
+		}
+		target := targetMap[ev.DstIP]
+		if target == nil {
+			target = &sweepTarget{ports: map[uint16]bool{}, actors: map[string]bool{}}
+			targetMap[ev.DstIP] = target
+		}
+		target.at = now
+		target.ports[ev.DstPort] = true
+		target.actors[ev.Actor] = true
+		distinctTargets := len(targetMap)
+		window := make(map[string]*sweepTarget, len(targetMap))
+		for ip, t := range targetMap {
+			window[ip] = &sweepTarget{at: t.at, ports: maps.Clone(t.ports), actors: maps.Clone(t.actors)}
+		}
+		e.mu.Unlock()
+
+		// Off-hours is the operator's window in the operator's zone (the
+		// tuning), as for every other detector. This used to be 22-05 UTC,
+		// which is early evening in the Americas.
+		isWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
+
+		// The thresholds are the floor (floor.go): fewer hosts for a shell or
+		// interpreter (cmd.exe, powershell, python, bash, nmap), fewer again
+		// off-hours on a workstation.
+		threshold := lateralHosts
+		if isInteractiveShell {
+			threshold = lateralShellHosts
+			if isOffHours && isWorkstation {
+				threshold = lateralShellHostsOffHours
+			}
+		} else if isOffHours && isWorkstation {
+			threshold = lateralHostsOffHours
+		}
+
+		routine, why := false, ""
+		if distinctTargets >= threshold {
+			routine, why = adminFanout(cfg, endpoint, procKey, window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
+			if routine {
+				e.alertf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
+			}
+		}
+		if distinctTargets >= threshold && !routine {
+			// A sweep reaching a floor port has its own cooldown: an earlier
+			// sweep on ordinary ports (explained, a note) cannot hide it.
+			floor := sweepFloorPorts(window)
+			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
+			if len(floor) > 0 {
+				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
+			}
+			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
+				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
+					"sweep_actor": sweepActor(window), "floor_ports": floor})
+				alert := storage.Alert{
+					ID:          uuid.New().String(),
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Timestamp:   now,
+					Title:       fmt.Sprintf("Lateral Port Sweep / Internal Fan-Out (%d Hosts)", distinctTargets),
+					Description: fmt.Sprintf("Process %s on %s initiated rapid internal connection sweep to %d distinct hosts on subnet within 60 seconds.", ev.ProcessPath, ev.EndpointID, distinctTargets),
+					Severity:    "CRITICAL",
+					Mitigated:   false,
+				}
+				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
+					ID:          alert.ID,
+					TenantID:    ev.TenantID,
+					EndpointID:  ev.EndpointID,
+					Hostname:    endpoint.Hostname,
+					AnomalyType: "LATERAL_PORT_SWEEP",
+					Technique:   "T1021",
+					Severity:    "CRITICAL",
+					Title:       alert.Title,
+					Description: alert.Description,
+					Details:     fmt.Sprintf("Internal Fan-Out: %d unique hosts | Window: 60s | Process: %s | Off-Hours: %t", distinctTargets, ev.ProcessPath, isOffHours),
+					Evidence:    string(sweepEvidence),
+					ProcessPath: ev.ProcessPath,
+					DstIP:       ev.DstIP,
+					DstPort:     ev.DstPort,
+					Timestamp:   now,
+				})
+				e.alertf("[!] ANOMALY ALERT [CRITICAL]: %s on %s (%s) -> %d targets in 60s", alert.Title, ev.EndpointID, procKey, distinctTargets)
+			}
+		}
+	}
 }

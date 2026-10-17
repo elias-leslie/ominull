@@ -42,9 +42,10 @@ func TestTheFloorDrillRaisesEveryRuleAndStoresNothing(t *testing.T) {
 }
 
 // Blinding a floor rule on a test hub - a container network over the LAN, an
-// exclusion over a floor port or an internet range - makes the drill raise a
-// CRITICAL naming the rules it missed. Switching bandwidth off does not, since
-// the burst is floor.
+// exclusion over an internet range, which still reaches the burst - makes the
+// drill raise a CRITICAL naming the rules it missed. Switching bandwidth off
+// does not, since the burst is floor, and an exclusion over a floor port or
+// the range no longer reaches the sweeps.
 func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 	t.Parallel()
 	exclusion := func(port uint16, dst string) storage.Exclusion {
@@ -74,12 +75,12 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 			if err := s.CreateExclusion(exclusion(445, "")); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"agent ssh fan-out reaching a floor port"}},
+		}, nil},
 		{"exclusion on an internet range", func(t *testing.T, s *storage.Store) {
 			if err := s.CreateExclusion(exclusion(0, "203.0.113.0/24")); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"port sweep", "bandwidth burst"}},
+		}, []string{"bandwidth burst"}},
 	} {
 		srv, store := setupTestServer(t)
 		c.blind(t, store)

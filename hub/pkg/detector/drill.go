@@ -100,8 +100,8 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 	}
 	cases = append(cases, run(DrillCase{Rule: "port sweep", Want: "PORT_SCAN_RECON"}, live, sweep))
 
-	// Twice the threshold, so one approved exclusion of a single LAN host
-	// does not read as a blinded rule.
+	// Twice the threshold, so a single LAN host the sweep does not count (a
+	// container address, say) does not read as a blinded rule.
 	var fanout []storage.Event
 	for i := 0; i < 2*lateralHosts; i++ {
 		fanout = append(fanout, flow(drillProgram+"fanout", lan(200+i), 8080, 60, time.Duration(i)*time.Second))

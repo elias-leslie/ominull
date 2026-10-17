@@ -256,7 +256,14 @@ the tuning holds a weaker `silence_after_minutes`, `bandwidth_min_samples`,
 feed's detection-policy note says so (`floor_clamped`); a stricter value runs
 as saved. Silence cannot be switched off, and the 10 MB burst is raised with
 `bandwidth_enabled` off and inside a learning window. A known workload's
-`expires_at` is at most 90 days out when added, changed or renewed.
+`expires_at` is at most 90 days out when added, changed or renewed. The
+threat-list match, sensitive-port egress, port sweep, lateral sweep and
+resolver bypass run before the exclusions and ignore the quiet-process list:
+no exclusion or quiet process silences them (the infrastructure paths in code,
+run as their own account, stay exempt from the sweeps). The 10 MB burst still
+yields to a quiet process and an exclusion, because Windows Update and
+Delivery Optimization upload tens of megabytes as svchost.exe and a backup
+program's exclusion for its storage service exists for exactly that.
 
 Floor drill (`hub/pkg/detector/drill.go`, `hub/pkg/server/floor_drill.go`). At
 start, weekly and after every applied detection policy change, inside the hub
