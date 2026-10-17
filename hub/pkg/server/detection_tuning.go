@@ -6,11 +6,51 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/threatintel"
 )
+
+// vendorRangesOwned refuses an agent runtime vendor prefix whose ends the
+// hub's network attribution places on a shared CDN or rented compute: any
+// site can be fronted from there, so the range would prove nothing about the
+// maker.
+func vendorRangesOwned(t storage.DetectionTuning) error {
+	for _, v := range t.AgentRuntimeVendors {
+		for _, raw := range v.Prefixes {
+			p, err := netip.ParsePrefix(raw)
+			if err != nil {
+				continue
+			}
+			for _, a := range []netip.Addr{p.Masked().Addr(), lastAddr(p)} {
+				geo := threatintel.ResolveGeoIP(a.String())
+				if geo.Tenancy == storage.TenancySharedCDN || geo.Tenancy == storage.TenancyHosting {
+					return fmt.Errorf("%w: agent runtime vendor prefix %s holds %s address space of %q, which any site can be served from",
+						storage.ErrInvalidDetectionTuning, raw, geo.Tenancy, geo.Org)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().AsSlice()
+	for i := range b {
+		bit := i * 8
+		switch {
+		case bit >= p.Bits():
+			b[i] = 0xff
+		case bit+8 > p.Bits():
+			b[i] |= 0xff >> uint(p.Bits()-bit)
+		}
+	}
+	a, _ := netip.AddrFromSlice(b)
+	return a
+}
 
 // handleDetectionTuning reads and writes the numbers the behavioural detectors
 // run on.
@@ -59,6 +99,8 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 				req.KnownWorkloads = nil
 			case "agent_runtimes":
 				req.AgentRuntimes = nil
+			case "agent_runtime_vendors":
+				req.AgentRuntimeVendors = nil
 			}
 		}
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -70,6 +112,9 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		after, err := storage.PrepareDetectionTuning(req)
+		if err == nil {
+			err = vendorRangesOwned(after)
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -203,6 +248,20 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	}
 	listDelta("known workloads", workloads(before), workloads(after))
 	listDelta("agent runtimes", runtimes(before), runtimes(after))
+	vendors := func(t storage.DetectionTuning) []string {
+		var out []string
+		for _, v := range t.AgentRuntimeVendors {
+			out = append(out, v.Runtime+"="+v.Vendor)
+			for _, d := range v.Domains {
+				out = append(out, v.Runtime+":"+d)
+			}
+			for _, p := range v.Prefixes {
+				out = append(out, v.Runtime+":"+p)
+			}
+		}
+		return out
+	}
+	listDelta("agent runtime vendors", vendors(before), vendors(after))
 	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
 	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
 	add("agent-heavy when a runtime is seen", before.AgentHeavyObserved, after.AgentHeavyObserved)

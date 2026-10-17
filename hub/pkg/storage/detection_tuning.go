@@ -121,6 +121,12 @@ type DetectionTuning struct {
 	AgentBaselineDays  int            `json:"agent_baseline_days"`
 	AgentUploadFloorMB int            `json:"agent_upload_floor_mb"`
 	AgentUploadFactor  int            `json:"agent_upload_factor"`
+	// AgentRuntimeVendors name each runtime's maker, its service domains and
+	// the address ranges it publishes for them (AgentRuntimeVendor). A flow
+	// from the runtime to its maker's range is judged by the runtime's hourly
+	// upload volume, not the per-connection bandwidth baseline. Adding a
+	// domain or prefix loosens detection; removing one tightens it.
+	AgentRuntimeVendors []AgentRuntimeVendor `json:"agent_runtime_vendors"`
 
 	// AgentHeavyEndpoints and AgentHeavyRoles name the endpoints (by id) and
 	// role tags where AI agents run programs and open connections all day.
@@ -172,12 +178,13 @@ func defaultDetectionTuning() DetectionTuning {
 		OffHoursZone:  "Local",
 		OffHoursOn:    true,
 
-		AgentEgressOn:      true,
-		AgentHeavyObserved: true,
-		AgentRuntimes:      defaultAgentRuntimes(),
-		AgentBaselineDays:  7,
-		AgentUploadFloorMB: 100,
-		AgentUploadFactor:  5,
+		AgentEgressOn:       true,
+		AgentHeavyObserved:  true,
+		AgentRuntimes:       defaultAgentRuntimes(),
+		AgentRuntimeVendors: defaultAgentRuntimeVendors(),
+		AgentBaselineDays:   7,
+		AgentUploadFloorMB:  100,
+		AgentUploadFactor:   5,
 
 		BeaconOn:          true,
 		BeaconMinSamples:  12,
@@ -512,6 +519,11 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 		return t, err
 	}
 	t.AdminFanoutTargets = targets
+	vendors, err := validAgentRuntimeVendors(t.AgentRuntimeVendors)
+	if err != nil {
+		return t, err
+	}
+	t.AgentRuntimeVendors = vendors
 	return t, nil
 }
 
@@ -633,6 +645,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AgentHeavyEndpoints = tidyList(t.AgentHeavyEndpoints)
 	t.AgentHeavyRoles = tidyList(t.AgentHeavyRoles)
 	t.AgentRuntimes = tidyAgentRuntimes(t.AgentRuntimes)
+	t.AgentRuntimeVendors = tidyAgentRuntimeVendors(t.AgentRuntimeVendors)
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
 	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"sync"
@@ -95,6 +96,23 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		{"mixed", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6; t.FirstSeenOn = false }, []string{"first_seen_enabled"}},
 		{"agent runtime removed", func(t *storage.DetectionTuning) { t.AgentRuntimes = t.AgentRuntimes[1:] }, []string{"agent_runtimes"}},
 		{"agent-heavy by observation", func(t *storage.DetectionTuning) { t.AgentHeavyObserved = !t.AgentHeavyObserved }, nil},
+		{"vendor prefix added", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].Prefixes = append(t.AgentRuntimeVendors[0].Prefixes, "198.51.100.0/24")
+		}, []string{"agent_runtime_vendors"}},
+		{"vendor domain added", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[1].Domains = append(t.AgentRuntimeVendors[1].Domains, "example.com")
+		}, []string{"agent_runtime_vendors"}},
+		{"vendor for a new runtime", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors = append(t.AgentRuntimeVendors, storage.AgentRuntimeVendor{Runtime: "ollama", Vendor: "Ollama", Domains: []string{"ollama.com"}})
+		}, []string{"agent_runtime_vendors"}},
+		{"vendor renamed", func(t *storage.DetectionTuning) { t.AgentRuntimeVendors[0].Vendor = "Someone" }, []string{"agent_runtime_vendors"}},
+		{"vendor prefix removed", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].Prefixes = t.AgentRuntimeVendors[0].Prefixes[1:]
+		}, nil},
+		{"vendor domain removed", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[1].Domains = t.AgentRuntimeVendors[1].Domains[1:]
+		}, nil},
+		{"vendor removed", func(t *storage.DetectionTuning) { t.AgentRuntimeVendors = t.AgentRuntimeVendors[1:] }, nil},
 		{"wider window", func(t *storage.DetectionTuning) { t.OffHoursStart = 21 }, nil},
 		{"shorter window", func(t *storage.DetectionTuning) { t.OffHoursStart = 23 }, []string{"off_hours_window"}},
 		{"moved window", func(t *storage.DetectionTuning) { t.OffHoursStart, t.OffHoursEnd = 23, 6 }, []string{"off_hours_window"}},
@@ -104,6 +122,12 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		after := base
 		after.QuietOrgs = append([]string(nil), base.QuietOrgs...)
 		after.AgentRuntimes = append(after.AgentRuntimes[:0:0], base.AgentRuntimes...)
+		after.AgentRuntimeVendors = nil
+		for _, v := range base.AgentRuntimeVendors {
+			v.Domains = append([]string(nil), v.Domains...)
+			v.Prefixes = append([]string(nil), v.Prefixes...)
+			after.AgentRuntimeVendors = append(after.AgentRuntimeVendors, v)
+		}
 		c.change(&after)
 		after, err := storage.PrepareDetectionTuning(after)
 		if err != nil {
@@ -908,5 +932,43 @@ func TestAFailedAcknowledgementIsNotNoted(t *testing.T) {
 	}
 	if f := feedNote(t, srv, "ominull.detection.changes"); f.StatusID != ocsfStatusResolved {
 		t.Fatalf("nothing was acknowledged yet the note says %+v", f)
+	}
+}
+
+// A vendor range is approved by the owner, refused when it is not one
+// maker's own address space, and a save that drops a range and adds another
+// drops it at once and asks only about the one it adds.
+func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	post := func(vendors []storage.AgentRuntimeVendor, approval string) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(map[string]any{"agent_runtime_vendors": vendors})
+		return policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), approval)
+	}
+	shipped := storage.DefaultDetectionTuning().AgentRuntimeVendors
+	for name, prefix := range map[string]string{"cloudflare": "104.16.0.0/16", "malformed": "160.79.104/23", "over-broad": "160.0.0.0/8"} {
+		v := append([]storage.AgentRuntimeVendor(nil), shipped...)
+		v[0].Prefixes = []string{prefix}
+		if w := post(v, ""); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s prefix %s = %d %s, want 400", name, prefix, w.Code, w.Body.String())
+		}
+	}
+	v := append([]storage.AgentRuntimeVendor(nil), shipped...)
+	v[0].Prefixes = []string{"160.79.104.0/23", "198.51.100.0/24"}
+	p := mustPend(t, post(v, ""))
+	if strings.Join(p.Loosens, ",") != "agent_runtime_vendors" {
+		t.Fatalf("loosens %v", p.Loosens)
+	}
+	if !reflect.DeepEqual(store.GetDetectionTuning().AgentRuntimeVendors[0].Prefixes, []string{"160.79.104.0/23"}) {
+		t.Fatalf("the tightening half was not saved first: %+v", store.GetDetectionTuning().AgentRuntimeVendors[0])
+	}
+	ownerOf(t, srv).approve(t, p.ApprovalID)
+	if w := post(v, p.ApprovalID); w.Code != http.StatusOK {
+		t.Fatalf("approved save = %d %s", w.Code, w.Body.String())
+	}
+	got := store.GetDetectionTuning()
+	if !got.InRuntimeVendorRange("claude", netip.MustParseAddr("198.51.100.9")) || got.InRuntimeVendorRange("claude", netip.MustParseAddr("2607:6bc0::1")) {
+		t.Fatalf("saved vendors %+v", got.AgentRuntimeVendors)
 	}
 }

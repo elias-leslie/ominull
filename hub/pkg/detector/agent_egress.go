@@ -229,39 +229,6 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 	}
 }
 
-// runtimeVendors are the runtimes' own services: a runtime talking to its
-// maker is the runtime working, not a new sink. Prefixes are the addresses the
-// maker publishes for that service; only there does the name prove anything.
-// Anthropic's are from platform.claude.com/docs/en/api/ip-addresses
-// (inbound, checked 2026-10-16). OpenAI's API sits behind Cloudflare, an
-// address any site can be fronted from, so codex has none.
-var runtimeVendors = map[string]struct {
-	name     string
-	domains  []string
-	prefixes []netip.Prefix
-}{
-	"codex": {"OpenAI", []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}, nil},
-	"claude": {"Anthropic", []string{"anthropic.com", "claude.ai", "claude.com"},
-		[]netip.Prefix{netip.MustParsePrefix("160.79.104.0/23"), netip.MustParsePrefix("2607:6bc0::/48")}},
-}
-
-// RuntimeVendor names the maker of an agent runtime (a name from
-// agent_runtimes, "claude") when name is one of that maker's own service
-// domains, or "".
-func RuntimeVendor(runtime, name string) string {
-	v, ok := runtimeVendors[strings.ToLower(strings.TrimSpace(runtime))]
-	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
-	if !ok || name == "" {
-		return ""
-	}
-	for _, d := range v.domains {
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return v.name
-		}
-	}
-	return ""
-}
-
 // runtimeToOwnVendor reports a flow from an agent runtime's own executable to
 // its maker's service: Claude Code sending a conversation to api.anthropic.com.
 // Those uploads are megabytes whenever a large context is sent, so a
@@ -272,25 +239,18 @@ func RuntimeVendor(runtime, name string) string {
 // address is inside the maker's published ranges: the SNI is whatever the
 // client chose to send and the domain is whatever any client last resolved
 // there, so a name alone would let any program called claude upload to its
-// own server under api.anthropic.com.
+// own server under api.anthropic.com. The makers, their domains and their
+// ranges are policy: the tuning's agent_runtime_vendors.
 func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event) bool {
 	if !cfg.AgentEgressOn || ev.AttributionStatus == pathMismatch {
 		return false
 	}
 	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
-	if runtime == "" || RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) == "" {
+	if runtime == "" || cfg.RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) == "" {
 		return false
 	}
 	addr, err := netip.ParseAddr(strings.TrimSpace(ev.DstIP))
-	if err != nil {
-		return false
-	}
-	for _, p := range runtimeVendors[runtime].prefixes {
-		if p.Contains(addr.Unmap()) {
-			return true
-		}
-	}
-	return false
+	return err == nil && cfg.InRuntimeVendorRange(runtime, addr)
 }
 
 func firstNonEmpty(v ...string) string {

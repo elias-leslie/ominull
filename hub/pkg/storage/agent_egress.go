@@ -3,9 +3,13 @@ package storage
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Agent egress baselines: which destinations each AI agent runtime on each
@@ -366,4 +370,147 @@ func tidyAgentRuntimes(in []AgentRuntime) []AgentRuntime {
 		return out[i].Path < out[j].Path
 	})
 	return out
+}
+
+// AgentRuntimeVendor names an agent runtime's maker and the maker's own
+// service: a runtime talking to its maker is the runtime working, not a new
+// sink. Domains are the maker's service domains (a name under one matches).
+// Prefixes are the addresses the maker publishes for that service, and only
+// there does the name prove anything: the SNI is whatever the client sent and
+// the domain whatever any client last resolved to the address. A maker whose
+// service sits behind a shared CDN gets no prefixes.
+type AgentRuntimeVendor struct {
+	Runtime  string   `json:"runtime"`
+	Vendor   string   `json:"vendor"`
+	Domains  []string `json:"domains"`
+	Prefixes []string `json:"prefixes"`
+}
+
+// defaultAgentRuntimeVendors: Anthropic's prefixes are from
+// platform.claude.com/docs/en/api/ip-addresses (inbound, checked 2026-10-16).
+// OpenAI's API sits behind Cloudflare, an address any site can be fronted
+// from, so codex has none.
+func defaultAgentRuntimeVendors() []AgentRuntimeVendor {
+	return []AgentRuntimeVendor{
+		{Runtime: "claude", Vendor: "Anthropic", Domains: []string{"anthropic.com", "claude.ai", "claude.com"},
+			Prefixes: []string{"160.79.104.0/23", "2607:6bc0::/48"}},
+		{Runtime: "codex", Vendor: "OpenAI", Domains: []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
+	}
+}
+
+// Vendor prefixes narrower than these only: a vendor range is a statement
+// about one service, and anything wider would vouch for whole providers.
+const (
+	vendorPrefixMinBits4 = 16
+	vendorPrefixMinBits6 = 32
+)
+
+func tidyAgentRuntimeVendors(in []AgentRuntimeVendor) []AgentRuntimeVendor {
+	out := make([]AgentRuntimeVendor, 0, len(in))
+	for _, v := range in {
+		v.Runtime = strings.ToLower(strings.TrimSpace(v.Runtime))
+		v.Vendor = strings.TrimSpace(v.Vendor)
+		if v.Runtime == "" {
+			continue
+		}
+		domains := make([]string, 0, len(v.Domains))
+		for _, d := range v.Domains {
+			domains = append(domains, strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), "."))
+		}
+		v.Domains = tidyList(domains)
+		v.Prefixes = tidyList(v.Prefixes)
+		out = append(out, v)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Runtime < out[j].Runtime })
+	return out
+}
+
+// validAgentRuntimeVendors masks each vendor prefix and refuses a vendor
+// entry that would vouch for more than one maker's service: a runtime named
+// twice, a domain that is a public suffix (every tenant under it would
+// match), or a prefix that is malformed, private or wider than a /16 (IPv4)
+// or /32 (IPv6).
+func validAgentRuntimeVendors(in []AgentRuntimeVendor) ([]AgentRuntimeVendor, error) {
+	seen := map[string]bool{}
+	for i, v := range in {
+		if seen[v.Runtime] {
+			return in, fmt.Errorf("%w: agent runtime vendor %q is named more than once", ErrInvalidDetectionTuning, v.Runtime)
+		}
+		seen[v.Runtime] = true
+		if v.Vendor == "" {
+			return in, fmt.Errorf("%w: agent runtime vendor for %q needs the vendor's name", ErrInvalidDetectionTuning, v.Runtime)
+		}
+		for _, d := range v.Domains {
+			if d == "" || strings.ContainsAny(d, " /*:@") || !strings.Contains(d, ".") {
+				return in, fmt.Errorf("%w: agent runtime vendor domain %q must be a plain domain name such as anthropic.com", ErrInvalidDetectionTuning, d)
+			}
+			if reg, err := publicsuffix.EffectiveTLDPlusOne(d); err != nil || !(d == reg || strings.HasSuffix(d, "."+reg)) {
+				return in, fmt.Errorf("%w: agent runtime vendor domain %q is a public suffix, which every site under it shares", ErrInvalidDetectionTuning, d)
+			}
+		}
+		prefixes := make([]string, 0, len(v.Prefixes))
+		for _, raw := range v.Prefixes {
+			p, err := netip.ParsePrefix(raw)
+			if err != nil || p.Addr().Is4In6() {
+				return in, fmt.Errorf("%w: agent runtime vendor prefix %q is not a network such as 160.79.104.0/23", ErrInvalidDetectionTuning, raw)
+			}
+			p = p.Masked()
+			minBits := vendorPrefixMinBits4
+			if p.Addr().Is6() {
+				minBits = vendorPrefixMinBits6
+			}
+			if p.Bits() < minBits {
+				return in, fmt.Errorf("%w: agent runtime vendor prefix %q is wider than a /%d; name the vendor's published service range", ErrInvalidDetectionTuning, raw, minBits)
+			}
+			a := p.Addr()
+			if a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() || privatePrefix(p) {
+				return in, fmt.Errorf("%w: agent runtime vendor prefix %q is not public address space", ErrInvalidDetectionTuning, raw)
+			}
+			prefixes = append(prefixes, p.String())
+		}
+		in[i].Prefixes = tidyList(prefixes)
+	}
+	return in, nil
+}
+
+func (t DetectionTuning) runtimeVendor(runtime string) (AgentRuntimeVendor, bool) {
+	runtime = strings.ToLower(strings.TrimSpace(runtime))
+	for _, v := range t.AgentRuntimeVendors {
+		if v.Runtime == runtime {
+			return v, true
+		}
+	}
+	return AgentRuntimeVendor{}, false
+}
+
+// RuntimeVendor names the maker of an agent runtime (a name from
+// agent_runtimes, "claude") when name is one of that maker's own service
+// domains, or "".
+func (t DetectionTuning) RuntimeVendor(runtime, name string) string {
+	v, ok := t.runtimeVendor(runtime)
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if !ok || name == "" {
+		return ""
+	}
+	for _, d := range v.Domains {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return v.Vendor
+		}
+	}
+	return ""
+}
+
+// InRuntimeVendorRange reports an address inside the ranges the runtime's
+// maker publishes for its service.
+func (t DetectionTuning) InRuntimeVendorRange(runtime string, addr netip.Addr) bool {
+	v, ok := t.runtimeVendor(runtime)
+	if !ok || !addr.IsValid() {
+		return false
+	}
+	for _, raw := range v.Prefixes {
+		if p, err := netip.ParsePrefix(raw); err == nil && p.Contains(addr.Unmap()) {
+			return true
+		}
+	}
+	return false
 }

@@ -212,7 +212,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		if runtime == "" {
 			runtime = proc
 		}
-		if vendor := detector.RuntimeVendor(runtime, name); vendor != "" {
+		if vendor := tuning.RuntimeVendor(runtime, name); vendor != "" {
 			// A cause, not an explanation: on a shared CDN address the name
 			// can be any other site's.
 			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", runtime, name, vendor)

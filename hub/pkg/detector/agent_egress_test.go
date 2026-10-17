@@ -258,3 +258,28 @@ func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
 		})
 	}
 }
+
+// The makers' ranges are the tuning's: a range the owner adds is honoured,
+// and a maker removed from the policy is judged like any other destination.
+func TestARuntimeVendorRangeComesFromThePolicy(t *testing.T) {
+	const claude = "/home/kasadis/.local/share/claude/versions/2.1.301"
+	ev := storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "198.51.100.9", DstPort: 443, Domain: "api.anthropic.com", ProcessPath: claude}
+	cfg := storage.DefaultDetectionTuning()
+	if runtimeToOwnVendor(cfg, ev) {
+		t.Fatal("an address outside the shipped ranges counted as Anthropic's")
+	}
+	cfg.AgentRuntimeVendors[0].Prefixes = append(cfg.AgentRuntimeVendors[0].Prefixes, "198.51.100.0/24")
+	cfg, err := storage.PrepareDetectionTuning(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeToOwnVendor(cfg, ev) {
+		t.Fatal("a range added to the policy was not honoured")
+	}
+	cfg.AgentRuntimeVendors = nil
+	ev.DstIP = "160.79.104.10"
+	if runtimeToOwnVendor(cfg, ev) {
+		t.Fatal("a maker removed from the policy still exempted its flows")
+	}
+}

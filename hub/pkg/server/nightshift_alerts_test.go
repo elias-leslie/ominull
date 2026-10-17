@@ -223,7 +223,7 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 	codex := describeAlert(storage.AnomalyAlert{ID: "c", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "davion-sidarli",
 		Title:       "codex reached a destination it never has: sdmntprpolandcentral.oaiusercontent.com@cloudflare, inc.",
 		ProcessPath: "/home/u/.local/lib/node_modules/@openai/codex/vendor/bin/codex", DstIP: "172.64.144.52", DstPort: 443,
-		Evidence: `{"destination_owner":"Cloudflare, Inc."}`}, tuning)
+		Evidence: `{"destination_owner":"Cloudflare, Inc."}`}, storage.DefaultDetectionTuning()) // the makers are the tuning's agent_runtime_vendors
 	if codex.What != "codex on davion-sidarli reached sdmntprpolandcentral.oaiusercontent.com (172.64.144.52:443, Cloudflare, Inc.) for the first time" ||
 		codex.Expected != "" || !strings.Contains(codex.Cause, "OpenAI") {
 		t.Fatalf("codex = %+v", codex)

@@ -2,7 +2,9 @@ package storage
 
 import (
 	"errors"
+	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -387,5 +389,73 @@ func TestAnUntunedHubGetsNoRowFromTheUpgrade(t *testing.T) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM detection_tuning`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("rows=%d err=%v", n, err)
+	}
+}
+
+// The runtimes' makers are policy. The shipped values are the ones the
+// detector used to carry in code, and a row saved before the field existed
+// runs with them.
+func TestAgentRuntimeVendorsShipWithTheMakersAndReachOldRows(t *testing.T) {
+	d := DefaultDetectionTuning()
+	if got := d.RuntimeVendor("claude", "api.anthropic.com"); got != "Anthropic" {
+		t.Fatalf("claude's maker = %q", got)
+	}
+	if got := d.RuntimeVendor("codex", "chatgpt.com"); got != "OpenAI" {
+		t.Fatalf("codex's maker = %q", got)
+	}
+	if d.RuntimeVendor("claude", "anthropic.com.example.net") != "" || d.RuntimeVendor("ollama", "anthropic.com") != "" {
+		t.Fatal("a look-alike name or another runtime matched a maker")
+	}
+	for _, ip := range []string{"160.79.104.10", "160.79.105.255", "2607:6bc0::10", "::ffff:160.79.104.10"} {
+		if !d.InRuntimeVendorRange("claude", netip.MustParseAddr(ip)) {
+			t.Errorf("%s is not in Anthropic's range", ip)
+		}
+	}
+	if d.InRuntimeVendorRange("claude", netip.MustParseAddr("160.79.106.1")) || d.InRuntimeVendorRange("codex", netip.MustParseAddr("104.18.1.1")) {
+		t.Fatal("an address outside the published ranges matched")
+	}
+
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO detection_tuning (id, settings, updated_at, updated_by) VALUES (1, ?, ?, 'old')`,
+		`{"warmup_hours":12,"agent_runtimes":[{"name":"claude","path":"claude"}]}`, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	got := s.GetDetectionTuning()
+	if got.WarmupHours != 12 || !reflect.DeepEqual(got.AgentRuntimeVendors, d.AgentRuntimeVendors) {
+		t.Fatalf("an old row did not get the shipped vendors: %+v", got.AgentRuntimeVendors)
+	}
+	if p := s.DetectionTuningProblem(); p != "" {
+		t.Fatalf("old row reported unsound: %s", p)
+	}
+}
+
+func TestAVendorEntryMayNotVouchForMoreThanOneService(t *testing.T) {
+	with := func(v AgentRuntimeVendor) DetectionTuning {
+		d := DefaultDetectionTuning()
+		d.AgentRuntimeVendors = append(d.AgentRuntimeVendors, v)
+		return d
+	}
+	ok, err := PrepareDetectionTuning(with(AgentRuntimeVendor{Runtime: "Ollama", Vendor: "Ollama", Domains: []string{"Ollama.com."}, Prefixes: []string{"198.51.100.7/24"}}))
+	if err != nil {
+		t.Fatalf("a sound vendor was refused: %v", err)
+	}
+	if ok.RuntimeVendor("ollama", "registry.ollama.com") != "Ollama" || !ok.InRuntimeVendorRange("ollama", netip.MustParseAddr("198.51.100.200")) {
+		t.Fatalf("the added vendor is not honoured: %+v", ok.AgentRuntimeVendors)
+	}
+	for name, v := range map[string]AgentRuntimeVendor{
+		"malformed prefix":    {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100/24"}},
+		"bare address":        {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100.7"}},
+		"wide IPv4":           {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"104.0.0.0/8"}},
+		"wide IPv6":           {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"2600::/16"}},
+		"private":             {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"10.1.0.0/16"}},
+		"public suffix":       {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"github.io"}},
+		"bare TLD":            {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"com"}},
+		"wildcard":            {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"*.ollama.com"}},
+		"no vendor name":      {Runtime: "ollama", Domains: []string{"ollama.com"}},
+		"runtime named twice": {Runtime: "claude", Vendor: "Someone", Domains: []string{"example.com"}},
+	} {
+		if _, err := PrepareDetectionTuning(with(v)); !errors.Is(err, ErrInvalidDetectionTuning) {
+			t.Errorf("%s: err %v, want a refusal", name, err)
+		}
 	}
 }

@@ -286,7 +286,14 @@ destinations and is never pruned, so a runtime idle past retention does not
 learn silently again. Registrable domains follow the whole public suffix list,
 so each tenant of a shared host (`x.a.run.app`) is its own destination. Tools
 an agent spawns are judged as themselves: the hub sees a parent's instance id,
-not its executable.
+not its executable. Each runtime's maker is policy too:
+`agent_runtime_vendors` holds `runtime`, `vendor`, `domains` and `prefixes`
+(the maker's published service ranges, no wider than /16 or /32, never on a
+shared CDN or rented compute). A runtime's flow to its maker's domain inside
+those ranges skips the per-connection bandwidth baseline (its hourly upload
+volume still judges it), and the maker's domain is named as the probable cause
+of a new destination. Adding a domain or prefix loosens and needs the owner's
+approval; removing one tightens.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses

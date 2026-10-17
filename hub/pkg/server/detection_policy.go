@@ -274,6 +274,8 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 			}
 		case dir == addLoosens:
 			mid[k] = keptEntries(a[k], b[k])
+		case dir == vendorField:
+			mid[k] = keptVendors(a[k], b[k])
 		}
 	}
 	var half storage.DetectionTuning
@@ -332,6 +334,88 @@ func keptEntries(before, after any) any {
 	return kept
 }
 
+func vendorList(v any) []storage.AgentRuntimeVendor {
+	var out []storage.AgentRuntimeVendor
+	raw, _ := json.Marshal(v)
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func vendorByRuntime(list []storage.AgentRuntimeVendor) map[string]storage.AgentRuntimeVendor {
+	m := map[string]storage.AgentRuntimeVendor{}
+	for _, v := range list {
+		m[v.Runtime] = v
+	}
+	return m
+}
+
+func setOf(list []string) map[string]bool {
+	m := map[string]bool{}
+	for _, x := range list {
+		m[x] = true
+	}
+	return m
+}
+
+// vendorsLoosen reports agent runtime vendors that vouch for more than
+// before: a runtime's maker renamed, or a service domain or published prefix
+// it did not have. Each one exempts flows to it from the per-connection
+// bandwidth baseline, so only removing entries tightens.
+func vendorsLoosen(before, after any) bool {
+	was := vendorByRuntime(vendorList(before))
+	for _, v := range vendorList(after) {
+		old, ok := was[v.Runtime]
+		if !ok {
+			if len(v.Domains) > 0 || len(v.Prefixes) > 0 {
+				return true
+			}
+			continue
+		}
+		if v.Vendor != old.Vendor && len(v.Domains) > 0 {
+			return true
+		}
+		domains, prefixes := setOf(old.Domains), setOf(old.Prefixes)
+		for _, d := range v.Domains {
+			if !domains[d] {
+				return true
+			}
+		}
+		for _, p := range v.Prefixes {
+			if !prefixes[p] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// keptVendors is the vendors before, holding only the domains and prefixes
+// after keeps: the tightening half of a vendor change.
+func keptVendors(before, after any) any {
+	next := vendorByRuntime(vendorList(after))
+	kept := []storage.AgentRuntimeVendor{}
+	for _, v := range vendorList(before) {
+		n, ok := next[v.Runtime]
+		if !ok {
+			continue
+		}
+		domains, prefixes := setOf(n.Domains), setOf(n.Prefixes)
+		k := storage.AgentRuntimeVendor{Runtime: v.Runtime, Vendor: v.Vendor, Domains: []string{}, Prefixes: []string{}}
+		for _, d := range v.Domains {
+			if domains[d] {
+				k.Domains = append(k.Domains, d)
+			}
+		}
+		for _, p := range v.Prefixes {
+			if prefixes[p] {
+				k.Prefixes = append(k.Prefixes, p)
+			}
+		}
+		kept = append(kept, k)
+	}
+	return kept
+}
+
 // changed reports whether a change changes anything at all.
 func (c policyChange) changed() bool {
 	a, _ := json.Marshal(c.before)
@@ -353,6 +437,7 @@ const (
 	addLoosens                           // a list entry that was not there loosens
 	anyLoosens                           // any change loosens
 	windowField                          // the off-hours window, judged as a whole
+	vendorField                          // agent runtime vendors: a domain or prefix that was not there loosens
 )
 
 var tuningDirections = map[string]tuningDirection{
@@ -393,6 +478,7 @@ var tuningDirections = map[string]tuningDirection{
 	"agent_heavy_endpoints": addLoosens,
 	"agent_heavy_roles":     addLoosens,
 	"agent_heavy_observed":  onLoosens,
+	"agent_runtime_vendors": vendorField,
 
 	"admin_fanout_sources":   addLoosens,
 	"admin_fanout_targets":   addLoosens,
@@ -436,6 +522,8 @@ func tuningLoosens(before, after storage.DetectionTuning) []string {
 			loose = !okA || !okB || (dir == higherLoosens && y > x) || (dir == lowerLoosens && y < x)
 		case addLoosens:
 			loose = addsEntries(a[k], b[k])
+		case vendorField:
+			loose = vendorsLoosen(a[k], b[k])
 		default:
 			loose = true
 		}
