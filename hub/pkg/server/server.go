@@ -735,6 +735,7 @@ func (s *Server) Start(addr string) error {
 	go s.reconcilePendingGrantsLoop()
 	go s.agentRolloutLoop()
 	go s.maintenanceScheduleLoop()
+	go s.sessionJobsLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)

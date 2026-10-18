@@ -328,3 +328,26 @@ func (m *Manager) updateRecordingProgress(sessionID, recordingState string, reco
 	)
 	return err
 }
+
+// SessionEnd says whether a session has ended, how, and whether its agent
+// side ever started. It reads the live session or its row without caching
+// it, so callers can look at old sessions in bulk. ok is false when there is
+// no such session.
+func (m *Manager) SessionEnd(sessionID string) (ended bool, state SessionState, reason string, started bool, ok bool) {
+	m.mu.Lock()
+	sess, live := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !live {
+		var err error
+		if sess, err = m.loadDurableSession(sessionID); err != nil {
+			return false, "", "", false, false
+		}
+	}
+	sess.mu.RLock()
+	defer sess.mu.RUnlock()
+	switch sess.State {
+	case StateClosed, StateExpired, StateFailed:
+		ended = true
+	}
+	return ended, sess.State, sess.CloseReason, sess.StartedAt != nil, true
+}
