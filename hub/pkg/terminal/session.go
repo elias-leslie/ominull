@@ -402,6 +402,19 @@ func (m *Manager) createSession(sessionID, token, tenantID, endpointID, operator
 	if activeEndpoint >= m.perEndpoint {
 		return nil, fmt.Errorf("active terminal session limit reached: max %d active terminal sessions allowed per endpoint (%s)", m.perEndpoint, endpointID)
 	}
+	// A non-shell kind may hold fewer slots per endpoint than the shared
+	// cap allows (one screen per endpoint); checked here, under m.mu with
+	// the shared caps, so two concurrent opens cannot both pass.
+	kind := KindFor(program)
+	if kind != nil && kind.MaxPerEndpoint > 0 {
+		n, err := m.countLiveKind(endpointID, kind.Prefix, now)
+		if err != nil {
+			return nil, fmt.Errorf("%s session cap could not be checked: %w", kind.Name, err)
+		}
+		if n >= kind.MaxPerEndpoint {
+			return nil, fmt.Errorf("a %s session is already open on this endpoint (%s); end it first", kind.Name, endpointID)
+		}
+	}
 	if d <= 0 || d > m.maxDuration {
 		d = m.maxDuration
 	}
@@ -442,8 +455,13 @@ func (m *Manager) createSession(sessionID, token, tenantID, endpointID, operator
 		MaxRecordingBytes: maxRec,
 	}
 
+	if kind != nil && kind.NoRecording {
+		sess.RecordingState = "off"
+		sess.MaxRecordingBytes = 0
+	}
+
 	// Create an evidence bundle for this terminal session if evidence store is attached
-	if m.evidenceStore != nil {
+	if m.evidenceStore != nil && (kind == nil || !kind.NoRecording) {
 		bundle, err := m.evidenceStore.CreateBundle(tenantID, endpointID, sessionID, "terminal_session", 30*24*time.Hour)
 		if err == nil && bundle != nil {
 			sess.BundleID = bundle.ID

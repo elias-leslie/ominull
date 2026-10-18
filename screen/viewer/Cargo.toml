@@ -1,0 +1,64 @@
+[package]
+name = "ominull-screen"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "OmniNull native remote-screen viewer and headless agent control (REMOTE_SCREEN.md §8.2, §9)."
+license = "BSL-1.1"
+publish = false
+
+[[bin]]
+name = "ominull-screen"
+path = "src/main.rs"
+
+[lib]
+name = "screen_viewer"
+path = "src/lib.rs"
+
+[dev-dependencies]
+# Test CA and leaf certificates are generated at test time (no key files in the repo). MIT/Apache-2.0.
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring", "pem"] }
+# Test-only: encodes the JPEG tiles the fake hub sends in tests/loopback.rs. MIT OR Apache-2.0.
+jpeg-encoder = { version = "=0.7.1", default-features = false, features = ["std"] }
+
+[dependencies]
+# The one shared schema (REMOTE_SCREEN.md §4.4), owned by screen/wire.
+screen-wire = { path = "../wire" }
+# PNG output for `ctl shot`. MIT OR Apache-2.0.
+png = "=0.18.1"
+# Window, input, fullscreen. Apache-2.0.
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+# CPU framebuffer blit to the window. MIT OR Apache-2.0.
+softbuffer = { version = "=0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+# JPEG tile decode, pure Rust. MIT OR Apache-2.0 OR Zlib.
+zune-jpeg = "=0.5.15"
+# WebSocket over our own TLS stream. MIT OR Apache-2.0.
+tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"] }
+# TLS with the ring provider and a root store built only from ca_pem. Apache-2.0 OR ISC OR MIT.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "=1.15.0", features = ["std"] }
+# JSON control frames and the stdin handshake. MIT OR Apache-2.0.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+# Toolbar text. MIT.
+font8x8 = { version = "=0.3.1", default-features = false }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Keyboard grab on X11 (XGrabKeyboard on winit's own Display). MIT.
+x11-dl = "=2.21.0"
+# Keyboard-shortcuts-inhibit on Wayland, on winit's own wl_display. MIT.
+wayland-client = "=0.31.15"
+wayland-backend = { version = "=0.3.17", features = ["client_system"] }
+wayland-protocols = { version = "=0.32.13", features = ["client", "unstable"] }
+raw-window-handle = "=0.6.2"
+
+[target.'cfg(windows)'.dependencies]
+# Low-level keyboard hook for Win, Alt+Tab, Esc while grabbed. MIT OR Apache-2.0.
+windows-sys = { version = "=0.52.0", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }
+raw-window-handle = "=0.6.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

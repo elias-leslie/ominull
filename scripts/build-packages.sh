@@ -18,7 +18,7 @@ if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-for tool in gcc x86_64-w64-mingw32-gcc go dpkg-deb wixl objdump; do
+for tool in gcc x86_64-w64-mingw32-gcc go cargo dpkg-deb wixl objdump; do
     command -v "${tool}" >/dev/null || {
         echo "[-] Required build tool is missing: ${tool}" >&2
         exit 1
@@ -52,9 +52,23 @@ echo "[*] Building hub and response authority."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -o "${BUILD_DIR}/ominull-response-authority" ./cmd/ominull-response-authority)
 
+# The remote screen helper (docs/REMOTE_SCREEN.md section 6) is Rust, built
+# offline from its vendored, lock-pinned sources. It ships inside the signed
+# MSI, and its SHA-256 is compiled into the agent, which refuses to launch any
+# other file as SYSTEM in the console session.
+echo "[*] Building the Windows remote screen helper."
+[ -d "${ROOT_DIR}/screen/helper/vendor" ] || {
+    echo "[-] screen/helper/vendor is missing; run screen/vendor.sh (it fetches the crates pinned in Cargo.lock)." >&2
+    exit 1
+}
+(cd "${ROOT_DIR}/screen/helper" && cargo build --release --locked --offline --target x86_64-pc-windows-gnu)
+cp "${ROOT_DIR}/screen/helper/target/x86_64-pc-windows-gnu/release/ominull-screen-helper.exe" "${BUILD_DIR}/ominull-screen-helper.exe"
+SCREEN_HELPER_SHA256="$(sha256sum "${BUILD_DIR}/ominull-screen-helper.exe" | cut -d' ' -f1)"
+
 echo "[*] Building Windows user-mode agent and recovery tool."
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
 	-DOMINULL_WFP_EMBEDDED \
+	-DOMINULL_SCREEN_HELPER_SHA256="\"${SCREEN_HELPER_SHA256}\"" \
 	-D_WIN32_WINNT=0x0A00 \
 	-DNTDDI_VERSION=0x0A000006 \
     -I"${ROOT_DIR}/agent/include" \
@@ -169,6 +183,7 @@ wixl --arch x64 \
     <(sed -e "s|@VERSION@|${VERSION}|g" \
          -e "s|@AGENT_EXE@|${BUILD_DIR}/ominulld.exe|g" \
          -e "s|@WFP_EXE@|${BUILD_DIR}/ominull_wfp_user.exe|g" \
+         -e "s|@SCREEN_HELPER_EXE@|${BUILD_DIR}/ominull-screen-helper.exe|g" \
          "${ROOT_DIR}/packaging/windows/ominull.wxs.in")
 
 echo "[+] Built packages:"

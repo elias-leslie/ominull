@@ -43,6 +43,10 @@ func main() {
 
 	cmd := os.Args[1]
 	if cmd == "help" || cmd == "--help" || cmd == "-h" {
+		if len(os.Args) > 2 && os.Args[2] == "screen" {
+			fmt.Print(screenHelp)
+			return
+		}
 		printUsage()
 		return
 	}
@@ -112,6 +116,8 @@ func main() {
 		err = client.cmdMaint(rest)
 	case "shell":
 		err = client.cmdShell(rest)
+	case "screen":
+		err = client.cmdScreen(rest)
 	case "exec":
 		code, xerr := client.cmdExec(rest)
 		if xerr != nil {
@@ -1655,6 +1661,20 @@ Remote Commands (each new session waits for the owner's passkey tap):
                                           stdout and stderr and exits with its exit code (- reads stdin)
   shell open [--ttl 90m] ENDPOINT         One tap, then exec/put/get on ENDPOINT reuse the session
   shell end ENDPOINT                      End the held session
+  screen open [--view] [--ttl 90m] [--viewer PATH] ENDPOINT
+                                          One tap, then shows ENDPOINT's screen in the screen viewer
+                                          (--view: watch only); the session ends when the viewer closes
+  screen hold [--view] [--ttl 90m] ENDPOINT
+                                          One tap for a session an agent then drives; ended sessions
+                                          make the next command fail with "open a new one"
+  screen info|shot|click|move|drag|scroll|type|key ENDPOINT ...
+                                          Act on the held session; X Y are pixels in the last
+                                          screen shot taken with the same --max-edge and --monitor
+  screen watch|end ENDPOINT               Watch the held session view-only, or end it
+  screen settings [ENDPOINT] [--ask-first on|off|fleet]
+                                          Whether screen sessions ask the person at the keyboard
+                                          first (turning it off waits for the owner's tap)
+                                          (ominullctl help screen explains all of it)
   put ENDPOINT LOCAL REMOTE               Copy a small file (up to 2 MiB) to the endpoint
   get ENDPOINT REMOTE LOCAL|-             Copy a file from the endpoint
   software list                           Inspect authoritative endpoint package inventory

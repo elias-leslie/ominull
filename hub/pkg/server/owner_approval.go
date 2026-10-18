@@ -88,6 +88,9 @@ type approvalPlan struct {
 	// SessionSeconds is how long a terminal may run; the authority shows it
 	// to the owner (it is not part of the digest).
 	SessionSeconds int64
+	// AskFirst: a screen session asks the person at the keyboard first;
+	// shown to the owner, not digested.
+	AskFirst bool
 	// OnRequested is told the approval id once one is created for this plan.
 	OnRequested func(approvalID string)
 }
@@ -226,7 +229,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 			v, err := s.responseAuth.RequestApproval(r.Context(), &responseauth.ApprovalRequestInput{
 				TenantID: tenantID, Requester: requester, Kind: plan.Kind, Action: plan.Action,
 				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
-				SessionSeconds: plan.SessionSeconds,
+				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst,
 			})
 			if err != nil {
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())

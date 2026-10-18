@@ -1,0 +1,7 @@
+# Offline, vendored supply chain (REMOTE_SCREEN.md §6.0): exact versions pinned
+# in Cargo.lock, all sources under ./vendor, no network at build time.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

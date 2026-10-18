@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"ominull/hub/pkg/response"
 )
 
 // The owner sees a staged rollout as staged, worked out from the payload.
@@ -223,5 +225,82 @@ func TestTerminalLengthsAndLimitsInPlainWords(t *testing.T) {
 	}
 	if _, _, err := describeApproval(ActionKindDetection, payload, []string{"detection:tuning"}, "admin"); err == nil {
 		t.Fatal("a limits change under another target was described")
+	}
+}
+
+// The owner reads control vs watch, the length, who for, and the consent
+// cases; the payload is exactly the digested mode (and unattended).
+func TestDescribeScreen(t *testing.T) {
+	tg := []string{"win-01"}
+	cases := []struct {
+		payload  string
+		seconds  int64
+		askFirst bool
+		action   string
+		summary  string
+	}{
+		{`{"mode":"control"}`, 0, false, "Control screen", "See and control the screen on win-01, for alice"},
+		{`{"mode":"control"}`, 4 * 3600, false, "Control screen", "See and control the screen on win-01, up to 4 hours, for alice"},
+		{`{"mode":"view"}`, 1800, false, "Watch screen", "Watch the screen on win-01 (no control), up to 30 minutes, for alice"},
+		{`{"mode":"control"}`, 3600, true, "Control screen", "See and control the screen on win-01, up to 1 hour, for alice; the person at the keyboard is asked to allow it first"},
+		{`{"mode":"view","ask_first":true}`, 0, false, "Watch screen", "Watch the screen on win-01 (no control), for alice; the person at the keyboard is asked to allow it first"},
+		{`{"mode":"control","unattended":true}`, 3600, true, "Control screen", "See and control the screen on win-01, up to 1 hour, for alice; the person at the keyboard is asked to allow it first; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"},
+	}
+	for _, tc := range cases {
+		a, s, err := describeScreen([]byte(tc.payload), tg, "alice", tc.seconds, tc.askFirst)
+		if err != nil || a != tc.action || s != tc.summary {
+			t.Errorf("%s: %q %q %v", tc.payload, a, s, err)
+		}
+	}
+	for _, tc := range []struct{ payload, summary string }{
+		{`{"mode":"control"}`, "An agent (admin key) will see and control the screen on win-01, up to 1 hour"},
+		{`{"mode":"view"}`, "An agent (admin key) will see the screen on win-01, up to 1 hour"},
+	} {
+		if _, s, err := describeScreen([]byte(tc.payload), tg, "admin (api-key)", 3600, false); err != nil || s != tc.summary {
+			t.Errorf("agent %s: %q %v", tc.payload, s, err)
+		}
+	}
+	for _, bad := range []string{`{"mode":"drive"}`, `{}`, `{"mode":"control","program":"cmd.exe"}`, `{"mode":"control","unattended":false}`, `[]`,
+		`{"mode":"control","ask_first":false}`, `{"ask_first":true,"mode":"control"}`, `{"mode":"control","ask_first":true,"unattended":true}`,
+		`{"mode": "control"}`, `{"Mode":"control"}`} {
+		if _, _, err := describeScreen([]byte(bad), tg, "alice", 0, false); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	if _, _, err := describeScreen([]byte(`{"mode":"view"}`), []string{"a", "b"}, "alice", 0, false); err == nil {
+		t.Error("two endpoints accepted")
+	}
+	// describeApproval routes the kind here.
+	if a, _, err := describeApproval(response.ActionKindScreenSession, []byte(`{"mode":"view"}`), tg, "alice"); err != nil || a != "Watch screen" {
+		t.Errorf("describeApproval: %q %v", a, err)
+	}
+}
+
+func TestScreenAskFirstWording(t *testing.T) {
+	off := map[string]interface{}{"scope": "win-01", "ask_first": false, "host": "Office PC"}
+	on := map[string]interface{}{"scope": "win-01", "ask_first": true}
+	got, err := ScreenAskFirstWording("screen:ask_first:win-01", on, off)
+	if err != nil || got != "Screen sessions on endpoint win-01 (Office PC) open without asking the person at the keyboard first (was: asked first)" {
+		t.Fatalf("%q %v", got, err)
+	}
+	got, err = ScreenAskFirstWording("screen:ask_first", map[string]interface{}{"scope": "fleet", "ask_first": false}, map[string]interface{}{"scope": "fleet", "ask_first": true})
+	if err != nil || !strings.HasPrefix(got, "Screen sessions on every machine without its own setting ask the person") {
+		t.Fatalf("%q %v", got, err)
+	}
+	for _, tc := range []struct {
+		target        string
+		before, after map[string]interface{}
+	}{
+		{"screen:ask_first", on, off},         // endpoint scope, fleet target
+		{"screen:ask_first:win-02", on, off},  // another endpoint
+		{"screen:ask_first:win-01", on, on},   // no change
+		{"screen:ask_first:win-01", nil, off}, // no before
+		{"screen:ask_first:win-01", on, map[string]interface{}{"scope": "win-01", "ask_first": "no"}},
+		{"screen:ask_first:win-01", on, map[string]interface{}{"scope": "win-02", "ask_first": false}},
+		{"screen:ask_first:win-01", on, map[string]interface{}{"scope": "win-01", "ask_first": false, "extra": 1}},
+	} {
+		if _, err := ScreenAskFirstWording(tc.target, tc.before, tc.after); err == nil {
+			t.Errorf("%s %v -> %v accepted", tc.target, tc.before, tc.after)
+		}
 	}
 }

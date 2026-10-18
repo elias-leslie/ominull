@@ -121,6 +121,10 @@ type ApprovalRequestInput struct {
 	// the hub will hold it. It is shown to the owner and not digested: agents
 	// check a terminal grant against the program alone.
 	SessionSeconds int64 `json:"session_seconds,omitempty"`
+	// AskFirst says the person at the endpoint's keyboard is asked to allow a
+	// screen session before it goes live (the machine's "ask the person
+	// first" setting). Shown to the owner, not digested, like SessionSeconds.
+	AskFirst bool `json:"ask_first,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -312,7 +316,7 @@ func sortedUnique(in []string) []string {
 func approvalKindAllowed(k response.ActionKind) bool {
 	switch k {
 	case ActionKindIsolation, ActionKindAgentUpdate, ActionKindMesh, ActionKindCapability, ActionKindDetection, response.ActionKindTerminalSession,
-		response.ActionKindScriptExec:
+		response.ActionKindScreenSession, response.ActionKindScriptExec:
 		return true
 	}
 	return false
@@ -360,7 +364,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// A package run's items are the exact bytes agents digest (the hub's
 	// field order, not sorted), so it is held to lower-case, unique keys
 	// (plainKeys) instead of the canonical form.
-	if in.Kind != response.ActionKindTerminalSession && in.Kind != response.ActionKindScriptExec {
+	// A screen payload's one form is the hub's field order (mode,
+	// unattended, ask_first), which describeScreen holds it to byte for byte.
+	if in.Kind != response.ActionKindTerminalSession && in.Kind != response.ActionKindScriptExec && in.Kind != response.ActionKindScreenSession {
 		if err := strictPayload(in.Payload); err != nil {
 			return nil, fmt.Errorf("approval payload refused: %w", err)
 		}
@@ -369,6 +375,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
 	if err == nil && in.Kind == response.ActionKindTerminalSession && in.SessionSeconds != 0 {
 		action, summary, err = describeTerminal(in.Payload, targets, requester, in.SessionSeconds)
+	}
+	if err == nil && in.Kind == response.ActionKindScreenSession && (in.SessionSeconds != 0 || in.AskFirst) {
+		action, summary, err = describeScreen(in.Payload, targets, requester, in.SessionSeconds, in.AskFirst)
 	}
 	if err != nil {
 		return nil, err

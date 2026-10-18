@@ -50,6 +50,16 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// relayMsg is one WebSocket message in flight through the relay. It keeps
+// the type it arrived as (text or binary) so a binary image passes through
+// unchanged; a shell frame is always text. cost is what it holds of the
+// direction's MaxQueueBytes (0 for the relay's own control messages).
+type relayMsg struct {
+	typ  int
+	data []byte
+	cost int64
+}
+
 // PairedRelay coordinates full-duplex bidirectional frame streaming between
 // the operator's browser and the remote endpoint agent.
 type PairedRelay struct {
@@ -58,8 +68,16 @@ type PairedRelay struct {
 	mgr       *Manager
 	opConn    *websocket.Conn
 	agentConn *websocket.Conn
-	opToAgent chan TerminalFrame
-	agentToOp chan TerminalFrame
+	opToAgent chan relayMsg
+	agentToOp chan relayMsg
+	// kind and policy are set for a non-shell session (policy.go); nil is
+	// the shell, policed and recorded as it always was.
+	kind   *SessionKind
+	policy FramePolicy
+	// watchers are a kind's watch (view-only) attachments, oldest first
+	// (watch.go); paused says the agent was last told to pause. Both under mu.
+	watchers  []*watcher
+	paused    bool
 	opQueue   byteGate // bytes queued operator -> agent
 	agQueue   byteGate // bytes queued agent -> operator
 	done      chan struct{}
@@ -85,18 +103,23 @@ type PairedRelay struct {
 // newPairedRelay initializes pairing state for a terminal session.
 func newPairedRelay(sess *TerminalSession, mgr *Manager) *PairedRelay {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &PairedRelay{
+	pr := &PairedRelay{
 		sess:      sess,
 		mgr:       mgr,
-		opToAgent: make(chan TerminalFrame, 64),
+		opToAgent: make(chan relayMsg, 64),
 		// Small on purpose: this is what stands between a flood and the
 		// operator's Ctrl-C. A full queue now pauses the agent read (TCP
 		// backpressure to the pty) instead of ending the session.
-		agentToOp: make(chan TerminalFrame, 16),
+		agentToOp: make(chan relayMsg, 16),
 		done:      make(chan struct{}),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+	if k := KindFor(sess.Program); k != nil {
+		pr.kind = k
+		pr.policy = k.NewPolicy(sess.Program, sess.SessionID)
+	}
+	return pr
 }
 
 // Close gracefully closes both WebSocket connections and transitions session state.
@@ -122,9 +145,14 @@ func (pr *PairedRelay) Close(reason string) {
 		pr.mu.Lock()
 		opWS := pr.opConn
 		agWS := pr.agentConn
+		watchers := pr.watchers
 		pr.opConn = nil
 		pr.agentConn = nil
+		pr.watchers = nil
 		pr.mu.Unlock()
+		for _, w := range watchers {
+			w.end(reason)
+		}
 
 		// Send close frame and close operator connection
 		if opWS != nil {
@@ -205,6 +233,9 @@ func (pr *PairedRelay) detachAttachment(owner chan struct{}, reason string) {
 	}
 
 	pr.detached.Store(true)
+	// Nobody left watching: ask the agent to stop sending (a screen pauses
+	// capture) rather than have the hub drop what it sends.
+	pr.pauseIfUnwatched()
 
 	// Discard whatever was queued for the operator who just left. It has
 	// already been recorded, and the reattaching operator replays the
@@ -350,6 +381,7 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 	// only once this attachment owns opConn, so no frame is enqueued into a
 	// channel with nothing draining it.
 	relay.detached.Store(false)
+	relay.resumeIfPaused()
 
 	// Launch operator read/write pumps
 	go relay.operatorWritePump(conn, stop)
@@ -441,53 +473,41 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 	// whole queue.
 	conn.SetReadLimit(MaxOperatorMessageSize)
 	_ = conn.SetReadDeadline(time.Now().Add(PongWait))
+	watched := pr.kind != nil && pr.kind.AttachedIsActivity
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(PongWait))
+		if watched {
+			pr.touchActivity()
+		}
 		return nil
 	})
 
 	for {
-		_, message, err := conn.ReadMessage()
+		typ, message, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
 
-		var frame TerminalFrame
-		if err := json.Unmarshal(message, &frame); err != nil {
-			// Malformed frame is a protocol violation; abort
-			pr.Close("malformed_operator_frame")
-			break
+		msg, d := pr.operatorMessage(typ, message)
+		if d.Activity {
+			pr.touchActivity()
 		}
-
-		// Operator is only permitted to send stdin, resize, or close
-		switch frame.Type {
-		case FrameStdin, FrameResize, FrameClose:
-			// Valid frame type
-		default:
-			pr.Close("forbidden_operator_frame_type")
+		switch d.Action {
+		case FrameCloseSession:
+			pr.Close(d.Reason)
 			return
+		case FrameDrop:
+			continue
 		}
-
-		if frame.Type == FrameClose {
-			frame.Timestamp = time.Now().UTC()
-			_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
-			pr.Close("operator_requested_close")
-			return
-		}
-
-		frame.Timestamp = time.Now().UTC()
-
-		// Audit record operator frame (stdin, resize)
-		_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 
 		// A full queue blocks this read (TCP backpressure to the browser)
 		// rather than ending the session: a big paste is not an attack.
-		n := frameCost(frame)
+		n := msg.cost
 		if !pr.opQueue.acquire(n, pr.done, stop, nil) {
 			return
 		}
 		select {
-		case pr.opToAgent <- frame:
+		case pr.opToAgent <- msg:
 		case <-pr.done:
 			pr.opQueue.release(n)
 			return
@@ -495,6 +515,89 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 			pr.opQueue.release(n)
 			return
 		}
+	}
+}
+
+// operatorMessage polices one operator message: the session kind's policy,
+// or for a shell the stdin/resize/close rule, recorded.
+func (pr *PairedRelay) operatorMessage(typ int, message []byte) (relayMsg, FrameDecision) {
+	if pr.policy != nil {
+		return policed(pr.policy.Operator(typ, message), typ, message)
+	}
+	var frame TerminalFrame
+	if err := json.Unmarshal(message, &frame); err != nil {
+		// Malformed frame is a protocol violation; abort
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "malformed_operator_frame"}
+	}
+
+	// Operator is only permitted to send stdin, resize, or close
+	switch frame.Type {
+	case FrameStdin, FrameResize, FrameClose:
+		// Valid frame type
+	default:
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "forbidden_operator_frame_type"}
+	}
+
+	frame.Timestamp = time.Now().UTC()
+	// Audit record operator frame (stdin, resize, close). RecordFrame also
+	// pushes the idle deadline for stdin and resize.
+	_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
+	if frame.Type == FrameClose {
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "operator_requested_close"}
+	}
+	data, _ := json.Marshal(frame)
+	return relayMsg{typ: websocket.TextMessage, data: data, cost: frameCost(frame)}, FrameDecision{}
+}
+
+// agentMessage polices one agent message the same way.
+func (pr *PairedRelay) agentMessage(typ int, message []byte) (relayMsg, FrameDecision) {
+	if pr.policy != nil {
+		return policed(pr.policy.Agent(typ, message), typ, message)
+	}
+	var frame TerminalFrame
+	if err := json.Unmarshal(message, &frame); err != nil {
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "malformed_agent_frame"}
+	}
+
+	// Agent is only permitted to send stdout or close
+	switch frame.Type {
+	case FrameStdout, FrameClose:
+		// Valid frame type
+	default:
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "forbidden_agent_frame_type"}
+	}
+
+	frame.Timestamp = time.Now().UTC()
+	// Audit record frame in session memory
+	_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
+	if frame.Type == FrameClose {
+		return relayMsg{}, FrameDecision{Action: FrameCloseSession, Reason: "agent_process_terminated"}
+	}
+	data, _ := json.Marshal(frame)
+	return relayMsg{typ: websocket.TextMessage, data: data, cost: frameCost(frame)}, FrameDecision{}
+}
+
+// policed turns a policy's decision into the message to forward: the bytes
+// as received, in the type received, unless the policy re-encoded them.
+func policed(d FrameDecision, typ int, message []byte) (relayMsg, FrameDecision) {
+	if d.Action != FrameForward {
+		return relayMsg{}, d
+	}
+	if d.Data != nil {
+		typ, message = websocket.TextMessage, d.Data
+	}
+	return relayMsg{typ: typ, data: message, cost: int64(len(message) + 64)}, d
+}
+
+// sendAgentControl queues one of the relay's own text messages for the agent
+// without waiting: a full queue (a flooding operator) loses it.
+func (pr *PairedRelay) sendAgentControl(data []byte) {
+	if len(data) == 0 || pr.isClosed() {
+		return
+	}
+	select {
+	case pr.opToAgent <- relayMsg{typ: websocket.TextMessage, data: data}:
+	default:
 	}
 }
 
@@ -510,37 +613,28 @@ func (pr *PairedRelay) agentReadPump(conn *websocket.Conn) {
 	})
 
 	for {
-		_, message, err := conn.ReadMessage()
+		typ, message, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
 
-		var frame TerminalFrame
-		if err := json.Unmarshal(message, &frame); err != nil {
-			pr.Close("malformed_agent_frame")
-			break
-		}
-
-		// Agent is only permitted to send stdout or close
-		switch frame.Type {
-		case FrameStdout, FrameClose:
-			// Valid frame type
-		default:
-			pr.Close("forbidden_agent_frame_type")
+		msg, d := pr.agentMessage(typ, message)
+		switch d.Action {
+		case FrameCloseSession:
+			pr.Close(d.Reason)
 			return
+		case FrameDrop:
+			continue
 		}
-
-		if frame.Type == FrameClose {
-			frame.Timestamp = time.Now().UTC()
-			_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
-			pr.Close("agent_process_terminated")
-			return
+		if pr.kind != nil {
+			// Every watcher gets its copy without holding up the others.
+			pr.fanOut(msg)
+			if !pr.controlAttached() {
+				// Nothing is queued for a control side nobody holds; the
+				// watchers had theirs.
+				continue
+			}
 		}
-
-		frame.Timestamp = time.Now().UTC()
-
-		// Audit record frame in session memory
-		_ = pr.mgr.RecordFrame(pr.sess.SessionID, frame)
 
 		// Detached: recorded above, and that is the whole delivery. Nothing
 		// is draining agentToOp with no operator attached, so enqueueing here
@@ -555,7 +649,7 @@ func (pr *PairedRelay) agentReadPump(conn *websocket.Conn) {
 		// A slow viewer (a phone over the tunnel) pauses the agent read
 		// instead of losing the session. The wait gives up as soon as the
 		// operator detaches: detached output is already in the recording.
-		if !pr.enqueueForOperator(frame) {
+		if !pr.enqueueForOperator(msg) {
 			return
 		}
 	}
@@ -579,21 +673,18 @@ func (pr *PairedRelay) operatorWritePump(conn *websocket.Conn, stop chan struct{
 			// This attachment has been detached. Return without touching
 			// the session: a later pump owns the relay now.
 			return
-		case frame, ok := <-pr.agentToOp:
+		case msg, ok := <-pr.agentToOp:
 			_ = conn.SetWriteDeadline(time.Now().Add(WriteWait))
 			if !ok {
 				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			pr.agQueue.release(frameCost(frame))
+			pr.agQueue.release(msg.cost)
 
-			data, err := json.Marshal(frame)
-			if err != nil {
-				return
-			}
-			// Deflating a one-keystroke echo costs more than it saves.
-			conn.EnableWriteCompression(len(data) > 512)
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			// Deflating a one-keystroke echo costs more than it saves, and
+			// a JPEG tile does not deflate at all.
+			conn.EnableWriteCompression(msg.typ == websocket.TextMessage && len(msg.data) > 512)
+			if err := conn.WriteMessage(msg.typ, msg.data); err != nil {
 				return
 			}
 
@@ -618,19 +709,15 @@ func (pr *PairedRelay) agentWritePump(conn *websocket.Conn) {
 		select {
 		case <-pr.done:
 			return
-		case frame, ok := <-pr.opToAgent:
+		case msg, ok := <-pr.opToAgent:
 			_ = conn.SetWriteDeadline(time.Now().Add(WriteWait))
 			if !ok {
 				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			pr.opQueue.release(frameCost(frame))
+			pr.opQueue.release(msg.cost)
 
-			data, err := json.Marshal(frame)
-			if err != nil {
-				return
-			}
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			if err := conn.WriteMessage(msg.typ, msg.data); err != nil {
 				return
 			}
 
@@ -675,17 +762,17 @@ func HashToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// enqueueForOperator hands one agent frame to the operator writer, waiting
+// enqueueForOperator hands one agent message to the operator writer, waiting
 // while the queue is full. It returns false when the relay is closing.
-func (pr *PairedRelay) enqueueForOperator(frame TerminalFrame) bool {
-	n := frameCost(frame)
+func (pr *PairedRelay) enqueueForOperator(msg relayMsg) bool {
+	n := msg.cost
 	// Waiting for room gives up when the operator detaches: detached output
 	// is already in the recording.
 	if !pr.agQueue.acquire(n, pr.done, nil, pr.detached.Load) {
 		return !pr.isDone()
 	}
 	select {
-	case pr.agentToOp <- frame:
+	case pr.agentToOp <- msg:
 		return true
 	case <-pr.done:
 		pr.agQueue.release(n)
@@ -696,7 +783,7 @@ func (pr *PairedRelay) enqueueForOperator(frame TerminalFrame) bool {
 	defer t.Stop()
 	for {
 		select {
-		case pr.agentToOp <- frame:
+		case pr.agentToOp <- msg:
 			return true
 		case <-pr.done:
 			pr.agQueue.release(n)

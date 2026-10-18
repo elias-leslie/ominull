@@ -131,6 +131,79 @@ func describeTerminal(payload []byte, targets []string, requester string, second
 		cleanText(p.Program, 120), targets[0], length, requester), nil
 }
 
+// describeScreen shows a screen request in the owner's words: control or
+// watch-only, how long, for whom, whether the person at the keyboard is asked
+// first, and whether it may open with nobody there to ask. The payload is
+// exactly the digested {"mode":...[,"unattended":true]}; anything else in it
+// is refused, since the agent digests those bytes and nothing more.
+func describeScreen(payload []byte, targets []string, requester string, seconds int64, askFirst bool) (string, string, error) {
+	var top map[string]json.RawMessage
+	if err := decodeJSON(payload, &top); err != nil {
+		return "", "", errors.New("screen approval payload must name the mode")
+	}
+	for k := range top {
+		if k != "mode" && k != "unattended" && k != "ask_first" {
+			return "", "", fmt.Errorf("screen approval payload carries an unknown member %q", cleanText(k, 40))
+		}
+	}
+	var p response.ScreenSessionPayload
+	if err := decodeJSON(payload, &p); err != nil {
+		return "", "", errors.New("screen approval payload must name the mode")
+	}
+	if _, has := top["unattended"]; has && !p.Unattended {
+		return "", "", errors.New(`a screen approval carries "unattended" only as true`)
+	}
+	if _, has := top["ask_first"]; has && !p.AskFirst {
+		return "", "", errors.New(`a screen approval carries "ask_first" only as true`)
+	}
+	// One byte form per meaning, the one the agent rebuilds and digests:
+	// keys in the order mode, unattended, ask_first, no spaces, false
+	// members left out. (Not the sorted canonical form other kinds use.)
+	if want, err := json.Marshal(p); err != nil || !bytes.Equal(want, payload) {
+		return "", "", errors.New(`a screen approval payload is exactly {"mode":...} then "unattended":true and "ask_first":true when set, in that order`)
+	}
+	// The payload is what the agent enforces, so its ask_first is what the
+	// owner is told about.
+	askFirst = askFirst || p.AskFirst
+	if len(targets) != 1 {
+		return "", "", errors.New("a screen approval covers exactly one endpoint")
+	}
+	if seconds < 0 || seconds > maxTerminalSessionSeconds {
+		return "", "", errors.New("a screen session runs at most 24 hours")
+	}
+	length := ""
+	if seconds > 0 {
+		length = ", up to " + spanText(seconds)
+	}
+	// An agent holding the hub's admin key (ominullctl) is named as one, so
+	// the owner always knows who will be at the controls.
+	agent := strings.HasSuffix(requester, "(api-key)")
+	var action, summary string
+	switch {
+	case p.Mode == response.ScreenModeControl && agent:
+		action = "Control screen"
+		summary = fmt.Sprintf("An agent (admin key) will see and control the screen on %s%s", targets[0], length)
+	case p.Mode == response.ScreenModeView && agent:
+		action = "Watch screen"
+		summary = fmt.Sprintf("An agent (admin key) will see the screen on %s%s", targets[0], length)
+	case p.Mode == response.ScreenModeControl:
+		action = "Control screen"
+		summary = fmt.Sprintf("See and control the screen on %s%s, for %s", targets[0], length, requester)
+	case p.Mode == response.ScreenModeView:
+		action = "Watch screen"
+		summary = fmt.Sprintf("Watch the screen on %s (no control)%s, for %s", targets[0], length, requester)
+	default:
+		return "", "", errors.New(`a screen approval's mode is "control" or "view"`)
+	}
+	if askFirst {
+		summary += "; the person at the keyboard is asked to allow it first"
+	}
+	if p.Unattended {
+		summary += "; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"
+	}
+	return action, summary, nil
+}
+
 // spanText reads a length of time the way the owner says it: "4 hours",
 // "1 hour 30 minutes", "45 minutes".
 func spanText(seconds int64) string {
@@ -158,6 +231,9 @@ func spanText(seconds int64) string {
 func describeApproval(kind response.ActionKind, payload []byte, targets []string, requester string) (string, string, error) {
 	if kind == response.ActionKindTerminalSession {
 		return describeTerminal(payload, targets, requester, 0)
+	}
+	if kind == response.ActionKindScreenSession {
+		return describeScreen(payload, targets, requester, 0, false)
 	}
 
 	if kind == ActionKindDetection {
@@ -405,6 +481,11 @@ var detectionPolicyOps = map[string]map[string]string{
 	"terminal_limits": {
 		"raise": "Raise remote shell limits",
 	},
+	// Whether a screen session first asks the person at the keyboard, fleet
+	// wide or for one machine. Turning it on only tightens and asks nobody.
+	"screen_ask_first": {
+		"off": "Stop asking before screen sessions",
+	},
 	// The software removal catalog: which programs a removal package may
 	// uninstall and how. Deleting an entry only tightens and asks nobody.
 	"software_catalog": {
@@ -492,6 +573,10 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 			return "", "", errors.New("a remote shell limits change targets terminal:limits and carries the limits in force")
 		}
 		summary, err := TerminalLimitsWording(before, after)
+		return action, summary, err
+	}
+	if p.Policy == "screen_ask_first" {
+		summary, err := ScreenAskFirstWording(targets[0], before, after)
 		return action, summary, err
 	}
 	if p.Policy == "software_catalog" {
@@ -882,4 +967,50 @@ func SoftwareCatalogWording(target string, before, after map[string]interface{})
 		return "", errors.New("this catalog change changes nothing the removal package reads")
 	}
 	return fitParts(append([]string{"Software removal catalog: " + a.Describe()}, parts...), nil)
+}
+
+// ScreenAskFirstWording says what a change to the screen ask-first setting
+// does. before and after are {"scope", "ask_first"} plus an optional "host"
+// label: scope "fleet" (target screen:ask_first) is the default for machines
+// without their own setting, any other scope is one endpoint (target
+// screen:ask_first:<id>). The hub uses it for its audit row; the authority
+// for the owner.
+func ScreenAskFirstWording(target string, before, after map[string]interface{}) (string, error) {
+	var scope string
+	var vals [2]bool
+	for i, m := range []map[string]interface{}{before, after} {
+		if m == nil {
+			return "", errors.New("a screen ask-first change carries the setting before and after")
+		}
+		for k := range m {
+			if k != "scope" && k != "ask_first" && k != "host" {
+				return "", fmt.Errorf("a screen ask-first setting carries an unknown member %q", cleanText(k, 40))
+			}
+		}
+		sc, _ := m["scope"].(string)
+		v, ok := m["ask_first"].(bool)
+		if sc == "" || !ok || (i == 1 && sc != scope) {
+			return "", errors.New("a screen ask-first setting names one scope and ask_first true or false")
+		}
+		scope, vals[i] = sc, v
+	}
+	where := "every machine without its own setting"
+	want := "screen:ask_first"
+	if scope != "fleet" {
+		want += ":" + scope
+		where = "endpoint " + cleanText(scope, 64)
+		if host, _ := after["host"].(string); host != "" && host != scope {
+			where += " (" + cleanText(host, 64) + ")"
+		}
+	}
+	if target != want {
+		return "", fmt.Errorf("a screen ask-first change for %s targets %s", cleanText(scope, 64), want)
+	}
+	if vals[0] == vals[1] {
+		return "", errors.New("this screen ask-first change changes nothing")
+	}
+	if vals[1] {
+		return "Screen sessions on " + where + " ask the person at the keyboard to allow them first (was: opened without asking)", nil
+	}
+	return "Screen sessions on " + where + " open without asking the person at the keyboard first (was: asked first)", nil
 }

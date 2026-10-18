@@ -46,6 +46,9 @@ const (
 	CapCollect  = "collect"
 	CapTerminal = "terminal"
 	CapScript   = "script"
+	// CapScreen is remote screen view/control. It sits beside the terminal:
+	// each session still takes its own owner approval.
+	CapScreen = "screen"
 )
 
 // Profiles. monitor: telemetry and updates only (hypervisors, hosts that must
@@ -55,8 +58,8 @@ const (
 // adds hub-pushed scripts.
 var profileCaps = map[string][]string{
 	"monitor":    {CapUpdate},
-	"respond":    {CapCollect, CapIsolate, CapMesh, CapTerminal, CapUpdate},
-	"engagement": {CapCollect, CapIsolate, CapMesh, CapScript, CapTerminal, CapUpdate},
+	"respond":    {CapCollect, CapIsolate, CapMesh, CapScreen, CapTerminal, CapUpdate},
+	"engagement": {CapCollect, CapIsolate, CapMesh, CapScreen, CapScript, CapTerminal, CapUpdate},
 }
 
 // ProfileCaps returns the sorted capability list of a profile.

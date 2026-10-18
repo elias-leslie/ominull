@@ -1,0 +1,47 @@
+[package]
+name = "ominull-screen-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Ominull remote-screen capture/input helper, launched by the agent into the active console session."
+license = "BSL-1.1"
+publish = false
+
+[[bin]]
+name = "ominull-screen-helper"
+path = "src/main.rs"
+
+[dependencies]
+# The one shared wire schema (also used by the native viewer). Path dep, vendored.
+screen-wire = { path = "../wire" }
+# Pure-Rust JPEG encoder for the capture tiles (REMOTE_SCREEN.md §6.2 blesses it
+# where WIC is awkward from Rust). MIT/Apache-2.0, no C toolchain, no build.rs.
+jpeg-encoder = { version = "=0.7.1", default-features = false, features = ["std"] }
+
+# Win32 only on Windows, so the Linux host build (cargo test) never pulls it in.
+[target.'cfg(windows)'.dependencies.windows]
+version = "=0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Registry",
+]
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

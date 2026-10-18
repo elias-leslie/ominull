@@ -554,6 +554,7 @@ func (a *Authority) UnlockSessionWithTOTP(tenantID, operatorID, browserSessionID
 			response.ActionKindForensicCollect,
 			response.ActionKindScriptExec,
 			response.ActionKindTerminalSession,
+			response.ActionKindScreenSession,
 		},
 		IssuedAt:          now,
 		IdleExpiresAt:     now.Add(idleTTL),
@@ -767,6 +768,7 @@ func (a *Authority) FinishWebAuthnAuthentication(req *WebAuthnAuthenticationRequ
 			response.ActionKindForensicCollect,
 			response.ActionKindScriptExec,
 			response.ActionKindTerminalSession,
+			response.ActionKindScreenSession,
 		},
 		IssuedAt:          now,
 		IdleExpiresAt:     now.Add(idleTTL),
@@ -852,6 +854,8 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 	switch req.ActionKind {
 	case response.ActionKindTerminalSession:
 		return nil, errors.New("terminal sessions need an owner approval, not a response session")
+	case response.ActionKindScreenSession:
+		return nil, errors.New("screen sessions need an owner approval, not a response session")
 	case response.ActionKindForensicCollect, response.ActionKindScriptExec:
 		// valid
 	default:

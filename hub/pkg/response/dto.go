@@ -32,6 +32,9 @@ const (
 	ActionKindForensicCollect ActionKind = "forensic_collection"
 	ActionKindScriptExec      ActionKind = "script_exec"
 	ActionKindTerminalSession ActionKind = "terminal_session"
+	// ActionKindScreenSession sees (and, in control mode, drives) the
+	// endpoint's interactive screen over the terminal relay.
+	ActionKindScreenSession ActionKind = "screen_session"
 )
 
 // GrantVersion is the current version of the endpoint grant protocol.
@@ -152,7 +155,7 @@ func (g *EndpointGrant) Validate() error {
 		return errors.New("missing endpoint_id")
 	}
 	switch g.ActionKind {
-	case ActionKindForensicCollect, ActionKindScriptExec, ActionKindTerminalSession:
+	case ActionKindForensicCollect, ActionKindScriptExec, ActionKindTerminalSession, ActionKindScreenSession:
 	default:
 		return fmt.Errorf("unsupported action_kind: %q", g.ActionKind)
 	}
@@ -186,7 +189,7 @@ func (o *JobOffer) Validate() error {
 		return errors.New("missing job_id")
 	}
 	switch o.Kind {
-	case ActionKindForensicCollect, ActionKindScriptExec, ActionKindTerminalSession:
+	case ActionKindForensicCollect, ActionKindScriptExec, ActionKindTerminalSession, ActionKindScreenSession:
 	default:
 		return fmt.Errorf("unsupported offer kind: %q", o.Kind)
 	}
@@ -307,4 +310,27 @@ type TerminalSessionPayload struct {
 	ConnectToken       string `json:"connect_token,omitempty"`
 	MaxDurationSeconds int    `json:"max_duration_seconds,omitempty"`
 	IdleTimeoutSeconds int    `json:"idle_timeout_seconds,omitempty"`
+}
+
+// Screen session modes. The grant's action digest is over ScreenSessionPayload
+// alone ({"mode":"control"} or {"mode":"view"}), exactly what the agent
+// re-digests; the session length is the hub's to enforce.
+const (
+	ScreenModeControl = "control"
+	ScreenModeView    = "view"
+)
+
+// ScreenSessionPayload is the digested action of a screen_session grant.
+// Unattended is set (and only then present) when the owner approved the
+// session opening with nobody at the keyboard to ask: on a machine that asks
+// the person first, the agent declines a session when nobody is signed in
+// unless its grant says this. Canonical bytes: {"mode":"control"},
+// {"mode":"view"}, or {"mode":"control","unattended":true}.
+type ScreenSessionPayload struct {
+	Mode       string `json:"mode"`
+	Unattended bool   `json:"unattended,omitempty"`
+	// AskFirst: the person at the keyboard is asked to allow the session
+	// first (the endpoint's screen.ask_first setting). Field order is the
+	// digest's key order: mode, unattended, ask_first.
+	AskFirst bool `json:"ask_first,omitempty"`
 }

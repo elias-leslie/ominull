@@ -1,0 +1,5 @@
+# Build output and vendored crate sources are regenerated, never committed.
+# Cargo.lock pins every crate's exact version and checksum; screen/vendor.sh
+# rebuilds vendor/ from it, and the release build then runs offline.
+*/target/
+*/vendor/

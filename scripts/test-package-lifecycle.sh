@@ -53,6 +53,10 @@ msiextract --directory "${MSI_ROOT}" "${MSI}" >/dev/null
     echo "[-] MSI has no standalone WFP recovery executable." >&2
     exit 1
 }
+[ -f "${MSI_ROOT}/Ominull/ominull-screen-helper.exe" ] || {
+    echo "[-] MSI has no remote screen helper." >&2
+    exit 1
+}
 if find "${MSI_ROOT}" -type f \( -iname '*.sys' -o -iname '*driver*' \) -print -quit | grep -q .; then
     echo "[-] MSI contains a retired kernel-driver payload." >&2
     exit 1

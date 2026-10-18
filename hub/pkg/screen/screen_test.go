@@ -1,0 +1,423 @@
+package screen
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/terminal"
+)
+
+func screenGrant(endpointID string) *response.EndpointGrant {
+	return &response.EndpointGrant{
+		Version: response.GrantVersion, GrantID: "grant-" + endpointID, TenantID: "t1", EndpointID: endpointID,
+		ActionKind: response.ActionKindScreenSession, OperatorID: "alice",
+		IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+}
+
+type harness struct {
+	t   *testing.T
+	mgr *terminal.Manager
+	srv *httptest.Server
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	mgr := terminal.NewManager(nil, nil, 30*time.Minute, 15*time.Minute)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/op", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.AttachOperator(w, r, r.URL.Query().Get("session_id"), r.URL.Query().Get("token")); err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		}
+	})
+	mux.HandleFunc("/agent", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if err := mgr.AttachAgent(w, r, q.Get("session_id"), q.Get("endpoint_id"), q.Get("token")); err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(func() { srv.Close(); _ = mgr.Close() })
+	return &harness{t: t, mgr: mgr, srv: srv}
+}
+
+func (h *harness) dial(path string, q url.Values) *websocket.Conn {
+	h.t.Helper()
+	u, _ := url.Parse(h.srv.URL)
+	u.Scheme, u.Path, u.RawQuery = "ws", path, q.Encode()
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		h.t.Fatalf("dial %s: %v", path, err)
+	}
+	return c
+}
+
+// open creates a session and attaches both sides.
+func (h *harness) open(endpoint, mode string) (*terminal.TerminalSession, *websocket.Conn, *websocket.Conn) {
+	h.t.Helper()
+	sess, err := CreateSession(h.mgr, "t1", endpoint, "alice", mode, screenGrant(endpoint), 0)
+	if err != nil {
+		h.t.Fatalf("CreateSession: %v", err)
+	}
+	agent := h.dial("/agent", url.Values{"session_id": {sess.SessionID}, "endpoint_id": {endpoint}, "token": {sess.ConnectToken}})
+	op := h.dial("/op", url.Values{"session_id": {sess.SessionID}, "token": {sess.OperatorToken}})
+	h.t.Cleanup(func() { _ = agent.Close(); _ = op.Close() })
+	return sess, op, agent
+}
+
+func read(t *testing.T, c *websocket.Conn) (int, []byte) {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	typ, data, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return typ, data
+}
+
+func send(t *testing.T, c *websocket.Conn, typ int, data string) {
+	t.Helper()
+	if err := c.WriteMessage(typ, []byte(data)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func TestScreenRelayPassesBinaryTilesAndControl(t *testing.T) {
+	h := newHarness(t)
+	sess, op, agent := h.open("win-01", response.ScreenModeControl)
+
+	hello := `{"type":"hello","monitors":[{"id":0,"w":2560,"h":1440,"x":0,"y":0,"primary":true}],"active":0}`
+	send(t, agent, websocket.TextMessage, hello)
+	if typ, got := read(t, op); typ != websocket.TextMessage || string(got) != hello {
+		t.Fatalf("hello: type %d %q", typ, got)
+	}
+	// A tile is one binary message: fixed header + JPEG, opaque to the hub.
+	tile := []byte{1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 7, 0, 0, 0, 0xff, 0xd8, 0xff, 0x00, 0xfe, 0xff, 0xd9}
+	if err := agent.WriteMessage(websocket.BinaryMessage, tile); err != nil {
+		t.Fatal(err)
+	}
+	if typ, got := read(t, op); typ != websocket.BinaryMessage || !bytes.Equal(got, tile) {
+		t.Fatalf("tile: type %d %x (binary must pass through unchanged)", typ, got)
+	}
+	frameEnd := `{"type":"frame_end","monitor":0,"frame":1,"tiles":1}`
+	send(t, agent, websocket.TextMessage, frameEnd)
+	if typ, got := read(t, op); typ != websocket.TextMessage || string(got) != frameEnd {
+		t.Fatalf("frame_end: type %d %q", typ, got)
+	}
+	ack := `{"type":"ack","monitor":0,"frame":1}`
+	send(t, op, websocket.TextMessage, ack)
+	if typ, got := read(t, agent); typ != websocket.TextMessage || string(got) != ack {
+		t.Fatalf("ack: type %d %q", typ, got)
+	}
+
+	input := `{"type":"input","ev":"mouse","x":100,"y":200,"buttons":{"l":true},"monitor":0}`
+	send(t, op, websocket.TextMessage, input)
+	if typ, got := read(t, agent); typ != websocket.TextMessage || string(got) != input {
+		t.Fatalf("input in control mode: type %d %q", typ, got)
+	}
+	// The hub clamps quality to its caps.
+	send(t, op, websocket.TextMessage, `{"type":"quality","fps":60,"jpeg_q":5}`)
+	_, got := read(t, agent)
+	var q struct {
+		Type  string `json:"type"`
+		FPS   int    `json:"fps"`
+		JPEGQ int    `json:"jpeg_q"`
+	}
+	if err := json.Unmarshal(got, &q); err != nil || q.Type != "quality" || q.FPS != MaxFPS || q.JPEGQ != MinJPEGQuality {
+		t.Fatalf("quality not clamped: %s", got)
+	}
+
+	if sum := sess.Summary(); sum["recording_state"] != "off" || sum["bundle_id"] != nil {
+		t.Fatalf("a screen session records by default: %v", sum)
+	}
+}
+
+func TestScreenViewModeDropsInput(t *testing.T) {
+	h := newHarness(t)
+	_, op, agent := h.open("win-02", response.ScreenModeView)
+	send(t, op, websocket.TextMessage, `{"type":"input","ev":"key","code":30,"down":true,"ext":false}`)
+	send(t, op, websocket.TextMessage, `{"type":"set_monitor","monitor":1}`)
+	_, got := read(t, agent)
+	if !strings.Contains(string(got), "set_monitor") {
+		t.Fatalf("view mode let input through to the agent: %s", got)
+	}
+}
+
+func TestScreenPolicyRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		side   string
+		typ    int
+		data   string
+		reason string
+	}{
+		{"operator binary", "op", websocket.BinaryMessage, "x", "forbidden_operator_frame_type"},
+		{"operator shell frame", "op", websocket.TextMessage, `{"type":"stdin","data":"aGk="}`, "forbidden_operator_frame_type"},
+		{"operator garbage", "op", websocket.TextMessage, `not json`, "malformed_operator_frame"},
+		{"operator close", "op", websocket.TextMessage, `{"type":"close"}`, "operator_requested_close"},
+		{"agent stdout", "agent", websocket.TextMessage, `{"type":"stdout","data":"aGk="}`, "forbidden_agent_frame_type"},
+		{"agent bye", "agent", websocket.TextMessage, `{"type":"bye","reason":"user signed out\n"}`, "agent_bye: user signed out"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			sess, op, agent := h.open("win-x", response.ScreenModeControl)
+			c, other := op, agent
+			if tc.side == "agent" {
+				c, other = agent, op
+			}
+			send(t, c, tc.typ, tc.data)
+			_ = other.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_, _, err := other.ReadMessage()
+			var ce *websocket.CloseError
+			if err == nil {
+				t.Fatal("session stayed open")
+			}
+			if !asClose(err, &ce) || ce.Text != tc.reason {
+				t.Fatalf("close = %v, want reason %q", err, tc.reason)
+			}
+			if sess.IsLive() {
+				t.Fatal("session still live")
+			}
+		})
+	}
+}
+
+func asClose(err error, ce **websocket.CloseError) bool {
+	c, ok := err.(*websocket.CloseError)
+	if ok {
+		*ce = c
+	}
+	return ok
+}
+
+func TestScreenPolicyUnknownModeIsViewOnly(t *testing.T) {
+	if d := newPolicy("screen:bogus", "s").Operator(websocket.TextMessage, []byte(`{"type":"input"}`)); d.Action != terminal.FrameDrop {
+		t.Fatalf("unknown mode let input through: %+v", d)
+	}
+	if d := newPolicy(Program(response.ScreenModeView), "s").Operator(websocket.TextMessage, []byte(`{"type":"ack","frame":3}`)); d.Action != terminal.FrameForward || d.Activity {
+		t.Fatalf("ack in view mode: %+v", d)
+	}
+}
+
+func TestScreenPauseOnDetachResumeOnAttach(t *testing.T) {
+	h := newHarness(t)
+	sess, op, agent := h.open("win-03", response.ScreenModeControl)
+	_ = op.Close()
+	if _, got := read(t, agent); string(got) != `{"type":"pause"}` {
+		t.Fatalf("detach sent %q, want pause", got)
+	}
+	tok, err := h.mgr.RotateOperatorToken(sess.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op2 := h.dial("/op", url.Values{"session_id": {sess.SessionID}, "token": {tok}})
+	defer op2.Close()
+	if _, got := read(t, agent); string(got) != `{"type":"resume"}` {
+		t.Fatalf("reattach sent %q, want resume", got)
+	}
+	// The session survives the detach and still relays.
+	send(t, agent, websocket.TextMessage, `{"type":"cursor_pos","x":1,"y":2,"visible":true}`)
+	if _, got := read(t, op2); !strings.Contains(string(got), "cursor_pos") {
+		t.Fatalf("after reattach: %s", got)
+	}
+}
+
+func TestScreenOnePerEndpoint(t *testing.T) {
+	mgr := terminal.NewManager(nil, nil, 30*time.Minute, 15*time.Minute)
+	defer mgr.Close()
+	if _, err := CreateSession(mgr, "t1", "win-04", "alice", response.ScreenModeView, screenGrant("win-04"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateSession(mgr, "t1", "win-04", "alice", response.ScreenModeControl, screenGrant("win-04"), 0); err == nil || !strings.Contains(err.Error(), "screen session is already open") {
+		t.Fatalf("second screen on one endpoint: %v", err)
+	}
+	// A shell beside it still opens (the shared cap is not lowered).
+	if _, err := mgr.CreateSession("t1", "win-04", "alice", "powershell.exe", screenGrant("win-04")); err != nil {
+		t.Fatalf("shell beside a screen: %v", err)
+	}
+	// Other endpoints are unaffected.
+	if _, err := CreateSession(mgr, "t1", "win-05", "alice", response.ScreenModeControl, screenGrant("win-05"), 0); err != nil {
+		t.Fatal(err)
+	}
+	// Wrong grant kind or mode are refused.
+	g := screenGrant("win-06")
+	g.ActionKind = response.ActionKindTerminalSession
+	if _, err := CreateSession(mgr, "t1", "win-06", "alice", response.ScreenModeControl, g, 0); err == nil {
+		t.Fatal("a terminal grant opened a screen")
+	}
+	if _, err := CreateSession(mgr, "t1", "win-06", "alice", "drive", screenGrant("win-06"), 0); err == nil {
+		t.Fatal("an unknown mode opened a screen")
+	}
+}
+
+// One control attachment plus watchers: everyone gets the agent's frames,
+// watcher input never reaches the agent, a watcher's acks count only while
+// it paces, and the agent pauses only once nobody is attached.
+func TestScreenWatchers(t *testing.T) {
+	h := newHarness(t)
+	h.srv.Config.Handler.(*http.ServeMux).HandleFunc("/watch", func(w http.ResponseWriter, r *http.Request) {
+		if err := h.mgr.AttachWatcher(w, r, r.URL.Query().Get("session_id")); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+		}
+	})
+	sess, op, agent := h.open("win-w", response.ScreenModeControl)
+	q := url.Values{"session_id": {sess.SessionID}}
+	var watchers []*websocket.Conn
+	for i := 0; i < MaxWatchers; i++ {
+		watchers = append(watchers, h.dial("/watch", q))
+	}
+	u, _ := url.Parse(h.srv.URL)
+	u.Scheme, u.Path, u.RawQuery = "ws", "/watch", q.Encode()
+	if c, _, err := websocket.DefaultDialer.Dial(u.String(), nil); err == nil {
+		c.Close()
+		t.Fatal("watcher cap not enforced")
+	}
+	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers })
+
+	tile := []byte{1, 0, 1, 0, 9, 9}
+	if err := agent.WriteMessage(websocket.BinaryMessage, tile); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append([]*websocket.Conn{op}, watchers...) {
+		if typ, got := read(t, c); typ != websocket.BinaryMessage || !bytes.Equal(got, tile) {
+			t.Fatalf("fan-out: %d %x", typ, got)
+		}
+	}
+	// Watchers: input dropped; ack ignored while control is attached.
+	send(t, watchers[0], websocket.TextMessage, `{"type":"input","ev":"key","code":30,"down":true}`)
+	send(t, watchers[0], websocket.TextMessage, `{"type":"ack","monitor":0,"frame":1}`)
+	send(t, op, websocket.TextMessage, `{"type":"ack","monitor":0,"frame":2}`)
+	if _, got := read(t, agent); !strings.Contains(string(got), `"frame":2`) {
+		t.Fatalf("agent got %s, want only the control ack", got)
+	}
+	// Control leaves: no pause (watchers remain); the oldest watcher paces.
+	_ = op.Close()
+	send(t, watchers[1], websocket.TextMessage, `{"type":"ack","monitor":0,"frame":3}`)
+	send(t, watchers[0], websocket.TextMessage, `{"type":"ack","monitor":0,"frame":4}`)
+	if _, got := read(t, agent); !strings.Contains(string(got), `"frame":4`) {
+		t.Fatalf("agent got %s, want the oldest watcher's ack (no pause)", got)
+	}
+	// A watcher's close detaches it alone.
+	send(t, watchers[0], websocket.TextMessage, `{"type":"close"}`)
+	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers-1 })
+	if !sess.IsLive() {
+		t.Fatal("a watcher ended the session")
+	}
+	for _, c := range watchers[1:] {
+		_ = c.Close()
+	}
+	if _, got := read(t, agent); string(got) != `{"type":"pause"}` {
+		t.Fatalf("after the last attachment left: %q, want pause", got)
+	}
+	w := h.dial("/watch", q)
+	defer w.Close()
+	if _, got := read(t, agent); string(got) != `{"type":"resume"}` {
+		t.Fatalf("first attachment back: %q, want resume", got)
+	}
+}
+
+func waitFor(t *testing.T, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 300; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not reached")
+}
+
+// Agent control input is audited by kind and coordinates; text by length.
+func TestScreenInputAudit(t *testing.T) {
+	var lines []string
+	defer SetInputAudit("sa", func(l string) { lines = append(lines, l) })()
+	p := newPolicy(Program(response.ScreenModeControl), "sa")
+	for _, f := range []string{
+		`{"type":"input","ev":"mouse","x":100,"y":200,"buttons":{},"monitor":0}`,
+		`{"type":"input","ev":"mouse","x":100,"y":200,"buttons":{"l":true},"monitor":0}`,
+		`{"type":"input","ev":"mouse","x":100,"y":200,"buttons":{"l":false},"monitor":0}`,
+		`{"type":"input","ev":"wheel","dx":0,"dy":-120,"monitor":1}`,
+		`{"type":"input","ev":"key","code":30,"down":true,"ext":false}`,
+		`{"type":"input","ev":"text","ch":"hunter2"}`,
+		`{"type":"input","ev":"sas"}`,
+	} {
+		p.Operator(websocket.TextMessage, []byte(f))
+	}
+	all := strings.Join(lines, "\n")
+	if len(lines) != 6 || strings.Contains(all, "hunter2") {
+		t.Fatalf("audit:\n%s", all)
+	}
+	for _, want := range []string{"left button down at 100,200", "left button up", "wheel dx=0 dy=-120", "key scancode 30 down", "typed text, 7 characters", "Ctrl+Alt+Del", "1 mouse moves"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("audit lacks %q:\n%s", want, all)
+		}
+	}
+	// Watchers and other sessions are not audited.
+	newPolicy(Program(response.ScreenModeControl), "other").Operator(websocket.TextMessage, []byte(`{"type":"input","ev":"sas"}`))
+	if len(lines) != 6 {
+		t.Fatal("an unaudited session was audited")
+	}
+}
+
+func TestLaunchCodes(t *testing.T) {
+	c := NewCredentials()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	code := c.IssueLaunchCode("s1", "owner@example", AttachControl)
+	if len(code) < 40 {
+		t.Fatalf("code %q is not high-entropy", code)
+	}
+	for k := range c.codes {
+		if k == code {
+			t.Fatal("code stored in the clear")
+		}
+	}
+	if op, kind, err := c.RedeemLaunchCode("s1", code, "10.0.0.1"); err != nil || op != "owner@example" || kind != AttachControl {
+		t.Fatalf("redeem: %q %q %v", op, kind, err)
+	}
+	if _, _, err := c.RedeemLaunchCode("s1", code, "10.0.0.1"); err != ErrCodeInvalid {
+		t.Fatalf("second redeem: %v", err)
+	}
+	other := c.IssueLaunchCode("s1", "o", AttachWatch)
+	if _, _, err := c.RedeemLaunchCode("s2", other, "10.0.0.1"); err != ErrCodeInvalid {
+		t.Fatalf("code for another session: %v", err)
+	}
+	if _, _, err := c.RedeemLaunchCode("s1", other, "10.0.0.1"); err != ErrCodeInvalid {
+		t.Fatalf("a code tried against the wrong session is spent: %v", err)
+	}
+	late := c.IssueLaunchCode("s3", "o", AttachControl)
+	now = now.Add(LaunchCodeTTL + time.Second)
+	if _, _, err := c.RedeemLaunchCode("s3", late, "10.0.0.2"); err != ErrCodeInvalid {
+		t.Fatalf("expired code: %v", err)
+	}
+	for i := 0; i < RedeemLimit; i++ {
+		_, _, _ = c.RedeemLaunchCode("s9", "guess", "10.0.0.3")
+	}
+	fresh := c.IssueLaunchCode("s9", "o", AttachControl)
+	if _, _, err := c.RedeemLaunchCode("s9", fresh, "10.0.0.4"); err != ErrRedeemLimit {
+		t.Fatalf("per-session limit: %v", err)
+	}
+	now = now.Add(RedeemWindow)
+	if _, _, err := c.RedeemLaunchCode("s9", fresh, "10.0.0.4"); err != nil {
+		t.Fatalf("after the window: %v", err)
+	}
+	tok := c.IssueWatchToken("s1", "owner")
+	if _, ok := c.TakeWatchToken("s2", tok); ok {
+		t.Fatal("watch token for another session")
+	}
+	if who, ok := c.TakeWatchToken("s1", tok); !ok || who != "owner" {
+		t.Fatal("watch token refused")
+	}
+	if _, ok := c.TakeWatchToken("s1", tok); ok {
+		t.Fatal("watch token used twice")
+	}
+}

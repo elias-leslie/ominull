@@ -886,7 +886,7 @@
     var mins = function (m) { return new Date(Date.now() - m * 60000).toISOString(); };
 
     var endpoints = [
-      { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.1.0 (windows-user-wfp)", status: "online", is_isolated: true, last_seen_at: now, created_at: "2026-08-20T10:00:00Z" },
+      { id: "win11-corp-exec", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-exec", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.15", mac: "00:1A:2B:3C:4D:5E", role_tag: "workstation", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.1.0 (windows-user-wfp)", status: "online", is_isolated: true, last_seen_at: now, created_at: "2026-08-20T10:00:00Z", response_capabilities: '{"isolate":true,"collect":true,"screen":{"input":true}}' },
       { id: "linux-dmz-web-01", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "dmz-web-01", os: "Debian 12 Bookworm (x86_64)", ip: "10.0.4.20", mac: "00:50:56:A1:B2:C3", role_tag: "web-server", installed_software: "Ominull Linux socket agent, Nginx 1.26", driver_version: "1.1.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.2), created_at: "2026-08-20T10:00:00Z" },
       { id: "win11-fin-11", tenant_id: "corp-default", location_id: "loc-hq", location_name: "Corporate HQ LAN", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", mac: "00:1A:2B:99:88:77", role_tag: "workstation", installed_software: "Ominull Windows user-mode WFP agent", driver_version: "1.0.0 (windows-user-wfp)", status: "offline", is_isolated: false, last_seen_at: mins(134), created_at: "2026-08-20T10:00:00Z" },
       { id: "linux-prod-db-01", tenant_id: "corp-default", location_id: "loc-cloud", location_name: "AWS Production VPC", hostname: "prod-db-01", os: "Linux 6.8.0-40-generic (x86_64)", ip: "172.16.10.4", mac: "02:42:AC:11:00:02", role_tag: "db-server", installed_software: "Ominull Linux socket agent, PostgreSQL 16", driver_version: "1.0.0 (linux-socket-v1)", status: "online", is_isolated: false, last_seen_at: mins(0.05), created_at: "2026-08-20T10:00:00Z" },
@@ -1532,6 +1532,11 @@
       eps.forEach(function (e) { if (e.id === id) e.is_isolated = on; });
       DEMO_CACHE["/api/v1/hierarchy"] = demoRebuildHierarchy();
     };
+    /* Remote screen in the demo: the session and the launch code are made up;
+       the viewer link goes nowhere without the native viewer installed. */
+    if (base === "/api/v1/screen/sessions" && method === "POST") return { session_id: "demo-screen-" + Math.random().toString(16).slice(2, 8), mode: body.mode, kind: "screen" };
+    if (base === "/api/v1/screen/sessions/launch") return { code: "demo-launch-code-not-valid", expires_in: 60 };
+    if (base === "/api/v1/screen/sessions" && method === "DELETE") return { status: "closed" };
     if (base === "/api/v1/terminal/limits") {
       var before = JSON.stringify(DEMO_TERMINAL_LIMITS.limits);
       if (body.reset) { DEMO_TERMINAL_LIMITS.limits = Object.assign({}, DEMO_TERMINAL_LIMITS.defaults); DEMO_TERMINAL_LIMITS.saved = false; }
@@ -2330,6 +2335,11 @@
           terminateTerminalSession(liveShell, asset.name || asset.ip);
         }, { danger: true }));
       });
+      if (screenCapable(asset.endpoint)) {
+        menu.appendChild(menuItem("Remote screen\u2026", "i-external", null, function () {
+          launchRemoteScreen(asset);
+        }, { why: "Asks for approval on your phone, then opens the OmniNull screen viewer" }));
+      }
       menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
         launchForensicsSheet(asset);
       }));
@@ -7475,6 +7485,59 @@
       confirmLabel: "End session",
       onConfirm: function () { closeTerminalSession(sessionSummary.session_id); }
     });
+  }
+
+  /* Remote screen (docs/REMOTE_SCREEN.md §9.2). The console has no viewer:
+     it gets the owner's approval, asks the hub for a one-use launch code (60 s,
+     bound to this session and operator) and hands it to the native viewer
+     through the ominull-screen:// scheme. The operator token never reaches the
+     page. A browser cannot tell whether the scheme is registered, so the
+     sheet always shows the ominullctl command as well. */
+  function screenCapable(ep) {
+    if (!ep || !ep.response_capabilities) return false;
+    try {
+      var c = JSON.parse(ep.response_capabilities);
+      return !!(c && c.screen);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function launchRemoteScreen(asset) {
+    var ep = asset.endpoint;
+    var host = asset.name || asset.ip || ep.id;
+    ownerApproved("/api/v1/screen/sessions", { endpoint_id: ep.id, mode: "control" }, { label: "See and control the screen on " + host })
+      .then(function (sess) {
+        if (!sess || !sess.session_id) throw new Error("The hub did not return a session.");
+        return request("/api/v1/screen/sessions/launch", "POST", { session_id: sess.session_id }).then(function (launch) {
+          if (!launch || !launch.code) throw new Error("The hub did not return a launch code.");
+          openScreenViewer(ep, host, sess.session_id, launch.code);
+        });
+      })
+      .catch(function (e) {
+        if (!e || !e.handled) toast("Could not start the remote screen: " + ((e && e.message) || e), "crit");
+      });
+  }
+
+  function openScreenViewer(ep, host, sessionId, code) {
+    var url = "ominull-screen://open?hub=" + encodeURIComponent(location.origin) +
+      "&session=" + encodeURIComponent(sessionId) + "&code=" + encodeURIComponent(code);
+    var cmd = "ominullctl screen open " + ep.id;
+    var link = h("a", { href: url, cls: "btn btn-primary", text: "Open the viewer" });
+    openSheet("Remote screen on " + host, h("div", { cls: "stack" },
+      h("p", { text: "Approved. Open the OmniNull screen viewer on this computer. The link works once, within the next minute." }),
+      h("p", { cls: "dim-2", text: "If nothing opens, the viewer isn't installed here. End this session and run this on a computer that has it (it asks for a new approval):" }),
+      h("div", { cls: "form-row" },
+        h("code", { text: cmd }),
+        h("button", { cls: "btn mini", type: "button", "aria-label": "Copy command", on: { click: function () { copyText(cmd, "Command"); } } }, icon("i-copy")))),
+      [
+        h("button", { cls: "btn", type: "button", text: "End session", on: { click: function () {
+          request("/api/v1/screen/sessions?id=" + encodeURIComponent(sessionId), "DELETE")
+            .then(function () { toast("Screen session ended.", "ok"); closeAllSheets(); })
+            .catch(function (e) { toast("Could not end the screen session: " + e.message, "crit"); });
+        } } }),
+        link
+      ]);
   }
 
   function closeTerminalSession(sessionId) {

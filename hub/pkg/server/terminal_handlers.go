@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/screen"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -38,7 +39,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		id := r.URL.Query().Get("id")
 		if id != "" {
 			sess, err := s.terminalMgr.GetSession(id)
-			if err != nil {
+			if err != nil || screen.IsScreen(sess.Program) {
 				writeJSONError(w, http.StatusNotFound, "session not found")
 				return
 			}
@@ -54,6 +55,9 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		sessions := s.terminalMgr.ListSessions(tenantID)
 		var summaries []map[string]interface{}
 		for _, sess := range sessions {
+			if screen.IsScreen(sess.Program) {
+				continue // screen sessions are listed by /api/v1/screen/sessions
+			}
 			summaries = append(summaries, sess.Summary())
 		}
 		if summaries == nil {
@@ -207,6 +211,10 @@ func (s *Server) handleTerminalWSOperator(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if s.screenSessionID(sessionID) {
+		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: that is a screen session")
+		return
+	}
 	if err := s.terminalMgr.AttachOperator(w, r, sessionID, token); err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: "+err.Error())
 		return
@@ -247,6 +255,10 @@ func (s *Server) handleTerminalWSAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.screenSessionID(sessionID) {
+		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: that is a screen session")
+		return
+	}
 	if err := s.terminalMgr.AttachAgent(w, r, sessionID, endpointID, token); err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "terminal attachment rejected: "+err.Error())
 		return
@@ -448,6 +460,10 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusForbidden, "only the operator who opened this terminal can reattach to it")
 		return
 	}
+	if screen.IsScreen(sess.Program) {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
 	if !sess.IsLive() {
 		writeJSONError(w, http.StatusConflict, "session is no longer live and cannot be attached")
 		return
@@ -549,6 +565,11 @@ func (s *Server) handleTerminalSessionDetach(w http.ResponseWriter, r *http.Requ
 func (s *Server) terminalProgram(w http.ResponseWriter, endpointID, program string) (string, []string, bool) {
 	if strings.TrimSpace(endpointID) == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing endpoint_id")
+		return "", nil, false
+	}
+	if screen.IsScreen(program) {
+		// That prefix selects the screen session kind (no recording).
+		writeJSONError(w, http.StatusBadRequest, "not a terminal program")
 		return "", nil, false
 	}
 	ep, err := s.store.GetEndpoint(endpointID)
@@ -656,6 +677,13 @@ func tailStdout(frames []terminal.TerminalFrame, n int) []terminal.TerminalFrame
 		}
 	}
 	return out
+}
+
+// screenSessionID reports whether a session id names a screen session, which
+// the terminal routes never attach.
+func (s *Server) screenSessionID(id string) bool {
+	sess, err := s.terminalMgr.GetSession(id)
+	return err == nil && screen.IsScreen(sess.Program)
 }
 
 // terminalCookieName gives every session its own attach cookie, so a browser

@@ -3886,6 +3886,21 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/terminal/ws/operator", s.responseGate(s.handleTerminalWSOperator))
 	mux.HandleFunc("/api/v1/terminal/ws/agent", s.responseGate(s.handleTerminalWSAgent))
 
+	// 12b. Remote screen sessions: the terminal relay with the screen kind
+	// (screen_handlers.go). No console page: the native viewer started by
+	// ominullctl attaches with a one-use X-Screen-Token header and no Origin;
+	// the agent socket carries the agent's own token.
+	mux.HandleFunc("/api/v1/screen/sessions", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveScreen, s.handleScreenSessions))))
+	mux.HandleFunc("/api/v1/screen/sessions/close", s.authMiddleware(s.responseGate(s.handleScreenSessionClose)))
+	mux.HandleFunc("/api/v1/screen/sessions/attach", s.authMiddleware(s.responseGate(s.handleScreenSessionAttach)))
+	mux.HandleFunc("/api/v1/screen/ws/operator", s.responseGate(s.handleScreenWSOperator))
+	mux.HandleFunc("/api/v1/screen/ws/agent", s.responseGate(s.handleScreenWSAgent))
+	mux.HandleFunc("/api/v1/screen/sessions/launch", s.authMiddleware(s.responseGate(s.handleScreenLaunch)))
+	mux.HandleFunc("/api/v1/screen/sessions/watch", s.authMiddleware(s.responseGate(s.handleScreenWatch)))
+	// The viewer's only credential is the launch code itself.
+	mux.HandleFunc("/api/v1/screen/launch/redeem", s.responseGate(s.handleScreenLaunchRedeem))
+	mux.HandleFunc("/api/v1/screen/settings", s.authMiddleware(s.responseGate(s.handleScreenSettings)))
+
 	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))
 	mux.HandleFunc("/api/v1/scripts/run", s.authMiddleware(s.responseGate(s.handleScriptsRun)))

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/screen"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -171,6 +172,11 @@ func (s *Server) buildTerminalPage(viewer accessOperator, q map[string][]string)
 		id, _ := sum["session_id"].(string)
 		ep, _ := sum["endpoint_id"].(string)
 		prog, _ := sum["program"].(string)
+		if screen.IsScreen(prog) {
+			// Listed on /console/screen; it still holds a shared slot.
+			live[ep]++
+			continue
+		}
 		row := terminalSessionRow{ID: id, HostID: ep, Host: names[ep], Program: prog}
 		row.Label, row.Tone = terminalStateLabel(terminal.SessionState(st))
 		if row.Host == "" {
@@ -191,7 +197,7 @@ func (s *Server) buildTerminalPage(viewer accessOperator, q map[string][]string)
 			sess, _ = s.terminalMgr.GetSession(id)
 		}
 		switch {
-		case sess == nil || sess.TenantID != "default":
+		case sess == nil || sess.TenantID != "default" || screen.IsScreen(sess.Program):
 			body.Gone = "That terminal isn't running anymore. Its recording, if it made one, is in evidence."
 		case !body.CanOpen:
 			body.Gone = "Your role can see terminals but can't open or join them."

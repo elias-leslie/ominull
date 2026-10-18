@@ -107,6 +107,7 @@ var jobActionNames = map[response.ActionKind]string{
 	response.ActionKindForensicCollect: "Evidence collection",
 	response.ActionKindScriptExec:      "Script",
 	response.ActionKindTerminalSession: "Terminal",
+	response.ActionKindScreenSession:   "Screen",
 	response.ActionKindIsolationChange: "Isolation change",
 	response.ActionKindAgentUpdate:     "Agent update",
 	response.ActionKindMeshQuarantine:  "Mesh quarantine",
