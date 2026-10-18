@@ -124,22 +124,19 @@ const (
 //	when_busy: skip (the default: report "skipped" and stop), wait (check
 //	           again every minute, for up to half the package's time limit),
 //	           run (do not wait for open apps or games).
-//	window:    HH:MM-HH:MM in the machine's own time; inside it the run does
-//	           not wait for people (battery and Windows Update still count).
+//	window:    1-4 HH:MM-HH:MM ranges, comma separated, in the machine's own
+//	           time or in UTC with a trailing Z; inside one the run does not
+//	           wait for people (battery and Windows Update still count).
 var (
 	RunOptionNames = map[string]bool{"when_busy": true, "window": true}
 	WhenBusyValues = map[string]bool{"skip": true, "wait": true, "run": true}
-	windowRe       = regexp.MustCompile(`^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$`)
 )
 
-// CheckWindow checks a maintenance window: "HH:MM-HH:MM", start and end
-// different (it may cross midnight).
+// CheckWindow checks a window run parameter: 1-4 ranges, comma separated,
+// optionally ending in Z (UTC).
 func CheckWindow(v string) error {
-	m := windowRe.FindStringSubmatch(v)
-	if m == nil || m[1]+m[2] == m[3]+m[4] {
-		return errors.New("a maintenance window is HH:MM-HH:MM (24-hour, machine time), start and end different")
-	}
-	return nil
+	_, err := ParseWindow(v)
+	return err
 }
 
 func checkRunOption(k, v string) error {

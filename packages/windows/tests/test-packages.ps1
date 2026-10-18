@@ -216,6 +216,15 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'window: across midnight, day' (-not (Test-InWindow '22:00-06:00' ([datetime]'2026-10-17 12:00')))
     Check 'window: none' (-not (Test-InWindow '' ([datetime]'2026-10-17 03:30')))
     Check 'window: bad text' (-not (Test-InWindow '1:00-5:00' ([datetime]'2026-10-17 03:30')))
+    Check 'window: second range' (Test-InWindow '01:00-02:00,13:00-14:00' ([datetime]'2026-10-17 13:30'))
+    Check 'window: between ranges' (-not (Test-InWindow '01:00-02:00,13:00-14:00' ([datetime]'2026-10-17 12:00')))
+    Check 'window: four ranges' (Test-InWindow '01:00-02:00,03:00-04:00,05:00-06:00,22:00-01:00' ([datetime]'2026-10-17 00:30'))
+    Check 'window: five ranges refused' (-not (Test-InWindow '01:00-02:00,03:00-04:00,05:00-06:00,07:00-08:00,09:00-10:00' ([datetime]'2026-10-17 01:30')))
+    Check 'window: trailing comma refused' (-not (Test-InWindow '01:00-02:00,' ([datetime]'2026-10-17 01:30')))
+    $utcNow = [datetime]::SpecifyKind([datetime]'2026-10-17 03:30', 'Utc')
+    Check 'window: Z compares UTC' ((Test-InWindow '03:00-04:00Z' $utcNow) -and -not (Test-InWindow '05:00-06:00Z' $utcNow))
+    $local = $utcNow.ToLocalTime()
+    Check 'window: Z with a local clock' (Test-InWindow '03:00-04:00Z' $local)
     $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }
     $env:OMINULL_PARAM_WHEN_BUSY = 'run'
     Check 'when_busy run: people do not count' ($null -eq (Get-PreflightReason $false 15))
@@ -235,6 +244,8 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'when_busy: a bad value fails' ($(try { Get-PreflightReason $false 15; $false } catch { "$_" -match 'when_busy' }))
     $env:OMINULL_PARAM_WHEN_BUSY = ''; $env:OMINULL_PARAM_WINDOW = '25:00-01:00'
     Check 'window: a bad value fails' ($(try { Get-PreflightReason $false 15; $false } catch { "$_" -match 'window' }))
+    $env:OMINULL_PARAM_WINDOW = '00:00-23:59,00:00-00:01Z'
+    Check 'window: ranges and Z accepted' ($null -eq (Get-PreflightReason $false 15))
     Remove-Item Env:OMINULL_PARAM_WHEN_BUSY, Env:OMINULL_PARAM_WINDOW -ErrorAction SilentlyContinue
 }
 

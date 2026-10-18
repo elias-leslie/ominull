@@ -4,7 +4,8 @@
 # after the preflight (someone at the machine, on battery) unless the run options say otherwise;
 # a marker records the restart time. revert: cancel a restart this package scheduled.
 # Run options: when_busy skip (default) | wait (up to half the timeout) | run (people do not
-# count); window HH:MM-HH:MM (machine time, may cross midnight) inside which people do not count.
+# count); window: 1-4 HH:MM-HH:MM ranges, comma separated, in machine time or in UTC with a trailing Z (a range may
+# cross midnight), inside which people do not count.
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
@@ -31,8 +32,9 @@ case "$IDLE" in [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | 1[0-3][0-9][0-9] | 14[0-3
 BUSY=${OMINULL_PARAM_WHEN_BUSY:-skip}
 case "$BUSY" in skip | wait | run) ;; *) result failed '[]' "when_busy must be skip, wait or run" ;; esac
 WINDOW=${OMINULL_PARAM_WINDOW:-}
-if [ -n "$WINDOW" ] && ! printf '%s' "$WINDOW" | grep -Eq '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'; then
-	result failed '[]' "window must be HH:MM-HH:MM"
+HM='([01][0-9]|2[0-3]):[0-5][0-9]'
+if [ -n "$WINDOW" ] && ! printf '%s' "$WINDOW" | grep -Eq "^$HM-$HM(,$HM-$HM){0,3}Z?\$"; then
+	result failed '[]' "window must be 1-4 HH:MM-HH:MM ranges (comma separated, Z for UTC)"
 fi
 
 # Debian/Ubuntu leave /var/run/reboot-required; Fedora/RHEL answer needs-restarting -r (exit 1).
@@ -52,8 +54,20 @@ mins() {
 }
 in_window() {
 	[ -n "$WINDOW" ] || return 1
-	s=$(mins "${WINDOW%%-*}"); e=$(mins "${WINDOW##*-}"); n=$(mins "$(date +%H:%M)")
-	if [ "$s" -le "$e" ]; then [ "$n" -ge "$s" ] && [ "$n" -lt "$e" ]; else [ "$n" -ge "$s" ] || [ "$n" -lt "$e" ]; fi
+	w=$WINDOW
+	case "$w" in
+	*Z) w=${w%Z}; n=$(mins "$(date -u +%H:%M)") ;;
+	*) n=$(mins "$(date +%H:%M)") ;;
+	esac
+	for r in $(printf '%s' "$w" | tr ',' ' '); do
+		s=$(mins "${r%%-*}"); e=$(mins "${r##*-}")
+		if [ "$s" -le "$e" ]; then
+			[ "$n" -ge "$s" ] && [ "$n" -lt "$e" ] && return 0
+		else
+			{ [ "$n" -ge "$s" ] || [ "$n" -lt "$e" ]; } && return 0
+		fi
+	done
+	return 1
 }
 
 # A local (not remote) user session that is active and not idle for IDLE minutes.

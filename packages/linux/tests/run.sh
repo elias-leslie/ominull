@@ -24,6 +24,14 @@ sed -e "s|^PATH=/usr/bin:/bin:/usr/sbin:/sbin|PATH=$stub:/usr/bin:/bin:/usr/sbin
 	-e "s|/run/systemd/shutdown/scheduled|$tmp/scheduled|" -e "s|/sys/class/power_supply|$tmp/ps|" \
 	"$pkgdir/reboot.sh" >"$tmp/reboot.sh"
 echo Battery >"$tmp/ps/BAT0/type"; echo Charging >"$tmp/ps/BAT0/status"
+cat >"$stub/date" <<'SH'
+#!/bin/sh
+# STUB_HM / STUB_UHM pin the clock for window checks; anything else is the real date.
+if [ "$*" = "+%H:%M" ] && [ -n "${STUB_HM:-}" ]; then echo "$STUB_HM"; exit 0; fi
+if [ "$*" = "-u +%H:%M" ] && [ -n "${STUB_UHM:-}" ]; then echo "$STUB_UHM"; exit 0; fi
+exec /bin/date "$@"
+SH
+chmod +x "$stub/date"
 cat >"$stub/shutdown" <<SH
 #!/bin/sh
 printf '%s\n' "\$*" >>"$tmp/shutdown.log"
@@ -64,6 +72,18 @@ o=$(run revert); check "rb: revert cancels its own restart" '[ "$(echo "$o" | fi
 o=$(run revert); check "rb: revert without its own restart is ok" '[ "$(echo "$o" | field "d[\"state\"]")" = ok ]'
 reset; touch "$tmp/reboot-required" "$tmp/someone"
 o=$(run enforce OMINULL_PARAM_WINDOW=00:00-23:59); check "rb: inside the window people do not count" '[ "$(echo "$o" | field "d[\"state\"]")" = fixed ] || [ "$(date +%H:%M)" = 23:59 ]'
+for w in "01:00-02:00,13:00-14:00 13:30" "22:00-01:00 00:30" "03:00-04:00Z U03:30"; do
+	set -- $w
+	reset; touch "$tmp/reboot-required" "$tmp/someone"
+	case "$2" in U*) o=$(run enforce OMINULL_PARAM_WINDOW="$1" STUB_HM=12:00 STUB_UHM="${2#U}") ;; *) o=$(run enforce OMINULL_PARAM_WINDOW="$1" STUB_HM="$2") ;; esac
+	check "rb: window $1 at $2 counts as inside" '[ "$(echo "$o" | field "d[\"state\"]")" = fixed ]'
+done
+for w in "01:00-02:00,13:00-14:00 12:00" "03:00-04:00Z U12:00"; do
+	set -- $w
+	reset; touch "$tmp/reboot-required" "$tmp/someone"
+	case "$2" in U*) o=$(run enforce OMINULL_PARAM_WINDOW="$1" STUB_HM=03:30 STUB_UHM="${2#U}") ;; *) o=$(run enforce OMINULL_PARAM_WINDOW="$1" STUB_HM="$2") ;; esac
+	check "rb: window $1 at $2 is outside" '[ "$(echo "$o" | field "d[\"state\"]")" != fixed ]'
+done
 reset; touch "$tmp/reboot-required" "$tmp/someone"
 o=$(run enforce OMINULL_PARAM_WHEN_BUSY=wait); check "rb: wait restarts once nobody is there" '[ "$(echo "$o" | field "d[\"state\"]")" = fixed ] && [ "$(cat "$tmp/slept")" = 2 ]'
 reset; touch "$tmp/reboot-required"; echo Discharging >"$tmp/ps/BAT0/status"
@@ -74,7 +94,7 @@ reset; touch "$tmp/reboot-required"
 o=$(run enforce STUB_SHUTDOWN_CODE=1) || true; check "rb: a shutdown error fails" '[ "$(echo "$o" | field "d[\"state\"]")" = failed ] && [ ! -e "$tmp/state/reboot.at" ]'
 reset; echo $(( $(date +%s) - 60 )) >"$tmp/state/reboot.at"
 o=$(run revert); check "rb: a restart time that passed is forgotten" '[ "$(echo "$o" | field "d[\"state\"]")" = ok ] && [ ! -e "$tmp/state/reboot.at" ]'
-for bad in OMINULL_PARAM_WHEN_BUSY=sometimes OMINULL_PARAM_WINDOW=25:00-01:00 OMINULL_PARAM_WARN_MINUTES=0 OMINULL_PARAM_ONLY_IF_NEEDED=yes OMINULL_PARAM_IDLE_MINUTES=1441; do
+for bad in OMINULL_PARAM_WHEN_BUSY=sometimes OMINULL_PARAM_WINDOW=25:00-01:00 OMINULL_PARAM_WINDOW=01:00-02:00, OMINULL_PARAM_WINDOW=01:00-02:00,03:00-04:00,05:00-06:00,07:00-08:00,09:00-10:00 OMINULL_PARAM_WARN_MINUTES=0 OMINULL_PARAM_ONLY_IF_NEEDED=yes OMINULL_PARAM_IDLE_MINUTES=1441; do
 	o=$(run enforce "$bad") && rc=0 || rc=$?
 	check "rb: $bad fails" '[ $rc -eq 1 ] && [ "$(echo "$o" | field "d[\"state\"]")" = failed ]'
 done

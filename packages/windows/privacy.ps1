@@ -76,18 +76,27 @@ function Get-PeopleReason([int]$IdleMinutes) {
     if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
   }
 }
-# Maintenance window "HH:MM-HH:MM" in machine time; it may cross midnight.
+# Maintenance window: 1-4 "HH:MM-HH:MM" ranges, comma separated, in machine time, or in UTC with a trailing Z; a
+# range may cross midnight.
+function Test-WindowText([string]$W) {
+  $W -cmatch '^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d(,([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d){0,3}Z?\z'
+}
 function Test-InWindow([string]$Window, [datetime]$Now) {
-  if ($Window -cnotmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)\z') { return $false }
-  $s = [int]$matches[1] * 60 + [int]$matches[2]; $e = [int]$matches[3] * 60 + [int]$matches[4]; $n = $Now.Hour * 60 + $Now.Minute
-  if ($s -le $e) { $n -ge $s -and $n -lt $e } else { $n -ge $s -or $n -lt $e }
+  if (-not (Test-WindowText $Window)) { return $false }
+  if ($Window.EndsWith('Z')) { $Now = $Now.ToUniversalTime(); $Window = $Window.TrimEnd('Z') }
+  $n = $Now.Hour * 60 + $Now.Minute
+  foreach ($r in $Window.Split(',')) {
+    $s = [int]$r.Substring(0, 2) * 60 + [int]$r.Substring(3, 2); $e = [int]$r.Substring(6, 2) * 60 + [int]$r.Substring(9, 2)
+    if (($s -le $e -and $n -ge $s -and $n -lt $e) -or ($s -gt $e -and ($n -ge $s -or $n -lt $e))) { return $true }
+  }
+  $false
 }
 # Run options from the hub: when_busy skip (default) | wait (up to half the timeout) | run (no people checks);
 # inside the window people do not count. Battery and Windows Update always do.
 function Get-RunOptions {
   $b = "$env:OMINULL_PARAM_WHEN_BUSY"; if (-not $b) { $b = 'skip' }; $w = "$env:OMINULL_PARAM_WINDOW"
   if ('skip', 'wait', 'run' -cnotcontains $b) { throw 'param when_busy is not skip, wait or run' }
-  if ($w -and $w -cnotmatch '^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d\z') { throw 'param window is not HH:MM-HH:MM' }
+  if ($w -and -not (Test-WindowText $w)) { throw 'param window is not 1-4 HH:MM-HH:MM ranges (comma separated, Z for UTC)' }
   @{ busy = $b; window = $w }
 }
 function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {

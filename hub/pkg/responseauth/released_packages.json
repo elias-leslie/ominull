@@ -1,46 +1,46 @@
 {
- "0051c45e185272f5c24b8a7e81310cbbc4d63fa48f2f60cd196826120013dddc": {
-  "name": "windows-updates",
-  "risk": "safe"
- },
- "167077faacbd5c4ef8ff223b7185537ab1622b2e969f131929d7bc02407e2a00": {
-  "name": "windows-software-removal",
-  "risk": "careful"
- },
- "48442cea0420cd709b5f47c7535d2803494ee11c9d495153681ab8d3ffe1431f": {
+ "3a904ffdfe0d8657b7ca2a28ecb76a3172c50103592131176e2bff13bf3a47e9": {
   "name": "windows-cleanup",
   "risk": "safe"
  },
- "6f71037b896e520ec39fc16fdb9c8ebbfbbeea94d2c0cd51039b76981dffe2ea": {
-  "name": "linux-reboot",
-  "risk": "careful"
+ "3faa927b034a218ed968519ada73314ab4acc2f2f68ca5a4e12afb5a79a61219": {
+  "name": "windows-audit",
+  "risk": "safe"
  },
- "78baef84bb45e7501e4250f9d2873c2a5b577b19c0df5620f3fecf699c2d09b3": {
-  "name": "windows-debloat",
-  "risk": "careful"
+ "52443a2e739deada94f1d74b735b6a20cc77d7629ad38eaa10c1ac3d330a0fb5": {
+  "name": "windows-updates",
+  "risk": "safe"
  },
- "7f6dc58a0cf7963730783a007cbaa30fc16bd265fffa26137a610ef79ef85a2d": {
-  "name": "windows-reboot",
-  "risk": "careful"
+ "82f0c92b14dd01f0000a207392975b1fae50a9d850512091700ba063e9aa9284": {
+  "name": "windows-performance",
+  "risk": "safe"
  },
  "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
   "name": "linux-maintenance-mode",
   "risk": "safe"
  },
- "9a3a695bd80e618dfc58f32d26d00b57ddab4bbc5ff384e8a7127bfd1c7e59f0": {
-  "name": "windows-privacy",
-  "risk": "safe"
+ "947be6cfdb0a6bfb6780ac5d599158198a8cccd7de989b6756b9815d85ba71c2": {
+  "name": "windows-reboot",
+  "risk": "careful"
  },
- "a2335ba4314ce105b10eb9102c59565d78ba90cbb4e6d83222cdde9918590311": {
+ "bcf8f4d5f9adc5de1778d419336a19dc119990463da3b836268c2bd1802bff17": {
+  "name": "linux-reboot",
+  "risk": "careful"
+ },
+ "de89d9d7b579073e34f65d8a86a68ad0fefb9b4c57f040d7adf631ba2aa4bd91": {
+  "name": "windows-software-removal",
+  "risk": "careful"
+ },
+ "e8d2b49651081d9d4f0d899ff4a57a48d503cbbb5098fc86d98564f136583158": {
   "name": "windows-maintenance-mode",
   "risk": "safe"
  },
- "b06e2e1d4e81f731e2277b1eb235f186f0d92cf00dd53d46566c5de297990752": {
-  "name": "windows-audit",
+ "ef122f3ada0644ce7aa0663ad67c698cfa9bc3e45b9db7d09e6d275c6bf5e356": {
+  "name": "windows-privacy",
   "risk": "safe"
  },
- "d04275f631dc44fb3ff0ba0c42455e5636b94729f3ea3b4af5b06e3f9048f471": {
-  "name": "windows-performance",
-  "risk": "safe"
+ "fe84217db11f579d28b9357eaecc6361314463d6a19612934f37c4a3e295dbb9": {
+  "name": "windows-debloat",
+  "risk": "careful"
  }
 }
