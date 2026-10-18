@@ -278,6 +278,19 @@ func (s *Store) CreateJob(tenantID, endpointID string, kind ActionKind, requeste
 }
 
 // OfferPendingJobs finds queued or lease-expired jobs for an endpoint and assigns fresh leases.
+// Offer limits. An agent reads the heartbeat reply into a fixed buffer
+// (32 KiB before 1.8.86, 1 MiB since) and a reply cut short drops every offer
+// past the cut, so offers are packed by size: the oldest job always goes, and
+// the rest only while the request bytes stay under offerBytesMax. A job
+// offered offerAttemptsMax times and never taken fails with a reason instead
+// of being offered forever.
+const (
+	offerBytesMax    = 256 << 10
+	offerAttemptsMax = 30
+	// ErrNeverTaken is the error_code of a job the endpoint never took.
+	ErrNeverTaken = "offered 30 times and never taken by the agent (its reply buffer may be too small for this job; update the agent)"
+)
+
 func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, leaseDuration time.Duration) ([]*JobOffer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,7 +338,19 @@ func (s *Store) OfferPendingJobs(tenantID, endpointID string, maxOffers int, lea
 		items = append(items, it)
 	}
 
+	bytes := 0
 	for _, it := range items {
+		if it.state == StateOffered && it.attempt >= offerAttemptsMax {
+			if _, err := s.db.Exec(`UPDATE response_jobs SET state = ?, error_code = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
+				string(StateFailed), ErrNeverTaken, now, now, it.id); err == nil {
+				_ = s.recordAudit(tenantID, endpointID, it.id, it.grantID, it.state, StateFailed, "scheduler", fmt.Sprintf("never taken after %d offers", it.attempt))
+			}
+			continue
+		}
+		if len(offers) > 0 && bytes+len(it.reqJSON) > offerBytesMax {
+			break
+		}
+		bytes += len(it.reqJSON)
 		leaseID := uuid.New().String()
 		leaseExpiresAt := now.Add(leaseDuration)
 

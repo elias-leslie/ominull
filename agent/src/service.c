@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include "../include/agent.h"
+#include "../include/hub_reply.h"
 #include "../windows/udp_collector.h"
 #include "../windows/tcp_pending.h"
 #include "../include/forensics_windows.h"
@@ -904,13 +905,17 @@ void RunAgentLoop(AGENT_CONFIG* config) {
              * peer list and the allow list. Four kilobytes truncated it once the
              * policy had a handful of rules in it, and a truncated reply is not
              * a parse error - it is a silently shorter enforcement state. */
-            /* 32 KiB: the answer also carries trust keys, a manifest and up
-             * to five enforcement grants with their payloads. */
-            static char hubResponse[32768];
-            hubResponse[0] = '\0';
+            /* HUB_REPLY_BYTES (hub_reply.h): trust keys, a manifest,
+             * enforcement grants and job offers with whole scripts. */
+            static char* hubResponse = NULL;
+            if (!hubResponse) hubResponse = (char*)malloc(HUB_REPLY_BYTES);
+            static char hubResponseFallback[32768];
+            char* reply = hubResponse ? hubResponse : hubResponseFallback;
+            size_t replyCap = hubResponse ? HUB_REPLY_BYTES : sizeof(hubResponseFallback);
+            reply[0] = '\0';
             uint64_t lostTcp = 0, lostUdp = 0;
             bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
-                                                   hubResponse, sizeof(hubResponse), &lostTcp, &lostUdp);
+                                                   reply, replyCap, &lostTcp, &lostUdp);
             /* Counted when lost for good, not when a send fails: a batch the
              * hub could not take is kept and sent again (upload_queue.h). */
             UDPWinCountLost(lostUdp);
@@ -919,18 +924,18 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             lastFlush = now;
             HubContact(accepted);
 
-            Service_AdoptDeviceCredential(config, hubResponse);
-            if (accepted) Agent_TrustProcessHeartbeat(hubResponse);
+            Service_AdoptDeviceCredential(config, reply);
+            if (accepted) Agent_TrustProcessHeartbeat(reply);
 
             // The hub answers with an agent_update descriptor when a newer
             // release is published. Update_Apply verifies it against the
             // pinned release key before anything is installed, and does not
             // return if the swap succeeds.
-            SyncEnforcement(config, hubResponse);
+            SyncEnforcement(config, reply);
 
-            Update_Apply(config, hubResponse);
+            Update_Apply(config, reply);
 
-            ProcessResponseOffersWindows(config, hubResponse);
+            ProcessResponseOffersWindows(config, reply);
 
             if (GetTickCount64() - g_LastSoftwareInventorySyncWin >= SOFTWARE_INVENTORY_SYNC_INTERVAL_WIN_MS) {
                 SyncSoftwareInventoryWin(config);

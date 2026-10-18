@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 #include "../include/response_dispatcher.h"
+#include "../include/hub_reply.h"
 
 static int failures = 0;
 
@@ -89,6 +90,64 @@ static void test_offer_parser(void) {
         "{\"response_offers\": [{\"job_id\": \"j1\", \"lease_id\": \"l1\", \"kind\": \"k1\", \"grant\": {\"version\": 2}}]}";
     parsed = ParseResponseOffers(malformed_json, offers, MAX_RESPONSE_OFFERS);
     expect("malformed offer rejected", parsed == 0, true);
+}
+
+/* JSON-escapes src into a new heap string. */
+static char* json_escape(const char* src) {
+    size_t n = strlen(src);
+    char* out = (char*)malloc(n * 6 + 1);
+    char* o = out;
+    for (const char* p = src; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') { *o++ = '\\'; *o++ = (char)c; }
+        else if (c == '\n') { *o++ = '\\'; *o++ = 'n'; }
+        else if (c == '\r') { *o++ = '\\'; *o++ = 'r'; }
+        else if (c == '\t') { *o++ = '\\'; *o++ = 't'; }
+        else if (c < 0x20) { o += sprintf(o, "\\u%04x", c); }
+        else *o++ = (char)c;
+    }
+    *o = '\0';
+    return out;
+}
+
+/* 2b. A reply with four offers of the largest real package, escaped twice as
+ * the hub sends it, parses whole and fits HUB_REPLY_BYTES. The old 32 KiB
+ * reply buffer cut even one of them off, and the job was offered forever. */
+static void test_offer_parser_real_package(void) {
+    FILE* f = fopen("packages/windows/cleanup.ps1", "rb");
+    if (!f) f = fopen("../../packages/windows/cleanup.ps1", "rb");
+    if (!f) { printf("  [-] cleanup.ps1 not found (run from the repo root)\n"); failures++; return; }
+    static char src[65536];
+    size_t n = fread(src, 1, sizeof(src) - 1, f);
+    fclose(f);
+    src[n] = '\0';
+    char* once = json_escape(src);
+    size_t plen = strlen(once) + 64;
+    char* payload = (char*)malloc(plen);
+    snprintf(payload, plen, "{\"script_id\":\"s-1\",\"source\":\"%s\"}", once);
+    char* twice = json_escape(payload);
+    const char* grant =
+        "\"grant\":{\"version\":2,\"grant_id\":\"g\",\"tenant_id\":\"default\",\"endpoint_id\":\"ep\",\"action_kind\":\"script_exec\","
+        "\"action_digest\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"operator_id\":\"admin\","
+        "\"response_session_id\":\"s\",\"issued_at\":1788350400,\"expires_at\":1788354000,\"nonce\":\"n\",\"signer_key_id\":\"k\","
+        "\"signature\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}";
+    size_t cap = HUB_REPLY_BYTES;
+    char* reply = (char*)malloc(cap);
+    size_t used = (size_t)snprintf(reply, cap, "{\"status\":\"ok\",\"response_offers\":[");
+    for (int i = 0; i < MAX_RESPONSE_OFFERS; i++) {
+        used += (size_t)snprintf(reply + used, cap - used, "%s{\"job_id\":\"job-%d\",\"lease_id\":\"lease-%d\",\"kind\":\"script_exec\",%s,\"payload_json\":\"%s\"}",
+                                 i ? "," : "", i, i, grant, twice);
+    }
+    used += (size_t)snprintf(reply + used, cap - used, "]}");
+    expect("four real-package offers fit HUB_REPLY_BYTES", used < cap - 1, true);
+    expect("one real-package offer is over the old 32 KiB", strlen(twice) + 1024 > 32768 || used > 32768, true);
+    static ResponseJobOffer offers[MAX_RESPONSE_OFFERS];
+    int parsed = ParseResponseOffers(reply, offers, MAX_RESPONSE_OFFERS);
+    expect("all four real-package offers parse", parsed == MAX_RESPONSE_OFFERS, true);
+    if (parsed > 0) expect("payload arrives whole", strcmp(offers[0].payload_json, payload) == 0, true);
+    reply[32767] = '\0'; /* what the old buffer kept */
+    expect("cut at 32 KiB, the offers past the cut are lost", ParseResponseOffers(reply, offers, MAX_RESPONSE_OFFERS) < MAX_RESPONSE_OFFERS, true);
+    free(once); free(payload); free(twice); free(reply);
 }
 
 /* 3. Test Durable Replay Cache */
@@ -390,6 +449,7 @@ int main(void) {
     printf("[*] Running Ominull Response Dispatcher test suite (Slice 1D.1)...\n");
     test_sha256();
     test_offer_parser();
+    test_offer_parser_real_package();
     test_replay_cache();
     test_grant_verification();
     test_screen_canonical_vectors();

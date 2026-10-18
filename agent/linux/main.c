@@ -37,6 +37,7 @@
 
 #include "../include/release_key.h"
 #include "../include/hub_address.h"
+#include "../include/hub_reply.h"
 #include "../include/response_dispatcher.h"
 #include "../include/agent_trust.h"
 #include "../include/release_verify_posix.h"
@@ -3227,10 +3228,14 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
      * the allow list. Four kilobytes truncated it once the policy had a handful
      * of rules in it, and a truncated reply is not a parse error - it is a
      * silently shorter enforcement state. */
-    /* 32 KiB: the answer also carries trust keys, a manifest and up to five
-     * enforcement grants with their payloads. */
-    static char respBuf[32768];
-    memset(respBuf, 0, sizeof(respBuf));
+    /* HUB_REPLY_BYTES (hub_reply.h): trust keys, a manifest, enforcement
+     * grants and job offers with whole scripts. */
+    static char* respHeap = NULL;
+    static char respFallback[32768];
+    if (!respHeap) respHeap = (char*)malloc(HUB_REPLY_BYTES);
+    char* respBuf = respHeap ? respHeap : respFallback;
+    const size_t respCap = respHeap ? HUB_REPLY_BYTES : sizeof(respFallback);
+    respBuf[0] = '\0';
     uint64_t tcpObs = 0, udpObs = 0;
     for (size_t i = 0; i < flowCount; i++) {
         if (flows[i].protocol == 17)
@@ -3255,7 +3260,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     }
     bool accepted = false;
     long status = 0;
-    if (PostTelemetryBody(config, url, body, bodyLength, gzipped, false, respBuf, sizeof(respBuf), &status) &&
+    if (PostTelemetryBody(config, url, body, bodyLength, gzipped, false, respBuf, respCap, &status) &&
         !ReportHubRejection(config, status)) {
         accepted = true;
     }
@@ -3272,7 +3277,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     if (accepted) {
         free(body);
         if (!g_FinalBatch)
-            ReplayQueuedTelemetry(config, url, respBuf, sizeof(respBuf), &loss);
+            ReplayQueuedTelemetry(config, url, respBuf, respCap, &loss);
     } else if (Upload_Retryable(status)) {
         UploadQueue_Push(&g_Uploads, body, bodyLength, gzipped, tcpObs, udpObs, &loss);
     } else {
