@@ -44,6 +44,7 @@ func TestRolloutRuleHubRollsOwnerSignedReleaseWithoutAsking(t *testing.T) {
 	defer db.Close()
 	s.agentVersion = "1.2.0"
 	owner := ownerOf(t, s)
+	owner.auth.UseApprovalRows(false) // the ask flow as before Approvals rows (approval_rows_test.go covers rows)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

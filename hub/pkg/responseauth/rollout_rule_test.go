@@ -114,6 +114,7 @@ func newRuleAuthority(t *testing.T) (*responseauth.Authority, *approvaltest.Appr
 
 func TestRolloutRuleApprovesOwnerSignedRolloutsWithoutAsking(t *testing.T) {
 	auth, ap, key, dir := newRuleAuthority(t)
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
 	makeRule(t, auth, ap, key)
 	rules, err := auth.RolloutRules("default")
 	if err != nil || len(rules) != 1 || rules[0].ApproverID != "owner-phone" {
@@ -166,6 +167,7 @@ func TestRolloutRuleApprovesOwnerSignedRolloutsWithoutAsking(t *testing.T) {
 
 func TestRolloutRuleRefusesWhatItDoesNotCover(t *testing.T) {
 	auth, ap, key, _ := newRuleAuthority(t)
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
 	makeRule(t, auth, ap, key)
 	other := newReleaseKey(t)
 	tampered := key.evidence(t, "1.8.74")
@@ -202,6 +204,7 @@ func TestRolloutRuleRefusesWhatItDoesNotCover(t *testing.T) {
 
 func TestRolloutRuleAnswerNeedsTheRuleSignature(t *testing.T) {
 	auth, ap, key, _ := newRuleAuthority(t)
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
 	v, err := auth.RequestApproval(rolloutRequest("1.8.72", []string{"ep-1"}, nil, key.evidence(t, "1.8.72")))
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +230,7 @@ func TestRolloutRuleAnswerNeedsTheRuleSignature(t *testing.T) {
 
 func TestRolloutRuleForgetEndsIt(t *testing.T) {
 	auth, ap, key, _ := newRuleAuthority(t)
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
 	makeRule(t, auth, ap, key)
 	if had, err := auth.ForgetRolloutRule("default", "admin"); err != nil || !had {
 		t.Fatalf("forget: %v %v", had, err)

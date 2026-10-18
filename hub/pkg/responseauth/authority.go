@@ -63,6 +63,7 @@ type Authority struct {
 	trustEpochs *trustEpochs                  // trust bundle epoch per tenant
 	rollouts    *rolloutRules                 // approve-all rules for owner-signed rollouts
 	packages    *packageRules                 // approve-all rules for maintenance package runs
+	rows        *approvalRowsBook             // the owner's Approvals rows, pushed by Nightshift
 	releaseKey  []byte                        // release public key PEM override (tests)
 	startedAt   time.Time
 }
@@ -142,6 +143,7 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 		trustEpochs: newTrustEpochs(cfg.StateDir, cfg.TrustEpochFloor),
 		rollouts:    newRolloutRules(cfg.StateDir),
 		packages:    newPackageRules(cfg.StateDir),
+		rows:        newApprovalRowsBook(cfg.StateDir),
 	}
 
 	// 1. Load keys from durable store

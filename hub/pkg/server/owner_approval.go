@@ -269,6 +269,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
 				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
 				StewardRun: plan.StewardRun, StewardRule: plan.StewardRule, StewardRuleToken: plan.StewardRuleToken, StewardNarrow: plan.StewardNarrow,
+				Facts: s.approvalFacts(plan.Targets),
 			})
 			if err != nil {
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
@@ -284,6 +285,11 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				// changes nothing; the authority approves it without asking
 				// and still checks it when it is spent below.
 				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking: a default audit of released packages: %s", plan.Action, v.ID, plan.Summary))
+				id = v.ID
+			} else if v.State == responseauth.ApprovalApproved && v.Method == "row" {
+				// The owner's Approvals row on Nightshift says this kind of
+				// ask runs without asking; spent below like any approval.
+				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking under the owner's Approvals row %s: %s", plan.Action, v.ID, v.Row, plan.Summary))
 				id = v.ID
 			} else if v.State == responseauth.ApprovalApproved && v.Method == "rule" {
 				// The authority approved it under the owner's approve-all rule

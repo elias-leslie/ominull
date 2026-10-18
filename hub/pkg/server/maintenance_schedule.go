@@ -345,6 +345,7 @@ func (s *Server) runScheduledPackage(key string, run *pendingAsk, now time.Time)
 	v, err := s.responseAuth.RequestApproval(ctx, &responseauth.ApprovalRequestInput{
 		TenantID: run.Tenant, Requester: schedulerName, Kind: response.ActionKindScriptExec,
 		Action: "Run maintenance", Summary: run.Label, Targets: run.Targets, Payload: run.Payload,
+		Facts: s.approvalFacts(run.Targets),
 	})
 	if err != nil {
 		block("the owner could not be asked: " + err.Error())

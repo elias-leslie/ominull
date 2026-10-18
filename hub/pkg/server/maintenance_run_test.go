@@ -131,6 +131,7 @@ func TestPackageRunsUnderOwnerApproval(t *testing.T) {
 func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
+	ownerOf(t, srv).auth.UseApprovalRows(false) // the ask flow as before Approvals rows (approval_rows_test.go covers rows)
 	defer store.Close()
 	srv.responseEnabled = true
 	owner := ownerOf(t, srv)

@@ -346,7 +346,8 @@ func otherValue(t *testing.T, h *scripts.PackageHeader) []string {
 // changed values.
 func TestBaselineAuditsNeedNoTap(t *testing.T) {
 	auth, _, _, _ := newRuleAuthority(t)
-	for i := 0; i < 40; i++ { // and no hourly limit
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
+	for i := 0; i < 40; i++ {   // and no hourly limit
 		in := packageRequest([]string{"ep-a", "ep-b"}, packageItem(t, "windows-audit", "safe", "audit", 300), packageItem(t, "windows-cleanup", "safe", "audit", 3600))
 		in.RuleOnly = true
 		v, err := auth.RequestApproval(in)
@@ -432,6 +433,7 @@ func playbookRequest(targets []string, pb *responseauth.PlaybookRun, route strin
 // route and window are checked.
 func TestPlaybookRunsAskAndLiveForTheWindow(t *testing.T) {
 	auth, ap, _, _ := newRuleAuthority(t)
+	auth.UseApprovalRows(false) // the approve-all rules, as before Approvals rows
 	audit := packageItem(t, "windows-audit", "safe", "audit", 300)
 	cleanup := packageItem(t, "windows-cleanup", "safe", "audit", 3600)
 	pb := &responseauth.PlaybookRun{Name: "Weekly tidy", WindowSeconds: 2 * 3600}

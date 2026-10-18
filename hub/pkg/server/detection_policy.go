@@ -208,31 +208,37 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 			TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
 			Summary: c.wording, Targets: []string{c.target}, Payload: payload,
 		})
-		if err != nil {
+		if err == nil && v.State == responseauth.ApprovalApproved && v.Method == "row" {
+			// The owner's Approvals row lets this change through; spent below.
+			s.audit(r, autoApprovedAudit, c.target, fmt.Sprintf("%s (approval %s) approved without asking under the owner's Approvals row %s: %s", v.Action, v.ID, v.Row, v.Summary))
+			id = v.ID
+		} else if err != nil {
 			s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", c.target, "detection policy: "+err.Error())
 			writeJSONError(w, approvalStatus(err), "this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the owner's approval could not be requested: "+err.Error())
 			return "", false
 		}
-		s.approvalWake.notify()
-		s.audit(r, "OWNER_APPROVAL_REQUESTED", c.target, fmt.Sprintf("%s (approval %s): %s", v.Action, v.ID, v.Summary))
-		body := map[string]interface{}{
-			"approval_id": v.ID,
-			"state":       v.State,
-			"action":      v.Action,
-			"summary":     v.Summary,
-			"targets":     v.Targets,
-			"loosens":     c.loosens,
-			"expires_at":  v.ExpiresAt,
-			"next":        "This change loosens " + c.loosensWhat() + ", so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
+		if id == "" {
+			s.approvalWake.notify()
+			s.audit(r, "OWNER_APPROVAL_REQUESTED", c.target, fmt.Sprintf("%s (approval %s): %s", v.Action, v.ID, v.Summary))
+			body := map[string]interface{}{
+				"approval_id": v.ID,
+				"state":       v.State,
+				"action":      v.Action,
+				"summary":     v.Summary,
+				"targets":     v.Targets,
+				"loosens":     c.loosens,
+				"expires_at":  v.ExpiresAt,
+				"next":        "This change loosens " + c.loosensWhat() + ", so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
+			}
+			if c.tightenedFirst != "" {
+				body["tightened_now"] = c.tightenedFirst
+			}
+			if c.drilled {
+				body["drill_blinds"] = c.drill
+			}
+			writeJSON(w, http.StatusAccepted, body)
+			return "", false
 		}
-		if c.tightenedFirst != "" {
-			body["tightened_now"] = c.tightenedFirst
-		}
-		if c.drilled {
-			body["drill_blinds"] = c.drill
-		}
-		writeJSON(w, http.StatusAccepted, body)
-		return "", false
 	}
 	sum := sha256.Sum256(payload)
 	if _, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{

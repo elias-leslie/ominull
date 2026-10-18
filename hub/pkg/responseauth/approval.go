@@ -98,6 +98,15 @@ type ApprovalStatement struct {
 	// (rollout_rule.go). Only an agent update of an owner-signed release
 	// carries it.
 	Offer string `json:"offer,omitempty"`
+	// Row is the owner's Approvals row this ask follows (approval_rows.go),
+	// with what picked it; AskReason, when set, says why it always asks.
+	Row       string     `json:"row,omitempty"`
+	RowInputs *RowInputs `json:"row_inputs,omitempty"`
+	AskReason string     `json:"ask_reason,omitempty"`
+	// Rows, Session and Lab are exactly what an approval_rules tap saves.
+	Rows    map[string]string `json:"rows,omitempty"`
+	Session *RowSession       `json:"session,omitempty"`
+	Lab     []string          `json:"lab,omitempty"`
 }
 
 // ApprovalRequestInput is what the hub asks for.
@@ -144,6 +153,9 @@ type ApprovalRequestInput struct {
 	// decide whether the rule covers a steward session.
 	StewardRuleToken string               `json:"steward_rule_token,omitempty"`
 	StewardNarrow    *StewardScreenNarrow `json:"steward_narrow,omitempty"`
+	// Facts are the hub's reading of the targets' trust reports, used only to
+	// pick the Approvals row (approval_rows.go).
+	Facts *ApprovalFacts `json:"facts,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -166,7 +178,8 @@ type ApprovalView struct {
 	Challenge  string        `json:"challenge"` // hex sha256 of prefix || statement
 	SignerKey  string        `json:"signer_key_id"`
 	ApproverID string        `json:"approver_id,omitempty"`
-	Method     string        `json:"method,omitempty"` // passkey | rule | unverified
+	Method     string        `json:"method,omitempty"` // passkey | rule | row | baseline | unverified
+	Row        string        `json:"row,omitempty"`    // the Approvals row that approved it (method row)
 	Offer      string        `json:"offer,omitempty"`
 	// StewardRule is the signed rule token an approved steward screen rule
 	// ask yields, for Nightshift to keep (steward_screen_rule.go).
@@ -456,20 +469,30 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// offered one.
 	// A baseline run (safe released packages, audit, default settings) needs
 	// no tap at all.
+	// Once the owner's Approvals rows were accepted they decide, and the old
+	// approve-all rules are neither consulted nor offered.
+	rowsLive := a.rows.stored(in.TenantID)
 	pkgDigests, pkgLabels, pkgErr := packageRuleCovers(in, targets)
 	pkgRuleID, pkgAuto := "", false
 	pkgBaseline := pkgErr == nil && packageBaseline(in, targets)
 	if pkgBaseline {
 		pkgAuto = true
-	} else if pkgErr == nil {
+	} else if pkgErr == nil && !rowsLive {
 		pkgRuleID, pkgAuto = a.packages.match(in.TenantID, pkgDigests, targets, time.Now())
-	}
-	if in.RuleOnly && !pkgAuto {
-		return nil, ErrRuleNotCovered
 	}
 	// A steward session for a stuck run under the machine's steward screen
 	// rule: approved now, no rate limit (the owner already allowed it).
 	stewardRule, stewardPayload, stewardAuto := a.stewardScreenMatch(in, targets, time.Now())
+	// The owner's Approvals row for this ask (approval_rows.go): auto, or
+	// session while the owner's session is open, approves it now.
+	row, askReason, rowIn := a.rowFor(in, targets, time.Now())
+	rowAuto, rowChoice := false, ""
+	if row != "" && !pkgAuto && !stewardAuto {
+		rowChoice, rowAuto = a.rows.allows(in.TenantID, row, time.Now())
+	}
+	if in.RuleOnly && !pkgAuto && !rowAuto {
+		return nil, ErrRuleNotCovered
+	}
 	digest := sha256.Sum256(in.Payload)
 	ttl := approvalDefaultTTL
 	if in.TTLSeconds > 0 {
@@ -490,7 +513,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	recent := b.created[in.TenantID]
 	pending += b.reserved[in.TenantID]
-	if !pkgAuto && !stewardAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
+	if !pkgAuto && !stewardAuto && !rowAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
 		b.mu.Unlock()
 		a.auditApproval(in.TenantID, in.Requester, "approval_refused", string(in.Kind), "", "", "denied", ErrApprovalRateLimit.Error())
 		return nil, ErrApprovalRateLimit
@@ -498,7 +521,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// Take both slots now, under the same lock as the check: concurrent
 	// callers must not all pass on the same stale counts. The hourly slot is
 	// spent even if signing fails below; the pending slot is handed back.
-	reserved := !pkgAuto && !stewardAuto
+	reserved := !pkgAuto && !stewardAuto && !rowAuto
 	if reserved {
 		b.created[in.TenantID] = append(recent, now)
 		b.reserved[in.TenantID]++
@@ -526,7 +549,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	var rule RolloutRule
 	auto := false
-	if covered {
+	if covered && !rowsLive && !rowAuto {
 		rule, auto = a.rollouts.use(in.TenantID, version, now)
 	}
 	var pkgRule PackageRule
@@ -553,11 +576,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		Digest:    hex.EncodeToString(digest[:]),
 		Created:   now.Unix(),
 		Expires:   now.Add(ttl).Unix(),
+		Row:       row,
+		RowInputs: &rowIn,
+		AskReason: askReason,
 	}
-	if covered && !auto {
+	if covered && !auto && !rowsLive && !rowAuto {
 		stmt.Offer = rolloutRuleOffer
 	}
-	if pkgErr == nil && !pkgAuto {
+	if pkgErr == nil && !pkgAuto && !rowsLive && !rowAuto {
 		stmt.Offer = packageRuleOffer
 	}
 	stmtJSON, err := json.Marshal(stmt)
@@ -601,7 +627,12 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			Offer:     stmt.Offer,
 		},
 	}
-	if auto || pkgAuto || stewardAuto {
+	if rowAuto && !auto {
+		t := now.UTC()
+		useBy := t.Add(approvalUseWindow)
+		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
+		rec.view.Method, rec.view.ApproverID, rec.view.Row = "row", a.rows.approver(in.TenantID), row
+	} else if auto || pkgAuto || stewardAuto {
 		t := now.UTC()
 		useBy := t.Add(approvalUseWindow)
 		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
@@ -634,6 +665,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
 			fmt.Sprintf("approved without asking under the approve-all rule the owner made %s (approval %s, approver %s): %s%s",
 				time.Unix(rule.Created, 0).UTC().Format(time.RFC3339), rule.ApprovalID, rule.ApproverID, evidence, note))
+	}
+	if rowAuto && !auto {
+		why := "auto"
+		if rowChoice == RowChoiceSession {
+			why = "session, and the owner's session is open"
+		}
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			fmt.Sprintf("approved without asking under the owner's Approvals row %s (%s; rows from %s)", row, why, a.rows.approver(in.TenantID)))
 	}
 	if pkgBaseline {
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
@@ -957,7 +996,7 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 		return nil, ErrApprovalNotUsable
 	}
 	targets := sortedUnique(req.Targets)
-	if r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") ||
+	if r.kind == ApprovalKindRules || r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") ||
 		cleanText(req.Requester, 80) != r.stmt.Requester ||
 		req.SessionSeconds != r.sessionSeconds || req.AskFirst != r.askFirst || req.AgentLabel != r.agentLabel || req.StewardRun != r.stewardRun {
 		b.mu.Unlock()

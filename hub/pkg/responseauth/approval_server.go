@@ -29,6 +29,10 @@ func approvalErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrApprovalRateLimit):
 		return http.StatusTooManyRequests
+	case errors.Is(err, ErrRowsNeedApproval):
+		return http.StatusForbidden
+	case errors.Is(err, ErrInvalidRows):
+		return http.StatusBadRequest
 	case errors.Is(err, ErrRuleNotCovered):
 		return http.StatusConflict
 	case errors.Is(err, ErrApprovalTooLong):
@@ -165,6 +169,7 @@ type ApprovalClient interface {
 	ForgetRolloutRule(ctx context.Context, tenantID, by string) (bool, error)
 	PackageRules(ctx context.Context, tenantID string) ([]PackageRuleView, error)
 	ForgetPackageRule(ctx context.Context, tenantID, id, by string) (int, error)
+	ApprovalRowsClient
 }
 
 // ApprovalError carries the authority's status for a refused approval call.

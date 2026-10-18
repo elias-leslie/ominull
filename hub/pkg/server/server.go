@@ -3763,6 +3763,8 @@ func (s *Server) routes() *http.ServeMux {
 	// read the fleet nor approve anything; only the owner's passkey can.
 	mux.HandleFunc("/api/v1/integrations/nightshift/approvals", s.approvalRelayAuth(s.handleRelayApprovals))
 	mux.HandleFunc("/api/v1/integrations/nightshift/approvals/answer", s.approvalRelayAuth(s.handleRelayAnswer))
+	mux.HandleFunc("/api/v1/integrations/nightshift/approval-rules", s.approvalRelayAuth(s.handleRelayApprovalRules))
+	mux.HandleFunc("/api/v1/integrations/nightshift/approval-rules/challenge", s.approvalRelayAuth(s.handleRelayApprovalRulesChallenge))
 	mux.HandleFunc("/api/v1/integrations/nightshift/alerts/verdict", s.approvalRelayAuth(s.handleRelayAlertVerdict))
 	// Lock facts only (ceiling, host authority, remote access off) for the
 	// machines that carry a lock, so Nightshift confirms its installer's work.
