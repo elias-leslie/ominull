@@ -150,3 +150,23 @@ in demo mode, with the fixture browser suite and the axe responsive check.
 
 ![Assets, after](images/console-ux/after-desk-assets.png)
 ![Assets, phone, after](images/console-ux/after-phone-assets.png)
+
+### Alerts and Response
+
+- Alerts: "Busiest hosts" with a one-line scope ("3 open alerts on 2 hosts")
+  and the colour legend behind "?". Filters read Open only / All / Critical...;
+  "Clear acknowledged" is now "Delete acknowledged…" because it deletes. The
+  table has one Finding column (title, then type and technique) that wraps, so
+  Acknowledge and Expected are always visible; with a finding open beside the
+  table, destination and process move to the detail panel. On a phone each
+  alert is a compact block led by its finding.
+- Response: one bar replaces three cards: lock state, terminals running and
+  jobs in flight (links), then Open a terminal, Job history and **Unlock**
+  (primary) or Session details and Lock. The access explanation is behind "?".
+  Script library rows carry the description under the name, fold after 8, and
+  explain versions and retire behind "?"; scheduled scripts get plain column
+  names.
+
+![Alerts, after](images/console-ux/after-desk-alerts.png)
+![Alerts, phone, after](images/console-ux/after-phone-alerts.png)
+![Response, after](images/console-ux/after-desk-response.png)

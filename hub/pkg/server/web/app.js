@@ -3529,8 +3529,15 @@
 
   /* Page head: what needs the owner on the left, the page's actions on the
      right with the primary one last. */
-  function pageTools(left, actions) {
-    return h("div", { cls: "page-tools" }, left, h("span", { cls: "fill" }), actions);
+  function pageTools(left, actions, help) {
+    var tip = help ? helpTip(help.key, help.text) : null;
+    var bar = h("div", { cls: "page-tools" }, left, h("span", { cls: "fill" }), actions, tip ? tip.button : null);
+    return tip ? h("div", { cls: "page-tools-wrap" }, bar, tip.text) : bar;
+  }
+
+  /* A count that links to where it is handled, same look as a needs-you item. */
+  function countLink(n, label, href, tone) {
+    return h("a", { cls: "attn", href: href, "data-tone": n ? (tone || "") : "" }, h("b", { text: String(n) }), h("span", { text: label }));
   }
 
   /* Text of a rendered cell, for sorting. Cells arrive as strings or as nodes,
@@ -4159,25 +4166,19 @@
 
     var stripHosts = Object.keys(sysMap).length;
     var stripTotal = Object.keys(sysMap).reduce(function (n, k) { return n + sysMap[k].total; }, 0);
-    var stripScope = breakdown
-      ? (af.unacknowledged_only ? "Every open alert matching the current filters" : "Every alert matching the current filters")
-      : "Only the " + allAnomalies.length + " alerts on this page - this hub reports no fleet summary";
-    stripScope += ": " + stripTotal.toLocaleString() + " alert" + (stripTotal === 1 ? "" : "s") +
-      " across " + stripHosts + " host" + (stripHosts === 1 ? "" : "s") +
-      (stripHosts > topSystems.length ? " (busiest " + topSystems.length + " shown)" : "") + ".";
+    var stripScope = stripTotal.toLocaleString() + (af.unacknowledged_only ? " open" : "") + " alert" + (stripTotal === 1 ? "" : "s") +
+      " on " + stripHosts + " host" + (stripHosts === 1 ? "" : "s") +
+      (stripHosts > topSystems.length ? " · busiest " + topSystems.length + " shown" : "") +
+      (breakdown ? "" : " · this page only (the hub sent no fleet summary)");
 
-    var chartCard = card("Systems with the Most Alerts by Alert Type",
+    var chartCard = card("Busiest hosts",
       h("div", { cls: "stack" },
-        h("p", { cls: "dim-3 u-t2", text: stripScope }),
+        h("p", { cls: "dim-3 u-t2 pad-x", text: stripScope }),
         chartBoxes.length
           ? h("div", { cls: "alerts-sys-grid" }, chartBoxes)
-          : emptyBox("No active anomaly alerts recorded across fleet."),
-        h("div", { cls: "legend pad-x" },
-          h("span", { text: "■ Red: Critical" }),
-          h("span", { text: "■ Amber: High" }),
-          h("span", { text: "■ Blue: Medium" }),
-          h("span", { text: "■ Gray: Low" }),
-          h("span", { text: "Click any host to filter table" }))));
+          : emptyBox("No open alerts.")),
+      null, false,
+      "Alerts per host for the current filters. Bar colours: red critical, amber high, blue medium, grey low. Click a host to show only its alerts; click it again to clear.");
 
     // 2. Filter Bar
     var sevBtns = ["", "CRITICAL", "HIGH", "MEDIUM", "LOW"].map(function (sev) {
@@ -4186,7 +4187,7 @@
         cls: "btn mini" + (active ? " btn-primary" : ""),
         type: "button",
         "aria-pressed": active ? "true" : "false",
-        text: sev ? sev : "ALL SEVERITIES",
+        text: sev ? sev.charAt(0) + sev.slice(1).toLowerCase() : "All",
         on: {
           click: function () {
             af.severity = sev;
@@ -4201,7 +4202,7 @@
       cls: "btn mini" + (af.unacknowledged_only ? " btn-primary" : ""),
       type: "button",
       "aria-pressed": af.unacknowledged_only ? "true" : "false",
-      text: af.unacknowledged_only ? "UNACKNOWLEDGED ONLY" : "ALL STATUSES",
+      text: af.unacknowledged_only ? "Open only" : "Open and acknowledged",
       on: {
         click: function () {
           af.unacknowledged_only = !af.unacknowledged_only;
@@ -4300,7 +4301,7 @@
     var selectedAlertIds = Object.keys(state.selectedAlerts || {}).filter(function (k) { return state.selectedAlerts[k]; });
     var bulkAckBtn = selectedAlertIds.length ? h("button", {
       cls: "btn btn-primary mini", type: "button",
-      text: "Acknowledge Selected (" + selectedAlertIds.length + ")",
+      text: "Acknowledge selected (" + selectedAlertIds.length + ")",
       on: {
         click: function () {
           request("/api/v1/anomalies/acknowledge", "POST", { ids: selectedAlertIds })
@@ -4342,7 +4343,7 @@
     });
 
     var clearResolvedBtn = h("button", {
-      cls: "btn mini", type: "button", text: "Clear Acknowledged",
+      cls: "btn mini", type: "button", text: "Delete acknowledged\u2026",
       on: {
         click: function () {
           /* "Clear" reads like clearing a filter. It deletes rows. */
@@ -4454,7 +4455,7 @@
           }));
 
       var tr = h("tr", {
-        cls: "alert-row-interactive" + (isSelected ? " selected" : ""),
+        cls: "row alert-row-interactive" + (isSelected ? " selected" : ""),
         on: {
           click: function () {
             state.expandedAlertId = isExpanded ? "" : a.id;
@@ -4465,14 +4466,16 @@
         h("td", {}, rowCheckbox),
         h("td", {}, stamp(parseTime(a.timestamp))),
         h("td", {}, h("span", { cls: "st", "data-state": (a.severity || "LOW").toLowerCase() === "critical" ? "crit" : (a.severity === "HIGH" ? "warn" : "idle"), text: a.severity || "LOW" })),
-        h("td", {}, h("span", { cls: "dim", text: (a.anomaly_type || "").replace(/_/g, " ") }),
-          a.technique ? h("span", { cls: "dim-3", text: " " + a.technique }) : null,
-          a.held_reason === "hunt" ? h("span", { cls: "dim-3", title: "Behavioural hunt lead, not an alert", text: " \u00b7 hunt lead" })
-            : a.held_reason ? h("span", { cls: "dim-3", title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null),
         h("td", {}, h("span", { cls: "host", text: a.hostname || a.endpoint_id || "—" })),
+        h("td", { cls: "alert-finding" },
+          h("button", {cls:"alert-inspect", type:"button", "aria-expanded":String(isExpanded), text: a.title || a.description || "Inspect alert", on:{click:function(e){e.stopPropagation();state.expandedAlertId=isExpanded?"":a.id;renderBody();}}}),
+          h("div", { cls: "dim-3 u-t2" },
+            h("span", { text: (a.anomaly_type || "").replace(/_/g, " ").toLowerCase() }),
+            a.technique ? h("span", { text: " " + a.technique }) : null,
+            a.held_reason === "hunt" ? h("span", { title: "Behavioural hunt lead, not an alert", text: " \u00b7 hunt lead" })
+              : a.held_reason ? h("span", { title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null)),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
-        h("td", {}, h("button", {cls:"btn alert-inspect", type:"button", "aria-expanded":String(isExpanded), text: a.title || a.description || "Inspect alert", on:{click:function(e){e.stopPropagation();state.expandedAlertId=isExpanded?"":a.id;renderBody();}}})),
         h("td", {}, ackAction));
 
       tableRows.push(tr);
@@ -4507,25 +4510,23 @@
               on: { click: function (e) { e.stopPropagation(); copyText(a.id); toast("Copied alert ID", "ok"); } }
             })));
 
-        expBox.prepend(h("p", {cls:"why", text:"Acknowledge marks this finding as read. Expected changes detection tuning for this program and counterparty. A verdict records what the finding was."}));
         selectedAlertDetail = h("aside", {cls:"alert-detail", "aria-label":"Selected alert evidence"}, expBox);
       }
     });
 
-    var alertsTable = h("div", { cls: "tblwrap" },
+    var alertsTable = stackOnPhone(h("div", { cls: "tblwrap alerts-table" + (selectedAlertDetail ? " alerts-table-narrow" : "") },
       h("table", {},
         h("thead", {},
           h("tr", {},
             h("th", { cls: "c-sel" }, headCheckbox),
             h("th", { text: "Time" }),
             h("th", { text: "Severity" }),
-            h("th", { text: "Anomaly Type" }),
-            h("th", { text: "System / Host" }),
+            h("th", { text: "Host" }),
+            h("th", { text: "Finding" }),
             h("th", { text: "Destination" }),
             h("th", { text: "Process" }),
-            h("th", { text: "Title / Finding" }),
             h("th", { text: "Action" }))),
-        h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "9" }, emptyBox("No alerts match active filters."))))));
+        h("tbody", {}, tableRows.length ? tableRows : h("tr", {}, h("td", { colspan: "8" }, emptyBox("No alerts match these filters.")))))));
 
     var totalAlerts = state.alertsData && typeof state.alertsData.total === "number" ? state.alertsData.total : allAnomalies.length;
     var pageCount = Math.max(1, Math.ceil(totalAlerts / af.limit));
@@ -4535,8 +4536,10 @@
       h("span", {text: "Page " + af.page + " of " + pageCount + " · " + totalAlerts + " matching alerts"}),
       h("button", {cls: "btn mini", type: "button", text: "Next", disabled: af.page >= pageCount,
         on: {click: function () { af.page++; state.selectedAlerts = {}; refresh(); }}}));
-    var alertsCard = card("Alerts (" + filteredAnomalies.length + " matching of " + totalAlerts + " total)",
-      h("div", { cls: "stack" }, h("div", {cls:"alert-split"}, alertsTable, selectedAlertDetail), pager));
+    var alertsCard = card("Alerts \u00b7 " + totalAlerts,
+      h("div", { cls: "stack" }, h("div", {cls:"alert-split"}, alertsTable, selectedAlertDetail), pager),
+      null, false,
+      "Click a finding for its evidence. Acknowledge marks it read. Expected tells detection that this program talking to this counterparty is normal here, so it stops being reported (asks your phone first). A verdict records what the finding turned out to be.");
 
     view.appendChild(h("div", { cls: "pad stack alerts-workspace" },
       chartCard,
@@ -7683,46 +7686,38 @@
 
     var authActions = isUnlocked
       ? [
-          h("button", { cls: "btn btn-crit", type: "button", text: "Lock Response Authority", on: { click: confirmLockResponseSession } }),
-          h("button", { cls: "btn", type: "button", text: "Session Details", on: { click: openResponseControllerSheet } })
+          h("button", { cls: "btn", type: "button", text: "Session details", on: { click: openResponseControllerSheet } }),
+          h("button", { cls: "btn btn-crit", type: "button", text: "Lock", on: { click: confirmLockResponseSession } })
         ]
       : [
-          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock Response Session", on: { click: function () { openUnlockResponseSheet(); } } })
+          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock", title: "Unlock with your authenticator code or passkey", disabled: READ_ONLY, on: { click: function () { openUnlockResponseSheet(); } } })
         ];
 
-    var authCard = card("Response access", h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row" },
-        chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Response Unlocked" : "Response Locked"),
-        h("span", { cls: "dim-2", text: (auth.active_sessions || 0) + " unlocked " + ((auth.active_sessions || 0) === 1 ? "session" : "sessions") + (auth.signer_key_id ? " \u00b7 signing key " + auth.signer_key_id.slice(0, 16) + "\u2026" : "") })
-      ),
-      isUnlocked
-        ? h("p", { cls: "pending", text: "Unlocked. You can collect evidence and run scripts; each one is signed with a key this browser holds in memory until you lock it. Terminals don't use this unlock: your phone approves each one." })
-        : h("p", { cls: "pending", text: "Collecting evidence and running scripts need an unlocked session. Unlock it with your authenticator code or passkey." }),
-      h("div", { cls: "form-row" }, authActions)
-    ));
-
-    /* Terminals and response jobs have their own pages; this view says how
+    /* Terminals and response jobs have their own pages; this bar says how
        many there are and links there. */
     var liveTerms = arrayOf(state.terminalSessions).filter(terminalSessionIsLive).length;
-    var termCard = card("Remote terminals",
-      h("div", { cls: "card-body form-row" },
-        h("span", { cls: "dim-2", text: liveTerms ? liveTerms + (liveTerms === 1 ? " terminal running." : " terminals running.") : "No terminal is running." }),
-        h("a", { cls: "btn", href: "/console/terminal", text: liveTerms ? "Terminals" : "Open a terminal" })));
-
     var openJobs = arrayOf(state.responseJobs).filter(function (j) {
       return ["succeeded", "failed", "cancelled"].indexOf(String(j.state || "queued")) < 0;
     }).length;
-    var jobsCard = card("Response jobs",
-      h("div", { cls: "card-body form-row" },
-        h("span", { cls: "dim-2", text: openJobs ? openJobs + (openJobs === 1 ? " job in flight." : " jobs in flight.") : "Nothing in flight." }),
-        h("a", { cls: "btn", href: "/console/jobs" + (openJobs ? "" : "?view=history"), text: openJobs ? "See jobs" : "Finished jobs" })));
+    var others = Math.max(0, (auth.active_sessions || 0) - (isUnlocked ? 1 : 0));
+    var authCard = pageTools(h("div", { cls: "needs-you" },
+        chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Unlocked" : "Locked"),
+        others ? h("span", { cls: "dim-2", text: others + " other unlocked " + (others === 1 ? "session" : "sessions") }) : null,
+        countLink(liveTerms, liveTerms === 1 ? "terminal running" : "terminals running", "/console/terminal"),
+        countLink(openJobs, openJobs === 1 ? "job in flight" : "jobs in flight", "/console/jobs" + (openJobs ? "" : "?view=history"))),
+      h("div", { cls: "row-acts" },
+        h("a", { cls: "btn", href: "/console/terminal", text: "Open a terminal" }),
+        h("a", { cls: "btn", href: "/console/jobs?view=history", text: "Job history" }),
+        authActions),
+      { key: "Response access", text: isUnlocked
+        ? "Unlocked: you can collect evidence and run scripts. Each one is signed with a key this browser holds in memory until you lock it." + (auth.signer_key_id ? " Signing key " + auth.signer_key_id.slice(0, 16) + "\u2026." : "") + " Terminals don't use this unlock; your phone approves each one."
+        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code or passkey. Terminals don't use this unlock; your phone approves each one." });
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
-        h("b", { text: sc.name || "" }),
+        h("div", { cls: "cell-wrap" }, h("b", { text: sc.name || "" }), sc.description ? h("div", { cls: "dim-2 u-t2", text: sc.description }) : null),
         h("span", { cls: "mono", text: sc.interpreter || "" }),
         h("span", { text: "v" + (sc.latest_version || 1) }),
-        h("span", { cls: "dim-2", text: sc.description || "" }),
         chip(sc.retired ? "crit" : "ok", sc.retired ? "Retired" : "Active"),
         stamp(parseTime(sc.updated_at)),
         h("div", { cls: "row-actions" },
@@ -7764,7 +7759,7 @@
       h("button", {
         cls: "btn btn-primary",
         type: "button",
-        text: "New Script",
+        text: "New script",
         on: {
           click: function () {
             openCreateScriptSheet();
@@ -7773,9 +7768,12 @@
       })
     );
 
-    var scriptsCard = card("Immutable Script Library",
-      scriptRows.length ? simpleTable(["Script", "Interpreter", "Version", "Description", "Status", "Updated", "Actions"], scriptRows) : h("div", { cls: "card-body", text: "No registered response scripts. Click 'New Script' to register a script." }),
-      [scriptCardHead]
+    var foldedScripts = foldRows("scripts", scriptRows, 8, "scripts");
+    var scriptsCard = card("Script library \u00b7 " + scriptRows.length,
+      scriptRows.length ? h("div", {}, stackOnPhone(simpleTable(["Script", "Interpreter", "Version", "Status", "Updated", ""], foldedScripts.rows, { key: "scripts" })), foldedScripts.toggle)
+        : emptyBox("No scripts yet. New script adds one."),
+      [scriptCardHead], false,
+      "Each script version is stored as written and never changes. Run sends one version to the machines you pick, signed with your unlocked session, once or on a schedule. Retire stops every future run and schedule of all its versions; past jobs are kept."
     );
 
     var schedRows = (state.scriptSchedules || []).map(function (sched) {
@@ -7806,11 +7804,14 @@
       ];
     });
 
-    var schedulesCard = card("Frozen Script Schedules",
-      schedRows.length ? simpleTable(["Schedule ID", "Script", "Frozen Digest", "Recurrence", "Target Snapshot", "Runs", "Status", "Created", "Action"], schedRows) : h("div", { cls: "card-body", text: "No scheduled script executions." })
+    var schedulesCard = card("Scheduled scripts \u00b7 " + schedRows.length,
+      schedRows.length ? stackOnPhone(simpleTable(["Schedule", "Script", "Digest", "Repeats", "Machines", "Runs", "Status", "Created", ""], schedRows, { key: "schedules" })) : emptyBox("No scheduled scripts. Schedule one from a script's Run sheet."),
+      null, false,
+      "A schedule keeps the exact script version (by digest) and the machine list it was created with. Later script versions or new machines do not change it; cancel it and schedule again instead."
     );
 
-    view.appendChild(h("div", { cls: "pad stack" }, authCard, termCard, jobsCard, scriptsCard, schedulesCard));
+    view.appendChild(authCard);
+    view.appendChild(h("div", { cls: "pad stack" }, scriptsCard, schedulesCard));
   }
 
   function openCreateScriptSheet() {

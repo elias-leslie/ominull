@@ -5045,3 +5045,42 @@ tfoot {
   .page-tools { padding: var(--s-2); }
   .page-tools .row-acts { width: 100%; justify-content: flex-end; }
 }
+
+/* Alerts: the finding is the row's main text and wraps, so the table fits its
+   card and the action column is never pushed off the edge. */
+.alerts-table td.alert-finding { white-space: normal; min-width: 220px; }
+.alerts-table .alert-inspect {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.alerts-table .alert-inspect:hover { text-decoration: underline; }
+.alerts-table .alert-inspect:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.alerts-table table { min-width: 0; }
+/* With a finding open beside the table, destination and process are in the
+   detail panel; the row keeps time, severity, host, finding and its actions. */
+@media (min-width: 1200px) {
+  .alerts-table-narrow th:nth-child(6), .alerts-table-narrow td:nth-child(6),
+  .alerts-table-narrow th:nth-child(7), .alerts-table-narrow td:nth-child(7) { display: none; }
+}
+@media (max-width: 640px) {
+  /* Density padding outranked the stacked layout, so every stacked cell sat
+     on its own padded line. */
+  body .tblwrap.tbl-stack tbody td { padding: 0; }
+  .alerts-table tbody td:first-child { flex-basis: auto; }
+  .alerts-table td.alert-finding { min-width: 0; flex-basis: calc(100% - 40px); order: -1; }
+  .alerts-table tbody td:first-child { order: -2; }
+  .alerts-table tbody td.alert-finding[data-label]::before, .alerts-table tbody td[data-label]:last-child::before { content: none; }
+  .alerts-workspace .traffic-filter-group { flex-wrap: wrap; }
+  .alerts-table tbody td:last-child { flex-basis: 100%; }
+}
+
+/* A table cell that holds a name plus a description line wraps instead of
+   widening the table past its card. */
+td .cell-wrap { white-space: normal; min-width: 200px; max-width: 60ch; }
+.page-tools-wrap > .help-text { border-bottom: 1px solid var(--line); }
+a.attn { text-decoration: none; }
