@@ -83,6 +83,9 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
+		if s.refuseRemoteAccess(w, req.EndpointID) {
+			return
+		}
 		program, _, ok := s.terminalProgram(w, req.EndpointID, req.Program)
 		if !ok {
 			return
@@ -617,7 +620,7 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 		Program            string `json:"program"`
 		MaxDurationSeconds int    `json:"max_duration_seconds"`
 	}
-	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
+	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseRemoteAccess(w, req.EndpointID) {
 		return nil, false
 	}
 	program, _, ok := s.terminalProgram(w, req.EndpointID, req.Program)

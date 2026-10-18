@@ -26,7 +26,8 @@ the ceiling. An unknown level is refused (exit 1) and nothing is written; an unr
 | `engagement` | everything | |
 
 Terminal and remote screen are refused by the agent under `monitor`, `isolate`, `signed-scripts` and
-`monitor-signed-scripts`.
+`monitor-signed-scripts`. The hub's per-machine "remote access off" setting (docs/REMOTE_SCREEN.md §7) refuses them
+on the hub side as well; set it for the same machines.
 
 Capability names (manifest and ceiling): `update`, `isolate`, `mesh`, `collect`, `script`, `terminal`, `screen`.
 Under `signed-scripts` and `monitor-signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must be `engagement`

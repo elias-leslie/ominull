@@ -309,3 +309,26 @@ func TestScreenAskFirstWording(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteAccessWording(t *testing.T) {
+	on := map[string]interface{}{"endpoint": "ws-1", "off": true}
+	off := map[string]interface{}{"endpoint": "ws-1", "off": false, "host": "workstation"}
+	got, err := RemoteAccessWording("remote_access:ws-1", on, off)
+	if err != nil || got != "Remote terminal and screen allowed again on endpoint ws-1 (workstation), each session still with approval (was: switched off)" {
+		t.Fatalf("%q %v", got, err)
+	}
+	for _, tc := range []struct {
+		target        string
+		before, after map[string]interface{}
+	}{
+		{"remote_access:other", on, off},
+		{"remote_access:ws-1", on, on},
+		{"remote_access:ws-1", nil, off},
+		{"remote_access:ws-1", on, map[string]interface{}{"endpoint": "ws-1", "off": false, "extra": 1}},
+		{"remote_access:ws-1", on, map[string]interface{}{"endpoint": "ws-2", "off": false}},
+	} {
+		if _, err := RemoteAccessWording(tc.target, tc.before, tc.after); err == nil {
+			t.Errorf("accepted %+v", tc)
+		}
+	}
+}

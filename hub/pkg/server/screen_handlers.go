@@ -123,6 +123,9 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
+		if s.refuseRemoteAccess(w, req.EndpointID) {
+			return
+		}
 		mode, ok := req.mode(w)
 		if !ok || !s.screenCapable(w, r, req.EndpointID, mode) {
 			return
@@ -760,7 +763,7 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 		return nil, false
 	}
 	var req screenOpenRequest
-	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
+	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseRemoteAccess(w, req.EndpointID) {
 		return nil, false
 	}
 	mode, ok := req.mode(w)

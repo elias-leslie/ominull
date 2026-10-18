@@ -527,6 +527,11 @@ var detectionPolicyOps = map[string]map[string]string{
 	"screen_ask_first": {
 		"off": "Stop asking before screen sessions",
 	},
+	// Remote terminal and screen switched off on one machine. Switching it
+	// off only tightens and asks nobody.
+	"remote_access": {
+		"on": "Allow remote terminal and screen again",
+	},
 	// The software removal catalog: which programs a removal package may
 	// uninstall and how. Deleting an entry only tightens and asks nobody.
 	"software_catalog": {
@@ -618,6 +623,10 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 	}
 	if p.Policy == "screen_ask_first" {
 		summary, err := ScreenAskFirstWording(targets[0], before, after)
+		return action, summary, err
+	}
+	if p.Policy == "remote_access" {
+		summary, err := RemoteAccessWording(targets[0], before, after)
 		return action, summary, err
 	}
 	if p.Policy == "software_catalog" {
@@ -1054,4 +1063,43 @@ func ScreenAskFirstWording(target string, before, after map[string]interface{}) 
 		return "Screen sessions on " + where + " ask the person at the keyboard to allow them first (was: opened without asking)", nil
 	}
 	return "Screen sessions on " + where + " open without asking the person at the keyboard first (was: asked first)", nil
+}
+
+// RemoteAccessWording says what a change to a machine's remote access
+// setting does. before and after are {"endpoint", "off"} plus an optional
+// "host" label; the target is remote_access:<endpoint>. The hub uses it for
+// its audit row; the authority for the owner.
+func RemoteAccessWording(target string, before, after map[string]interface{}) (string, error) {
+	var ep string
+	var vals [2]bool
+	for i, m := range []map[string]interface{}{before, after} {
+		if m == nil {
+			return "", errors.New("a remote access change carries the setting before and after")
+		}
+		for k := range m {
+			if k != "endpoint" && k != "off" && k != "host" {
+				return "", fmt.Errorf("a remote access setting carries an unknown member %q", cleanText(k, 40))
+			}
+		}
+		e, _ := m["endpoint"].(string)
+		v, ok := m["off"].(bool)
+		if e == "" || !ok || (i == 1 && e != ep) {
+			return "", errors.New("a remote access setting names one endpoint and off true or false")
+		}
+		ep, vals[i] = e, v
+	}
+	if target != "remote_access:"+ep {
+		return "", fmt.Errorf("a remote access change for %s targets remote_access:%s", cleanText(ep, 64), cleanText(ep, 64))
+	}
+	if vals[0] == vals[1] {
+		return "", errors.New("this remote access change changes nothing")
+	}
+	where := "endpoint " + cleanText(ep, 64)
+	if host, _ := after["host"].(string); host != "" && host != ep {
+		where += " (" + cleanText(host, 64) + ")"
+	}
+	if vals[1] {
+		return "Remote terminal and screen switched off on " + where + ", for everyone (was: allowed with approval)", nil
+	}
+	return "Remote terminal and screen allowed again on " + where + ", each session still with approval (was: switched off)", nil
 }

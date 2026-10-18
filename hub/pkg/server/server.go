@@ -3906,6 +3906,7 @@ func (s *Server) routes() *http.ServeMux {
 	// The viewer's only credential is the launch code itself.
 	mux.HandleFunc("/api/v1/screen/launch/redeem", s.responseGate(s.handleScreenLaunchRedeem))
 	mux.HandleFunc("/api/v1/screen/settings", s.authMiddleware(s.responseGate(s.handleScreenSettings)))
+	mux.HandleFunc("/api/v1/remote-access/settings", s.authMiddleware(s.responseGate(s.handleRemoteAccess)))
 
 	// 13. Versioned Immutable Script Library & Execution API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/scripts", s.authMiddleware(s.responseGate(s.handleScripts)))

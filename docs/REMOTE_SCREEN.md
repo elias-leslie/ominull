@@ -443,6 +443,17 @@ endpoint at a time.
 - **Input only while live.** The helper injects input only while an approved
   session is active and paired; on detach/pause it stops both capture and input.
 - No new listening port: the agent/helper always dials out to the hub.
+- **Remote access off (per machine).** `PUT /api/v1/remote-access/settings`
+  `{"endpoint_id":"..","off":true}` switches off every remote terminal and
+  screen session on that machine, for everyone (owner, agents, steward); it is
+  stored as data (settings row `remote_access.off`), never derived from a
+  hostname. Switching it off applies at once and closes the machine's open
+  sessions; switching it back on needs the owner's tap ("Allow remote terminal
+  and screen again"). Requests for that machine are refused with 403 before any
+  approval is asked for. An unreadable settings row refuses everywhere until it
+  is rewritten. `GET /api/v1/remote-access/settings[?endpoint_id=]` reads it.
+  The agent-side lock levels (docs/HOST_AUTHORITY.md) refuse terminal and screen
+  too; this setting is the hub-side half, for any agent version.
 
 ## 8. ominullctl
 
