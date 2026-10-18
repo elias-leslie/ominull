@@ -1224,6 +1224,8 @@
       return { script_id: "demo-" + name, name: name, title: title, description: desc, interpreter: "powershell.exe",
         risk: risk, reboot_possible: true, timeout: timeout, latest_version: 3, last: last };
     }
+    var winOrder = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return /windows/i.test(e.os || ""); });
+    var second = winOrder.length > 1 && winOrder[1].id === ep;
     function run(state, mode, ago, extra) {
       var r = { job_id: "demo-job-" + state, job_state: "succeeded", state: state, mode: mode, reboot: false, changed: [],
         requested_at: new Date(Date.now() - ago * 60000).toISOString(), completed_at: new Date(Date.now() - ago * 60000 + 90000).toISOString() };
@@ -1243,7 +1245,12 @@
       pkg("windows-debloat", "Remove bundled apps", "Removes a fixed list of bundled and sponsored apps.", "careful", 900, null),
       pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
       pkg("windows-privacy", "Privacy", "Sets telemetry, advertising, suggestions, Copilot and Recall policies.", "safe", 300, run("ok", "audit", 2880)),
-      pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null })),
+      pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, second
+        ? run("needs_hands", "enforce", 19, { job_state: "running", completed_at: null, phase: "needs_hands", reason: "waiting on a window",
+          window: { title: "Windows Update restart options", process: "SystemSettings.exe", session: 1 },
+          progress: { pct: 62, message: "Installing update 3 of 5", heartbeat_at: new Date(Date.now() - 20000).toISOString(), idle_seconds: 540 } })
+        : run("running", "enforce", 4, { job_state: "running", completed_at: null, phase: "running",
+          progress: { pct: 40, message: "Installing update 2 of 5", heartbeat_at: new Date(Date.now() - 12000).toISOString(), idle_seconds: 3 } })),
       Object.assign(pkg("windows-maintenance-mode", "Maintenance mode", "Keeps the computer awake while maintenance runs.", "safe", 120, null), { role: "maintenance_mode" }),
       Object.assign(pkg("windows-reboot", "Restart", "Restarts the computer after an on-screen warning, by default only when Windows is waiting for a restart.", "careful", 3600, run("drift", "audit", 1440, { reason: "Windows is waiting for a restart" })), { role: "reboot" })
     ], maintenance_mode: demoMaintMode(ep, "windows") };
@@ -1289,8 +1296,11 @@
       var hosts = {};
       win.slice(0, 2).forEach(function (e, i) {
         hosts[e.id] = i === 0
-          ? [{ state: "done", result: "ok" }, { state: "done", result: "fixed" }, { state: "done", result: "drift" }, { state: "started", job_id: "demo-job-pb" }, { state: "pending" }]
-          : [{ state: "done", result: "ok" }, { state: "started", job_id: "demo-job-pb2" }, { state: "pending" }, { state: "pending" }, { state: "pending" }];
+          ? [{ state: "done", result: "ok" }, { state: "done", result: "fixed" }, { state: "done", result: "drift" }, { state: "started", job_id: "demo-job-pb", live: { state: "running", phase: "running",
+            progress: { pct: 40, message: "Installing update 2 of 5", heartbeat_at: new Date(Date.now() - 12000).toISOString(), idle_seconds: 3 } } }, { state: "pending" }]
+          : [{ state: "done", result: "ok" }, { state: "started", job_id: "demo-job-pb2", live: { state: "needs_hands", phase: "needs_hands", reason: "waiting on a window",
+            window: { title: "Windows Update restart options", process: "SystemSettings.exe", session: 1 },
+            progress: { pct: 62, message: "Installing update 3 of 5", heartbeat_at: new Date(Date.now() - 20000).toISOString(), idle_seconds: 540 } } }, { state: "pending" }, { state: "pending" }, { state: "pending" }];
       });
       DEMO_PLAYBOOKS = {
         max_steps: 8,
@@ -3494,6 +3504,11 @@
     var decisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
     if (decisions) items.push({ n: decisions, label: decisions === 1 ? "decision" : "decisions", tone: "warn", title: "Answer on the Maintenance page",
       run: function () { go("maintenance"); } });
+    var stuck = maintStuckRuns();
+    if (stuck.hands) items.push({ n: stuck.hands, label: stuck.hands === 1 ? "run waiting on a window" : "runs waiting on a window", tone: "crit",
+      title: "A maintenance run is stopped at a window that needs a click. Open Maintenance.", run: function () { go("maintenance"); } });
+    if (stuck.stalled) items.push({ n: stuck.stalled, label: stuck.stalled === 1 ? "run stalled" : "runs stalled", tone: "crit",
+      title: "A maintenance run has gone quiet. Open Maintenance.", run: function () { go("maintenance"); } });
     var unack = state.unackAlertsTotal || 0;
     if (unack) items.push({ n: unack, label: unack === 1 ? "open alert" : "open alerts", tone: "crit", title: "Review on the Alerts page",
       run: function () { go("alerts"); } });
@@ -9504,8 +9519,47 @@
     ok: ["ok", "Nothing to change"], fixed: ["ok", "Fixed"], drift: ["warn", "Needs changes"],
     failed: ["crit", "Failed"], skipped: ["idle", "Skipped"], running: ["warn", "Running"],
     waiting: ["idle", "Waiting for the agent"], cancelled: ["idle", "Cancelled"], no_result: ["crit", "No result came back"],
-    na: ["idle", "Not applicable"]
+    na: ["idle", "Not applicable"], stalled: ["crit", "Stalled"], needs_hands: ["crit", "Waiting on a window"],
+    not_run: ["idle", "Not run"]
   };
+
+  /* A run the agent supervises reports a progress line and, when it is stuck,
+     why: no output for a while (stalled) or a window that wants a click
+     (needs_hands). Both read as a line under the state chip. */
+  function runIsStuck(run) { return !!run && (run.state === "stalled" || run.state === "needs_hands"); }
+  function runLiveText(run) {
+    var bits = [];
+    var p = run && run.progress;
+    if (p && (p.pct >= 0 || p.message)) bits.push((p.pct >= 0 ? p.pct + "%" : "") + (p.pct >= 0 && p.message ? " " : "") + (p.message || ""));
+    if (run && run.state === "needs_hands" && run.window && run.window.title) {
+      bits.push("window \u201c" + run.window.title + "\u201d" + (run.window.process ? " (" + run.window.process + ")" : ""));
+    } else if (runIsStuck(run) && run.reason) {
+      bits.push(run.reason);
+    }
+    var beat = p && p.heartbeat_at ? parseTime(p.heartbeat_at) : null;
+    if (beat && (run.state === "running" || runIsStuck(run))) bits.push("last word " + ago(beat) + " ago");
+    return bits.join(" \u00b7 ");
+  }
+
+  /* Machines with a supervised run that is stuck, from the playbook runs the
+     console reads in the background and from the per-machine maintenance
+     reads already open. needs_hands outranks stalled for the same machine. */
+  function maintStuckRuns() {
+    var seen = {};
+    function note(ep, st) { if (st === "needs_hands" || !seen[ep]) seen[ep] = st; }
+    arrayOf(state.maintPlaybooks && state.maintPlaybooks.runs).forEach(function (r) {
+      if (r.done) return;
+      Object.keys(r.hosts || {}).forEach(function (ep) {
+        arrayOf(r.hosts[ep]).forEach(function (st) { if (st.state === "started" && runIsStuck(st.live)) note(ep, st.live.state); });
+      });
+    });
+    Object.keys(state.maintenanceByEndpoint || {}).forEach(function (ep) {
+      arrayOf(state.maintenanceByEndpoint[ep].packages).forEach(function (pk) { if (pk.last && runIsStuck(pk.last)) note(ep, pk.last.state); });
+    });
+    var hands = 0, stalled = 0;
+    Object.keys(seen).forEach(function (ep) { if (seen[ep] === "needs_hands") hands++; else stalled++; });
+    return { hands: hands, stalled: stalled, total: hands + stalled };
+  }
 
   function maintenanceCard(asset) {
     var ep = asset.endpoint;
@@ -9518,7 +9572,7 @@
       return isWindows ? card("Maintenance and security", emptyBox("No maintenance packages in the script library yet."), null, true) : null;
     }
     /* A run in flight changes on the agent's schedule, not ours: re-read while one is open. */
-    var open = all.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting"); }) || !!(m.mode && m.mode.pending);
+    var open = all.some(function (p) { return p.last && (p.last.state === "running" || p.last.state === "waiting" || runIsStuck(p.last)); }) || !!(m.mode && m.mode.pending);
     if (open && !m.loading && Date.now() - m.at > 10000) loadMaintenance(ep.id);
     var sw = state.maintSettingsByEndpoint[ep.id];
     if (!sw || (!sw.loading && !sw.data && !sw.error)) loadMaintSettings(ep.id);
@@ -9545,7 +9599,8 @@
         result = h("div", { cls: "uf uf-wrap uf-g1" },
           h("a", { href: "/console/jobs?id=" + encodeURIComponent(last.job_id) }, chip(st[0], st[1])),
           last.mode ? h("span", { cls: "dim-2", text: last.mode }) : null,
-          last.reason ? h("span", { cls: "dim-2", text: "· " + last.reason }) : null,
+          runIsStuck(last) || last.state === "running" ? null : (last.reason ? h("span", { cls: "dim-2", text: "· " + last.reason }) : null),
+          last.state === "running" || runIsStuck(last) ? h("span", { cls: "dim-2 run-live", role: "status", text: runLiveText(last) }) : null,
           last.changed && last.changed.length ? h("span", { cls: "dim-2", text: "· " + last.changed.length + " changed" }) : null,
           (last.controls && last.controls.length) ? h("button", { cls: "btn mini", type: "button", text: "Controls", "aria-label": "Controls checked by " + p.title,
             on: { click: function () { openSheet(p.title + " on " + asset.name, h("div", { cls: "stack" }, maintCompliance(last.pass || 0, last.fail || 0), maintControlsTable(last.controls, asset)),
@@ -10167,7 +10222,12 @@
     var cur = -1;
     for (var i = 0; i < steps.length; i++) if (steps[i].state === "started" || steps[i].state === "pending") { cur = i; break; }
     if (cur >= 0) {
-      return h("span", { text: "Step " + (cur + 1) + " of " + steps.length + ": " + maintStepText(labels[cur]) + (steps[cur].state === "started" ? ", running" : ", next") });
+      var live = steps[cur].state === "started" ? steps[cur].live : null;
+      var stuck = runIsStuck(live);
+      var line = h("span", { text: "Step " + (cur + 1) + " of " + steps.length + ": " + maintStepText(labels[cur]) + (steps[cur].state === "started" ? (stuck ? "" : ", running") : ", next") });
+      if (!live || (!stuck && !runLiveText(live))) return line;
+      return h("div", { cls: "stack-s" }, h("span", { cls: "uf uf-wrap uf-g1" }, line, stuck ? chip((MAINT_STATES[live.state] || MAINT_STATES.failed)[0], (MAINT_STATES[live.state] || MAINT_STATES.failed)[1]) : null),
+        h("span", { cls: "dim-2 run-live", role: "status", text: runLiveText(live) }));
     }
     var counts = {};
     steps.forEach(function (st) { var k = st.state === "not_started" ? "not started" : (st.result || "done"); counts[k] = (counts[k] || 0) + 1; });
@@ -10289,7 +10349,8 @@
     if (!runs.length) return null;
     var running = runs.filter(function (r) { return !r.done; }).length;
     return card("Playbook runs", body,
-      [running ? chip("warn", running + " running") : chip("idle", "none running")], true);
+      [maintStuckRuns().total ? chip("crit", maintStuckRuns().total + " stuck") : null,
+        running ? chip("warn", running + " running") : chip("idle", "none running")], true);
   }
 
   function maintPlaybooksRedraw(d) {
@@ -11368,10 +11429,12 @@
     }
     var maintBadge = $("rail-maint-badge");
     if (maintBadge) {
-      var waiting = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
+      var openDecisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
+      var stuckRuns = maintStuckRuns().total;
+      var waiting = openDecisions + stuckRuns;
       maintBadge.textContent = String(waiting);
       maintBadge.setAttribute("data-n", String(waiting));
-      maintBadge.setAttribute("title", waiting + " waiting for you");
+      maintBadge.setAttribute("title", [openDecisions ? openDecisions + (openDecisions === 1 ? " decision" : " decisions") : "", stuckRuns ? stuckRuns + (stuckRuns === 1 ? " stuck run" : " stuck runs") : ""].filter(Boolean).join(" and ") + (waiting ? " waiting for you" : "Nothing waiting"));
     }
 
     var health = $("health");
@@ -11751,6 +11814,14 @@
       jobs.push(request("/api/v1/maintenance/decisions").then(function (d) { state.maintDecisions = d || null; }, function (e) {
         if (e && (e.status === 404 || e.status === 403)) state.maintDecisionsOff = true;
         if (resources["/api/v1/maintenance/decisions"]) delete resources["/api/v1/maintenance/decisions"].error;
+      }));
+    }
+    /* Stuck playbook runs feed the same badge and strip, so the runs are read
+       in the background as well, at most once a minute. */
+    if (state.section !== "maintenance" && !state.maintDecisionsOff && Date.now() - (state.maintRunsAt || 0) > 60000) {
+      state.maintRunsAt = Date.now();
+      jobs.push(request("/api/v1/maintenance/playbooks").then(function (d) { if (d && d.playbooks) state.maintPlaybooks = d; }, function (e) {
+        if (resources["/api/v1/maintenance/playbooks"]) delete resources["/api/v1/maintenance/playbooks"].error;
       }));
     }
     if (state.section === "maintenance") {

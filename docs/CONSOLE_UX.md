@@ -269,6 +269,27 @@ Rendered from synthetic events (22 events on 14 lines):
 ![Maintenance, phone, after](images/console-ux/after-phone-maintenance.png)
 ![Run sheet, phone](images/console-ux/after-phone-maintenance-run.png)
 
+### Run states (supervised runs)
+
+- A run the agent supervises can be **Stalled** (no output, CPU or disk
+  activity for a while, or no word from the machine) or **Waiting on a
+  window** (a visible window wants a click). Both used to fall back to
+  "Failed" in the console. They are red state chips now, next to **Not run**
+  (offline past the window).
+- Under the chip, one live line: progress ("62% Installing update 3 of 5"),
+  the window it waits on (title and program), the reason, and "last word 20s
+  ago". It shows in the machine's Maintenance card and in Playbook runs.
+- A stuck run counts in the needs-you strip ("1 run waiting on a window", "1
+  run stalled"), in the Maintenance rail badge (with the open decisions), and
+  as a red "stuck" chip on Playbook runs. The console reads playbook runs in
+  the background once a minute for this; runs started one at a time are
+  counted when that machine's Maintenance card has been opened. The Jobs
+  page lists every in-flight run.
+
+![Run states on a machine](images/console-ux/after-desk-route-runstates.png)
+![Playbook runs, desktop](images/console-ux/after-desk-maint-runstates.png)
+![Playbook runs, phone](images/console-ux/after-phone-maint-runstates.png)
+
 ### Asset view
 
 - Head: name, state, evidence strip, and chips for OS, role and agent version

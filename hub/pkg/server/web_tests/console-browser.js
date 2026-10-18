@@ -19,7 +19,8 @@
   container.remove();
  });
  await check('needs-you strip and Maintenance badge count what waits on the owner', async () => {
-  const saved={d:a.state.maintDecisions,u:a.state.unackAlertsTotal};
+  const saved={d:a.state.maintDecisions,u:a.state.unackAlertsTotal,p:a.state.maintPlaybooks,m:a.state.maintenanceByEndpoint};
+  a.state.maintPlaybooks=null; a.state.maintenanceByEndpoint={};
   a.state.maintDecisions={open:[{key:'k1',group:'g',group_title:'G',endpoint_id:'e',package:'p',item:{id:'i',name:'n',reason:'r'},answers:['handled']}]};
   a.state.unackAlertsTotal=0; a.state.section='assets'; a.render();
   const chips=[...document.querySelectorAll('.needs-you .attn')].map(b=>b.textContent);
@@ -29,7 +30,7 @@
   assert(badge && badge.dataset.n==='1','Maintenance badge does not count the open decision');
   a.state.maintDecisions={open:[]}; a.render();
   assert(document.getElementById('rail-maint-badge').dataset.n==='0','Badge stays after decisions close');
-  a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.render();
+  a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.state.maintPlaybooks=saved.p; a.state.maintenanceByEndpoint=saved.m; a.render();
  });
  await check('Maintenance Run picks a runnable package and only machines it fits', async () => {
   const saved={s:a.state.maintSettings,sec:a.state.section,tab:a.state.maintTab};
@@ -78,6 +79,28 @@
   const needs=[...document.querySelectorAll('.needs-you .attn')].map(b=>b.textContent).join('|');
   assert(!/quarantined|outdated/.test(needs),'Needs-you still repeats the filter chips: '+needs);
   a.state.filters=saved.f; a.state.query=saved.q; a.state.section=saved.s; a.render();
+ });
+ await check('stuck supervised runs show their own state, a live line, and reach the needs-you strip and the Maintenance badge', async () => {
+  const saved={p:a.state.maintPlaybooks,d:a.state.maintDecisions,u:a.state.unackAlertsTotal,sec:a.state.section,m:a.state.maintenanceByEndpoint};
+  const beat=new Date(Date.now()-20000).toISOString();
+  const step=live=>({state:'started',job_id:'j',live});
+  a.state.maintDecisions={open:[]}; a.state.unackAlertsTotal=0; a.state.maintenanceByEndpoint={};
+  a.state.maintPlaybooks={playbooks:[],runs:[{id:'r1',name:'Weekly tidy',started:new Date().toISOString(),deadline:new Date(Date.now()+3600000).toISOString(),done:false,steps:['windows-updates (enforce)'],hosts:{
+   'ep-a':[step({state:'needs_hands',reason:'waiting on a window',window:{title:'Restart options',process:'Settings.exe',session:1},progress:{pct:62,message:'Installing 3 of 5',heartbeat_at:beat}})],
+   'ep-b':[step({state:'stalled',reason:'no output, CPU or disk activity for 9 min',progress:{pct:-1,message:'',heartbeat_at:beat}})],
+   'ep-c':[step({state:'running',progress:{pct:10,message:'Starting',heartbeat_at:beat}})]}}]};
+  a.state.section='assets'; a.render();
+  const chips=[...document.querySelectorAll('.needs-you .attn')].map(b=>b.textContent);
+  assert(chips.includes('1run waiting on a window'),'Needs-you misses the run waiting on a window: '+chips.join(','));
+  assert(chips.includes('1run stalled'),'Needs-you misses the stalled run: '+chips.join(','));
+  assert(document.getElementById('rail-maint-badge').dataset.n==='2','Maintenance badge does not count stuck runs');
+  a.state.section='maintenance'; document.getElementById('view').dataset.section=''; a.render();
+  const text=document.getElementById('view').textContent;
+  assert(/Waiting on a window/.test(text) && /Stalled/.test(text),'Run states fall back to Failed: '+text.slice(0,200));
+  assert(!/Failed/.test(document.querySelector('.card + .card') ? text : ''),'A stuck run reads Failed');
+  assert(/62% Installing 3 of 5/.test(text) && /Restart options/.test(text),'Live progress and window missing');
+  assert(/no output, CPU or disk activity for 9 min/.test(text),'Stalled reason missing');
+  a.state.maintPlaybooks=saved.p; a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.state.maintenanceByEndpoint=saved.m; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });
  await check('navigation links never contain sentinel credential', () => {
   a.openAccountPop(); assert(![...document.querySelectorAll('a')].some(x=>x.href.includes('AUDIT_SENTINEL')), 'Credential in navigation URL'); a.closeAccountPop();
