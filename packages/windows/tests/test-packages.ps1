@@ -117,18 +117,28 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'mode: unknown is audit' ((Get-Mode 'delete-everything' 'enforce') -eq 'audit')
     Check 'mode: revert' ((Get-Mode 'revert' '') -eq 'revert')
     Check 'mode: Revert is not revert' ((Get-Mode 'Revert' '') -eq 'audit')
-    Check 'quser idle .' ((ConvertFrom-QuserIdle '.') -eq 0)
-    Check 'quser idle none' ((ConvertFrom-QuserIdle 'none') -eq 0)
-    Check 'quser idle minutes' ((ConvertFrom-QuserIdle '5') -eq 5)
-    Check 'quser idle h:mm' ((ConvertFrom-QuserIdle '1:05') -eq 65)
-    Check 'quser idle d+h:mm' ((ConvertFrom-QuserIdle '2+03:04') -eq 3064)
-    $hdr = ' USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME'
-    Check 'quser: active console user' (Test-UserActive @($hdr, '>nadia                 console             1  Active      none   10/17/2026 9:00 AM') 15)
-    Check 'quser: idle 45 min is not active' (-not (Test-UserActive @($hdr, ' nadia                 console             1  Active        45   10/17/2026 9:00 AM') 15))
-    Check 'quser: idle 14 min is active' (Test-UserActive @($hdr, ' nadia                 console             1  Active        14   10/17/2026 9:00 AM') 15)
-    Check 'quser: idle 45 min is active under a 60 min threshold' (Test-UserActive @($hdr, ' nadia                 console             1  Active        45   10/17/2026 9:00 AM') 60)
-    Check 'quser: disconnected is not active' (-not (Test-UserActive @($hdr, ' bob                                       2  Disc          1:00  10/17/2026 9:00 AM') 15))
-    Check 'quser: no sessions' (-not (Test-UserActive @() 15))
+    # Presence from the WTS sessions (quser is absent on Windows Home).
+    $active = @{ id = 1; state = 0; user = 'nadia'; idle = 2; locked = $false }
+    Check 'sessions: active unlocked user' (Test-SessionsActive @($active) 15)
+    Check 'sessions: idle 45 min is not active' (-not (Test-SessionsActive @(@{ id = 1; state = 0; user = 'nadia'; idle = 45; locked = $false }) 15))
+    Check 'sessions: idle 14 min is active' (Test-SessionsActive @(@{ id = 1; state = 0; user = 'nadia'; idle = 14; locked = $false }) 15)
+    Check 'sessions: idle 45 min is active under a 60 min threshold' (Test-SessionsActive @(@{ id = 1; state = 0; user = 'nadia'; idle = 45; locked = $false }) 60)
+    Check 'sessions: idle not reported counts as active' (Test-SessionsActive @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $false }) 15)
+    Check 'sessions: locked is not active' (-not (Test-SessionsActive @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $true }) 15))
+    Check 'sessions: disconnected is not active' (-not (Test-SessionsActive @(@{ id = 2; state = 4; user = 'bob'; idle = 60; locked = $false }) 15))
+    Check 'sessions: no user (the sign-in screen) is not active' (-not (Test-SessionsActive @(@{ id = 1; state = 0; user = ''; idle = $null; locked = $false }) 15))
+    Check 'sessions: none' (-not (Test-SessionsActive @() 15))
+    Check 'sessions: one active among others' (Test-SessionsActive @(@{ id = 2; state = 4; user = 'bob'; idle = 60; locked = $false }, $active) 15)
+    # The WTS declarations compile and WTSINFOW has the Windows layout (216 bytes on x64).
+    $wts = Get-WtsType
+    Check 'WTS declarations compile' ($null -ne $wts -and $null -ne $wts.GetMethod('WTSEnumerateSessionsW'))
+    Check 'WTSINFOW layout' ([Runtime.InteropServices.Marshal]::SizeOf([type][OmniNull.Wts+WtsInfo]) -eq 216 -and
+        [Runtime.InteropServices.Marshal]::OffsetOf([type][OmniNull.Wts+WtsInfo], 'LastInputTime').ToInt32() -eq 192)
+    # Where the session query cannot run (here, off Windows), the answer is "cannot tell", never "nobody".
+    if (-not $IsWindows) {
+        $why = Get-SessionReason 15
+        Check 'sessions: an unanswerable query is busy, not nobody' ($why -like 'it cannot tell whether someone is using the computer*')
+    }
 
     # Params: defaults come from line 1, a run overrides them, bad values fail.
     $tmpPkg = Join-Path ([IO.Path]::GetTempPath()) ("omp-" + [guid]::NewGuid().ToString('N') + '.ps1')
@@ -188,16 +198,16 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'result field order' ((Format-Result 'ok' $false @() @{}) -match '^\{"v":1,"state":"ok","reboot":false,"changed":\[\],"detail":')
 
     # Preflight with stand-ins for every system call.
-    $script:Quser = @{ code = -1; out = @() }; $script:Procs = @(); $script:Batt = $null; $script:Busy = $false; $script:Ti = $null
-    function Invoke-Native { $script:Quser }
+    $script:Sess = @(); $script:Procs = @(); $script:Batt = $null; $script:Busy = $false; $script:Ti = $null
+    function Get-Sessions { $script:Sess }
     function Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$ClassName, $Property, $Filter)
         if ($ClassName -eq 'Win32_Process') { $script:Procs } else { $script:Batt } }
     function Get-Process { [CmdletBinding()] param([Parameter(Position = 0)]$Name) $script:Ti }
     function New-Object { [pscustomobject]@{ IsBusy = $script:Busy } }
     Check 'preflight: nothing blocks' ($null -eq (Get-PreflightReason $true 15))
-    $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }
+    $script:Sess = @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $false })
     Check 'preflight: user active' ((Get-PreflightReason $false 15) -match 'using the computer')
-    $script:Quser = @{ code = 1; out = @('No User exists for *') }
+    $script:Sess = @()
     $script:Procs = @([pscustomobject]@{ ExecutablePath = 'C:\Riot Games\VALORANT\live\VALORANT.exe' })
     Check 'preflight: game running' ((Get-PreflightReason $false 15) -match 'game is running \(VALORANT.exe\)')
     $script:Procs = @([pscustomobject]@{ ExecutablePath = $null }); $script:Batt = [pscustomobject]@{ BatteryStatus = 1 }
@@ -225,7 +235,7 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'window: Z compares UTC' ((Test-InWindow '03:00-04:00Z' $utcNow) -and -not (Test-InWindow '05:00-06:00Z' $utcNow))
     $local = $utcNow.ToLocalTime()
     Check 'window: Z with a local clock' (Test-InWindow '03:00-04:00Z' $local)
-    $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }
+    $script:Sess = @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $false })
     $env:OMINULL_PARAM_WHEN_BUSY = 'run'
     Check 'when_busy run: people do not count' ($null -eq (Get-PreflightReason $false 15))
     $script:Batt = [pscustomobject]@{ BatteryStatus = 1 }
@@ -236,9 +246,9 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     $env:OMINULL_PARAM_WINDOW = ''
     Check 'skip: someone using it skips' ((Get-PreflightReason $false 15) -match 'using the computer')
     $env:OMINULL_PARAM_WHEN_BUSY = 'wait'; $script:PkgTimeout = 600; $script:Slept = 0
-    function Start-Sleep { param($Seconds) $script:Slept++; if ($script:Slept -ge 2) { $script:Quser = @{ code = 1; out = @() } } }
+    function Start-Sleep { param($Seconds) $script:Slept++; if ($script:Slept -ge 2) { $script:Sess = @() } }
     Check 'wait: runs once nobody is using it' ($null -eq (Get-PreflightReason $false 15) -and $script:Slept -eq 2)
-    $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }; $script:PkgTimeout = 60
+    $script:Sess = @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $false }); $script:PkgTimeout = 60
     Check 'wait: gives up within half the timeout' ((Get-PreflightReason $false 15) -match 'using the computer')
     $env:OMINULL_PARAM_WHEN_BUSY = 'sometimes'
     Check 'when_busy: a bad value fails' ($(try { Get-PreflightReason $false 15; $false } catch { "$_" -match 'when_busy' }))
@@ -652,7 +662,7 @@ foreach ($n in 'cleanup', 'updates') {
     function Get-Installed { $script:inv | Where-Object { $script:phase -ne 'after' -or $script:gone -notcontains $_.key } }
     function Invoke-Uninstaller($Cmd, [int]$Sec) { $script:calls += "$($Cmd.exe)|$($Cmd.args)|$Sec"; if ($Cmd.args -match 'hang') { $null } else { 0 } }
     function Get-Running($i) { if ($i.key -eq 'AppEx') { @([pscustomobject]@{ ProcessId = 42 }) } else { @() } }
-    function Invoke-Native { @{ code = 0; out = @(' USERNAME SESSIONNAME ID STATE IDLE TIME LOGON TIME', '>nadia console 1 Active none 10/17/2026 9:00 AM') } }
+    function Get-Sessions { @(@{ id = 1; state = 0; user = 'nadia'; idle = $null; locked = $false }) }
     function Stop-Tree([int]$Id) { $script:calls += "kill $Id" }
     function Write-Log {}
     try {
@@ -677,7 +687,7 @@ foreach ($n in 'cleanup', 'updates') {
         Check 'sr: registry uses the machine string plus its flag' ($script:calls -contains "$tmp\x\wave.exe|--uninstall --force-uninstall|600")
         Check 'sr: removed only what is gone after' (@($Detail.removed) -join ',' -eq 'WaveBrowser' -and $script:State -eq 'drift' -and $Changed[0] -eq 'removed WaveBrowser')
         # Nobody at the computer: close it and uninstall.
-        function Invoke-Native { @{ code = 1; out = @() } }
+        function Get-Sessions { @() }
         $script:calls = @(); $script:n = 0; $script:phase = ''; $Changed.Clear(); $Detail = [ordered]@{}; Invoke-Package
         Check 'sr: idle computer: running program closed, then removed' (($script:calls -contains 'kill 42') -and ($script:calls -match 'uninst.exe\|/S\|600') -and @($Detail.removed) -contains 'App Explorer')
         # msi uses the product code the machine lists, never a command.

@@ -81,7 +81,11 @@ packages but small: a handful of machines, one owner, no new stores.
   rows do not count against it. Audit, privacy and performance report
   controls today.
 - Enforce runs return `skipped` (with `detail.reason`) when someone is using
-  the machine (a `quser` session active within `idle_minutes`), a game is
+  the machine (an active, unlocked Windows session with a user whose last
+  input is within `idle_minutes`, read through the WTS API so it works on
+  Windows Home, which has no `quser`; a session whose idle time Windows
+  does not report counts as in use, and a failed session query counts as
+  "cannot tell", never as nobody there), a game is
   running (process paths under the usual game library folders; launchers and
   always-on helpers such as Epic Online Services are not games), the machine
   is on battery, or, for updates and cleanup, Windows Update is installing.

@@ -4,7 +4,7 @@ $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
 # Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
 # The agent's environment block can carry a broken PATH (1.8.81 and older: a long PATH came through as
-# PATH=<cmd.exe>), which hides shutdown.exe, quser and the rest: put the system folders back first.
+# PATH=<cmd.exe>), which hides shutdown.exe and the rest: put the system folders back first.
 function Repair-Path([string]$Path, [string]$Sys) {
   if (-not $Sys) { return $Path }
   $parts = @("$Path" -split ';' | Where-Object { $_ }); $sr = $Sys -replace '[\\/][^\\/]+$', ''
@@ -84,13 +84,41 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     @{ code = $p.ExitCode; out = @("$($o.Result)`n$($e.Result)" -split "`r?`n" | Where-Object { $_ -ne '' }) }
   } catch { @{ code = -1; out = @("$Exe could not be started: $($_.Exception.Message)") } }
 }
-# quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
-function ConvertFrom-QuserIdle([string]$Idle) {
-  if ($Idle -match '^(?:(\d+)\+)?(?:(\d+):)?(\d+)$') { [int]$matches[1] * 1440 + [int]$matches[2] * 60 + [int]$matches[3] } else { 0 }
+# Presence without quser (absent on Windows Home): WTS sessions with state (0 active), user, idle minutes since
+# the last input (null when not reported) and locked (LogonUI runs in it).
+$script:WtsSource = @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct WtsInfo {
+  public int State, Id, A, B, C, D, E, F;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Station;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 17)] public string Domain;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 21)] public string User;
+  public long ConnectTime, DisconnectTime, LastInputTime, LogonTime, CurrentTime; }
+[DllImport("wtsapi32.dll", SetLastError = true)] public static extern bool WTSEnumerateSessionsW(IntPtr s, int r, int v, out IntPtr p, out int n);
+[DllImport("wtsapi32.dll")] public static extern bool WTSQuerySessionInformationW(IntPtr s, int id, int c, out IntPtr p, out int n);
+[DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr p);
+'@
+function Get-WtsType { if (-not ('OmniNull.Wts' -as [type])) { Add-Type -Namespace OmniNull -Name Wts -MemberDefinition $script:WtsSource }; [OmniNull.Wts] }
+function Get-Sessions {
+  $t = Get-WtsType; $m = [Runtime.InteropServices.Marshal]; $p = [IntPtr]::Zero; $n = 0
+  if (-not $t::WTSEnumerateSessionsW([IntPtr]::Zero, 0, 1, [ref]$p, [ref]$n)) { throw "WTSEnumerateSessions failed ($($m::GetLastWin32Error()))" }
+  $locked = @(Get-Process LogonUI -ErrorAction SilentlyContinue | ForEach-Object { $_.SessionId })
+  try {
+    for ($i = 0; $i -lt $n; $i++) {
+      $id = $m::ReadInt32($p, $i * 3 * [IntPtr]::Size); $b = [IntPtr]::Zero; $len = 0
+      if ($id -eq 0 -or -not $t::WTSQuerySessionInformationW([IntPtr]::Zero, $id, 24, [ref]$b, [ref]$len)) { continue }
+      try { $w = $m::PtrToStructure($b, [type][OmniNull.Wts+WtsInfo]) } finally { $t::WTSFreeMemory($b) }
+      $idle = $null; if ($w.LastInputTime -gt 0 -and $w.CurrentTime -ge $w.LastInputTime) { $idle = [int][math]::Floor(($w.CurrentTime - $w.LastInputTime) / 6e8) }
+      @{ id = $id; state = $w.State; user = "$($w.User)"; idle = $idle; locked = $locked -contains $id }
+    }
+  } finally { $t::WTSFreeMemory($p) }
 }
-function Test-UserActive([string[]]$Lines, [int]$IdleMinutes) {
-  foreach ($l in $Lines) { if ($l -match '\sActive\s+(\S+)\s' -and (ConvertFrom-QuserIdle $matches[1]) -lt $IdleMinutes) { return $true } }
-  $false
+# In use: an active, unlocked session with a user, idle under the threshold or not reported.
+function Test-SessionsActive($Sessions, [int]$IdleMinutes) {
+  [bool](@($Sessions) | Where-Object { $_ -and $_.state -eq 0 -and $_.user -and -not $_.locked -and ($null -eq $_.idle -or $_.idle -lt $IdleMinutes) })
+}
+function Get-SessionReason([int]$IdleMinutes) {
+  try { $s = @(Get-Sessions) } catch { return "it cannot tell whether someone is using the computer ($($_.Exception.Message))" }
+  if (Test-SessionsActive $s $IdleMinutes) { 'someone is using the computer' }
 }
 # Game folders; tray launchers (Steam, Epic, Riot Client, Battle.net, EA app) do not count.
 function Test-GamePath([string]$Path) {
@@ -98,8 +126,8 @@ function Test-GamePath([string]$Path) {
 }
 function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
 function Get-PeopleReason([int]$IdleMinutes) {
-  $q = Invoke-Native 'quser.exe' @()
-  if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
+  $why = Get-SessionReason $IdleMinutes
+  if ($why) { return $why }
   foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
     if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
   }
@@ -159,8 +187,7 @@ function Invoke-InPkgTemp([scriptblock]$Block) {
   try { & $Block } finally { foreach ($v in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($v, $old[$v]) } }
 }
 # --- package temp end ---
-# The only places this package deletes from. Nothing under Users, the Recycle Bin,
-# the agent's TEMP folder or ProgramData\Ominull is ever listed.
+# The only places it deletes from: never Users, the Recycle Bin, the agent's TEMP or ProgramData\Ominull.
 function Get-Targets {
   $sr = $env:SystemRoot; $pd = $env:ProgramData
   @(
@@ -209,9 +236,8 @@ function Measure-Targets {
   $m['delivery_optimization'] = $sum
   $m
 }
-# DISM can hang for hours at no CPU (seen on two laptops, worse with a DISM left from an earlier run).
-# A leftover Dism.exe is ended before starting, and every DISM call is time-boxed: on the limit its whole
-# process tree is killed and the component cleanup is reported skipped, not failed.
+# DISM can hang for hours at no CPU: a leftover Dism.exe is ended first, and each call is time-boxed (on the
+# limit its tree is killed and the cleanup reported skipped).
 function Stop-StaleDism {
   foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='Dism.exe'" -ErrorAction SilentlyContinue)) {
     Write-Log "ending leftover Dism.exe pid $($p.ProcessId) from an earlier run"
@@ -220,7 +246,7 @@ function Stop-StaleDism {
   }
 }
 $DismExe = 'dism.exe'
-# Seconds a DISM call may take: its param, never past the package time limit (less 3 minutes to report).
+# DISM call seconds: its param, within the package limit less 3 min.
 function Get-DismSeconds([int]$Minutes) {
   if (-not $script:Started) { $script:Started = Get-Date }
   $left = $script:PkgTimeout - ((Get-Date) - $script:Started).TotalSeconds - 180
