@@ -5084,3 +5084,20 @@ tfoot {
 td .cell-wrap { white-space: normal; min-width: 200px; max-width: 60ch; }
 .page-tools-wrap > .help-text { border-bottom: 1px solid var(--line); }
 a.attn { text-decoration: none; }
+td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywhere; max-width: 48ch; }
+.det-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  font-size: var(--t-3);
+}
+.det-chip b { font-family: var(--f-mono); font-size: var(--t-2); }
+.det-chip[data-on="true"] .ic { color: var(--ok); }
+.det-chip[data-on="false"] { color: var(--ink-3); }
+.det-details { margin: 0; padding-left: 1.1em; color: var(--ink-2); font-size: var(--t-3); line-height: 1.6; }
+/* A toggle or view switch shows which one is on. */
+.btn[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); background: var(--raised); }
+.role-note { margin: var(--s-2) 0 0; }

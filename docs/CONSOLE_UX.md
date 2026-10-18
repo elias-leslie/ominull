@@ -170,3 +170,24 @@ in demo mode, with the fixture browser suite and the axe responsive check.
 ![Alerts, after](images/console-ux/after-desk-alerts.png)
 ![Alerts, phone, after](images/console-ux/after-phone-alerts.png)
 ![Response, after](images/console-ux/after-desk-response.png)
+
+### Settings (Policy, Access, Audit)
+
+- Policy: two views, **Detection** (isolation baseline, tuning, learning mode,
+  exclusions, threat indicators, peer-mesh quarantine) and **Hub health**
+  (diagnostics, release convergence). Detection tuning is a row of on/off
+  chips with one line per detector and a head chip for how many values differ
+  from what shipped. Threat indicators fold after 10 with the count in the
+  head. Every card's explanation is behind "?"; exclusion state and long
+  process paths wrap instead of clipping. On a phone each policy row is a
+  compact block.
+- Access: the Cloudflare Access explanation moved behind "?"; the one-line
+  description of the chosen role stays under the form.
+- Audit: actions read as words ("Isolate host") with the raw code on hover,
+  and the action filter accepts either form. **Filter history** is the page's
+  primary action.
+
+![Policy, after](images/console-ux/after-desk-policy.png)
+![Policy, phone, after](images/console-ux/after-phone-policy.png)
+![Access, after](images/console-ux/after-desk-access.png)
+![Audit, after](images/console-ux/after-desk-audit.png)

@@ -6420,15 +6420,14 @@
       ];
     });
 
-    var body = h("div", { cls: "stack" },
-      h("p", { cls: "why pad-x", text: "What a host may still reach while it is isolated. Hub recovery, loopback and IPv6 link control remain permitted. Other permitted destinations come from this list." }),
-      simpleTable(["Name", "Scope", "Rules", "State", ""], rows));
+    var body = stackOnPhone(simpleTable(["Name", "Scope", "Rules", "State", ""], rows));
 
     var actions = IS_ADMIN ? [h("button", {
       cls: "btn", type: "button", text: "New policy",
       on: { click: function () { openBaselineEditor(null); } }
     })] : null;
-    return card("Isolation baseline", body, actions);
+    return card("Isolation baseline", body, actions, false,
+      "What a host may still reach while it is isolated. Hub recovery, loopback and IPv6 link control always stay open; every other permitted destination comes from this list.");
   }
 
   /* ---------------------------------------------------- detection tuning */
@@ -6617,26 +6616,28 @@
       if (a !== undefined && a !== b) changed.push(k);
     });
 
+    var onOff = function (label, off, detail) {
+      return h("span", { cls: "det-chip", "data-on": off ? "false" : "true", title: detail || "" },
+        icon(off ? "g-offline" : "g-online", true), h("span", { text: label }), h("b", { text: off ? "Off" : "On" }));
+    };
+    var details = [];
+    if (t.beacon_enabled !== false) details.push("Beaconing: " + (t.beacon_min_samples || "\u2014") + " check-ins over " + (t.beacon_min_span_minutes || "\u2014") + " min, confidence " + (t.beacon_score_threshold || "\u2014"));
+    if (t.off_hours_enabled !== false && wrap.window) details.push("Off-hours: " + wrap.window + (wrap.now ? " (hub time " + wrap.now + ")" : ""));
+    details.push(t.warmup_hours ? "New hosts judged after " + t.warmup_hours + "h" : "New hosts judged from their first packet");
+    details.push("Known-quiet: " + arrayOf(t.quiet_processes).length + " processes, " + arrayOf(t.quiet_orgs).length + " networks, " + (arrayOf(t.quiet_clients).length + arrayOf(t.quiet_pairs).length) + " clients or pairs");
+
     var body = h("div", { cls: "card-body stack" },
-      h("dl", { cls: "kv" },
-        h("dt", { text: "Beaconing" }),
-        h("dd", {}, h("b", { text: t.beacon_enabled === false ? "Off" : "On" }),
-          h("span", { cls: "dim-3", text: t.beacon_enabled === false ? "" : "  · " + (t.beacon_min_samples || "—") + " check-ins over " + (t.beacon_min_span_minutes || "—") + " min, confidence " + (t.beacon_score_threshold || "—") })),
-        h("dt", { text: "Off-hours" }),
-        h("dd", {}, h("b", { text: t.off_hours_enabled === false ? "Off" : "On" }),
-          h("span", { cls: "dim-3", text: t.off_hours_enabled === false ? "" : "  · " + (wrap.window || "") })),
-        h("dt", { text: "First-seen" }), h("dd", { text: t.first_seen_enabled === false ? "Off" : "On" }),
-        h("dt", { text: "Bandwidth" }), h("dd", { text: t.bandwidth_enabled === false ? "Off" : "On" }),
-        h("dt", { text: "Learning period" }),
-        h("dd", { text: t.warmup_hours ? t.warmup_hours + "h after an endpoint first reports" : "None — hosts are judged from their first packet" }),
-        h("dt", { text: "Known-quiet" }),
-        h("dd", { text: arrayOf(t.quiet_processes).length + " process(es), " + arrayOf(t.quiet_orgs).length + " network(s), " + (arrayOf(t.quiet_clients).length + arrayOf(t.quiet_pairs).length) + " expected client(s)/pair(s)" }),
-        h("dt", { text: "Hub time" }), h("dd", { cls: "ip", text: wrap.now || "—" })),
-      changed.length
-        ? h("p", { cls: "note note-warn", role: "alert", text: changed.length + " setting(s) differ from the shipped values" + (t.updated_by ? ", last changed by " + t.updated_by : "") })
-        : h("p", { cls: "pending", text: "Running the shipped values." }));
+      h("div", { cls: "uf uf-wrap uf-g2" },
+        onOff("Beaconing", t.beacon_enabled === false),
+        onOff("Off-hours", t.off_hours_enabled === false),
+        onOff("First-seen", t.first_seen_enabled === false),
+        onOff("Bandwidth", t.bandwidth_enabled === false)),
+      h("ul", { cls: "det-details" }, details.map(function (x) { return h("li", { text: x }); })));
 
     return card("Detection tuning", body, [
+      changed.length
+        ? h("span", { role: "status", title: t.updated_by ? "Last changed by " + t.updated_by : "" }, chip("warn", changed.length + " changed from shipped"))
+        : h("span", { cls: "dim-3", text: "shipped values" }),
       h("button", {
         cls: "btn", type: "button", text: IS_ADMIN ? "Adjust" : "View",
         on: { click: openTuningSheet }
@@ -6665,7 +6666,7 @@
         h("span", { cls: "st", "data-state": row.open ? "ok" : "idle" },
           h("span", { text: label })),
         h("span", { cls: "dim-3", title: stampTitle(parseTime(w.ends_at)) }, row.open ? (Number.isFinite(Number(row.remaining_minutes)) ? Math.floor(row.remaining_minutes / 1440) + "d " + Math.floor(row.remaining_minutes % 1440 / 60) + "h remaining" : "Unknown end time") : (parseTime(w.ends_at) ? stamp(parseTime(w.ends_at)) : "Unknown end time")),
-        h("span", { cls: "dim-3", text: w.note || "" }),
+        h("span", { cls: "dim-3 cell-wrap", text: w.note || "" }),
         h("div", { cls: "row-actions" },
           h("button", {
             cls: "btn mini", type: "button", text: "Proposals",
@@ -6684,10 +6685,10 @@
       ];
     });
 
-    var body = simpleTable(["Scope", "State", "Ends", "Note", ""], rows, {
+    var body = stackOnPhone(simpleTable(["Scope", "State", "Ends", "Note", ""], rows, {
       key: "learning-windows",
       empty: "No learning window has been opened. Detections are being judged, not described."
-    });
+    }));
 
     var actions = IS_ADMIN ? [
       h("button", {
@@ -6695,7 +6696,8 @@
         on: { click: openLearningSheet }
       })
     ] : [];
-    return card("Learning mode", body, actions);
+    return card("Learning mode", body, actions, false,
+      "While a window is open, beacon, volume and agent egress findings on its scope are held instead of raised; threat-list matches, sensitive ports, sweeps, resolver bypass and silence still page. Proposals lists the tuning changes the hub suggests from what it saw, for you to apply.");
   }
 
   function openLearningSheet() {
@@ -6778,10 +6780,10 @@
 
         var body = h("div", {},
           h("p", { cls: "note", text: "Corroboration is how many of the machines this window watched agree. A proposal backed by one host scores low on purpose: that is the shape of a finding, not of ordinary traffic." }),
-          simpleTable(["", "Kind", "Subject", "Silences", "Evidence", "Corroboration"], rows, {
+          stackOnPhone(simpleTable(["", "Kind", "Subject", "Silences", "Evidence", "Corroboration"], rows, {
             key: "learning-proposals",
             empty: "This window has nothing to propose yet."
-          }));
+          })));
 
         openSheet("Proposals \u00b7 " + (w.scope_label || w.scope_id || ""), body, IS_ADMIN ? [
           h("button", {
@@ -6819,7 +6821,7 @@
         return [
           h("span", { text: x.name || x.id }),
           h("span", { cls: "dim-3", text: x.scope + (x.scope_value ? " \u00b7 " + x.scope_value : "") }),
-          h("span", { cls: "dim", text: x.process_path || "any" }),
+          h("span", { cls: "dim path-wrap", text: x.process_path || "any" }),
           h("span", { cls: "ip", text: x.dst_ip_range || "any" }),
           h("span", { cls: "ip", text: (x.port ? String(x.port) : "any") + "/" + (x.protocol || "any") }),
           h("span", { cls: "st", "data-state": x.active && !exclusionExpired(x) ? "ok" : "idle" },
@@ -6835,9 +6837,11 @@
         ];
       }),
       { key: "policy-exclusions", empty: "No exclusion has been carved out of the policy." });
+    stackOnPhone(excl);
 
-    var iocs = simpleTable(["Indicator", "Type", "Threat", "Source", "Confidence", "Last seen"],
-      state.iocs.map(function (i) {
+    var iocRows = foldRows("policy-iocs", state.iocs, 10, "indicators");
+    var iocs = h("div", {}, simpleTable(["Indicator", "Type", "Threat", "Source", "Confidence", "Last seen"],
+      iocRows.rows.map(function (i) {
         return [
           h("span", { cls: "ip", text: i.value || i.indicator || "\u2014" }),
           h("span", { cls: "dim-3", text: i.type || "" }),
@@ -6846,7 +6850,8 @@
           h("span", { cls: "ago", text: String(i.confidence !== undefined ? i.confidence : "") }),
           stamp(parseTime(i.last_seen_at || i.created_at))
         ];
-      }));
+      }), { key: "policy-iocs", empty: "No indicators loaded. Sync feeds pulls them." }), iocRows.toggle);
+    stackOnPhone(iocs.firstChild);
 
     var mesh = simpleTable(["Address", "MAC", "Subnet", "Reason", "Since", ""],
       state.meshPeers.map(function (p) {
@@ -6867,7 +6872,8 @@
             }
           })
         ];
-      }));
+      }), { key: "policy-mesh", empty: "No machine is quarantined through the peer mesh." });
+    stackOnPhone(mesh);
 
     if (state.policyHealth && !state.diagnostics && !state.diagnosticsRunning && !state.diagnosticsError) loadDiagnostics();
 
@@ -6877,8 +6883,9 @@
       baselineCard(),
       tuningCard(),
       learningCard(),
-      card("Exclusions", excl),
-      card("Threat indicators", iocs, [
+      card("Exclusions \u00b7 " + state.exclusions.length, excl, null, false,
+        "Traffic that matches an exclusion is not reported by the behavioural detectors. Threat-list matches, sensitive ports, sweeps and resolver bypass still raise. Disable one to close it; an expired one matches nothing and is renewed by saving it with a new expiry."),
+      card("Threat indicators \u00b7 " + capped(state.iocs.length, IOC_PAGE), iocs, [
         h("button", {
           cls: "btn", type: "button", text: "Sync feeds",
           on: {
@@ -6890,13 +6897,14 @@
           }
         })
       ]),
-      card("Peer-mesh quarantine", mesh)
+      card("Peer-mesh quarantine \u00b7 " + state.meshPeers.length, mesh, null, false,
+        "Addresses every agent blocks as a peer, separate from isolating a host. Agents apply the list on their next check-in. Release asks your phone first.")
     ];
 
-    var policyTabs = h("div", { cls: "uf uf-g2", role: "group", "aria-label": "Policy views" },
-      h("button", { cls: "btn", type: "button", "aria-pressed": String(!state.policyHealth), text: "Baseline and detection", on: { click: function () { state.policyHealth=false; renderBody(); } } }),
-      h("button", { cls: "btn", type: "button", "aria-pressed": String(!!state.policyHealth), text: "Hub health and updates", on: { click: function () { state.policyHealth=true; renderBody(); } } }));
-    view.appendChild(h("div", { cls: "pad stack" }, policyTabs, (state.policyHealth ? stackItems.slice(0,3) : stackItems.slice(3)).filter(Boolean)));
+    var policyTabs = h("div", { cls: "uf uf-wrap uf-g2", role: "group", "aria-label": "Policy views" },
+      h("button", { cls: "btn", type: "button", "aria-pressed": String(!state.policyHealth), text: "Detection", on: { click: function () { state.policyHealth=false; renderBody(); } } }),
+      h("button", { cls: "btn", type: "button", "aria-pressed": String(!!state.policyHealth), text: "Hub health", on: { click: function () { state.policyHealth=true; renderBody(); } } }));
+    view.appendChild(h("div", { cls: "pad stack" }, policyTabs, (state.policyHealth ? stackItems.slice(0,2) : stackItems.slice(2)).filter(Boolean)));
   }
 
   /* "Is the fleet actually on the release I shipped?"
@@ -7053,13 +7061,20 @@
     var to = h("input", { type: "date", value: (f.to || "").slice(0,10) });
     var body = h("div", { cls: "stack" },
       h("label", { cls: "field" }, h("span", { text: "Actor — exact username or ID" }), actor),
-      h("label", { cls: "field" }, h("span", { text: "Action — exact recorded action" }), action),
+      h("label", { cls: "field" }, h("span", { text: "Action — as shown in the trail, e.g. Isolate host" }), action),
       h("label", { cls: "field" }, h("span", { text: "From date (UTC, inclusive)" }), from),
       h("label", { cls: "field" }, h("span", { text: "Before date (UTC, exclusive)" }), to));
     openSheet("Filter audit history", body, [h("button", { cls: "btn btn-primary", type: "button", text: "Apply filters", on: { click: function () {
-      auditHistory.filter = { actor: actor.value.trim(), action: action.value.trim(), from: from.value ? from.value + "T00:00:00Z" : "", to: to.value ? to.value + "T00:00:00Z" : "" };
+      auditHistory.filter = { actor: actor.value.trim(), action: action.value.trim().toUpperCase().replace(/\s+/g, "_"), from: from.value ? from.value + "T00:00:00Z" : "", to: to.value ? to.value + "T00:00:00Z" : "" };
       auditHistory.cursor = ""; auditHistory.previous = []; closeSheet(); refresh();
     } } })]);
+  }
+
+  /* CONSOLE_SIGNIN reads as "Console signin"; the raw code stays in the
+     cell's title and in the export. */
+  function auditActionLabel(action) {
+    var t = String(action || "").replace(/_/g, " ").toLowerCase();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
   }
 
   function renderAudit() {
@@ -7070,21 +7085,21 @@
       return [
         stamp(parseTime(a.timestamp)),
         h("span", { cls: "dim", text: a.username || a.user_id || "\u2014" }),
-        h("span", { text: a.action || "" }),
-        h("span", { cls: "ip", text: a.resource || "" }),
-        h("span", { cls: "dim-3", text: a.details || "" }),
+        h("span", { title: a.action || "", text: auditActionLabel(a.action) }),
+        h("span", { cls: "ip path-wrap", text: a.resource || "" }),
+        h("div", { cls: "dim-3 cell-wrap", text: a.details || "" }),
         h("span", { cls: "ip", text: a.ip_address || "" })
       ];
     });
 
     view.appendChild(h("div", { cls: "pad stack" },
       h("div", { cls: "uf uf-wrap uf-g2" },
-        h("button", { cls: "btn", type: "button", text: "Filter history", on: {click: openAuditFilters} }),
+        h("button", { cls: "btn btn-primary", type: "button", text: "Filter history", on: {click: openAuditFilters} }),
         h("button", { cls: "btn", type: "button", text: "Newest entries", on: {click: function () { auditHistory.cursor=""; auditHistory.previous=[]; refresh(); }} }),
         h("button", { cls: "btn", type: "button", text: "Previous page", disabled: !auditHistory.previous.length, on: {click: function () { auditHistory.cursor=auditHistory.previous.pop() || ""; refresh(); }} }),
         h("button", { cls: "btn", type: "button", text: "Older entries", disabled: !auditHistory.next, on: {click: function () { auditHistory.previous.push(auditHistory.cursor); auditHistory.cursor=auditHistory.next; refresh(); }} }),
         h("button", { cls: "btn", type: "button", text: "Export this page (JSON)", on: {click: function () { downloadText("ominull-audit-page.json", JSON.stringify({exported_at:new Date().toISOString(), scope:"current authorized page", filter:auditHistory.filter, entries:state.audit},null,2)); }} })),
-      h("p", {text: "Page " + (auditHistory.previous.length+1) + " · " + state.audit.length + " entries · up to 100 per page. Older pages retain the original snapshot. Time sorting applies to this page."}),
+      h("p", {cls: "dim-2", title: "Older pages keep the snapshot they were read from. Sorting a column sorts this page only.", text: "Page " + (auditHistory.previous.length+1) + " \u00b7 " + state.audit.length + " entries (up to 100 per page)"}),
       Object.values(auditHistory.filter).some(Boolean) ? h("p", {text: "Filters: " + Object.keys(auditHistory.filter).filter(function (key) {return auditHistory.filter[key];}).map(function (key) {return key + " = " + auditHistory.filter[key];}).join(" · ")}) : null,
       card("Audit trail", simpleTable(["Time", "Actor", "Action", "Resource", "Details", "From"], rows)),
       dataPerEndpointCard()));
@@ -9129,7 +9144,7 @@
     });
     opRoleSel.value = "analyst";
 
-    opRoleNote = h("p", { cls: "pending", text: ROLE_NOTES[opRoleSel.value] || "" });
+    opRoleNote = h("p", { cls: "dim-2 u-t2 role-note", "aria-live": "polite", text: ROLE_NOTES[opRoleSel.value] || "" });
     opRoleSel.addEventListener("change", function () {
       opRoleNote.textContent = ROLE_NOTES[opRoleSel.value] || "";
     });
@@ -9145,8 +9160,8 @@
           h("label", { cls: "field" }, h("span", { text: "Role" }), opRoleSel),
           h("button", { cls: "btn btn-primary", type: "button", id: "op-grant", text: "Grant",
             on: { click: grantOperator } })),
-        opRoleNote,
-        h("p", { cls: "pending", text: "The address must match the one the identity provider returns. Granting a role here does not admit anyone on its own: Cloudflare Access still decides who reaches this hub, and this list decides what they are once they do." })));
+        opRoleNote), null, false,
+      "The address must match the one the identity provider returns. Granting a role here does not admit anyone on its own: Cloudflare Access still decides who reaches this hub, and this list decides what they are once they do.");
   }
 
   function grantOperator() {
