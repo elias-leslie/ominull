@@ -61,8 +61,14 @@ echo "[*] Building the Windows remote screen helper."
     echo "[-] screen/helper/vendor is missing; run screen/vendor.sh (it fetches the crates pinned in Cargo.lock)." >&2
     exit 1
 }
-(cd "${ROOT_DIR}/screen/helper" && cargo build --release --locked --offline --target x86_64-pc-windows-gnu)
-cp "${ROOT_DIR}/screen/helper/target/x86_64-pc-windows-gnu/release/ominull-screen-helper.exe" "${BUILD_DIR}/ominull-screen-helper.exe"
+# Reproducible: the helper's workspace root (screen/Cargo.toml) keeps the wire
+# path dependency's hash relative, the remaps strip the checkout and cargo home
+# paths rustc embeds, and the linker leaves out the PE timestamp, so the same
+# commit gives the same SHA-256 from any checkout.
+(cd "${ROOT_DIR}/screen/helper" && \
+    RUSTFLAGS="--remap-path-prefix=${ROOT_DIR}=/ominull --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo -C link-arg=-Wl,--no-insert-timestamp" \
+    cargo build --release --locked --offline --target x86_64-pc-windows-gnu)
+cp "${ROOT_DIR}/screen/target/x86_64-pc-windows-gnu/release/ominull-screen-helper.exe" "${BUILD_DIR}/ominull-screen-helper.exe"
 SCREEN_HELPER_SHA256="$(sha256sum "${BUILD_DIR}/ominull-screen-helper.exe" | cut -d' ' -f1)"
 
 echo "[*] Building Windows user-mode agent and recovery tool."

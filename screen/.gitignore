@@ -3,3 +3,4 @@
 # rebuilds vendor/ from it, and the release build then runs offline.
 */target/
 */vendor/
+/target/

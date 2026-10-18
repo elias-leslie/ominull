@@ -1,0 +1,15 @@
+# The helper's workspace root sits one level up so its path dependency on the
+# shared wire crate is hashed relative to it, not by absolute checkout path:
+# the helper's SHA-256 is compiled into the agent and must not depend on where
+# the tree was checked out. The viewer and wire crates stay standalone.
+[workspace]
+members = ["helper"]
+exclude = ["viewer", "wire"]
+resolver = "2"
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -77,7 +77,7 @@ screen/viewer/Cargo.lock; their license files ship with each crate's source
 
 The OmniNull Windows screen helper (screen/helper, ominull-screen-helper.exe)
 and the shared protocol crate (screen/wire) include these third-party Rust
-crates, pinned in screen/helper/Cargo.lock and screen/wire/Cargo.lock:
+crates, pinned in screen/Cargo.lock (the helper) and screen/wire/Cargo.lock:
 
   MIT OR Apache-2.0:
     serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json
