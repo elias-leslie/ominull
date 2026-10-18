@@ -198,11 +198,15 @@ func TestTerminalLengthsAndLimitsInPlainWords(t *testing.T) {
 			t.Errorf("spanText(%d) = %q, want %q", secs, got, want)
 		}
 	}
-	_, summary, err := describeTerminal([]byte(`{"program":"powershell.exe"}`), []string{"ep-1"}, "admin", 14400)
+	_, summary, err := describeTerminal([]byte(`{"program":"powershell.exe"}`), []string{"ep-1"}, "admin", 14400, "")
 	if err != nil || summary != "Interactive powershell.exe on ep-1, recorded, up to 4 hours, for admin" {
 		t.Fatalf("terminal summary %q err %v", summary, err)
 	}
-	if _, _, err := describeTerminal([]byte(`{"program":"/bin/sh"}`), []string{"ep-1"}, "admin", 25*3600); err == nil {
+	_, summary, err = describeTerminal([]byte(`{"program":"bash"}`), []string{"ep-1"}, "admin (api-key)", 3600, "claude-ops")
+	if err != nil || summary != `Interactive bash on ep-1, recorded, up to 1 hour, for admin (api-key), an agent calling itself "claude-ops"` {
+		t.Fatalf("terminal summary with an agent label %q err %v", summary, err)
+	}
+	if _, _, err := describeTerminal([]byte(`{"program":"/bin/sh"}`), []string{"ep-1"}, "admin", 25*3600, ""); err == nil {
 		t.Fatal("a 25-hour session was described")
 	}
 	before := map[string]interface{}{"max_duration_seconds": 3600.0, "idle_timeout_seconds": 900.0, "max_per_endpoint": 3.0, "max_per_tenant": 8.0}
@@ -239,35 +243,36 @@ func TestDescribeScreen(t *testing.T) {
 		action   string
 		summary  string
 	}{
-		{`{"mode":"control"}`, 0, false, "Control screen", "See and control the screen on win-01, for alice"},
-		{`{"mode":"control"}`, 4 * 3600, false, "Control screen", "See and control the screen on win-01, up to 4 hours, for alice"},
-		{`{"mode":"view"}`, 1800, false, "Watch screen", "Watch the screen on win-01 (no control), up to 30 minutes, for alice"},
+		{`{"mode":"control"}`, 0, false, "Control screen", "See and control the screen on win-01, for alice; it opens without asking the person at the keyboard"},
+		{`{"mode":"control"}`, 4 * 3600, false, "Control screen", "See and control the screen on win-01, up to 4 hours, for alice; it opens without asking the person at the keyboard"},
+		{`{"mode":"view"}`, 1800, false, "Watch screen", "Watch the screen on win-01 (no control), up to 30 minutes, for alice; it opens without asking the person at the keyboard"},
 		{`{"mode":"control"}`, 3600, true, "Control screen", "See and control the screen on win-01, up to 1 hour, for alice; the person at the keyboard is asked to allow it first"},
 		{`{"mode":"view","ask_first":true}`, 0, false, "Watch screen", "Watch the screen on win-01 (no control), for alice; the person at the keyboard is asked to allow it first"},
 		{`{"mode":"control","unattended":true}`, 3600, true, "Control screen", "See and control the screen on win-01, up to 1 hour, for alice; the person at the keyboard is asked to allow it first; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"},
 	}
 	for _, tc := range cases {
-		a, s, err := describeScreen([]byte(tc.payload), tg, "alice", tc.seconds, tc.askFirst)
+		a, s, err := describeScreen([]byte(tc.payload), tg, "alice", tc.seconds, tc.askFirst, "")
 		if err != nil || a != tc.action || s != tc.summary {
 			t.Errorf("%s: %q %q %v", tc.payload, a, s, err)
 		}
 	}
-	for _, tc := range []struct{ payload, summary string }{
-		{`{"mode":"control"}`, "An agent (admin key) will see and control the screen on win-01, up to 1 hour"},
-		{`{"mode":"view"}`, "An agent (admin key) will see the screen on win-01, up to 1 hour"},
+	for _, tc := range []struct{ payload, label, summary string }{
+		{`{"mode":"control"}`, "", "An agent (admin key) will see and control the screen on win-01, up to 1 hour; it opens without asking the person at the keyboard"},
+		{`{"mode":"view"}`, "", "An agent (admin key) will see the screen on win-01, up to 1 hour; it opens without asking the person at the keyboard"},
+		{`{"mode":"control"}`, "claude-ops", `An agent calling itself "claude-ops" (admin key) will see and control the screen on win-01, up to 1 hour; it opens without asking the person at the keyboard`},
 	} {
-		if _, s, err := describeScreen([]byte(tc.payload), tg, "admin (api-key)", 3600, false); err != nil || s != tc.summary {
+		if _, s, err := describeScreen([]byte(tc.payload), tg, "admin (api-key)", 3600, false, tc.label); err != nil || s != tc.summary {
 			t.Errorf("agent %s: %q %v", tc.payload, s, err)
 		}
 	}
 	for _, bad := range []string{`{"mode":"drive"}`, `{}`, `{"mode":"control","program":"cmd.exe"}`, `{"mode":"control","unattended":false}`, `[]`,
 		`{"mode":"control","ask_first":false}`, `{"ask_first":true,"mode":"control"}`, `{"mode":"control","ask_first":true,"unattended":true}`,
 		`{"mode": "control"}`, `{"Mode":"control"}`} {
-		if _, _, err := describeScreen([]byte(bad), tg, "alice", 0, false); err == nil {
+		if _, _, err := describeScreen([]byte(bad), tg, "alice", 0, false, ""); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
 	}
-	if _, _, err := describeScreen([]byte(`{"mode":"view"}`), []string{"a", "b"}, "alice", 0, false); err == nil {
+	if _, _, err := describeScreen([]byte(`{"mode":"view"}`), []string{"a", "b"}, "alice", 0, false, ""); err == nil {
 		t.Error("two endpoints accepted")
 	}
 	// describeApproval routes the kind here.

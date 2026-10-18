@@ -16,7 +16,17 @@ static SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
 static HANDLE g_StopEvent = NULL;
 static AGENT_CONFIG g_Config;
 
-static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
+/* Defined in response_windows.c; bumped on a console session change so a live
+ * screen worker respawns its helper into the new active session (REMOTE_SCREEN.md
+ * §6.1). The helper never migrates itself. */
+extern volatile LONG g_ScreenSessionEpoch;
+
+/* The extended control handler: the simple handler cannot receive
+ * SERVICE_CONTROL_SESSIONCHANGE, which carries event data. */
+static DWORD WINAPI ServiceCtrlHandler(DWORD CtrlCode, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
+    (void)dwEventType;
+    (void)lpEventData;
+    (void)lpContext;
     switch (CtrlCode) {
         case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
@@ -24,9 +34,18 @@ static void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
             SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
             if (g_StopEvent) SetEvent(g_StopEvent);
             break;
+        case SERVICE_CONTROL_SESSIONCHANGE:
+            /* Fast-user-switch, console connect/disconnect, sign-in/out: nudge
+             * any live screen worker to respawn its helper into the new active
+             * console session. We do not inspect the specific event id; one bump
+             * per change is enough and the worker re-checks
+             * WTSGetActiveConsoleSessionId (0xFFFFFFFF during transitions). */
+            InterlockedIncrement(&g_ScreenSessionEpoch);
+            break;
         default:
             break;
     }
+    return NO_ERROR;
 }
 
 
@@ -941,13 +960,13 @@ static void WINAPI ServiceMain(DWORD argc, LPSTR *argv) {
     // from the registered binPath in main() and handed over via Service_SetConfig.
     (void)argc;
     (void)argv;
-    g_StatusHandle = RegisterServiceCtrlHandlerA(SERVICE_NAME, ServiceCtrlHandler);
+    g_StatusHandle = RegisterServiceCtrlHandlerExA(SERVICE_NAME, ServiceCtrlHandler, NULL);
     if (!g_StatusHandle) return;
 
     ZeroMemory(&g_ServiceStatus, sizeof(g_ServiceStatus));
     g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE;
     SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
 
     g_StopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);

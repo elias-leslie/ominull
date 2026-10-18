@@ -28,7 +28,9 @@ pub enum Action {
     Move { x: f64, y: f64, monitor: Option<u32>, max_edge: u32 },
     Drag { x1: f64, y1: f64, x2: f64, y2: f64, monitor: Option<u32>, max_edge: u32 },
     Scroll { x: f64, y: f64, dy: i32, monitor: Option<u32>, max_edge: u32 },
-    Type { text: String },
+    /// `None`: the text comes from the stdin session line (`"text"`), which
+    /// keeps it out of the process list.
+    Type { text: Option<String> },
     Key { combo: Combo },
     End,
 }
@@ -140,11 +142,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
             Action::Scroll { x: num(pos[0])?, y: num(pos[1])?, dy, monitor, max_edge }
         }
         "type" => {
-            want(1)?;
-            if pos[0].is_empty() {
-                return Err("ctl type needs some text".into());
+            if pos.len() > 1 {
+                return Err(format!("ctl type takes at most 1 argument, got {}", pos.len()));
             }
-            Action::Type { text: pos[0].to_string() }
+            match pos.first() {
+                Some(&"") => return Err("ctl type needs some text".into()),
+                t => Action::Type { text: t.map(|t| t.to_string()) },
+            }
         }
         "key" => {
             want(1)?;
@@ -344,6 +348,7 @@ fn run_inner(a: &Attached, action: &Action, held: &mut Held) -> Result<Value, St
             Ok(json!({ "ok": true }))
         }
         Action::Type { text } => {
+            let text = text.as_deref().ok_or("ctl type has no text")?;
             a.monitors()?;
             let units = input::text_units(text);
             for u in &units {
@@ -399,8 +404,12 @@ pub fn main_ctl(args: &[String], connect: impl FnOnce() -> Result<Connect, Strin
         Ok(a) => a,
         Err(e) => return (json!({ "error": e }), false),
     };
-    let c = match connect() {
+    let mut c = match connect() {
         Ok(c) => c,
+        Err(e) => return (json!({ "error": e }), false),
+    };
+    let action = match with_line_text(action, c.text.take()) {
+        Ok(a) => a,
         Err(e) => return (json!({ "error": e }), false),
     };
     let a = match Attached::open(&c) {
@@ -413,6 +422,17 @@ pub fn main_ctl(args: &[String], connect: impl FnOnce() -> Result<Connect, Strin
         (Ok(v), Ok(())) => (v, true),
         (Ok(_), Err(e)) => (json!({ "error": e }), false),
         (Err(e), _) => (json!({ "error": e }), false),
+    }
+}
+
+/// Fills `ctl type`'s text from the session line when argv had none. The
+/// text must come from exactly one place.
+fn with_line_text(action: Action, line_text: Option<String>) -> Result<Action, String> {
+    match (action, line_text) {
+        (Action::Type { text: None }, Some(t)) if !t.is_empty() => Ok(Action::Type { text: Some(t) }),
+        (Action::Type { text: None }, _) => Err("ctl type needs some text: as its argument or as \"text\" in the session line on stdin".into()),
+        (Action::Type { text: Some(_) }, Some(_)) => Err("ctl type got text both as an argument and in the session line; send it once".into()),
+        (a, _) => Ok(a),
     }
 }
 
@@ -437,15 +457,27 @@ mod tests {
         );
         assert!(matches!(parse_args(&args("drag 1 2 3 4 --monitor 0")).unwrap(), Action::Drag { monitor: Some(0), .. }));
         assert!(matches!(parse_args(&args("scroll 1 2 -3")).unwrap(), Action::Scroll { dy: -3, .. }));
-        assert_eq!(parse_args(&["type".into(), "héllo world".into()]).unwrap(), Action::Type { text: "héllo world".into() });
+        assert_eq!(parse_args(&["type".into(), "héllo world".into()]).unwrap(), Action::Type { text: Some("héllo world".into()) });
+        assert_eq!(parse_args(&args("type")).unwrap(), Action::Type { text: None });
         assert_eq!(parse_args(&args("key ctrl+alt+del")).unwrap(), Action::Key { combo: Combo::Sas });
         assert_eq!(parse_args(&args("end")).unwrap(), Action::End);
     }
 
     #[test]
     fn rejects_bad_args() {
-        for bad in ["", "shot", "click 1", "click a b", "click 1 2 --button side", "scroll 1 2 0", "scroll 1 2 50", "move 1 2 --bogus", "key a+b", "fly", "info extra", "click NaN 1", "shot -o x --max-edge 1"] {
+        for bad in ["", "shot", "click 1", "click a b", "click 1 2 --button side", "scroll 1 2 0", "scroll 1 2 50", "move 1 2 --bogus", "key a+b", "fly", "info extra", "click NaN 1", "shot -o x --max-edge 1", "type a b"] {
             assert!(parse_args(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn type_text_from_the_session_line() {
+        let line = |t: &str| Some(t.to_string());
+        assert_eq!(with_line_text(Action::Type { text: None }, line("pa ss")).unwrap(), Action::Type { text: line("pa ss") });
+        assert_eq!(with_line_text(Action::Type { text: line("argv") }, None).unwrap(), Action::Type { text: line("argv") });
+        assert!(with_line_text(Action::Type { text: None }, None).is_err());
+        assert!(with_line_text(Action::Type { text: None }, line("")).is_err());
+        assert!(with_line_text(Action::Type { text: line("a") }, line("b")).is_err());
+        assert_eq!(with_line_text(Action::Info, line("ignored")).unwrap(), Action::Info);
     }
 }

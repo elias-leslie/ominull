@@ -120,6 +120,41 @@ static void test_job_object_containment(void) {
     expect("contained worker propagates non-zero exit code 42", fail_code == 42, true);
 }
 
+/* Screen-session canonical digest rebuild (REMOTE_SCREEN.md §6): all eight
+ * digested forms plus the refusals (literal false, bad/missing mode). */
+static void screen_vec(const char* label, const char* offer, const char* want_canon) {
+    char canon[64] = {0};
+    bool ok = ScreenCanonicalFromOffer(offer, canon, sizeof(canon));
+    expect(label, ok && strcmp(canon, want_canon) == 0, true);
+}
+
+static void test_screen_canonical_vectors(void) {
+    screen_vec("control",
+               "{\"session_id\":\"s\",\"mode\":\"control\",\"connect_token\":\"t\",\"operator\":\"admin\"}",
+               "{\"mode\":\"control\"}");
+    screen_vec("control+ask_first",
+               "{\"mode\":\"control\",\"ask_first\":true}", "{\"mode\":\"control\",\"ask_first\":true}");
+    screen_vec("control+unattended",
+               "{\"mode\":\"control\",\"unattended\":true}", "{\"mode\":\"control\",\"unattended\":true}");
+    screen_vec("control+unattended+ask_first",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}");
+    screen_vec("view", "{\"mode\":\"view\"}", "{\"mode\":\"view\"}");
+    screen_vec("view+ask_first", "{\"mode\":\"view\",\"ask_first\":true}", "{\"mode\":\"view\",\"ask_first\":true}");
+    screen_vec("view+unattended", "{\"mode\":\"view\",\"unattended\":true}", "{\"mode\":\"view\",\"unattended\":true}");
+    screen_vec("view+unattended+ask_first",
+               "{\"mode\":\"view\",\"unattended\":true,\"ask_first\":true}",
+               "{\"mode\":\"view\",\"unattended\":true,\"ask_first\":true}");
+    screen_vec("flags out of order rebuild in order",
+               "{\"ask_first\":true,\"mode\":\"control\",\"unattended\":true}",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}");
+
+    char canon[64];
+    expect("unattended:false refused", ScreenCanonicalFromOffer("{\"mode\":\"control\",\"unattended\":false}", canon, sizeof(canon)), false);
+    expect("bad mode refused", ScreenCanonicalFromOffer("{\"mode\":\"spy\"}", canon, sizeof(canon)), false);
+    expect("missing mode refused", ScreenCanonicalFromOffer("{\"operator\":\"x\"}", canon, sizeof(canon)), false);
+}
+
 int main(void) {
     printf("[*] Running Windows Response Dispatcher & Job Object test suite (Slice 1D.2)...\n");
     test_sha256();
@@ -127,6 +162,7 @@ int main(void) {
     test_win32_replay_cache();
     test_ed25519_verify_win();
     test_job_object_containment();
+    test_screen_canonical_vectors();
 
     if (failures == 0) {
         printf("[+] All Windows response dispatcher tests passed cleanly.\n");

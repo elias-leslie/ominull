@@ -43,9 +43,12 @@ func writeTestCA(t *testing.T, dir string) string {
 }
 
 // hubEnded makes the fake hub answer /attach as for a session that ended.
+// screenAgentSeen records "METHOD PATH AGENT" for every request carrying
+// X-Ominull-Agent.
 var (
-	screenHubMu sync.Mutex
-	hubEnded    bool
+	screenHubMu     sync.Mutex
+	hubEnded        bool
+	screenAgentSeen []string
 )
 
 func fakeScreenHub(t *testing.T) (*httptest.Server, func() []string) {
@@ -53,6 +56,7 @@ func fakeScreenHub(t *testing.T) (*httptest.Server, func() []string) {
 	var seen []string
 	screenHubMu.Lock()
 	hubEnded = false
+	screenAgentSeen = nil
 	screenHubMu.Unlock()
 	note := func(s string) { screenHubMu.Lock(); seen = append(seen, s); screenHubMu.Unlock() }
 	mux := http.NewServeMux()
@@ -118,7 +122,14 @@ func fakeScreenHub(t *testing.T) (*httptest.Server, func() []string) {
 	mux.HandleFunc("/api/v1/endpoints", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`[{"id":"win-01","hostname":"Office PC"}]`))
 	})
-	hub := httptest.NewServer(mux)
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a := r.Header.Get("X-Ominull-Agent"); a != "" {
+			screenHubMu.Lock()
+			screenAgentSeen = append(screenAgentSeen, r.Method+" "+r.URL.Path+" "+a)
+			screenHubMu.Unlock()
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(hub.Close)
 	return hub, func() []string { screenHubMu.Lock(); defer screenHubMu.Unlock(); return append([]string(nil), seen...) }
 }
@@ -251,7 +262,7 @@ func TestScreenHeldSession(t *testing.T) {
 		{"move", []string{"--max-edge", "800", "win-01", "10", "20"}, "ctl move --max-edge 800 -- 10 20"},
 		{"drag", []string{"win-01", "1", "2", "3", "4", "--monitor", "0"}, "ctl drag --max-edge 1280 --monitor 0 -- 1 2 3 4"},
 		{"scroll", []string{"win-01", "5", "6", "-3"}, "ctl scroll --max-edge 1280 -- 5 6 -3"},
-		{"type", []string{"win-01", "--", "--hello world"}, "ctl type --max-edge 1280 -- --hello world"},
+		{"type", []string{"win-01", "--", "--hello world"}, "ctl type --max-edge 1280 --"},
 		{"key", []string{"win-01", "ctrl+alt+del"}, "ctl key --max-edge 1280 -- ctrl+alt+del"},
 		{"info", []string{"win-01"}, "ctl info --max-edge 1280 --"},
 	}
@@ -277,6 +288,16 @@ func TestScreenHeldSession(t *testing.T) {
 	var first, second screenHandshake
 	_ = json.Unmarshal([]byte(stdin[0]), &first)
 	_ = json.Unmarshal([]byte(stdin[1]), &second)
+	for _, l := range stdin {
+		var hs screenHandshake
+		_ = json.Unmarshal([]byte(l), &hs)
+		if (hs.Text != "") != strings.Contains(l, "--hello world") || (hs.Text != "" && hs.Text != "--hello world") {
+			t.Fatalf("type text not on the stdin line as expected: %+v", hs)
+		}
+	}
+	if strings.Contains(read("ARGS"), "hello world") {
+		t.Fatal("typed text reached ctl's argv")
+	}
 	if first.Token != "op-secret" || second.Token != "op-rot-1" || second.SessionID != "ss-1" || second.Mode != "control" || second.Host != "Office PC" || !strings.Contains(second.CAPEM, "BEGIN CERTIFICATE") {
 		t.Fatalf("handshakes %+v %+v", first, second)
 	}
@@ -400,5 +421,109 @@ func TestScreenSettings(t *testing.T) {
 	}
 	if err := c.screenSettings([]string{"--ask-first", "maybe"}, &out); err == nil {
 		t.Fatal("bad value accepted")
+	}
+}
+
+// screen type with "-" or no text reads stdin (one trailing newline
+// dropped); the text reaches ctl only on its stdin line. --agent names the
+// agent on the open and on every later request for the held session.
+func TestScreenTypeStdinAndAgent(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("OMINULL_SCREEN_MAX_EDGE", "")
+	t.Setenv("OMINULL_AGENT", "")
+	hub, _ := fakeScreenHub(t)
+	dir := t.TempDir()
+	tool, read := fakeCtl(t, dir)
+	c := newAPIClient(CLIConfig{HubURL: hub.URL, APIKey: "test", CAFile: writeTestCA(t, dir)})
+	var out bytes.Buffer
+	agentsSeen := func() string {
+		screenHubMu.Lock()
+		defer screenHubMu.Unlock()
+		return strings.Join(screenAgentSeen, ",")
+	}
+
+	for _, bad := range []string{strings.Repeat("a", 65), "bad\tlabel", "café", `say "hi"`, `back\\slash`} {
+		if err := c.screenHold([]string{"--viewer", tool, "--agent", bad, "win-01"}, &out); err == nil || !strings.Contains(err.Error(), "--agent") {
+			t.Fatalf("agent %q: %v", bad, err)
+		}
+	}
+	t.Setenv("OMINULL_AGENT", strings.Repeat("x", 65))
+	if err := c.screenHold([]string{"--viewer", tool, "win-01"}, &out); err == nil {
+		t.Fatal("over-long $OMINULL_AGENT accepted")
+	}
+	if agentsSeen() != "" {
+		t.Fatal("a bad label reached the hub")
+	}
+	t.Setenv("OMINULL_AGENT", "env-agent")
+	if err := c.screenHold([]string{"--viewer", tool, "--agent", "Claude (ops)", "win-01"}, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	lastLine := func() screenHandshake {
+		lines := strings.Split(strings.TrimSpace(read("STDIN")), "\n")
+		var hs screenHandshake
+		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &hs); err != nil {
+			t.Fatal(err)
+		}
+		return hs
+	}
+	for _, tc := range []struct {
+		args  []string
+		stdin string
+		want  string
+	}{
+		{[]string{"win-01", "-"}, "s3cret pw\n", "s3cret pw"},
+		{[]string{"win-01"}, "two\nlines\r\n", "two\nlines"},
+		{[]string{"win-01", "argv text"}, "", "argv text"},
+	} {
+		screenStdin = strings.NewReader(tc.stdin)
+		err := c.screenAction("type", append([]string{"--viewer", tool}, tc.args...), &out)
+		screenStdin = os.Stdin
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if hs := lastLine(); hs.Text != tc.want || hs.Token == "" {
+			t.Fatalf("%v: stdin line text %q", tc.args, hs.Text)
+		}
+	}
+	args := read("ARGS")
+	if strings.Contains(args, "s3cret") || strings.Contains(args, "lines") || strings.Contains(args, "argv text") {
+		t.Fatalf("typed text reached argv: %s", args)
+	}
+	for _, in := range []string{"", "\n", strings.Repeat("a", maxScreenTypeText+1), "\xff"} {
+		screenStdin = strings.NewReader(in)
+		err := c.screenAction("type", []string{"--viewer", tool, "win-01", "-"}, &out)
+		screenStdin = os.Stdin
+		if err == nil {
+			t.Fatalf("stdin %q accepted", in[:min(len(in), 8)])
+		}
+	}
+
+	seen := agentsSeen()
+	for _, want := range []string{"POST /api/v1/screen/sessions Claude (ops)", "POST /api/v1/screen/sessions/attach Claude (ops)"} {
+		if !strings.Contains(seen, want) {
+			t.Fatalf("hub saw agent headers %s, missing %q", seen, want)
+		}
+	}
+	if strings.Contains(seen, "env-agent") {
+		t.Fatal("--agent should win over $OMINULL_AGENT")
+	}
+	raw, _ := os.ReadFile(heldScreenFile("win-01"))
+	if !bytes.Contains(raw, []byte(`"agent":"Claude (ops)"`)) {
+		t.Fatalf("held state %s", raw)
+	}
+	if err := c.screenEnd([]string{"win-01"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agentsSeen(), "DELETE /api/v1/screen/sessions Claude (ops)") {
+		t.Fatalf("end sent no agent header: %s", agentsSeen())
+	}
+
+	// $OMINULL_AGENT is the fallback.
+	if err := c.screenOpen([]string{"--viewer", tool, "win-01"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agentsSeen(), "POST /api/v1/screen/sessions env-agent") {
+		t.Fatalf("env fallback not sent: %s", agentsSeen())
 	}
 }

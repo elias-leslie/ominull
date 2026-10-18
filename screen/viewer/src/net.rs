@@ -282,6 +282,13 @@ pub fn pump<S: Read + Write>(
         for r in replies {
             send(ws, r)?;
         }
+        if let Some(why) = session.take_fatal() {
+            let _ = send(ws, screen_wire::InMsg::Close.to_json());
+            let _ = ws.close(None);
+            let _ = ws.flush();
+            changed();
+            return Ok(Stop::Remote(why));
+        }
         if session.take_changed() {
             changed();
         }

@@ -383,3 +383,60 @@ func TestDetectionPolicyApprovalIsSpentWithoutGrants(t *testing.T) {
 		t.Fatalf("second consume: %v", err)
 	}
 }
+
+// What the owner was shown beside the digest - session length, ask-first and
+// an agent's self-declared label - must be what the request spending the
+// approval carries, for a terminal as for a screen.
+func TestApprovalConsumeBindsSessionAskFirstAndAgentLabel(t *testing.T) {
+	auth, ap := newApprovalAuthority(t)
+	if _, err := auth.RequestApproval(&responseauth.ApprovalRequestInput{TenantID: "default", Requester: "alice (console)",
+		Kind: response.ActionKindTerminalSession, Targets: []string{"ep-1"}, Payload: []byte(`{"program":"/bin/bash"}`), AgentLabel: "claude-ops"}); err == nil {
+		t.Fatal("an agent label without the admin key was accepted")
+	}
+	if _, err := auth.RequestApproval(&responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin (api-key)",
+		Kind: response.ActionKindTerminalSession, Targets: []string{"ep-1"}, Payload: []byte(`{"program":"/bin/bash"}`), AgentLabel: `a"b`}); err == nil {
+		t.Fatal("an agent label with a quote was accepted")
+	}
+	for _, tc := range []struct {
+		name    string
+		kind    response.ActionKind
+		payload string
+		askF    bool
+	}{
+		{"terminal", response.ActionKindTerminalSession, `{"program":"/bin/bash"}`, false},
+		{"screen", response.ActionKindScreenSession, `{"mode":"control","ask_first":true}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin (api-key)", Kind: tc.kind,
+				Targets: []string{"ep-1"}, Payload: []byte(tc.payload), SessionSeconds: 1800, AskFirst: tc.askF, AgentLabel: "claude-ops"}
+			v, err := auth.RequestApproval(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(v.Summary, `calling itself "claude-ops"`) || !strings.Contains(v.Summary, "30 minutes") {
+				t.Fatalf("summary %q", v.Summary)
+			}
+			if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
+				t.Fatal(err)
+			}
+			good := responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin (api-key)", Kind: tc.kind,
+				Digest: digestOf([]byte(tc.payload)), Targets: []string{"ep-1"}, SessionSeconds: 1800, AskFirst: tc.askF, AgentLabel: "claude-ops"}
+			for name, change := range map[string]func(*responseauth.ApprovalConsumeRequest){
+				"longer":        func(r *responseauth.ApprovalConsumeRequest) { r.SessionSeconds = 3600 },
+				"no length":     func(r *responseauth.ApprovalConsumeRequest) { r.SessionSeconds = 0 },
+				"ask-first":     func(r *responseauth.ApprovalConsumeRequest) { r.AskFirst = !r.AskFirst },
+				"no label":      func(r *responseauth.ApprovalConsumeRequest) { r.AgentLabel = "" },
+				"another label": func(r *responseauth.ApprovalConsumeRequest) { r.AgentLabel = "other" },
+			} {
+				bad := good
+				change(&bad)
+				if _, err := auth.ConsumeApproval(&bad); !errors.Is(err, responseauth.ErrApprovalMismatch) {
+					t.Fatalf("%s: %v", name, err)
+				}
+			}
+			if g, err := auth.ConsumeApproval(&good); err != nil || len(g) != 1 {
+				t.Fatalf("consume: %v %v", g, err)
+			}
+		})
+	}
+}

@@ -10,7 +10,9 @@
 //!   * [`WindowsBackend`]: DXGI Desktop Duplication (primary, incl. the secure
 //!     desktop as LocalSystem) with a GDI BitBlt fallback, JPEG via the pure
 //!     `jpeg-encoder`, `SendInput` with virtual-desktop mapping, input-desktop
-//!     following, the always-on banner (own UI thread), and a `sas.dll` SendSAS.
+//!     following, and the always-on banner + consent prompt (own UI thread).
+//!     Ctrl+Alt+Del is not issued here: the session emits a service-request
+//!     frame (§6.4) the agent service acts on.
 
 mod banner;
 mod capture;
@@ -41,7 +43,8 @@ pub use capture::WindowsBackend;
 /// happen before any capture/input or DLL load.
 fn harden_process() {
     unsafe {
-        // SYSTEM32 only for implicit/loaded DLLs (sas.dll is loaded this way).
+        // SYSTEM32 only for implicit/loaded DLLs: defense in depth against DLL
+        // search-order hijack for anything the helper or its deps load (§6.7).
         let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
         // Correct coordinates on scaled displays (§6.3).
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -64,12 +67,12 @@ pub fn run() -> i32 {
     let args = match Args::parse(argv) {
         Some(a) => a,
         None => {
-            eprintln!("usage: ominull-screen-helper --session <id> --mode <control|view>");
+            eprintln!("usage: ominull-screen-helper --mode <control|view> [--unattended] [--ask-first] [--operator <name>]");
             return 2;
         }
     };
 
-    let backend = match WindowsBackend::new() {
+    let backend = match WindowsBackend::new(args.mode == crate::session::Mode::Control, args.operator.as_deref()) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("screen backend init failed: {e:?}");
@@ -101,6 +104,7 @@ fn run_loop<B: ScreenBackend>(backend: B, args: Args) -> i32 {
                     }
                 }
                 Ok(Some((FrameKind::Binary, _))) => { /* not expected operator->agent; drop */ }
+                Ok(Some((FrameKind::Service, _))) => { /* service frames only flow helper->agent; drop */ }
                 Ok(None) => break, // agent closed our stdin: session over
                 Err(_) => break,
             }
@@ -111,6 +115,18 @@ fn run_loop<B: ScreenBackend>(backend: B, args: Args) -> i32 {
     let mut session = Session::new(backend, args.mode);
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    // §7 consent gate: with ask_first on, the session does not go active (no
+    // capture, no input) until the person at the keyboard allows it; with it off
+    // this returns at once (the banner still shows). A decline writes `bye`.
+    match session.authorize(&mut out, args.ask_first, args.unattended, args.operator.as_deref()) {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = out.flush();
+            return 0;
+        }
+        Err(_) => return 1,
+    }
 
     if session.send_hello(&mut out).is_err() {
         return 1;

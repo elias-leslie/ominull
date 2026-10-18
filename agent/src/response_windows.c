@@ -21,8 +21,14 @@
 #include "../include/agent.h"
 #include "../include/response_dispatcher.h"
 #include "../include/terminal_windows.h"
+#include "../include/screen_windows.h"
 #include "../include/forensics_windows.h"
 #include "../include/script_exec_windows.h"
+
+/* Bumped by the service (service.c) on SERVICE_CONTROL_SESSIONCHANGE; a live
+ * screen worker watches it and respawns the helper into the new active console
+ * session (REMOTE_SCREEN.md §6.1). Declared extern in screen_windows.h. */
+volatile LONG g_ScreenSessionEpoch = 0;
 
 typedef struct {
     AGENT_CONFIG config;
@@ -163,6 +169,25 @@ static DWORD WINAPI TerminalWorkerThreadProc(LPVOID lpParam) {
     return 0;
 }
 
+typedef struct {
+    AGENT_CONFIG config;
+    ScreenSessionParamsWin params;
+} ScreenWorkerThreadArgs;
+
+static DWORD WINAPI ScreenWorkerThreadProc(LPVOID lpParam) {
+    ScreenWorkerThreadArgs* args = (ScreenWorkerThreadArgs*)lpParam;
+    if (!args) return 1;
+
+    /* The helper is launched into the active console session and bytes are
+     * relayed over its stdio; the connect token and session_id stay here and
+     * never reach the helper. No message parsing happens in C beyond the pipe
+     * framing and the 1-byte service opcode (REMOTE_SCREEN.md §6.5). */
+    Screen_RunWindowsWorker(&args->config, &args->params);
+
+    free(args);
+    return 0;
+}
+
 void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJson) {
     if (!config || !respJson) return;
 
@@ -228,6 +253,23 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
                 memcpy(&args->config, config, sizeof(AGENT_CONFIG));
                 memcpy(&args->params, &params, sizeof(TerminalSessionParamsWin));
                 HANDLE hThread = CreateThread(NULL, 0, TerminalWorkerThreadProc, args, 0, NULL);
+                if (hThread) {
+                    CloseHandle(hThread);
+                } else {
+                    free(args);
+                }
+            }
+        } else if (strcmp(offer->kind, "screen_session") == 0) {
+            ScreenSessionParamsWin params;
+            if (!Screen_ParsePayloadWindows(offer->payload_json, &params)) {
+                continue;
+            }
+
+            ScreenWorkerThreadArgs* args = (ScreenWorkerThreadArgs*)malloc(sizeof(ScreenWorkerThreadArgs));
+            if (args) {
+                memcpy(&args->config, config, sizeof(AGENT_CONFIG));
+                memcpy(&args->params, &params, sizeof(ScreenSessionParamsWin));
+                HANDLE hThread = CreateThread(NULL, 0, ScreenWorkerThreadProc, args, 0, NULL);
                 if (hThread) {
                     CloseHandle(hThread);
                 } else {

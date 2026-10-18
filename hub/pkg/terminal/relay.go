@@ -78,8 +78,9 @@ type PairedRelay struct {
 	// (watch.go); paused says the agent was last told to pause. Both under mu.
 	watchers  []*watcher
 	paused    bool
-	opQueue   byteGate // bytes queued operator -> agent
-	agQueue   byteGate // bytes queued agent -> operator
+	pauseMu   sync.Mutex // orders pauseIfUnwatched and resumeIfPaused
+	opQueue   byteGate   // bytes queued operator -> agent
+	agQueue   byteGate   // bytes queued agent -> operator
 	done      chan struct{}
 	closeOnce sync.Once
 	ctx       context.Context
@@ -522,7 +523,7 @@ func (pr *PairedRelay) operatorReadPump(conn *websocket.Conn, stop chan struct{}
 // or for a shell the stdin/resize/close rule, recorded.
 func (pr *PairedRelay) operatorMessage(typ int, message []byte) (relayMsg, FrameDecision) {
 	if pr.policy != nil {
-		return policed(pr.policy.Operator(typ, message), typ, message)
+		return reencoded(pr.policy.Operator(typ, message))
 	}
 	var frame TerminalFrame
 	if err := json.Unmarshal(message, &frame); err != nil {
@@ -589,15 +590,50 @@ func policed(d FrameDecision, typ int, message []byte) (relayMsg, FrameDecision)
 	return relayMsg{typ: typ, data: message, cost: int64(len(message) + 64)}, d
 }
 
-// sendAgentControl queues one of the relay's own text messages for the agent
-// without waiting: a full queue (a flooding operator) loses it.
-func (pr *PairedRelay) sendAgentControl(data []byte) {
-	if len(data) == 0 || pr.isClosed() {
-		return
+// reencoded turns a policy's verdict on an operator or watcher message into
+// the message to forward. Only bytes the policy produced itself (Data) are
+// ever forwarded: a policy that forwards without re-encoding gets its
+// message dropped, so raw operator bytes never reach the agent.
+func reencoded(d FrameDecision) (relayMsg, FrameDecision) {
+	if d.Action != FrameForward {
+		return relayMsg{}, d
 	}
+	if d.Data == nil {
+		d.Action = FrameDrop
+		return relayMsg{}, d
+	}
+	return relayMsg{typ: websocket.TextMessage, data: d.Data, cost: int64(len(d.Data) + 64)}, d
+}
+
+// agentControlWait is how long the relay waits for room in the agent queue
+// for one of its own control messages (pause/resume).
+const agentControlWait = time.Second
+
+// sendAgentControl queues one of the relay's own text messages for the
+// agent, waiting up to agentControlWait for room behind a busy operator. It
+// reports whether the message was queued, so the caller's state (paused or
+// not) only changes when the agent will hear about it.
+func (pr *PairedRelay) sendAgentControl(data []byte) bool {
+	if len(data) == 0 || pr.isClosed() {
+		return false
+	}
+	msg := relayMsg{typ: websocket.TextMessage, data: data}
 	select {
-	case pr.opToAgent <- relayMsg{typ: websocket.TextMessage, data: data}:
+	case pr.opToAgent <- msg:
+		return true
+	case <-pr.done:
+		return false
 	default:
+	}
+	t := time.NewTimer(agentControlWait)
+	defer t.Stop()
+	select {
+	case pr.opToAgent <- msg:
+		return true
+	case <-pr.done:
+		return false
+	case <-t.C:
+		return false
 	}
 }
 

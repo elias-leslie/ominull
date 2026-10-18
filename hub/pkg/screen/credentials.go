@@ -22,10 +22,14 @@ const (
 	LaunchCodeTTL = 60 * time.Second
 	// WatchTokenTTL is how long a watch token waits for its attach.
 	WatchTokenTTL = 5 * time.Minute
-	// RedeemLimit is how many redeem attempts one address, or one session,
-	// gets per RedeemWindow.
-	RedeemLimit  = 10
-	RedeemWindow = time.Minute
+	// RedeemLimit is how many redeem attempts one source address gets per
+	// RedeemWindow. SessionRedeemLimit is a much higher backstop per session:
+	// someone who only knows a session id cannot lock its owner out of
+	// redeeming from their own address without RedeemLimit-many addresses
+	// of their own.
+	RedeemLimit        = 10
+	SessionRedeemLimit = 100
+	RedeemWindow       = time.Minute
 )
 
 // Attachment kinds.
@@ -117,33 +121,47 @@ func (c *Credentials) IssueLaunchCode(sessionID, operator, kind string) string {
 }
 
 // RedeemLaunchCode spends a code for sessionID once, returning the operator
-// and attachment kind it was issued for. Attempts are limited per address
-// and per session, counted before the code is looked at.
+// and attachment kind it was issued for. Failed attempts are limited per
+// source address (RedeemLimit) and, far more loosely, per session
+// (SessionRedeemLimit). Only failures count, and a live code for its own
+// session always redeems: the code is 256 random bits, so the limit is not
+// what keeps it from being guessed - it bounds the noise - and someone
+// else's bad guesses (or a shared NAT address) must never lock the owner out.
 func (c *Credentials) RedeemLaunchCode(sessionID, code, ip string) (operator, kind string, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
 	c.sweepLocked(now)
-	for _, k := range []string{"ip:" + ip, "session:" + sessionID} {
-		if len(c.attempts[k]) >= RedeemLimit {
+	h := hashOf(code)
+	e, ok := c.codes[h]
+	if ok && code != "" && subtle.ConstantTimeCompare([]byte(e.sessionID), []byte(sessionID)) == 1 && !now.After(e.expires) {
+		delete(c.codes, h)
+		return e.operator, e.kind, nil
+	}
+	limits := map[string]int{"ip:" + ip: RedeemLimit, "session:" + sessionID: SessionRedeemLimit}
+	for k, limit := range limits {
+		if len(c.attempts[k]) >= limit {
 			return "", "", ErrRedeemLimit
 		}
 	}
-	for _, k := range []string{"ip:" + ip, "session:" + sessionID} {
+	for k := range limits {
 		c.attempts[k] = append(c.attempts[k], now)
 	}
-	h := hashOf(code)
-	e, ok := c.codes[h]
-	if !ok || code == "" {
-		return "", "", ErrCodeInvalid
+	if ok {
+		// One use: a code is spent by any redeem that names it, right or
+		// wrong session, so a guessed session id cannot be retried against it.
+		delete(c.codes, h)
 	}
-	// One use: a code is spent by any redeem that names it, right or wrong
-	// session, so a guessed session id cannot be retried against it.
-	delete(c.codes, h)
-	if subtle.ConstantTimeCompare([]byte(e.sessionID), []byte(sessionID)) != 1 || now.After(e.expires) {
-		return "", "", ErrCodeInvalid
-	}
-	return e.operator, e.kind, nil
+	return "", "", ErrCodeInvalid
+}
+
+// ResetAttempts clears the redeem rate limit counters. The hub's store is
+// process-wide, so a test that runs into the limit clears it after itself
+// rather than leaving the next test locked out.
+func (c *Credentials) ResetAttempts() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.attempts = map[string][]time.Time{}
 }
 
 // IssueWatchToken mints a one-use watch token for sessionID.

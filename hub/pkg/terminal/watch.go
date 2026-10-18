@@ -59,32 +59,40 @@ func (m *Manager) WatcherCount(sessionID string) int {
 }
 
 // pauseIfUnwatched tells the agent to pause once no attachment remains.
+// paused is set only once the pause is queued for the agent, so it never
+// claims a pause the agent did not get. pauseMu orders pause and resume.
 func (pr *PairedRelay) pauseIfUnwatched() {
 	if pr.kind == nil {
 		return
 	}
+	pr.pauseMu.Lock()
+	defer pr.pauseMu.Unlock()
 	pr.mu.Lock()
 	send := pr.opConn == nil && len(pr.watchers) == 0 && !pr.paused
-	if send {
-		pr.paused = true
-	}
 	pr.mu.Unlock()
-	if send {
-		pr.sendAgentControl(pr.kind.PauseMessage)
+	if send && pr.sendAgentControl(pr.kind.PauseMessage) {
+		pr.mu.Lock()
+		pr.paused = true
+		pr.mu.Unlock()
 	}
 }
 
 // resumeIfPaused tells a paused agent to resume (the first attachment back).
+// A resume that could not be queued leaves the relay paused, so the next
+// attachment tries again.
 func (pr *PairedRelay) resumeIfPaused() {
 	if pr.kind == nil {
 		return
 	}
+	pr.pauseMu.Lock()
+	defer pr.pauseMu.Unlock()
 	pr.mu.Lock()
 	send := pr.paused
-	pr.paused = false
 	pr.mu.Unlock()
-	if send {
-		pr.sendAgentControl(pr.kind.ResumeMessage)
+	if send && pr.sendAgentControl(pr.kind.ResumeMessage) {
+		pr.mu.Lock()
+		pr.paused = false
+		pr.mu.Unlock()
 	}
 }
 
@@ -259,7 +267,12 @@ func (pr *PairedRelay) watcherReadPump(w *watcher, wp WatchPolicy) {
 		if !pr.isPacer(w) {
 			continue
 		}
-		msg, _ := policed(d, typ, message)
+		// Only the policy's own re-encoding reaches the agent, never the
+		// watcher's bytes.
+		msg, d := reencoded(d)
+		if d.Action != FrameForward {
+			continue
+		}
 		if !pr.opQueue.acquire(msg.cost, pr.done, w.stop, nil) {
 			return
 		}

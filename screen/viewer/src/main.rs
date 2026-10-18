@@ -25,7 +25,7 @@ const USAGE: &str = "usage:
     move X Y [--monitor N] [--max-edge E]
     drag X1 Y1 X2 Y2 [--button B] [--monitor N] [--max-edge E]
     scroll X Y DY [--monitor N] [--max-edge E]
-    type TEXT
+    type [TEXT]                       without TEXT: the \"text\" field of the stdin session line
     key COMBO                         e.g. ctrl+c, alt+f4, ctrl+alt+del
     end
   X/Y are in screenshot space (the same --max-edge as the shot, default 1280).";

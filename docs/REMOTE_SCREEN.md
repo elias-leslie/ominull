@@ -448,7 +448,7 @@ endpoint at a time.
 
 ### 8.1 Owner viewing
 
-`ominullctl screen open ENDPOINT [--view] [--ttl DUR] [--viewer PATH]` asks for
+`ominullctl screen open ENDPOINT [--view] [--ttl DUR] [--viewer PATH] [--agent LABEL]` asks for
 the owner tap (202 until approved, like `shell open`), creates the session, then
 starts `ominull-screen` (`--viewer`, else next to ominullctl, else PATH) and
 writes **one JSON line on its stdin**:
@@ -464,14 +464,14 @@ the same `.ended` marker semantics, so a session that ended makes the next
 command fail with "open a new one" instead of silently filing a new ask.
 
 ```
-ominullctl screen hold ENDPOINT [--view] [--ttl DUR]   # one tap; approval names the agent
+ominullctl screen hold ENDPOINT [--view] [--ttl DUR] [--agent LABEL]   # one tap; approval names the agent
 ominullctl screen info  ENDPOINT                        # monitors, sizes, desktop (user/secure/lock)
 ominullctl screen shot  ENDPOINT [--monitor N] -o file.png   # one full frame, cursor composited
 ominullctl screen click ENDPOINT X Y [--button left|right|middle] [--double]
 ominullctl screen move  ENDPOINT X Y
 ominullctl screen drag  ENDPOINT X1 Y1 X2 Y2
 ominullctl screen scroll ENDPOINT X Y DY
-ominullctl screen type  ENDPOINT "text"                 # Unicode text events
+ominullctl screen type  ENDPOINT ["text" | -]           # Unicode text events; - or no text: read stdin
 ominullctl screen key   ENDPOINT ctrl+alt+del|win+r|enter|...
 ominullctl screen watch ENDPOINT                        # owner watches live, view-only
 ominullctl screen end   ENDPOINT
@@ -493,6 +493,26 @@ session stays live between commands; the agent pauses capture while nothing is
 attached). The wire schema lives only in Rust; ominullctl does approval, held
 state, markers and process plumbing. `ominullctl help screen` carries this usage
 for agents.
+
+`screen type` text never goes in a process's argv: ominullctl puts it in the
+handshake line as `"text"` and runs `ominull-screen ctl type` with no text
+argument. With `-` (or no text) ominullctl reads it from its own stdin, one
+trailing newline dropped, so a caller can keep a password off every command
+line. `--agent LABEL` (default `$OMINULL_AGENT`; at most 64 printable ASCII
+characters, checked client-side) is sent as `X-Ominull-Agent` on the session
+request and, from the held state, on every later request for that session.
+
+**The agent label is self-declared.** Every agent shares the one hub admin
+key, so the hub cannot tell agents apart; `X-Ominull-Agent` is only what the
+caller says it is. The hub reads it only from an admin-key request (1 to 64
+printable ASCII characters, no `"` or `\`, no leading/trailing space; anything
+else is a 400) and always shows it as a claim: the owner's approval reads
+`An agent calling itself "claude-ops" (admin key) will ...`, the endpoint's
+consent prompt and banner get operator `agent "claude-ops" (admin key)`, and
+the audit names `admin (agent calling itself "claude-ops", admin key)`. The
+label is bound to the approval (as are the session length and ask-first), so
+the request that spends it must carry the same label. Per-agent hub keys are
+the real fix and would replace the claim with an identity.
 
 ## 9. Native viewer (`screen/viewer`, binary `ominull-screen`)
 

@@ -95,6 +95,32 @@ type approvalPlan struct {
 	OnRequested func(approvalID string)
 }
 
+// agentLabelHeader is the name an agent calling with the shared hub admin
+// key gives itself (ominullctl sends it). It is self-declared: the owner's
+// approval and the audit show it as a claim ("an agent calling itself
+// ..."), never as an identity. Per-agent keys would be the real fix.
+const agentLabelHeader = "X-Ominull-Agent"
+
+// agentLabel is the request's self-declared agent label: "" when it carries
+// none or was not made with the admin key (only an admin-key caller is an
+// agent); ok is false when an admin-key caller sent an unusable one.
+func agentLabel(r *http.Request) (string, bool) {
+	if r.Header.Get("X-Auth-Method") != "api-key" || r.Header.Get("X-Role") != "admin" {
+		return "", true
+	}
+	vals := r.Header.Values(agentLabelHeader)
+	switch len(vals) {
+	case 0:
+		return "", true
+	case 1:
+		v := strings.TrimSpace(vals[0])
+		if responseauth.ValidAgentLabel(v) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // approvalResolver validates a request and describes it. It writes its own
 // error response and returns ok=false to stop.
 type approvalResolver func(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool)
@@ -223,13 +249,18 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		if m := r.Header.Get("X-Auth-Method"); m != "" {
 			requester += " (" + m + ")"
 		}
+		label, ok := agentLabel(r)
+		if !ok {
+			writeJSONError(w, http.StatusBadRequest, agentLabelHeader+" must be 1 to 64 printable characters, without quotes or backslashes")
+			return
+		}
 
 		id := strings.TrimSpace(r.Header.Get(approvalHeader))
 		if id == "" {
 			v, err := s.responseAuth.RequestApproval(r.Context(), &responseauth.ApprovalRequestInput{
 				TenantID: tenantID, Requester: requester, Kind: plan.Kind, Action: plan.Action,
 				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
-				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst,
+				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
 			})
 			if err != nil {
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
@@ -269,6 +300,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		sum := sha256.Sum256(payload)
 		grants, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{
 			ID: id, TenantID: tenantID, Requester: requester, Kind: plan.Kind, Digest: hex.EncodeToString(sum[:]), Targets: plan.Targets,
+			SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
 		})
 		if err != nil {
 			s.audit(r, "OWNER_APPROVAL_REFUSED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s with approval %s: %v", plan.Action, id, err))

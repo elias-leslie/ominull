@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // screenViewerName is the native viewer binary ominullctl starts (its ctl
@@ -48,6 +49,67 @@ type screenHandshake struct {
 	Token     string `json:"token"`
 	Mode      string `json:"mode"`
 	Host      string `json:"host"`
+	// Text is screen type's text: ctl reads it here, never from argv.
+	Text string `json:"text,omitempty"`
+}
+
+// maxScreenTypeText bounds the text screen type sends (the viewer's stdin
+// line has a 256 KiB cap that also carries the CA bundle).
+const maxScreenTypeText = 64 * 1024
+
+// screenStdin is where screen type reads its text with "-" or no text
+// argument. Tests replace it.
+var screenStdin io.Reader = os.Stdin
+
+// screenAgentLabel is --agent, else $OMINULL_AGENT: a short name for the
+// agent asking, which the hub shows in the owner's approval and the audit
+// (X-Ominull-Agent). Empty means none.
+func screenAgentLabel(flagVal string) (string, error) {
+	v := strings.TrimSpace(flagVal)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("OMINULL_AGENT"))
+	}
+	if len(v) > 64 {
+		return "", errors.New("--agent (or $OMINULL_AGENT) is at most 64 characters")
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return "", errors.New("--agent (or $OMINULL_AGENT) takes printable ASCII only")
+		}
+		if v[i] == '"' || v[i] == '\\' {
+			return "", errors.New("--agent (or $OMINULL_AGENT) cannot contain quotes or backslashes")
+		}
+	}
+	return v, nil
+}
+
+// agentHeader adds X-Ominull-Agent to every request it carries.
+type agentHeader struct {
+	base  http.RoundTripper
+	label string
+}
+
+func (t agentHeader) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("X-Ominull-Agent", t.label)
+	return t.base.RoundTrip(r)
+}
+
+// withAgent is c sending X-Ominull-Agent: label on every request (c itself
+// when label is empty).
+func (c *APIClient) withAgent(label string) *APIClient {
+	if label == "" {
+		return c
+	}
+	hc := *c.httpClient
+	base := hc.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	hc.Transport = agentHeader{base: base, label: label}
+	cp := *c
+	cp.httpClient = &hc
+	return &cp
 }
 
 func (c *APIClient) cmdScreen(args []string) error {
@@ -81,13 +143,15 @@ const screenUsageShort = `usage: ominullctl screen open|hold|info|shot|click|mov
 const screenHelp = `Remote screen (Windows endpoints that report the screen capability)
 
 Owner viewing:
-  ominullctl screen open [--view] [--ttl 90m] [--viewer PATH] ENDPOINT
+  ominullctl screen open [--view] [--ttl 90m] [--viewer PATH] [--agent LABEL] ENDPOINT
       One owner tap, then the screen viewer (ominull-screen) shows ENDPOINT's
       screen. --view: watch only. The session ends when the viewer closes.
 
 Agent control (a held session):
-  ominullctl screen hold [--view] [--ttl 90m] ENDPOINT
+  ominullctl screen hold [--view] [--ttl 90m] [--agent LABEL] ENDPOINT
       One owner tap; the owner's phone says an agent with the admin key asks.
+      --agent (default $OMINULL_AGENT) names the agent in that ask and in the
+      audit: up to 64 printable ASCII characters.
       Every command below then reuses that session until it ends - no more
       taps. Prints the screen info (monitors and sizes).
   ominullctl screen info  ENDPOINT
@@ -102,8 +166,11 @@ Agent control (a held session):
   ominullctl screen drag  ENDPOINT X1 Y1 X2 Y2 [--monitor N] [--max-edge E]
   ominullctl screen scroll ENDPOINT X Y DY [--monitor N] [--max-edge E]
       DY is wheel notches, 1..10, up positive and down negative.
-  ominullctl screen type  ENDPOINT "text"
+  ominullctl screen type  ENDPOINT ["text" | -]
       Types the text as Unicode characters (the audit records only its length).
+      With - or no text, reads it from stdin (one trailing newline dropped),
+      which keeps a password off the command line. Either way the text goes
+      to ominull-screen on its stdin, never in its arguments.
   ominullctl screen key   ENDPOINT COMBO
       A key or combination: enter, esc, tab, win+r, ctrl+c, alt+f4,
       ctrl+alt+del (the secure attention sequence), ...
@@ -161,14 +228,20 @@ func findScreenViewer(flagPath string) (string, error) {
 func (c *APIClient) screenOpen(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("screen open", flag.ContinueOnError)
 	view := fs.Bool("view", false, "watch only: no mouse or keyboard")
+	agentFlag := fs.String("agent", "", "name of the agent asking, shown to the owner and in the audit (default $OMINULL_AGENT)")
 	ttl := fs.Duration("ttl", 0, "how long the session may run, e.g. 90m (default and most: the hub's session limit; the hub also ends an idle session)")
 	viewerFlag := fs.String("viewer", "", "the screen viewer to start (default: "+screenViewerName+" next to ominullctl, else on PATH)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: ominullctl screen open [--view] [--ttl 90m] [--viewer PATH] ENDPOINT")
+		return errors.New("usage: ominullctl screen open [--view] [--ttl 90m] [--viewer PATH] [--agent LABEL] ENDPOINT")
 	}
+	agent, err := screenAgentLabel(*agentFlag)
+	if err != nil {
+		return err
+	}
+	c = c.withAgent(agent)
 	if err := hubSafe(c.cfg.HubURL); err != nil {
 		return err
 	}
@@ -293,6 +366,8 @@ type heldScreen struct {
 	Mode      string    `json:"mode"`
 	Host      string    `json:"host"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// Agent is the --agent label hold was given; later commands send it too.
+	Agent string `json:"agent,omitempty"`
 }
 
 func heldScreenFile(endpoint string) string {
@@ -342,7 +417,7 @@ func screenMaxEdge() int {
 }
 
 // screenHandshakeLine is the one stdin line ominull-screen reads.
-func (c *APIClient) screenHandshakeLine(sessionID, token, mode, host string) ([]byte, error) {
+func (c *APIClient) screenHandshakeLine(sessionID, token, mode, host, text string) ([]byte, error) {
 	var caPEM []byte
 	if c.cfg.CAFile != "" {
 		var err error
@@ -352,7 +427,7 @@ func (c *APIClient) screenHandshakeLine(sessionID, token, mode, host string) ([]
 	}
 	hs, err := json.Marshal(screenHandshake{
 		HubURL: strings.TrimRight(c.cfg.HubURL, "/"), CAPEM: string(caPEM), SessionID: sessionID,
-		Token: token, Mode: mode, Host: host,
+		Token: token, Mode: mode, Host: host, Text: text,
 	})
 	return append(hs, '\n'), err
 }
@@ -409,12 +484,14 @@ func (c *APIClient) screenAttach(h *heldScreen) (string, error) {
 }
 
 // screenCtl runs one ctl action on the held session and returns its JSON.
-func (c *APIClient) screenCtl(h *heldScreen, tool string, args []string) ([]byte, error) {
+// text (screen type) rides the stdin line, never argv.
+func (c *APIClient) screenCtl(h *heldScreen, tool string, args []string, text string) ([]byte, error) {
+	c = c.withAgent(h.Agent)
 	token, err := c.screenAttach(h)
 	if err != nil {
 		return nil, err
 	}
-	line, err := c.screenHandshakeLine(h.SessionID, token, h.Mode, h.Host)
+	line, err := c.screenHandshakeLine(h.SessionID, token, h.Mode, h.Host, text)
 	if err != nil {
 		return nil, err
 	}
@@ -438,12 +515,18 @@ func (c *APIClient) screenHold(args []string, out io.Writer) error {
 	view := fs.Bool("view", false, "watch only: info and shot work, input does not")
 	ttl := fs.Duration("ttl", 0, "how long to keep the session, e.g. 90m (default and most: the hub's session limit; the hub also ends an idle session)")
 	viewerFlag := fs.String("viewer", "", "ominull-screen to run (default: next to ominullctl, else on PATH)")
+	agentFlag := fs.String("agent", "", "name of the agent asking, shown to the owner and in the audit (default $OMINULL_AGENT)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: ominullctl screen hold [--view] [--ttl 90m] ENDPOINT")
+		return errors.New("usage: ominullctl screen hold [--view] [--ttl 90m] [--agent LABEL] ENDPOINT")
 	}
+	agent, err := screenAgentLabel(*agentFlag)
+	if err != nil {
+		return err
+	}
+	c = c.withAgent(agent)
 	endpoint := fs.Arg(0)
 	if err := hubSafe(c.cfg.HubURL); err != nil {
 		return err
@@ -457,7 +540,7 @@ func (c *APIClient) screenHold(args []string, out io.Writer) error {
 	}
 	// Already held and still live: reuse it, no new tap.
 	if h, err := loadHeldScreen(endpoint); err == nil {
-		if res, err := c.screenCtl(h, tool, []string{"info"}); err == nil {
+		if res, err := c.screenCtl(h, tool, []string{"info"}, ""); err == nil {
 			fmt.Fprintf(os.Stderr, "[+] A screen session to %s is already held; the screen commands use it.\n", endpoint)
 			_, err = out.Write(res)
 			return err
@@ -493,14 +576,14 @@ func (c *APIClient) screenHold(args []string, out io.Writer) error {
 	if s.ExpiresAt.IsZero() && *ttl > 0 {
 		s.ExpiresAt = time.Now().Add(*ttl)
 	}
-	h := &heldScreen{Hub: strings.TrimRight(c.cfg.HubURL, "/"), SessionID: s.SessionID, Endpoint: endpoint, Mode: s.Mode, Host: c.endpointLabel(endpoint), ExpiresAt: s.ExpiresAt}
+	h := &heldScreen{Hub: strings.TrimRight(c.cfg.HubURL, "/"), SessionID: s.SessionID, Endpoint: endpoint, Mode: s.Mode, Host: c.endpointLabel(endpoint), ExpiresAt: s.ExpiresAt, Agent: agent}
 	end := func() {
 		_, _, _ = c.doRequestWith(http.MethodDelete, "/api/v1/screen/sessions?id="+url.QueryEscape(s.SessionID), nil, nil)
 	}
 	// Attach once now, with the token the open returned: the endpoint must
 	// connect within the hub's connect timeout, and this is also the check
 	// that the screen is really there.
-	line, err := c.screenHandshakeLine(s.SessionID, s.Token, s.Mode, h.Host)
+	line, err := c.screenHandshakeLine(s.SessionID, s.Token, s.Mode, h.Host, "")
 	if err != nil {
 		end()
 		return err
@@ -566,10 +649,13 @@ func (c *APIClient) screenAction(action string, args []string, out io.Writer) er
 		}
 	}
 	want := map[string]int{"info": 0, "shot": 0, "click": 2, "move": 2, "drag": 4, "scroll": 3, "type": 1, "key": 1}[action]
+	if action == "type" && len(pos) == 1 {
+		pos = append(pos, "-") // no text argument: read it from stdin
+	}
 	if len(pos) != want+1 {
 		return fmt.Errorf("usage: ominullctl screen %s ENDPOINT%s (ominullctl help screen)", action,
 			map[string]string{"info": "", "shot": " -o FILE.png [--monitor N] [--max-edge E]", "click": " X Y [--button B] [--double] [--monitor N]",
-				"move": " X Y [--monitor N]", "drag": " X1 Y1 X2 Y2 [--monitor N]", "scroll": " X Y DY [--monitor N]", "type": ` "text"`, "key": " COMBO"}[action])
+				"move": " X Y [--monitor N]", "drag": " X1 Y1 X2 Y2 [--monitor N]", "scroll": " X Y DY [--monitor N]", "type": ` ["text" | -]`, "key": " COMBO"}[action])
 	}
 	endpoint, vals := pos[0], pos[1:]
 	if *maxEdge < 16 || *maxEdge > 16384 {
@@ -608,7 +694,16 @@ func (c *APIClient) screenAction(action string, args []string, out io.Writer) er
 			ctl = append(ctl, "--double")
 		}
 	}
-	// Positionals after "--", so text or a negative DY is never read as a flag.
+	// The text goes on ctl's stdin line, never in its argv (the process list).
+	text := ""
+	if action == "type" {
+		var err error
+		if text, err = screenTypeText(vals[0]); err != nil {
+			return err
+		}
+		vals = nil
+	}
+	// Positionals after "--", so a negative DY is never read as a flag.
 	ctl = append(append(ctl, "--"), vals...)
 
 	h, err := loadHeldScreen(endpoint)
@@ -619,12 +714,34 @@ func (c *APIClient) screenAction(action string, args []string, out io.Writer) er
 	if err != nil {
 		return err
 	}
-	res, err := c.screenCtl(h, tool, ctl)
+	res, err := c.screenCtl(h, tool, ctl, text)
 	if err != nil {
 		return err
 	}
 	_, err = out.Write(res)
 	return err
+}
+
+// screenTypeText is screen type's text: the argument, or with "-" stdin
+// minus one trailing newline (so echo and here-strings type no Enter).
+func screenTypeText(arg string) (string, error) {
+	text := arg
+	if arg == "-" {
+		raw, err := io.ReadAll(io.LimitReader(screenStdin, maxScreenTypeText+3))
+		if err != nil {
+			return "", fmt.Errorf("could not read the text from stdin: %w", err)
+		}
+		text = strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	}
+	switch {
+	case text == "":
+		return "", errors.New("screen type needs some text")
+	case len(text) > maxScreenTypeText:
+		return "", fmt.Errorf("screen type takes at most %d bytes of text", maxScreenTypeText)
+	case !utf8.ValidString(text):
+		return "", errors.New("screen type's text is not UTF-8")
+	}
+	return text, nil
 }
 
 // screenWatch opens the GUI viewer view-only beside the held session, for
@@ -643,6 +760,7 @@ func (c *APIClient) screenWatch(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	c = c.withAgent(h.Agent)
 	viewer, err := findScreenViewer(*viewerFlag)
 	if err != nil {
 		return err
@@ -666,7 +784,7 @@ func (c *APIClient) screenWatch(args []string, out io.Writer) error {
 	if host == "" {
 		host = h.Host
 	}
-	line, err := c.screenHandshakeLine(h.SessionID, wt.Token, "view", host)
+	line, err := c.screenHandshakeLine(h.SessionID, wt.Token, "view", host, "")
 	if err != nil {
 		return err
 	}
@@ -696,7 +814,7 @@ func (c *APIClient) screenEnd(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, status, err := c.doRequestWith(http.MethodDelete, "/api/v1/screen/sessions?id="+url.QueryEscape(h.SessionID), nil, nil)
+	_, status, err := c.withAgent(h.Agent).doRequestWith(http.MethodDelete, "/api/v1/screen/sessions?id="+url.QueryEscape(h.SessionID), nil, nil)
 	_ = os.Remove(heldScreenFile(endpoint))
 	_ = os.Remove(heldScreenEnded(endpoint))
 	if err != nil && status != http.StatusNotFound {

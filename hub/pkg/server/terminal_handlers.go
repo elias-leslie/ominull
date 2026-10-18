@@ -157,7 +157,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 		}
 
 		sess, err := s.terminalMgr.GetSession(id)
-		if err != nil {
+		if err != nil || screen.IsScreen(sess.Program) {
 			writeJSONError(w, http.StatusNotFound, "session not found")
 			return
 		}
@@ -303,7 +303,7 @@ func (s *Server) handleTerminalSessionClose(w http.ResponseWriter, r *http.Reque
 	}
 
 	sess, err := s.terminalMgr.GetSession(req.SessionID)
-	if err != nil {
+	if err != nil || screen.IsScreen(sess.Program) {
 		writeJSONError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -446,7 +446,7 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 	}
 
 	sess, err := s.terminalMgr.GetSession(req.SessionID)
-	if err != nil {
+	if err != nil || screen.IsScreen(sess.Program) {
 		writeJSONError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -458,10 +458,6 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 	// tenant does not inherit it by reattaching.
 	if sess.OperatorID != s.operatorFromRequest(r) {
 		writeJSONError(w, http.StatusForbidden, "only the operator who opened this terminal can reattach to it")
-		return
-	}
-	if screen.IsScreen(sess.Program) {
-		writeJSONError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	if !sess.IsLive() {
@@ -535,7 +531,7 @@ func (s *Server) handleTerminalSessionDetach(w http.ResponseWriter, r *http.Requ
 	}
 
 	sess, err := s.terminalMgr.GetSession(req.SessionID)
-	if err != nil {
+	if err != nil || screen.IsScreen(sess.Program) {
 		writeJSONError(w, http.StatusNotFound, "session not found")
 		return
 	}

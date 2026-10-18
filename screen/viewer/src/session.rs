@@ -13,8 +13,11 @@ use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
-/// The largest monitor side accepted from `hello` (8K plus margin).
-pub const MAX_SIDE: u32 = 16384;
+/// The largest monitor side accepted from `hello`/`resized` (8K).
+pub const MAX_SIDE: u32 = 8192;
+/// The most framebuffer pixels one monitor may need (one `u32` each, so
+/// 256 MiB at most). The hub is not trusted to bound this.
+pub const MAX_FB_PIXELS: u64 = 8192 * 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -141,6 +144,9 @@ pub struct Session {
     keyframe_in_frame: bool,
     changed: bool,
     bye: Option<String>,
+    /// Set when the far side sent something the viewer refuses; the pump
+    /// ends the session with this reason.
+    fatal: Option<String>,
 }
 
 impl Default for Session {
@@ -151,7 +157,7 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session { pic: Arc::new(Mutex::new(Picture::new())), keyframe_in_frame: false, changed: false, bye: None }
+        Session { pic: Arc::new(Mutex::new(Picture::new())), keyframe_in_frame: false, changed: false, bye: None, fatal: None }
     }
 
     pub fn picture(&self) -> Arc<Mutex<Picture>> {
@@ -172,6 +178,11 @@ impl Session {
         self.bye.clone()
     }
 
+    /// Why the viewer refuses to go on, once; the pump then ends the session.
+    pub fn take_fatal(&mut self) -> Option<String> {
+        self.fatal.take()
+    }
+
     pub fn set_ended(&mut self, why: &str) {
         let mut p = lk(&self.pic);
         if !matches!(p.state, State::Ended(_)) {
@@ -188,8 +199,20 @@ impl Session {
         let mut p = lk(&self.pic);
         match msg {
             OutMsg::Hello { monitors, active } | OutMsg::Resized { monitors, active } => {
-                let monitors: Vec<MonitorInfo> =
-                    monitors.into_iter().filter(|m| m.w > 0 && m.h > 0 && m.w <= MAX_SIDE && m.h <= MAX_SIDE).collect();
+                if let Some(m) = monitors.iter().find(|m| !monitor_fits(m)) {
+                    let why = format!(
+                        "the screen reported a {}x{} monitor, larger than this viewer accepts ({MAX_SIDE}x{MAX_SIDE})",
+                        m.w, m.h
+                    );
+                    self.bye = Some(why.clone());
+                    self.fatal = Some(why.clone());
+                    p.state = State::Ended(why);
+                    p.version += 1;
+                    drop(p);
+                    self.changed = true;
+                    return replies;
+                }
+                let monitors: Vec<MonitorInfo> = monitors.into_iter().filter(|m| m.w > 0 && m.h > 0).collect();
                 let keep = p.active.filter(|a| monitors.iter().any(|m| m.id == *a));
                 let want = if monitors.iter().any(|m| m.id == active) {
                     active
@@ -302,6 +325,11 @@ impl Session {
         p.version += 1;
         self.changed = true;
     }
+}
+
+/// A monitor whose framebuffer the viewer is willing to allocate.
+pub fn monitor_fits(m: &MonitorInfo) -> bool {
+    m.w <= MAX_SIDE && m.h <= MAX_SIDE && (m.w as u64) * (m.h as u64) <= MAX_FB_PIXELS
 }
 
 fn lk(pic: &Mutex<Picture>) -> MutexGuard<'_, Picture> {
@@ -430,6 +458,33 @@ mod tests {
         let p = p.lock().unwrap();
         assert!(p.fb[20 * 64 + 63] & 0xff > 200);
         assert_eq!(p.fb[20 * 64 + 47], 0);
+    }
+
+    #[test]
+    fn oversized_monitor_ends_session_without_allocating() {
+        let mut s = Session::new();
+        s.on_text(hello().as_bytes());
+        let big = r#"{"type":"resized","monitors":[{"id":0,"w":16384,"h":16384,"x":0,"y":0,"primary":true}],"active":0}"#;
+        assert!(s.on_text(big.as_bytes()).is_empty());
+        let why = s.take_fatal().expect("session must end");
+        assert!(why.contains("16384x16384") && why.contains("8192x8192"), "{why}");
+        assert_eq!(s.take_fatal(), None, "reported once");
+        {
+            let p = s.picture();
+            let p = p.lock().unwrap();
+            assert_eq!(p.state, State::Ended(why.clone()));
+            assert_eq!((p.fb_w, p.fb_h, p.fb.len()), (64, 32, 64 * 32), "old picture kept, nothing allocated");
+        }
+        assert_eq!(s.end_reason(), Some(why));
+        // One side too long, even if the other is tiny, is refused as well.
+        let mut s = Session::new();
+        s.on_text(br#"{"type":"hello","monitors":[{"id":0,"w":8193,"h":1,"x":0,"y":0,"primary":true}],"active":0}"#);
+        assert!(s.take_fatal().is_some());
+        assert!(s.picture().lock().unwrap().fb.is_empty());
+        // The limit itself is accepted.
+        let edge = MonitorInfo { id: 0, w: MAX_SIDE, h: MAX_SIDE, x: 0, y: 0, primary: true };
+        assert!(monitor_fits(&edge));
+        assert!(!monitor_fits(&MonitorInfo { w: MAX_SIDE + 1, ..edge.clone() }));
     }
 
     #[test]

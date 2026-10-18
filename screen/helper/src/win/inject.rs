@@ -1,4 +1,6 @@
-//! `SendInput` injection (§6.3) and the `sas.dll` Ctrl+Alt+Del path (§6.4).
+//! `SendInput` injection (§6.3). Ctrl+Alt+Del (§6.4) is not here: the SAS can
+//! only be issued by the agent service, so a `sas` event becomes a
+//! service-request frame the agent acts on; the helper never calls SendSAS.
 //!
 //! Normalized 0..65535 active-monitor coordinates are mapped into the monitor's
 //! rect and then to virtual-desktop absolute, so injection is resolution- and
@@ -9,10 +11,6 @@
 use std::collections::HashSet;
 use std::mem::size_of;
 
-use windows::core::{BOOL, PCSTR};
-use windows::Win32::Foundation::{FreeLibrary, ERROR_SUCCESS, FALSE};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExA, LOAD_LIBRARY_SEARCH_SYSTEM32};
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSEINPUT,
@@ -26,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use screen_wire::input::InputEvent;
 
-use crate::backend::{Monitor, SasResult};
+use crate::backend::Monitor;
 
 #[derive(Default)]
 pub struct Injector {
@@ -52,7 +50,9 @@ impl Injector {
             InputEvent::Wheel { dx, dy, .. } => self.wheel(*dx, *dy),
             InputEvent::Key { scancode, down, extended } => self.key(*scancode, *down, *extended),
             InputEvent::Text { units } => self.text(units),
-            InputEvent::Sas => { /* handled via send_sas() */ }
+            // SAS is never injected here; the session turns it into a
+            // service-request frame the agent service acts on (§6.4).
+            InputEvent::Sas => {}
         }
     }
 
@@ -199,54 +199,3 @@ fn send_unicode(unit: u16, up: bool) {
     }
 }
 
-/// Ctrl+Alt+Del (§6.4). `SoftwareSASGeneration` "not configured" means disabled
-/// (the default), and we never write it; so we read it, and only call `SendSAS`
-/// when services are permitted (bit 0). Otherwise the viewer is told it is off.
-/// `sas.dll` is loaded SYSTEM32-only (mingw lacks the import lib).
-pub fn send_sas() -> SasResult {
-    if !sas_policy_allows_services() {
-        return SasResult::Unavailable;
-    }
-    unsafe {
-        let module = match LoadLibraryExA(PCSTR(b"sas.dll\0".as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) {
-            Ok(m) if !m.is_invalid() => m,
-            _ => return SasResult::Unavailable,
-        };
-        let result = match GetProcAddress(module, PCSTR(b"SendSAS\0".as_ptr())) {
-            Some(p) => {
-                let send_sas: unsafe extern "system" fn(BOOL) = std::mem::transmute(p);
-                send_sas(FALSE);
-                SasResult::Sent
-            }
-            None => SasResult::Unavailable,
-        };
-        let _ = FreeLibrary(module);
-        result
-    }
-}
-
-fn sas_policy_allows_services() -> bool {
-    // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System :
-    // SoftwareSASGeneration, bit0 = services allowed. Absent = disabled.
-    let subkey: Vec<u16> =
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\0".encode_utf16().collect();
-    let value: Vec<u16> = "SoftwareSASGeneration\0".encode_utf16().collect();
-    let mut data: u32 = 0;
-    let mut size: u32 = size_of::<u32>() as u32;
-    unsafe {
-        let status = RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            pcwstr_of(&subkey),
-            pcwstr_of(&value),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut data as *mut u32 as *mut core::ffi::c_void),
-            Some(&mut size),
-        );
-        status == ERROR_SUCCESS && (data & 0x1) != 0
-    }
-}
-
-fn pcwstr_of(buf: &[u16]) -> windows::core::PCWSTR {
-    windows::core::PCWSTR(buf.as_ptr())
-}

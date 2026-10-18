@@ -110,9 +110,23 @@ func TestServer_ScreenSessionFlow(t *testing.T) {
 		t.Fatalf("open: %d %v", resp.StatusCode, sum)
 	}
 	id, _ := sum["session_id"].(string)
-	opToken, _ := sum["connect_token"].(string)
-	if sum["mode"] != "control" || opToken == "" {
+	// Only an admin-key agent (ominullctl) gets the operator token in the
+	// open's answer; anyone else attaches through /attach or a launch code.
+	if sum["mode"] != "control" || sum["connect_token"] != nil {
 		t.Fatalf("summary %v", sum)
+	}
+	attachReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/screen/sessions/attach", strings.NewReader(`{"session_id":"`+id+`"}`))
+	bearer(attachReq)
+	attachResp, err := client.Do(attachReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attached map[string]interface{}
+	_ = json.NewDecoder(attachResp.Body).Decode(&attached)
+	attachResp.Body.Close()
+	opToken, _ := attached["connect_token"].(string)
+	if attachResp.StatusCode != http.StatusOK || opToken == "" {
+		t.Fatalf("attach: %d %v", attachResp.StatusCode, attached)
 	}
 	if len(resp.Cookies()) != 0 {
 		t.Fatalf("a screen open set cookies: %v", resp.Cookies())
@@ -407,6 +421,9 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 	if !limited {
 		t.Fatal("redeem never rate limited")
 	}
+	// The limit is process-wide (per source address, and every test comes
+	// from 127.0.0.1): clear it so a repeated run is not locked out.
+	screenCreds.ResetAttempts()
 
 	// The audit: attach kinds and who, the agent's input without the text,
 	// redeem outcomes.
@@ -569,5 +586,123 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+op)
 	if r, err := client.Do(req); err != nil || r.StatusCode != http.StatusForbidden {
 		t.Fatalf("auditor put: %v %v", r, err)
+	}
+}
+
+// The approval binds the session length, ask-first and the agent's
+// self-declared label: a second request under the same approval cannot
+// change any of them. The label is shown as a claim in the approval, the
+// endpoint's offer and the audit; the console never gets an operator token.
+func TestServer_ScreenApprovalBindings(t *testing.T) {
+	t.Parallel()
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	seedScreenEndpoint(t, srv, "win-bind", `{"isolate":true,"screen":{"input":true}}`)
+	client := &http.Client{}
+	call := func(label, approval, body string) (int, map[string]interface{}) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/screen/sessions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-admin-key-12345")
+		if label != "" {
+			req.Header.Set(agentLabelHeader, label)
+		}
+		if approval != "" {
+			req.Header.Set(approvalHeader, approval)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+	body := `{"endpoint_id":"win-bind","mode":"control","max_duration_seconds":1800}`
+	if code, m := call(`bad"label`, "", body); code != http.StatusBadRequest {
+		t.Fatalf("a label with a quote: %d %v", code, m)
+	}
+	code, pending := call("claude-ops", "", body)
+	if code != http.StatusAccepted {
+		t.Fatalf("open: %d %v", code, pending)
+	}
+	appID, _ := pending["approval_id"].(string)
+	view, err := auth.GetApproval(appID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Summary != `An agent calling itself "claude-ops" (admin key) will see and control the screen on win-bind, up to 30 minutes; it opens without asking the person at the keyboard` {
+		t.Fatalf("approval wording: %q", view.Summary)
+	}
+	ownerOf(t, srv).approve(t, appID)
+	for _, tc := range []struct{ name, label, body string }{
+		{"longer session", "claude-ops", `{"endpoint_id":"win-bind","mode":"control","max_duration_seconds":3600}`},
+		{"no label", "", body},
+		{"another label", "other-agent", body},
+	} {
+		if code, m := call(tc.label, appID, tc.body); code != http.StatusForbidden {
+			t.Fatalf("%s under the approval: %d %v", tc.name, code, m)
+		}
+	}
+	code, sum := call("claude-ops", appID, body)
+	if code != http.StatusCreated {
+		t.Fatalf("approved open: %d %v", code, sum)
+	}
+	if tok, _ := sum["connect_token"].(string); tok == "" {
+		t.Fatalf("an admin-key agent gets the operator token: %v", sum)
+	}
+	jobs, err := srv.responseStore.ListJobs("default", "win-bind", 10)
+	if err != nil || len(jobs) != 1 || !strings.Contains(jobs[0].RequestJSON, `\"operator\":\"agent \\\"claude-ops\\\" (admin key)\"`) {
+		t.Fatalf("offer operator: %v %v", jobs, err)
+	}
+	id, _ := sum["session_id"].(string)
+
+	// Terminal routes never reach a screen session.
+	jwt, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: hubauth.RoleAdmin, TenantID: "default"}, "test-admin-key-12345", time.Hour)
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodDelete, "/api/v1/terminal/sessions?id=" + id, ""},
+		{http.MethodPost, "/api/v1/terminal/sessions/close", `{"session_id":"` + id + `"}`},
+		{http.MethodPost, "/api/v1/terminal/sessions/detach", `{"session_id":"` + id + `"}`},
+	} {
+		req, _ := http.NewRequest(tc.method, ts.URL+tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+jwt)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s %s on a screen session: %d", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+	if live, _ := srv.terminalMgr.GetSession(id); !live.IsLive() {
+		t.Fatal("a terminal route ended the screen session")
+	}
+
+	// A failed redeem is audited under the session's tenant.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/screen/launch/redeem", strings.NewReader(`{"session_id":"`+id+`","code":"guess"}`))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	created, failed := false, false
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end) && !(created && failed); time.Sleep(20 * time.Millisecond) {
+		entries, _ := store.ListAuditLogs("", 1000)
+		for _, e := range entries {
+			if e.Action == "SCREEN_LAUNCH_REDEEM_FAILED" && e.Resource == id && e.TenantID == "default" {
+				failed = true
+			}
+			if e.Action == "SCREEN_SESSION_CREATED" && strings.Contains(e.Details, `admin (agent calling itself "claude-ops", admin key)`) &&
+				strings.Contains(e.Details, "without asking the person at the keyboard") {
+				created = true
+			}
+		}
+	}
+	if !created || !failed {
+		t.Fatalf("audit: created with the label %v, failed redeem with tenant %v", created, failed)
 	}
 }

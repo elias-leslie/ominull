@@ -215,12 +215,153 @@ static void test_grant_verification(void) {
     rmdir(tmp_dir);
 }
 
+/* 5. Screen-session canonical digest rebuild (REMOTE_SCREEN.md §6). The grant
+ * binds sha256 of a canonical {"mode"[,"unattended"][,"ask_first"]} subset, not
+ * the whole offer; ScreenCanonicalFromOffer rebuilds exactly those bytes. */
+static void screen_vec(const char* label, const char* offer, const char* want_canon) {
+    char canon[64] = {0};
+    bool ok = ScreenCanonicalFromOffer(offer, canon, sizeof(canon));
+    expect(label, ok && strcmp(canon, want_canon) == 0, true);
+}
+
+static void test_screen_canonical_vectors(void) {
+    /* All eight digested forms: {control,view} x {unattended off/on} x {ask_first off/on},
+     * keys in order mode, unattended, ask_first, no spaces, false members omitted. */
+    screen_vec("control",
+               "{\"session_id\":\"s\",\"mode\":\"control\",\"connect_token\":\"t\",\"operator\":\"admin\"}",
+               "{\"mode\":\"control\"}");
+    screen_vec("control+ask_first",
+               "{\"mode\":\"control\",\"connect_token\":\"t\",\"ask_first\":true}",
+               "{\"mode\":\"control\",\"ask_first\":true}");
+    screen_vec("control+unattended",
+               "{\"mode\":\"control\",\"unattended\":true}",
+               "{\"mode\":\"control\",\"unattended\":true}");
+    screen_vec("control+unattended+ask_first",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}");
+    screen_vec("view",
+               "{\"mode\":\"view\",\"operator\":\"an agent (admin key)\"}",
+               "{\"mode\":\"view\"}");
+    screen_vec("view+ask_first",
+               "{\"mode\":\"view\",\"ask_first\":true}",
+               "{\"mode\":\"view\",\"ask_first\":true}");
+    screen_vec("view+unattended",
+               "{\"mode\":\"view\",\"unattended\":true}",
+               "{\"mode\":\"view\",\"unattended\":true}");
+    screen_vec("view+unattended+ask_first",
+               "{\"mode\":\"view\",\"unattended\":true,\"ask_first\":true}",
+               "{\"mode\":\"view\",\"unattended\":true,\"ask_first\":true}");
+
+    /* Key order in the offer does not matter; canonical order is fixed. */
+    screen_vec("flags out of order rebuild in order",
+               "{\"ask_first\":true,\"mode\":\"control\",\"unattended\":true}",
+               "{\"mode\":\"control\",\"unattended\":true,\"ask_first\":true}");
+
+    /* The hub never sends literal false for a flag; such an offer is refused. */
+    char canon[64];
+    expect("unattended:false refused", ScreenCanonicalFromOffer("{\"mode\":\"control\",\"unattended\":false}", canon, sizeof(canon)), false);
+    expect("ask_first:false refused", ScreenCanonicalFromOffer("{\"mode\":\"view\",\"ask_first\":false}", canon, sizeof(canon)), false);
+    expect("bad mode refused", ScreenCanonicalFromOffer("{\"mode\":\"spy\"}", canon, sizeof(canon)), false);
+    expect("missing mode refused", ScreenCanonicalFromOffer("{\"operator\":\"x\"}", canon, sizeof(canon)), false);
+}
+
+/* 6. Screen-session grant end-to-end: the digest over the canonical subset is
+ * verified through VerifyResponseGrant, and a tampered mode/flag is rejected. */
+static bool screen_sign_grant(const char* tmp_dir, const char* key_path, const char* canonical,
+                              const char* mode_kind_unused, ResponseGrant* grant) {
+    (void)mode_kind_unused;
+    int64_t now = (int64_t)time(NULL);
+    uint8_t h[32];
+    char digest[65];
+    Response_SHA256_Sum((const uint8_t*)canonical, strlen(canonical), h);
+    Response_BytesToHex(h, 32, digest);
+
+    memset(grant, 0, sizeof(*grant));
+    grant->version = 2;
+    strcpy(grant->grant_id, "screen-grant-1");
+    strcpy(grant->tenant_id, "default");
+    strcpy(grant->endpoint_id, "ep-screen");
+    strcpy(grant->action_kind, "screen_session");
+    strcpy(grant->action_digest, digest);
+    strcpy(grant->operator_id, "admin");
+    strcpy(grant->response_session_id, "sess-scr");
+    grant->issued_at = now - 10;
+    grant->expires_at = now + 300;
+    strcpy(grant->nonce, "scr-nonce-1");
+    strcpy(grant->signer_key_id, "scr-key");
+
+    uint8_t canon[1024];
+    size_t clen = EncodeGrantV2Canonical(grant->version, grant->grant_id, grant->tenant_id, grant->endpoint_id,
+                                         grant->action_kind, grant->action_digest, grant->operator_id,
+                                         grant->response_session_id, grant->issued_at, grant->expires_at,
+                                         grant->nonce, grant->signer_key_id, canon, sizeof(canon));
+    if (clen == 0) return false;
+    char data_path[160], sig_path[160], cmd[512];
+    snprintf(data_path, sizeof(data_path), "%s/scr_data.bin", tmp_dir);
+    snprintf(sig_path, sizeof(sig_path), "%s/scr_sig.bin", tmp_dir);
+    FILE* fd = fopen(data_path, "wb");
+    if (!fd) return false;
+    fwrite(canon, 1, clen, fd);
+    fclose(fd);
+    snprintf(cmd, sizeof(cmd), "openssl pkeyutl -sign -rawin -inkey %s -in %s -out %s >/dev/null 2>&1",
+             key_path, data_path, sig_path);
+    if (system(cmd) != 0) return false;
+    FILE* fs = fopen(sig_path, "rb");
+    if (!fs) return false;
+    uint8_t sig[64];
+    bool ok = fread(sig, 1, 64, fs) == 64;
+    fclose(fs);
+    if (ok) Response_BytesToHex(sig, 64, grant->signature);
+    unlink(data_path);
+    unlink(sig_path);
+    return ok;
+}
+
+static void test_screen_grant_verification(void) {
+    char tmp_dir[64] = "/tmp/ominull_test_scrkeys_XXXXXX";
+    if (!mkdtemp(tmp_dir)) return;
+    char key_path[128], pub_path[128], gen[512];
+    snprintf(key_path, sizeof(key_path), "%s/ed25519.key", tmp_dir);
+    snprintf(pub_path, sizeof(pub_path), "%s/ed25519.pub", tmp_dir);
+    snprintf(gen, sizeof(gen),
+             "openssl genpkey -algorithm Ed25519 -out %s >/dev/null 2>&1 && "
+             "openssl pkey -in %s -pubout -out %s >/dev/null 2>&1", key_path, key_path, pub_path);
+    if (system(gen) != 0) { rmdir(tmp_dir); expect("screen keypair generated", false, true); return; }
+
+    /* Grant digests {"mode":"control"}. */
+    ResponseGrant g;
+    if (screen_sign_grant(tmp_dir, key_path, "{\"mode\":\"control\"}", NULL, &g)) {
+        const char* good = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\",\"operator\":\"admin\"}";
+        expect("screen good digest verifies", VerifyResponseGrant(&g, good, "ep-screen", pub_path), true);
+
+        const char* flipped = "{\"session_id\":\"s1\",\"mode\":\"view\",\"connect_token\":\"tok\",\"operator\":\"admin\"}";
+        expect("screen flipped mode fails", VerifyResponseGrant(&g, flipped, "ep-screen", pub_path), false);
+
+        const char* extra = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\",\"unattended\":true}";
+        expect("screen injected unattended fails", VerifyResponseGrant(&g, extra, "ep-screen", pub_path), false);
+    }
+
+    /* Grant digests {"mode":"control","unattended":true}. */
+    if (screen_sign_grant(tmp_dir, key_path, "{\"mode\":\"control\",\"unattended\":true}", NULL, &g)) {
+        const char* with = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\",\"unattended\":true}";
+        expect("screen unattended grant + unattended offer verifies", VerifyResponseGrant(&g, with, "ep-screen", pub_path), true);
+        const char* without = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\"}";
+        expect("screen unattended mismatch fails", VerifyResponseGrant(&g, without, "ep-screen", pub_path), false);
+    }
+
+    unlink(key_path);
+    unlink(pub_path);
+    rmdir(tmp_dir);
+}
+
 int main(void) {
     printf("[*] Running Ominull Response Dispatcher test suite (Slice 1D.1)...\n");
     test_sha256();
     test_offer_parser();
     test_replay_cache();
     test_grant_verification();
+    test_screen_canonical_vectors();
+    test_screen_grant_verification();
 
     if (failures == 0) {
         printf("[+] All response dispatcher tests passed cleanly.\n");

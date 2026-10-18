@@ -697,6 +697,7 @@ static inline const char* Trust_CapabilityFor(const char* kind) {
     if (strcmp(kind, "forensic_collection") == 0) return "collect";
     if (strcmp(kind, "script_exec") == 0) return "script";
     if (strcmp(kind, "terminal_session") == 0) return "terminal";
+    if (strcmp(kind, "screen_session") == 0) return "screen";
     return NULL;
 }
 

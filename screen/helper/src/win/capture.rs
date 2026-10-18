@@ -35,13 +35,13 @@ use screen_wire::proto::{
 };
 
 use crate::backend::{
-    CaptureFrame, CursorPos, CursorShape, DesktopState, Monitor, SasResult, ScreenBackend, Tile,
+    CaptureFrame, Consent, CursorPos, CursorShape, DesktopState, Monitor, ScreenBackend, Tile,
     TILE_SIZE,
 };
 
 use super::banner::Banner;
 use super::desktop::DesktopFollower;
-use super::inject::{self, Injector};
+use super::inject::Injector;
 
 /// One monitor plus where to find its adapter/output for duplication.
 struct MonEntry {
@@ -73,7 +73,7 @@ pub struct WindowsBackend {
 }
 
 impl WindowsBackend {
-    pub fn new() -> windows::core::Result<Self> {
+    pub fn new(control: bool, operator: Option<&str>) -> windows::core::Result<Self> {
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
         let entries = enumerate_monitors(&factory);
         Ok(WindowsBackend {
@@ -91,7 +91,7 @@ impl WindowsBackend {
             quality: 60,
             injector: Injector::new(),
             desktop: DesktopFollower::new(),
-            banner: Banner::start(),
+            banner: Banner::start(control, operator),
             pending_desktop: None,
             gdi_hashes: HashMap::new(),
         })
@@ -413,8 +413,12 @@ impl ScreenBackend for WindowsBackend {
         }
     }
 
-    fn send_sas(&mut self) -> SasResult {
-        inject::send_sas()
+    fn request_consent(&mut self, control: bool, operator: Option<&str>) -> Consent {
+        if self.banner.request_consent(control, operator) {
+            Consent::Allowed
+        } else {
+            Consent::Denied
+        }
     }
 
     fn desktop_state(&mut self) -> DesktopState {

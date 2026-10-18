@@ -54,6 +54,7 @@
 
 #include "response_canonical.h"
 #include "ed25519_verify.h"
+#include "terminal_frame.h"   /* TermJson: bounded JSON reader for the screen offer payload */
 
 #define MAX_RESPONSE_OFFERS 4
 #define MAX_PAYLOAD_JSON_LEN 65536
@@ -552,6 +553,46 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
  * Grant Verification & Digest Verification
  * ------------------------------------------------------------------------- */
 
+/* ScreenCanonicalFromOffer rebuilds the exact bytes the hub digested for a
+ * screen_session grant (REMOTE_SCREEN.md §3/§6): {"mode":"control|view"} with
+ * ,"unattended":true and/or ,"ask_first":true appended in that fixed order, no
+ * spaces, false members omitted. The offer payload
+ * ({"session_id","mode","connect_token","operator"[,"unattended":true][,"ask_first":true]})
+ * is read with the bounded TermJson reader, never strstr. mode must be exactly
+ * control or view; unattended and ask_first must be the JSON literal true or be
+ * absent (a literal false, which the hub never sends, is refused). operator,
+ * session_id and connect_token are not digested and are ignored here. */
+static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out, size_t out_cap) {
+    if (!payload_json || !out) return false;
+    char mode[16] = {0};
+    bool have_mode = false, unattended = false, ask_first = false;
+    TermJson j;
+    if (!TermJson_Begin(&j, payload_json, strlen(payload_json))) return false;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        if (TermJson_KeyIs(k, kl, "mode")) {
+            if (vt != 's' || !TermJson_CopyString(v, vl, mode, sizeof(mode))) return false;
+            have_mode = true;
+        } else if (TermJson_KeyIs(k, kl, "unattended")) {
+            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
+            unattended = true;
+        } else if (TermJson_KeyIs(k, kl, "ask_first")) {
+            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
+            ask_first = true;
+        }
+    }
+    if (!have_mode || (strcmp(mode, "control") != 0 && strcmp(mode, "view") != 0)) return false;
+    int n = snprintf(out, out_cap, "{\"mode\":\"%s\"%s%s}", mode,
+                     unattended ? ",\"unattended\":true" : "",
+                     ask_first ? ",\"ask_first\":true" : "");
+    return n > 0 && (size_t)n < out_cap;
+}
+
 /* VerifyResponseGrantKey checks a response job grant against a public key
  * held in memory (the agent's pinned response key). */
 static inline bool VerifyResponseGrantKey(
@@ -603,6 +644,16 @@ static inline bool VerifyResponseGrantKey(
                         Response_BytesToHex(computed_hash, 32, computed_hex);
                     }
                 }
+            }
+        } else if (grant->action_kind[0] && strcmp(grant->action_kind, "screen_session") == 0 && payload_json) {
+            /* The screen grant binds the canonical {"mode"[,"unattended"][,"ask_first"]}
+             * subset, not the whole offer (REMOTE_SCREEN.md §6). Rebuild it from the
+             * offer and recompute; mode/unattended/ask_first thus reach the worker only
+             * through this verified digest. */
+            char canon[64];
+            if (ScreenCanonicalFromOffer(payload_json, canon, sizeof(canon))) {
+                Response_SHA256_Sum((const uint8_t*)canon, strlen(canon), computed_hash);
+                Response_BytesToHex(computed_hash, 32, computed_hex);
             }
         }
         if (strcasecmp(grant->action_digest, computed_hex) != 0) {

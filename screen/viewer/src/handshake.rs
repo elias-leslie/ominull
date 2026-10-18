@@ -102,6 +102,9 @@ pub struct Connect {
     pub token: String,
     pub mode: Mode,
     pub host_label: String,
+    /// `ctl type`'s text, when the caller sends it here instead of in argv
+    /// (argv is visible in the process list). Never logged.
+    pub text: Option<String>,
 }
 
 impl fmt::Debug for Connect {
@@ -112,6 +115,7 @@ impl fmt::Debug for Connect {
             .field("token", &"<redacted>")
             .field("mode", &self.mode)
             .field("host_label", &self.host_label)
+            .field("text", &self.text.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -132,6 +136,8 @@ struct Line {
     mode: Option<String>,
     #[serde(default)]
     host: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// Parses and checks one handshake line.
@@ -150,7 +156,7 @@ pub fn parse_line(line: &str) -> Result<Connect, String> {
     // No mode means view: the hub enforces it anyway, and view is the safe guess.
     let mode = Mode::parse(l.mode.as_deref().unwrap_or("view"))?;
     let host_label = clean_label(l.host.as_deref().unwrap_or(""), &hub.host);
-    Ok(Connect { hub, ca_pem: l.ca_pem, session_id: l.session_id, token: l.token, mode, host_label })
+    Ok(Connect { hub, ca_pem: l.ca_pem, session_id: l.session_id, token: l.token, mode, host_label, text: l.text })
 }
 
 /// Reads exactly one line (bounded) from `r` and parses it.
@@ -225,6 +231,14 @@ mod tests {
         assert_eq!(c.host_label, "PC-1");
         assert_eq!(c.ws_url(), "wss://hub.lan:9443/api/v1/screen/ws/operator?session_id=s-1");
         assert!(!format!("{c:?}").contains("tok_abc"), "Debug must not print the token");
+        assert_eq!(c.text, None);
+    }
+
+    #[test]
+    fn text_rides_the_line_and_stays_out_of_debug() {
+        let c = parse_line(&line(r#","text":"hunter2 \u00e9""#)).unwrap();
+        assert_eq!(c.text.as_deref(), Some("hunter2 é"));
+        assert!(!format!("{c:?}").contains("hunter2"), "Debug must not print the text");
     }
 
     #[test]

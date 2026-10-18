@@ -2,6 +2,7 @@ package screen
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 
@@ -11,10 +12,10 @@ import (
 )
 
 // The hub parses only the JSON control frames it polices (REMOTE_SCREEN.md
-// 4.4): the frame type, a quality request and a bye's reason. Every binary
-// agent message (a tile, a cursor shape: fixed binary header + bytes) is
-// opaque and passes through as binary, unread. Input events pass through
-// unread too; the helper validates them.
+// 4.4). Every binary agent message (a tile, a cursor shape: fixed binary
+// header + bytes) is opaque and passes through as binary, unread. Operator
+// and watcher frames are parsed strictly and forwarded only as the hub's own
+// canonical re-encoding (frame.go); the helper still validates every bound.
 
 // Operator -> agent frame types.
 const (
@@ -49,20 +50,24 @@ func newPolicy(program, sessionID string) terminal.FramePolicy {
 	return &policy{sessionID: sessionID, control: mode == response.ScreenModeControl, buttons: map[string]bool{}}
 }
 
-// Watcher polices a watch attachment: its acks reach the agent while it
-// paces; its close detaches it alone; input and stream changes are not a
-// watcher's to make.
+// Watcher polices a watch attachment: its canonical ack reaches the agent
+// (re-encoded) while it paces; its close detaches it alone; input and stream
+// changes are not a watcher's to make and are dropped. Anything that does not
+// parse strictly detaches the watcher.
 func (p *policy) Watcher(msgType int, data []byte) terminal.FrameDecision {
 	if msgType != websocket.TextMessage {
 		return closeWith("forbidden_watcher_frame_type")
 	}
-	var f controlFrame
-	if err := json.Unmarshal(data, &f); err != nil {
+	f, err := parseOperatorFrame(data)
+	if errors.Is(err, errForbiddenType) {
+		return closeWith("forbidden_watcher_frame_type")
+	}
+	if err != nil {
 		return closeWith("malformed_watcher_frame")
 	}
 	switch f.Type {
 	case opAck:
-		return terminal.FrameDecision{}
+		return terminal.FrameDecision{Data: f.encode()}
 	case opClose:
 		return closeWith("watcher_left")
 	}
@@ -73,44 +78,40 @@ func closeWith(reason string) terminal.FrameDecision {
 	return terminal.FrameDecision{Action: terminal.FrameCloseSession, Reason: reason}
 }
 
+// controlFrame is the agent -> operator subset the hub reads.
 type controlFrame struct {
-	Type   string   `json:"type"`
-	FPS    *float64 `json:"fps"`
-	JPEGQ  *float64 `json:"jpeg_q"`
-	Reason string   `json:"reason"`
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
 }
 
+// Operator polices the control attachment. Every forwarded frame is the
+// hub's own re-encoding of a strict parse (frame.go); pause and resume are
+// the hub's to send and end the session if an operator sends them.
 func (p *policy) Operator(msgType int, data []byte) terminal.FrameDecision {
 	if msgType != websocket.TextMessage {
 		return closeWith("forbidden_operator_frame_type")
 	}
-	var f controlFrame
-	if err := json.Unmarshal(data, &f); err != nil {
+	f, err := parseOperatorFrame(data)
+	if errors.Is(err, errForbiddenType) {
+		return closeWith("forbidden_operator_frame_type")
+	}
+	if err != nil {
 		return closeWith("malformed_operator_frame")
 	}
 	switch f.Type {
 	case opAck:
 		// The viewer acks every frame by itself; that is not a person.
-		return terminal.FrameDecision{}
+		return terminal.FrameDecision{Data: f.encode()}
 	case opInput:
 		if !p.control {
 			// The owner approved watching only. The helper ignores input in
 			// a view session too; this is the hub's half.
 			return terminal.FrameDecision{Action: terminal.FrameDrop}
 		}
-		p.auditInput(data)
-		return terminal.FrameDecision{Activity: true}
-	case opSetMonitor:
-		return terminal.FrameDecision{Activity: true}
-	case opQuality:
-		fps := clampInt(f.FPS, 1, MaxFPS, MaxFPS)
-		q := clampInt(f.JPEGQ, MinJPEGQuality, MaxJPEGQuality, DefaultJPEGQuality)
-		out, _ := json.Marshal(struct {
-			Type  string `json:"type"`
-			FPS   int    `json:"fps"`
-			JPEGQ int    `json:"jpeg_q"`
-		}{opQuality, fps, q})
-		return terminal.FrameDecision{Data: out, Activity: true}
+		p.auditInput(f.Input)
+		return terminal.FrameDecision{Data: f.encode(), Activity: true}
+	case opSetMonitor, opQuality:
+		return terminal.FrameDecision{Data: f.encode(), Activity: true}
 	case opClose:
 		return closeWith("operator_requested_close")
 	}

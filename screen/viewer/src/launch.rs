@@ -166,6 +166,7 @@ pub fn redeem(link: &LaunchUrl, entry: &HubEntry) -> Result<Connect, String> {
         token: r.token,
         mode,
         host_label: clean_label(r.host.as_deref().unwrap_or(""), &link.hub.host),
+        text: None,
     })
 }
 

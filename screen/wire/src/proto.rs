@@ -4,7 +4,10 @@
 //! the helper encodes agent->operator and decodes operator->agent, the viewer
 //! does the reverse, from the same functions.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeSet;
+use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Binary messages (§4.1).
@@ -209,6 +212,7 @@ pub fn parse_out(json: &[u8]) -> Option<OutMsg> {
 /// builds one; deserializable so the helper reads it. Validation is separate
 /// ([`crate::input::validate`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawInput {
     pub ev: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +238,7 @@ pub struct RawInput {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawButtons {
     #[serde(default)]
     pub l: bool,
@@ -276,10 +281,92 @@ impl InMsg {
     }
 }
 
+/// A `serde_json::Value` whose deserializer refuses any JSON object with a
+/// duplicate key, at any nesting depth. serde_json's default silently keeps the
+/// last of repeated keys, so a lenient peer or a frame re-encoder could act on a
+/// different value than the helper validated; untrusted operator/hub frames
+/// (§4.2) are refused outright instead. JSON keys are already case-significant
+/// to serde, so a `"Type"` key cannot be smuggled in for the `"type"` tag.
+struct StrictValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for StrictValue {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = serde_json::Value;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON value with unique object keys")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(v.into())
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(v.into())
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(v.into())
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(v.into())
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(v.to_owned().into())
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(v.into())
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Null)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Null)
+            }
+            fn visit_some<D>(self, d: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Ok(StrictValue::deserialize(d)?.0)
+            }
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut arr = Vec::new();
+                while let Some(StrictValue(v)) = seq.next_element()? {
+                    arr.push(v);
+                }
+                Ok(serde_json::Value::Array(arr))
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut obj = serde_json::Map::new();
+                let mut seen = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom("duplicate object key"));
+                    }
+                    let StrictValue(val) = map.next_value()?;
+                    obj.insert(key, val);
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
+        }
+        Ok(StrictValue(d.deserialize_any(V)?))
+    }
+}
+
 /// Parses one operator/hub -> agent JSON text frame (helper side). A malformed
-/// message is dropped (None) rather than ending the session.
+/// message is dropped (None) rather than ending the session. Invalid JSON,
+/// duplicate object keys (smuggling), and unknown fields in an input event
+/// (`deny_unknown_fields` on [`RawInput`]/[`RawButtons`]) are all refused.
 pub fn parse_in(json: &[u8]) -> Option<InMsg> {
-    serde_json::from_slice::<InMsg>(json).ok()
+    let StrictValue(v) = serde_json::from_slice(json).ok()?;
+    serde_json::from_value(v).ok()
 }
 
 #[cfg(test)]
@@ -369,5 +456,36 @@ mod tests {
         assert!(matches!(parse_in(b"{\"type\":\"pause\"}"), Some(InMsg::Pause)));
         assert!(matches!(parse_in(b"{\"type\":\"future\"}"), Some(InMsg::Unknown)));
         assert!(parse_in(b"{not json").is_none());
+    }
+
+    #[test]
+    fn in_msg_duplicate_key_rejected() {
+        // A repeated top-level key is refused outright (no "last wins").
+        assert!(parse_in(b"{\"type\":\"pause\",\"type\":\"close\"}").is_none());
+        // A repeated key nested in an input event is also refused.
+        assert!(parse_in(
+            b"{\"type\":\"input\",\"ev\":\"mouse\",\"x\":1,\"x\":2}"
+        )
+        .is_none());
+        // A repeated key inside the buttons sub-object is refused too.
+        assert!(parse_in(
+            b"{\"type\":\"input\",\"ev\":\"mouse\",\"buttons\":{\"l\":true,\"l\":false}}"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn in_msg_unknown_field_rejected() {
+        // An unknown field smuggled into an input event is refused
+        // (deny_unknown_fields), rather than silently ignored.
+        assert!(parse_in(
+            b"{\"type\":\"input\",\"ev\":\"key\",\"code\":30,\"down\":true,\"evil\":1}"
+        )
+        .is_none());
+        // The same event without the stray field still parses.
+        assert!(matches!(
+            parse_in(b"{\"type\":\"input\",\"ev\":\"key\",\"code\":30,\"down\":true}"),
+            Some(InMsg::Input(_))
+        ));
     }
 }

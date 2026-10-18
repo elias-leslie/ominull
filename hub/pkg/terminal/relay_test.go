@@ -363,3 +363,51 @@ func TestByteGateBoundsQueuedBytes(t *testing.T) {
 		t.Fatal("an oversized frame must pass an empty queue")
 	}
 }
+
+// A pause that cannot be queued for the agent (a flooding operator filled
+// the queue) does not mark the relay paused, so its state never claims a
+// pause the agent did not get; once there is room the pause goes out.
+func TestPauseIsMarkedOnlyWhenQueued(t *testing.T) {
+	pr := &PairedRelay{
+		opToAgent: make(chan relayMsg, 1),
+		done:      make(chan struct{}),
+		kind:      &SessionKind{PauseMessage: []byte(`{"type":"pause"}`), ResumeMessage: []byte(`{"type":"resume"}`)},
+	}
+	pr.opToAgent <- relayMsg{typ: websocket.TextMessage, data: []byte("input")}
+	start := time.Now()
+	pr.pauseIfUnwatched()
+	if pr.paused {
+		t.Fatal("marked paused though the pause was never queued")
+	}
+	if waited := time.Since(start); waited < agentControlWait/2 {
+		t.Fatalf("gave up after %v without waiting for room", waited)
+	}
+	<-pr.opToAgent
+	pr.pauseIfUnwatched()
+	if !pr.paused || string((<-pr.opToAgent).data) != `{"type":"pause"}` {
+		t.Fatal("the pause was not sent once there was room")
+	}
+	// A resume that cannot be queued leaves it paused, so the next
+	// attachment resumes it.
+	pr.opToAgent <- relayMsg{typ: websocket.TextMessage, data: []byte("input")}
+	pr.resumeIfPaused()
+	if !pr.paused {
+		t.Fatal("marked resumed though the resume was never queued")
+	}
+	<-pr.opToAgent
+	pr.resumeIfPaused()
+	if pr.paused || string((<-pr.opToAgent).data) != `{"type":"resume"}` {
+		t.Fatal("the resume was not sent once there was room")
+	}
+}
+
+// A kind's policy forwards operator bytes only as its own re-encoding.
+func TestReencodedNeverForwardsRawBytes(t *testing.T) {
+	if _, d := reencoded(FrameDecision{}); d.Action != FrameDrop {
+		t.Fatalf("a forward without Data was not dropped: %+v", d)
+	}
+	msg, d := reencoded(FrameDecision{Data: []byte(`{"type":"ack","monitor":0,"frame":1}`)})
+	if d.Action != FrameForward || msg.typ != websocket.TextMessage || string(msg.data) != `{"type":"ack","monitor":0,"frame":1}` {
+		t.Fatalf("re-encoded forward: %+v %+v", msg, d)
+	}
+}

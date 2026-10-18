@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/screen"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/terminal"
@@ -149,9 +150,15 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 		// prompt. ask_first is re-read from the setting resolveScreen just
 		// digested; if it changed in between, offer and grant disagree and
 		// the agent refuses the session.
+		// The helper's consent prompt and banner show it ("controlled by
+		// ..."), so an admin-key agent's self-declared label is named there
+		// too. The agent strips quotes and keeps at most 64 characters.
 		who := operatorID
 		if r.Header.Get("X-Auth-Method") == "api-key" {
 			who = "an agent (admin key)"
+			if label, _ := agentLabel(r); label != "" {
+				who = "agent \"" + label + "\" (admin key)"
+			}
 		}
 		offer := map[string]interface{}{"session_id": sess.SessionID, "mode": mode, "connect_token": sess.ConnectToken, "operator": who}
 		if req.Unattended {
@@ -169,18 +176,25 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 		unattended := ""
 		if askFirst {
 			unattended += ", asks the person at the keyboard first"
+		} else {
+			unattended += ", without asking the person at the keyboard"
 		}
 		if req.Unattended {
 			unattended += ", may open with nobody at the keyboard"
 		}
 		s.audit(r, "SCREEN_SESSION_CREATED", sess.SessionID, fmt.Sprintf(
 			"Opened a %s screen session on %s for %s under grant %s, up to %s%s",
-			mode, req.EndpointID, operatorID, grant.GrantID, d.Round(time.Minute), unattended))
-		// The caller (ominullctl) gets the operator's one-use token once,
-		// here, and hands it to the viewer on stdin. It never reaches a URL.
+			mode, req.EndpointID, s.screenCaller(r), grant.GrantID, d.Round(time.Minute), unattended))
 		screenCreds.SetControlMinter(sess.SessionID, screenAgentName(r))
 		out := screenSummary(sess)
-		out["connect_token"] = sess.OperatorToken
+		// An agent (ominullctl, admin key) gets the operator's one-use token
+		// once, here, and hands it to the viewer on stdin; it never reaches a
+		// URL. The console gets no token at all: it asks /launch for a
+		// one-use launch code instead, so a page never holds a credential
+		// that drives the screen.
+		if r.Header.Get("X-Auth-Method") == "api-key" {
+			out["connect_token"] = sess.OperatorToken
+		}
 		writeJSON(w, http.StatusCreated, out)
 
 	case http.MethodDelete:
@@ -258,6 +272,12 @@ func (s *Server) handleScreenSessionAttach(w http.ResponseWriter, r *http.Reques
 	}
 	if !screenRoleCanOpen(r) {
 		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to attach to a screen session")
+		return
+	}
+	// The console never holds an operator token (a page could leak it); it
+	// opens the viewer with a one-use launch code from /launch.
+	if r.Header.Get("X-Auth-Method") == "console" {
+		writeJSONError(w, http.StatusForbidden, "the console opens the viewer with a launch code (/api/v1/screen/sessions/launch)")
 		return
 	}
 	var req struct {
@@ -342,7 +362,7 @@ func (s *Server) handleScreenWSOperator(w http.ResponseWriter, r *http.Request) 
 	}
 	who := sess.OperatorID
 	if agent := screenCreds.ControlAgent(sessionID); agent != "" {
-		who = agent + " (agent, admin key)"
+		who = agent
 		clear := screen.SetInputAudit(sessionID, func(line string) {
 			s.auditScreen(r, sess, who, "SCREEN_AGENT_INPUT", line)
 		})
@@ -379,22 +399,28 @@ func (s *Server) auditScreen(r *http.Request, sess *terminal.TerminalSession, wh
 // is then reattached with a fresh /attach or launch code.
 var screenCreds = screen.NewCredentials()
 
-// screenAgentName is the agent behind a request made with the hub admin key
-// (its control input is audited), or "" for a person.
+// screenAgentName is the agent behind a request made with the hub admin key,
+// as the audit names it (its control input is audited), or "" for a person.
+// A self-declared X-Ominull-Agent label is named as a claim:
+// `admin (agent calling itself "claude-ops", admin key)`.
 func screenAgentName(r *http.Request) string {
 	if r.Header.Get("X-Auth-Method") != "api-key" {
 		return ""
 	}
-	if u := r.Header.Get("X-Username"); u != "" {
-		return u
+	u := r.Header.Get("X-Username")
+	if u == "" {
+		u = "admin"
 	}
-	return "admin"
+	if label, ok := agentLabel(r); ok && label != "" {
+		return u + " (agent calling itself \"" + label + "\", admin key)"
+	}
+	return u + " (agent, admin key)"
 }
 
 // screenCaller is who a request is for, as the screen audit names them.
 func (s *Server) screenCaller(r *http.Request) string {
-	if r.Header.Get("X-Auth-Method") == "api-key" {
-		return s.operatorFromRequest(r) + " (agent, admin key)"
+	if a := screenAgentName(r); a != "" {
+		return a
 	}
 	return s.operatorFromRequest(r)
 }
@@ -522,8 +548,8 @@ func (s *Server) screenTokenBody(sess *terminal.TerminalSession, token, mode str
 // handleScreenLaunchRedeem is POST /api/v1/screen/launch/redeem
 // {session_id, code}: the native viewer trades a launch code for an
 // attachment token. It carries no other credential (the viewer has none), so
-// it is rate limited per address and per session, every code is one use,
-// and every outcome is audited.
+// it is rate limited per source address (and loosely per session), every
+// code is one use, and every outcome is audited.
 func (s *Server) handleScreenLaunchRedeem(w http.ResponseWriter, r *http.Request) {
 	if s.terminalMgr == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
@@ -542,8 +568,14 @@ func (s *Server) handleScreenLaunchRedeem(w http.ResponseWriter, r *http.Request
 		return
 	}
 	fail := func(status int, why string) {
+		// The redeem carries no credential, so the tenant is the named
+		// session's, when there is one.
+		tenantID := ""
+		if sess, err := s.terminalMgr.GetSession(req.SessionID); err == nil && screen.IsScreen(sess.Program) {
+			tenantID = sess.TenantID
+		}
 		_ = s.store.RecordAudit(storage.AuditEntry{
-			ID: uuid.New().String(), Username: "unknown", Action: "SCREEN_LAUNCH_REDEEM_FAILED",
+			ID: uuid.New().String(), TenantID: tenantID, Username: "unknown", Action: "SCREEN_LAUNCH_REDEEM_FAILED",
 			Resource: req.SessionID, Details: "Launch code redeem refused: " + why,
 			IPAddress: clientIP(r), Timestamp: time.Now().UTC(),
 		})
@@ -713,13 +745,18 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	}
 	if r.Header.Get("X-Auth-Method") == "api-key" {
 		// The authority words it the same way from the requester.
-		summary = "An agent (admin key) will see and control the screen on " + label + ", up to " + span
+		agent, _ := agentLabel(r)
+		claim := responseauth.AgentClaim(agent)
+		who := strings.ToUpper(claim[:1]) + claim[1:] + " (admin key)"
+		summary = who + " will see and control the screen on " + label + ", up to " + span
 		if mode == response.ScreenModeView {
-			summary = "An agent (admin key) will see the screen on " + label + ", up to " + span
+			summary = who + " will see the screen on " + label + ", up to " + span
 		}
 	}
 	if askFirst {
 		summary += "; the person at the keyboard is asked to allow it first"
+	} else {
+		summary += "; it opens without asking the person at the keyboard"
 	}
 	if req.Unattended {
 		summary += "; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"

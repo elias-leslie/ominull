@@ -110,9 +110,35 @@ func listTargets(t []string) string {
 // show; the hub's own bound is the same (terminal.LimitBounds).
 const maxTerminalSessionSeconds = 24 * 60 * 60
 
+// ValidAgentLabel reports whether s can be an agent's self-declared label
+// (the hub's X-Ominull-Agent header): 1 to 64 printable ASCII characters,
+// no quote or backslash (it is shown quoted), no leading or trailing space.
+func ValidAgentLabel(s string) bool {
+	if s == "" || len(s) > 64 || strings.TrimSpace(s) != s {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// AgentClaim is how an agent's self-declared label is shown: as a claim,
+// never as an identity ("an agent calling itself \"claude-ops\"").
+func AgentClaim(label string) string {
+	if label == "" {
+		return "an agent"
+	}
+	return "an agent calling itself \"" + label + "\""
+}
+
 // describeTerminal shows a terminal request; seconds, when set, is how long
-// the hub will let the session run.
-func describeTerminal(payload []byte, targets []string, requester string, seconds int64) (string, string, error) {
+// the hub will let the session run. label is an admin-key agent's
+// self-declared name, shown as a claim.
+func describeTerminal(payload []byte, targets []string, requester string, seconds int64, label string) (string, string, error) {
 	var p response.TerminalSessionPayload
 	if err := decodeJSON(payload, &p); err != nil || strings.TrimSpace(p.Program) == "" {
 		return "", "", errors.New("terminal approval payload must name the program")
@@ -127,8 +153,12 @@ func describeTerminal(payload []byte, targets []string, requester string, second
 	if seconds > 0 {
 		length = " up to " + spanText(seconds) + ","
 	}
+	who := requester
+	if label != "" {
+		who += ", " + AgentClaim(label)
+	}
 	return "Open terminal", fmt.Sprintf("Interactive %s on %s, recorded,%s for %s",
-		cleanText(p.Program, 120), targets[0], length, requester), nil
+		cleanText(p.Program, 120), targets[0], length, who), nil
 }
 
 // describeScreen shows a screen request in the owner's words: control or
@@ -136,7 +166,11 @@ func describeTerminal(payload []byte, targets []string, requester string, second
 // first, and whether it may open with nobody there to ask. The payload is
 // exactly the digested {"mode":...[,"unattended":true]}; anything else in it
 // is refused, since the agent digests those bytes and nothing more.
-func describeScreen(payload []byte, targets []string, requester string, seconds int64, askFirst bool) (string, string, error) {
+//
+// Whether the person at the keyboard is asked is always said, either way:
+// leaving the clause out would read the same as not knowing. label is an
+// admin-key agent's self-declared name, shown as a claim.
+func describeScreen(payload []byte, targets []string, requester string, seconds int64, askFirst bool, label string) (string, string, error) {
 	var top map[string]json.RawMessage
 	if err := decodeJSON(payload, &top); err != nil {
 		return "", "", errors.New("screen approval payload must name the mode")
@@ -178,14 +212,19 @@ func describeScreen(payload []byte, targets []string, requester string, seconds 
 	// An agent holding the hub's admin key (ominullctl) is named as one, so
 	// the owner always knows who will be at the controls.
 	agent := strings.HasSuffix(requester, "(api-key)")
+	who := ""
+	if agent {
+		claim := AgentClaim(label)
+		who = strings.ToUpper(claim[:1]) + claim[1:] + " (admin key)"
+	}
 	var action, summary string
 	switch {
 	case p.Mode == response.ScreenModeControl && agent:
 		action = "Control screen"
-		summary = fmt.Sprintf("An agent (admin key) will see and control the screen on %s%s", targets[0], length)
+		summary = fmt.Sprintf("%s will see and control the screen on %s%s", who, targets[0], length)
 	case p.Mode == response.ScreenModeView && agent:
 		action = "Watch screen"
-		summary = fmt.Sprintf("An agent (admin key) will see the screen on %s%s", targets[0], length)
+		summary = fmt.Sprintf("%s will see the screen on %s%s", who, targets[0], length)
 	case p.Mode == response.ScreenModeControl:
 		action = "Control screen"
 		summary = fmt.Sprintf("See and control the screen on %s%s, for %s", targets[0], length, requester)
@@ -197,6 +236,8 @@ func describeScreen(payload []byte, targets []string, requester string, seconds 
 	}
 	if askFirst {
 		summary += "; the person at the keyboard is asked to allow it first"
+	} else {
+		summary += "; it opens without asking the person at the keyboard"
 	}
 	if p.Unattended {
 		summary += "; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"
@@ -230,10 +271,10 @@ func spanText(seconds int64) string {
 // digested payload. targets is the sorted, de-duplicated target list.
 func describeApproval(kind response.ActionKind, payload []byte, targets []string, requester string) (string, string, error) {
 	if kind == response.ActionKindTerminalSession {
-		return describeTerminal(payload, targets, requester, 0)
+		return describeTerminal(payload, targets, requester, 0, "")
 	}
 	if kind == response.ActionKindScreenSession {
-		return describeScreen(payload, targets, requester, 0, false)
+		return describeScreen(payload, targets, requester, 0, false, "")
 	}
 
 	if kind == ActionKindDetection {

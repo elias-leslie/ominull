@@ -125,6 +125,11 @@ type ApprovalRequestInput struct {
 	// screen session before it goes live (the machine's "ask the person
 	// first" setting). Shown to the owner, not digested, like SessionSeconds.
 	AskFirst bool `json:"ask_first,omitempty"`
+	// AgentLabel is the name an agent using the hub admin key gives itself
+	// (the hub's X-Ominull-Agent header). Self-declared: it is shown to the
+	// owner as a claim, never as an identity. Only an admin-key requester
+	// may carry one.
+	AgentLabel string `json:"agent_label,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -175,6 +180,13 @@ type ApprovalConsumeRequest struct {
 	Digest     string              `json:"digest"`
 	Targets    []string            `json:"targets"`
 	TTLSeconds int64               `json:"ttl_seconds,omitempty"`
+	// SessionSeconds, AskFirst and AgentLabel must equal what the request
+	// that was approved carried: the owner was shown them, so a second
+	// request cannot change the session length, the ask-first wording or
+	// the agent's name under the same approval.
+	SessionSeconds int64  `json:"session_seconds,omitempty"`
+	AskFirst       bool   `json:"ask_first,omitempty"`
+	AgentLabel     string `json:"agent_label,omitempty"`
 }
 
 // Approver is one pinned owner passkey (ES256, raw P-256 coordinates).
@@ -209,6 +221,11 @@ type approvalRecord struct {
 	digest    string
 	payload   []byte
 	createdAt time.Time
+	// What the owner was shown beside the digest; ConsumeApproval requires
+	// the same values.
+	sessionSeconds int64
+	askFirst       bool
+	agentLabel     string
 }
 
 type approvalBook struct {
@@ -372,12 +389,20 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		}
 	}
 	requester := cleanText(in.Requester, 80)
-	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
-	if err == nil && in.Kind == response.ActionKindTerminalSession && in.SessionSeconds != 0 {
-		action, summary, err = describeTerminal(in.Payload, targets, requester, in.SessionSeconds)
+	if in.AgentLabel != "" {
+		if !ValidAgentLabel(in.AgentLabel) {
+			return nil, errors.New("an agent label is 1 to 64 printable characters, without quotes or backslashes")
+		}
+		if !strings.HasSuffix(requester, "(api-key)") {
+			return nil, errors.New("only a request made with the hub admin key carries an agent label")
+		}
 	}
-	if err == nil && in.Kind == response.ActionKindScreenSession && (in.SessionSeconds != 0 || in.AskFirst) {
-		action, summary, err = describeScreen(in.Payload, targets, requester, in.SessionSeconds, in.AskFirst)
+	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
+	if err == nil && in.Kind == response.ActionKindTerminalSession {
+		action, summary, err = describeTerminal(in.Payload, targets, requester, in.SessionSeconds, in.AgentLabel)
+	}
+	if err == nil && in.Kind == response.ActionKindScreenSession {
+		action, summary, err = describeScreen(in.Payload, targets, requester, in.SessionSeconds, in.AskFirst, in.AgentLabel)
 	}
 	if err != nil {
 		return nil, err
@@ -508,6 +533,10 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		digest:    stmt.Digest,
 		payload:   append([]byte(nil), in.Payload...),
 		createdAt: now,
+		// Only what describeTerminal/describeScreen showed the owner.
+		sessionSeconds: in.SessionSeconds,
+		askFirst:       in.AskFirst,
+		agentLabel:     in.AgentLabel,
 		view: ApprovalView{
 			ID:        stmt.ID,
 			TenantID:  stmt.TenantID,
@@ -839,8 +868,9 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 }
 
 // ConsumeApproval spends an approved request exactly once and signs one
-// grant per target. The kind, payload digest and target set must equal what
-// the owner approved.
+// grant per target. The kind, payload digest, target set, requester and
+// what the owner was shown beside them (session length, ask-first, agent
+// label) must equal what the owner approved.
 func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.EndpointGrant, error) {
 	if req == nil || req.ID == "" {
 		return nil, ErrApprovalNotFound
@@ -865,7 +895,8 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 	}
 	targets := sortedUnique(req.Targets)
 	if r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") ||
-		cleanText(req.Requester, 80) != r.stmt.Requester {
+		cleanText(req.Requester, 80) != r.stmt.Requester ||
+		req.SessionSeconds != r.sessionSeconds || req.AskFirst != r.askFirst || req.AgentLabel != r.agentLabel {
 		b.mu.Unlock()
 		a.auditApproval(req.TenantID, "", "approval_consume_refused", string(req.Kind), strings.Join(targets, ","), req.ID, "denied", "action differs from the approved one")
 		return nil, ErrApprovalMismatch
