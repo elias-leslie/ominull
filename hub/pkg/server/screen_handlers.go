@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -122,7 +124,7 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		mode, ok := req.mode(w)
-		if !ok || !s.screenCapable(w, req.EndpointID, mode) {
+		if !ok || !s.screenCapable(w, r, req.EndpointID, mode) {
 			return
 		}
 		operatorID := s.operatorFromRequest(r)
@@ -688,7 +690,7 @@ func (q screenOpenRequest) mode(w http.ResponseWriter) (string, bool) {
 // must report the screen capability (unlike the terminal there is no
 // fallback for agents that report nothing) and a pinned response key, and
 // for control, remote input.
-func (s *Server) screenCapable(w http.ResponseWriter, endpointID, mode string) bool {
+func (s *Server) screenCapable(w http.ResponseWriter, r *http.Request, endpointID, mode string) bool {
 	if strings.TrimSpace(endpointID) == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing endpoint_id")
 		return false
@@ -706,7 +708,41 @@ func (s *Server) screenCapable(w http.ResponseWriter, endpointID, mode string) b
 		writeJSONError(w, http.StatusConflict, why)
 		return false
 	}
+	if why := s.screenTrustRefusal(r.Context(), ep); why != "" {
+		writeJSONError(w, http.StatusConflict, why)
+		return false
+	}
 	return true
+}
+
+// screenTrustRefusal says, before the owner is asked, why the endpoint's
+// agent would drop a screen grant without a word: its signed capability
+// manifest lacks screen, it has not taken the manifest that adds it yet, or
+// its local ceiling forbids it. "" when nothing known stands in the way.
+func (s *Server) screenTrustRefusal(ctx context.Context, ep *storage.Endpoint) string {
+	m := s.endpointManifest(ctx, endpointTenant(ep), ep.ID, "", false)
+	if m == nil {
+		return ""
+	}
+	if !slices.Contains(m.Caps, response.CapScreen) {
+		return fmt.Sprintf("this endpoint's capability profile (%s) does not include the remote screen; change what the host accepts first", m.Profile)
+	}
+	s.trust.mu.Lock()
+	s.trust.init()
+	seen, ok := s.trust.reports[ep.ID]
+	s.trust.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	if seen.report.ManifestSeq < m.Seq {
+		return fmt.Sprintf("this endpoint has not taken the capability manifest that allows the remote screen yet (it holds %d, current is %d); it picks it up at its next check-in, so try again in a minute", seen.report.ManifestSeq, m.Seq)
+	}
+	switch seen.report.Ceiling {
+	case "", "respond", "engagement":
+	default:
+		return fmt.Sprintf("this endpoint's local capability ceiling (%s), set on the host, does not allow the remote screen", seen.report.Ceiling)
+	}
+	return ""
 }
 
 // resolveScreen describes a screen request for the owner's approval. The
@@ -728,7 +764,7 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 		return nil, false
 	}
 	mode, ok := req.mode(w)
-	if !ok || !s.screenCapable(w, req.EndpointID, mode) {
+	if !ok || !s.screenCapable(w, r, req.EndpointID, mode) {
 		return nil, false
 	}
 	d := s.terminalDuration(req.MaxDurationSeconds)

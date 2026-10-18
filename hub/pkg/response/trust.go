@@ -73,6 +73,24 @@ func ProfileCaps(profile string) ([]string, bool) {
 	return out, true
 }
 
+// MatchesProfile reports whether the manifest holds exactly what its profile
+// holds in this release. A manifest signed before a release changed the
+// profile does not, and is re-signed.
+func (m *CapabilityManifest) MatchesProfile() bool {
+	want, ok := ProfileCaps(m.Profile)
+	if !ok || len(want) != len(m.Caps) {
+		return false
+	}
+	have := append([]string(nil), m.Caps...)
+	sort.Strings(have)
+	for i := range want {
+		if have[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ProfileRank orders profiles by reach, for "is this a raise" checks.
 func ProfileRank(profile string) int {
 	switch profile {

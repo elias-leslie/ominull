@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -704,5 +705,64 @@ func TestServer_ScreenApprovalBindings(t *testing.T) {
 	}
 	if !created || !failed {
 		t.Fatalf("audit: created with the label %v, failed redeem with tenant %v", created, failed)
+	}
+}
+
+// TestServer_ScreenTrustPreflight: the owner is never asked for a session the
+// endpoint's agent would drop without a word (the first live test: a manifest
+// signed before screen joined the respond profile).
+func TestServer_ScreenTrustPreflight(t *testing.T) {
+	t.Parallel()
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	seedScreenEndpoint(t, srv, "win-pre", `{"isolate":true,"screen":{"input":true}}`)
+	open := func() (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/screen/sessions", strings.NewReader(`{"endpoint_id":"win-pre","mode":"control"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-admin-key-12345")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		msg, _ := m["error"].(string)
+		return resp.StatusCode, msg
+	}
+	report := func(seq int64, ceiling string) {
+		srv.trust.mu.Lock()
+		srv.trust.init()
+		srv.trust.reports["win-pre"] = trustReportSeen{report: response.AgentTrustReport{V: 1, ManifestSeq: seq, Ceiling: ceiling}, at: time.Now()}
+		srv.trust.mu.Unlock()
+	}
+	ctx := context.Background()
+	m := srv.endpointManifest(ctx, "default", "win-pre", "", true)
+	if m == nil || !m.Has(response.CapScreen) {
+		t.Fatalf("respond manifest without screen: %+v", m)
+	}
+
+	report(m.Seq-1, "")
+	if code, msg := open(); code != http.StatusConflict || !strings.Contains(msg, "has not taken the capability manifest") {
+		t.Fatalf("agent behind its manifest: %d %q", code, msg)
+	}
+	report(m.Seq, "isolate")
+	if code, msg := open(); code != http.StatusConflict || !strings.Contains(msg, "local capability ceiling (isolate)") {
+		t.Fatalf("ceiling below screen: %d %q", code, msg)
+	}
+	report(m.Seq, "respond")
+	if code, msg := open(); code != http.StatusAccepted {
+		t.Fatalf("ready endpoint was not offered to the owner: %d %q", code, msg)
+	}
+
+	// Narrowed to monitor: no screen in the profile at all.
+	if n := srv.endpointManifest(ctx, "default", "win-pre", "monitor", true); n == nil || n.Profile != "monitor" {
+		t.Fatalf("narrowing: %+v", n)
+	}
+	if code, msg := open(); code != http.StatusConflict || !strings.Contains(msg, "profile (monitor) does not include the remote screen") {
+		t.Fatalf("monitor profile: %d %q", code, msg)
 	}
 }

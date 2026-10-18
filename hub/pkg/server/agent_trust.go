@@ -157,7 +157,7 @@ func (s *Server) endpointManifest(ctx context.Context, tenantID, endpointID, pro
 	c.init()
 	m, ok := c.manifests[endpointID]
 	c.mu.Unlock()
-	if ok && !refresh && (profile == "" || response.ProfileRank(profile) >= response.ProfileRank(m.Profile)) {
+	if ok && !refresh && m.MatchesProfile() && (profile == "" || response.ProfileRank(profile) >= response.ProfileRank(m.Profile)) {
 		return m
 	}
 	m, err := s.responseAuth.EndpointManifest(ctx, &responseauth.ManifestRequest{TenantID: tenantID, EndpointID: endpointID, Profile: profile})

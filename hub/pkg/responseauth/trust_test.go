@@ -341,3 +341,58 @@ func TestTrustEpochIsTheAuthoritysAndManifestsFollowThePolicyKey(t *testing.T) {
 		t.Fatalf("re-signed manifest %+v %v (was %+v)", n, err, m)
 	}
 }
+
+// A manifest signed before a release added a capability to its profile (screen
+// joined respond in 1.8.80) is re-signed with the profile's current list, same
+// profile, next seq; one that already matches is left alone.
+func TestManifestFollowsItsProfileAcrossReleases(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "keys"), 0o700)
+	open := func() *responseauth.Authority {
+		a, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, responseauth.NewMemoryStore())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	auth := open()
+	req := &responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-old"}
+	m, err := auth.EndpointManifest(req)
+	if err != nil || m.Seq != 1 || !m.Has(response.CapScreen) {
+		t.Fatalf("initial manifest %+v %v", m, err)
+	}
+	again, _ := auth.EndpointManifest(req)
+	if again.Seq != 1 {
+		t.Fatalf("a manifest that matches its profile was re-signed: %+v", again)
+	}
+
+	// Rewrite the stored manifest as an older release signed it: respond
+	// without screen.
+	path := filepath.Join(dir, "manifests.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []map[string]interface{}
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) != 1 {
+		t.Fatalf("manifests.json: %v %d", err, len(list))
+	}
+	list[0]["caps"] = []string{"collect", "isolate", "mesh", "terminal", "update"}
+	raw, _ = json.Marshal(list)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	auth = open()
+	keys, _ := auth.TrustKeys("default")
+	n, err := auth.EndpointManifest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Seq != 2 || n.Profile != "respond" || !n.Has(response.CapScreen) || !n.MatchesProfile() || n.Verify(pub(t, keys.PolicyKey)) != nil {
+		t.Fatalf("stale manifest not refreshed: %+v", n)
+	}
+	if still, _ := auth.EndpointManifest(req); still.Seq != 2 {
+		t.Fatalf("refreshed manifest re-signed again: %+v", still)
+	}
+}

@@ -491,6 +491,19 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 				fmt.Sprintf("profile %s under the current policy key, seq %d", n.Profile, n.Seq))
 			m = n
 		}
+		// A release that changes what a profile holds (e.g. screen joined
+		// respond in 1.8.80) re-signs older manifests, same profile, next
+		// seq. The profile stays the owner's choice; each session of a new
+		// capability still takes its own owner approval.
+		if _, ok := response.ProfileCaps(m.Profile); ok && !m.MatchesProfile() {
+			n, err := a.signManifestLocked(req.TenantID, ep, m.Profile, m.Seq+1)
+			if err != nil {
+				return nil, err
+			}
+			a.auditApproval(req.TenantID, "authority", "manifest_refreshed", string(response.ActionKindCapability), ep, "", "success",
+				fmt.Sprintf("profile %s now holds %s (was %s), seq %d", n.Profile, strings.Join(n.Caps, ", "), strings.Join(m.Caps, ", "), n.Seq))
+			m = n
+		}
 		// Narrowing needs no approval: it can only take capabilities away.
 		if profile != "" && response.ProfileRank(profile) > 0 && response.ProfileRank(profile) < response.ProfileRank(m.Profile) {
 			n, err := a.signManifestLocked(req.TenantID, ep, profile, m.Seq+1)
