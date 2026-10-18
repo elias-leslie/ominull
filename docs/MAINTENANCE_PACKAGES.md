@@ -464,6 +464,16 @@ latest runs (`ominull.decisions.playbook.<id>`,
   runs skip it there (a reason is required); `handled` just closes it.
   Answers are audited (`MAINTENANCE_DECISION`) and kept in the settings row
   `maintenance.decisions` (the newest 500).
+- **Nightshift inbox.** The feed records say `"answer_in":"Nightshift inbox or OmniNull console"`. Nightshift
+  reads the open items and answers them with its approval relay key (no admin fallback). It reads with
+  `GET /api/v1/integrations/nightshift/decisions`, which returns `{"open":[{key, group, group_title, endpoint_id, endpoint, package,
+  item:{id,name,reason,keep?}, seen, answers}]}` with no answered list (the feed can't carry the items; its records stay
+  for the board count). It answers with
+  `POST /api/v1/integrations/nightshift/decisions/answer {"key","answer","reason"}`. The rules are the same
+  as the console's (keep needs a reason and a list setting); only keys that are open now (the ones the
+  `ominull.decisions.*` records list) are answered. `200 {"answered":{...}}`, `400` bad answer or keep without a
+  reason, `404` not open (answered already, or a newer run settled it). Audited `MAINTENANCE_DECISION` by
+  `nightshift (owner)`.
 - **Coming back.** An answered item opens again only if a run that finished
   after the answer reports it again.
 - **Console.** A *Decisions for you* card at the top of the Maintenance page,

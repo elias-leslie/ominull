@@ -277,7 +277,7 @@ func (s *Server) decisionFindings(now time.Time) ([]feedFinding, error) {
 		msg := fmt.Sprintf("%s: %s waiting for your decision on %s", g.title,
 			plural(len(g.items), "item", "items"), plural(len(g.hosts), "machine", "machines"))
 		out = append(out, s.feedFinding(now, decisionUID(key), "Maintenance decisions", ocsfSevMedium, ocsfStatusNew, msg, res,
-			map[string]any{"run": key, "decisions": items, "answer_in": "OmniNull console, Maintenance page, Decisions"}))
+			map[string]any{"run": key, "decisions": items, "answer_in": "Nightshift inbox or OmniNull console"}))
 	}
 	resolved := map[string]string{}
 	for _, a := range s.decisionAnswers() {
@@ -355,6 +355,64 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// relayDecision is what Nightshift's inbox shows for one open item.
+type relayDecision struct {
+	Key        string    `json:"key"`
+	Group      string    `json:"group"`
+	GroupTitle string    `json:"group_title"`
+	EndpointID string    `json:"endpoint_id"`
+	Endpoint   string    `json:"endpoint"`
+	Package    string    `json:"package"`
+	Item       ownerItem `json:"item"`
+	Seen       time.Time `json:"seen"`
+	Answers    []string  `json:"answers"`
+}
+
+// handleRelayDecisions: GET /api/v1/integrations/nightshift/decisions (relay
+// key): the open items only, for Nightshift's inbox (the feed cannot carry
+// them). No answered list.
+func (s *Server) handleRelayDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	open, err := s.openDecisions(time.Now().UTC())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]relayDecision, 0, len(open))
+	for _, d := range open {
+		out = append(out, relayDecision{Key: d.Key, Group: d.Group, GroupTitle: d.GroupTitle, EndpointID: d.EndpointID, Endpoint: d.Endpoint,
+			Package: d.Package, Item: d.Item, Seen: d.Seen, Answers: d.Answers})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"open": out})
+}
+
+// handleRelayDecisionAnswer: POST /api/v1/integrations/nightshift/decisions/answer
+// (relay key). The owner answered an open decision in Nightshift's inbox; the
+// same rules as the console apply, recorded as by "nightshift (owner)".
+func (s *Server) handleRelayDecisionAnswer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var a decisionAnswer
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	r.Header.Set("X-Username", "nightshift (owner)")
+	d, status, err := s.answerDecision(r, a, time.Now().UTC())
+	if err != nil {
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"answered": d})
 }
 
 func (s *Server) answerDecision(r *http.Request, a decisionAnswer, now time.Time) (*ownerDecision, int, error) {

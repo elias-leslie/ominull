@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -140,5 +141,106 @@ func TestOwnerDecisions(t *testing.T) {
 	runRemoval(t, srv, `{"v":1,"state":"drift","reboot":false,"changed":[],"detail":{"needs_owner":[{"id":"hp-extras","name":"HP Extras","reason":"it is running and was left open","keep":"keep"}]}}`)
 	if v := getDecisions(t, srv); len(v.Open) != 1 || v.Open[0].Item.ID != "hp-extras" {
 		t.Fatalf("reopened: %+v", v.Open)
+	}
+}
+
+// Nightshift's inbox answers an open decision with the relay key: the same
+// rules as the console, recorded as by "nightshift (owner)"; the admin route
+// stays admin-only and the relay key answers nothing that is not open.
+func TestRelayDecisionAnswer(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.responseEnabled = true
+	ownerOf(t, srv)
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	syncRealPackage(t, srv, "software-removal.ps1")
+	runRemoval(t, srv, `{"v":1,"state":"drift","reboot":false,"changed":[],"detail":{"needs_owner":[`+
+		`{"id":"wave-tool","name":"Wave Tool","reason":"its uninstaller did not finish","keep":"keep"},`+
+		`{"id":"hp-extras","name":"HP Extras","reason":"left open","keep":"keep"}]}}`)
+	byID := map[string]ownerDecision{}
+	for _, d := range getDecisions(t, srv).Open {
+		byID[d.Item.ID] = d
+	}
+	findings, _ := srv.decisionFindings(time.Now().UTC())
+	if len(findings) != 1 || findings[0].Unmapped["answer_in"] != "Nightshift inbox or OmniNull console" {
+		t.Fatalf("answer_in: %+v", findings)
+	}
+
+	issue := adminPost(srv, "/api/v1/integrations/nightshift/approval-key", ``, "")
+	var k struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(issue.Body.Bytes(), &k)
+	relay := func(key, body string) (int, string) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/nightshift/decisions/answer", strings.NewReader(body))
+		req.Header.Set("X-API-Key", key)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	wave, hp := byID["wave-tool"].Key, byID["hp-extras"].Key
+	listOpen := func(key string) (int, []relayDecision) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/nightshift/decisions", nil)
+		req.Header.Set("X-API-Key", key)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		var v struct {
+			Open []relayDecision `json:"open"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &v)
+		if strings.Contains(w.Body.String(), `"answered"`) {
+			t.Fatalf("relay list carries answered items: %s", w.Body.String())
+		}
+		return w.Code, v.Open
+	}
+	if c, _ := listOpen("mock_admin_token"); c != http.StatusUnauthorized {
+		t.Fatalf("admin key on the relay list: %d", c)
+	}
+	if c, open := listOpen(k.Key); c != http.StatusOK || len(open) != 2 || open[0].GroupTitle == "" || open[0].Endpoint != "laptop-1" || len(open[0].Answers) != 2 {
+		t.Fatalf("relay list: %d %+v", c, open)
+	}
+	if c, b := relay("mock_admin_token", `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusUnauthorized {
+		t.Fatalf("admin key on the relay route: %d %s", c, b)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/decisions", strings.NewReader(`{"key":"`+hp+`","answer":"handled"}`))
+	req.Header.Set("X-API-Key", k.Key)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatalf("relay key answered on the admin route: %s", w.Body.String())
+	}
+	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"keep"}`); c != http.StatusBadRequest {
+		t.Fatalf("keep without a reason: %d %s", c, b)
+	}
+	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"maybe"}`); c != http.StatusBadRequest {
+		t.Fatalf("bad answer: %d %s", c, b)
+	}
+	if c, b := relay(k.Key, `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusOK || !strings.Contains(b, `"by":"nightshift (owner)"`) {
+		t.Fatalf("relay handled: %d %s", c, b)
+	}
+	if c, b := relay(k.Key, `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusNotFound {
+		t.Fatalf("closed key: %d %s", c, b)
+	}
+	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"keep","reason":"the kids use it"}`); c != http.StatusOK {
+		t.Fatalf("relay keep: %d %s", c, b)
+	}
+	if c, open := listOpen(k.Key); c != http.StatusOK || len(open) != 0 {
+		t.Fatalf("after answers the list is empty: %d %+v", c, open)
+	}
+	logs, err := store.ListAuditLogs("", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, l := range logs {
+		if l.Action == "MAINTENANCE_DECISION" && l.Username == "nightshift (owner)" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("want 2 MAINTENANCE_DECISION audits by nightshift (owner), got %d", n)
 	}
 }
