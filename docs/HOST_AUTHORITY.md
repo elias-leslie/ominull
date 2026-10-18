@@ -189,5 +189,22 @@ Each heartbeat's `trust` object adds:
 "host_error":"<why a host file was not used>"
 ```
 
-`host_keys`, `host_allow` and `host_error` appear only when `host_authority.json` exists. `host_authority` is true
-when at least one key loaded. The fleet trust view (`GET /api/v1/fleet/trust`) carries the same fields.
+`host_keys`, `host_allow` and `host_error` appear only when `host_authority.json` existed when the agent started (it
+reads the file only then: write the host files before restarting the agent). `host_authority` is true when at least
+one key loaded. The fleet trust view (`GET /api/v1/fleet/trust`, admin) carries the same fields; `host_authority` is
+`false`, not absent, for an agent that reported none.
+
+### Lock facts for Nightshift
+
+`GET /api/v1/integrations/nightshift/locks` with the approval relay key (`X-API-Key`; the admin key is refused, as on
+every relay route). It lists only machines whose latest trust report shows a ceiling or a host file, with public facts:
+
+```json
+{"endpoints":[{"endpoint_id":"..","hostname":"..","agent_version":"1.8.81","ceiling":"signed-scripts",
+  "profile":"respond","manifest_seq":2,"host_file":true,"host_authority":true,
+  "host_keys":[{"id":"<signer_key_id>","role":"tap"}],"host_allow":[],"host_error":"..",
+  "remote_access_off":true,"reported_at":"2026-10-18T03:36:50Z","stale":false}]}
+```
+
+`host_file` false with a ceiling set usually means the agent started before the installer wrote
+`host_authority.json`; restart it. `stale` is true when the report is older than the 15 minutes the courier accepts.

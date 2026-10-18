@@ -743,7 +743,7 @@ type fleetTrustRow struct {
 	Ceiling      string   `json:"ceiling,omitempty"`
 	// Host authority: keys pinned on the host (ids and roles), the auto
 	// allow-list, and why a host file was not used.
-	HostAuthority   bool                       `json:"host_authority,omitempty"`
+	HostAuthority   *bool                      `json:"host_authority,omitempty"` // set whenever the agent reported: false shows as false
 	HostKeys        []response.HostKeyReport   `json:"host_keys,omitempty"`
 	HostAllow       []response.HostAllowReport `json:"host_allow,omitempty"`
 	HostError       string                     `json:"host_error,omitempty"`
@@ -815,7 +815,8 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 				row.MissingKeys = append(row.MissingKeys, "policy")
 			}
 			row.Profile, row.ManifestSeq, row.Ceiling = rep.Profile, rep.ManifestSeq, rep.Ceiling
-			row.HostAuthority, row.HostKeys, row.HostAllow, row.HostError = rep.HostAuthority, rep.HostKeys, rep.HostAllow, rep.HostError
+			hostAuth := rep.HostAuthority
+			row.HostAuthority, row.HostKeys, row.HostAllow, row.HostError = &hostAuth, rep.HostKeys, rep.HostAllow, rep.HostError
 			iso := rep.Isolated
 			row.AgentIsolated = &iso
 			row.IsolationSource = rep.IsolationSource
