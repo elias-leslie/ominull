@@ -297,29 +297,8 @@ func TestScreenWatchers(t *testing.T) {
 	// The hub reads a watcher's messages in order, so its pong to a ping
 	// sent after the ack says the ack was judged - while control was still
 	// attached - before control leaves below.
-	pong := make(chan struct{}, 1)
-	watchers[0].SetPongHandler(func(string) error {
-		select {
-		case pong <- struct{}{}:
-		default:
-		}
-		return nil
-	})
-	go func() {
-		for {
-			if _, _, err := watchers[0].NextReader(); err != nil {
-				return
-			}
-		}
-	}()
-	if err := watchers[0].WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-pong:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the hub never answered the watcher's ping")
-	}
+	judged := watcherSync(t)
+	judged(watchers[0])
 	send(t, op, websocket.TextMessage, `{"type":"ack","monitor":0,"frame":2}`)
 	if _, got := read(t, agent); !strings.Contains(string(got), `"frame":2`) {
 		t.Fatalf("agent got %s, want only the control ack", got)
@@ -334,6 +313,10 @@ func TestScreenWatchers(t *testing.T) {
 	if _, got := read(t, agent); !strings.Contains(string(got), `"frame":4`) {
 		t.Fatalf("agent got %s, want the oldest watcher's ack (no pause)", got)
 	}
+	// watchers[1]'s non-pacing ack must be judged before watchers[0] leaves
+	// below, or it arrives after watchers[1] became the pacer and is passed on
+	// where the pause is expected.
+	judged(watchers[1])
 	// A watcher's close detaches it alone.
 	send(t, watchers[0], websocket.TextMessage, `{"type":"close"}`)
 	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers-1 })
@@ -645,5 +628,43 @@ func TestLaunchCodes(t *testing.T) {
 	}
 	if _, ok := c.TakeWatchToken("s1", tok); ok {
 		t.Fatal("watch token used twice")
+	}
+}
+
+// watcherSync returns a function that waits until the hub has judged every
+// message a watcher sent so far: the hub reads a connection's messages in
+// order, so its pong to a later ping proves the earlier ones were handled.
+// It takes over reading the connection (pongs are seen only while reading).
+func watcherSync(t *testing.T) func(*websocket.Conn) {
+	started := map[*websocket.Conn]chan struct{}{}
+	return func(c *websocket.Conn) {
+		t.Helper()
+		pong, ok := started[c]
+		if !ok {
+			pong = make(chan struct{}, 1)
+			started[c] = pong
+			c.SetPongHandler(func(string) error {
+				select {
+				case pong <- struct{}{}:
+				default:
+				}
+				return nil
+			})
+			go func() {
+				for {
+					if _, _, err := c.NextReader(); err != nil {
+						return
+					}
+				}
+			}()
+		}
+		if err := c.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-pong:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the hub never answered the watcher's ping")
+		}
 	}
 }
