@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -288,5 +289,50 @@ func TestPackageRunDue(t *testing.T) {
 		if got := packageRunDue(c.jobs, day, now); got != c.want {
 			t.Errorf("%s: due=%v, want %v", name, got, c.want)
 		}
+	}
+}
+
+// Every package in the repository, synced into the library as the release
+// does, is offered to the owner under its own name as a released package,
+// never as an unknown script (1.8.83: a stale library copy of windows-reboot
+// read "not a released package").
+func TestEveryReleasedPackageRunsAsReleased(t *testing.T) {
+	t.Parallel()
+	files, _ := filepath.Glob("../../../packages/windows/*.ps1")
+	lin, _ := filepath.Glob("../../../packages/linux/*.sh")
+	files = append(files, lin...)
+	if len(files) < 10 {
+		t.Fatalf("found only %d packages", len(files))
+	}
+	for _, f := range files {
+		rel := strings.TrimPrefix(f, "../../../packages/")
+		t.Run(rel, func(t *testing.T) {
+			srv, store := setupTestServer(t)
+			defer store.Close()
+			srv.responseEnabled = true
+			ownerOf(t, srv)
+			for _, ep := range []storage.Endpoint{
+				{ID: "ep-win", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: time.Now().UTC()},
+				{ID: "ep-lin", TenantID: "default", Hostname: "server-1", OS: "Ubuntu 24.04", Status: "online", LastSeenAt: time.Now().UTC()},
+			} {
+				if err := store.UpsertEndpoint(ep); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, h := syncRealPackage(t, srv, rel)
+			ep := "ep-win"
+			if h.PlatformName() == "linux" {
+				ep = "ep-lin"
+			}
+			body := `{"endpoint_ids":["` + ep + `"],"packages":["` + h.Name + `"],"mode":"enforce"}`
+			w := adminPost(srv, "/api/v1/maintenance/run", body, "")
+			if w.Code != http.StatusAccepted && w.Code != http.StatusCreated {
+				t.Fatalf("%s: %d %s", h.Name, w.Code, w.Body.String())
+			}
+			short := strings.TrimPrefix(strings.TrimPrefix(h.Name, "windows-"), "linux-")
+			if strings.Contains(w.Body.String(), "not a released package") || !strings.Contains(w.Body.String(), short) {
+				t.Fatalf("%s is not offered as a released package: %s", h.Name, w.Body.String())
+			}
+		})
 	}
 }

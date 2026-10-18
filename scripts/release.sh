@@ -150,6 +150,8 @@ if [ "${DO_HUB}" -eq 1 ]; then
     echo "[*] Installing hub package first and publishing signed endpoint packages."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${DEPLOY_CMD}"
+    echo "[*] Syncing the hub's package library with the released packages."
+    "${ROOT_DIR}/scripts/sync-package-library.sh"
 fi
 
 if [ "${DO_AGENTS}" -eq 0 ]; then
