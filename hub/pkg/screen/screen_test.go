@@ -668,3 +668,83 @@ func watcherSync(t *testing.T) func(*websocket.Conn) {
 		}
 	}
 }
+
+// TestScreenReattachGetsStateAndOpensTheWindow is the third live test:
+// ominullctl attaches once per command, and the helper sends its monitor list
+// and desktop only at start, so every command after the first timed out
+// waiting for a monitor list. Each new attachment now gets them first, and a
+// resume acks the frames the departed viewer left unacked, so the helper's
+// flow-control window is open for the next picture.
+func TestScreenReattachGetsStateAndOpensTheWindow(t *testing.T) {
+	h := newHarness(t)
+	h.addWatch()
+	sess, op, agent := h.open("win-re", response.ScreenModeControl)
+
+	hello := `{"type":"hello","monitors":[{"id":0,"w":1280,"h":800,"x":0,"y":0,"primary":true}],"active":0}`
+	desktop := `{"type":"desktop","name":"user","signed_in":true}`
+	send(t, agent, websocket.TextMessage, hello)
+	send(t, agent, websocket.TextMessage, desktop)
+	send(t, agent, websocket.TextMessage, `{"type":"frame_end","monitor":0,"frame":6,"tiles":20}`)
+	for _, want := range []string{hello, desktop, `"frame_end"`} {
+		if _, got := read(t, op); !strings.Contains(string(got), want) {
+			t.Fatalf("first viewer got %s, want %s", got, want)
+		}
+	}
+	// The viewer leaves without acking frame 6: the hub pauses the agent.
+	_ = op.Close()
+	waitDetached(t, sess)
+	if _, got := read(t, agent); string(got) != `{"type":"pause"}` {
+		t.Fatalf("after the viewer left: %q, want pause", got)
+	}
+
+	// The next command's viewer gets the monitor list and desktop first.
+	tok, err := h.mgr.RotateOperatorToken(sess.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op2 := h.dial("/op", url.Values{"session_id": {sess.SessionID}, "token": {tok}})
+	defer op2.Close()
+	wantHello := `{"type":"hello","monitors":[{"id":0,"w":1280,"h":800,"x":0,"y":0,"primary":true}],"active":0}`
+	if _, got := read(t, op2); string(got) != wantHello {
+		t.Fatalf("second viewer's first message: %s, want the monitor list", got)
+	}
+	if _, got := read(t, op2); string(got) != desktop {
+		t.Fatalf("second viewer's second message: %s, want the desktop", got)
+	}
+	// The agent is resumed and its window opened: two acks of frame 6.
+	for _, want := range []string{`{"type":"resume"}`, `{"type":"ack","monitor":0,"frame":6}`, `{"type":"ack","monitor":0,"frame":6}`} {
+		if _, got := read(t, agent); string(got) != want {
+			t.Fatalf("agent after reattach: %s, want %s", got, want)
+		}
+	}
+	// A monitor change replaces the list a later attachment gets.
+	resized := `{"type":"resized","monitors":[{"id":0,"w":1920,"h":1080,"x":0,"y":0,"primary":true}],"active":0}`
+	send(t, agent, websocket.TextMessage, resized)
+	if _, got := read(t, op2); string(got) != resized {
+		t.Fatalf("live resized: %s", got)
+	}
+	w := h.dial("/watch", url.Values{"session_id": {sess.SessionID}})
+	defer w.Close()
+	if _, got := read(t, w); !strings.Contains(string(got), `"type":"hello"`) || !strings.Contains(string(got), `"w":1920`) {
+		t.Fatalf("watcher's first message: %s, want the resized monitor list as a hello", got)
+	}
+	if _, got := read(t, w); string(got) != desktop {
+		t.Fatalf("watcher's second message: %s, want the desktop", got)
+	}
+}
+
+// A session whose agent has sent nothing yet replays nothing and acks nothing.
+func TestScreenReplayEmptyBeforeHello(t *testing.T) {
+	p := newPolicy(Program(response.ScreenModeView), "empty").(*policy)
+	if r := p.Replay(); len(r) != 0 {
+		t.Fatalf("replay before hello: %q", r)
+	}
+	if r := p.ResumeMessages(); len(r) != 0 {
+		t.Fatalf("resume acks before any frame: %q", r)
+	}
+	// A malformed hello is not kept.
+	p.Agent(websocket.TextMessage, []byte(`{"type":"hello"}`))
+	if r := p.Replay(); len(r) != 0 {
+		t.Fatalf("replay after a hello without monitors: %q", r)
+	}
+}

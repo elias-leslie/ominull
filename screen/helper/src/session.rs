@@ -164,6 +164,10 @@ impl<B: ScreenBackend> Session<B> {
                 // attach/detach burst (ominullctl screen shot/click) repaints at
                 // once (§4.1 note).
                 self.paused = false;
+                // Frames sent to a viewer that has since left will never be
+                // acked (the hub drops them while nobody is attached); without
+                // this a full window would stall every later attachment.
+                self.unacked = 0;
                 self.backend.request_keyframe();
             }
             InMsg::Ack { frame, .. } => {
@@ -434,6 +438,16 @@ mod tests {
         s.on_message(InMsg::Resume, &mut out).unwrap();
         assert_eq!(s.backend.keyframe_requests, before + 1);
         assert!(!s.paused);
+    }
+
+    #[test]
+    fn resume_reopens_the_ack_window() {
+        let mut s = Session::new(MockBackend::default(), Mode::Control);
+        let mut out = Vec::new();
+        s.unacked = MAX_UNACKED;
+        s.on_message(InMsg::Pause, &mut out).unwrap();
+        s.on_message(InMsg::Resume, &mut out).unwrap();
+        assert_eq!(s.unacked, 0);
     }
 
     #[test]

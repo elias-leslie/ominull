@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"ominull/hub/pkg/response"
@@ -40,6 +41,18 @@ const (
 type policy struct {
 	sessionID string
 	control   bool
+	// replayMu guards hello and desktop: the latest monitor list (as a
+	// hello) and desktop message from the agent, which the helper sends only
+	// at start and on a change. Each new attachment gets them first
+	// (terminal.ReplayPolicy), or a second ominullctl command would wait
+	// forever for a monitor list.
+	replayMu sync.Mutex
+	hello    []byte
+	desktop  []byte
+	// lastFrame is the agent's latest frame_end (monitor, frame), guarded by
+	// replayMu; haveFrame says one was seen.
+	lastMonitor, lastFrame int64
+	haveFrame              bool
 	// buttons is the control attachment's last mouse button state, for the
 	// input audit (read pump goroutine only).
 	buttons map[string]bool
@@ -132,7 +145,24 @@ func (p *policy) Agent(msgType int, data []byte) terminal.FrameDecision {
 		return closeWith("malformed_agent_frame")
 	}
 	switch f.Type {
-	case agHello, agDesktop, agFrameEnd, agCursorPos, agResized, agSASUnavailable:
+	case agHello, agResized:
+		p.remember(f.Type, data)
+		return terminal.FrameDecision{}
+	case agDesktop:
+		p.remember(f.Type, data)
+		return terminal.FrameDecision{}
+	case agFrameEnd:
+		var fe struct {
+			Monitor int64 `json:"monitor"`
+			Frame   int64 `json:"frame"`
+		}
+		if json.Unmarshal(data, &fe) == nil && fe.Frame >= 0 && fe.Monitor >= 0 {
+			p.replayMu.Lock()
+			p.lastMonitor, p.lastFrame, p.haveFrame = fe.Monitor, fe.Frame, true
+			p.replayMu.Unlock()
+		}
+		return terminal.FrameDecision{}
+	case agCursorPos, agSASUnavailable:
 		return terminal.FrameDecision{}
 	case agBye:
 		reason := "agent_bye"
@@ -143,6 +173,85 @@ func (p *policy) Agent(msgType int, data []byte) terminal.FrameDecision {
 	}
 	return closeWith("forbidden_agent_frame_type")
 }
+
+// remember keeps the state a later attachment needs. A resized carries the
+// same monitors and active fields as hello, so it is kept as a hello.
+func (p *policy) remember(typ string, data []byte) {
+	var keep []byte
+	switch typ {
+	case agHello, agResized:
+		var m struct {
+			Monitors json.RawMessage `json:"monitors"`
+			Active   json.RawMessage `json:"active"`
+		}
+		if json.Unmarshal(data, &m) != nil || len(m.Monitors) == 0 {
+			return
+		}
+		if len(m.Active) == 0 {
+			m.Active = json.RawMessage("0")
+		}
+		keep, _ = json.Marshal(struct {
+			Type     string          `json:"type"`
+			Monitors json.RawMessage `json:"monitors"`
+			Active   json.RawMessage `json:"active"`
+		}{agHello, m.Monitors, m.Active})
+	case agDesktop:
+		keep = append([]byte(nil), data...)
+	}
+	if keep == nil {
+		return
+	}
+	p.replayMu.Lock()
+	defer p.replayMu.Unlock()
+	if typ == agDesktop {
+		p.desktop = keep
+	} else {
+		p.hello = keep
+	}
+}
+
+// Replay is what each new attachment gets first: the monitor list, then the
+// current desktop (terminal.ReplayPolicy).
+func (p *policy) Replay() [][]byte {
+	p.replayMu.Lock()
+	defer p.replayMu.Unlock()
+	var out [][]byte
+	if p.hello != nil {
+		out = append(out, p.hello)
+	}
+	if p.desktop != nil {
+		out = append(out, p.desktop)
+	}
+	return out
+}
+
+// ResumeMessages acks the latest frame twice when a viewer comes back after a
+// pause (terminal.ResumePolicy). Frames that reached the hub while nobody was
+// attached were dropped unacked, and the helper sends nothing while two are
+// unacked (REMOTE_SCREEN.md 4.3), so without this a second ominullctl command
+// got its monitor list and then never a picture. The helper counts an ack
+// only for a frame inside its window, so a spare ack opens nothing it should
+// not. MaxUnacked acks open a full window.
+func (p *policy) ResumeMessages() [][]byte {
+	p.replayMu.Lock()
+	defer p.replayMu.Unlock()
+	if !p.haveFrame {
+		return nil
+	}
+	ack, _ := json.Marshal(struct {
+		Type    string `json:"type"`
+		Monitor int64  `json:"monitor"`
+		Frame   int64  `json:"frame"`
+	}{opAck, p.lastMonitor, p.lastFrame})
+	out := make([][]byte, maxUnacked)
+	for i := range out {
+		out[i] = ack
+	}
+	return out
+}
+
+// maxUnacked is the helper's flow-control window (screen/helper MAX_UNACKED).
+const maxUnacked = 2
 
 func clampInt(v *float64, lo, hi, def int) int {
 	if v == nil || math.IsNaN(*v) || math.IsInf(*v, 0) {

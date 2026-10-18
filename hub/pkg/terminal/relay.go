@@ -366,6 +366,12 @@ func (m *Manager) AttachOperator(w http.ResponseWriter, r *http.Request, session
 	if err == nil {
 		_ = conn.SetCompressionLevel(1) // fastest: latency over ratio
 	}
+	if err == nil {
+		// Nothing else writes to conn until its write pump starts below.
+		if err = writeReplay(conn, relay.policy); err != nil {
+			_ = conn.Close()
+		}
+	}
 	if err != nil {
 		sess.mu.Lock()
 		sess.OperatorConnected = false

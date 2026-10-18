@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Session kinds other than a shell ride the same relay, manager, caps and
@@ -54,6 +56,39 @@ type FramePolicy interface {
 // detaches that watcher alone - a watcher never ends the session.
 type WatchPolicy interface {
 	Watcher(msgType int, data []byte) FrameDecision
+}
+
+// ReplayPolicy is implemented by the policy of a kind whose agent sends some
+// state only once (screen: the monitor list and the current desktop) that
+// every attachment needs before anything else. The relay writes Replay's text
+// messages to each new control or watch attachment first, before its write
+// pump starts, so they always arrive ahead of the live stream.
+type ReplayPolicy interface {
+	Replay() [][]byte
+}
+
+// ResumePolicy is implemented by the policy of a kind that must tell the agent
+// more than ResumeMessage when the first attachment comes back after a pause
+// (screen: acks for frames the departed viewer never acked, so the agent's
+// flow-control window is open again). The relay sends them right after the
+// resume, to the agent.
+type ResumePolicy interface {
+	ResumeMessages() [][]byte
+}
+
+// writeReplay sends a ReplayPolicy's messages to a just-upgraded attachment.
+func writeReplay(conn *websocket.Conn, p FramePolicy) error {
+	rp, ok := p.(ReplayPolicy)
+	if !ok {
+		return nil
+	}
+	for _, msg := range rp.Replay() {
+		_ = conn.SetWriteDeadline(time.Now().Add(WriteWait))
+		if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SessionKind is a non-shell session kind.

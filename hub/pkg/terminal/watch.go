@@ -93,6 +93,11 @@ func (pr *PairedRelay) resumeIfPaused() {
 		pr.mu.Lock()
 		pr.paused = false
 		pr.mu.Unlock()
+		if rp, ok := pr.policy.(ResumePolicy); ok {
+			for _, msg := range rp.ResumeMessages() {
+				pr.sendAgentControl(msg)
+			}
+		}
 	}
 }
 
@@ -193,6 +198,11 @@ func (m *Manager) AttachWatcher(w http.ResponseWriter, r *http.Request, sessionI
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return fmt.Errorf("websocket upgrade failed: %w", err)
+	}
+	// Nothing else writes to conn until its write pump starts below.
+	if err := writeReplay(conn, relay.policy); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("watcher replay failed: %w", err)
 	}
 	stop := make(chan struct{})
 	var stopOnce sync.Once
