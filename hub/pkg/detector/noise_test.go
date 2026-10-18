@@ -937,7 +937,7 @@ func TestADaemonPathRunAsALoginUserIsStillJudged(t *testing.T) {
 		{"PORT_SCAN_RECON", "/usr/sbin/dnsmasq", "nobody", sweep},
 		{"LATERAL_PORT_SWEEP", "/usr/sbin/dnsmasq", "nobody", lateral},
 	} {
-		for i, user := range []string{"kasadis", "UID:1000", ""} {
+		for i, user := range []string{"alice", "UID:1000", ""} {
 			engine, store := noiseEngine(t)
 			c.run(engine, fmt.Sprintf("linux-9%d", i), c.path, user)
 			if got := anomaliesOfType(t, store, c.detector); len(got) == 0 {
@@ -966,7 +966,7 @@ func TestAPathTheAgentCouldNotMatchToItsFileVouchesForNothing(t *testing.T) {
 				TenantID: "default", EndpointID: "linux-chrome", Timestamp: start.Add(time.Duration(i) * time.Minute),
 				Action: "PERMIT", Direction: "OUTBOUND",
 				DstIP: "104.16.0.1", DstPort: 443, BytesOut: 1024,
-				ProcessPath: "/opt/google/chrome/chrome", UserIdentity: "kasadis", AttributionStatus: status,
+				ProcessPath: "/opt/google/chrome/chrome", UserIdentity: "alice", AttributionStatus: status,
 			})
 		}
 		return len(anomaliesOfType(t, store, "C2_BEACONING"))
@@ -997,7 +997,7 @@ func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
 				TenantID: "default", EndpointID: "linux-sync", Timestamp: start.Add(time.Duration(i) * time.Minute),
 				Action: "PERMIT", Direction: "OUTBOUND",
 				DstIP: "104.16.0.1", DstPort: 443, BytesOut: 1024,
-				ProcessPath: "/usr/local/bin/synctool", UserIdentity: "kasadis", AttributionStatus: status,
+				ProcessPath: "/usr/local/bin/synctool", UserIdentity: "alice", AttributionStatus: status,
 			})
 		}
 		return len(anomaliesOfType(t, store, "C2_BEACONING"))
@@ -1029,7 +1029,7 @@ func TestAKnownPathWorkloadDoesNotVouchForAPathMismatch(t *testing.T) {
 			Action: "PERMIT", Direction: "OUTBOUND",
 			// 159.65.0.5 is DigitalOcean: rented compute, never seen before.
 			DstIP: "159.65.0.5", DstPort: 443, BytesOut: 200,
-			ProcessPath: "/usr/local/bin/synctool", UserIdentity: "kasadis", AttributionStatus: status,
+			ProcessPath: "/usr/local/bin/synctool", UserIdentity: "alice", AttributionStatus: status,
 		})
 		return len(anomaliesOfType(t, store, "NOVEL_DESTINATION"))
 	}

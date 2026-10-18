@@ -127,13 +127,13 @@ func TestAQuietProcessIsQuietOnlyAsItsServiceAccount(t *testing.T) {
 			t.Errorf("systemd-resolved running as %s is not quiet", user)
 		}
 	}
-	for _, user := range []string{"kasadis", "UID:1000", "", "systemd-timesync", "nobody"} {
+	for _, user := range []string{"alice", "UID:1000", "", "systemd-timesync", "nobody"} {
 		if cfg.IsQuietProcess(resolved, "", user) {
 			t.Errorf("systemd-resolved running as %q is quiet", user)
 		}
 	}
-	if cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "", "kasadis") ||
-		cfg.IsQuietProcess("/opt/ominull/bin/ominulld", "", "kasadis") {
+	if cfg.IsQuietProcess("/snap/snapd/28254/usr/lib/snapd/snapd", "", "alice") ||
+		cfg.IsQuietProcess("/opt/ominull/bin/ominulld", "", "alice") {
 		t.Error("a root daemon's path was quiet for a login user")
 	}
 	svchost := `C:\Windows\System32\svchost.exe`
@@ -147,7 +147,7 @@ func TestAQuietProcessIsQuietOnlyAsItsServiceAccount(t *testing.T) {
 	}
 	cfg.QuietProcesses = []string{"/usr/sbin/ntpd sha256:" + strings.Repeat("ab", 32) + " user:ntp"}
 	if !cfg.IsQuietProcess("/usr/sbin/ntpd", strings.Repeat("ab", 32), "ntp") ||
-		cfg.IsQuietProcess("/usr/sbin/ntpd", strings.Repeat("ab", 32), "kasadis") ||
+		cfg.IsQuietProcess("/usr/sbin/ntpd", strings.Repeat("ab", 32), "alice") ||
 		cfg.IsQuietProcess("/usr/sbin/ntpd", "", "ntp") {
 		t.Error("an entry with both a hash and an account does not need both")
 	}
@@ -156,7 +156,7 @@ func TestAQuietProcessIsQuietOnlyAsItsServiceAccount(t *testing.T) {
 	}
 	// The expected-client and pair lists are about programs a person runs and
 	// carry no account; an account clause there would never be checked.
-	if MatchesQuietPath("/usr/bin/rclone user:kasadis", "/usr/bin/rclone", "") {
+	if MatchesQuietPath("/usr/bin/rclone user:alice", "/usr/bin/rclone", "") {
 		t.Error("an account-bound entry matched where no account is checked")
 	}
 }
@@ -201,8 +201,8 @@ func TestASaveRefusesNamesAndFragments(t *testing.T) {
 		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, `c:/users/me/appdata/local/app.exe`) },
 		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/dev/shm/x/agent") },
 		func(c *DetectionTuning) { c.QuietProcesses = append(c.QuietProcesses, "/usr/sbin/ntpd user:") },
-		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/usr/bin/rclone user:kasadis") },
-		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "/usr/bin/rclone user:kasadis@as15169") },
+		func(c *DetectionTuning) { c.QuietClients = append(c.QuietClients, "/usr/bin/rclone user:alice") },
+		func(c *DetectionTuning) { c.QuietPairs = append(c.QuietPairs, "/usr/bin/rclone user:alice@as15169") },
 	} {
 		cfg := DefaultDetectionTuning()
 		bad(&cfg)

@@ -201,7 +201,7 @@ func TestANameOnSharedHostingIsKeyedWithItsOwner(t *testing.T) {
 // runtime's hourly volume, not the per-connection spike; any other process,
 // any other destination, and a path the agent could not match still are.
 func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
-	const claude = "/home/kasadis/.local/share/claude/versions/2.1.301"
+	const claude = "/home/u/.local/share/claude/versions/2.1.301"
 	spike := func(t *testing.T, ev storage.Event) []storage.AnomalyAlert {
 		t.Helper()
 		engine, store := noiseEngine(t)
@@ -262,7 +262,7 @@ func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
 // The makers' ranges are the tuning's: a range the owner adds is honoured,
 // and a maker removed from the policy is judged like any other destination.
 func TestARuntimeVendorRangeComesFromThePolicy(t *testing.T) {
-	const claude = "/home/kasadis/.local/share/claude/versions/2.1.301"
+	const claude = "/home/u/.local/share/claude/versions/2.1.301"
 	ev := storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
 		DstIP: "198.51.100.9", DstPort: 443, Domain: "api.anthropic.com", ProcessPath: claude}
 	cfg := storage.DefaultDetectionTuning()

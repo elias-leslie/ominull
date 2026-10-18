@@ -113,12 +113,12 @@ func TestSweepsAndResolverBypassIgnoreExclusionsAndQuietProcesses(t *testing.T) 
 	// The excluded interpreter: a port sweep, a lateral sweep and a lookup
 	// through a public resolver all raise.
 	for i := 0; i < portSweepShellPorts; i++ {
-		engine.Evaluate(flow("linux-1", tool, "kasadis", "198.51.100.7", uint16(3000+i), 60, time.Duration(i)*100*time.Millisecond))
+		engine.Evaluate(flow("linux-1", tool, "alice", "198.51.100.7", uint16(3000+i), 60, time.Duration(i)*100*time.Millisecond))
 	}
 	for i := 0; i < lateralShellHosts; i++ {
-		engine.Evaluate(flow("linux-1", tool, "kasadis", fmt.Sprintf("192.168.250.%d", 10+i), 8080, 60, time.Duration(i)*time.Second))
+		engine.Evaluate(flow("linux-1", tool, "alice", fmt.Sprintf("192.168.250.%d", 10+i), 8080, 60, time.Duration(i)*time.Second))
 	}
-	engine.Evaluate(flow("linux-1", tool, "kasadis", "8.8.8.8", 53, 300, 0))
+	engine.Evaluate(flow("linux-1", tool, "alice", "8.8.8.8", 53, 300, 0))
 	for _, want := range []string{"PORT_SCAN_RECON", "LATERAL_PORT_SWEEP", "AGENT_DNS_BYPASS"} {
 		if got := anomaliesOfType(t, store, want); len(got) != 1 {
 			t.Fatalf("an exclusion hid %s: %d findings", want, len(got))

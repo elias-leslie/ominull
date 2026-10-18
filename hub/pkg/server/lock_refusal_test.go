@@ -44,7 +44,7 @@ func TestLockRefusalTable(t *testing.T) {
 			}
 		}
 	}
-	if why := lockRefusal("davion", &response.AgentTrustReport{Ceiling: "signed-scripts"}, "terminal"); why != "davion is locked to signed-scripts on the machine itself; a terminal is not allowed there" {
+	if why := lockRefusal("workstation", &response.AgentTrustReport{Ceiling: "signed-scripts"}, "terminal"); why != "workstation is locked to signed-scripts on the machine itself; a terminal is not allowed there" {
 		t.Errorf("terminal reason: %q", why)
 	}
 }

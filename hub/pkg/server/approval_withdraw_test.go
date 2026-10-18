@@ -62,7 +62,7 @@ func TestAgentUpdateRefusesNonVersion(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	seedEndpointWithCapability(t, db, "ep-1", "Linux", "1.1.0", "deb")
-	for v, want := range map[string]int{"linux-davion-gem": http.StatusBadRequest, "1.8": http.StatusAccepted, "v1.2.0": http.StatusAccepted, "1..2": http.StatusBadRequest} {
+	for v, want := range map[string]int{"linux-host-1": http.StatusBadRequest, "1.8": http.StatusAccepted, "v1.2.0": http.StatusAccepted, "1..2": http.StatusBadRequest} {
 		r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(`{"endpoint_ids":["ep-1"],"version":"`+v+`"}`))
 		r.Header.Set("X-API-Key", "mock_admin_token")
 		w := httptest.NewRecorder()

@@ -15,14 +15,14 @@ paths = []
 legacy_tools = ["ruff", "types", "security", "govulncheck"]
 
 [native.environment]
-GOMODCACHE = "/home/kasadis/go/pkg/mod"
+GOMODCACHE = "/srv/scratch/cache/home/go--pkg--mod"
 GOCACHE = "/tmp/st-ominull-native-go-cache"
 GOPATH = "/tmp/st-ominull-native-gopath"
 GOTOOLCHAIN = "local"
 GOFLAGS = "-mod=readonly"
 
 [native.tools]
-go = "/home/kasadis/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.linux-amd64/bin/go"
+go = "/srv/scratch/cache/home/go--pkg--mod/golang.org/toolchain@v0.0.1-go1.26.9.linux-amd64/bin/go"
 python3 = "/usr/bin/python3.12"
 gcc = "/usr/bin/gcc"
 as = "/usr/bin/as"
