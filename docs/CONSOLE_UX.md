@@ -314,6 +314,32 @@ Rendered from synthetic events (22 events on 14 lines):
 ![Fleet window on the Maintenance page](images/console-ux/after-desk-maint-window.png)
 ![Fleet window on the Maintenance page, phone](images/console-ux/after-phone-maint-window.png)
 
+### Access and lock
+
+- A machine's Overview has an **Access and lock** card (second, after Facts):
+  the lock level in words (Signed scripts, Watch and signed scripts, No
+  scripts, Everything), whether it is host-locked and which pinned keys it
+  takes scripts from, standing approvals, the last thing it refused and when,
+  and whether the hub and the agent agree on isolation. An agent too old to
+  report says so instead of staying empty.
+- The head shows chips (Lock: ..., Host-locked, Remote access off, Isolation
+  mismatch) and the quick look has a Lock line. The asset list gets two
+  filters: **Isolation mismatch** and **Host-locked**.
+- **Remote terminal and screen** has a Switch off... button (confirm sheet,
+  applies at once, ends open sessions). Switching it back on loosens a
+  safety setting, so it waits for an owner tap on the phone.
+- The Access page has a read-only **Release keys** card: the routine keys
+  (epoch and short fingerprints) and the retired agent releases with how many
+  machines still run them. Needs the hub's `retired_versions` in
+  `GET /api/v1/agents/update-status`; older hubs show "None".
+- Uses `GET /api/v1/fleet/trust` and `/api/v1/remote-access/settings`; the
+  demo console answers both.
+
+![Access and lock card](images/console-ux/after-desk-lock-card.png)
+![Access and lock card, phone](images/console-ux/after-phone-lock-card.png)
+![Release keys on the Access page](images/console-ux/after-desk-release-keys.png)
+![Isolation mismatch filter, phone](images/console-ux/after-phone-lock-filter.png)
+
 ### Asset view
 
 - Head: name, state, evidence strip, and chips for OS, role and agent version

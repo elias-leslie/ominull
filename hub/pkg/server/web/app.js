@@ -488,6 +488,12 @@
     maintSettingsByEndpoint: {},
     /* Maintenance windows: the fleet read ({default, endpoints}) and one read per machine. */
     maintWindows: null,
+    /* Lock levels: GET /api/v1/fleet/trust by endpoint id, and the machines where
+       remote terminal and screen are switched off (null: not readable). */
+    fleetTrust: null,
+    fleetTrustError: "",
+    remoteOff: null,
+    routineKeys: null,
     maintWindowByEndpoint: {},
     maintSettings: null,
     maintCatalog: null,
@@ -1095,6 +1101,13 @@
           { endpoint_id: "win11-fin-11", hostname: "corp-win11-fin", os: "Windows 11 Enterprise (x86_64)", ip: "10.0.4.31", driver_version: "1.0.0 (windows-user-wfp)" },
           { endpoint_id: "linux-branch-nvr", hostname: "branch-nvr-01", os: "Debian 12 Bookworm (aarch64)", ip: "10.0.4.46", driver_version: "1.0.0 (linux-socket-v1)" }
         ],
+        retired_versions: ["1.0.0"],
+        endpoints: [
+          { endpoint_id: "linux-prod-db-01", driver_version: "1.0.0 (linux-socket-v1)", status: "online" },
+          { endpoint_id: "win11-fin-11", driver_version: "1.0.0 (windows-user-wfp)", status: "offline" },
+          { endpoint_id: "linux-branch-nvr", driver_version: "1.0.0 (linux-socket-v1)", status: "online" },
+          { endpoint_id: "win11-corp-exec", driver_version: "1.1.0 (windows-user-wfp)", status: "online" }
+        ],
         pending: []
       },
       /* Demo mode has to reach the self-service screen too, or the only way to
@@ -1323,6 +1336,38 @@
   /* Maintenance windows in the demo: the fleet default plus a two-range
      override on the second Windows host. Machines on Windows report their
      clock (offset 0); the Linux demo host has not reported one yet. */
+  /* Lock levels in the demo: the Linux database host is locked like the
+     workstation (signed scripts, host authority), the API host like the
+     hypervisor and disagrees with the hub about isolation; remote access is
+     off on the database host. */
+  var DEMO_REMOTE_OFF = null;
+  function demoRemoteOff() {
+    if (!DEMO_REMOTE_OFF) DEMO_REMOTE_OFF = { "linux-prod-db-01": true };
+    return DEMO_REMOTE_OFF;
+  }
+  var DEMO_ROUTINE_KEYS = { epoch: 3, signature: "demo", keys: [
+    { id: "routine-2026-10", xy: "9f3a61c0b7e24d58a1c4fe0932ab57d6c8e11f4a03b9d27c5e68a4f1b3d90c72a8e5", public_key: "" },
+    { id: "routine-2026-09", xy: "17d4e9a2c6b08f35e1a97d4c20b6f83a5d19e7c4b02a68f3d5e1c97a40b2d8f6e3a1", public_key: "" } ] };
+  function demoFleetTrust() {
+    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]);
+    var agoS = function (m) { return Math.round((Date.now() - m * 60000) / 1000); };
+    return { endpoints: eps.map(function (e) {
+      var row = { endpoint_id: e.id, hostname: e.hostname, agent_version: e.driver_version, verification: "agent", trust_bundle: "signed", keys: "all pinned",
+        profile: "engagement", ceiling: "", host_authority: false, hub_isolated: !!e.is_isolated, agent_isolated: !!e.is_isolated, reported_at: new Date(Date.now() - 40000).toISOString(),
+        routine_epoch: 3, routine_keys: 2 };
+      if (e.id === "linux-prod-db-01") {
+        Object.assign(row, { ceiling: "signed-scripts", host_authority: true, host_keys: [{ id: "a1", role: "tap" }, { id: "b2", role: "auto" }],
+          host_allow: [{ name: "btrfs-scrub", sha256: "x", modes: ["audit", "enforce"] }, { name: "cleanup", sha256: "y", modes: ["enforce"] }],
+          refused: "terminal: the lock level does not allow it", refused_at: agoS(190) });
+      } else if (e.id === "linux-prod-api-02") {
+        Object.assign(row, { ceiling: "monitor-signed-scripts", profile: "monitor-scripts", host_authority: true, host_keys: [{ id: "a1", role: "tap" }],
+          agent_isolated: true, disagrees: true, isolation_source: "local dead-man" });
+      } else if (e.id === "win11-fin-11") {
+        row = { endpoint_id: e.id, hostname: e.hostname, agent_version: e.driver_version, verification: "hub-only", trust_bundle: "signed", hub_isolated: false };
+      }
+      return row;
+    }), counts: { agent: eps.length - 1, "hub-only": 1 } };
+  }
   var DEMO_WINDOWS = null;
   function demoWindowState() {
     if (!DEMO_WINDOWS) {
@@ -1452,6 +1497,9 @@
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
         if (base === "/api/v1/maintenance/windows") { resolve(demoWindows(path)); return; }
+        if (base === "/api/v1/fleet/trust") { resolve(demoFleetTrust()); return; }
+        if (base === "/api/v1/remote-access/settings") { resolve({ off: Object.keys(demoRemoteOff()).filter(function (k) { return demoRemoteOff()[k]; }).sort() }); return; }
+        if (base === "/api/v1/trust/routine-keys") { resolve(JSON.parse(JSON.stringify(DEMO_ROUTINE_KEYS))); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
@@ -1687,6 +1735,12 @@
       DEMO_CATALOG.entries.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
       DEMO_CATALOG.saved = true;
       return Object.assign(JSON.parse(JSON.stringify(DEMO_CATALOG)), { changed: true });
+    }
+    if (base === "/api/v1/remote-access/settings") {
+      var rep_ = body.endpoint_id || "";
+      var was = !!demoRemoteOff()[rep_];
+      if (body.off) demoRemoteOff()[rep_] = true; else delete demoRemoteOff()[rep_];
+      return { endpoint_id: rep_, off: !!body.off, changed: was !== !!body.off, sessions_closed: 0 };
     }
     if (base === "/api/v1/maintenance/windows") {
       var wst = demoWindowState();
@@ -2092,7 +2146,9 @@
     outdated: { label: "Agent outdated", test: function (a) { return a.stale; } },
     risky: { label: "Risky ports", test: function (a) { return a.riskyPorts > 0; } },
     keyonly: { label: "No client cert", test: function (a) { return a.evidence.agent && !(a.endpoint && a.endpoint.cert_cn); } },
-    offline: { label: "Offline", test: function (a) { return a.evidence.agent && !a.online; } }
+    offline: { label: "Offline", test: function (a) { return a.evidence.agent && !a.online; } },
+    hostlocked: { label: "Host-locked", test: function (a) { var t = a.endpoint && lockRow(a.endpoint.id); return !!(t && t.host_authority); } },
+    isomismatch: { label: "Isolation mismatch", test: function (a) { var t = a.endpoint && lockRow(a.endpoint.id); return !!(t && t.disagrees); } }
   };
 
   function activeFilters() {
@@ -2125,6 +2181,8 @@
       outdated: count(function (x) { return x.stale; }),
       risky: count(function (x) { return x.riskyPorts > 0; }),
       offline: count(function (x) { return x.evidence.agent && !x.online; }),
+      hostlocked: count(FILTERS.hostlocked.test),
+      isomismatch: count(FILTERS.isomismatch.test),
       /* A new agent can report with its unique device credential before direct
          native mTLS is enabled. This is the number still missing the extra
          certificate proof before --client-certs required is safe. */
@@ -2955,6 +3013,7 @@
     addKV("Client", asset.tenantName === "Unassigned" ? "" : asset.tenantName);
     addKV("Location", asset.locationName === "Unassigned Devices" ? "" : asset.locationName);
     addKV("Agent", ep ? shortVersion(ep.driver_version) + (asset.stale ? " (outdated)" : "") : "none");
+    if (ep) addKV("Lock", lockSummary(lockRow(ep.id), ep.id));
     var aboutCol = h("div", {}, h("h4", { text: "About" }), kv);
 
     var ports = h("div", { cls: "portlist" });
@@ -3293,7 +3352,8 @@
     ];
     var problems = [["offline", "Offline", stats.offline, "warn"], ["quarantined", "Quarantined", stats.quarantined, "crit"],
       ["outdated", "Agent outdated", stats.outdated, "warn"], ["risky", "Risky ports", stats.risky, "warn"],
-      ["keyonly", "No client cert", stats.keyonly, "warn"]].map(function (f) {
+      ["keyonly", "No client cert", stats.keyonly, "warn"], ["isomismatch", "Isolation mismatch", stats.isomismatch, "crit"],
+      ["hostlocked", "Host-locked", stats.hostlocked, ""]].map(function (f) {
       return chipBtn(f[0], f[1], f[2], f[3], !!state.filters[f[0]], function () { setFilter(f[0], !state.filters[f[0]]); });
     });
     var filtering = activeFilters().length > 0 || !!state.query.trim();
@@ -3309,6 +3369,7 @@
 
   var ASSET_HELP = "Click a row to see its facts, open ports and actions; Open full view has everything else. " +
     "The three bars after a name show who knows the machine: agent (green), scan (amber), router lease (blue). " +
+    "Host-locked machines run only scripts Nightshift signed; Isolation mismatch means the hub and the agent disagree about isolation. " +
     "No client cert means the agent reports with its device credential but has not shown a client certificate yet. " +
     "Keys: j and k move, Enter opens, i isolates, r rescans; Ctrl or Shift plus click selects several.";
 
@@ -9327,7 +9388,42 @@
     var listCard = card("Operators",
       simpleTable(["Email", "Role", "Granted by", "Added", ""], rows));
 
-    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard, deviceCredentialCard()));
+    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard, deviceCredentialCard(), releaseKeysCard()));
+  }
+
+  /* Read-only: which routine release keys the hub holds (signed by the
+     owner's release key, which only Nightshift can use) and which agent
+     releases are retired. Changing either is not done here. */
+  function releaseKeysCard() {
+    var rk = state.routineKeys;
+    var us = state.updateStatus || {};
+    var keys = arrayOf(rk && rk.keys);
+    var body = [];
+    if (!rk) {
+      body.push(h("p", { role: "status", text: "Reading the release keys…" }));
+    } else if (rk.error) {
+      body.push(h("p", { role: "status", text: "Release keys unavailable: " + rk.error }));
+    } else if (!keys.length) {
+      body.push(h("p", { text: "No routine release keys are held. Only the release key itself signs agent packages." }));
+    } else {
+      body.push(h("p", { text: keys.length + (keys.length === 1 ? " routine key" : " routine keys") + " at epoch " + rk.epoch + ". They sign agent packages for session-signed upkeep; the release key signed this list." }));
+      body.push(simpleTable(["Key", "Fingerprint"], keys.map(function (k) {
+        var xy = String(k.xy || "");
+        return [h("b", { text: k.id }), h("span", { cls: "mono", text: xy.length > 20 ? xy.slice(0, 10) + "…" + xy.slice(-10) : xy || "—" })];
+      }), { sortable: false }));
+    }
+    var retired = arrayOf(us.retired_versions);
+    var running = function (v) { return arrayOf(us.endpoints).filter(function (e) { return shortVersion(e.driver_version) === v; }).length; };
+    body.push(h("h4", { cls: "u-mt2", text: "Retired agent releases" }));
+    body.push(retired.length
+      ? h("ul", { cls: "stack plain-list" }, retired.map(function (v) {
+        var n = running(v);
+        return h("li", { cls: "uf uf-wrap uf-g1" }, chip("crit", "Retired"), h("b", { text: v }),
+          h("span", { cls: "dim-2", text: n ? n + (n === 1 ? " machine still runs it until a newer release reaches it" : " machines still run it until a newer release reaches them") : "no machine runs it" }));
+      }))
+      : h("p", { cls: "dim-2", text: "None. A retired release is never rolled out again." }));
+    return card("Release keys", h("div", { cls: "card-body stack" }, body), null, false,
+      "Read-only here. Nightshift signs the routine key list with the release key, and retires a release from its own board; the hub only keeps and shows them.");
   }
 
   function confirmRevokeDeviceCredential(cr) {
@@ -10809,6 +10905,135 @@
   }
 
   /* OS, role and agent version at a glance in the asset view's head. */
+  /* ------------------------------------------- lock level and host lock */
+
+  /* What a lock level lets the machine do, in words. The level is set on the
+     machine itself (docs/HOST_AUTHORITY.md); the hub only reports it. */
+  var LOCK_LEVELS = {
+    monitor: ["Watch only", "Watches and takes agent updates. It cannot be isolated and runs no scripts, terminal or screen."],
+    isolate: ["Isolate only", "Can be isolated, hands over evidence and takes agent updates. No scripts, terminal or screen."],
+    "signed-scripts": ["Signed scripts", "Can be isolated, hands over evidence, takes updates and runs scripts Nightshift signed. No terminal or screen."],
+    "monitor-signed-scripts": ["Watch and signed scripts", "Hands over evidence, takes updates and runs scripts Nightshift signed. It cannot be isolated and has no terminal or screen."],
+    respond: ["No scripts", "Everything except scripts: isolation, evidence, updates, terminal and screen."],
+    engagement: ["Everything", "No lock level holds anything back."]
+  };
+
+  function lockRow(epID) { return (state.fleetTrust && state.fleetTrust[epID]) || null; }
+  function lockLabel(level) { return LOCK_LEVELS[level] ? LOCK_LEVELS[level][0] : level; }
+  function remoteIsOff(epID) { return !!(state.remoteOff && state.remoteOff[epID]); }
+
+  /* Chips for the asset view head: the lock level, host lock, remote access off. */
+  function lockChips(epID) {
+    var t = lockRow(epID);
+    var out = [];
+    if (t && t.ceiling) out.push(chip(t.ceiling === "engagement" ? "idle" : "info", "Lock: " + lockLabel(t.ceiling)));
+    if (t && t.host_authority) out.push(chip("info", "Host-locked"));
+    if (remoteIsOff(epID)) out.push(chip("info", "Remote access off"));
+    if (t && t.disagrees) out.push(chip("crit", "Isolation mismatch"));
+    return out;
+  }
+
+  /* One line for the quick look: "Signed scripts, host-locked". */
+  function lockSummary(t, epID) {
+    var bits = [];
+    if (t && t.ceiling) bits.push(lockLabel(t.ceiling));
+    if (t && t.host_authority) bits.push("host-locked");
+    if (remoteIsOff(epID)) bits.push("remote access off");
+    return bits.join(", ");
+  }
+
+  function lockScriptsText(t) {
+    if (t.host_error) return "Scripts are refused here: the host's key file could not be used (" + t.host_error + ").";
+    var keys = arrayOf(t.host_keys);
+    var scriptsOk = !t.ceiling || /scripts|engagement/.test(t.ceiling);
+    if (t.host_authority) {
+      return "Only scripts Nightshift signed run here" + (keys.length ? " (" + keys.length + (keys.length === 1 ? " key" : " keys") + " pinned: " + keys.map(function (k) { return k.role; }).join(", ") + ")" : "") + "." +
+        (scriptsOk ? "" : " The lock level holds them back anyway.");
+    }
+    if (t.ceiling === "signed-scripts" || t.ceiling === "monitor-signed-scripts") return "Refused until a Nightshift key is pinned on the machine.";
+    if (!scriptsOk) return "None run here: the lock level does not allow scripts.";
+    return "Scripts the hub signs run here, inside what the permission profile allows.";
+  }
+
+  function setRemoteAccessOff(asset, off) {
+    var ep = asset.endpoint;
+    var body = { endpoint_id: ep.id, off: off };
+    function done(v) {
+      state.remoteOff = state.remoteOff || {};
+      if (off) state.remoteOff[ep.id] = true; else delete state.remoteOff[ep.id];
+      toast(off ? "Remote terminal and screen are off on " + asset.name + (v && v.sessions_closed ? " (" + v.sessions_closed + " open closed)" : "") : "Remote terminal and screen are back on for " + asset.name, "ok");
+      renderRoute(); render();
+    }
+    if (off) {
+      confirmSheet({
+        title: "Switch off remote access on " + asset.name,
+        consequence: "Nobody can open a terminal or screen on it, you included, and any session open now ends. It takes effect at once. Switching it back on needs a tap on your phone.",
+        confirmLabel: "Switch off",
+        onConfirm: function () {
+          request("/api/v1/remote-access/settings", "PUT", body).then(done).catch(function (e) { toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); });
+        }
+      });
+      return;
+    }
+    confirmSheet({
+      title: "Switch remote access back on for " + asset.name,
+      consequence: "This loosens a safety setting, so it waits for a tap on your phone. Nothing opens by itself afterwards; terminal and screen still ask each time.",
+      confirmLabel: "Ask on my phone",
+      onConfirm: function () {
+        ownerApproved("/api/v1/remote-access/settings", body, { method: "PUT", label: "Switch remote terminal and screen back on for " + asset.name })
+          .then(done).catch(function (e) { if (e && e.handled) return; toast("Not switched on: " + ((e && e.message) || "request failed"), "crit"); });
+      }
+    });
+  }
+
+  /* Overview card: what this machine will accept, in plain words. */
+  function accessLockCard(asset) {
+    var ep = asset.endpoint;
+    if (!ep) return null;
+    var t = lockRow(ep.id);
+    if (!t) {
+      if (!state.fleetTrust && !state.fleetTrustError) return card("Access and lock", h("p", { role: "status", text: "Reading the lock level…" }), null, true);
+      return state.fleetTrustError ? card("Access and lock", h("p", { role: "status", text: "Lock level unavailable: " + state.fleetTrustError }), null, true) : null;
+    }
+    function fact(label, value) { return [h("dt", { text: label }), h("dd", {}, value === undefined || value === null || value === "" ? "—" : value)]; }
+    var facts;
+    if (t.verification !== "agent") {
+      facts = fact("Lock level", t.verification === "hub-only"
+        ? "This agent is too old to check signatures or report a lock level itself (it needs 1.8.59 or newer)."
+        : "The agent has not reported its lock level yet.");
+    } else {
+      var lv = LOCK_LEVELS[t.ceiling];
+      var refusedAt = t.refused_at ? new Date(t.refused_at * 1000) : null;
+      var allow = arrayOf(t.host_allow);
+      facts = [].concat(
+        fact("Lock level", t.ceiling
+          ? h("div", {}, h("b", { text: lockLabel(t.ceiling) }), h("div", { cls: "dim-2", text: lv ? lv[1] : "A level this console does not know." }))
+          : "None set on the machine. The hub's permissions for it apply as they are."),
+        fact("Scripts", h("span", {}, t.host_authority ? chip("info", "Host-locked") : null, t.host_authority ? " " : "", lockScriptsText(t))),
+        allow.length ? fact("Standing approvals", allow.length + (allow.length === 1 ? " package runs" : " packages run") + " without asking: " + allow.map(function (a) { return a.name; }).join(", ") + ".") : [],
+        fact("Last refusal", t.refused ? h("span", {}, t.refused, refusedAt ? h("span", { cls: "dim-2", text: " · " + ago(refusedAt) + " ago" }) : null) : "Nothing refused that it remembers."),
+        fact("Isolation", t.disagrees
+          ? h("span", {}, chip("crit", "Hub and agent disagree"), " The hub says " + (t.hub_isolated ? "isolated" : "not isolated") + "; the agent says " + (t.agent_isolated ? "isolated" : "not isolated") + (t.isolation_source ? " (" + t.isolation_source + ")" : "") + ".")
+          : (t.agent_isolated ? "Isolated" : "Not isolated") + ", and the hub agrees."),
+        t.profile ? fact("Permission profile", t.profile) : [],
+        t.reported_at ? fact("Reported", stamp(parseTime(t.reported_at))) : []);
+    }
+    var remote = null;
+    if (state.remoteOff) {
+      var off = remoteIsOff(ep.id);
+      remote = h("div", { cls: "card-body uf uf-wrap uf-g1 access-remote" },
+        h("b", { text: "Remote terminal and screen" }),
+        off ? chip("info", "Off") : h("span", { text: "On" }),
+        h("span", { cls: "dim-2", text: off ? "Nobody can open one on this machine. Switching it back on needs a tap on your phone." : "Switching it off applies at once and ends open sessions." }),
+        h("span", { cls: "u-grow" }),
+        h("button", { cls: "btn mini", type: "button", text: off ? "Switch back on…" : "Switch off…", disabled: READ_ONLY || !IS_ADMIN,
+          "aria-label": (off ? "Switch remote access back on for " : "Switch remote access off for ") + asset.name,
+          on: { click: function () { setRemoteAccessOff(asset, !off); } } }));
+    }
+    return card("Access and lock", h("div", {}, h("div", { cls: "card-body" }, h("dl", { cls: "kv kv-2" }, facts)), remote), null, true,
+      "The lock level is set on the machine itself, as root or Administrator, and the hub cannot change it. A host-locked machine takes scripts only from keys Nightshift pinned on it. Refusals are what the agent last turned down.");
+  }
+
   function routeHeadChips(asset) {
     var ep = asset.endpoint;
     if (!ep) return null;
@@ -10816,7 +11041,8 @@
     return h("span", { cls: "uf uf-wrap uf-g1 route-chips" },
       os ? chip("idle", os) : null,
       asset.role && asset.role !== "unknown" ? chip("idle", roleLabel(asset.role)) : null,
-      chip(asset.stale ? "warn" : "idle", "v" + shortVersion(ep.driver_version) + (asset.stale ? " outdated" : "")));
+      chip(asset.stale ? "warn" : "idle", "v" + shortVersion(ep.driver_version) + (asset.stale ? " outdated" : "")),
+      lockChips(ep.id));
   }
 
   /* The asset view's own actions: what the owner does to this machine,
@@ -10963,7 +11189,7 @@
     /* The asset view in tabs, by what the owner came to do. Each tab is a
        list of cards; a feature that belongs to a tab adds its card here. */
     var tabs = [
-      { id: "overview", label: "Overview", cards: [factsCard, alertCard, card("Observed exposure", portsBody)] },
+      { id: "overview", label: "Overview", cards: [factsCard, accessLockCard(asset), alertCard, card("Observed exposure", portsBody)] },
       { id: "maintenance", label: "Maintenance", cards: ep ? [maintenanceCard(asset)] : [] },
       { id: "network", label: "Network", cards: [ep ? baselineEndpointCard(asset) : null, ep ? commProfileCard(asset) : null, flowCard] },
       { id: "software", label: "Software", cards: ep ? [softwareInventoryCard(asset)] : [] },
@@ -11965,6 +12191,24 @@
         }
       }),
       request("/api/v1/agents/update-status").then(function (d) { state.updateStatus = d || null; }),
+      /* Lock levels and remote access are optional reads: an older hub or a
+         role that may not read them leaves the cards saying so. */
+      request("/api/v1/fleet/trust").then(function (d) {
+        var by = {};
+        arrayOf(d && d.endpoints).forEach(function (r) { by[r.endpoint_id] = r; });
+        state.fleetTrust = by; state.fleetTrustError = "";
+      }).catch(function (e) {
+        state.fleetTrustError = (e && e.message) || "request failed";
+        if (resources["/api/v1/fleet/trust"]) delete resources["/api/v1/fleet/trust"].error;
+      }),
+      request("/api/v1/remote-access/settings").then(function (d) {
+        var by = {};
+        arrayOf(d && d.off).forEach(function (id) { by[id] = true; });
+        state.remoteOff = by;
+      }).catch(function () {
+        state.remoteOff = null;
+        if (resources["/api/v1/remote-access/settings"]) delete resources["/api/v1/remote-access/settings"].error;
+      }),
       request("/api/v1/mesh/quarantined").then(function (d) { state.meshPeers = arrayOf(d); })
     ];
 
@@ -11994,6 +12238,10 @@
       jobs.push(request("/api/v1/device-auth/credentials").then(function (d) {
         state.deviceCredentials = arrayOf(d && d.credentials);
       }).catch(function () { /* the card says the list could not be read */ }));
+      jobs.push(request("/api/v1/trust/routine-keys").then(function (d) { state.routineKeys = d || null; }).catch(function (e) {
+        state.routineKeys = { error: (e && e.message) || "request failed" };
+        if (resources["/api/v1/trust/routine-keys"]) delete resources["/api/v1/trust/routine-keys"].error;
+      }));
     }
     /* Terminal sessions are fleet state, not Response-page state. This fetch
        sat inside the `section === "response"` block, so an operator on Assets

@@ -154,6 +154,65 @@
   a.closeAllSheets();
   a.state.maintWindows=saved.w; a.state.maintWindowByEndpoint=saved.b; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });
+ await check('access and lock: card, chips, filters, remote access switch and release keys', async () => {
+  const until = async (fn, what, n) => { for (let i = 0; i < (n||100); i++) { if (fn()) return; await new Promise(r => setTimeout(r, 50)); } throw new Error('Timed out waiting for ' + what); };
+  const saved = {tab:a.state.routeTab,key:a.state.routeTabKey,sec:a.state.section,f:a.state.filters,r:a.state.remoteOff,hold:a.state.demoApprovalHold};
+  const asset = id => a.state.assets.find(x=>x.endpoint && x.endpoint.id===id);
+  const cardText = () => { const c=[...document.querySelectorAll('.card')].find(x=>/^Access and lock/i.test(x.textContent)); return c ? c.textContent : ''; };
+  const head = () => (document.querySelector('.route-chips')||{}).textContent||'';
+  await until(() => a.state.fleetTrust && a.state.remoteOff, 'the lock report and remote access settings');
+  a.state.routeTab='overview'; a.state.routeTabKey='';
+  const db = asset('linux-prod-db-01');
+  a.openRoute(db.key);
+  await until(() => /Signed scripts/.test(cardText()), 'the db-01 lock card');
+  const t = cardText();
+  assert(/Host-locked/.test(t) && /Only scripts Nightshift signed run here/.test(t),'Host lock missing: '+t);
+  assert(/2 packages run without asking: btrfs-scrub, cleanup/.test(t),'Standing approvals missing: '+t);
+  assert(/the lock level does not allow it/.test(t),'Last refusal missing: '+t);
+  assert(/Lock: Signed scripts/.test(head()) && /Host-locked/.test(head()) && /Remote access off/.test(head()),'Head chips missing: '+head());
+  /* Remote access: db-01 is off, so the button asks to switch back on, which waits for the phone. */
+  a.state.demoApprovalHold = false;
+  const sw = () => [...document.querySelectorAll('.access-remote button')][0];
+  assert(/Switch back on/.test(sw().textContent),'Switch back on button missing');
+  sw().click(); await wait();
+  assert(/tap on your phone/.test((document.querySelector('.sheet')||{}).textContent||''),'Switch back on does not say it needs a phone tap');
+  [...document.querySelectorAll('.sheet button')].find(b=>/Ask on my phone/.test(b.textContent)).click();
+  await until(() => !a.state.remoteOff['linux-prod-db-01'], 'remote access to come back on after the tap', 200);
+  await until(() => /Switch off/.test((sw()||{}).textContent||''), 'the button to read Switch off');
+  assert(!/Remote access off/.test(head()),'Remote access off chip stays after switching on');
+  sw().click(); await wait();
+  [...document.querySelectorAll('.sheet button')].find(b=>b.textContent==='Switch off').click();
+  await until(() => a.state.remoteOff['linux-prod-db-01'], 'remote access to go off at once');
+  await until(() => /Remote access off/.test(head()), 'the head chip');
+  a.closeRoute();
+  /* api-02: the agent and the hub disagree about isolation. */
+  const api = asset('linux-prod-api-02');
+  a.openRoute(api.key);
+  await until(() => /Hub and agent disagree/.test(cardText()), 'the api-02 mismatch');
+  assert(/Isolation mismatch/.test(head()) && /Watch and signed scripts/.test(cardText()),'api-02 chips or level missing: '+head());
+  a.closeRoute();
+  /* An agent too old to report: the card says why instead of staying empty. */
+  const hub = asset('win11-fin-11');
+  a.openRoute(hub.key);
+  await until(() => /too old to check signatures/.test(cardText()), 'the hub-only explanation');
+  a.closeRoute();
+  /* The asset list filters. */
+  a.state.section='assets'; a.state.filters={}; document.getElementById('view').dataset.section=''; a.render();
+  const chipBtn = label => [...document.querySelectorAll('button')].find(b=>b.textContent.indexOf(label)===0);
+  assert(/Host-locked\s*2/.test(chipBtn('Host-locked').textContent),'Host-locked count: '+chipBtn('Host-locked').textContent);
+  assert(/Isolation mismatch\s*1/.test(chipBtn('Isolation mismatch').textContent),'Isolation mismatch count: '+chipBtn('Isolation mismatch').textContent);
+  chipBtn('Isolation mismatch').click(); await wait();
+  const rows = () => [...document.querySelectorAll('#view')].map(v=>v.textContent).join(' ');
+  assert(/prod-api-02/.test(rows()) && !/prod-db-01/.test(rows()),'Isolation mismatch filter shows the wrong machines');
+  /* Release keys on the Access page. */
+  a.state.filters={}; a.state.section='access'; document.getElementById('view').dataset.section=''; a.render();
+  await until(() => /Release keys/.test(document.getElementById('view').textContent) && a.state.routineKeys, 'the release keys card');
+  document.getElementById('view').dataset.section=''; a.render();
+  const v = document.getElementById('view').textContent;
+  assert(/routine-2026-10/.test(v) && /epoch 3/.test(v),'Routine keys missing');
+  assert(/Retired/.test(v) && /1\.0\.0/.test(v) && /machines? still run/.test(v),'Retired releases missing');
+  a.state.remoteOff=saved.r; a.state.demoApprovalHold=saved.hold; a.state.filters=saved.f; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
+ });
  await check('navigation links never contain sentinel credential', () => {
   a.openAccountPop(); assert(![...document.querySelectorAll('a')].some(x=>x.href.includes('AUDIT_SENTINEL')), 'Credential in navigation URL'); a.closeAccountPop();
  });

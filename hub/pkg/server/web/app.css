@@ -5189,6 +5189,7 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 .assets-table .detail .kv { grid-template-columns: 72px 1fr; }
 .assets-table .detail-stack { display: flex; flex-wrap: wrap; gap: var(--s-2); }
 .assets-table .detail .why { color: var(--ink-2); font-size: var(--t-2); margin-top: var(--s-2); }
+.plain-list { margin: var(--s-2) 0 0; padding: 0; list-style: none; }
 .weak-list { margin: var(--s-2) 0 0; padding: 0; list-style: none; }
 .weak-list li { padding-left: var(--s-3); position: relative; }
 .weak-list li::before { content: "\00b7"; position: absolute; left: 2px; }
