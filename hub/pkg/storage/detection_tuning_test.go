@@ -142,7 +142,7 @@ func TestAQuietProcessIsQuietOnlyAsItsServiceAccount(t *testing.T) {
 			t.Errorf("svchost running as %s is not quiet", user)
 		}
 	}
-	if cfg.IsQuietProcess(svchost, "", `LAPTOP-85T7CI9J\Administrator`) || cfg.IsQuietProcess(svchost, "", "") {
+	if cfg.IsQuietProcess(svchost, "", `WORKSTATION-01\Administrator`) || cfg.IsQuietProcess(svchost, "", "") {
 		t.Error("svchost started by a login user, or by nobody known, is quiet")
 	}
 	cfg.QuietProcesses = []string{"/usr/sbin/ntpd sha256:" + strings.Repeat("ab", 32) + " user:ntp"}
