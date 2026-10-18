@@ -3,6 +3,14 @@ $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $Ver
 $Pkg = 'windows-reboot'
 # --- prelude begin (identical in every package; tests compare) ---
 # Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
+# The agent's environment block can carry a broken PATH (1.8.81 and older: a long PATH came through as
+# PATH=<cmd.exe>), which hides shutdown.exe, quser and the rest: put the system folders back first.
+function Repair-Path([string]$Path, [string]$Sys) {
+  if (-not $Sys) { return $Path }
+  $parts = @("$Path" -split ';' | Where-Object { $_ }); $sr = $Sys -replace '[\\/][^\\/]+$', ''
+  $need = @($Sys, $sr, "$Sys\Wbem", "$Sys\WindowsPowerShell\v1.0") | Where-Object { $parts -notcontains $_ }
+  (@($need) + $parts) -join ';'
+}
 function Initialize-Env {
   $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
   $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
@@ -10,6 +18,7 @@ function Initialize-Env {
     LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
     PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
   foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $env:PATH = Repair-Path $env:PATH $sys
   $script:Root = Join-Path $pd 'OminullMaintenance'
 }
 # audit reports, enforce changes, revert restores first-seen values.
@@ -51,7 +60,7 @@ function Start-Log([int]$Keep) {
 }
 function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { $full = if ([Environment]::SystemDirectory) { Join-Path ([Environment]::SystemDirectory) $Exe }; if ($full -and (Test-Path -LiteralPath $full)) { $Exe = $full } else { return @{ code = -1; out = @("$Exe was not found") } } }
   $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
   @{ code = $c; out = $o }
@@ -138,6 +147,24 @@ function Get-Marker {
   try { $at = [datetime]::Parse("$((Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).at)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { return $null }
   $at.ToUniversalTime()
 }
+# "shutdown /r exit 5: Access is denied." from a native result, with its own output when it said something.
+function Get-NativeError([string]$What, $R) {
+  $text = if ($R.code -eq -1) { "$($R.out -join ' ')" } else { try { ([ComponentModel.Win32Exception][int]$R.code).Message } catch { '' } }
+  $said = "$(@($R.out) -join ' ')".Trim()
+  $e = "$What exit $($R.code)"; if ($text) { $e += ": $text" }; if ($said -and $said -ne $text) { $e += " ($said)" }
+  $e.Substring(0, [math]::Min(300, $e.Length))
+}
+# The fallback: a one-time SYSTEM task that restarts the machine after the warning time, with
+# the warning shown by msg.exe where Windows has it. revert removes the task with the marker.
+function Register-RestartTask([int]$Secs, [string]$Msg) {
+  $a = New-ScheduledTaskAction -Execute "$([Environment]::SystemDirectory)\WindowsPowerShell\v1.0\powershell.exe" -Argument '-NoProfile -NonInteractive -Command Restart-Computer -Force'
+  $t = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds([math]::Max(60, $Secs)))
+  $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+  Register-ScheduledTask -TaskName 'OmniNull restart' -Action $a -Trigger $t -Principal $p -Force | Out-Null
+  $m = Join-Path ([Environment]::SystemDirectory) 'msg.exe'
+  if (Test-Path -LiteralPath $m) { $null = Invoke-Native $m @('*', "/time:$Secs", $Msg) }
+}
+function Remove-RestartTask { try { Unregister-ScheduledTask -TaskName 'OmniNull restart' -Confirm:$false -ErrorAction Stop; $true } catch { $false } }
 function Get-LastBoot { try { (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime.ToUniversalTime() } catch { $null } }
 function Invoke-Package {
   $pending = [bool](Test-PendingReboot); $Detail.pending_reboot = $pending
@@ -149,10 +176,10 @@ function Invoke-Package {
   }
   if ($Mode -eq 'revert') {
     if (-not $marker) { $script:State = 'ok'; $Detail.reason = 'no restart from this package is waiting'; return }
-    $r = Invoke-Native 'shutdown.exe' @('/a')
+    $r = Invoke-Native 'shutdown.exe' @('/a'); $task = Remove-RestartTask
     Remove-Item -LiteralPath (Get-MarkerFile) -Force
-    # 1116: no shutdown was in progress (someone already cancelled it).
-    if ($r.code -eq 0) { $Changed.Add('cancelled the scheduled restart'); $script:State = 'fixed' } elseif ($r.code -eq 1116) { $script:State = 'ok' } else { throw "shutdown /a exit $($r.code)" }
+    # 1116: no shutdown was in progress (someone already cancelled it, or the fallback task held it).
+    if ($r.code -eq 0 -or $task) { $Changed.Add('cancelled the scheduled restart'); $script:State = 'fixed' } elseif ($r.code -eq 1116) { $script:State = 'ok' } else { throw (Get-NativeError 'shutdown /a' $r) }
     return
   }
   if ($marker) { $script:State = 'ok'; $Detail.reason = 'a restart is already scheduled'; $Detail.restart_at = $marker.ToString('o'); return }
@@ -162,13 +189,21 @@ function Invoke-Package {
   $secs = [int]$Opt.warn_minutes * 60
   $msg = "OmniNull maintenance: this computer restarts in $($Opt.warn_minutes) minutes to finish updates and upkeep. Save your work now."
   $r = Invoke-Native 'shutdown.exe' @('/r', '/t', "$secs", '/d', 'p:4:1', '/c', $msg)
-  # 1190: a shutdown is already scheduled (by someone else); leave it be.
+  # 1190: a shutdown is already scheduled (by someone else, e.g. Windows Update); 1115: one is
+  # already under way. Either way the machine restarts: leave it be.
   if ($r.code -eq 1190) { $script:State = 'ok'; $Detail.reason = 'a restart or shutdown is already scheduled'; return }
-  if ($r.code -ne 0) { throw "shutdown /r exit $($r.code)" }
+  if ($r.code -eq 1115) { $script:State = 'ok'; $Detail.reason = 'a restart or shutdown is already under way'; return }
+  $how = "restart in $($Opt.warn_minutes) min, warning on screen"
+  if ($r.code -ne 0) {
+    # shutdown.exe missing or refusing: restart through a one-time scheduled task instead.
+    $Detail.shutdown_error = Get-NativeError 'shutdown /r' $r
+    try { Register-RestartTask $secs $msg } catch { throw "$($Detail.shutdown_error); the scheduled-task fallback failed too: $_" }
+    $how = "restart in $($Opt.warn_minutes) min through a scheduled task (shutdown.exe did not take it)"
+  }
   $at = $now.AddSeconds($secs)
   New-Item -ItemType Directory -Force -Path "$($script:Root)\state" | Out-Null
   ConvertTo-Json @{ at = $at.ToString('o') } | Set-Content -LiteralPath (Get-MarkerFile) -Encoding UTF8
-  $Changed.Add("restart in $($Opt.warn_minutes) min, warning on screen"); $Detail.restart_in_seconds = $secs; $Detail.restart_at = $at.ToString('o')
+  $Changed.Add($how); $Detail.restart_in_seconds = $secs; $Detail.restart_at = $at.ToString('o')
   $script:State = 'fixed'
 }
 $Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false

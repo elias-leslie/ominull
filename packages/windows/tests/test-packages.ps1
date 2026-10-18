@@ -676,7 +676,10 @@ foreach ($n in 'cleanup', 'updates') {
     function Test-PendingReboot { $script:pending }
     function Get-LastBoot { [datetime]::UtcNow.AddDays(-1) }
     function Get-PreflightReason { $script:why }
-    function Invoke-Native([string]$Exe, [string[]]$Arguments) { $script:calls += , (@($Exe) + $Arguments); @{ code = $script:code; out = @() } }
+    function Invoke-Native([string]$Exe, [string[]]$Arguments) { $script:calls += , (@($Exe) + $Arguments); @{ code = $script:code; out = @($script:out) } }
+    $script:out = @(); $script:taskCalls = 0; $script:taskFail = $false
+    function Register-RestartTask { $script:taskCalls++; if ($script:taskFail) { throw 'the Task Scheduler is not running' } }
+    function Remove-RestartTask { $false }
     function Run([string]$M) { $script:Mode = $M; $script:Changed = New-Object System.Collections.Generic.List[string]; $script:Detail = [ordered]@{}; $script:State = 'failed'; Invoke-Package }
     try {
         $Opt = @{ only_if_needed = $true; warn_minutes = 10; idle_minutes = 15 }
@@ -693,7 +696,19 @@ foreach ($n in 'cleanup', 'updates') {
         $n = $script:calls.Count; Run 'revert'; Check 'rb: revert without its own restart touches nothing' ($script:State -eq 'ok' -and $script:calls.Count -eq $n)
         $Opt.only_if_needed = $false; $script:pending = $false; $script:code = 1190; Run 'enforce'
         Check 'rb: a shutdown already scheduled elsewhere is left be' ($script:State -eq 'ok' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
-        $script:code = 5; $threw = $false; try { Run 'enforce' } catch { $threw = $true }; Check 'rb: a shutdown.exe error fails' $threw
+        $script:code = 1115; Run 'enforce'
+        Check 'rb: a restart already under way counts as done' ($script:State -eq 'ok' -and $Detail.reason -match 'under way' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
+        $script:code = 5; Run 'enforce'
+        Check 'rb: shutdown.exe refusing falls back to a scheduled restart' ($script:State -eq 'fixed' -and $script:taskCalls -eq 1 -and $Detail.shutdown_error -match '^shutdown /r exit 5' -and ($Changed -join ' ') -match 'scheduled task' -and (Test-Path -LiteralPath (Get-MarkerFile)))
+        Remove-Item -LiteralPath (Get-MarkerFile) -Force
+        $script:taskFail = $true; $err = ''; try { Run 'enforce' } catch { $err = "$_" }
+        Check 'rb: both failing reports the Windows error and the fallback error' ($err -match '^shutdown /r exit 5' -and $err -match 'fallback failed too: the Task Scheduler is not running')
+        $script:code = -1; $script:out = @('shutdown.exe was not found'); $err = ''; try { Run 'enforce' } catch { $err = "$_" }
+        Check 'rb: a missing shutdown.exe says so instead of exit -1 alone' ($err -match '^shutdown /r exit -1: shutdown\.exe was not found')
+        $script:taskFail = $false; $script:out = @()
+        $fixed = Repair-Path 'C:\Windows\system32\cmd.exe' 'C:\Windows\system32'
+        Check 'rb: a broken PATH gets the system folders back' ($fixed -like 'C:\Windows\system32;C:\Windows;C:\Windows\system32\Wbem;C:\Windows\system32\WindowsPowerShell\v1.0;C:\Windows\system32\cmd.exe')
+        Check 'rb: a sound PATH is left alone' ((Repair-Path $fixed 'C:\Windows\system32') -eq $fixed)
         $script:code = 0; @{ at = [datetime]::UtcNow.AddDays(-2).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath (Get-MarkerFile)
         Run 'revert'; Check 'rb: a restart that already happened is forgotten' ($script:State -eq 'ok' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }

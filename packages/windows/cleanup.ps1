@@ -3,6 +3,14 @@ $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $Ver
 $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
 # Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
+# The agent's environment block can carry a broken PATH (1.8.81 and older: a long PATH came through as
+# PATH=<cmd.exe>), which hides shutdown.exe, quser and the rest: put the system folders back first.
+function Repair-Path([string]$Path, [string]$Sys) {
+  if (-not $Sys) { return $Path }
+  $parts = @("$Path" -split ';' | Where-Object { $_ }); $sr = $Sys -replace '[\\/][^\\/]+$', ''
+  $need = @($Sys, $sr, "$Sys\Wbem", "$Sys\WindowsPowerShell\v1.0") | Where-Object { $parts -notcontains $_ }
+  (@($need) + $parts) -join ';'
+}
 function Initialize-Env {
   $sys = [Environment]::SystemDirectory; $sr = Split-Path $sys; $f = { [Environment]::GetFolderPath($args[0]) }; $pd = & $f 'CommonApplicationData'; $pf = & $f 'ProgramFiles'
   $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
@@ -10,6 +18,7 @@ function Initialize-Env {
     LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
     PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
   foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
+  $env:PATH = Repair-Path $env:PATH $sys
   $script:Root = Join-Path $pd 'OminullMaintenance'
 }
 # audit reports, enforce changes, revert restores first-seen values.
@@ -51,7 +60,7 @@ function Start-Log([int]$Keep) {
 }
 function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @() } }
+  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { $full = if ([Environment]::SystemDirectory) { Join-Path ([Environment]::SystemDirectory) $Exe }; if ($full -and (Test-Path -LiteralPath $full)) { $Exe = $full } else { return @{ code = -1; out = @("$Exe was not found") } } }
   $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
   @{ code = $c; out = $o }
