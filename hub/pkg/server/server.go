@@ -3772,6 +3772,8 @@ func (s *Server) routes() *http.ServeMux {
 	// Lock facts only (ceiling, host authority, remote access off) for the
 	// machines that carry a lock, so Nightshift confirms its installer's work.
 	mux.HandleFunc("/api/v1/integrations/nightshift/locks", s.approvalRelayAuth(s.handleNightshiftLocks))
+	// Each enrolled agent's build, so Nightshift checks none still trusts a retired release key.
+	mux.HandleFunc("/api/v1/integrations/nightshift/agent-builds", s.approvalRelayAuth(s.handleNightshiftBuilds))
 	// The owner answered a maintenance decision in Nightshift's inbox.
 	mux.HandleFunc("/api/v1/integrations/nightshift/decisions", s.approvalRelayAuth(s.responseGate(s.handleRelayDecisions)))
 	mux.HandleFunc("/api/v1/integrations/nightshift/decisions/answer", s.approvalRelayAuth(s.responseGate(s.handleRelayDecisionAnswer)))
