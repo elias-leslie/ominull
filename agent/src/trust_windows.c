@@ -16,7 +16,7 @@
 
 #include "../include/agent.h"
 #include "../include/agent_trust.h"
-#include "../include/der_sig.h"
+#include "../include/release_verify_win.h"
 #define OMINULL_NEED_PUBKEY_XY
 #include "../include/release_key.h"
 
@@ -33,6 +33,7 @@ void Agent_TrustInit(const char* endpoint_id) {
         Trust_Distrust(&g_Trust);
     }
     g_Trust.verify_release = WinVerifyRelease;
+    Trust_LoadRoutine(&g_Trust);
     g_TrustLoaded = true;
     printf("[*] Trust: response key %s, auto-isolation key %s, policy key %s; manifest %s.\n",
            g_Trust.have_key[TRUST_KEY_RESPONSE] ? "pinned" : "missing", g_Trust.have_key[TRUST_KEY_AUTO] ? "pinned" : "missing",
@@ -177,29 +178,26 @@ bool Agent_TrustSecureDirectory(const char* dir) {
 /* Agent_VerifyReleaseMessage checks a DER ECDSA P-256 signature over msg
  * against the release key compiled into this agent (CNG). */
 bool Agent_VerifyReleaseMessage(const char* msg, size_t len, const unsigned char* der, size_t derlen) {
-    unsigned char raw[64], hash[32];
-    if (!msg || !der || !DerToRawSignature(der, derlen, raw)) return false;
-    BCRYPT_ALG_HANDLE hAlg = NULL;
-    BCRYPT_HASH_HANDLE hHash = NULL;
-    BCRYPT_KEY_HANDLE hKey = NULL;
-    bool ok = false;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0) != 0) return false;
-    bool hashed = BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) == 0 && BCryptHashData(hHash, (PUCHAR)msg, (ULONG)len, 0) == 0 &&
-                  BCryptFinishHash(hHash, hash, 32, 0) == 0;
-    if (hHash) BCryptDestroyHash(hHash);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    if (!hashed) return false;
-    unsigned char blob[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
-    BCRYPT_ECCKEY_BLOB* hdr = (BCRYPT_ECCKEY_BLOB*)blob;
-    hdr->dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
-    hdr->cbKey = 32;
-    memcpy(blob + sizeof(BCRYPT_ECCKEY_BLOB), OMINULL_RELEASE_PUBKEY_XY, OMINULL_RELEASE_PUBKEY_XY_LEN);
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0) != 0) return false;
-    if (BCryptImportKeyPair(hAlg, NULL, BCRYPT_ECCPUBLIC_BLOB, &hKey, blob, sizeof(blob), 0) == 0)
-        ok = BCryptVerifySignature(hKey, NULL, hash, 32, raw, 64, 0) == 0;
-    if (hKey) BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return ok;
+    return ReleaseVerifyWinMsg(OMINULL_RELEASE_PUBKEY_XY, msg, len, der, derlen);
+}
+
+static bool WinVerifyKey(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    return ReleaseVerifyWinMsg(xy ? xy : OMINULL_RELEASE_PUBKEY_XY, msg, len, der, derlen);
+}
+
+/* Agent_TrustUpdateSigner finds the key that signed an agent update's release
+ * statement: the compiled-in key or a pinned routine key. Returns false when
+ * none does; else copies that key's point (for the package signature, which
+ * must verify with the same key) and its name (main or routine:<id>). */
+bool Agent_TrustUpdateSigner(const char* statement, size_t len, const unsigned char* der, size_t derlen, unsigned char xy[64], char* name,
+                             size_t cap) {
+    if (!g_TrustLoaded) return false;
+    if (!g_Trust.routine_loaded) Trust_LoadRoutine(&g_Trust);
+    int signer = Trust_UpdateSigner(&g_Trust, WinVerifyKey, statement, len, der, derlen);
+    if (signer < 0) return false;
+    memcpy(xy, signer == 0 ? OMINULL_RELEASE_PUBKEY_XY : g_Trust.routine[signer - 1].xy, 64);
+    Trust_SignerName(&g_Trust, signer, name, cap);
+    return true;
 }
 
 static bool WinVerifyRelease(const char* msg, size_t len, const uint8_t* der, size_t derlen) {

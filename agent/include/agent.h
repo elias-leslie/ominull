@@ -270,5 +270,10 @@ bool Agent_TrustSecureDirectory(const char* dir);
 /* Agent_VerifyReleaseMessage checks a DER ECDSA signature over msg against the
  * compiled-in release key (updater.c, CNG). */
 bool Agent_VerifyReleaseMessage(const char* msg, size_t len, const unsigned char* der, size_t derlen);
+/* Agent_TrustUpdateSigner: the key (compiled-in or a pinned routine key) that
+ * signed an agent update's release statement; its point and name (main or
+ * routine:<id>) are copied out. False when no key verifies it. */
+bool Agent_TrustUpdateSigner(const char* statement, size_t len, const unsigned char* der, size_t derlen, unsigned char xy[64], char* name,
+                             size_t cap);
 
 #endif // OMINULL_AGENT_H

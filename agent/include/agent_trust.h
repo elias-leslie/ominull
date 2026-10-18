@@ -31,6 +31,7 @@
 #include "response_dispatcher.h"
 #include <strings.h>
 #include <stdarg.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <aclapi.h>
@@ -458,6 +459,20 @@ typedef struct {
     int  modeCount;
 } TrustHostAllow;
 
+/* Routine release keys: up to four P-256 keys the release key vouches for in
+ * an OMINULL-ROUTINE-KEYS-V1 statement. They are accepted for agent update
+ * packages only (the package .sig and its release statement), never for a
+ * trust bundle, host authority, a script grant, a key rotation or another
+ * routine-keys statement: everything else verifies against the compiled-in
+ * key alone (verify_release). */
+#define TRUST_MAX_ROUTINE_KEYS 4
+#define TRUST_ROUTINE_ENTRY_LEN 145   /* 16 hex id, ':', 128 hex X||Y */
+#define TRUST_ROUTINE_LIST_MAX (TRUST_MAX_ROUTINE_KEYS * (TRUST_ROUTINE_ENTRY_LEN + 1))
+typedef struct {
+    char    id[17];
+    uint8_t xy[64];          /* raw uncompressed point, X then Y, no 0x04 */
+} TrustRoutineKey;
+
 /* Trust_ReleaseVerifier checks a DER ECDSA-P256/SHA-256 signature over msg
  * against the release key compiled into this agent (openssl on Linux, CNG on
  * Windows). It is the trust root for pinning the authority's keys. */
@@ -509,6 +524,16 @@ typedef struct {
     TrustManifest manifest;
     TrustState state;
     Trust_ReleaseVerifier verify_release;   /* set by the platform after Trust_Init */
+    /* Routine release keys (routine.pin, floor in routine.epoch). Loaded by
+     * Trust_LoadRoutine once verify_release is set: the pin's signature is
+     * checked again at every load. */
+    TrustRoutineKey routine[TRUST_MAX_ROUTINE_KEYS];
+    int     routineCount;
+    int64_t routine_epoch;                  /* of the pinned statement, 0 = none */
+    int64_t routine_floor;                  /* highest routine epoch ever pinned here */
+    char    routine_list[TRUST_ROUTINE_LIST_MAX + 1];
+    bool    routine_loaded;
+    uint8_t failed_routine[32];             /* last routine offer that did not verify */
     bool untrusted;                         /* the key/state directory is not ours: read and write nothing */
     uint8_t failed_bundle[32];              /* last trust offer that did not verify */
     char refused[200];       /* last refusal, reported to the hub; never secrets */
@@ -1204,6 +1229,11 @@ static inline void Trust_Distrust(TrustContext* t) {
     t->hostAllowCount = 0;
     t->state.exists = true;   /* nothing to adopt into */
     snprintf(t->state.source, sizeof(t->state.source), "none");
+    memset(t->routine, 0, sizeof(t->routine));   /* no routine key from there either */
+    t->routineCount = 0;
+    t->routine_epoch = 0;
+    t->routine_list[0] = '\0';
+    t->routine_loaded = true;
     t->untrusted = true;
     Trust_Refuse(t, 0, "the trust directory is not protected; no pinned key, manifest or state is used%s", "");
 }
@@ -1310,6 +1340,256 @@ static inline void Trust_PinKeys(TrustContext* t, const char* obj, const char* e
     Trust_LoadManifestState(t);
     printf("[+] Pinned the authority keys for tenant %s (epoch %lld, response %.16s...), signed by the release key.\n", tenant, (long long)epoch, hex[0]);
     fflush(stdout);
+}
+
+/* ---------------------------------------------------------------------------
+ * Routine release keys.
+ *
+ * The hub's heartbeat answer carries trust.routine_keys = {epoch, keys, sig}:
+ * keys is "<id>:<xy>,..." (0 to 4 entries, ids 16 lowercase hex and strictly
+ * ascending, xy the 128 lowercase hex of a raw P-256 point), sig a base64 DER
+ * signature by the compiled-in release key over
+ *   "OMINULL-ROUTINE-KEYS-V1\nepoch=<epoch>\nkeys=<keys>\n".
+ * A newer epoch replaces the set (an empty list revokes every routine key);
+ * routine.epoch keeps the highest epoch ever pinned, so a lower one is never
+ * taken again, even after routine.pin is removed. The keys only ever verify
+ * an agent update's release statement and package (Trust_UpdateSigner).
+ * ------------------------------------------------------------------------- */
+
+static inline int Trust_RoutineStatement(int64_t epoch, const char* list, char* out, size_t cap) {
+    return snprintf(out, cap, "OMINULL-ROUTINE-KEYS-V1\nepoch=%lld\nkeys=%s\n", (long long)epoch, list);
+}
+
+static inline bool Trust_LowerHexN(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    return true;
+}
+
+/* Trust_ParseRoutineList reads a key list exactly as the statement carries
+ * it; anything else (upper case, spaces, a fifth key, unsorted or repeated
+ * ids, a wrong length) is refused. */
+static inline bool Trust_ParseRoutineList(const char* s, TrustRoutineKey out[TRUST_MAX_ROUTINE_KEYS], int* count) {
+    *count = 0;
+    if (!s) return false;
+    if (!*s) return true;
+    const char* p = s;
+    for (;;) {
+        if (*count >= TRUST_MAX_ROUTINE_KEYS) return false;
+        /* Checked in order, so nothing is read past the terminator. */
+        if (!Trust_LowerHexN(p, 16) || p[16] != ':' || !Trust_LowerHexN(p + 17, 128)) return false;
+        char sep = p[TRUST_ROUTINE_ENTRY_LEN];
+        if (sep != ',' && sep != '\0') return false;
+        TrustRoutineKey* k = &out[*count];
+        memcpy(k->id, p, 16);
+        k->id[16] = '\0';
+        if (*count > 0 && strcmp(out[*count - 1].id, k->id) >= 0) return false;
+        if (!Response_HexToBytes(p + 17, k->xy, 64)) return false;
+        (*count)++;
+        if (sep == '\0') return true;
+        p += TRUST_ROUTINE_ENTRY_LEN + 1;
+        if (!*p) return false;   /* a trailing comma */
+    }
+}
+
+/* A JSON number that is exactly a decimal integer >= 1 (no sign, fraction or
+ * exponent). */
+static inline bool Trust_PositiveInt(const char* v, const char* ve, int64_t* out) {
+    const char* p = TJ_Ws(v, ve);
+    while (ve > p && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\n' || ve[-1] == '\r')) ve--;
+    if (p >= ve || *p == '0') return false;
+    int64_t x = 0;
+    for (; p < ve; p++) {
+        if (!isdigit((unsigned char)*p) || x > (INT64_MAX - 9) / 10) return false;
+        x = x * 10 + (*p - '0');
+    }
+    *out = x;
+    return x >= 1;
+}
+
+/* Trust_RoutineVerify: the statement for epoch and list verifies against the
+ * compiled-in release key (never a routine key). */
+static inline bool Trust_RoutineVerify(const TrustContext* t, int64_t epoch, const char* list, const char* sigB64) {
+    char stmt[TRUST_ROUTINE_LIST_MAX + 96];
+    int sn = Trust_RoutineStatement(epoch, list, stmt, sizeof(stmt));
+    if (sn <= 0 || sn >= (int)sizeof(stmt) || !t->verify_release || !sigB64 || !sigB64[0]) return false;
+    uint8_t der[160];
+    size_t dl = Response_Base64Decode(sigB64, strlen(sigB64), der, sizeof(der));
+    return dl > 0 && t->verify_release(stmt, (size_t)sn, der, dl);
+}
+
+static inline bool Trust_ParseRoutinePin(const char* buf, int64_t* epoch, char* list, size_t lcap, char* sig, size_t scap) {
+    static const char head[] = "ominull-routine 1\nepoch=";
+    if (strncmp(buf, head, sizeof(head) - 1) != 0) return false;
+    const char* p = buf + sizeof(head) - 1;
+    const char* nl = strchr(p, '\n');
+    if (!nl || !Trust_PositiveInt(p, nl, epoch)) return false;
+    p = nl + 1;
+    if (strncmp(p, "keys=", 5) != 0) return false;
+    p += 5;
+    nl = strchr(p, '\n');
+    if (!nl || (size_t)(nl - p) >= lcap) return false;
+    memcpy(list, p, (size_t)(nl - p));
+    list[nl - p] = '\0';
+    p = nl + 1;
+    if (strncmp(p, "sig=", 4) != 0) return false;
+    p += 4;
+    nl = strchr(p, '\n');
+    if (!nl || nl == p || (size_t)(nl - p) >= scap || nl[1] != '\0') return false;
+    memcpy(sig, p, (size_t)(nl - p));
+    sig[nl - p] = '\0';
+    return true;
+}
+
+static inline void Trust_SetRoutine(TrustContext* t, int64_t epoch, const char* list, const TrustRoutineKey* keys, int n) {
+    memset(t->routine, 0, sizeof(t->routine));
+    for (int i = 0; i < n; i++) t->routine[i] = keys[i];
+    t->routineCount = n;
+    t->routine_epoch = epoch;
+    snprintf(t->routine_list, sizeof(t->routine_list), "%s", list);
+}
+
+/* Trust_LoadRoutine reads routine.epoch and routine.pin and takes the pinned
+ * set only when its statement still verifies against the release key and is
+ * not below the floor. Called once verify_release is set (the platform after
+ * Trust_Init, or the first heartbeat); a pin that fails is ignored and
+ * reported. */
+static inline void Trust_LoadRoutine(TrustContext* t) {
+    t->routine_loaded = true;
+    Trust_SetRoutine(t, 0, "", NULL, 0);
+    if (t->untrusted) return;
+    char path[260], buf[TRUST_ROUTINE_LIST_MAX + 400];
+    Trust_Path(t, false, "routine.epoch", path, sizeof(path));
+    long long floor = 0;
+    if (Trust_ReadSmallFile(t, path, buf, sizeof(buf)) && sscanf(buf, "%lld", &floor) == 1 && floor > t->routine_floor) t->routine_floor = floor;
+    Trust_Path(t, false, "routine.pin", path, sizeof(path));
+    if (!Trust_PathExists(path)) return;
+    int64_t now = (int64_t)time(NULL), epoch = 0;
+    char list[TRUST_ROUTINE_LIST_MAX + 1], sig[160];
+    TrustRoutineKey keys[TRUST_MAX_ROUTINE_KEYS];
+    int n = 0;
+    if (!Trust_ReadSmallFile(t, path, buf, sizeof(buf)) || !Trust_ParseRoutinePin(buf, &epoch, list, sizeof(list), sig, sizeof(sig)) ||
+        !Trust_ParseRoutineList(list, keys, &n)) {
+        Trust_Refuse(t, now, "routine.pin is unreadable; no routine release key is used%s", "");
+        return;
+    }
+    if (epoch < t->routine_floor) {
+        Trust_Refuse(t, now, "routine.pin is older than a routine key set already pinned here; ignored%s", "");
+        return;
+    }
+    if (!Trust_RoutineVerify(t, epoch, list, sig)) {
+        Trust_Refuse(t, now, "routine.pin does not verify against the release key; ignored%s", "");
+        return;
+    }
+    Trust_SetRoutine(t, epoch, list, keys, n);
+    if (epoch > t->routine_floor) t->routine_floor = epoch;   /* routine.epoch was lost: in memory, rewritten on the next pin */
+}
+
+/* Trust_AcceptRoutineKeys takes the hub's routine_keys object: strictly
+ * formed, signed by the release key, and newer than every set pinned here.
+ * The same epoch with the same keys is a no-op. The same epoch is taken
+ * again only when nothing is pinned (routine.pin was lost or did not
+ * verify), which restores the set already in force, never an older one. */
+static inline void Trust_AcceptRoutineKeys(TrustContext* t, const char* obj, const char* end, int64_t now) {
+    if (t->untrusted) return;
+    if (!t->routine_loaded) Trust_LoadRoutine(t);
+    const char *ev, *eve;
+    int64_t epoch = 0;
+    char list[TRUST_ROUTINE_LIST_MAX + 1], sig[160];
+    TrustRoutineKey keys[TRUST_MAX_ROUTINE_KEYS];
+    int n = 0;
+    if (TJ_Member(obj, end, "epoch", &ev, &eve) != 1 || !Trust_PositiveInt(ev, eve, &epoch) ||
+        !TJ_MemberPlain(obj, end, "keys", list, sizeof(list)) || !TJ_MemberPlain(obj, end, "sig", sig, sizeof(sig)) || !sig[0] ||
+        !Trust_ParseRoutineList(list, keys, &n)) {
+        Trust_Refuse(t, now, "the hub's routine release keys are malformed; nothing changed%s", "");
+        return;
+    }
+    if (t->routine_epoch > 0 && epoch == t->routine_epoch && strcmp(list, t->routine_list) == 0) return;
+    if (epoch < t->routine_floor || (epoch == t->routine_floor && t->routine_epoch == epoch)) {
+        Trust_Refuse(t, now, "the hub offers routine release keys older than the set pinned here; nothing changed%s", "");
+        return;
+    }
+    uint8_t h[32];
+    {
+        char both[TRUST_ROUTINE_LIST_MAX + 256];
+        int bn = snprintf(both, sizeof(both), "%lld|%s|%s", (long long)epoch, list, sig);
+        if (bn <= 0 || bn >= (int)sizeof(both)) return;
+        Response_SHA256_Sum((const uint8_t*)both, (size_t)bn, h);
+    }
+    if (memcmp(h, t->failed_routine, 32) == 0) return;   /* a process per check on Linux: not again until it changes */
+    if (!Trust_RoutineVerify(t, epoch, list, sig)) {
+        memcpy(t->failed_routine, h, 32);
+        Trust_Refuse(t, now, "the hub's routine release keys do not verify against the release key; nothing changed%s", "");
+        return;
+    }
+    /* The floor first, then the pin in one atomic write. */
+    char path[260], buf[TRUST_ROUTINE_LIST_MAX + 400];
+    if (epoch > t->routine_floor || !t->routine_epoch) {
+        snprintf(buf, sizeof(buf), "%lld\n", (long long)epoch);
+        Trust_Path(t, false, "routine.epoch", path, sizeof(path));
+        if (!Trust_WriteFile(t, path, buf, false)) {
+            Trust_Refuse(t, now, "the routine key epoch could not be written; nothing changed%s", "");
+            return;
+        }
+        t->routine_floor = epoch;
+    }
+    snprintf(buf, sizeof(buf), "ominull-routine 1\nepoch=%lld\nkeys=%s\nsig=%s\n", (long long)epoch, list, sig);
+    Trust_Path(t, false, "routine.pin", path, sizeof(path));
+    if (!Trust_WriteFile(t, path, buf, false)) {
+        Trust_Refuse(t, now, "the routine release keys could not be written; nothing changed%s", "");
+        return;
+    }
+    Trust_SetRoutine(t, epoch, list, keys, n);
+    printf("[+] Pinned %d routine release key%s (epoch %lld), signed by the release key.\n", n, n == 1 ? "" : "s", (long long)epoch);
+    fflush(stdout);
+}
+
+/* Trust_KeyVerifier checks a DER ECDSA-P256/SHA-256 signature over msg with
+ * the raw point xy, or with the compiled-in release key when xy is NULL. */
+typedef bool (*Trust_KeyVerifier)(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen);
+
+/* Trust_UpdateSigner finds the key that signed an agent update's release
+ * statement: 0 the compiled-in key, i + 1 routine key i, -1 none. The
+ * package signature must then verify with that same key. Only the update
+ * path calls this. */
+static inline int Trust_UpdateSigner(const TrustContext* t, Trust_KeyVerifier fn, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    if (!fn || !msg || !der || !derlen) return -1;
+    if (fn(NULL, msg, len, der, derlen)) return 0;
+    for (int i = 0; i < t->routineCount; i++)
+        if (fn(t->routine[i].xy, msg, len, der, derlen)) return i + 1;
+    return -1;
+}
+
+/* "main" or "routine:<id>", for the update log. */
+static inline void Trust_SignerName(const TrustContext* t, int signer, char* out, size_t cap) {
+    if (signer > 0 && signer <= t->routineCount) snprintf(out, cap, "routine:%s", t->routine[signer - 1].id);
+    else snprintf(out, cap, "%s", signer == 0 ? "main" : "none");
+}
+
+/* Trust_P256PEM writes the SubjectPublicKeyInfo PEM of a raw P-256 point
+ * (for the openssl CLI). */
+static inline bool Trust_P256PEM(const uint8_t xy[64], char* out, size_t cap) {
+    static const uint8_t prefix[26] = {0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                                       0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00};
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    uint8_t der[91];
+    memcpy(der, prefix, sizeof(prefix));
+    der[26] = 0x04;
+    memcpy(der + 27, xy, 64);
+    char enc[125];
+    size_t e = 0;
+    for (size_t i = 0; i < sizeof(der); i += 3) {   /* 91 = 30*3 + 1 */
+        uint32_t v = (uint32_t)der[i] << 16;
+        if (i + 1 < sizeof(der)) v |= (uint32_t)der[i + 1] << 8;
+        if (i + 2 < sizeof(der)) v |= der[i + 2];
+        enc[e++] = b64[(v >> 18) & 63];
+        enc[e++] = b64[(v >> 12) & 63];
+        enc[e++] = i + 1 < sizeof(der) ? b64[(v >> 6) & 63] : '=';
+        enc[e++] = i + 2 < sizeof(der) ? b64[v & 63] : '=';
+    }
+    enc[e] = '\0';
+    int n = snprintf(out, cap, "-----BEGIN PUBLIC KEY-----\n%.64s\n%s\n-----END PUBLIC KEY-----\n", enc, enc + 64);
+    return n > 0 && (size_t)n < cap;
 }
 
 static inline void Trust_AcceptManifest(TrustContext* t, const char* v, const char* ve, int64_t now) {
@@ -1696,7 +1976,12 @@ static inline bool Trust_ProcessHeartbeat(TrustContext* t, const char* resp, siz
     if (!resp || !len) return false;
     const char* end = resp + len;
     const char *v, *ve;
-    if (TJ_Member(resp, end, "trust", &v, &ve) == 1) Trust_PinKeys(t, v, ve, now);
+    if (!t->routine_loaded && t->verify_release) Trust_LoadRoutine(t);
+    if (TJ_Member(resp, end, "trust", &v, &ve) == 1) {
+        Trust_PinKeys(t, v, ve, now);
+        const char *rv, *rve;
+        if (TJ_Member(v, ve, "routine_keys", &rv, &rve) == 1) Trust_AcceptRoutineKeys(t, rv, rve, now);
+    }
     if (t->mfloor_dirty && !t->untrusted && Trust_WriteFloors(t, t->mfloor, t->mfloorCount)) t->mfloor_dirty = false;
     if (TJ_Member(resp, end, "capability_manifest", &v, &ve) == 1) {
         if (t->mfloor_dirty) Trust_Refuse(t, now, "the manifest floor could not be made durable; no manifest is taken until it is%s", "");
@@ -1972,11 +2257,13 @@ static inline void Trust_ReportJSON(const TrustContext* t, char* out, size_t cap
     snprintf(out, cap,
              "{\"v\":1,\"keys\":\"%s\",\"response_key\":%s,\"auto_isolate_key\":%s,\"policy_key\":%s,"
              "\"manifest_seq\":%lld,\"profile\":\"%s\",\"iso_seen\":%lld,\"mesh_seen\":%lld,"
-             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\",\"utc_offset_minutes\":%d",
+             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\",\"utc_offset_minutes\":%d,"
+             "\"routine_epoch\":%lld,\"routine_keys\":%d",
              keys, t->have_key[0] ? "true" : "false", t->have_key[1] ? "true" : "false", t->have_key[2] ? "true" : "false",
              (long long)(t->manifest.have ? t->manifest.seq : 0), t->manifest.have ? t->manifest.profile : "",
              (long long)t->state.iso_seen, (long long)t->state.mesh_seen, Trust_EffectiveIsolated(t) ? "true" : "false",
-             t->state.source, npeers, refused, (long long)t->refused_at, t->ceiling, Trust_UTCOffsetMinutes());
+             t->state.source, npeers, refused, (long long)t->refused_at, t->ceiling, Trust_UTCOffsetMinutes(),
+             (long long)t->routine_epoch, t->routineCount);
     Trust_HostReportJSON(t, out, cap);
 }
 

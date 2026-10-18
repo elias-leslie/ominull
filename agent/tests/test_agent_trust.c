@@ -24,6 +24,7 @@
 
 #include "../include/agent_trust.h"
 #include "trust_fixtures.h"
+#include "routine_fixtures.h"
 #ifndef _WIN32
 #include "../include/release_verify_posix.h"
 #endif
@@ -58,7 +59,8 @@ static void make_dir(void) {
 
 static void remove_dir(void) {
     const char* files[] = {"response.pub", "auto_isolate.pub", "policy.pub", "trust.pin", "trust.epoch", "manifest.state", "manifest.floor",
-                           "capability.ceiling", "enforcement.state", "host_authority.json", "host_auto_allow.json"};
+                           "capability.ceiling", "enforcement.state", "host_authority.json", "host_auto_allow.json",
+                           "routine.pin", "routine.epoch"};
     char path[400];
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         snprintf(path, sizeof(path), "%s" TRUST_SEP "%s", g_dir, files[i]);
@@ -713,6 +715,231 @@ static void test_host_authority(int64_t now) {
     remove_dir();
 }
 
+/* ---------------------------------------------------------------------------
+ * Routine release keys (routine_fixtures.h, agent/tests/gen_routine_fixtures.sh).
+ * POSIX checks them with openssl; Windows with a table of the pairs the
+ * fixture keys signed, or with CNG itself when built with
+ * -DOMINULL_TEST_BCRYPT and -lbcrypt.
+ * ------------------------------------------------------------------------- */
+
+static uint8_t fxr_release_xy[64], fxr_a_xy[64], fxr_b_xy[64];
+static Trust_KeyVerifier fxr_key_verify;
+
+#ifdef _WIN32
+#ifdef OMINULL_TEST_BCRYPT
+#include "../include/release_verify_win.h"
+static bool fxr_release(const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    return ReleaseVerifyWinMsg(fxr_release_xy, msg, len, der, derlen);
+}
+static bool fxr_key(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    return ReleaseVerifyWinMsg(xy ? xy : fxr_release_xy, msg, len, der, derlen);
+}
+#else
+static bool fxr_key(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    static const struct { const char* xy; const char* msg; const char* sig; } valid[] = FXR_VALID;
+    char xh[129];
+    Response_BytesToHex(xy ? xy : fxr_release_xy, 64, xh);
+    for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+        uint8_t want[160];
+        size_t wl = Response_Base64Decode(valid[i].sig, strlen(valid[i].sig), want, sizeof(want));
+        if (strcmp(xh, valid[i].xy) == 0 && len == strlen(valid[i].msg) && memcmp(msg, valid[i].msg, len) == 0 && derlen == wl &&
+            memcmp(der, want, wl) == 0)
+            return true;
+    }
+    return false;
+}
+static bool fxr_release(const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    return fxr_key(NULL, msg, len, der, derlen);
+}
+#endif
+#endif
+
+static void init_routine(void) {
+    Trust_Init(&T, FX_ENDPOINT, g_dir, g_dir, false);
+#ifdef _WIN32
+    T.verify_release = fxr_release;
+    fxr_key_verify = fxr_key;
+#else
+    g_ReleaseVerifyPem = FXR_RELEASE_PEM;
+    snprintf(g_ReleaseVerifyDir, sizeof(g_ReleaseVerifyDir), "%s", g_dir);
+    T.verify_release = ReleaseVerifyPosix;
+    fxr_key_verify = ReleaseVerifyPosixXY;
+#endif
+    Trust_LoadRoutine(&T);
+}
+
+static void routine_offer(int64_t now, const char* epoch, const char* keys, const char* sig) {
+    static char trust[16384];
+    snprintf(trust, sizeof(trust), "{\"routine_keys\":{\"epoch\":%s,\"keys\":\"%s\",\"sig\":\"%s\"}}", epoch, keys, sig);
+    T.refused[0] = '\0';
+    beat(now, trust, NULL, NULL, 0);
+}
+
+/* An agent update as the updaters check it: the key that verifies the
+ * release statement must also verify the package. */
+static bool update_ok(const char* stmtSig, const char* pkgSig, char* who, size_t cap) {
+    uint8_t der[160], pder[160];
+    size_t dl = Response_Base64Decode(stmtSig, strlen(stmtSig), der, sizeof(der));
+    size_t pl = Response_Base64Decode(pkgSig, strlen(pkgSig), pder, sizeof(pder));
+    char st[512];
+    int sn = Trust_ReleaseStatement("ominull-agent_9.9.9_amd64.deb", "9.9.9",
+                                    "abababababababababababababababababababababababababababababababab", st, sizeof(st));
+    int signer = Trust_UpdateSigner(&T, fxr_key_verify, st, (size_t)sn, der, dl);
+    if (who) Trust_SignerName(&T, signer, who, cap);
+    if (signer < 0) return false;
+    return fxr_key_verify(signer == 0 ? NULL : T.routine[signer - 1].xy, FXR_PKG, strlen(FXR_PKG), pder, pl);
+}
+
+static bool report_has(const char* needle) {
+    static char rep[8192];
+    Trust_ReportJSON(&T, rep, sizeof(rep));
+    return strstr(rep, needle) != NULL;
+}
+
+static bool routine_file(const char* leaf) {
+    char path[400];
+    snprintf(path, sizeof(path), "%s" TRUST_SEP "%s", g_dir, leaf);
+    return Trust_PathExists(path);
+}
+
+static void test_routine_keys(int64_t now) {
+    printf("[*] routine release keys\n");
+    Response_HexToBytes(FXR_RELEASE_XY, fxr_release_xy, 64);
+    Response_HexToBytes(FXR_A_XY, fxr_a_xy, 64);
+    Response_HexToBytes(FXR_B_XY, fxr_b_xy, 64);
+    char st[1024];
+    Trust_RoutineStatement(5, FXR_LIST_AB, st, sizeof(st));
+    expect("routine-keys statement bytes", strcmp(st, FXR_STMT_5_AB) == 0);
+    Trust_RoutineStatement(6, "", st, sizeof(st));
+    expect("empty routine-keys statement bytes", strcmp(st, "OMINULL-ROUTINE-KEYS-V1\nepoch=6\nkeys=\n") == 0);
+    char pem[200];
+    expect("routine key to PEM matches openssl's", Trust_P256PEM(fxr_a_xy, pem, sizeof(pem)) && strcmp(pem, FXR_A_PEM) == 0);
+    expect("release key to PEM matches openssl's", Trust_P256PEM(fxr_release_xy, pem, sizeof(pem)) && strcmp(pem, FXR_RELEASE_PEM) == 0);
+
+    init_routine();
+    expect("fresh host: no routine keys", T.routineCount == 0 && T.routine_epoch == 0);
+    expect("fresh host reports routine_epoch 0 and routine_keys 0", report_has("\"routine_epoch\":0,\"routine_keys\":0"));
+    char who[40];
+    expect("fresh host: update signed by the release key accepted", update_ok(FXR_UPDATE_SIG_R, FXR_PKG_SIG_R, who, sizeof(who)) && strcmp(who, "main") == 0);
+    expect("fresh host: update signed by a routine key refused", !update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_A, NULL, 0));
+
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB_WRONG);
+    expect("routine keys signed by a key other than the release key refused",
+           T.routineCount == 0 && refused_with("do not verify against the release key") && !routine_file("routine.pin"));
+
+    /* Malformed lists and fields: refused before any signature check. */
+    static char bad[8][1024];
+    snprintf(bad[0], sizeof(bad[0]), "%s", FXR_LIST_AB);
+    for (char* c = bad[0]; *c; c++) *c = (char)toupper((unsigned char)*c);
+    snprintf(bad[1], sizeof(bad[1]), "%s:%s,%s:%s", FXR_B_ID, FXR_B_XY, FXR_A_ID, FXR_A_XY);
+    snprintf(bad[2], sizeof(bad[2]), "1000000000000000:%s,2000000000000000:%s,3000000000000000:%s,4000000000000000:%s,5000000000000000:%s",
+             FXR_A_XY, FXR_A_XY, FXR_A_XY, FXR_A_XY, FXR_A_XY);
+    snprintf(bad[3], sizeof(bad[3]), "111111111111111:%s", FXR_A_XY);
+    snprintf(bad[4], sizeof(bad[4]), "%s:%s, %s:%s", FXR_A_ID, FXR_A_XY, FXR_B_ID, FXR_B_XY);
+    snprintf(bad[5], sizeof(bad[5]), "%s,", FXR_LIST_A);
+    snprintf(bad[6], sizeof(bad[6]), "%s:%s,%s:%s", FXR_A_ID, FXR_A_XY, FXR_A_ID, FXR_B_XY);
+    snprintf(bad[7], sizeof(bad[7]), "%s:%.126s", FXR_A_ID, FXR_A_XY);
+    const char* why[8] = {"uppercase hex", "unsorted ids", "five keys", "short id", "a space", "a trailing comma", "a repeated id", "short point"};
+    for (int i = 0; i < 8; i++) {
+        TrustRoutineKey k[TRUST_MAX_ROUTINE_KEYS];
+        int n = 0;
+        char what[96];
+        snprintf(what, sizeof(what), "routine key list with %s refused", why[i]);
+        routine_offer(now, "5", bad[i], FXR_SIG_5_AB);
+        expect(what, !Trust_ParseRoutineList(bad[i], k, &n) && T.routineCount == 0 && refused_with("malformed"));
+    }
+    {
+        TrustRoutineKey k[TRUST_MAX_ROUTINE_KEYS];
+        int n = -1;
+        expect("an empty list parses as no keys", Trust_ParseRoutineList("", k, &n) && n == 0);
+        expect("four sorted keys parse", Trust_ParseRoutineList(FXR_LIST_AB, k, &n) && n == 2 && strcmp(k[1].id, FXR_B_ID) == 0 &&
+                                             memcmp(k[0].xy, fxr_a_xy, 64) == 0);
+    }
+    const char* badEpoch[] = {"0", "-5", "5.0", "5e0", "\"5\"", "05", "null"};
+    for (size_t i = 0; i < sizeof(badEpoch) / sizeof(badEpoch[0]); i++) {
+        char what[96];
+        snprintf(what, sizeof(what), "routine epoch %s refused", badEpoch[i]);
+        routine_offer(now, badEpoch[i], FXR_LIST_AB, FXR_SIG_5_AB);
+        expect(what, T.routineCount == 0 && refused_with("malformed"));
+    }
+    routine_offer(now, "5", FXR_LIST_AB, "");
+    expect("routine keys without a signature refused", T.routineCount == 0 && refused_with("malformed"));
+
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB);
+    expect("release-signed routine keys pinned", T.routineCount == 2 && T.routine_epoch == 5 && !refused_with("routine") &&
+                                                     routine_file("routine.pin") && routine_file("routine.epoch"));
+    expect("report carries routine_epoch 5 and routine_keys 2", report_has("\"routine_epoch\":5,\"routine_keys\":2"));
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB);
+    expect("the same epoch and keys again is a no-op", T.routineCount == 2 && T.routine_epoch == 5 && !refused_with("routine"));
+    routine_offer(now, "5", FXR_LIST_A, FXR_SIG_5_A);
+    expect("the same epoch with other keys refused", T.routineCount == 2 && refused_with("older than the set pinned"));
+    routine_offer(now, "4", FXR_LIST_A, FXR_SIG_4_A);
+    expect("a lower epoch refused", T.routineCount == 2 && T.routine_epoch == 5 && refused_with("older than the set pinned"));
+    routine_offer(now, "7", FXR_LIST_AB, FXR_SIG_7_AB_BY_A);
+    expect("a routine key cannot sign routine keys", T.routine_epoch == 5 && refused_with("do not verify against the release key"));
+
+    init_routine();
+    expect("routine keys reload and re-verify at start", T.routineCount == 2 && T.routine_epoch == 5 && strcmp(T.routine[0].id, FXR_A_ID) == 0);
+    expect("update statement signed by a routine key accepted", update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_A, who, sizeof(who)) &&
+                                                                    strcmp(who, "routine:" FXR_A_ID) == 0);
+    expect("routine-signed statement with a package signed by another routine key refused", !update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_B, NULL, 0));
+    expect("routine-signed statement with a package signed by the release key refused", !update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_R, NULL, 0));
+    expect("release-signed statement with a routine-signed package refused", !update_ok(FXR_UPDATE_SIG_R, FXR_PKG_SIG_A, NULL, 0));
+    expect("release-signed update still accepted", update_ok(FXR_UPDATE_SIG_R, FXR_PKG_SIG_R, who, sizeof(who)) && strcmp(who, "main") == 0);
+    expect("update statement signed by neither refused", !update_ok(FXR_UPDATE_SIG_W, FXR_PKG_SIG_R, NULL, 0));
+
+    /* A routine key never stands in for the release key anywhere else. */
+    beat(now, offer(0, FX_KEYS_JSON, FXR_TB_SIG_BY_A), NULL, NULL, 0);
+    expect("a routine key never verifies a trust bundle", !T.have_key[0] && !T.have_key[1] && !T.have_key[2] && refused_with("does not verify"));
+    {
+        uint8_t der[160];
+        size_t dl = Response_Base64Decode(FXR_TB_SIG_BY_A, strlen(FXR_TB_SIG_BY_A), der, sizeof(der));
+        expect("the release verifier refuses a routine key's signature", !T.verify_release(FX_TB_STATEMENT, strlen(FX_TB_STATEMENT), der, dl));
+        dl = Response_Base64Decode(FXR_UPDATE_SIG_A, strlen(FXR_UPDATE_SIG_A), der, sizeof(der));
+        expect("the release verifier refuses a routine-signed release statement", !T.verify_release(FXR_UPDATE_STMT, strlen(FXR_UPDATE_STMT), der, dl));
+    }
+
+    /* A changed pin is ignored and reported; the set in force can be sent again. */
+    char path[400], buf[2048];
+    snprintf(path, sizeof(path), "%s" TRUST_SEP "routine.pin", g_dir);
+    FILE* f = fopen(path, "rb");
+    size_t n = f ? fread(buf, 1, sizeof(buf) - 1, f) : 0;
+    if (f) fclose(f);
+    buf[n] = '\0';
+    char* e = strstr(buf, "epoch=5");
+    if (e) e[6] = '9';
+    f = fopen(path, "wb");
+    if (f) {
+        fputs(buf, f);
+        fclose(f);
+    }
+    init_routine();
+    expect("a tampered routine.pin is ignored and reported", T.routineCount == 0 && T.routine_epoch == 0 && refused_with("routine.pin does not verify"));
+    expect("with the pin ignored a routine-signed update is refused", !update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_A, NULL, 0));
+    routine_offer(now, "4", FXR_LIST_A, FXR_SIG_4_A);
+    expect("the floor still refuses a lower epoch", T.routineCount == 0 && refused_with("older"));
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB);
+    expect("the set in force is pinned again", T.routineCount == 2 && T.routine_epoch == 5);
+    Trust_RemoveFile(path);
+    init_routine();
+    expect("without routine.pin no routine key", T.routineCount == 0 && T.routine_floor == 5);
+    routine_offer(now, "4", FXR_LIST_A, FXR_SIG_4_A);
+    expect("the floor survives a removed routine.pin", T.routineCount == 0 && refused_with("older"));
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB);
+    expect("restored", T.routineCount == 2);
+
+    /* An empty list revokes every routine key. */
+    routine_offer(now, "6", "", FXR_SIG_6_NONE);
+    expect("an empty list revokes the routine keys", T.routineCount == 0 && T.routine_epoch == 6 && !refused_with("routine"));
+    expect("report after revocation", report_has("\"routine_epoch\":6,\"routine_keys\":0"));
+    expect("an update signed by a revoked routine key is refused", !update_ok(FXR_UPDATE_SIG_A, FXR_PKG_SIG_A, NULL, 0));
+    init_routine();
+    expect("the revocation holds after a restart", T.routineCount == 0 && T.routine_epoch == 6 && !refused_with("routine"));
+    routine_offer(now, "5", FXR_LIST_AB, FXR_SIG_5_AB);
+    expect("the revoked set cannot be sent again", T.routineCount == 0 && refused_with("older"));
+    expect("after revocation the release key still signs updates", update_ok(FXR_UPDATE_SIG_R, FXR_PKG_SIG_R, NULL, 0));
+}
+
 int main(void) {
     int64_t now = FX_T0 + 100;
     test_versions();
@@ -725,6 +952,9 @@ int main(void) {
     test_monitor_release(now);
     test_offers_and_updates(now);
     test_host_authority(now);
+    make_dir();
+    test_routine_keys(now);
+    remove_dir();
     if (failures) {
         printf("[-] agent trust: %d failure(s)\n", failures);
         return 1;

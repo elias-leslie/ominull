@@ -28,6 +28,7 @@ typedef struct {
     const char* sig_path;
     const char* sha256;
     int settle_seconds;      /* how long the new agent must stay up */
+    const char* key_name;    /* which key signed the release statement: main or routine:<id> (NULL: main) */
 } AgentUpdateScript;
 
 /* Returns the script length, or -1 when it does not fit. */
@@ -47,7 +48,7 @@ static inline int AgentUpdate_BuildScript(const AgentUpdateScript* s, char* out,
         "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/agent.deb.sig\" \"$D/agent.deb\"\n"
         "base64 -d \"$D/release.sig.b64\" > \"$D/release.sig\"\n"
         "openssl dgst -sha256 -verify \"$D/release.pub\" -signature \"$D/release.sig\" \"$D/release.statement\"\n"
-        "echo \"[+] v%s verified against the pinned release key; installing\"\n"
+        "echo \"[+] v%s verified against release key %s; installing\"\n"
         "cp -p \"$B\" \"$D/ominulld.previous\"\n"
         "R0=$(systemctl show -p NRestarts --value \"$U\" 2>/dev/null || echo 0)\n"
         "rollback() {\n"
@@ -70,7 +71,7 @@ static inline int AgentUpdate_BuildScript(const AgentUpdateScript* s, char* out,
         s->dir, s->binary, s->unit, s->log_path, s->version,
         s->curl_args, s->hub_url, s->pkg_path,
         s->curl_args, s->hub_url, s->sig_path,
-        s->sha256, s->version, s->version, s->version,
+        s->sha256, s->version, s->key_name ? s->key_name : "main", s->version, s->version,
         s->settle_seconds, s->version);
     if (n < 0 || (size_t)n >= cap) return -1;
     return n;

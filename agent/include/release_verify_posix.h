@@ -42,8 +42,9 @@ static inline bool ReleaseVerify_Write(const char* path, const void* data, size_
     return close(fd) == 0;
 }
 
-static inline bool ReleaseVerifyPosix(const char* msg, size_t len, const uint8_t* der, size_t derlen) {
-    if (!g_ReleaseVerifyPem || !msg || !der || !derlen) return false;
+/* ReleaseVerifyPosixKey checks the signature against the PEM public key pem. */
+static inline bool ReleaseVerifyPosixKey(const char* pem, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    if (!pem || !msg || !der || !derlen) return false;
     char dir[260], fm[300], fs[300], fp[300];
     snprintf(dir, sizeof(dir), "%.190s/.release-verify-XXXXXX", g_ReleaseVerifyDir);
     if (!mkdtemp(dir)) return false;
@@ -51,7 +52,7 @@ static inline bool ReleaseVerifyPosix(const char* msg, size_t len, const uint8_t
     snprintf(fs, sizeof(fs), "%s/sig", dir);
     snprintf(fp, sizeof(fp), "%s/release.pub", dir);
     bool ok = ReleaseVerify_Write(fm, msg, len) && ReleaseVerify_Write(fs, der, derlen) &&
-              ReleaseVerify_Write(fp, g_ReleaseVerifyPem, strlen(g_ReleaseVerifyPem));
+              ReleaseVerify_Write(fp, pem, strlen(pem));
     if (ok) {
         pid_t pid = fork();
         if (pid == 0) {
@@ -80,5 +81,21 @@ static inline bool ReleaseVerifyPosix(const char* msg, size_t len, const uint8_t
     rmdir(dir);
     return ok;
 }
+
+/* ReleaseVerifyPosix checks against the compiled-in release key only: the
+ * verifier for trust bundles and routine-keys statements. */
+static inline bool ReleaseVerifyPosix(const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    return ReleaseVerifyPosixKey(g_ReleaseVerifyPem, msg, len, der, derlen);
+}
+
+#ifdef OMINULL_AGENT_TRUST_H
+/* ReleaseVerifyPosixXY is the Trust_KeyVerifier for agent updates: the
+ * compiled-in key (xy NULL) or a pinned routine key. */
+static inline bool ReleaseVerifyPosixXY(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
+    if (!xy) return ReleaseVerifyPosix(msg, len, der, derlen);
+    char pem[200];
+    return Trust_P256PEM(xy, pem, sizeof(pem)) && ReleaseVerifyPosixKey(pem, msg, len, der, derlen);
+}
+#endif
 
 #endif

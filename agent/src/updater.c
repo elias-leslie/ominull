@@ -12,13 +12,11 @@
  * checking adds no dependency to the agent.
  */
 
-#define OMINULL_NEED_PUBKEY_XY
 #include "../include/agent.h"
-#include "../include/release_key.h"
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <ctype.h>
-#include "../include/der_sig.h"
+#include "../include/release_verify_win.h"
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
@@ -240,47 +238,17 @@ done:
     return ok;
 }
 
-static bool Sha256Bytes(const unsigned char* data, size_t len, unsigned char out[32]) {
-    BCRYPT_ALG_HANDLE hAlg = NULL;
-    BCRYPT_HASH_HANDLE hHash = NULL;
-    bool ok = false;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0) != STATUS_SUCCESS) return false;
-    if (BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) == STATUS_SUCCESS &&
-        BCryptHashData(hHash, (PUCHAR)data, (ULONG)len, 0) == STATUS_SUCCESS)
-        ok = (BCryptFinishHash(hHash, out, 32, 0) == STATUS_SUCCESS);
-    if (hHash) BCryptDestroyHash(hHash);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return ok;
-}
-
-/* VerifyReleaseSignature checks a detached signature against the pinned release
- * key. This is the control that makes the whole update path safe: the key is
- * compiled in, so trust never routes through the hub. */
-static bool VerifyReleaseSignature(const unsigned char hash[32], const unsigned char* sig, size_t sigLen) {
+/* VerifyReleaseSignature checks a detached signature against one release key:
+ * the compiled-in key, or a routine key the compiled-in key vouched for
+ * (agent updates only). The release statement picks the key; the package
+ * must verify with that same key. Trust never routes through the hub. */
+static bool VerifyReleaseSignature(const unsigned char xy[64], const unsigned char hash[32], const unsigned char* sig, size_t sigLen) {
     unsigned char raw[64];
     if (!DerToRawSignature(sig, sigLen, raw)) {
         printf("[!] Release signature is not a well-formed ECDSA DER structure.\n");
         return false;
     }
-
-    unsigned char blob[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
-    BCRYPT_ECCKEY_BLOB* hdr = (BCRYPT_ECCKEY_BLOB*)blob;
-    hdr->dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
-    hdr->cbKey = 32;
-    memcpy(blob + sizeof(BCRYPT_ECCKEY_BLOB), OMINULL_RELEASE_PUBKEY_XY, OMINULL_RELEASE_PUBKEY_XY_LEN);
-
-    BCRYPT_ALG_HANDLE hAlg = NULL;
-    BCRYPT_KEY_HANDLE hKey = NULL;
-    bool ok = false;
-
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0) != STATUS_SUCCESS) return false;
-    if (BCryptImportKeyPair(hAlg, NULL, BCRYPT_ECCPUBLIC_BLOB, &hKey, blob, sizeof(blob), 0) != STATUS_SUCCESS) goto done;
-    ok = (BCryptVerifySignature(hKey, NULL, (PUCHAR)hash, 32, raw, 64, 0) == STATUS_SUCCESS);
-
-done:
-    if (hKey) BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return ok;
+    return ReleaseVerifyWinHash(xy, hash, sig, sigLen);
 }
 
 static bool ReadWholeFile(const char* path, unsigned char** out, size_t* outLen) {
@@ -541,12 +509,14 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
     }
     char statement[512];
     int sn = Agent_TrustReleaseStatement(pkgName, version, sha, statement, sizeof(statement));
-    unsigned char stmtHash[32];
-    if (sn <= 0 || sn >= (int)sizeof(statement) || !Sha256Bytes((const unsigned char*)statement, (size_t)sn, stmtHash) ||
-        !VerifyReleaseSignature(stmtHash, releaseSig, releaseSigLen)) {
-        printf("[!] Rejected agent update v%s: the release statement does not verify against the pinned release key.\n", version);
+    unsigned char signerXY[64];
+    char signerName[40];
+    if (sn <= 0 || sn >= (int)sizeof(statement) ||
+        !Agent_TrustUpdateSigner(statement, (size_t)sn, releaseSig, releaseSigLen, signerXY, signerName, sizeof(signerName))) {
+        printf("[!] Rejected agent update v%s: the release statement does not verify against the release key or a pinned routine key.\n", version);
         return;
     }
+    printf("[*] Agent v%s release statement verified by key %s.\n", version, signerName);
 
     char dir[MAX_PATH];
     if (!InstallDir(dir, sizeof(dir))) return;
@@ -587,14 +557,14 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
 
     unsigned char* sigBytes = NULL;
     size_t sigLen = 0;
-    if (!ReadWholeFile(sigFile, &sigBytes, &sigLen) || !VerifyReleaseSignature(hash, sigBytes, sigLen)) {
+    if (!ReadWholeFile(sigFile, &sigBytes, &sigLen) || !VerifyReleaseSignature(signerXY, hash, sigBytes, sigLen)) {
         free(sigBytes);
-        printf("[!] Rejected agent update v%s: signature does not verify against the pinned release key.\n", version);
+        printf("[!] Rejected agent update v%s: the package signature does not verify with key %s, which signed its release statement.\n", version, signerName);
         RemoveDirTree(stage);
         return;
     }
     free(sigBytes);
-    printf("[+] v%s verified against the pinned release key; installing.\n", version);
+    printf("[+] v%s verified against release key %s; installing.\n", version, signerName);
 
 	char helper[MAX_PATH];
 	PathIn(stage, "ominull-msi-helper.exe", helper, sizeof(helper));

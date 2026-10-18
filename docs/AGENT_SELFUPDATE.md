@@ -61,6 +61,40 @@ stop, invokes Windows Installer, and starts the package-owned service after a
 successful transaction. A failed transaction leaves the prior MSI installation
 authoritative.
 
+## Routine release keys
+
+Besides the compiled-in release key, an agent accepts up to four routine
+release keys, and only for agent updates: the package `.sig` and its
+`OMINULL-RELEASE-V1` release statement. Trust bundles, host authority, script
+grants, key rotation and routine-key statements still verify against the
+compiled-in key alone.
+
+The hub sends them in the heartbeat answer as
+`trust.routine_keys = {"epoch": N, "keys": "<list>", "sig": "<base64 DER>"}`.
+The agent rebuilds the statement
+
+```
+OMINULL-ROUTINE-KEYS-V1
+epoch=<N>
+keys=<id>:<xy>,<id>:<xy>
+```
+
+(each line ends in `\n`; `id` is 16 lowercase hex, `xy` the 128 lowercase hex of
+the raw P-256 point, entries sorted by id, at most four, an empty list revokes
+them all) and checks the release key's signature over it. Anything malformed
+is refused. A set is taken only at an epoch above every one pinned before
+(the same epoch and keys again changes nothing); `routine.epoch` keeps that
+floor even if `routine.pin` is deleted. `routine.pin` (next to `trust.pin`)
+holds the epoch, list and signature, and the signature is checked again at
+every start; a changed pin is ignored and reported.
+
+For an update the agent tries the compiled-in key, then each routine key, on
+the release statement. The package signature must verify with the same key:
+on Linux that key is written as `release.pub` for the install script's
+openssl checks; on Windows CNG checks the package with it. The log says which
+key verified (`main` or `routine:<id>`). The trust report carries
+`routine_epoch` (0 when none) and `routine_keys` (how many are pinned).
+
 ## Rollback and dead-man behavior
 
 An update job remains pending until the endpoint reports the target version and

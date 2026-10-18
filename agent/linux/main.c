@@ -2555,8 +2555,6 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         return;
     }
 
-    if (!PrepareUpdateDir()) return;
-    if (!WriteStagedFile("release.pub", OMINULL_RELEASE_PUBKEY_PEM, 0600)) return;
     const char* pkgName = strrchr(pkgPath, '/');
     pkgName = pkgName ? pkgName + 1 : pkgPath;
     char wantName[128];
@@ -2567,6 +2565,26 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
     char statement[512];
     int sn = Trust_ReleaseStatement(pkgName, version, sha256, statement, sizeof(statement));
     if (sn < 0 || sn >= (int)sizeof(statement)) return;
+    /* The statement must verify against the compiled-in release key or a
+     * pinned routine key; that one key goes to apply.sh as release.pub, so
+     * the package signature must verify with the same key. */
+    uint8_t releaseDer[160];
+    size_t releaseDerLen = Response_Base64Decode(releaseSig, strlen(releaseSig), releaseDer, sizeof(releaseDer));
+    int signer = Trust_UpdateSigner(&g_Trust, ReleaseVerifyPosixXY, statement, (size_t)sn, releaseDer, releaseDerLen);
+    if (signer < 0) {
+        printf("[!] Rejected agent update v%s: the release statement does not verify against the release key or a pinned routine key.\n", version);
+        return;
+    }
+    char signerName[40], signerPem[200];
+    const char* releasePub = OMINULL_RELEASE_PUBKEY_PEM;
+    Trust_SignerName(&g_Trust, signer, signerName, sizeof(signerName));
+    if (signer > 0) {
+        if (!Trust_P256PEM(g_Trust.routine[signer - 1].xy, signerPem, sizeof(signerPem))) return;
+        releasePub = signerPem;
+    }
+    printf("[*] Agent v%s release statement verified by key %s.\n", version, signerName);
+    if (!PrepareUpdateDir()) return;
+    if (!WriteStagedFile("release.pub", releasePub, 0600)) return;
     char sigLine[520];
     snprintf(sigLine, sizeof(sigLine), "%s\n", releaseSig);
     if (!WriteStagedFile("release.statement", statement, 0600)) return;
@@ -2593,7 +2611,7 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         .dir = OMINULL_UPDATE_DIR, .binary = "/opt/ominull/bin/ominulld",
         .log_path = "/var/log/ominull-update.log", .unit = "ominull-agent.service",
         .version = version, .curl_args = curlSec, .hub_url = config->hub_url,
-        .pkg_path = pkgPath, .sig_path = sigPath, .sha256 = sha256, .settle_seconds = 45,
+        .pkg_path = pkgPath, .sig_path = sigPath, .sha256 = sha256, .settle_seconds = 45, .key_name = signerName,
     };
     int n = AgentUpdate_BuildScript(&spec, script, sizeof(script));
     if (n < 0) {
@@ -3699,6 +3717,7 @@ int main(int argc, char* argv[]) {
     Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
     g_ReleaseVerifyPem = OMINULL_RELEASE_PUBKEY_PEM;
     g_Trust.verify_release = ReleaseVerifyPosix;
+    Trust_LoadRoutine(&g_Trust);
     printf("  Trust:         response key %s, auto-isolation key %s, policy key %s; manifest %s\n",
            g_Trust.have_key[TRUST_KEY_RESPONSE] ? "pinned" : "missing", g_Trust.have_key[TRUST_KEY_AUTO] ? "pinned" : "missing",
            g_Trust.have_key[TRUST_KEY_POLICY] ? "pinned" : "missing", g_Trust.manifest.have ? g_Trust.manifest.profile : "none yet");

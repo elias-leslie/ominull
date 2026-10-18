@@ -105,6 +105,7 @@ int main(void) {
     check("healthy binary: new binary stays", fileHas("bin/ominulld", "echo new"));
     check("healthy binary: not marked failed", !exists("D/failed-9.9.9"));
     check("healthy binary: no previous copy left", !exists("D/ominulld.previous"));
+    check("healthy binary: log names the key that verified it", fileHas("update.log", "verified against release key main"));
 
     rc = run("echo new", 0, true);
     check("crash-looping binary: rolled back", rc != 0 && fileHas("bin/ominulld", "echo old") && exists("D/failed-9.9.9"));
