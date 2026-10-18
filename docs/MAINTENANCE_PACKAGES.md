@@ -114,6 +114,8 @@ packages but small: a handful of machines, one owner, no new stores.
   hub shows whether the window is open and its next start, and the schedule
   starts enforce runs only inside the window. Without it (machine time, older
   agent) the package's own window check decides.
+  CLI: `ominullctl maint window show [EP]`, `maint window set EP|--default
+  01:00-05:00[,..] [--clock machine|utc]`, `maint window reset EP|--default`.
 - Packages never restart the machine themselves; they report `reboot`.
   Only the Restart package (below) restarts, with a warning on screen.
 - Each script stays under 24 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.

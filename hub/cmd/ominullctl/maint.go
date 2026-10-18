@@ -11,6 +11,7 @@ package main
 //	          [--reason TEXT] [--until YYYY-MM-DD|never] [--reset]
 //	  A machine override (--endpoint) needs --reason; --until lets it lapse
 //	  back to the fleet default.
+//	maint window show [ENDPOINT] | set ENDPOINT|--default RANGE[,RANGE...] [--clock machine|utc] | reset ENDPOINT|--default
 //	maint rules | maint forget-rule [ID]
 
 import (
@@ -25,7 +26,7 @@ import (
 
 func (c *APIClient) cmdMaint(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|status|settings|set|rules|forget-rule")
+		return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|window|status|settings|set|rules|forget-rule")
 	}
 	switch args[0] {
 	case "settings":
@@ -46,6 +47,8 @@ func (c *APIClient) cmdMaint(args []string) error {
 		return c.maintPromote(args[1:])
 	case "cancel":
 		return c.maintCancel(args[1:])
+	case "window":
+		return c.maintWindow(args[1:])
 	case "status":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: ominullctl maint status ENDPOINT")
@@ -86,7 +89,7 @@ func (c *APIClient) cmdMaint(args []string) error {
 		}
 		return err
 	}
-	return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|status|settings|set|rules|forget-rule")
+	return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|window|status|settings|set|rules|forget-rule")
 }
 
 // splitMaintArgs separates --mode/--every/--no-wait from positional words.

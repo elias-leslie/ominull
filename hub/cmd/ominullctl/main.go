@@ -1721,6 +1721,8 @@ Fleet & CyberOps Commands:
   maint script EP --file F --reason TEXT  Run a one-off script (one owner tap; --no-wait prints run and job ids)
   maint promote JOB_ID | --file F         Add a script with a package header to the library
   maint cancel JOB_ID                     Stop a running job (the agent kills it and its children)
+  maint window show [EP]                  Maintenance windows: fleet default and each machine's own, with the next start
+  maint window set EP|--default R[,R]     Set a window (HH:MM-HH:MM, up to four; --clock machine|utc); reset EP|--default
   maint status ENDPOINT                   Latest result of each package on a host
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
