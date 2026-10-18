@@ -65,7 +65,12 @@ import (
 
 const (
 	// PackageRunRoute is the hub route a package run approval belongs to.
-	PackageRunRoute   = "/api/v1/maintenance/run"
+	PackageRunRoute = "/api/v1/maintenance/run"
+	// PlaybookRunRoute is the route of a playbook run: the same items, run
+	// one after another on each host within the approved window.
+	PlaybookRunRoute  = "/api/v1/maintenance/playbooks/run"
+	PlaybookMaxWindow = 24 * 60 * 60
+	playbookMinWindow = 10 * 60
 	packageRuleOffer  = "packages" // ApprovalStatement.Offer
 	packageRuleIdle   = 90 * 24 * time.Hour
 	packageMaxItems   = 10
@@ -118,6 +123,16 @@ type PackageRunPayload struct {
 	Route   string   `json:"route"`
 	Items   []string `json:"items"` // each the exact ScriptExecPayload JSON an agent receives
 	Targets []string `json:"targets"`
+	// Playbook is set for a playbook run: the items run in this order, one at
+	// a time on each host, and their grants live for the window the owner
+	// approved (the hub holds a step back until the one before it ends).
+	Playbook *PlaybookRun `json:"playbook,omitempty"`
+}
+
+// PlaybookRun names a playbook run and how long it may take.
+type PlaybookRun struct {
+	Name          string `json:"name"`
+	WindowSeconds int64  `json:"window_seconds"`
 }
 
 // PackageItem is one script payload of a run as the authority read it.
@@ -329,41 +344,55 @@ func parsePackageItem(raw string) (PackageItem, error) {
 // ParsePackageRun reads a package run payload; targets is the approval's
 // sorted, de-duplicated target list.
 func ParsePackageRun(payload []byte, targets []string) ([]PackageItem, error) {
+	items, _, err := parsePackageRunPayload(payload, targets)
+	return items, err
+}
+
+// parsePackageRunPayload also returns the playbook part, if any.
+func parsePackageRunPayload(payload []byte, targets []string) ([]PackageItem, *PlaybookRun, error) {
 	if err := plainKeys(payload); err != nil {
-		return nil, fmt.Errorf("package run payload refused: %w", err)
+		return nil, nil, fmt.Errorf("package run payload refused: %w", err)
 	}
 	var p PackageRunPayload
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
-		return nil, errors.New("package run payload must carry route, items and targets")
+		return nil, nil, errors.New("package run payload must carry route, items and targets")
 	}
-	if p.Route != PackageRunRoute {
-		return nil, fmt.Errorf("route %q is not a package run", cleanText(p.Route, 80))
+	if p.Playbook == nil && p.Route != PackageRunRoute || p.Playbook != nil && p.Route != PlaybookRunRoute {
+		return nil, nil, fmt.Errorf("route %q is not a package run", cleanText(p.Route, 80))
+	}
+	if pb := p.Playbook; pb != nil {
+		if pb.Name == "" || cleanText(pb.Name, 80) != pb.Name {
+			return nil, nil, errors.New("a playbook run names its playbook in up to 80 plain characters")
+		}
+		if pb.WindowSeconds < playbookMinWindow || pb.WindowSeconds > PlaybookMaxWindow {
+			return nil, nil, errors.New("a playbook run takes 10 minutes to 24 hours")
+		}
 	}
 	if strings.Join(sortedUnique(p.Targets), "\x00") != strings.Join(targets, "\x00") {
-		return nil, errors.New("payload targets differ from the approval's targets")
+		return nil, nil, errors.New("payload targets differ from the approval's targets")
 	}
 	if len(p.Items) == 0 || len(p.Items) > packageMaxItems {
-		return nil, fmt.Errorf("a package run carries 1-%d scripts", packageMaxItems)
+		return nil, nil, fmt.Errorf("a package run carries 1-%d scripts", packageMaxItems)
 	}
 	if len(p.Items)*len(targets) > packageMaxGrants {
-		return nil, fmt.Errorf("a package run covers at most %d script runs", packageMaxGrants)
+		return nil, nil, fmt.Errorf("a package run covers at most %d script runs", packageMaxGrants)
 	}
 	items := make([]PackageItem, 0, len(p.Items))
 	seen := map[string]bool{}
 	for _, raw := range p.Items {
 		it, err := parsePackageItem(raw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if seen[it.Digest] {
-			return nil, errors.New("a package run names the same script payload twice")
+			return nil, nil, errors.New("a package run names the same script payload twice")
 		}
 		seen[it.Digest] = true
 		items = append(items, it)
 	}
-	return items, nil
+	return items, p.Playbook, nil
 }
 
 // paramName is a lower-case identifier of at most 32 characters.
@@ -409,8 +438,8 @@ func packageBaseline(in *ApprovalRequestInput, targets []string) bool {
 	if in.Kind != response.ActionKindScriptExec {
 		return false
 	}
-	items, err := ParsePackageRun(in.Payload, targets)
-	if err != nil {
+	items, pb, err := parsePackageRunPayload(in.Payload, targets)
+	if err != nil || pb != nil { // a playbook asks every time
 		return false
 	}
 	for _, it := range items {
@@ -422,9 +451,12 @@ func packageBaseline(in *ApprovalRequestInput, targets []string) bool {
 }
 
 func describePackageRun(payload []byte, targets []string) (string, string, error) {
-	items, err := ParsePackageRun(payload, targets)
+	items, pb, err := parsePackageRunPayload(payload, targets)
 	if err != nil {
 		return "", "", err
+	}
+	if pb != nil {
+		return describePlaybookRun(pb, items, targets)
 	}
 	parts := make([]string, 0, len(items))
 	for _, it := range items {
@@ -449,15 +481,38 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 	return "Run maintenance", short, nil
 }
 
+// describePlaybookRun: the steps in order, each with its time limit, risk
+// and changed settings, and the window the grants live for.
+func describePlaybookRun(pb *PlaybookRun, items []PackageItem, targets []string) (string, string, error) {
+	lead := fmt.Sprintf("Playbook %q as SYSTEM on %s, one step after another, all within %s: ", pb.Name, listTargets(targets), spanText(pb.WindowSeconds))
+	for _, short := range []bool{false, true} {
+		parts := make([]string, 0, len(items))
+		for i, it := range items {
+			step := fmt.Sprintf("%d. %s", i+1, it.Label())
+			if !short {
+				step += fmt.Sprintf(", up to %d min", (it.Exec.TimeoutSeconds+59)/60)
+			}
+			parts = append(parts, step+it.riskNote()+it.settingsNote(false))
+		}
+		if full := lead + strings.Join(parts, "; "); len([]rune(full)) <= approvalMaxSummary {
+			return "Run playbook", full, nil
+		}
+	}
+	return "", "", errors.New("too much to show in one approval; give the playbook fewer steps or change fewer settings")
+}
+
 // packageRuleCovers says whether a request is one a package rule may cover
 // (every item a safe package) and returns its item digests and labels.
 func packageRuleCovers(in *ApprovalRequestInput, targets []string) ([]string, []string, error) {
 	if in.Kind != response.ActionKindScriptExec {
 		return nil, nil, errors.New("not a package run")
 	}
-	items, err := ParsePackageRun(in.Payload, targets)
+	items, pb, err := parsePackageRunPayload(in.Payload, targets)
 	if err != nil {
 		return nil, nil, err
+	}
+	if pb != nil {
+		return nil, nil, errors.New("a playbook run asks every time")
 	}
 	digests := make([]string, 0, len(items))
 	labels := make([]string, 0, len(items))
@@ -748,7 +803,7 @@ func (a *Authority) createPackageRule(v ApprovalView, targets []string, payload 
 // signPackageGrants spends a package run approval: one grant per endpoint
 // and script payload, each bound to that payload's own digest.
 func (a *Authority) signPackageGrants(req *ApprovalConsumeRequest, requester string, stmt ApprovalStatement, payload []byte, targets []string, now time.Time) ([]*response.EndpointGrant, error) {
-	items, err := ParsePackageRun(payload, targets)
+	items, pb, err := parsePackageRunPayload(payload, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -757,6 +812,11 @@ func (a *Authority) signPackageGrants(req *ApprovalConsumeRequest, requester str
 		return nil, err
 	}
 	ttl := grantTTL(req.Kind, req.TTLSeconds)
+	if pb != nil {
+		// The hub starts each step when the one before it ends, so every
+		// grant lives for the window the owner approved.
+		ttl = pb.WindowSeconds
+	}
 	grants := make([]*response.EndpointGrant, 0, len(items)*len(targets))
 	for _, ep := range targets {
 		for _, it := range items {

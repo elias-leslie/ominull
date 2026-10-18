@@ -3894,6 +3894,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/maintenance", s.authMiddleware(s.responseGate(s.handleMaintenance)))
 	mux.HandleFunc("/api/v1/maintenance/settings", s.authMiddleware(s.responseGate(s.handleMaintenanceSettings)))
 	mux.HandleFunc("/api/v1/maintenance/catalog", s.authMiddleware(s.responseGate(s.handleSoftwareCatalog)))
+	mux.HandleFunc("/api/v1/maintenance/playbooks", s.authMiddleware(s.responseGate(s.handlePlaybooks)))
+	mux.HandleFunc("/api/v1/maintenance/playbooks/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolvePlaybookRun, s.handlePlaybookRun)))))
 	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)

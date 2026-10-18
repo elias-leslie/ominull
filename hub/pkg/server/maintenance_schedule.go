@@ -109,6 +109,7 @@ func (b *maintenanceBlocks) list() []scheduleBlock {
 }
 
 func (s *Server) maintenanceScheduleLoop() {
+	go s.playbookLoop()
 	t := time.NewTicker(maintenanceTick)
 	defer t.Stop()
 	for range t.C {
@@ -202,6 +203,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 	if err != nil {
 		return err
 	}
+	busy := s.playbookBusyHosts() // a playbook running there has the machine
 	for _, d := range defs {
 		// Maintenance mode is switched on for a while, never on a schedule.
 		if d.Script.Interpreter != d.Header.Interpreter() || d.Header.Role == scripts.RoleMaintenanceMode {
@@ -209,7 +211,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		}
 		groups := map[string]*pendingAsk{} // item digest -> run
 		for _, ep := range eps {
-			if !d.Header.RunsOn(ep.OS) {
+			if !d.Header.RunsOn(ep.OS) || busy[ep.ID] {
 				continue
 			}
 			eff := st.Effective(d.Header, ep.ID)

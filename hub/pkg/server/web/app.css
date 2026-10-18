@@ -4938,3 +4938,11 @@ tfoot {
 
   .terminal-actions-group { gap: 4px; flex: none; }
 }
+
+/* Playbooks (Maintenance page) */
+.pb-steps { margin: 0; padding-left: 1.4em; }
+.pb-steps li { margin: 0 0 2px; }
+.pb-step-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pb-step-row select { flex: 1 1 12em; min-width: 0; }
+.pb-step-n { min-width: 1.6em; }
+.pb-hosts { border: 1px solid var(--line, currentColor); border-radius: 4px; padding: 8px 12px; display: grid; gap: 6px; margin: 0; }

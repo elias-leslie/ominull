@@ -418,3 +418,61 @@ func TestCarefulStepsAndRevertAlwaysAsk(t *testing.T) {
 		t.Fatalf("an enforce rule covered a revert: %v", err)
 	}
 }
+
+func playbookRequest(targets []string, pb *responseauth.PlaybookRun, route string, items ...string) *responseauth.ApprovalRequestInput {
+	in := packageRequest(targets, items...)
+	sorted := append([]string(nil), targets...)
+	sort.Strings(sorted)
+	in.Payload, _ = json.Marshal(responseauth.PackageRunPayload{Route: route, Items: items, Targets: sorted, Playbook: pb})
+	return in
+}
+
+// A playbook run: never a baseline, never offered a rule, steps shown in
+// order with the window, and every grant lives for exactly that window. Its
+// route and window are checked.
+func TestPlaybookRunsAskAndLiveForTheWindow(t *testing.T) {
+	auth, ap, _, _ := newRuleAuthority(t)
+	audit := packageItem(t, "windows-audit", "safe", "audit", 300)
+	cleanup := packageItem(t, "windows-cleanup", "safe", "audit", 3600)
+	pb := &responseauth.PlaybookRun{Name: "Weekly tidy", WindowSeconds: 2 * 3600}
+
+	rule := playbookRequest([]string{"ep-a"}, pb, responseauth.PlaybookRunRoute, audit, cleanup)
+	rule.RuleOnly = true
+	if _, err := auth.RequestApproval(rule); !errors.Is(err, responseauth.ErrRuleNotCovered) {
+		t.Fatalf("a playbook of baseline audits must still ask: %v", err)
+	}
+	for name, in := range map[string]*responseauth.ApprovalRequestInput{
+		"plain route":  playbookRequest([]string{"ep-a"}, pb, responseauth.PackageRunRoute, audit),
+		"no playbook":  playbookRequest([]string{"ep-a"}, nil, responseauth.PlaybookRunRoute, audit),
+		"short window": playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{Name: "x", WindowSeconds: 60}, responseauth.PlaybookRunRoute, audit),
+		"long window":  playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{Name: "x", WindowSeconds: 25 * 3600}, responseauth.PlaybookRunRoute, audit),
+		"no name":      playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{WindowSeconds: 3600}, responseauth.PlaybookRunRoute, audit),
+	} {
+		if _, err := auth.RequestApproval(in); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	in := playbookRequest([]string{"ep-a"}, pb, responseauth.PlaybookRunRoute, cleanup, audit)
+	v, err := auth.RequestApproval(in)
+	if err != nil || v.State != responseauth.ApprovalPending || statementOffer(t, v) != "" {
+		t.Fatalf("ask: %v %+v", err, v)
+	}
+	if !strings.Contains(v.Summary, `Playbook "Weekly tidy" as SYSTEM on ep-a, one step after another, all within 2 hours: 1. windows-cleanup (audit), up to 60 min; 2. windows-audit (audit), up to 5 min`) {
+		t.Fatalf("summary: %s", v.Summary)
+	}
+	if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(in.Payload)
+	grants, err := auth.ConsumeApproval(&responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin",
+		Kind: response.ActionKindScriptExec, Digest: hex.EncodeToString(sum[:]), Targets: []string{"ep-a"}, TTLSeconds: 300})
+	if err != nil || len(grants) != 2 {
+		t.Fatalf("grants: %v %d", err, len(grants))
+	}
+	for _, g := range grants {
+		if g.ExpiresAt-g.IssuedAt != 2*3600 {
+			t.Fatalf("a playbook grant lives %ds, want the approved window", g.ExpiresAt-g.IssuedAt)
+		}
+	}
+}

@@ -199,6 +199,46 @@ the phone, and the approval names the catalog's size.
   something was removed, else `ok`. Revert: `na` (an uninstall cannot be
   undone).
 
+## Playbooks
+
+A playbook is a named list of up to 8 package steps (package and mode) run
+in order, optionally inside maintenance mode. Playbooks are data: one
+settings row (`maintenance.playbooks`), edited from the Maintenance page or
+`GET/PUT/DELETE /api/v1/maintenance/playbooks` (PUT `{"playbook":{"id",
+"name","steps":[{"package","mode"}],"maintenance_mode","note"}}`, admin).
+Saving checks every step against the library (a live package, not
+maintenance mode itself, all on one platform), runs nothing and asks nobody.
+
+- **Running one.** `POST /api/v1/maintenance/playbooks/run
+  {"playbook_id","endpoint_ids"}` (admin) asks the owner once for every step
+  on every machine. With maintenance mode on, the run is maintenance mode on
+  (its `hours` set to the run's window), the steps, then maintenance mode
+  off. Each step uses the machines' effective settings for that package, so
+  machines that differ need separate runs (as for any package run).
+- **Window.** Each step's time limit plus 10 minutes (and 10 minutes for
+  each maintenance mode run), rounded up to whole hours; a playbook that
+  would need more than 24 hours is refused. The payload the owner approves
+  (`PackageRunPayload.playbook {name, window_seconds}`, route
+  `/api/v1/maintenance/playbooks/run`) carries the window, the approval reads
+  "one step after another, all within N hours" with the steps numbered, and
+  the authority signs every grant of that run for exactly the window. A
+  playbook run is never a baseline and never offered an approve-all rule.
+- **One step at a time.** The agent starts every job it is offered at once,
+  so the hub keeps the grants and starts a machine's next step only when the
+  one before it has ended (finished, failed, or quiet past its time limit
+  plus 10 minutes); it checks every 30 seconds. A failed step does not stop
+  the ones after it, so maintenance mode still ends. A step not started
+  when the window ends is not started (`not_started`); a step still queued
+  on an offline machine past the window reads `not_run`. Runs live in the
+  settings row `maintenance.playbook_runs` (script payloads and unused grants
+  are dropped when a run ends; the 20 newest finished runs are kept).
+  Scheduled package runs leave a machine alone while a playbook runs on it.
+- **Console.** The Maintenance tab's **Playbooks** card lists playbooks
+  with their steps (*Run…*, *Edit…*, *Remove*) and recent runs with each
+  machine's progress ("Step 2 of 5: Cleanup (enforce), running", or the
+  results once done). *Run…* picks Windows or Linux machines to match the
+  steps and waits for the phone.
+
 ## Settings
 
 One small table, `maintenance_settings`, keyed (tenant, package, endpoint):

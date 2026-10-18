@@ -79,13 +79,9 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 	if !scripts.RunModes[req.Mode] {
 		return nil, nil, errors.New("mode must be audit, enforce or revert")
 	}
-	windows := map[string]bool{}
-	for _, id := range req.EndpointIDs {
-		ep, err := s.store.GetEndpoint(id)
-		if err != nil || ep == nil || ep.Status == "retired" || (ep.TenantID != tenantID && tenantID != "default") {
-			return nil, nil, fmt.Errorf("endpoint %s not found", id)
-		}
-		windows[id] = strings.Contains(strings.ToLower(ep.OS), "windows")
+	windows, err := s.packageHosts(tenantID, req.EndpointIDs)
+	if err != nil {
+		return nil, nil, err
 	}
 	settings, err := s.maintenanceSettings(tenantID)
 	if err != nil {
@@ -102,42 +98,70 @@ func (s *Server) packageRunItems(tenantID string, body []byte) (*packageRunReque
 			continue
 		}
 		seen[sc.ID] = true
-		for id, win := range windows {
-			if win != windowsInterpreter(sc.Interpreter) {
-				return nil, nil, fmt.Errorf("%s does not run on %s", sc.Name, id)
-			}
-		}
-		sv, err := s.scriptsStore.GetScriptVersion(tenantID, sc.ID, sc.LatestVersion)
+		it, _, err := s.buildPackageItem(tenantID, sc, req.Mode, req.EndpointIDs, windows, settings, nil)
 		if err != nil {
 			return nil, nil, err
 		}
-		h, err := scripts.ParsePackageHeader(sv.Source)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %v", sc.Name, err)
-		}
-		// One run is one payload on every named host, so the hosts must
-		// share the package's effective settings.
-		var params map[string]string
-		for _, id := range req.EndpointIDs {
-			p := settings.Effective(h, id).RunParams(req.Mode)
-			if err := s.fillCatalogParams(h, p); err != nil {
-				return nil, nil, err
-			}
-			if params != nil && !sameParams(params, p) {
-				return nil, nil, fmt.Errorf("%s has different settings on these hosts; run them separately", sc.Name)
-			}
-			params = p
-		}
-		if err := h.CheckRun(params); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", sc.Name, err)
-		}
-		raw, err := packageItem(sc, sv, params, h.Timeout, packageMaxOutput)
-		if err != nil {
-			return nil, nil, err
-		}
-		items = append(items, packageRunItem{Raw: raw, Digest: responseauth.ItemDigest(raw), Script: sc, Version: sv.Version})
+		items = append(items, it)
 	}
 	return &req, items, nil
+}
+
+// packageHosts checks the named endpoints and says which run Windows.
+func (s *Server) packageHosts(tenantID string, ids []string) (map[string]bool, error) {
+	windows := map[string]bool{}
+	for _, id := range ids {
+		ep, err := s.store.GetEndpoint(id)
+		if err != nil || ep == nil || ep.Status == "retired" || (ep.TenantID != tenantID && tenantID != "default") {
+			return nil, fmt.Errorf("endpoint %s not found", id)
+		}
+		windows[id] = strings.Contains(strings.ToLower(ep.OS), "windows")
+	}
+	return windows, nil
+}
+
+// buildPackageItem is one package's run payload for hosts that share its
+// effective settings (windows says which hosts run Windows). override sets
+// parameters over the settings (a playbook's maintenance mode length).
+func (s *Server) buildPackageItem(tenantID string, sc *scripts.Script, mode string, endpointIDs []string, windows map[string]bool,
+	settings scripts.Settings, override map[string]string) (packageRunItem, *scripts.PackageHeader, error) {
+	for _, id := range endpointIDs {
+		if windows[id] != windowsInterpreter(sc.Interpreter) {
+			return packageRunItem{}, nil, fmt.Errorf("%s does not run on %s", sc.Name, id)
+		}
+	}
+	sv, err := s.scriptsStore.GetScriptVersion(tenantID, sc.ID, sc.LatestVersion)
+	if err != nil {
+		return packageRunItem{}, nil, err
+	}
+	h, err := scripts.ParsePackageHeader(sv.Source)
+	if err != nil {
+		return packageRunItem{}, nil, fmt.Errorf("%s: %v", sc.Name, err)
+	}
+	// One run is one payload on every named host, so the hosts must
+	// share the package's effective settings.
+	var params map[string]string
+	for _, id := range endpointIDs {
+		p := settings.Effective(h, id).RunParams(mode)
+		for k, v := range override {
+			p[k] = v
+		}
+		if err := s.fillCatalogParams(h, p); err != nil {
+			return packageRunItem{}, nil, err
+		}
+		if params != nil && !sameParams(params, p) {
+			return packageRunItem{}, nil, fmt.Errorf("%s has different settings on these hosts; run them separately", sc.Name)
+		}
+		params = p
+	}
+	if err := h.CheckRun(params); err != nil {
+		return packageRunItem{}, nil, fmt.Errorf("%s: %w", sc.Name, err)
+	}
+	raw, err := packageItem(sc, sv, params, h.Timeout, packageMaxOutput)
+	if err != nil {
+		return packageRunItem{}, nil, err
+	}
+	return packageRunItem{Raw: raw, Digest: responseauth.ItemDigest(raw), Script: sc, Version: sv.Version}, h, nil
 }
 
 func sameParams(a, b map[string]string) bool {

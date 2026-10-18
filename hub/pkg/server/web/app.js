@@ -489,6 +489,7 @@
     maintSettingsByEndpoint: {},
     maintSettings: null,
     maintCatalog: null,
+    maintPlaybooks: null,
     maintTab: "maintenance",
     maintCardTab: "maintenance",
     /* The hub has kept a rolling communication profile per endpoint since the
@@ -1266,6 +1267,27 @@
       appx: { appx: "remove the Store app for all users", manual: "needs someone at the screen" } },
     flags: ["/S", "/SILENT", "/VERYSILENT /NORESTART", "/quiet", "/quiet /norestart", "/uninstall /quiet", "-uninstall", "--uninstall", "--force-uninstall"]
   };
+  var DEMO_PLAYBOOKS = null;
+  function demoPlaybooks() {
+    if (!DEMO_PLAYBOOKS) {
+      var win = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return /windows/i.test(e.os || ""); });
+      var hosts = {};
+      win.slice(0, 2).forEach(function (e, i) {
+        hosts[e.id] = i === 0
+          ? [{ state: "done", result: "ok" }, { state: "done", result: "fixed" }, { state: "done", result: "drift" }, { state: "started", job_id: "demo-job-pb" }, { state: "pending" }]
+          : [{ state: "done", result: "ok" }, { state: "started", job_id: "demo-job-pb2" }, { state: "pending" }, { state: "pending" }, { state: "pending" }];
+      });
+      DEMO_PLAYBOOKS = {
+        max_steps: 8,
+        playbooks: [{ id: "weekly-tidy", name: "Weekly tidy", maintenance_mode: true, note: "Sunday night, after the games update",
+          steps: [{ package: "windows-cleanup", mode: "enforce" }, { package: "windows-updates", mode: "enforce" }, { package: "windows-audit", mode: "audit" }] }],
+        runs: Object.keys(hosts).length ? [{ id: "demo-run-1", playbook_id: "weekly-tidy", name: "Weekly tidy", requester: "admin",
+          started: new Date(Date.now() - 50 * 60000).toISOString(), deadline: new Date(Date.now() + 70 * 60000).toISOString(), done: false,
+          steps: ["windows-maintenance-mode (enforce)", "windows-cleanup (enforce)", "windows-updates (enforce)", "windows-audit (audit)", "windows-maintenance-mode (revert)"], hosts: hosts }] : []
+      };
+    }
+    return JSON.parse(JSON.stringify(DEMO_PLAYBOOKS));
+  }
   function demoTerminalLimits() {
     return JSON.parse(JSON.stringify(DEMO_TERMINAL_LIMITS));
   }
@@ -1343,6 +1365,7 @@
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
+        if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1525,6 +1548,26 @@
         else if (body.mode === "revert") delete DEMO_MAINT_MODE[id];
       });
       return { jobs: (body.endpoint_ids || []).map(function (id) { return { endpoint_id: id, package: (body.packages || [])[0], job_id: "demo-job-" + Date.now() }; }) };
+    }
+    if (base === "/api/v1/maintenance/playbooks") {
+      demoPlaybooks();
+      var pid = method === "DELETE" ? decodeURIComponent((path.split("id=")[1] || "").split("&")[0]) : body.playbook.id;
+      DEMO_PLAYBOOKS.playbooks = DEMO_PLAYBOOKS.playbooks.filter(function (b) { return b.id !== pid; });
+      if (method !== "DELETE") DEMO_PLAYBOOKS.playbooks.push(body.playbook);
+      DEMO_PLAYBOOKS.playbooks.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
+      return demoPlaybooks();
+    }
+    if (base === "/api/v1/maintenance/playbooks/run") {
+      demoPlaybooks();
+      var book = DEMO_PLAYBOOKS.playbooks.filter(function (b) { return b.id === body.playbook_id; })[0];
+      var labels = arrayOf(book && book.steps).map(function (st) { return st.package + " (" + st.mode + ")"; });
+      if (book && book.maintenance_mode) labels = ["windows-maintenance-mode (enforce)"].concat(labels, ["windows-maintenance-mode (revert)"]);
+      var hs = {};
+      (body.endpoint_ids || []).forEach(function (id) { hs[id] = labels.map(function (l, i) { return i === 0 ? { state: "started", job_id: "demo-job-" + Date.now() } : { state: "pending" }; }); });
+      var run = { id: "demo-run-" + Date.now(), playbook_id: body.playbook_id, name: book ? book.name : body.playbook_id, requester: "admin",
+        started: new Date().toISOString(), deadline: new Date(Date.now() + 2 * 3600000).toISOString(), done: false, steps: labels, hosts: hs };
+      DEMO_PLAYBOOKS.runs.unshift(run);
+      return { run: run };
     }
     if (base === "/api/v1/maintenance/catalog") {
       var drop = method === "DELETE" ? decodeURIComponent((path.split("id=")[1] || "").split("&")[0]) : body.entry.id;
@@ -9718,7 +9761,190 @@
       card(tab === "security" ? "Security packages" : "Maintenance packages",
         pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
           : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true),
+      tab === "maintenance" ? maintPlaybooksCard() : null,
       usesCatalog ? maintCatalogCard() : null));
+  }
+
+  /* Playbooks: named package runs in order. A run asks the owner once for
+     every step on every machine; the hub then starts each machine's steps
+     one after another, inside maintenance mode when the playbook says so. */
+  function maintPkgTitle(name) {
+    var p = arrayOf(state.maintSettings && state.maintSettings.packages).filter(function (x) { return x.name === name; })[0];
+    return p ? p.title : name;
+  }
+  /* "windows-cleanup (enforce)" as the operator reads it. */
+  function maintStepText(label) {
+    var m = /^(.*) \((audit|enforce|revert)\)$/.exec(label || "");
+    if (!m) return label;
+    if (/maintenance-mode$/.test(m[1])) return m[2] === "revert" ? "Maintenance mode off" : "Maintenance mode on";
+    return maintPkgTitle(m[1]) + " (" + m[2] + ")";
+  }
+  var PB_RESULT_TONE = { ok: "ok", fixed: "ok", drift: "warn", skipped: "idle", na: "idle", failed: "crit", no_result: "crit", not_run: "warn", cancelled: "idle" };
+  function maintHostProgress(steps, labels) {
+    var cur = -1;
+    for (var i = 0; i < steps.length; i++) if (steps[i].state === "started" || steps[i].state === "pending") { cur = i; break; }
+    if (cur >= 0) {
+      return h("span", { text: "Step " + (cur + 1) + " of " + steps.length + ": " + maintStepText(labels[cur]) + (steps[cur].state === "started" ? ", running" : ", next") });
+    }
+    var counts = {};
+    steps.forEach(function (st) { var k = st.state === "not_started" ? "not started" : (st.result || "done"); counts[k] = (counts[k] || 0) + 1; });
+    return h("span", { cls: "uf uf-wrap uf-g1" }, Object.keys(counts).map(function (k) {
+      return chip(PB_RESULT_TONE[k] || (k === "not started" ? "warn" : "idle"), counts[k] + " " + k);
+    }));
+  }
+  function maintAssetName(epID) {
+    var a = arrayOf(state.assets).filter(function (x) { return x.endpoint && x.endpoint.id === epID; })[0];
+    return a ? a.name : epID;
+  }
+  function maintPlaybooksCard() {
+    var d = state.maintPlaybooks;
+    var actions = IS_ADMIN && d && !d.error ? [h("button", { cls: "btn mini", type: "button", text: "Add…",
+      on: { click: function () { openPlaybookSheet(null); } } })] : null;
+    if (!d) return card("Playbooks", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Loading playbooks…" })), actions, true);
+    if (d.error) return card("Playbooks", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Playbooks unavailable: " + d.error })), null, true);
+    var body = h("div", { cls: "card-body stack" },
+      h("p", { cls: "pending", text: "A playbook runs packages in order on the machines you pick. Each run asks you once on your phone for every step on every machine; the steps then run one after another on each machine. With maintenance mode on, the machines stay awake for the run and may sleep again when it ends." }));
+    var books = arrayOf(d.playbooks);
+    body.appendChild(books.length ? stackOnPhone(simpleTable(["Playbook", "Steps", ""], books.map(function (b) {
+      return [
+        h("div", {}, h("b", { text: b.name }), b.maintenance_mode ? h("span", { cls: "u-ml2" }, chip("idle", "maintenance mode")) : null,
+          b.note ? h("div", { cls: "dim-2", text: b.note }) : null),
+        h("ol", { cls: "pb-steps" }, arrayOf(b.steps).map(function (st) { return h("li", { text: maintPkgTitle(st.package) + " (" + st.mode + ")" }); })),
+        h("div", { cls: "uf uf-g1" },
+          h("button", { cls: "btn mini", type: "button", text: "Run…", disabled: READ_ONLY, "aria-label": "Run " + b.name, on: { click: function () { openPlaybookRunSheet(b); } } }),
+          IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Edit…", "aria-label": "Edit " + b.name, on: { click: function () { openPlaybookSheet(b); } } }) : null,
+          IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove " + b.name, on: { click: function () { playbookRemove(b); } } }) : null)
+      ];
+    }), { sortable: false })) : emptyBox("No playbooks yet." + (IS_ADMIN ? " Add one to run several packages in order with one approval." : "")));
+    var runs = arrayOf(d.runs).slice(0, 10);
+    if (runs.length) {
+      var rows = [];
+      runs.forEach(function (r) {
+        Object.keys(r.hosts || {}).sort().forEach(function (ep, i) {
+          rows.push([
+            i === 0 ? h("div", {}, h("b", { text: r.name }), h("div", { cls: "dim-2" }, stamp(parseTime(r.started))),
+              r.done ? null : h("div", { cls: "dim-2", text: "steps not started by " + new Date(parseTime(r.deadline)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " are skipped" })) : "",
+            maintAssetName(ep),
+            maintHostProgress(arrayOf(r.hosts[ep]), arrayOf(r.steps))
+          ]);
+        });
+      });
+      body.appendChild(h("h4", { text: "Recent runs" }));
+      body.appendChild(stackOnPhone(simpleTable(["Run", "Machine", "Progress"], rows, { sortable: false })));
+    }
+    return card("Playbooks", body, actions, true);
+  }
+
+  function maintPlaybooksRedraw(d) {
+    if (d && d.playbooks) state.maintPlaybooks = d;
+    if (state.section !== "maintenance") return;
+    $("view").dataset.section = "";
+    renderBody();
+  }
+
+  function playbookRemove(b) {
+    confirmSheet({
+      title: "Remove the playbook " + b.name + "?",
+      consequence: "Runs already started carry on. Nothing else changes.",
+      confirmLabel: "Remove",
+      onConfirm: function () {
+        request("/api/v1/maintenance/playbooks?id=" + encodeURIComponent(b.id), "DELETE").then(function (d) {
+          maintPlaybooksRedraw(d); toast("Removed " + b.name, "ok");
+        }, function (err) { toast("Not removed: " + err.message, "crit"); });
+      }
+    });
+  }
+
+  function openPlaybookSheet(book) {
+    var max = (state.maintPlaybooks && state.maintPlaybooks.max_steps) || 8;
+    var pkgs = arrayOf(state.maintSettings && state.maintSettings.packages).filter(function (p) { return !p.role; });
+    var b = book ? JSON.parse(JSON.stringify(book)) : { id: "", name: "", maintenance_mode: true, steps: [], note: "" };
+    var name = h("input", { type: "text", maxlength: "80", value: b.name, "aria-label": "Name" });
+    var id = h("input", { type: "text", maxlength: "48", value: b.id, disabled: !!book, "aria-label": "Id" });
+    var idTouched = !!book;
+    id.addEventListener("input", function () { idTouched = true; });
+    name.addEventListener("input", function () {
+      if (!idTouched) id.value = name.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    });
+    var mm = h("input", { type: "checkbox", checked: !!b.maintenance_mode, "aria-label": "Maintenance mode for the run" });
+    var note = h("input", { type: "text", maxlength: "200", value: b.note || "", "aria-label": "Note" });
+    var list = h("div", { cls: "stack" });
+    var steps = arrayOf(b.steps).slice();
+    function drawSteps() {
+      clear(list);
+      if (!steps.length) list.appendChild(h("p", { cls: "dim-2", text: "No steps yet." }));
+      steps.forEach(function (st, i) {
+        var pkgSel = h("select", { "aria-label": "Package for step " + (i + 1), on: { change: function (e) { st.package = e.target.value; } } },
+          pkgs.map(function (p) { return h("option", { value: p.name, text: p.title + (p.platform === "linux" ? " (Linux)" : ""), selected: p.name === st.package }); }));
+        var modeSel = h("select", { "aria-label": "Mode for step " + (i + 1), on: { change: function (e) { st.mode = e.target.value; } } },
+          [["audit", "Audit"], ["enforce", "Enforce"], ["revert", "Revert"]].map(function (m) { return h("option", { value: m[0], text: m[1], selected: m[0] === st.mode }); }));
+        function move(by) { var j = i + by; if (j < 0 || j >= steps.length) return; var t = steps[i]; steps[i] = steps[j]; steps[j] = t; drawSteps(); }
+        list.appendChild(h("div", { cls: "pb-step-row" },
+          h("span", { cls: "dim-2 pb-step-n", text: (i + 1) + "." }), pkgSel, modeSel,
+          h("button", { cls: "btn mini", type: "button", text: "\u2191", disabled: i === 0, "aria-label": "Move step " + (i + 1) + " up", on: { click: function () { move(-1); } } }),
+          h("button", { cls: "btn mini", type: "button", text: "\u2193", disabled: i === steps.length - 1, "aria-label": "Move step " + (i + 1) + " down", on: { click: function () { move(1); } } }),
+          h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove step " + (i + 1), on: { click: function () { steps.splice(i, 1); drawSteps(); } } })));
+      });
+      addBtn.disabled = steps.length >= max || !pkgs.length;
+    }
+    var addBtn = h("button", { cls: "btn mini", type: "button", text: "Add a step", on: { click: function () {
+      steps.push({ package: pkgs[0] ? pkgs[0].name : "", mode: "audit" }); drawSteps();
+      var sels = list.querySelectorAll("select"); if (sels.length) sels[sels.length - 2].focus();
+    } } });
+    drawSteps();
+    var save = h("button", { cls: "btn btn-primary", type: "button", text: book ? "Save" : "Add", on: { click: function () {
+      var out = { id: id.value.trim(), name: name.value.trim(), maintenance_mode: mm.checked, steps: steps };
+      if (note.value.trim()) out.note = note.value.trim();
+      if (!out.name) { toast("Give the playbook a name.", "warn"); name.focus(); return; }
+      if (!steps.length) { toast("Add at least one step.", "warn"); addBtn.focus(); return; }
+      save.disabled = true;
+      request("/api/v1/maintenance/playbooks", "PUT", { playbook: out }).then(function (d) {
+        closeSheet(); maintPlaybooksRedraw(d); toast("Saved", "ok");
+      }, function (err) { save.disabled = false; toast("Not saved: " + err.message, "crit"); });
+    } } });
+    openSheet(book ? "Edit " + book.name : "Add a playbook", h("div", { cls: "stack" },
+      h("div", { cls: "form-row" },
+        h("label", { cls: "field" }, h("span", { text: "Name" }), name),
+        h("label", { cls: "field" }, h("span", { text: "Id" }), id)),
+      h("div", { cls: "field" }, h("span", { text: "Steps, in order (up to " + max + ")" }), list, h("div", {}, addBtn)),
+      h("label", { cls: "uf uf-g1" }, mm, h("span", { text: "Maintenance mode: keep the machines awake for the run, and let them sleep again at the end" })),
+      h("label", { cls: "field" }, h("span", { text: "Note (optional)" }), note),
+      h("p", { cls: "pending", text: "Each step runs with the machine's own settings for that package. Saving runs nothing; every run asks you on your phone first." })),
+      [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    name.focus();
+  }
+
+  function openPlaybookRunSheet(book) {
+    var pkgs = arrayOf(state.maintSettings && state.maintSettings.packages);
+    var first = pkgs.filter(function (p) { return p.name === (book.steps[0] || {}).package; })[0];
+    var linux = first && first.platform === "linux";
+    var hosts = arrayOf(state.assets).filter(function (a) {
+      return a.endpoint && a.endpoint.status !== "retired" && /windows/i.test(a.endpoint.os || "") !== linux;
+    }).sort(function (x, y) { return x.name < y.name ? -1 : 1; });
+    var boxes = hosts.map(function (a) {
+      return { a: a, box: h("input", { type: "checkbox", "aria-label": a.name }) };
+    });
+    var go = h("button", { cls: "btn btn-primary", type: "button", text: "Run", disabled: READ_ONLY || !hosts.length, on: { click: function () {
+      var ids = boxes.filter(function (b) { return b.box.checked; }).map(function (b) { return b.a.endpoint.id; });
+      if (!ids.length) { toast("Pick at least one machine.", "warn"); return; }
+      go.disabled = true;
+      ownerApproved("/api/v1/maintenance/playbooks/run", { playbook_id: book.id, endpoint_ids: ids },
+        { label: "Run " + book.name + " on " + ids.length + (ids.length === 1 ? " machine" : " machines"), onPending: function () { closeSheet(); } })
+        .then(function () {
+          closeSheet(); toast(book.name + " started", "ok");
+          request("/api/v1/maintenance/playbooks").then(maintPlaybooksRedraw, function () {});
+        })
+        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+    } } });
+    openSheet("Run " + book.name, h("div", { cls: "stack" },
+      h("ol", { cls: "pb-steps" }, (book.maintenance_mode ? [h("li", { text: "Maintenance mode on" })] : [])
+        .concat(arrayOf(book.steps).map(function (st) { return h("li", { text: maintPkgTitle(st.package) + " (" + st.mode + ")" }); }))
+        .concat(book.maintenance_mode ? [h("li", { text: "Maintenance mode off" })] : [])),
+      hosts.length ? h("fieldset", { cls: "pb-hosts" }, h("legend", { text: linux ? "Linux machines" : "Windows machines" }),
+        boxes.map(function (b) { return h("label", { cls: "uf uf-g1" }, b.box, h("span", { text: b.a.name })); }))
+        : emptyBox("No " + (linux ? "Linux" : "Windows") + " machines with an agent."),
+      h("p", { cls: "pending", text: "One approval on your phone covers every step on every machine you pick. Machines with different settings for a package need separate runs." })),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
   /* The software removal catalog: what Software removal may uninstall and
@@ -10990,6 +11216,8 @@
     }
     if (state.section === "maintenance") {
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
+      jobs.push(request("/api/v1/maintenance/playbooks").then(function (d) { state.maintPlaybooks = d || null; },
+        function (e) { state.maintPlaybooks = { error: (e && e.message) || "request failed" }; }));
       jobs.push(request("/api/v1/maintenance/catalog").then(function (d) { state.maintCatalog = d || null; },
         function (e) { state.maintCatalog = { error: (e && e.message) || "request failed" }; }));
     }
