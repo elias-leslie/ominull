@@ -52,10 +52,32 @@
   a.state.maintSettings=saved.s; a.state.maintTab=saved.tab; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });
  await check('all asset comparators accept real row types and retain sort focus', () => {
-  for (let col=2; col<=9; col++) for (const dir of ['asc','desc']) { a.state.assetSort={col,dir}; a.sortAssetRows(a.state.assets); a.render(); }
+  for (let col=1; col<=6; col++) for (const dir of ['asc','desc']) { a.state.assetSort={col,dir}; a.sortAssetRows(a.state.assets); a.render(); }
   a.state.assetSort=null; a.render();
   const button = document.querySelector('button[title="Sort by Asset"]'); button.focus(); button.click();
   assert(document.activeElement.title === 'Sort by Asset','Sort lost keyboard focus');
+ });
+ await check('Assets filter bar toggles filters, keeps agent scope exclusive, and the strip stops repeating them', async () => {
+  const saved={f:a.state.filters,q:a.state.query,s:a.state.section};
+  a.state.filters={}; a.state.query=''; a.state.section='assets'; a.render();
+  const chip=label=>[...document.querySelectorAll('.fbar .fchip')].find(b=>b.firstChild.textContent===label);
+  assert(chip('All') && chip('With agent') && chip('No agent') && chip('Offline') && chip('Quarantined') && chip('Agent outdated') && chip('Risky ports') && chip('No client cert'),'Filter chip missing');
+  assert(chip('All').getAttribute('aria-pressed')==='true','All is not the resting chip');
+  chip('With agent').click(); await wait();
+  assert(a.state.filters.agented && chip('With agent').getAttribute('aria-pressed')==='true','With agent did not turn on');
+  chip('No agent').click(); await wait();
+  assert(a.state.filters.noagent && !a.state.filters.agented,'Agent scopes are not exclusive');
+  const shown=document.querySelectorAll('tr.row').length;
+  assert(shown>0 && [...document.querySelectorAll('tr.row')].every(r=>!r.textContent.includes('Outdated')),'No agent list shows an agent');
+  chip('All').click(); await wait();
+  assert(!a.state.filters.agented && !a.state.filters.noagent,'All did not reset the scope');
+  chip('Quarantined').click(); await wait();
+  assert(a.state.filters.quarantined,'Quarantined chip did not filter');
+  const clear=[...document.querySelectorAll('.fbar .btn')].find(b=>b.textContent==='Clear filters'); assert(clear,'No way to clear filters'); clear.click(); await wait();
+  assert(Object.keys(a.state.filters).length===0,'Clear filters left a filter on');
+  const needs=[...document.querySelectorAll('.needs-you .attn')].map(b=>b.textContent).join('|');
+  assert(!/quarantined|outdated/.test(needs),'Needs-you still repeats the filter chips: '+needs);
+  a.state.filters=saved.f; a.state.query=saved.q; a.state.section=saved.s; a.render();
  });
  await check('navigation links never contain sentinel credential', () => {
   a.openAccountPop(); assert(![...document.querySelectorAll('a')].some(x=>x.href.includes('AUDIT_SENTINEL')), 'Credential in navigation URL'); a.closeAccountPop();

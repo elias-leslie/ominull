@@ -4759,14 +4759,7 @@ hr.line {
 .nav-expanded .rail-btn .tip { display: none; }
 .rail-mark { color: inherit; background: transparent; border: 0; cursor: pointer; }
 button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
-body[data-section="assets"] #view .tblwrap th:nth-child(3), body[data-section="assets"] #view .tblwrap td:nth-child(3) { position: sticky; left: 0; z-index: 1; background: var(--panel); }
 @media (max-width: 1024px) {
-  body[data-section="assets"] #view .tblwrap th:nth-child(5), body[data-section="assets"] #view .tblwrap td:nth-child(5),
-  body[data-section="assets"] #view .tblwrap th:nth-child(6), body[data-section="assets"] #view .tblwrap td:nth-child(6),
-  body[data-section="assets"] #view .tblwrap th:nth-child(8), body[data-section="assets"] #view .tblwrap td:nth-child(8),
-  body[data-section="assets"] #view .tblwrap th:nth-child(9), body[data-section="assets"] #view .tblwrap td:nth-child(9),
-  body[data-section="assets"] #view .tblwrap th:nth-child(10), body[data-section="assets"] #view .tblwrap td:nth-child(10) { display: none; }
-  body[data-section="assets"] #view .tblwrap table { min-width: 0; width: 100%; }
   .strip { flex-wrap: wrap; overflow: visible; }
   .strip .metric { min-width: 0; }
 }
@@ -4775,15 +4768,9 @@ body[data-section="assets"] #view .tblwrap th:nth-child(3), body[data-section="a
   .topbar { flex-wrap: wrap; height: auto; gap: 6px; padding: 8px; }
   .btn-install span, .btn-sweep span { display: none; }
   .connection-status { font-size: 12px; padding: 6px 8px; }
-  body[data-section="assets"] #view .tblwrap th:nth-child(2), body[data-section="assets"] #view .tblwrap td:nth-child(2) { display: none; }
-  body[data-section="assets"] #view .tblwrap td { padding: 6px 4px; white-space: normal; overflow-wrap: anywhere; }
-  body[data-section="assets"] #view .tblwrap td:nth-child(3) { position: static; max-width: 110px; }
-  body[data-section="assets"] #view .tblwrap td:nth-child(4) { max-width: 100px; }
-  body[data-section="assets"] #view .tblwrap td:nth-child(7) { white-space: nowrap; overflow-wrap: normal; }
   .asset-pages { font-size: 12px; gap: 6px; }
 }
 .tile .l { white-space: normal; overflow: visible; text-overflow: clip; letter-spacing: .025em; }
-body[data-section="assets"] #view .tblwrap th:nth-child(3), body[data-section="assets"] #view .tblwrap td:nth-child(3) { background: var(--panel); }
 @media (max-width: 600px) {
   .strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile { min-width: 0; padding: 5px 8px; }
@@ -5131,4 +5118,120 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 @media (max-width: 640px) {
   .route-bar { padding: var(--s-2) var(--s-3); }
   .route-head .route-chips { display: none; }
+}
+
+/* ------------------------------------------------------------- Assets
+   One table, one filter bar. The columns are what you scan for (name, address,
+   state, agent, exposure, last seen); everything else is in the quick look and
+   the asset view. */
+.fbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+.fbar-set { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.fbar-sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 0; }
+.fbar > .fill { flex: 1; }
+.fbar-count { font-family: var(--f-mono); font-size: var(--t-2); }
+.fchip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--t-3);
+  cursor: pointer;
+}
+.fchip b { font-family: var(--f-mono); font-size: var(--t-2); font-weight: 500; color: var(--ink-3); }
+.fchip[data-tone="warn"] b { color: var(--warn); }
+.fchip[data-tone="crit"] b { color: var(--crit); }
+.fchip:hover:not([disabled]) { border-color: var(--ink-3); color: var(--ink); }
+.fchip[aria-pressed="true"] { background: var(--raised); border-color: var(--brand); color: var(--ink); }
+.fchip[aria-pressed="true"] b { color: var(--ink); }
+.fchip[disabled] { opacity: 0.55; cursor: default; }
+
+.assets-table table { min-width: 880px; }
+.assets-table .c-sel { width: 32px; }
+.assets-table .c-menu { width: 36px; }
+.assets-table .c-addr { width: 128px; }
+.assets-table .c-state { width: 140px; }
+.assets-table .c-agent { width: 150px; }
+.assets-table .c-expo { width: 150px; }
+.assets-table .c-seen { width: 96px; }
+.assets-table td.c-asset { max-width: 0; width: 28%; }
+.assets-table .a-name { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+.assets-table .a-name .host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.assets-table .a-name .ev, .assets-table .a-name .term-glyph { flex: none; }
+.assets-table .a-sub { color: var(--ink-3); font-size: var(--t-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assets-table tbody td { padding-block: var(--s-2); }
+.assets-table tr.grp td {
+  font-family: var(--f-sans);
+  font-size: var(--t-3);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+  padding-block: var(--s-2);
+}
+.assets-table tr.grp .g-name { color: var(--ink); }
+.assets-table tr.grp .cnt { font-family: var(--f-sans); font-size: var(--t-2); color: var(--ink-3); }
+.assets-table tr.row { cursor: pointer; }
+.assets-table td.c-menu .menu-btn { min-width: 28px; min-height: 28px; }
+
+/* Quick look */
+.assets-table .detail { grid-template-columns: 1.2fr 1.2fr 1fr; }
+.assets-table .detail .kv { grid-template-columns: 72px 1fr; }
+.assets-table .detail-stack { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.assets-table .detail .why { color: var(--ink-2); font-size: var(--t-2); margin-top: var(--s-2); }
+.weak-list { margin: var(--s-2) 0 0; padding: 0; list-style: none; }
+.weak-list li { padding-left: var(--s-3); position: relative; }
+.weak-list li::before { content: "\00b7"; position: absolute; left: 2px; }
+
+@media (max-width: 900px) {
+  .assets-table table { min-width: 0; }
+  .assets-table thead { display: none; }
+  .assets-table tbody tr.row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto 44px;
+    grid-template-areas: "sel asset state menu" ". addr seen seen" ". agent expo expo";
+    align-items: center;
+    column-gap: var(--s-2);
+    row-gap: var(--s-1);
+    padding: var(--s-2) var(--s-3) var(--s-2) 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .assets-table tbody tr.row td { display: block; padding: 0; border: 0; width: auto; max-width: none; }
+  .assets-table tbody tr.row td.c-asset { max-width: none; width: auto; grid-area: asset; }
+  .assets-table tbody tr.row td.c-sel { grid-area: sel; display: grid; place-items: center; min-height: 44px; }
+  .assets-table tbody tr.row td.c-state { grid-area: state; }
+  .assets-table tbody tr.row td.c-menu { grid-area: menu; justify-self: stretch; }
+  .assets-table tbody tr.row td.c-menu .menu-btn { width: 44px; height: 44px; }
+  .assets-table tbody tr.row td.c-addr { grid-area: addr; }
+  .assets-table tbody tr.row td.c-seen { grid-area: seen; justify-self: end; }
+  .assets-table tbody tr.row td.c-agent { grid-area: agent; }
+  .assets-table tbody tr.row td.c-expo { grid-area: expo; justify-self: end; }
+  .assets-table tbody tr.row td.c-agent:empty, .assets-table td.c-expo:empty { display: none; }
+  .assets-table tr.grp td, .assets-table tr.exp > td { display: block; }
+  .assets-table tr.grp .tw { min-height: 32px; flex-wrap: wrap; }
+  .assets-table .detail { grid-template-columns: 1fr; }
+  .assets-table .detail-stack .btn { min-height: 44px; }
+  .fchip { min-height: 32px; }
+  .fbar-sep { display: none; }
+  .fbar .btn.mini { min-height: 32px; }
+}
+.assets-table tr.exp .stack { gap: 0; }
+@media (max-width: 900px) {
+  /* One scrolling line of chips instead of four wrapped rows. */
+  .fbar { flex-wrap: nowrap; overflow-x: auto; gap: var(--s-2); scrollbar-width: thin; }
+  .fbar-set { flex-wrap: nowrap; }
+  .fchip { white-space: nowrap; flex: none; }
+  .fbar > .fill { display: none; }
+  .fbar-count { flex: none; }
+  .fbar .btn { flex: none; }
 }

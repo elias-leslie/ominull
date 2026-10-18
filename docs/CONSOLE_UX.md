@@ -139,18 +139,40 @@ in demo mode, with the fixture browser suite and the axe responsive check.
   shown behind a "?" in the card head; `foldRows` folds reference lists;
   `needsYouItems()` / `needsYouBar()` collect what waits on the owner;
   `pageTools(left, actions)` lays out a page head.
-- Assets: needs-you strip (decisions, open alerts, quarantined, outdated
-  agents; each a link) and the page's own actions, **Install agent** (primary)
-  and **Sweep subnet**. Both left the global top bar and are in the command
-  palette.
+- Assets (second pass, rebuilt): the stat tiles and their sparkline history
+  are gone. A filter bar replaces them, and each chip is the filter and its
+  count: scope (All, With agent, No agent), then problems (Offline,
+  Quarantined, Agent outdated, Risky ports, No client cert). The agent scopes
+  are exclusive; **Clear filters** and "N of M shown" sit at the end. The
+  needs-you strip keeps only what is not a filter (decisions, open alerts);
+  it no longer repeats quarantined and outdated.
+- Six columns you scan by: **Asset** (name, evidence bars, terminal glyph,
+  and a short "what it is" line; the full identity is the tooltip), Address,
+  State, **Agent** (version, "outdated", or **Install...** when there is
+  none), **Exposure** ("3 ports", "2 risky") and Last seen. All six sort,
+  inside each client and location group. Groups read in plain sentence case
+  with counts; unassigned machines come last as "Not assigned to a location".
+- Click a row for a quick look: About (address, MAC, role with how sure,
+  risk, client, agent), Exposure (ports, weak points), and Actions (**Open
+  full view**, Isolate or Release, Install agent, Rescan, and a link to how
+  the identity was formed). The merged-claims and "why we think this" columns
+  moved to the asset view, where Facts now also carries risk and the reason
+  for the role.
+- Phone: no table. Each machine is a card (name, state, address, last seen,
+  agent, exposure) with 44px targets; the filter chips scroll sideways on one
+  line.
+- The pager only appears past 100 matches. The page help is behind "?".
+- Install agent and Sweep subnet left the global top bar and are in the
+  command palette.
 - Rail regrouped Fleet / Act / Settings; Maintenance shows a badge with open
   decisions, read in the background once a minute.
 - Phone top bar fits one row (lock state as icon and dot, search as icon).
 - Asset view no longer prints "undefined" for host alert and flow counts; demo
   host reads answer for that host only.
 
-![Assets, after](images/console-ux/after-desk-assets.png)
-![Assets, phone, after](images/console-ux/after-phone-assets.png)
+![Assets, after](images/console-ux/after-desk-assets2.png)
+![Assets, quick look](images/console-ux/after-desk-assets-quicklook.png)
+![Assets, phone, after](images/console-ux/after-phone-assets2.png)
 
 ### Alerts and Response
 
