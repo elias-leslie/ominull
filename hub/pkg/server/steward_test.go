@@ -76,7 +76,9 @@ func TestStewardScreen(t *testing.T) {
 	if code, _ := heartbeat(t, srv, ep, `{"job_id":"`+jobID+`","lease_id":"`+lease+`","phase":"running"}`); code != http.StatusOK {
 		t.Fatal("heartbeat")
 	}
-	open := func(body string) *httptest.ResponseRecorder { return stewardDo(srv, key, http.MethodPost, "/api/v1/screen/sessions", body) }
+	open := func(body string) *httptest.ResponseRecorder {
+		return stewardDo(srv, key, http.MethodPost, "/api/v1/screen/sessions", body)
+	}
 	for body, want := range map[string]string{
 		`{"endpoint_id":"` + ep + `","mode":"control"}`:                                           "steward_run",
 		`{"endpoint_id":"` + ep + `","mode":"control","steward_run":"` + jobID + `"}`:             "not waiting on a dialog or stalled",

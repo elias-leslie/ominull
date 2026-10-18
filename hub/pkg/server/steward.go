@@ -59,13 +59,13 @@ const (
 
 // stewardRoutes is everything the steward key reaches, by path and method.
 var stewardRoutes = map[string][]string{
-	"/api/v1/maintenance/wait":         {http.MethodGet},
-	"/api/v1/maintenance/escalate":     {http.MethodPost},
-	"/api/v1/approvals":                {http.MethodGet},
-	"/api/v1/maintenance":              {http.MethodGet},
-	"/api/v1/screen/sessions":          {http.MethodPost, http.MethodDelete},
-	"/api/v1/screen/sessions/attach":   {http.MethodPost},
-	"/api/v1/screen/sessions/close":    {http.MethodPost},
+	"/api/v1/maintenance/wait":       {http.MethodGet},
+	"/api/v1/maintenance/escalate":   {http.MethodPost},
+	"/api/v1/approvals":              {http.MethodGet},
+	"/api/v1/maintenance":            {http.MethodGet},
+	"/api/v1/screen/sessions":        {http.MethodPost, http.MethodDelete},
+	"/api/v1/screen/sessions/attach": {http.MethodPost},
+	"/api/v1/screen/sessions/close":  {http.MethodPost},
 }
 
 func stewardAllowed(r *http.Request) bool {
