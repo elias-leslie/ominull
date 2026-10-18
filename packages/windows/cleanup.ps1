@@ -3,8 +3,7 @@ $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $Ver
 $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
 # Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
-# The agent's environment block can carry a broken PATH (1.8.81 and older: a long PATH came through as
-# PATH=<cmd.exe>), which hides shutdown.exe and the rest: put the system folders back first.
+# Agents before 1.8.86 could pass PATH=<cmd.exe> (long PATH): put the system folders back first.
 function Repair-Path([string]$Path, [string]$Sys) {
   if (-not $Sys) { return $Path }
   $parts = @("$Path" -split ';' | Where-Object { $_ }); $sr = $Sys -replace '[\\/][^\\/]+$', ''
@@ -60,8 +59,7 @@ function Start-Log([int]$Keep) {
   $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
 function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
-# Native tools run as plain processes: no PowerShell pipeline, so a missing PATHEXT (the agent's
-# environment) cannot turn shutdown.exe into a "document", and a failure to start is a result.
+# Native tools run as plain processes: no PATHEXT needed, and a failure to start is a result.
 function ConvertTo-NativeArg([string]$A) {
   if ($A -and $A -notmatch '[\s"]') { return $A }
   '"' + (($A -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
@@ -84,8 +82,7 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     @{ code = $p.ExitCode; out = @("$($o.Result)`n$($e.Result)" -split "`r?`n" | Where-Object { $_ -ne '' }) }
   } catch { @{ code = -1; out = @("$Exe could not be started: $($_.Exception.Message)") } }
 }
-# Presence without quser (absent on Windows Home): WTS sessions with state (0 active), user, idle minutes since
-# the last input (null when not reported) and locked (LogonUI runs in it).
+# Presence without quser (not on Home): WTS sessions; idle null when not reported; locked = LogonUI in it.
 $script:WtsSource = @'
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct WtsInfo {
   public int State, Id, A, B, C, D, E, F;
@@ -132,8 +129,7 @@ function Get-PeopleReason([int]$IdleMinutes) {
     if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
   }
 }
-# Maintenance window: 1-4 "HH:MM-HH:MM" ranges, comma separated, in machine time, or in UTC with a trailing Z; a
-# range may cross midnight.
+# Window: 1-4 "HH:MM-HH:MM" ranges, machine time or UTC with a trailing Z; may cross midnight.
 function Test-WindowText([string]$W) {
   $W -cmatch '^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d(,([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d){0,3}Z?\z'
 }
@@ -147,14 +143,16 @@ function Test-InWindow([string]$Window, [datetime]$Now) {
   }
   $false
 }
-# Run options from the hub: when_busy skip (default) | wait (up to half the timeout) | run (no people checks);
-# inside the window people do not count. Battery and Windows Update always do.
+# when_busy skip (default) | wait (half the timeout) | run; people don't count in the window, battery and updates do.
 function Get-RunOptions {
   $b = "$env:OMINULL_PARAM_WHEN_BUSY"; if (-not $b) { $b = 'skip' }; $w = "$env:OMINULL_PARAM_WINDOW"
   if ('skip', 'wait', 'run' -cnotcontains $b) { throw 'param when_busy is not skip, wait or run' }
   if ($w -and -not (Test-WindowText $w)) { throw 'param window is not 1-4 HH:MM-HH:MM ranges (comma separated, Z for UTC)' }
   @{ busy = $b; window = $w }
 }
+# TiWorker idles for minutes after any update scan, ours included: it counts only while using CPU.
+function Get-TiCpu { [double](@(Get-Process TiWorker -ErrorAction SilentlyContinue) | ForEach-Object { $_.TotalProcessorTime.TotalSeconds } | Measure-Object -Sum).Sum }
+function Test-ServicingBusy { if (-not (Get-Process TiWorker -ErrorAction SilentlyContinue)) { return $false }; $a = Get-TiCpu; Start-Sleep -Seconds 10; (Get-TiCpu) - $a -gt 1 }
 function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
   $o = Get-RunOptions; $until = (Get-Date).AddSeconds([math]::Max(0, $script:PkgTimeout) / 2)
   while ($o.busy -cne 'run' -and -not (Test-InWindow $o.window (Get-Date))) {
@@ -165,8 +163,8 @@ function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
   }
   if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
   if ($CheckUpdates) {
-    if (Get-Process TiWorker -ErrorAction SilentlyContinue) { return 'Windows Update is installing' }
     try { if ((New-Object -ComObject Microsoft.Update.Installer).IsBusy) { return 'Windows Update is installing' } } catch {}
+    if (Test-ServicingBusy) { return 'Windows servicing is busy (TiWorker working)' }
   }
 }
 function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detail) {
@@ -178,9 +176,8 @@ function Format-Result([string]$State, [bool]$Reboot, [string[]]$Changed, $Detai
 }
 # --- prelude end ---
 # --- package temp begin (shared; tests compare) ---
-# DISM and Appx calls failed with "The system cannot find the path specified" for every package while
-# the after-test was clean; the agent's TEMP is the likely cause. They get a package-owned folder,
-# set only around the call; the agent's own folder is never touched.
+# DISM and Appx failed with "cannot find the path" under the agent's TEMP: they get a package folder, set
+# only around the call.
 function Invoke-InPkgTemp([scriptblock]$Block) {
   $t = "$($script:Root)\tmp"; New-Item -ItemType Directory -Force -Path $t | Out-Null
   $old = @{}; foreach ($v in 'TEMP', 'TMP') { $old[$v] = [Environment]::GetEnvironmentVariable($v); [Environment]::SetEnvironmentVariable($v, $t) }
@@ -255,18 +252,18 @@ function Get-DismSeconds([int]$Minutes) {
 function Invoke-Dism([string[]]$Arguments, [int]$Seconds) {
   if ($Seconds -le 0) { return @{ code = -2; out = @(); timed_out = $true } }
   if (-not (Get-Command $DismExe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @(); timed_out = $false } }
-  $dir = "$($script:Root)\tmp"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  $out = Join-Path $dir 'dism.out'; $err = Join-Path $dir 'dism.err'
-  $p = Start-Process -FilePath $DismExe -ArgumentList $Arguments -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-  $null = $p.Handle   # keeps the exit code readable after the process ends
+  # Not Start-Process: its environment copy threw on case-duplicate names.
+  $si = New-Object Diagnostics.ProcessStartInfo (Resolve-Native $DismExe)
+  $si.Arguments = (@($Arguments) | ForEach-Object { ConvertTo-NativeArg $_ }) -join ' '
+  $si.UseShellExecute = $false; $si.RedirectStandardOutput = $true; $si.RedirectStandardError = $true; $si.CreateNoWindow = $true
+  $p = [Diagnostics.Process]::Start($si); $o = $p.StandardOutput.ReadToEndAsync(); $null = $p.StandardError.ReadToEndAsync()
   if (-not $p.WaitForExit($Seconds * 1000)) {
     if ((Invoke-Native 'taskkill.exe' @('/PID', "$($p.Id)", '/T', '/F')).code -eq -1) { try { $p.Kill() } catch {} }
     try { $null = $p.WaitForExit(30000) } catch {}
     Write-Log "dism timed out after $Seconds s, process tree ended: $($Arguments -join ' ')"
     return @{ code = -2; out = @(); timed_out = $true }
   }
-  $p.WaitForExit()   # exited; this also waits for its output to be written out
-  @{ code = $p.ExitCode; out = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue); timed_out = $false }
+  $p.WaitForExit(); @{ code = $p.ExitCode; out = @("$($o.Result)" -split "`r?`n" | Where-Object { $_ }); timed_out = $false }
 }
 function Send-ProgressLine([string]$Text) { [Console]::Error.WriteLine("::progress:: $Text") }
 function Test-ComponentCleanup {

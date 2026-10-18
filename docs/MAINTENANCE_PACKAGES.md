@@ -88,7 +88,16 @@ packages but small: a handful of machines, one owner, no new stores.
   "cannot tell", never as nobody there), a game is
   running (process paths under the usual game library folders; launchers and
   always-on helpers such as Epic Online Services are not games), the machine
-  is on battery, or, for updates and cleanup, Windows Update is installing.
+  is on battery, or, for updates and cleanup, Windows Update is installing
+  (the update installer says it is busy) or Windows servicing is working
+  (TiWorker using CPU over a 10 s sample; an idle TiWorker, which lingers
+  after any update scan, does not count). The updates package checks this
+  before it searches, since its own search starts TiWorker.
+- Packages start native tools as plain processes, never with
+  `Start-Process -Redirect*/-NoNewWindow`: in Windows PowerShell that copies
+  the environment into a case-insensitive map, which throws on names that
+  differ only by case (agents before 1.8.87 sent `OMINULL_PARAM_mode` and
+  `OMINULL_PARAM_MODE`).
   Audit runs are never skipped.
 - **Run options** (`when_busy`, `window`) are set by the hub, never declared
   in a header, and gate the people checks (someone using the machine, a game)

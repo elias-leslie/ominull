@@ -45,6 +45,7 @@ $forbidden = @{
     'stdout noise'                 = 'Write-Host|Write-Output|Out-Host|Write-Information|Out-Default'
     'winget as SYSTEM'             = 'winget'
     'PS 7-only switch'             = '-AsHashtable'
+    'Start-Process env copy'       = 'Start-Process[^\r\n]*-(Redirect|NoNewWindow|UseNewEnvironment|Credential)'
 }
 foreach ($n in $Names) {
     $path = Join-Path $Dir "$n.ps1"
@@ -215,8 +216,15 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     $script:Batt = $null; $script:Busy = $true
     Check 'preflight: update installing' ((Get-PreflightReason $true 15) -match 'Windows Update')
     Check 'preflight: update check only when asked' ($null -eq (Get-PreflightReason $false 15))
-    $script:Busy = $false; $script:Ti = [pscustomobject]@{ Name = 'TiWorker' }
-    Check 'preflight: TiWorker running' ((Get-PreflightReason $true 15) -match 'Windows Update')
+    # TiWorker counts only while working: an idle one (left from any update scan, ours included) does not.
+    $script:Busy = $false; $script:TiCpu = 5.0
+    $script:Ti = [pscustomobject]@{ Name = 'TiWorker' } | Add-Member -PassThru ScriptProperty TotalProcessorTime { [timespan]::FromSeconds($script:TiCpu) }
+    function Start-Sleep { param($Seconds) $script:TiCpu += $script:TiStep }
+    $script:TiStep = 0.2
+    Check 'preflight: an idle TiWorker is not an install' ($null -eq (Get-PreflightReason $true 15))
+    $script:TiStep = 4
+    Check 'preflight: a working TiWorker is' ((Get-PreflightReason $true 15) -match 'servicing is busy')
+    Remove-Item function:Start-Sleep
     $script:Ti = $null
     # Run options: the window (may cross midnight), wait and run.
     Check 'window: inside' (Test-InWindow '01:00-05:00' ([datetime]'2026-10-17 03:30'))
@@ -283,6 +291,20 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     $Opt = @{ exclude = [string[]]@('everything') }
     $threw = $false; try { Test-Wanted $fw | Out-Null } catch { $threw = $true }
     Check 'updates: unknown exclude kind fails the run' $threw
+    $Changed = New-Object System.Collections.Generic.List[string]
+    # Enforce checks busy before searching: the search starts TiWorker, which then read as an install.
+    $Opt = Get-PkgParams (Join-Path $Dir 'updates.ps1'); $script:order = @()
+    $searcher = [pscustomobject]@{} | Add-Member -PassThru ScriptMethod Search { param($c) $script:order += 'search'; [pscustomobject]@{ Updates = @(& $u '2026-10 Security Update (KB5127648)' (& $cat 'Security Updates' 'x') $false) } }
+    $sess = [pscustomobject]@{ ClientApplicationID = '' } | Add-Member -PassThru ScriptMethod CreateUpdateSearcher { $searcher }
+    function New-Object { [CmdletBinding()] param($TypeName, [switch]$ComObject) $sess }
+    function Get-PreflightReason { $script:order += 'preflight'; 'Windows Update is installing' }
+    function Test-PendingReboot { $false }
+    function Write-Log {}
+    $Mode = 'enforce'; $Detail = [ordered]@{}
+    Invoke-Package
+    Check "updates: busy is checked before the search ($($script:order -join ','))" (($script:order -join ',') -eq 'preflight,search' -and $script:State -eq 'skipped' -and @($Detail.available).Count -eq 1)
+    $script:order = @(); $Mode = 'audit'; $Detail = [ordered]@{}; Invoke-Package
+    Check 'updates: audit never checks busy' (($script:order -join ',') -eq 'search' -and $script:State -eq 'drift')
 }
 & {
     . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'cleanup.ps1'))))

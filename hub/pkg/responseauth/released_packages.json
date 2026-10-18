@@ -1,29 +1,25 @@
 {
- "12413e8f8bf597a2ea080fefc6c7611ec699dc9a0bf73eeada7b66c3a6bf470b": {
-  "name": "windows-software-removal",
-  "risk": "careful"
- },
- "13a2d7b1aff8f59c905f9945171fc012b3d1ab5a0695c6d25473b9e008d397c8": {
-  "name": "windows-privacy",
+ "0c0152bc2e9990f433668ecaa41ea03f9106ccb80b9f16ba54051f5b6d752f45": {
+  "name": "windows-updates",
   "risk": "safe"
  },
- "435dca220fe9f6fb71a54bcf742b2a6c46150c85f9a4666edfca78d18b7fc7ca": {
-  "name": "windows-audit",
+ "40f9ac510b4e5aa7955fc0850e8e5632af7d40650d6e1abd4c8067ce4a02dc77": {
+  "name": "windows-performance",
   "risk": "safe"
  },
- "491408eee5d4b53a79744a8c5c810a075f7ac156b5a4a2e3e349c0e0beee7cb3": {
+ "8913626ecea0be023032ca75bec66a6d19e1723364226d524f74dae0366f6752": {
   "name": "windows-maintenance-mode",
   "risk": "safe"
- },
- "4a6707d01d9e6d63b468dbb5146b37082c922816254b22d6b390923a9b381aaa": {
-  "name": "windows-debloat",
-  "risk": "careful"
  },
  "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
   "name": "linux-maintenance-mode",
   "risk": "safe"
  },
- "bc96919f874a3eae3230162f76e6959fac8f6da4701e97c94e73879e44764195": {
+ "930d65b39430a200c735d15f49d1539091bc692dd58b84353988a5d8106fdb8d": {
+  "name": "windows-audit",
+  "risk": "safe"
+ },
+ "94cdb2f16acf1b01a7c4ce08ba63c0c68f126b51ebbc5767b8315268cb1a00c2": {
   "name": "windows-cleanup",
   "risk": "safe"
  },
@@ -31,15 +27,19 @@
   "name": "linux-reboot",
   "risk": "careful"
  },
- "e51ad422a3de86c83a3eb3f7d741efcefff5ca1e87ad1651695844c2eb1990ec": {
-  "name": "windows-updates",
+ "cdba4507d3be09eb22877257de23a44c4946c6a334906d613e017b4cdf7ed44a": {
+  "name": "windows-debloat",
+  "risk": "careful"
+ },
+ "ddc13ab7437d25d3ab884beadd56554662909a1d811f09e40699f3dfaf430c16": {
+  "name": "windows-privacy",
   "risk": "safe"
  },
- "e972b32d084aecc83aa4c87c069802949c77003503de0c17ff656f77c1098035": {
-  "name": "windows-performance",
-  "risk": "safe"
+ "e8e51a2f0d6256b8ee718a123c08173f4f80136c8e3184f7fc23454cf132ac35": {
+  "name": "windows-software-removal",
+  "risk": "careful"
  },
- "ef717f66514282ed6fb5db8d3a08862e81800667ff3ae98638f606469b3b6cfc": {
+ "f5c219fcd909faffdaba081d592351ac731ba187071618a5a73c3daee50f3b99": {
   "name": "windows-reboot",
   "risk": "careful"
  }
