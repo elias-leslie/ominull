@@ -44,17 +44,19 @@ type runAttentionItem struct {
 	unmapped map[string]any
 }
 
+// feedSafe lowercases a value and keeps only letters, digits, - and _.
+func feedSafe(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(v))
+}
+
 // runUID: ominull.run.<endpoint>.<package>, feed-safe.
 func runUID(endpointID, pkg string) string {
-	clean := func(v string) string {
-		return strings.Map(func(r rune) rune {
-			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
-				return r
-			}
-			return '-'
-		}, strings.ToLower(v))
-	}
-	return "ominull.run." + clean(endpointID) + "." + clean(pkg)
+	return "ominull.run." + feedSafe(endpointID) + "." + feedSafe(pkg)
 }
 
 // runNextMove says what a steward (or the owner) should do about the run.
