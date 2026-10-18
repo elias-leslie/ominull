@@ -232,7 +232,7 @@
     const result = [],
       mapping = new Map();
     let hidden = 0,
-      budget = 1500;
+      budget = o.budget || 1500;
     [...groups.values()]
       .sort((a, b) => a.label.localeCompare(b.label))
       .forEach((g) => {
@@ -242,7 +242,7 @@
             a.id.localeCompare(b.id),
         );
         const count = Math.min(
-          (o.expanded || {})[g.key] || 0,
+          o.expandAll ? g.members.length : (o.expanded || {})[g.key] || 0,
           budget,
           g.members.length,
         );
@@ -358,6 +358,7 @@
     if (scope.kind === "group" || scope.kind === "region") {
       const base = project(data, {
         ...options,
+        expandAll: false,
         expanded: {},
         collapsedRegions: {},
       });
@@ -381,7 +382,12 @@
                 ? g.count
                 : 0),
       );
-      const p = project(data, { ...options, expanded, collapsedRegions: {} });
+      const p = project(data, {
+        ...options,
+        expandAll: false,
+        expanded,
+        collapsedRegions: {},
+      });
       const targetGroups = new Set(targets.map((g) => g.id));
       const inside = new Set(
         p.nodes
@@ -453,13 +459,19 @@
     };
     const grouped = project(local, {
       ...options,
+      expandAll: false,
       regions: false,
       expanded: {},
     });
     const expanded = Object.fromEntries(
       grouped.groups.map((g) => [g.key, 100000]),
     );
-    const raw = project(local, { ...options, regions: false, expanded });
+    const raw = project(local, {
+      ...options,
+      expandAll: false,
+      regions: false,
+      expanded,
+    });
     const rawNodes = new Map(
       raw.nodes.filter((n) => !n.is_group).map((n) => [n.id, n]),
     );
@@ -634,7 +646,49 @@
     if (/printer/.test(role)) return "printer";
     return "endpoint";
   }
+  // Overview detail: a small estate is drawn host by host from the start, a
+  // large one as groups. Filters that narrow a large estate bring it back under
+  // the limit, so the same rule applies to what is left.
+  function shouldExpand(data, options, limit) {
+    const o = options || {};
+    if ((data.nodes || []).length <= limit) return true;
+    const narrowed = !!(
+      (o.query || "").trim() ||
+      o.coverage ||
+      o.protocol ||
+      o.verdict ||
+      o.activeOnly
+    );
+    if (!narrowed) return false;
+    const p = project(data, { ...o, expanded: {}, expandAll: false });
+    return p.matched <= limit;
+  }
+  // What each filter chip would leave, counted on the unfiltered data.
+  function counts(data) {
+    const nodes = data.nodes || [],
+      edges = data.edges || [];
+    const c = {
+      nodes: nodes.length,
+      edges: edges.length,
+      managed: 0,
+      unmanaged: 0,
+      quiet: 0,
+      blocked: 0,
+      anomalous: 0,
+      clean: 0,
+    };
+    nodes.forEach((n) => {
+      c[coverage(n)]++;
+      if (n.quiet) c.quiet++;
+    });
+    edges.forEach((e) => {
+      c[e.verdict === "blocked" || e.verdict === "anomalous" ? e.verdict : "clean"]++;
+    });
+    return c;
+  }
   return {
+    shouldExpand,
+    counts,
     project,
     scene,
     iconKind,

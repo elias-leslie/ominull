@@ -2,13 +2,20 @@
 (function () {
   "use strict";
   const M = window.OminullTopologyModel;
+  // A small estate is drawn host by host; a large one as groups. A phone
+  // cannot read many labels, so its limit is lower.
+  const AUTO_HOSTS = 60,
+    AUTO_HOSTS_NARROW = 16,
+    HOST_BUDGET = 400,
+    LIST_ROWS = 300;
   function el(tag, props, ...children) {
     const n = document.createElement(tag);
     Object.entries(props || {}).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === false) return;
       if (k === "class") n.className = v;
       else if (k === "text") n.textContent = v;
       else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-      else n.setAttribute(k, v);
+      else n.setAttribute(k, v === true ? "" : v);
     });
     children
       .flat()
@@ -16,10 +23,10 @@
       .forEach((c) => n.append(c));
     return n;
   }
-  function button(text, fn, title) {
+  function button(text, fn, title, cls) {
     return el("button", {
       type: "button",
-      class: "tg-button",
+      class: "btn tg-button" + (cls ? " " + cls : ""),
       text,
       onclick: fn,
       title: title || text,
@@ -33,24 +40,88 @@
     values.forEach(([value, text]) => s.append(el("option", { value, text })));
     return el("label", { class: "tg-field" }, el("span", { text: label }), s);
   }
+  // A filter chip is the filter and its count; it is built once and updated in
+  // place so a refresh never steals keyboard focus.
+  function chip(label, fn, title) {
+    const count = el("b"),
+      b = el(
+        "button",
+        { type: "button", class: "tg-chip", onclick: fn, title: title || "" },
+        el("span", { text: label }),
+        count,
+      );
+    return {
+      node: b,
+      set(n, on, tone) {
+        count.textContent = n === null ? "" : num(n);
+        b.setAttribute("aria-pressed", String(!!on));
+        b.dataset.tone = n && tone ? tone : "";
+        b.disabled = n === 0 && !on;
+      },
+    };
+  }
   const bytes = (n) => {
     n = Number(n) || 0;
-    const u = ["B", "KB", "MB", "GB"];
+    const u = ["B", "KB", "MB", "GB", "TB"];
     let i = 0;
-    while (n >= 1024 && i < 3) {
+    while (n >= 1024 && i < 4) {
       n /= 1024;
       i++;
     }
     return (n < 10 && i ? n.toFixed(1) : Math.round(n)) + " " + u[i];
   };
   const num = (n) => (Number(n) || 0).toLocaleString();
-  const time = (t) => (t ? new Date(t).toLocaleString() : "Not observed");
+  const plural = (n, one, many) => num(n) + " " + (n === 1 ? one : many);
+  const portText = (p) => p.protocol + (p.port ? "/" + p.port : "");
+  const uniq = (list) => [...new Set(list)];
+  const cssVar = (name, fallback) =>
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim() ||
+    fallback;
+  // The graph is drawn by a canvas, which cannot read CSS variables, so the
+  // console's tokens are read here and again when the theme changes.
+  function palette() {
+    return {
+      ink: cssVar("--ink", "#dadde3"),
+      ink2: cssVar("--ink-2", "#949ba8"),
+      ink3: cssVar("--ink-3", "#878e9b"),
+      line: cssVar("--line", "#2c313a"),
+      ground: cssVar("--ground", "#14161a"),
+      panel: cssVar("--panel", "#1a1d23"),
+      brand: cssVar("--brand", "#8fa9e8"),
+      ok: cssVar("--ok", "#73b87d"),
+      warn: cssVar("--warn", "#e6be6d"),
+      crit: cssVar("--crit", "#cd7670"),
+      info: cssVar("--info", "#689bdb"),
+    };
+  }
+  // Flows carry bytes only where the collector could read a counter, so a
+  // figure is qualified when only part of the traffic was measured.
+  function volume(e) {
+    const flows = e.flow_count || 0,
+      measured = e.measured_flows;
+    if (measured === undefined || measured >= flows)
+      return bytes(e.total_bytes) + " measured";
+    if (!measured) return "no byte counts";
+    return (
+      bytes(e.total_bytes) +
+      " on " +
+      num(measured) +
+      " of " +
+      plural(flows, "flow", "flows")
+    );
+  }
   function mount(container, api) {
     let data = { nodes: [], edges: [], conversations: [] },
+      loaded = false,
+      loadError = "",
       projection,
+      nodeMap = new Map(),
+      rawNodes = new Map(),
+      adjacency = new Map(),
       reporterLabels = new Map(),
       cy,
       worker,
+      pal = palette(),
       layoutID = 0,
       lastStructure = "",
       first = true,
@@ -64,7 +135,14 @@
       pendingData = null,
       dragging = false,
       destroyed = false,
-      saveError = "";
+      saveError = "",
+      listRows = LIST_ROWS,
+      noticeTimer,
+      transient = "",
+      pinBtn,
+      unpinBtn,
+      arrangeBtn;
+    const selection = { node: false };
     let state = {
       group: "network",
       regions: true,
@@ -85,6 +163,7 @@
       coverage: "",
       protocol: "",
       verdict: "",
+      detail: "auto",
       viewport: null,
     };
     if (api.draft) {
@@ -97,17 +176,8 @@
       class: "tg-workspace",
       "aria-label": "Network topology",
     });
-    const status = el("div", {
-        class: "tg-status",
-        role: "status",
-        "aria-live": "polite",
-      }),
-      summary = el("div", { class: "tg-summary" }),
-      chips = el("div", { class: "tg-chips" }),
-      crumbs = el("nav", {
-        class: "tg-crumbs",
-        "aria-label": "Topology navigation",
-      });
+
+    /* ---- controls ---- */
     const search = el("input", {
       type: "search",
       placeholder: "Host, IP, domain or process",
@@ -135,8 +205,20 @@
         change(true);
       },
     );
+    const detail = select(
+      "Show",
+      [
+        ["auto", "Automatic"],
+        ["groups", "Groups only"],
+        ["hosts", "All hosts"],
+      ],
+      (v) => {
+        state.detail = v;
+        change(true);
+      },
+    );
     const windowSelect = select(
-      "Time window",
+      "Window",
       [
         ["1h", "Last hour"],
         ["6h", "Last 6 hours"],
@@ -149,7 +231,6 @@
         markDirty();
       },
     );
-    windowSelect.querySelector("select").value = state.window;
     const saved = select("Saved view", [["", "Unsaved workspace"]], loadView);
     const save = button("Save", () => saveView(false)),
       saveAs = button("Save as…", () => saveView(true));
@@ -160,35 +241,95 @@
     }
     const removeView = button("Delete view", deleteView);
     removeView.hidden = true;
-    const heading = el(
-      "div",
-      { class: "tg-heading" },
-      el(
-        "div",
-        {},
-        el("h1", { text: "Network topology" }),
-        el("p", {
-          text: "Observed communication · double-click to explore · scroll to zoom",
-        }),
-      ),
-      el("div", { class: "tg-saved" }, saved, save, saveAs, removeView),
-    );
-    const filterPanel = el(
+    const dirtyDot = el("span", {
+      class: "tg-dirty",
+      title: "Unsaved changes",
+      text: "●",
+      hidden: "",
+    });
+    const views_ = el(
       "details",
-      { class: "tg-filters" },
-      el("summary", { text: "Filters" }),
+      { class: "tg-views" },
+      el(
+        "summary",
+        { class: "btn tg-button" },
+        "Views",
+        dirtyDot,
+      ),
+      el("div", { class: "tg-pop" }, saved, el("div", { class: "tg-row" }, save, saveAs, removeView)),
     );
-    const coverage = select(
-      "Agent coverage",
-      [
-        ["", "All hosts"],
-        ["managed", "Agent installed"],
-        ["unmanaged", "No agent"],
-      ],
-      (v) => {
-        state.coverage = v;
+    const helpText = el(
+      "div",
+      { class: "tg-help-text", id: "tg-help-text", hidden: "" },
+      el("p", {
+        text: "Boxes group addresses; arrows show who talked to whom in the chosen window. Click to select, double-click to explore, Shift-click to select several, scroll or pinch to zoom.",
+      }),
+      el("p", {
+        text: "With something selected, green arrows leave it and blue arrows arrive at it. Dim icons were quiet in this window. List view shows the same data for keyboard use.",
+      }),
+    );
+    const help = el("button", {
+      type: "button",
+      class: "btn tg-button tg-help",
+      "aria-controls": "tg-help-text",
+      "aria-expanded": "false",
+      "aria-label": "About this page",
+      title: "About this page",
+      text: "?",
+      onclick: () => {
+        helpText.hidden = !helpText.hidden;
+        help.setAttribute("aria-expanded", String(!helpText.hidden));
+      },
+    });
+    // Phones: the selects and chips fold behind one button so the graph gets the screen.
+    const filterToggle = el("button", {
+      type: "button",
+      class: "btn tg-button tg-filter-toggle",
+      "aria-expanded": "false",
+      onclick: () => {
+        const open = root.dataset.controls !== "open";
+        root.dataset.controls = open ? "open" : "closed";
+        filterToggle.setAttribute("aria-expanded", String(open));
+      },
+    });
+    const bar = el(
+      "div",
+      { class: "tg-bar" },
+      search,
+      filterToggle,
+      group,
+      detail,
+      windowSelect,
+      el("span", { class: "tg-fill" }),
+      views_,
+      help,
+    );
+
+    /* ---- filter chips ---- */
+    const chipCover = {
+      managed: chip("Agent installed", () => toggle("coverage", "managed")),
+      unmanaged: chip("No agent", () => toggle("coverage", "unmanaged")),
+    };
+    const chipQuiet = chip(
+      "Hide quiet",
+      () => {
+        state.activeOnly = !state.activeOnly;
         change();
       },
+      "Hide known hosts that sent or received nothing in this window",
+    );
+    const chipVerdict = {
+      blocked: chip("Blocked", () => toggle("verdict", "blocked"), "Links with blocked flows"),
+      anomalous: chip("Anomalous", () => toggle("verdict", "anomalous"), "Links with anomalous flows"),
+      clean: chip("Clean", () => toggle("verdict", "clean"), "Links with no finding"),
+    };
+    const chipRegions = chip(
+      "Regions",
+      () => {
+        state.regions = !state.regions;
+        change(true);
+      },
+      "Separate internal, virtual, external and discovery networks",
     );
     const protocol = select(
       "Protocol",
@@ -203,105 +344,53 @@
         change();
       },
     );
-    const verdict = select(
-      "Link status",
-      [
-        ["", "All links"],
-        ["blocked", "Contains blocks"],
-        ["anomalous", "Contains anomalies"],
-        ["clean", "No finding"],
-      ],
-      (v) => {
-        state.verdict = v;
-        change();
-      },
-    );
-    const active = el("input", {
-      type: "checkbox",
-      onchange: () => {
-        state.activeOnly = active.checked;
-        change();
-      },
-    });
-    const regions = el("input", {
-      type: "checkbox",
-      onchange: () => {
-        state.regions = regions.checked;
-        change(true);
-      },
-    });
-    filterPanel.append(
-      el(
-        "div",
-        { class: "tg-filter-body" },
-        el("label", { class: "tg-check" }, regions, "Separate logical regions"),
-        coverage,
-        protocol,
-        verdict,
-        el("label", { class: "tg-check" }, active, "Active in window only"),
-        button("Clear filters", () => {
-          state.query = "";
-          state.coverage = "";
-          state.protocol = "";
-          state.verdict = "";
-          state.activeOnly = false;
-          syncControls();
-          change();
-        }),
-      ),
-    );
-    const toolbar = el(
+    const shown = el("span", { class: "tg-shown", "aria-live": "polite" });
+    const clear = button("Clear filters", clearFilters, "Clear search and filters", "tg-clear");
+    const chips = el(
       "div",
-      { class: "tg-toolbar" },
-      search,
-      group,
-      windowSelect,
-      filterPanel,
+      { class: "tg-filters", role: "group", "aria-label": "Filters" },
+      el("div", { class: "tg-set" }, chipCover.managed.node, chipCover.unmanaged.node, chipQuiet.node),
+      el("span", { class: "tg-sep" }),
+      el("div", { class: "tg-set" }, chipVerdict.blocked.node, chipVerdict.anomalous.node, chipVerdict.clean.node),
+      el("span", { class: "tg-sep" }),
+      protocol,
+      chipRegions.node,
+      el("span", { class: "tg-fill" }),
+      shown,
+      clear,
     );
-    const canvas = el("div", {
-        class: "tg-canvas",
-        role: "group",
-        "aria-label":
-          "Interactive communication graph. Use List view for keyboard access.",
-      }),
-      list = el("div", { class: "tg-list", hidden: "" });
-    const tooltip = el("div", {
-      class: "tg-tooltip",
-      id: "topology-tooltip",
-      role: "tooltip",
-      hidden: "",
+    function toggle(key, value) {
+      state[key] = state[key] === value ? "" : value;
+      change();
+    }
+    function clearFilters() {
+      state.query = "";
+      state.coverage = "";
+      state.protocol = "";
+      state.verdict = "";
+      state.activeOnly = false;
+      syncControls();
+      change();
+    }
+    function filtered() {
+      return !!(
+        state.query ||
+        state.coverage ||
+        state.protocol ||
+        state.verdict ||
+        state.activeOnly
+      );
+    }
+
+    /* ---- scope row, canvas tools ---- */
+    const crumbs = el("nav", {
+      class: "tg-crumbs",
+      "aria-label": "Topology navigation",
     });
-    const directionKey = el(
-      "div",
-      { class: "tg-direction-key" },
-      el("span", { class: "tg-incoming", text: "← Incoming" }),
-      el("span", { class: "tg-outgoing", text: "Outgoing →" }),
-      el("span", {
-        class: "tg-direction-reference",
-        text: "Hover or select a node",
-      }),
-    );
-    const context = el("div", {
-      class: "tg-context",
-      "aria-label": "Selected item actions",
-    });
-    const stage = el(
-      "div",
-      { class: "tg-stage" },
-      el(
-        "div",
-        { class: "tg-graph-area" },
-        canvas,
-        list,
-        directionKey,
-        tooltip,
-      ),
-      context,
-    );
     const pan = button(
       "Pan",
       () => setMode("pan"),
-      "Drag background to pan. Shift-click selects multiple hosts.",
+      "Drag the background to pan. Shift-click selects several hosts.",
     );
     const box = button(
       "Select",
@@ -310,13 +399,7 @@
     );
     const listButton = button("List view", () => {
       state.list = !state.list;
-      canvas.hidden = state.list;
-      list.hidden = !state.list;
-      listButton.textContent = state.list ? "Graph view" : "List view";
-      if (!state.list) {
-        cy.resize();
-      }
-      renderList();
+      applyListMode();
       markDirty();
     });
     const undo = button("Undo", () => {
@@ -330,48 +413,84 @@
       undo.disabled = !history.length;
     });
     undo.disabled = true;
-    const pin = button("Pin selection", () => {
-      remember();
-      const ids = selectedLeaves().map((n) => n.id());
-      state.pins = [...new Set([...state.pins, ...ids])];
-      updatePins();
-      markDirty();
-      inspect();
-    });
-    const unpin = button("Unpin", () => {
-      remember();
-      const ids = new Set(selectedLeaves().map((n) => n.id()));
-      state.pins = state.pins.filter((id) => !ids.has(id));
-      updatePins();
-      markDirty();
-      inspect();
-    });
     const controls = el(
       "div",
       { class: "tg-canvas-tools" },
-      pan,
-      box,
-      button("Fit", () => cy.fit(undefined, 25)),
-      button("Arrange", () => arrange(false)),
-      button("Arrange selection", () => arrange(true)),
-      pin,
-      unpin,
+      el("div", { class: "tg-seg" }, pan, box),
+      button("Fit", () => cy.fit(undefined, 25), "Fit the whole graph in view"),
+      button("Arrange", () => arrange(false), "Lay the graph out again"),
       undo,
-      button("−", () => zoomBy(1 / 1.25), "Zoom out"),
-      button("+", () => zoomBy(1.25), "Zoom in"),
+      button("−", () => zoomBy(1 / 1.25), "Zoom out", "tg-zoom"),
+      button("+", () => zoomBy(1.25), "Zoom in", "tg-zoom"),
       listButton,
     );
-    root.append(
-      heading,
-      toolbar,
-      chips,
+    const scope = el("div", { class: "tg-scope" }, crumbs, controls);
+
+    /* ---- stage ---- */
+    const canvas = el("div", {
+        class: "tg-canvas",
+        role: "group",
+        "aria-label":
+          "Interactive communication graph. Use List view for keyboard access.",
+      }),
+      list = el("div", { class: "tg-list", hidden: "" }),
+      empty = el("div", { class: "tg-empty", hidden: "" }),
+      notice = el("div", {
+        class: "tg-notice",
+        role: "status",
+        "aria-live": "polite",
+        hidden: "",
+      });
+    const tooltip = el("div", {
+      class: "tg-tooltip",
+      id: "topology-tooltip",
+      role: "tooltip",
+      hidden: "",
+    });
+    const directionRef = el("span", {
+      class: "tg-direction-reference",
+      text: "Select a host to see its direction",
+    });
+    const summary = el("div", { class: "tg-summary" });
+    const strip = el(
+      "div",
+      { class: "tg-direction-key" },
+      el(
+        "span",
+        { class: "tg-legend", "aria-label": "Legend" },
+        el("span", { class: "tg-key tg-key-agent", text: "Agent" }),
+        el("span", { class: "tg-key tg-key-plain", text: "No agent" }),
+        el("span", { class: "tg-key tg-key-risk", text: "High risk" }),
+        el("span", { class: "tg-key tg-key-iso", text: "Isolated" }),
+      ),
+      el("span", { class: "tg-incoming", text: "← Incoming" }),
+      el("span", { class: "tg-outgoing", text: "Outgoing →" }),
+      directionRef,
       summary,
-      crumbs,
-      controls,
-      stage,
-      status,
     );
+    const viewport = el(
+      "div",
+      { class: "tg-viewport" },
+      canvas,
+      list,
+      empty,
+      notice,
+      tooltip,
+    );
+    const context = el("aside", {
+      class: "tg-context",
+      "aria-label": "Selected item",
+    });
+    const stage = el(
+      "div",
+      { class: "tg-stage" },
+      el("div", { class: "tg-graph-area" }, viewport, strip),
+      context,
+    );
+    root.append(bar, helpText, chips, scope, stage);
     container.replaceChildren(root);
+
+    /* ---- graph ---- */
     const iconPaths = {
       endpoint:
         '<circle cx="24" cy="21" r="12"/><path d="M18 39h12M24 33v6"/><circle cx="24" cy="21" r="3"/>',
@@ -395,15 +514,20 @@
         '<path d="M13 16V4h22v12M12 35H5V16h38v19h-7M13 28h22v16H13zM34 22h2"/>',
     };
     const iconCache = new Map();
+    // Colour carries one fact: green is a process, blue a host with an agent,
+    // red a flagged destination, dim an address the estate does not know.
+    function iconColor(n, kind) {
+      if (n.type === "process") return pal.ok;
+      if (n.context || kind === "domain") return pal.ink2;
+      if (n.type === "threat") return pal.crit;
+      if (!n.is_group && !n.is_region && M.coverage(n) === "managed")
+        return pal.brand;
+      return pal.ink;
+    }
     function icon(n) {
       const kind = M.iconKind(n),
-        color =
-          n.type === "process"
-            ? "#64d5ba"
-            : n.context || kind === "domain"
-              ? "#a8bcea"
-              : "#b4d6d9";
-      const key = kind + color;
+        color = iconColor(n, kind),
+        key = kind + color;
       if (!iconCache.has(key))
         iconCache.set(
           key,
@@ -426,18 +550,9 @@
         ),
         renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
       });
-      markDirty();
     }
-    cy = window.OminullCytoscape({
-      container: canvas,
-      elements: [],
-      minZoom: 0.12,
-      maxZoom: 2.8,
-      selectionType: "additive",
-      userZoomingEnabled: true,
-      zoomingEnabled: true,
-      boxSelectionEnabled: false,
-      style: [
+    function graphStyle(c) {
+      return [
         {
           selector: "node",
           style: {
@@ -452,7 +567,7 @@
             label: "data(display)",
             "font-family": "IBM Plex Sans",
             "font-size": 13,
-            color: "#e6edf2",
+            color: c.ink,
             "text-wrap": "wrap",
             "text-max-width": 160,
             "text-valign": "bottom",
@@ -474,11 +589,11 @@
           style: {
             shape: "round-rectangle",
             "background-image": "none",
-            "background-color": "#253b42",
-            "background-opacity": 0.18,
-            "border-color": "#68858c",
+            "background-color": c.line,
+            "background-opacity": 0.45,
+            "border-color": c.ink3,
             "border-width": 1,
-            "border-opacity": 0.4,
+            "border-opacity": 0.45,
             padding: 38,
             "text-valign": "top",
             "text-margin-y": -12,
@@ -488,38 +603,47 @@
         },
         {
           selector: 'node[regionKey="external"]:parent',
-          style: { "background-color": "#394565" },
+          style: { "background-color": c.info, "background-opacity": 0.12 },
         },
         {
           selector: 'node[regionKey="virtual"]:parent',
-          style: { "background-color": "#34564b" },
+          style: { "background-color": c.ok, "background-opacity": 0.12 },
         },
         {
           selector: 'node[regionKey="discovery"]:parent',
-          style: { "background-color": "#4b4055" },
+          style: { "background-color": c.warn, "background-opacity": 0.1 },
         },
         {
           selector: "node[?quiet]",
-          style: { "background-image-opacity": 0.5 },
+          style: { "background-image-opacity": 0.45, "text-opacity": 0.6 },
+        },
+        {
+          selector: 'node[risk="HIGH"], node[risk="CRITICAL"]',
+          style: {
+            "border-color": c.crit,
+            "border-width": 2,
+            "border-opacity": 0.9,
+          },
         },
         {
           selector: "node[?isolated]",
           style: {
-            "border-color": "#e89786",
+            "border-color": c.warn,
             "border-width": 2,
             "border-style": "dashed",
+            "border-opacity": 1,
           },
         },
         {
           selector: "node[pinned]",
-          style: { "border-color": "#e0bf76", "border-width": 2 },
+          style: { "border-color": c.warn, "border-width": 2, "border-opacity": 1 },
         },
         {
           selector: "edge",
           style: {
             width: "data(width)",
-            "line-color": "#627782",
-            "target-arrow-color": "#627782",
+            "line-color": c.ink3,
+            "target-arrow-color": c.ink3,
             "target-arrow-shape": "triangle",
             "arrow-scale": 1.1,
             "curve-style": "unbundled-bezier",
@@ -527,65 +651,70 @@
             "control-point-weights": 0.5,
             label: "data(edgeLabel)",
             "font-size": 11,
-            color: "#aebdc5",
-            "text-background-color": "#101719",
+            color: c.ink2,
+            "text-background-color": c.ground,
             "text-background-opacity": 0.95,
             "text-background-padding": 3,
             "text-rotation": "autorotate",
-            opacity: 0.72,
+            opacity: 0.7,
             "overlay-opacity": 0,
           },
         },
         {
           selector: 'edge[verdict="blocked"]',
           style: {
-            "line-color": "#e89786",
-            "target-arrow-color": "#e89786",
+            "line-color": c.crit,
+            "target-arrow-color": c.crit,
             "line-style": "dashed",
+            opacity: 0.9,
           },
         },
         {
           selector: 'edge[verdict="anomalous"]',
-          style: { "line-color": "#e0bf76", "target-arrow-color": "#e0bf76" },
+          style: { "line-color": c.warn, "target-arrow-color": c.warn, opacity: 0.9 },
         },
         {
           selector: ":selected",
           style: {
-            "border-color": "#f0d68f",
+            "border-color": c.brand,
             "border-width": 3,
-            "line-color": "#f0d68f",
-            "target-arrow-color": "#f0d68f",
+            "border-style": "solid",
+            "border-opacity": 1,
+            "line-color": c.brand,
+            "target-arrow-color": c.brand,
             opacity: 1,
           },
         },
-        { selector: ".muted", style: { opacity: 0.18 } },
+        { selector: ".muted", style: { opacity: 0.16 } },
         {
           selector: "edge.incoming",
-          style: {
-            "line-color": "#81adff",
-            "target-arrow-color": "#81adff",
-            opacity: 1,
-          },
+          style: { "line-color": c.info, "target-arrow-color": c.info, opacity: 1 },
         },
         {
           selector: "edge.outgoing",
-          style: {
-            "line-color": "#64d5ba",
-            "target-arrow-color": "#64d5ba",
-            opacity: 1,
-          },
+          style: { "line-color": c.ok, "target-arrow-color": c.ok, opacity: 1 },
         },
-      ],
+      ];
+    }
+    cy = window.OminullCytoscape({
+      container: canvas,
+      elements: [],
+      minZoom: 0.12,
+      maxZoom: 2.8,
+      selectionType: "additive",
+      userZoomingEnabled: true,
+      zoomingEnabled: true,
+      boxSelectionEnabled: false,
+      style: graphStyle(pal),
     });
-    pin.disabled = unpin.disabled = true;
     worker = new Worker(
       "vendor/topology-layout.js?v=" + encodeURIComponent(api.version || ""),
     );
     worker.onmessage = (e) => {
       if (destroyed || e.data.id !== layoutID) return;
+      viewport.removeAttribute("aria-busy");
       if (e.data.error) {
-        status.textContent =
-          "Layout failed: " + e.data.error + ". Existing positions retained.";
+        say("Layout failed: " + e.data.error + ". Existing positions retained.");
         return;
       }
       cy.batch(() => {
@@ -601,19 +730,23 @@
         first = false;
         fitNext = false;
       }
-      status.textContent =
-        projection?.notice ||
-        (e.data.regioned ? "Regions arranged" : "Layout ready");
-      if (projection?.omittedEdges)
-        status.textContent +=
-          " " +
-          num(projection.omittedEdges) +
-          " additional links; use Show more.";
+      renderNotice();
     };
     worker.onerror = () => {
-      status.textContent =
-        "Layout worker unavailable. Drag nodes manually or use List view.";
+      viewport.removeAttribute("aria-busy");
+      say("Layout worker unavailable. Drag nodes manually or use List view.");
     };
+    // Theme changes repaint the graph with the new tokens.
+    const themeWatch = new MutationObserver(() => {
+      pal = palette();
+      iconCache.clear();
+      cy.style(graphStyle(pal));
+      if (projection) renderGraph(true);
+    });
+    themeWatch.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
     let hoverTimer,
       hideTimer,
       hoverID = "",
@@ -640,12 +773,18 @@
     }
     tooltip.addEventListener("mouseenter", () => clearTimeout(hideTimer));
     tooltip.addEventListener("mouseleave", deferHide);
-    function escapeTooltip(e) {
-      if (e.key === "Escape") hideTooltip();
+    function escapeKey(e) {
+      if (e.key !== "Escape") return;
+      if (!tooltip.hidden) hideTooltip();
+      else if (views_.open) views_.open = false;
+      else if (selected && root.contains(document.activeElement)) clearSelection();
     }
-    root.addEventListener("keydown", escapeTooltip);
-    // Canvas hover does not imply DOM focus, so Escape also works from the page.
-    document.addEventListener("keydown", escapeTooltip);
+    document.addEventListener("keydown", escapeKey);
+    // A click outside the views panel closes it.
+    function closeViews(e) {
+      if (views_.open && !views_.contains(e.target)) views_.open = false;
+    }
+    document.addEventListener("click", closeViews);
     function highlight(id) {
       cy.elements().removeClass("incoming outgoing muted");
       const hovered = cy.getElementById(id || "");
@@ -655,9 +794,8 @@
           : cy.getElementById(
               selected || (projection?.detail ? state.scope?.id : ""),
             );
-      const caption = directionKey.querySelector(".tg-direction-reference");
       if (!ref.length || !ref.isNode()) {
-        caption.textContent = "Hover or select a node";
+        directionRef.textContent = "Select a host to see its direction";
         return;
       }
       const members = new Set(ref.union(ref.descendants()).map((n) => n.id()));
@@ -674,61 +812,90 @@
                 : "muted",
         );
       });
-      const n = projection.nodes.find((n) => n.id === ref.id());
-      caption.textContent = "At " + (n ? M.shortLabel(n) : ref.id());
+      const n = nodeMap.get(ref.id());
+      directionRef.textContent = "At " + (n ? M.shortLabel(n) : ref.id());
+    }
+    function nodeLines(n) {
+      if (n.is_region)
+        return [
+          n.description,
+          plural(n.count, "address", "addresses"),
+          n.collapsed
+            ? "Double-click to explore"
+            : "Drag region to move its groups",
+        ];
+      if (n.is_group)
+        return [
+          n.label,
+          plural(n.count, "address", "addresses"),
+          "Double-click to explore",
+        ];
+      return [
+        n.description,
+        n.process,
+        n.type === "process"
+          ? "Reported by " + (reporterLabels.get(n.endpoint_id) || n.endpoint_id)
+          : "",
+        n.ip,
+        n.role && !/^unknown$/i.test(n.role) ? "Role: " + n.role : "",
+        n.os && !/^unknown$/i.test(n.os) ? "OS: " + n.os : "",
+        n.risk && n.risk !== "CLEAN" ? "Risk: " + n.risk : "",
+        n.evidence?.length ? "Evidence: " + n.evidence.join(", ") : "",
+        n.address_scope ? "Scope: " + n.address_scope : "",
+        n.quiet
+          ? "No observed traffic in this window"
+          : "Traffic observed in this window",
+        ["process", "domain", "traffic"].includes(n.type)
+          ? ""
+          : M.coverage(n) === "managed"
+            ? "Agent installed"
+            : "No agent",
+        n.is_isolated ? "Isolated" : "",
+      ];
+    }
+    function relationLines(edge, limit) {
+      const records = edge.relations || [];
+      const domains = uniq(records.map((r) => r.domain).filter(Boolean));
+      const processes = uniq(
+        records
+          .filter((r) => r.process)
+          .map((r) => {
+            const reporter = reporterLabels.get(r.endpoint_id);
+            return (
+              r.process.split(/[\\/]/).pop() +
+              " · " +
+              (reporter || r.endpoint_id || "Unattributed reporter")
+            );
+          }),
+      );
+      return [
+        ["Domains", domains],
+        ["Processes / reporter", processes],
+      ]
+        .filter(([, values]) => values.length)
+        .map(
+          ([label, values]) =>
+            label +
+            ": " +
+            values.slice(0, limit).join("; ") +
+            (values.length > limit ? " +" + (values.length - limit) : ""),
+        );
     }
     function showTooltip(id, point, trigger) {
       hideTooltip();
-      const n = projection.nodes.find((n) => n.id === id);
+      const n = nodeMap.get(id);
       const edge = projection.edges.find((e) => "edge:" + e.id === id);
       if (!n && !edge) return;
       tooltip.replaceChildren();
       if (n) {
         tooltip.append(el("strong", { text: M.shortLabel(n) }));
-        const lines = n.is_region
-          ? [
-              n.description,
-              num(n.count) + (n.count === 1 ? " address" : " addresses"),
-              n.collapsed
-                ? "Double-click to explore"
-                : "Drag region to move its groups",
-            ]
-          : n.is_group
-            ? [
-                n.label,
-                num(n.count) + (n.count === 1 ? " address" : " addresses"),
-                "Double-click to explore",
-              ]
-            : [
-                n.description,
-                n.process,
-                n.type === "process"
-                  ? "Reported by " +
-                    (reporterLabels.get(n.endpoint_id) || n.endpoint_id)
-                  : "",
-                n.ip,
-                n.role && !/^unknown$/i.test(n.role) ? "Role: " + n.role : "",
-                n.os && !/^unknown$/i.test(n.os) ? "OS: " + n.os : "",
-                n.risk && n.risk !== "CLEAN" ? "Risk: " + n.risk : "",
-                n.evidence?.length ? "Evidence: " + n.evidence.join(", ") : "",
-                n.address_scope ? "Scope: " + n.address_scope : "",
-                n.quiet
-                  ? "No observed traffic in this window"
-                  : "Traffic observed in this window",
-                ["process", "domain", "traffic"].includes(n.type)
-                  ? ""
-                  : M.coverage(n) === "managed"
-                    ? "Agent installed"
-                    : "No agent",
-                n.is_isolated ? "Isolated" : "",
-              ];
-        lines
+        nodeLines(n)
           .filter(Boolean)
           .filter((v, i, a) => a.indexOf(v) === i && v !== M.shortLabel(n))
           .forEach((text) => tooltip.append(el("div", { text })));
       } else {
-        const source = projection.nodes.find((n) => n.id === edge.source),
-          target = projection.nodes.find((n) => n.id === edge.target);
+        const source = nodeMap.get(edge.source),
+          target = nodeMap.get(edge.target);
         tooltip.append(
           el("strong", {
             text: M.shortLabel(source) + " → " + M.shortLabel(target),
@@ -737,17 +904,10 @@
         tooltip.append(
           el("div", {
             text:
-              num(edge.flow_count) +
-              " observations · " +
-              bytes(edge.total_bytes) +
-              " measured",
+              plural(edge.flow_count, "flow", "flows") + " · " + volume(edge),
           }),
         );
-        const ports = [
-          ...new Set(
-            edge.ports.map((p) => p.protocol + (p.port ? "/" + p.port : "")),
-          ),
-        ];
+        const ports = uniq(edge.ports.map(portText));
         if (ports.length)
           tooltip.append(
             el("div", {
@@ -756,46 +916,17 @@
                 (ports.length > 5 ? " +" + (ports.length - 5) : ""),
             }),
           );
-        const records = edge.relations || [];
-        const domains = [
-          ...new Set(records.map((r) => r.domain).filter(Boolean)),
-        ];
-        const processes = [
-          ...new Set(
-            records
-              .filter((r) => r.process)
-              .map((r) => {
-                const reporter = reporterLabels.get(r.endpoint_id);
-                return (
-                  r.process.split(/[\\/]/).pop() +
-                  " · " +
-                  (reporter || r.endpoint_id || "Unattributed reporter")
-                );
-              }),
-          ),
-        ];
-        for (const [label, values] of [
-          ["Domains", domains],
-          ["Processes / reporter", processes],
-        ])
-          if (values.length)
-            tooltip.append(
-              el("div", {
-                text:
-                  label +
-                  ": " +
-                  values.slice(0, 2).join("; ") +
-                  (values.length > 2 ? " +" + (values.length - 2) : ""),
-              }),
-            );
+        relationLines(edge, 2).forEach((text) =>
+          tooltip.append(el("div", { text })),
+        );
         if (edge.verdict !== "clean")
           tooltip.append(
             el("div", {
               class: "tg-tooltip-finding",
               text:
                 edge.verdict === "blocked"
-                  ? "Contains blocked observations"
-                  : "Contains anomalous observations",
+                  ? "Contains blocked flows"
+                  : "Contains anomalous flows",
             }),
           );
         tooltip.append(
@@ -804,7 +935,7 @@
       }
       tooltip.hidden = false;
       tooltipState = { id, point, trigger };
-      const area = canvas.parentElement.getBoundingClientRect();
+      const area = viewport.getBoundingClientRect();
       tooltip.style.left =
         Math.max(
           8,
@@ -813,7 +944,7 @@
       tooltip.style.top =
         Math.max(
           8,
-          Math.min(point.y + 12, area.height - tooltip.offsetHeight - 40),
+          Math.min(point.y + 12, area.height - tooltip.offsetHeight - 8),
         ) + "px";
       if (trigger) {
         tooltipTrigger = trigger;
@@ -849,11 +980,7 @@
       if (selected && Date.now() - lastDoubleTap > 500) drill(selected);
     });
     cy.on("tap", (e) => {
-      if (e.target === cy) {
-        selected = "";
-        cy.elements().unselect();
-        inspect();
-      }
+      if (e.target === cy) clearSelection();
     });
     cy.on("grab", "node", () => {
       dragging = true;
@@ -877,9 +1004,8 @@
       }
     });
     cy.on("select unselect", () => {
-      pin.disabled = unpin.disabled = selectedLeaves().length === 0;
+      if (selection.node) syncSelectionActions();
     });
-    cy.on("dragpan scrollzoom pinchzoom", markDirty);
     cy.on("pan zoom", () => {
       state.viewport = { zoom: cy.zoom(), pan: cy.pan() };
     });
@@ -894,12 +1020,17 @@
     observer.observe(canvas);
     setMode(state.mode);
     syncControls();
-    canvas.hidden = state.list;
-    list.hidden = !state.list;
-    listButton.textContent = state.list ? "Graph view" : "List view";
-    if (dirty) save.textContent = "Save *";
+    applyListMode();
     refreshViews();
     inspect();
+    function applyListMode() {
+      canvas.hidden = state.list;
+      list.hidden = !state.list;
+      listButton.textContent = state.list ? "Graph view" : "List view";
+      pan.disabled = box.disabled = state.list;
+      if (!state.list && cy) cy.resize();
+      renderList();
+    }
     function setMode(mode) {
       state.mode = mode;
       cy.boxSelectionEnabled(mode === "select");
@@ -907,9 +1038,66 @@
       pan.setAttribute("aria-pressed", String(mode === "pan"));
       box.setAttribute("aria-pressed", String(mode === "select"));
     }
+    // Moving the view is not a change worth saving; moving or pinning hosts,
+    // filters and the window are.
     function markDirty() {
       dirty = true;
-      save.textContent = "Save *";
+      dirtyDot.hidden = false;
+    }
+    function markClean() {
+      dirty = false;
+      dirtyDot.hidden = true;
+    }
+    if (dirty) dirtyDot.hidden = false;
+    function say(text, keep) {
+      clearTimeout(noticeTimer);
+      transient = keep ? "" : text;
+      renderNotice();
+      if (!keep && text)
+        noticeTimer = setTimeout(() => {
+          transient = "";
+          renderNotice();
+        }, 6000);
+    }
+    function noticeText() {
+      if (saveError) return saveError;
+      if (transient) return transient;
+      if (loadError && loaded)
+        return (
+          "Refresh failed: " +
+          loadError +
+          ". Showing the last graph" +
+          (data.to ? " from " + new Date(data.to).toLocaleTimeString() : "") +
+          "."
+        );
+      if (!projection) return "";
+      return [
+        projection.hidden
+          ? plural(projection.hidden, "address", "addresses") +
+            " grouped. Double-click a group to explore it."
+          : "",
+        projection.omittedEdges
+          ? plural(projection.omittedEdges, "lower-volume link", "lower-volume links") +
+            " left out; narrow the filters."
+          : "",
+        data.evidence_truncated
+          ? "Evidence is limited to the 20,000 most recent relations, so domain and process search is partial."
+          : "",
+        state.query
+          ? "Search matches hosts and observed relations; link totals cover the matching host pairs."
+          : "",
+        projection.notice && projection.detail ? projection.notice : "",
+        projection.capacityReached
+          ? "Drawing limit reached; narrow the filters to see other relations."
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+    function renderNotice() {
+      const text = noticeText();
+      notice.textContent = text;
+      notice.hidden = !text;
     }
     function capture() {
       cy.nodes()
@@ -964,24 +1152,52 @@
     }
     function change(rearrange) {
       markDirty();
+      syncControls();
       renderGraph();
       if (rearrange) arrange(false);
     }
     function syncControls() {
       search.value = state.query;
       group.querySelector("select").value = state.group;
+      detail.querySelector("select").value = state.detail;
       windowSelect.querySelector("select").value = state.window;
-      coverage.querySelector("select").value = state.coverage;
       protocol.querySelector("select").value = state.protocol;
-      verdict.querySelector("select").value = state.verdict;
-      active.checked = state.activeOnly;
-      regions.checked = state.regions;
+      renderFilters();
+    }
+    function renderFilters() {
+      const c = M.counts(data);
+      chipCover.managed.set(c.managed, state.coverage === "managed");
+      chipCover.unmanaged.set(c.unmanaged, state.coverage === "unmanaged", "warn");
+      chipQuiet.set(c.quiet, state.activeOnly);
+      chipVerdict.blocked.set(c.blocked, state.verdict === "blocked", "crit");
+      chipVerdict.anomalous.set(c.anomalous, state.verdict === "anomalous", "warn");
+      chipVerdict.clean.set(c.clean, state.verdict === "clean");
+      chipRegions.set(null, state.regions);
+      clear.hidden = !filtered();
+      const active = [state.coverage, state.protocol, state.verdict, state.activeOnly].filter(Boolean).length;
+      filterToggle.textContent = active ? `Filters (${active})` : "Filters";
+    }
+    function sceneOptions() {
+      const o = { ...state };
+      const overview = !state.scope || state.scope.kind === "overview";
+      if (overview && state.detail !== "groups") {
+        const narrow = canvas.clientWidth > 0 && canvas.clientWidth < 640;
+        if (
+          state.detail === "hosts" ||
+          M.shouldExpand(data, o, narrow ? AUTO_HOSTS_NARROW : AUTO_HOSTS)
+        ) {
+          o.expandAll = true;
+          o.budget = HOST_BUDGET;
+        }
+      }
+      return o;
     }
     function renderGraph(skipCapture) {
       if (dragging) return;
       const previousTooltip = tooltipState;
       if (!skipCapture) capture();
-      projection = M.scene(data, state);
+      projection = M.scene(data, sceneOptions());
+      nodeMap = new Map(projection.nodes.map((n) => [n.id, n]));
       const elements = projection.nodes.map((n, i) => ({
         group: "nodes",
         data: {
@@ -994,15 +1210,14 @@
           display:
             M.shortLabel(n) +
             (n.is_group || (n.is_region && n.collapsed)
-              ? "\n" +
-                num(n.count) +
-                (n.count === 1 ? " address" : " addresses")
+              ? "\n" + plural(n.count, "address", "addresses")
               : ""),
           ...(n.is_group ? { groupNode: true } : {}),
           ...(n.is_region ? { regionNode: true, regionKey: n.key } : {}),
           agent: !!n.endpoint_id || n.type === "managed",
           quiet: !!n.quiet,
           isolated: !!n.is_isolated,
+          risk: String(n.risk || "").toUpperCase(),
         },
         position: state.positions[n.id] || {
           x: (i % 8) * 210,
@@ -1020,15 +1235,7 @@
             bend: 35 + (edgeIndex % 4) * 18,
             width: Math.min(5, 1 + Math.log10(1 + e.flow_count)),
             edgeLabel: projection.detail
-              ? [
-                  ...new Set(
-                    (e.ports || []).map(
-                      (p) => p.protocol + (p.port ? "/" + p.port : ""),
-                    ),
-                  ),
-                ]
-                  .slice(0, 2)
-                  .join(" · ")
+              ? uniq((e.ports || []).map(portText)).slice(0, 2).join(" · ")
               : "",
           },
         }),
@@ -1049,75 +1256,63 @@
           elements.forEach((e) => cy.getElementById(e.data.id).data(e.data)),
         );
       updatePins();
-      summary.replaceChildren(
-        el(
-          "span",
-          {},
-          el("strong", {
-            text: num(
-              projection.detail
-                ? projection.nodes.filter(
-                    (n) => !n.parent && n.id !== state.scope.id,
-                  ).length
-                : projection.matched,
-            ),
-          }),
-          projection.detail
-            ? " destinations shown"
-            : " of " + num(projection.total) + " addresses",
-        ),
-        el(
-          "span",
-          {},
-          el("strong", {
-            text: num(
-              projection.detail
-                ? projection.nodes.filter((n) => n.type === "process").length
-                : projection.groups.length,
-            ),
-          }),
-          projection.detail ? " processes" : " groups",
-        ),
-        el(
-          "span",
-          {},
-          el("strong", { text: num(projection.edges.length) }),
+      renderSummary();
+      renderFilters();
+      renderCrumbs();
+      renderEmpty();
+      renderNotice();
+      renderList();
+      inspect();
+      if (previousTooltip) {
+        const trigger = state.list
+          ? [...list.querySelectorAll("button")].find(
+              (b) => b.dataset.topologyId === previousTooltip.id,
+            )
+          : null;
+        if (!state.list || trigger)
+          showTooltip(previousTooltip.id, previousTooltip.point, trigger);
+        else hideTooltip();
+      }
+      if (first && projection.nodes.length) arrange(false);
+    }
+    function renderSummary() {
+      const hosts = projection.detail
+        ? projection.nodes.filter((n) => !n.parent && n.id !== state.scope.id)
+            .length
+        : projection.matched;
+      const parts = [
+        projection.detail
+          ? plural(hosts, "destination", "destinations")
+          : num(hosts) + " of " + plural(projection.total, "address", "addresses"),
+        projection.detail
+          ? plural(
+              projection.nodes.filter((n) => n.type === "process").length,
+              "process",
+              "processes",
+            )
+          : plural(projection.groups.length, "group", "groups"),
+        num(projection.edges.length) +
           " of " +
-            num(projection.edges.length + projection.omittedEdges) +
-            " links",
-        ),
+          plural(projection.edges.length + projection.omittedEdges, "link", "links"),
+      ];
+      summary.replaceChildren(
+        el("span", { text: parts.join(" · ") }),
         el("span", {
           class: "tg-window",
           text: data.to
-            ? "Observed through " + new Date(data.to).toLocaleTimeString()
+            ? "Through " + new Date(data.to).toLocaleTimeString()
             : "Waiting for observations",
         }),
       );
-      chips.replaceChildren();
-      [
-        ["query", state.query],
-        ["coverage", state.coverage],
-        ["protocol", state.protocol],
-        ["verdict", state.verdict],
-        ["activeOnly", state.activeOnly ? "Active only" : ""],
-      ].forEach(([key, value]) => {
-        if (value)
-          chips.append(
-            button(
-              value + " ×",
-              () => {
-                state[key] = key === "activeOnly" ? false : "";
-                syncControls();
-                change();
-              },
-              "Remove " + value + " filter",
-            ),
-          );
-      });
+      shown.textContent = filtered()
+        ? num(projection.matched) + " of " + num(projection.total) + " match"
+        : "";
+    }
+    function renderCrumbs() {
       crumbs.replaceChildren();
       if (state.trail?.length) crumbs.append(button("← Back", () => goBack()));
       (state.trail || []).forEach((entry, i) =>
-        crumbs.append(button(entry.label, () => goBack(i))),
+        crumbs.append(button(entry.label, () => goBack(i), "", "tg-crumb")),
       );
       crumbs.append(
         el("span", {
@@ -1138,40 +1333,47 @@
             change(true);
           }),
         );
-      status.textContent =
-        (projection.hidden
-          ? num(projection.hidden) +
-            " addresses grouped. Double-click to explore. "
-          : "") +
-        (projection.omittedEdges
-          ? num(projection.omittedEdges) +
-            " lower-volume links omitted; narrow filters. "
-          : "") +
-        (data.evidence_truncated
-          ? "Evidence limited to 20,000 recent relations; domain/process search is partial. "
-          : "") +
-        (state.query
-          ? "Search finds hosts and observed relations; link totals cover the matching host pairs. "
-          : "") +
-        "";
-      if (projection.notice) status.textContent += projection.notice;
-      if (projection.capacityReached)
-        status.textContent +=
-          " Drawing limit reached; narrow filters to see other relations.";
-      if (saveError) status.textContent = saveError;
-      renderList();
-      inspect();
-      if (previousTooltip) {
-        const trigger = state.list
-          ? [...list.querySelectorAll("button")].find(
-              (b) => b.dataset.topologyId === previousTooltip.id,
-            )
-          : null;
-        if (!state.list || trigger)
-          showTooltip(previousTooltip.id, previousTooltip.point, trigger);
-        else hideTooltip();
+    }
+    // The graph says why it is empty and what to do, instead of leaving a
+    // blank canvas.
+    function renderEmpty() {
+      empty.replaceChildren();
+      const none = !projection || !projection.nodes.length;
+      let title = "",
+        body = "",
+        actions = [];
+      if (!loaded && !loadError) {
+        title = "Loading topology…";
+      } else if (!loaded) {
+        title = "Topology did not load";
+        body = loadError;
+        actions = [button("Try again", () => api.onWindow(state.window))];
+      } else if (none && filtered()) {
+        title = "Nothing matches these filters";
+        actions = [button("Clear filters", clearFilters)];
+      } else if (none && state.scope && state.scope.kind !== "overview") {
+        title = projection?.notice || "Nothing to show for this selection.";
+        actions = [button("← Back", () => goBack())];
+      } else if (none) {
+        title = "No traffic observed in this window";
+        body =
+          "Hosts appear here once an agent or the scanner sees them talking.";
+        if (state.window !== "7d")
+          actions = [
+            button("Try the last 7 days", () => {
+              state.window = "7d";
+              syncControls();
+              api.onWindow("7d");
+            }),
+          ];
       }
-      if (first && projection.nodes.length) arrange(false);
+      empty.hidden = !title;
+      if (title)
+        empty.append(
+          el("strong", { text: title }),
+          body ? el("p", { text: body }) : null,
+          actions.length ? el("div", { class: "tg-row" }, ...actions) : null,
+        );
     }
     function arrange(selectionOnly) {
       if (!first) {
@@ -1183,7 +1385,7 @@
         ? new Set(selectedLeaves().map((n) => n.id()))
         : null;
       if (movable && !movable.size) {
-        status.textContent = "Select hosts or groups to arrange first.";
+        say("Select hosts or groups to arrange first.");
         return;
       }
       const fixed = cy
@@ -1195,6 +1397,7 @@
         )
         .map((n) => ({ nodeId: n.id(), position: n.position() }));
       fitNext = !selectionOnly;
+      viewport.setAttribute("aria-busy", "true");
       worker.postMessage({
         scope: state.scope?.kind,
         viewport: { width: cy.width(), height: cy.height() },
@@ -1205,7 +1408,6 @@
         })),
         fixed,
       });
-      status.textContent = "Arranging graph… You can keep using the controls.";
     }
     function focus(id) {
       const n = (data.nodes || []).find(
@@ -1213,62 +1415,24 @@
       );
       if (n) navigate({ kind: "host", id: n.id }, M.shortLabel(n));
     }
+
+    /* ---- list view ---- */
     function renderList() {
-      if (!state.list) return;
+      if (!state.list || !projection) return;
       const focusedID = list.contains(document.activeElement)
         ? document.activeElement.dataset.topologyId
         : null;
+      const scrollTop = list.scrollTop;
       list.replaceChildren();
-      const table = el(
-        "table",
-        { class: "tg-table" },
-        el(
-          "thead",
-          {},
-          el(
-            "tr",
-            {},
-            ...["Host / group", "Address", "Coverage", "Inspect"].map((t) =>
-              el("th", { scope: "col", text: t }),
-            ),
-          ),
-        ),
-      );
-      const body = el("tbody");
-      projection.nodes.forEach((n) =>
-        body.append(
-          el(
-            "tr",
-            {},
-            el("td", { text: n.label || n.id }),
-            el("td", {
-              text: n.ip || num(n.count) + (n.count === 1 ? " host" : " hosts"),
-            }),
-            el("td", {
-              text: n.is_region
-                ? "Region"
-                : n.is_group
-                  ? "Group"
-                  : M.coverage(n) === "managed"
-                    ? "Agent installed"
-                    : "No agent",
-            }),
-            el(
-              "td",
-              {},
-              button("Inspect", () => {
-                selected = n.id;
-                inspect();
-              }),
-            ),
-          ),
-        ),
-      );
       function evidenceButton(id) {
-        const b = button("Inspect", () => {
-          selected = id;
-          inspect();
-        });
+        const b = button(
+          "Inspect",
+          () => {
+            selected = id;
+            inspect();
+          },
+          "Show details",
+        );
         b.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             e.preventDefault();
@@ -1280,7 +1444,7 @@
           if (restoringListFocus) return;
           highlight(id);
           const r = b.getBoundingClientRect(),
-            area = list.getBoundingClientRect();
+            area = viewport.getBoundingClientRect();
           showTooltip(id, { x: r.left - area.left, y: r.bottom - area.top }, b);
         };
         b.addEventListener("focus", show);
@@ -1289,29 +1453,101 @@
         b.addEventListener("mouseleave", deferHide);
         return b;
       }
-      [...body.rows].forEach((row, i) =>
-        row.lastElementChild.replaceChildren(
-          evidenceButton(projection.nodes[i].id),
+      const table = (caption, heads, rows, more) =>
+        el(
+          "table",
+          { class: "tg-table" },
+          el("caption", { text: caption }),
+          el(
+            "thead",
+            {},
+            el("tr", {}, ...heads.map((t) => el("th", { scope: "col", text: t }))),
+          ),
+          el("tbody", {}, rows),
+        );
+      const visibleNodes = projection.nodes.slice(0, listRows),
+        visibleEdges = projection.edges.slice(0, listRows);
+      const nodeRows = visibleNodes.map((n) =>
+        el(
+          "tr",
+          { "aria-selected": String(n.id === selected) },
+          el("td", { class: "c-name", text: M.shortLabel(n) }),
+          el("td", {
+            class: "c-addr",
+            text: n.ip || plural(n.count, "host", "hosts"),
+          }),
+          el("td", {
+            class: "c-role",
+            text:
+              n.is_region || n.is_group
+                ? ""
+                : n.role && !/^unknown$/i.test(n.role)
+                  ? n.role
+                  : "",
+          }),
+          el("td", {
+            class: "c-cov",
+            text: n.is_region
+              ? "Region"
+              : n.is_group
+                ? "Group"
+                : ["process", "domain", "traffic"].includes(n.type)
+                  ? n.type === "process" ? "Process" : n.type === "domain" ? "Domain" : "Traffic"
+                  : M.coverage(n) === "managed"
+                    ? "Agent installed"
+                    : "No agent",
+          }),
+          el("td", { class: "c-act" }, evidenceButton(n.id)),
         ),
       );
-      projection.edges.forEach((e) => {
-        const source = projection.nodes.find((n) => n.id === e.source),
-          target = projection.nodes.find((n) => n.id === e.target);
-        body.append(
-          el(
-            "tr",
-            {},
-            el("td", {
-              text: M.shortLabel(source) + " → " + M.shortLabel(target),
-            }),
-            el("td", { text: num(e.flow_count) + " observations" }),
-            el("td", { text: "Directed link" }),
-            el("td", {}, evidenceButton("edge:" + e.id)),
-          ),
+      const edgeRows = visibleEdges.map((e) => {
+        const source = nodeMap.get(e.source),
+          target = nodeMap.get(e.target);
+        const ports = uniq((e.ports || []).map(portText));
+        return el(
+          "tr",
+          { "aria-selected": String("edge:" + e.id === selected) },
+          el("td", {
+            class: "c-name",
+            text: M.shortLabel(source) + " → " + M.shortLabel(target),
+          }),
+          el("td", { class: "c-addr", text: plural(e.flow_count, "flow", "flows") }),
+          el("td", {
+            class: "c-role",
+            text: ports.slice(0, 3).join(" · ") + (ports.length > 3 ? " +" + (ports.length - 3) : ""),
+          }),
+          el("td", {
+            class: "c-cov",
+            text:
+              e.verdict === "blocked"
+                ? "Blocked"
+                : e.verdict === "anomalous"
+                  ? "Anomalous"
+                  : "Clean",
+          }),
+          el("td", { class: "c-act" }, evidenceButton("edge:" + e.id)),
         );
       });
-      table.append(body);
-      list.append(table);
+      list.append(
+        table("Hosts and groups", ["Name", "Address", "Role", "Agent", ""], nodeRows),
+        table("Links", ["From → to", "Flows", "Ports", "Status", ""], edgeRows),
+      );
+      const hiddenRows =
+        Math.max(0, projection.nodes.length - listRows) +
+        Math.max(0, projection.edges.length - listRows);
+      if (hiddenRows)
+        list.append(
+          el(
+            "div",
+            { class: "tg-more" },
+            el("span", { text: plural(hiddenRows, "more row", "more rows") + " not shown" }),
+            button("Show more", () => {
+              listRows += LIST_ROWS;
+              renderList();
+            }),
+          ),
+        );
+      list.scrollTop = scrollTop;
       if (focusedID) {
         const target = [...list.querySelectorAll("button")].find(
           (b) => b.dataset.topologyId === focusedID,
@@ -1326,6 +1562,8 @@
         }
       }
     }
+
+    /* ---- navigation ---- */
     function navigate(scope, label) {
       capture();
       state.trail = [
@@ -1348,6 +1586,7 @@
       state.viewport = null;
       selected = "";
       history = [];
+      listRows = LIST_ROWS;
       undo.disabled = true;
       lastStructure = "";
       first = true;
@@ -1363,25 +1602,26 @@
       Object.assign(state, entry, { scopeLabel: entry.label });
       selected = "";
       history = [];
+      listRows = LIST_ROWS;
       undo.disabled = true;
       lastStructure = "";
       first = false;
       hideTooltip();
-      const viewport = state.viewport;
+      const vp = state.viewport;
       renderGraph(true);
-      if (viewport) {
-        cy.zoom(viewport.zoom);
-        cy.pan(viewport.pan);
+      if (vp) {
+        cy.zoom(vp.zoom);
+        cy.pan(vp.pan);
       }
       markDirty();
     }
     function drill(id) {
-      const n = projection?.nodes.find((n) => n.id === id);
+      const n = nodeMap.get(id);
       if (!n) {
         const e = projection?.edges.find((e) => "edge:" + e.id === id);
         if (e) {
-          const source = projection.nodes.find((n) => n.id === e.source);
-          const target = projection.nodes.find((n) => n.id === e.target);
+          const source = nodeMap.get(e.source);
+          const target = nodeMap.get(e.target);
           const host =
             source?.host_id ||
             (!source?.is_group && !source?.is_region && source?.id);
@@ -1410,75 +1650,288 @@
       else if (n.type !== "traffic")
         navigate({ kind: "host", id: n.host_id || n.id }, M.shortLabel(n));
     }
-    function inspect() {
-      context.replaceChildren();
-      if (cy && projection) highlight(hoverID);
-      const n = projection?.nodes.find((n) => n.id === selected);
-      const edge = projection?.edges.find((e) => "edge:" + e.id === selected);
-      if (!n && !edge) return;
-      context.append(
-        el("strong", { text: n ? M.shortLabel(n) : "Observed communication" }),
-      );
-      if (n?.ip) context.append(el("span", { text: n.ip }));
-      if (n?.type !== "traffic")
-        context.append(
-          button(
-            "Explore",
-            () => drill(selected),
-            "Double-click an item to explore it",
-          ),
-        );
-      if (n?.asset_id && n.type !== "process")
-        context.append(button("Open asset", () => api.onAsset(n)));
-      if (n?.type === "process")
-        context.append(
-          button("Traffic records", () =>
-            api.onTraffic({ process: n.process, endpoint_id: n.endpoint_id }),
-          ),
-        );
-      else if (n?.ip) {
-        context.append(
-          button("Outgoing records", () => api.onTraffic({ src_ip: n.ip })),
-          button("Incoming records", () => api.onTraffic({ dst_ip: n.ip })),
-        );
-      }
-      if (n?.is_group && state.group === "network") {
-        const choice = select(
-          "Region",
-          [
-            ["", "Automatic"],
-            ...Object.entries(M.regionDefinitions).map(([k, v]) => [
-              k,
-              v.label,
-            ]),
-          ],
-          (value) => {
-            state.regionOverrides[n.baseKey || n.key] = value;
-            if (state.scope?.kind === "group" && state.scope.id === n.id) {
-              const moved = M.project(data, state).groups.find(
-                (g) => g.baseKey === n.baseKey,
-              );
-              if (moved) state.scope.id = moved.id;
-            }
-            change(true);
-          },
-        );
-        choice.querySelector("select").value =
-          state.regionOverrides[n.baseKey || n.key] || "";
-        context.append(choice);
-      }
-      context.append(
-        button(
-          "×",
-          () => {
-            selected = "";
-            cy.elements().unselect();
-            inspect();
-          },
-          "Clear selection",
-        ),
-      );
+    function clearSelection() {
+      selected = "";
+      cy.elements().unselect();
+      inspect();
     }
+
+    /* ---- selection panel ---- */
+    function syncSelectionActions() {
+      if (!pinBtn) return;
+      const any = selectedLeaves().length > 0;
+      pinBtn.disabled = unpinBtn.disabled = arrangeBtn.disabled = !any;
+    }
+    const badge = (text, tone) =>
+      el("span", { class: "tg-badge", "data-tone": tone || "", text });
+    const facts = (rows) =>
+      el(
+        "dl",
+        { class: "tg-facts" },
+        rows
+          .filter(([, v]) => v)
+          .flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })]),
+      );
+    function peersOf(n) {
+      const id = n.host_id || n.id;
+      const merged = new Map();
+      (adjacency.get(id) || []).forEach((e) => {
+        const out = e.source === id,
+          other = out ? e.target : e.source;
+        const m = merged.get(other) || { other, flows: 0, out: false, in: false };
+        m.flows += e.flow_count || 0;
+        if (out) m.out = true;
+        else m.in = true;
+        merged.set(other, m);
+      });
+      return [...merged.values()].sort((a, b) => b.flows - a.flows);
+    }
+    function trafficFilter(edge) {
+      const s = nodeMap.get(edge.source),
+        t = nodeMap.get(edge.target);
+      if (!s || !t) return null;
+      if (s.type === "process")
+        return { process: s.process, endpoint_id: s.endpoint_id, dst_ip: t.ip || "" };
+      if (t.type === "process")
+        return { process: t.process, endpoint_id: t.endpoint_id, src_ip: s.ip || "" };
+      if (s.ip && t.ip) return { src_ip: s.ip, dst_ip: t.ip };
+      return null;
+    }
+    function inspect() {
+      const keepFocus = context.contains(document.activeElement)
+        ? document.activeElement.textContent
+        : null;
+      buildContext();
+      if (keepFocus)
+        [...context.querySelectorAll("button")]
+          .find((b) => b.textContent === keepFocus)
+          ?.focus({ preventScroll: true });
+    }
+    function buildContext() {
+      context.replaceChildren();
+      pinBtn = unpinBtn = arrangeBtn = null;
+      selection.node = false;
+      if (cy && projection) highlight(hoverID);
+      const n = nodeMap.get(selected);
+      const edge = projection?.edges.find((e) => "edge:" + e.id === selected);
+      context.dataset.open = n || edge ? "true" : "false";
+      if (!n && !edge) return;
+      const head = el("div", { class: "tg-ctx-head" });
+      const body = [];
+      const actions = el("div", { class: "tg-row" });
+      if (n) {
+        selection.node = true;
+        head.append(
+          el("strong", { text: M.shortLabel(n) }),
+          el(
+            "span",
+            { class: "tg-badges" },
+            ...(n.is_region || n.is_group
+              ? [badge(n.is_region ? "Region" : "Group")]
+              : n.type === "process"
+                ? [badge("Process")]
+                : n.type === "domain"
+                  ? [badge("Domain")]
+                  : n.type === "traffic"
+                    ? []
+                    : [
+                        M.coverage(n) === "managed"
+                          ? badge("Agent installed", "ok")
+                          : badge("No agent", "warn"),
+                        n.risk && n.risk !== "CLEAN" && n.risk !== "LOW"
+                          ? badge(n.risk, "crit")
+                          : null,
+                        n.is_isolated ? badge("Isolated", "crit") : null,
+                        n.quiet ? badge("Quiet") : null,
+                      ]),
+          ),
+        );
+        body.push(
+          facts(
+            n.is_region || n.is_group
+              ? [
+                  ["Contains", plural(n.count, "address", "addresses")],
+                  ["About", n.description],
+                ]
+              : [
+                  ["Address", n.ip],
+                  ["Role", n.role && !/^unknown$/i.test(n.role) ? n.role : ""],
+                  ["System", n.os && !/^unknown$/i.test(n.os) ? n.os : ""],
+                  ["Scope", n.address_scope],
+                  ["Evidence", n.evidence?.length ? n.evidence.join(", ") : ""],
+                  [
+                    "Reported by",
+                    n.type === "process"
+                      ? reporterLabels.get(n.endpoint_id) || n.endpoint_id
+                      : "",
+                  ],
+                  ["About", n.description],
+                  [
+                    "Traffic",
+                    n.quiet
+                      ? "None observed in this window"
+                      : ["process", "domain", "traffic"].includes(n.type)
+                        ? ""
+                        : "Observed in this window",
+                  ],
+                ],
+          ),
+        );
+        if (n.type !== "traffic")
+          actions.append(
+            button("Explore", () => drill(selected), "Double-click an item to explore it", "btn-primary"),
+          );
+        if (n.asset_id && n.type !== "process")
+          actions.append(button("Open asset", () => api.onAsset(n)));
+        if (n.type === "process")
+          actions.append(
+            button("Traffic records", () =>
+              api.onTraffic({ process: n.process, endpoint_id: n.endpoint_id }),
+            ),
+          );
+        else if (n.ip)
+          actions.append(
+            button("Outgoing flows", () => api.onTraffic({ src_ip: n.ip })),
+            button("Incoming flows", () => api.onTraffic({ dst_ip: n.ip })),
+          );
+        if (n.is_group && state.group === "network") {
+          const choice = select(
+            "Region",
+            [
+              ["", "Automatic"],
+              ...Object.entries(M.regionDefinitions).map(([k, v]) => [k, v.label]),
+            ],
+            (value) => {
+              state.regionOverrides[n.baseKey || n.key] = value;
+              if (state.scope?.kind === "group" && state.scope.id === n.id) {
+                const moved = M.project(data, state).groups.find(
+                  (g) => g.baseKey === n.baseKey,
+                );
+                if (moved) state.scope.id = moved.id;
+              }
+              change(true);
+            },
+          );
+          choice.querySelector("select").value =
+            state.regionOverrides[n.baseKey || n.key] || "";
+          body.push(choice);
+        }
+        const peers =
+          !n.is_group && !n.is_region && ["managed", "unmanaged", "cloud", "threat", "gateway"].includes(n.type)
+            ? peersOf(n)
+            : [];
+        if (peers.length) {
+          body.push(
+            el(
+              "div",
+              { class: "tg-peers" },
+              el("h3", { text: "Busiest links" }),
+              ...peers.slice(0, 5).map((p) => {
+                const other = rawNodes.get(p.other);
+                const name = other ? M.shortLabel(other) : p.other;
+                return el(
+                  "button",
+                  {
+                    type: "button",
+                    class: "tg-peer",
+                    title: "Explore this pair",
+                    onclick: () =>
+                      navigate(
+                        { kind: "host", id: n.host_id || n.id, peer: p.other },
+                        M.shortLabel(n) + " ↔ " + name,
+                      ),
+                  },
+                  el("span", { text: (p.out && p.in ? "↔ " : p.out ? "→ " : "← ") + name }),
+                  el("b", { text: plural(p.flows, "flow", "flows") }),
+                );
+              }),
+              peers.length > 5
+                ? el("small", { text: "+" + (peers.length - 5) + " more" })
+                : null,
+            ),
+          );
+        }
+        pinBtn = button("Pin", () => {
+          remember();
+          const ids = selectedLeaves().map((x) => x.id());
+          state.pins = [...new Set([...state.pins, ...ids])];
+          updatePins();
+          markDirty();
+        }, "Keep the selected hosts where they are");
+        unpinBtn = button("Unpin", () => {
+          remember();
+          const ids = new Set(selectedLeaves().map((x) => x.id()));
+          state.pins = state.pins.filter((id) => !ids.has(id));
+          updatePins();
+          markDirty();
+        });
+        arrangeBtn = button("Arrange selection", () => arrange(true), "Lay out only the selected hosts");
+        if (n.type !== "traffic")
+          body.push(el("div", { class: "tg-row tg-layout" }, pinBtn, unpinBtn, arrangeBtn));
+        syncSelectionActions();
+      } else {
+        const source = nodeMap.get(edge.source),
+          target = nodeMap.get(edge.target);
+        head.append(
+          el("strong", {
+            text: M.shortLabel(source) + " → " + M.shortLabel(target),
+          }),
+          el(
+            "span",
+            { class: "tg-badges" },
+            edge.verdict === "blocked"
+              ? badge("Blocked", "crit")
+              : edge.verdict === "anomalous"
+                ? badge("Anomalous", "warn")
+                : badge("Clean"),
+          ),
+        );
+        const ports = new Map();
+        (edge.ports || []).forEach((p) => {
+          const k = portText(p);
+          ports.set(k, (ports.get(k) || 0) + (p.flow_count || 0));
+        });
+        const portList = [...ports.entries()].sort((a, b) => b[1] - a[1]);
+        body.push(
+          facts([
+            ["Flows", num(edge.flow_count)],
+            ["Volume", volume(edge)],
+            [
+              "Ports",
+              portList
+                .slice(0, 8)
+                .map(([k, c]) => (c ? k + " (" + num(c) + ")" : k))
+                .join(" · ") + (portList.length > 8 ? " +" + (portList.length - 8) : ""),
+            ],
+            ...relationLines(edge, 4).map((l) => {
+              const i = l.indexOf(": ");
+              return [l.slice(0, i), l.slice(i + 2)];
+            }),
+          ]),
+        );
+        actions.append(
+          button("Explore", () => drill(selected), "Double-click an item to explore it", "btn-primary"),
+        );
+        const filter = trafficFilter(edge);
+        if (filter)
+          actions.append(button("Traffic records", () => api.onTraffic(filter)));
+      }
+      context.append(
+        head,
+        ...body,
+        actions.children.length ? actions : null,
+        button("Close", clearSelection, "Clear selection", "tg-close"),
+      );
+      // On a phone the panel takes room from the canvas; keep the selection in view.
+      if (canvas.clientWidth < 640 && n)
+        setTimeout(() => {
+          cy.resize();
+          const node = cy.getElementById(n.id);
+          if (node.length && !state.list) cy.center(node);
+        }, 60);
+    }
+
+    /* ---- saved views ---- */
     function refreshViews() {
       return api
         .request("/api/v1/topology/views")
@@ -1492,9 +1945,10 @@
             s.append(el("option", { value: v.id, text: v.name })),
           );
           s.value = currentView ? currentView.id : "";
+          removeView.hidden = !currentView || api.role === "auditor";
         })
         .catch((e) => {
-          status.textContent = "Saved views unavailable: " + e.message;
+          say("Saved views unavailable: " + e.message);
         });
     }
     function applyView(v) {
@@ -1510,6 +1964,7 @@
         trail: v.state.trail || [],
         collapsedRegions: v.state.collapsedRegions || {},
         regionOverrides: v.state.regionOverrides || {},
+        detail: v.state.detail || "auto",
       };
       state.expanded = state.expanded || {};
       state.positions = state.positions || {};
@@ -1518,43 +1973,50 @@
       setMode(state.mode);
       lastStructure = "";
       first = false;
-      const viewport = state.viewport;
+      selected = "";
+      const vp = state.viewport;
       renderGraph(true);
       restorePositions();
       updatePins();
-      if (viewport) {
-        cy.zoom(viewport.zoom);
-        cy.pan(viewport.pan);
+      if (vp) {
+        cy.zoom(vp.zoom);
+        cy.pan(vp.pan);
       }
-      canvas.hidden = state.list;
-      list.hidden = !state.list;
-      listButton.textContent = state.list ? "Graph view" : "List view";
-      renderList();
+      applyListMode();
       api.onWindow(state.window);
-      dirty = false;
-      save.textContent = "Save";
+      markClean();
       removeView.hidden = api.role === "auditor";
+      views_.open = false;
     }
     function loadView(id) {
       const v = views.find((v) => v.id === id);
       if (!v) return;
       if (dirty) {
-        confirmDialog("Discard unsaved layout changes?", () => applyView(v));
+        confirmDialog("Discard unsaved layout changes?", () => applyView(v), () => {
+          saved.querySelector("select").value = currentView ? currentView.id : "";
+        });
       } else applyView(v);
     }
-    function confirmDialog(title, done) {
+    function confirmDialog(title, done, cancelled) {
       const d = el("dialog", { class: "tg-dialog" }, el("h2", { text: title }));
-      d.append(
+      const row = el("div", { class: "tg-row" });
+      row.append(
         button("Keep editing", () => {
           d.close();
           d.remove();
+          if (cancelled) cancelled();
         }),
         button("Continue", () => {
           d.close();
           d.remove();
           done();
-        }),
+        }, "", "btn-primary"),
       );
+      d.append(row);
+      d.addEventListener("cancel", () => {
+        d.remove();
+        if (cancelled) cancelled();
+      });
       root.append(d);
       d.showModal();
     }
@@ -1575,7 +2037,7 @@
         { class: "tg-dialog" },
         el("h2", { text: "Save personal view" }),
         el("p", {
-          text: "Stores filters, time window, positions, pins and zoom for your operator account.",
+          text: "Keeps filters, time window, positions, pins and zoom for your account.",
         }),
         input,
       );
@@ -1590,13 +2052,24 @@
         persist(input.value.trim(), id, 0);
         d.close();
         d.remove();
+      }, "", "btn-primary");
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          go.click();
+        }
       });
+      d.addEventListener("cancel", () => d.remove());
       d.append(
-        button("Cancel", () => {
-          d.close();
-          d.remove();
-        }),
-        go,
+        el(
+          "div",
+          { class: "tg-row" },
+          button("Cancel", () => {
+            d.close();
+            d.remove();
+          }),
+          go,
+        ),
       );
       root.append(d);
       d.showModal();
@@ -1608,17 +2081,17 @@
         .then((v) => {
           currentView = v;
           saveError = "";
-          dirty = false;
-          save.textContent = "Save";
+          markClean();
           removeView.hidden = false;
-          status.textContent = "Personal view saved.";
+          say("Personal view saved.");
           refreshViews();
         })
         .catch((e) => {
-          status.textContent = saveError =
+          saveError =
             "View not saved: " +
             e.message +
             ". Your layout is still here; use Save as to keep a separate copy.";
+          renderNotice();
         });
     }
     function deleteView() {
@@ -1636,37 +2109,64 @@
             refreshViews();
           })
           .catch((e) => {
-            status.textContent = saveError = e.message;
+            saveError = e.message;
+            renderNotice();
           }),
       );
     }
+
+    /* ---- data ---- */
     function update(next, error) {
       if (destroyed) return;
       if (error) {
-        status.textContent =
-          "Refresh failed: " + error + ". Last graph retained.";
+        loadError = error;
+        renderEmpty();
+        renderNotice();
         return;
       }
+      loadError = "";
       if (!next) return;
       if (dragging) {
         pendingData = next;
         return;
       }
+      // The hub serves one snapshot until it expires; an unchanged snapshot
+      // needs no repaint, so a refresh never disturbs layout or hover.
+      const unchanged =
+        loaded &&
+        !api.draft &&
+        next.to &&
+        next.to === data.to &&
+        next.from === data.from;
+      if (unchanged) {
+        renderNotice();
+        return;
+      }
+      loaded = true;
       data = next;
       reporterLabels = new Map(
         (data.nodes || [])
           .filter((n) => n.endpoint_id)
           .map((n) => [n.endpoint_id, n.label || n.ip]),
       );
+      rawNodes = new Map((data.nodes || []).map((n) => [n.id, n]));
+      adjacency = new Map();
+      (data.edges || []).forEach((e) => {
+        for (const id of [e.source, e.target]) {
+          if (!adjacency.has(id)) adjacency.set(id, []);
+          adjacency.get(id).push(e);
+        }
+      });
       const restoreDraft = api.draft;
-      const viewport = restoreDraft && state.viewport;
+      const vp = restoreDraft && state.viewport;
       renderGraph(!!restoreDraft);
-      if (viewport) {
-        cy.zoom(viewport.zoom);
-        cy.pan(viewport.pan);
+      if (vp) {
+        cy.zoom(vp.zoom);
+        cy.pan(vp.pan);
       }
       api.draft = null;
     }
+    renderEmpty();
     return {
       update,
       focus,
@@ -1677,8 +2177,11 @@
       destroy() {
         destroyed = true;
         clearTimeout(searchTimer);
+        clearTimeout(noticeTimer);
         hideTooltip();
-        document.removeEventListener("keydown", escapeTooltip);
+        document.removeEventListener("keydown", escapeKey);
+        document.removeEventListener("click", closeViews);
+        themeWatch.disconnect();
         observer.disconnect();
         worker.terminate();
         cy.destroy();
