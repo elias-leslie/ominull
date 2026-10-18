@@ -141,8 +141,9 @@ function Invoke-Revert([string]$HiveRoot) {
 }
 # --- original values end ---
 # --- registry helpers begin (shared; tests compare) ---
-function New-Control([string]$Id, $Expected, $Actual, [string]$State, [string]$Risk) {
-  [ordered]@{ id = $Id; expected = "$Expected"; actual = "$Actual"; state = $State; risk = $(if ($Risk) { $Risk } else { 'safe' }) }
+function New-Control([string]$Id, $Expected, $Actual, [string]$State, [string]$Risk, [string]$Cis) {
+  $c = [ordered]@{ id = $Id; expected = "$Expected"; actual = "$Actual"; state = $State; risk = $(if ($Risk) { $Risk } else { 'safe' }) }
+  if ($Cis) { $c.cis = $Cis }; $c
 }
 function Get-Reg([string]$Path, [string]$Name) { try { (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { $null } }
 function Set-RegDword([string]$Path, [string]$Name, [int]$Value) {
@@ -174,7 +175,7 @@ function Dismount-DefaultHive {
     if ($script:HiveMine) { throw "the Default user hive could not be unloaded: $($r.out)" }
   } finally { $script:HiveMine = $false; $script:HiveLock = $null; $m.ReleaseMutex(); $m.Dispose() }
 }
-# A setting is (path, name, DWORD[, 'careful']); its key names it in originals and controls.
+# A setting is (path, name, DWORD[, 'careful'|''[, cis reference]]); its key names it in originals and controls.
 function Get-Key($s) { "$($s[0])\$($s[1])" -replace '^Registry::HKEY_USERS\\OminullDefault', 'DefaultUser' }
 function Get-Drift($Settings) {
   $d = [ordered]@{}; foreach ($s in $Settings) { $c = Get-Reg $s[0] $s[1]; if ("$c" -ne "$($s[2])") { $d[(Get-Key $s)] = $c } }; $d
@@ -190,7 +191,7 @@ function Invoke-Settings($Settings) {
   }
   $Detail.controls = @(foreach ($s in $Settings) {
     $k = Get-Key $s; $a = $after.Contains($k)
-    New-Control $k $s[2] $(if ($a) { $after[$k] } else { $s[2] }) $(if ($a) { 'fail' } elseif ($fixed[$k]) { 'fixed' } else { 'pass' }) $s[3] })
+    New-Control $k $s[2] $(if ($a) { $after[$k] } else { $s[2] }) $(if ($a) { 'fail' } elseif ($fixed[$k]) { 'fixed' } else { 'pass' }) $s[3] $s[4] })
 }
 # --- registry helpers end ---
 # group = key|name|value under the table's root (user: Default hive, new profiles). T = telemetry floor.

@@ -11,14 +11,6 @@
   "name": "windows-cleanup",
   "risk": "safe"
  },
- "59b2518b303d12a108338a959c795b2d769597ee39a19ba10afcd640eddd762f": {
-  "name": "windows-privacy",
-  "risk": "safe"
- },
- "5da7d476965ab22e704b3645a2cae14338f834bd92e4bab142904b9a8cc51907": {
-  "name": "windows-performance",
-  "risk": "safe"
- },
  "6f71037b896e520ec39fc16fdb9c8ebbfbbeea94d2c0cd51039b76981dffe2ea": {
   "name": "linux-reboot",
   "risk": "careful"
@@ -35,12 +27,20 @@
   "name": "linux-maintenance-mode",
   "risk": "safe"
  },
+ "9a3a695bd80e618dfc58f32d26d00b57ddab4bbc5ff384e8a7127bfd1c7e59f0": {
+  "name": "windows-privacy",
+  "risk": "safe"
+ },
  "a2335ba4314ce105b10eb9102c59565d78ba90cbb4e6d83222cdde9918590311": {
   "name": "windows-maintenance-mode",
   "risk": "safe"
  },
  "b06e2e1d4e81f731e2277b1eb235f186f0d92cf00dd53d46566c5de297990752": {
   "name": "windows-audit",
+  "risk": "safe"
+ },
+ "d04275f631dc44fb3ff0ba0c42455e5636b94729f3ea3b4af5b06e3f9048f471": {
+  "name": "windows-performance",
   "risk": "safe"
  }
 }
