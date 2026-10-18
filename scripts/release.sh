@@ -155,6 +155,13 @@ if [ "${DO_HUB}" -eq 1 ]; then
         "${DEPLOY_CMD}"
     echo "[*] Syncing the hub's package library with the released packages."
     "${ROOT_DIR}/scripts/sync-package-library.sh"
+    # A workstation copy of ominullctl left from an older release misread
+    # newer command lines (agents update took a second id as the version), so
+    # an existing copy on the operator's PATH is refreshed with this build.
+    ctl_copy="${OMINULL_CTL_COPY:-${HOME}/.local/bin/ominullctl}"
+    if [ -f "${ctl_copy}" ] && [ -x "${ROOT_DIR}/build/ominullctl" ]; then
+        install -m 0775 "${ROOT_DIR}/build/ominullctl" "${ctl_copy}" && echo "[+] Refreshed ${ctl_copy}."
+    fi
 fi
 
 if [ "${DO_AGENTS}" -eq 0 ]; then
