@@ -612,6 +612,7 @@ foreach ($n in 'cleanup', 'updates') {
         $owner = @{}; foreach ($o in @($Detail.needs_owner)) { $owner[$o.id] = $o.reason }
         Check 'sr: a running program is left open while someone uses the computer' ($owner['app-explorer'] -match 'running' -and -not ($script:calls -match 'kill'))
         Check 'sr: manual entries go to the owner' ($owner['manual'] -match 'someone at the screen')
+        Check 'sr: every owner item offers the keep list' (@($Detail.needs_owner | Where-Object { $_.keep -cne 'keep' }).Count -eq 0)
         Check 'sr: an uninstall string that runs a shell is refused' ($owner['shell'] -match 'shell' -and -not ($script:calls -match 'cmd.exe'))
         Check 'sr: a hung uninstaller is stopped and reported' ($owner['hang'] -match 'did not finish in 60 s' -and ($script:calls -match '/hang\|60$'))
         Check 'sr: registry uses the machine string plus its flag' ($script:calls -contains "$tmp\x\wave.exe|--uninstall --force-uninstall|600")

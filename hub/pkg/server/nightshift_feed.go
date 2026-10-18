@@ -549,6 +549,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("storage", sf, err)
 	mf, err := s.maintenanceFindings(now)
 	add("maintenance", mf, err)
+	dcf, err := s.decisionFindings(now)
+	add("maintenance_decisions", dcf, err)
 	// An unsound tuning row is reported even when the change log cannot be read.
 	df, err := s.detectionPolicySection(now)
 	findings = append(findings, df...)

@@ -416,7 +416,7 @@ ask is not asked again for 24 hours, or until the settings change.
 
 ## Nightshift feed
 
-The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries two records:
+The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries these records:
 
 - `ominull.maintenance`: critical (pushes) when the latest run of any package
   on any host failed or returned no result line, with counts in the message
@@ -425,6 +425,36 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
   compliance per category.
 - `ominull.maintenance.schedule`: medium (board only) while a scheduled run is
   waiting for the owner or was declined, resolved otherwise.
+- `ominull.decisions.<run>`: one per run with items waiting for the owner
+  (below), medium (board only), listing each item; resolved for a week once
+  every item of the run is answered.
+
+## Owner decisions
+
+A package result may list what it could not settle by itself in
+`detail.needs_owner`: `[{"id","name","reason","keep"}]` (software removal
+does: manual entries, unsafe or missing uninstallers, programs left open,
+uninstallers that hung or left the program behind). `keep`, when present,
+names a list setting of the package that a "keep" answer adds `id` to. The
+hub reads these from each machine's latest runs (text cut short, control
+characters dropped, at most 40 per run, a `keep` that is not a setting name
+ignored) and groups the open ones by run: a playbook run, or one package's
+latest runs (`ominull.decisions.playbook.<id>`,
+`ominull.decisions.package.<name>`).
+
+- **Answers.** `GET /api/v1/maintenance/decisions` returns `open` (key,
+  machine, package, item, the answers it allows) and the 20 latest
+  `answered`. `POST {"key","answer","reason"}` (admin): `keep` adds the item
+  to that machine's override of the named list setting (software removal:
+  `keep`), with "keeps NAME: reason" added to the override's reason, so later
+  runs skip it there (a reason is required); `handled` just closes it.
+  Answers are audited (`MAINTENANCE_DECISION`) and kept in the settings row
+  `maintenance.decisions` (the newest 500).
+- **Coming back.** An answered item opens again only if a run that finished
+  after the answer reports it again.
+- **Console.** A *Decisions for you* card at the top of the Maintenance page,
+  shown only while something is open, lists the items by run with *Keep…*
+  (asks why) and *Handled*.
 
 ## Running a package
 
@@ -462,6 +492,9 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
   `loginctl`, `shutdown` and `sleep` first in `PATH`: Restart's audit, warned
   enforce, `only_if_needed`, skip / wait / run, the window, battery, revert of
   its own restart only, bad parameters. The Linux CI job runs it.
+- `hub/pkg/server/maintenance_decisions_test.go`: needs_owner items cleaned,
+  one feed record per run and its resolved form, keep writing the machine's
+  override with the reason, handled, and an item reopening on a later run.
 - `hub/pkg/server/playbooks_test.go`: saving, one step at a time, the window
   and its end, "Don't wait", the hold after a restart, the maintenance window
   setting and the schedule never restarting a machine.

@@ -490,6 +490,7 @@
     maintSettings: null,
     maintCatalog: null,
     maintPlaybooks: null,
+    maintDecisions: null,
     maintTab: "maintenance",
     maintCardTab: "maintenance",
     /* The hub has kept a rolling communication profile per endpoint since the
@@ -1268,6 +1269,20 @@
       appx: { appx: "remove the Store app for all users", manual: "needs someone at the screen" } },
     flags: ["/S", "/SILENT", "/VERYSILENT /NORESTART", "/quiet", "/quiet /norestart", "/uninstall /quiet", "-uninstall", "--uninstall", "--force-uninstall"]
   };
+  var DEMO_DECISIONS = null;
+  function demoDecisions() {
+    if (!DEMO_DECISIONS) {
+      var win = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return /windows/i.test(e.os || ""); });
+      var a = win[0] || { id: "demo-ep", hostname: "corp-win11-exec" }, b = win[1] || a;
+      var seen = new Date(Date.now() - 3 * 3600000).toISOString();
+      DEMO_DECISIONS = { answered: [], open: [
+        { key: "demo-d1", group: "playbook:demo-run", group_title: "Playbook Weekly tidy", endpoint_id: a.id, endpoint: a.hostname, package: "windows-software-removal",
+          item: { id: "wave-tool", name: "Wave Browser Helper", reason: "its uninstaller did not finish in 600 s; it may be waiting for someone at the screen", keep: "keep" }, seen: seen, answers: ["keep", "handled"] },
+        { key: "demo-d2", group: "playbook:demo-run", group_title: "Playbook Weekly tidy", endpoint_id: b.id, endpoint: b.hostname, package: "windows-software-removal",
+          item: { id: "mcafee-trial", name: "McAfee LiveSafe trial", reason: "it is running and was left open", keep: "keep" }, seen: seen, answers: ["keep", "handled"] }] };
+    }
+    return JSON.parse(JSON.stringify(DEMO_DECISIONS));
+  }
   var DEMO_PLAYBOOKS = null;
   function demoPlaybooks() {
     if (!DEMO_PLAYBOOKS) {
@@ -1370,6 +1385,7 @@
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
+        if (base === "/api/v1/maintenance/decisions") { resolve(demoDecisions()); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1557,6 +1573,13 @@
         else if (body.mode === "revert") delete DEMO_MAINT_MODE[id];
       });
       return { jobs: (body.endpoint_ids || []).map(function (id) { return { endpoint_id: id, package: (body.packages || [])[0], job_id: "demo-job-" + Date.now() }; }) };
+    }
+    if (base === "/api/v1/maintenance/decisions") {
+      var dd = demoDecisions(), hit = dd.open.filter(function (x) { return x.key === body.key; })[0];
+      if (!hit) return { answered: null };
+      DEMO_DECISIONS.open = DEMO_DECISIONS.open.filter(function (x) { return x.key !== body.key; });
+      DEMO_DECISIONS.answered.unshift(Object.assign({}, hit, { answer: body.answer, reason: body.reason || "", by: "demo", at: new Date().toISOString(), answers: null }));
+      return { answered: DEMO_DECISIONS.answered[0] };
     }
     if (base === "/api/v1/maintenance/playbooks") {
       demoPlaybooks();
@@ -9854,6 +9877,7 @@
     });
     var usesCatalog = pkgs.some(function (p) { return arrayOf(p.params).some(function (x) { return x.type === "catalog"; }); });
     view.appendChild(h("div", { cls: "pad stack" },
+      maintDecisionsCard(),
       card("Package settings", head, null, true),
       card(tab === "security" ? "Security packages" : "Maintenance packages",
         pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
@@ -9893,6 +9917,69 @@
     var a = arrayOf(state.assets).filter(function (x) { return x.endpoint && x.endpoint.id === epID; })[0];
     return a ? a.name : epID;
   }
+  /* What package runs could not settle by themselves, grouped by run. Keep
+     adds the item to that machine's keep list with the owner's reason;
+     Handled closes it until a later run reports it again. */
+  function maintDecisionsCard() {
+    var d = state.maintDecisions;
+    if (!d || d.error || !arrayOf(d.open).length) return null;
+    var groups = {}, order = [];
+    arrayOf(d.open).forEach(function (x) {
+      if (!groups[x.group]) { groups[x.group] = []; order.push(x.group); }
+      groups[x.group].push(x);
+    });
+    var body = h("div", { cls: "card-body stack" },
+      h("div", { cls: "pending", text: "Things a run could not settle by itself. Keep leaves it on that machine for good (it becomes that machine's setting, with your reason). Handled closes it; it comes back only if a later run finds it again." }));
+    order.forEach(function (g) {
+      var list = groups[g];
+      body.appendChild(h("h4", { text: list[0].group_title }));
+      body.appendChild(stackOnPhone(simpleTable(["Machine", "What", "Why", ""], list.map(function (x) {
+        return [
+          decisionHost(x),
+          h("div", {}, h("b", { text: x.item.name }), h("div", { cls: "dim-2", text: maintPkgTitle(x.package) })),
+          x.item.reason,
+          IS_ADMIN ? h("div", { cls: "uf uf-g1" },
+            arrayOf(x.answers).indexOf("keep") >= 0 ? h("button", { cls: "btn mini", type: "button", text: "Keep…", "aria-label": "Keep " + x.item.name + " on this machine",
+              on: { click: function () { openDecisionKeepSheet(x); } } }) : null,
+            h("button", { cls: "btn mini", type: "button", text: "Handled", "aria-label": "Mark " + x.item.name + " handled",
+              on: { click: function (e) { e.target.disabled = true; answerDecision(x, "handled", "").catch(function () { e.target.disabled = false; }); } } }))
+            : null
+        ];
+      }), { sortable: false })));
+    });
+    return card("Decisions for you", body, null, true);
+  }
+
+  function decisionHost(x) {
+    var n = maintAssetName(x.endpoint_id);
+    return n === x.endpoint_id ? (x.endpoint || n) : n;
+  }
+
+  function answerDecision(x, answer, reason) {
+    return request("/api/v1/maintenance/decisions", "POST", { key: x.key, answer: answer, reason: reason }).then(function () {
+      toast(answer === "keep" ? x.item.name + " stays on " + decisionHost(x) : x.item.name + " marked handled", "ok");
+      return request("/api/v1/maintenance/decisions").then(function (d) {
+        state.maintDecisions = d;
+        if (state.section === "maintenance") { $("view").dataset.section = ""; renderBody(); }
+      });
+    }, function (e) { toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); throw e; });
+  }
+
+  function openDecisionKeepSheet(x) {
+    var reason = h("input", { type: "text", maxlength: "200", "aria-label": "Why this machine keeps it" });
+    var go = h("button", { cls: "btn btn-primary", type: "button", text: "Keep", on: { click: function () {
+      if (!reason.value.trim()) { toast("Say why this machine keeps it.", "warn"); reason.focus(); return; }
+      go.disabled = true;
+      answerDecision(x, "keep", reason.value.trim()).then(function () { closeSheet(); }, function () { go.disabled = false; });
+    } } });
+    openSheet("Keep " + x.item.name + "?", h("div", { cls: "stack" },
+      h("p", { text: decisionHost(x) + " keeps " + x.item.name + ". " + maintPkgTitle(x.package) + " skips it there from now on; other machines are not affected." }),
+      h("label", { cls: "uf-col uf-g1" }, h("b", { text: "Why" }), reason),
+      h("p", { cls: "pending", text: "Your reason is saved with the machine's setting, so it shows wherever that setting does." })),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    setTimeout(function () { reason.focus(); }, 0);
+  }
+
   function maintPlaybooksCard() {
     var d = state.maintPlaybooks;
     var actions = IS_ADMIN && d && !d.error ? [h("button", { cls: "btn mini", type: "button", text: "Add…",
@@ -11316,6 +11403,8 @@
     }
     if (state.section === "maintenance") {
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
+      jobs.push(request("/api/v1/maintenance/decisions").then(function (d) { state.maintDecisions = d || null; },
+        function (e) { state.maintDecisions = { error: (e && e.message) || "request failed" }; }));
       jobs.push(request("/api/v1/maintenance/playbooks").then(function (d) { state.maintPlaybooks = d || null; },
         function (e) { state.maintPlaybooks = { error: (e && e.message) || "request failed" }; }));
       jobs.push(request("/api/v1/maintenance/catalog").then(function (d) { state.maintCatalog = d || null; },

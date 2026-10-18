@@ -165,7 +165,8 @@ function Get-Running($i) {
   if ("$($i.location)".Length -lt 8) { return @() }; $loc = $i.location.TrimEnd('\') + '\'
   @(Get-CimInstance Win32_Process -Property ProcessId, ExecutablePath -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($loc, [StringComparison]::OrdinalIgnoreCase) })
 }
-function Add-Owner($id, $n, [string]$r) { $script:owner += [ordered]@{ id = $id; name = $n; reason = $r.Substring(0, [math]::Min(160, $r.Length)) } }
+# keep: the hub's "keep it on this machine" answer adds id to this machine's keep list.
+function Add-Owner($id, $n, [string]$r) { $script:owner += [ordered]@{ id = $id; name = $n; reason = $r.Substring(0, [math]::Min(160, $r.Length)); keep = 'keep' } }
 function Invoke-Package {
   if ($Mode -eq 'revert') { $script:State = 'na'; $Detail.reason = 'uninstalled software cannot be put back; reinstall it'; return }
   $found = @(); $script:owner = @(); $kept = @(); $refused = @(); $other = [ordered]@{}; $deferred = @(); $removed = @()

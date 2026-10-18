@@ -38,6 +38,9 @@ type packageRun struct {
 	CompletedAt *time.Time        `json:"completed_at,omitempty"`
 	// RestartIn is a restart package's warning time (detail.restart_in_seconds).
 	RestartIn int `json:"restart_in_seconds,omitempty"`
+	// NeedsOwner is what the run left for the owner to decide
+	// (detail.needs_owner), cleaned of anything an endpoint could abuse.
+	NeedsOwner []ownerItem `json:"needs_owner,omitempty"`
 }
 
 type packageStatus struct {
@@ -99,10 +102,11 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 				run.Pass, run.Fail = scripts.Compliance(run.Controls)
 				var d struct {
 					Reason, Error string
-					RestartIn     int `json:"restart_in_seconds"`
+					RestartIn     int             `json:"restart_in_seconds"`
+					NeedsOwner    json.RawMessage `json:"needs_owner"`
 				}
 				if json.Unmarshal(pr.Detail, &d) == nil {
-					run.Reason, run.RestartIn = d.Reason, d.RestartIn
+					run.Reason, run.RestartIn, run.NeedsOwner = d.Reason, d.RestartIn, cleanOwnerItems(d.NeedsOwner)
 					if run.Reason == "" {
 						run.Reason = d.Error
 					}

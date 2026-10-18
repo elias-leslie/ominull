@@ -3,6 +3,10 @@
   "name": "windows-updates",
   "risk": "safe"
  },
+ "167077faacbd5c4ef8ff223b7185537ab1622b2e969f131929d7bc02407e2a00": {
+  "name": "windows-software-removal",
+  "risk": "careful"
+ },
  "3fb1c82f1936b5add09c80c250e55acadc1104fefa6499442f53dd28942c2b76": {
   "name": "windows-cleanup",
   "risk": "safe"
@@ -25,10 +29,6 @@
  },
  "7f6dc58a0cf7963730783a007cbaa30fc16bd265fffa26137a610ef79ef85a2d": {
   "name": "windows-reboot",
-  "risk": "careful"
- },
- "897c0e204868b5c6628732af1328febe358b0160f2b8c384aac3378db5adae8a": {
-  "name": "windows-software-removal",
   "risk": "careful"
  },
  "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
