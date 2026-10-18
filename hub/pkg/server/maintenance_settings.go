@@ -24,12 +24,14 @@ import (
 // wait for people (battery and Windows Update still count).
 const maintenanceWindowSetting = "maintenance.window"
 
+// maintenanceWindow is the fleet default window as a run parameter
+// (maintenance_windows.go holds the per-machine windows).
 func (s *Server) maintenanceWindow() string {
-	v, err := s.store.GetSetting(maintenanceWindowSetting)
-	if err != nil || scripts.CheckWindow(v) != nil {
-		return ""
-	}
-	return v
+	maintenanceWindowsMu.Lock()
+	st := s.loadMaintenanceWindows()
+	maintenanceWindowsMu.Unlock()
+	w, _ := s.fleetWindow(st)
+	return w.Param()
 }
 
 // addWindow gives an enforce or revert run the maintenance window; audits
@@ -288,7 +290,23 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 				return
 			}
 		}
-		if err := s.store.SetSetting(maintenanceWindowSetting, v); err != nil {
+		maintenanceWindowsMu.Lock()
+		st := s.loadMaintenanceWindows()
+		st.Default = nil
+		if v != "" {
+			fw, _ := scripts.ParseWindow(v)
+			st.Default = &fw
+		}
+		raw, _ := json.Marshal(st)
+		if st.Default == nil && len(st.Endpoints) == 0 {
+			raw = nil
+		}
+		err := s.store.SetSetting(maintenanceWindowsSetting, string(raw))
+		if err == nil {
+			err = s.store.SetSetting(maintenanceWindowSetting, "")
+		}
+		maintenanceWindowsMu.Unlock()
+		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

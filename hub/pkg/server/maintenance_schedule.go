@@ -204,7 +204,6 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		return err
 	}
 	busy := s.playbookBusyHosts() // a playbook running there has the machine
-	window := s.maintenanceWindow()
 	for _, d := range defs {
 		// Maintenance mode is switched on for a while and a restart is a
 		// playbook step; neither runs on a schedule.
@@ -232,7 +231,10 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 				continue
 			}
 			params := eff.RunParams("")
-			addWindow(d.Header, params, window)
+			addWindow(d.Header, params, s.windowParams([]string{ep.ID})[ep.ID])
+			if params["window"] != "" && !s.windowOpenOrUnknown(params["window"], ep.ID, now) {
+				continue // enforce waits for the machine's window
+			}
 			if s.fillCatalogParams(d.Header, params) != nil || d.Header.CheckRun(params) != nil {
 				continue
 			}

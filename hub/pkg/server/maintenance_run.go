@@ -142,10 +142,10 @@ func (s *Server) buildPackageItem(tenantID string, sc *scripts.Script, mode stri
 	// One run is one payload on every named host, so the hosts must
 	// share the package's effective settings.
 	var params map[string]string
-	window := s.maintenanceWindow()
+	winParams := s.windowParams(endpointIDs)
 	for _, id := range endpointIDs {
 		p := settings.Effective(h, id).RunParams(mode)
-		addWindow(h, p, window)
+		addWindow(h, p, winParams[id])
 		for k, v := range override {
 			p[k] = v
 		}

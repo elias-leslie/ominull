@@ -637,6 +637,7 @@ static void test_host_authority(int64_t now) {
            strstr(report, "\"host_authority\":true") && strstr(report, hk_id[0]) && strstr(report, "\"role\":\"auto\"") &&
                strstr(report, "\"name\":\"scrub\"") && strstr(report, "\"modes\":[\"audit\"]"));
     expect("report is one JSON object", report[0] == '{' && report[strlen(report) - 1] == '}');
+    expect("report carries the clock's UTC offset", strstr(report, "\"utc_offset_minutes\":") != NULL);
 
     host_grant(&g, 0, 3, "job-1", "nightshift:tap");
     expect("tap-signed V3 script grant for this job verifies", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) == NULL);

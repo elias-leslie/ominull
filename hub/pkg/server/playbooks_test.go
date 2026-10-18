@@ -235,7 +235,8 @@ func TestPlaybookWaitsForTheRestart(t *testing.T) {
 	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
 	owner := ownerOf(t, srv)
 	v, _ := owner.auth.GetApproval(id, "")
-	if !strings.Contains(v.Summary, "windows-reboot (enforce)") || !strings.Contains(v.Summary, "careful") {
+	// The names shorten to fit once the window sentence is in.
+	if !strings.Contains(v.Summary, "reboot") || !strings.Contains(v.Summary, "careful") {
 		t.Fatalf("the restart must show as careful: %s", v.Summary)
 	}
 	owner.approve(t, id)
@@ -307,7 +308,8 @@ func TestMaintenanceWindowSetting(t *testing.T) {
 			t.Errorf("%s run carries window %q, want %q", mode, p.Parameters["window"], want)
 		}
 	}
-	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", `{"window":""}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"window":""`) {
+	// Clearing goes back to the shipped default window.
+	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", `{"window":""}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"window":"01:00-05:00"`) {
 		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
 	}
 	// Enabled with enforce on the fleet, the restart package still never runs on a schedule.

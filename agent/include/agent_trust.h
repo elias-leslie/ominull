@@ -1935,6 +1935,25 @@ static inline void Trust_HostReportJSON(const TrustContext* t, char* out, size_t
     out[len + h + 1] = '\0';
 }
 
+/* Trust_UTCOffsetMinutes is the machine clock's offset east of UTC now
+ * (daylight saving included), for maintenance windows in machine time. */
+static inline int Trust_UTCOffsetMinutes(void) {
+#ifdef _WIN32
+    TIME_ZONE_INFORMATION tz;
+    DWORD r = GetTimeZoneInformation(&tz);
+    if (r == TIME_ZONE_ID_INVALID) return 0;
+    long bias = tz.Bias;
+    if (r == TIME_ZONE_ID_DAYLIGHT) bias += tz.DaylightBias;
+    else if (r == TIME_ZONE_ID_STANDARD) bias += tz.StandardBias;
+    return (int)-bias;
+#else
+    time_t now = time(NULL);
+    struct tm lt;
+    if (!localtime_r(&now, &lt)) return 0;
+    return (int)(lt.tm_gmtoff / 60);
+#endif
+}
+
 /* Trust_ReportJSON is what this agent tells the hub about its trust state:
  * no keys, no grant ids, nothing secret. */
 static inline void Trust_ReportJSON(const TrustContext* t, char* out, size_t cap) {
@@ -1953,11 +1972,11 @@ static inline void Trust_ReportJSON(const TrustContext* t, char* out, size_t cap
     snprintf(out, cap,
              "{\"v\":1,\"keys\":\"%s\",\"response_key\":%s,\"auto_isolate_key\":%s,\"policy_key\":%s,"
              "\"manifest_seq\":%lld,\"profile\":\"%s\",\"iso_seen\":%lld,\"mesh_seen\":%lld,"
-             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\"",
+             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\",\"utc_offset_minutes\":%d",
              keys, t->have_key[0] ? "true" : "false", t->have_key[1] ? "true" : "false", t->have_key[2] ? "true" : "false",
              (long long)(t->manifest.have ? t->manifest.seq : 0), t->manifest.have ? t->manifest.profile : "",
              (long long)t->state.iso_seen, (long long)t->state.mesh_seen, Trust_EffectiveIsolated(t) ? "true" : "false",
-             t->state.source, npeers, refused, (long long)t->refused_at, t->ceiling);
+             t->state.source, npeers, refused, (long long)t->refused_at, t->ceiling, Trust_UTCOffsetMinutes());
     Trust_HostReportJSON(t, out, cap);
 }
 

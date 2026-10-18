@@ -259,6 +259,9 @@ type AgentTrustReport struct {
 	HostKeys      []HostKeyReport   `json:"host_keys,omitempty"`
 	HostAllow     []HostAllowReport `json:"host_allow,omitempty"`
 	HostError     string            `json:"host_error,omitempty"`
+	// UTCOffset is the machine's clock offset east of UTC in minutes (agents
+	// from 1.8.82), for maintenance windows in machine time.
+	UTCOffset *int `json:"utc_offset_minutes,omitempty"`
 }
 
 // HostKeyReport is one pinned host-authority key: its signer_key_id and role

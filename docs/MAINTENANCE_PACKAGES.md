@@ -95,11 +95,25 @@ packages but small: a handful of machines, one owner, no new stores.
     (do not wait for open apps or games). Playbook steps that change
     something use `wait`, or `run` when the run is started with "Don't wait
     for open apps".
-  - `window`: the fleet maintenance window, `HH:MM-HH:MM` in each machine's
-    own time (it may cross midnight). Inside it people do not count. The hub
-    adds it to every enforce and revert run (console, schedule, playbook)
-    once it is set, maintenance mode excepted. Setting it changes those runs'
+  - `window`: the machine's maintenance window, 1-4 `HH:MM-HH:MM` ranges
+    joined by commas, in the machine's own time, or in UTC with a trailing
+    `Z` (a range may cross midnight). Inside it people do not count. The hub
+    adds it to every enforce and revert run (console, schedule, playbook),
+    maintenance mode excepted. Changing a window changes those runs'
     payloads, so standing approve-all rules ask once more.
+- **Maintenance windows** (`GET/PUT /api/v1/maintenance/windows[?endpoint_id=]`):
+  a fleet default plus per-machine windows, stored as data (settings row
+  `maintenance.windows`). Body `{"ranges":["01:00-05:00"],"clock":"machine"|"utc"}`
+  for the fleet or, with `endpoint_id`, one machine; `{"reset":true}` drops a
+  machine's own window (it follows the fleet) or the fleet default. Unset, the
+  default is 01:00-05:00 machine time (or the older single fleet window, which
+  `PUT /api/v1/maintenance/settings {"window":..}` still sets). Audited as
+  `MAINTENANCE_WINDOWS_SET`; no tap. One run covers only machines whose
+  windows match ("run them separately" otherwise). Agents from 1.8.82 report
+  their clock's UTC offset (trust report `utc_offset_minutes`); with it the
+  hub shows whether the window is open and its next start, and the schedule
+  starts enforce runs only inside the window. Without it (machine time, older
+  agent) the package's own window check decides.
 - Packages never restart the machine themselves; they report `reboot`.
   Only the Restart package (below) restarts, with a warning on screen.
 - Each script stays under 24 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.

@@ -3915,6 +3915,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/scripts/schedules", s.authMiddleware(s.responseGate(s.handleScriptSchedules)))
 	mux.HandleFunc("/api/v1/maintenance", s.authMiddleware(s.responseGate(s.handleMaintenance)))
 	mux.HandleFunc("/api/v1/maintenance/settings", s.authMiddleware(s.responseGate(s.handleMaintenanceSettings)))
+	mux.HandleFunc("/api/v1/maintenance/windows", s.authMiddleware(s.responseGate(s.handleMaintenanceWindows)))
 	mux.HandleFunc("/api/v1/maintenance/catalog", s.authMiddleware(s.responseGate(s.handleSoftwareCatalog)))
 	mux.HandleFunc("/api/v1/maintenance/playbooks", s.authMiddleware(s.responseGate(s.handlePlaybooks)))
 	mux.HandleFunc("/api/v1/maintenance/decisions", s.authMiddleware(s.responseGate(s.handleDecisions)))
