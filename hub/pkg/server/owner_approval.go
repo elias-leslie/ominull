@@ -674,6 +674,13 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		m["version"] = version
 		newBody, _ = json.Marshal(m)
 	}
+	if !releaseVersionText(version) {
+		// Asked before anything else: a command line misread once sent a
+		// host id as the version, and the owner was asked to "install agent
+		// linux-..." on one machine.
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("version %q is not a release version (like 1.8.86)", version))
+		return nil, false
+	}
 	targets := req.EndpointIDs
 	if req.All {
 		eps, err := s.store.ListEndpoints("")
@@ -913,4 +920,18 @@ func publicApproval(v *responseauth.ApprovalView) map[string]interface{} {
 		"requester": v.Requester, "created_at": v.CreatedAt, "expires_at": v.ExpiresAt,
 		"decided_at": v.DecidedAt, "use_by": v.UseBy,
 	}
+}
+
+// releaseVersionText: digits in two to four dot-separated parts, optional v.
+func releaseVersionText(v string) bool {
+	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
+	if len(parts) < 2 || len(parts) > 4 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || len(p) > 6 || strings.Trim(p, "0123456789") != "" {
+			return false
+		}
+	}
+	return true
 }
