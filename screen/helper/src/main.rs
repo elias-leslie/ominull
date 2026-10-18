@@ -9,7 +9,9 @@
 //! and test on any host; only the real run needs Windows.
 
 mod backend;
+mod diag;
 mod session;
+mod stall;
 #[cfg(windows)]
 mod win;
 

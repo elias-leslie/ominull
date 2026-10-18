@@ -302,19 +302,45 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
     for (int i = 0; i < offer_count; i++) {
         ResponseJobOffer* offer = &offers[i];
 
+        /* Screen offers get a small diagnostics trail (REMOTE_SCREEN.md §6/§9)
+         * so a session that never reaches the viewer is not blind. Only safe
+         * fields are logged: the session id (safe charset) and the mode, never
+         * the connect token or any payload bytes. Other kinds are not logged
+         * here, keeping the "never log job ids/payloads" invariant for them. */
+        bool is_screen = (strcmp(offer->kind, "screen_session") == 0);
+        char log_sid[64] = "?";
+        char log_mode[16] = "?";
+        if (is_screen) {
+            ScreenSessionParamsWin lp;
+            if (Screen_ParsePayloadWindows(offer->payload_json, &lp)) {
+                strncpy(log_sid, lp.session_id, sizeof(log_sid) - 1);
+                log_sid[sizeof(log_sid) - 1] = '\0';
+                strncpy(log_mode, lp.mode, sizeof(log_mode) - 1);
+                log_mode[sizeof(log_mode) - 1] = '\0';
+            }
+            Screen_LogSession(log_sid, "offer received", log_mode);
+        }
+
         // 1. Verify EndpointGrant V2, against the pinned key, for this kind,
         //    inside this endpoint's capability manifest
         const char* refuse1 = Agent_TrustOfferRefusal(offer->kind, &offer->grant);
-        if (refuse1) continue;
+        if (refuse1) {
+            if (is_screen) Screen_LogSession(log_sid, "offer refused", refuse1);
+            continue;
+        }
         /* Against the pinned key in memory (trust.pin), never a file copy; a
          * script on a host-authority host against its host key. V3 grants
          * must name this job. No ACK, no result on a refusal. */
         const char* refuse2 = Agent_TrustOfferGrantRefusal(offer->job_id, &offer->grant, offer->payload_json, config->endpoint_id);
-        if (refuse2) continue;
+        if (refuse2) {
+            if (is_screen) Screen_LogSession(log_sid, "offer refused", refuse2);
+            continue;
+        }
 
         // 2. Durable Replay Cache check (C:\ProgramData\Ominull\replay_cache.state)
         if (!ReplayCache_CheckAndRecord(NULL, offer->grant.grant_id, offer->grant.nonce, offer->grant.expires_at)) {
             // Replay detected: drop offer silently
+            if (is_screen) Screen_LogSession(log_sid, "offer refused", "replay");
             continue;
         }
 
@@ -323,8 +349,10 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
         snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"accepted\":true}", offer->job_id, offer->lease_id);
         if (!Hub_PostPathJSON(config, "/api/v1/response/jobs/ack", ack_body, NULL, 0)) {
             // Lease expired, rejected, or transport down
+            if (is_screen) Screen_LogSession(log_sid, "ack failed", "lease expired, rejected, or transport down");
             continue;
         }
+        if (is_screen) Screen_LogSession(log_sid, "ack ok", NULL);
 
         // 4. Action Dispatcher: recognized and supported actions
         if (strcmp(offer->kind, "forensic_collection") == 0) {

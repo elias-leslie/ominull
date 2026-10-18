@@ -34,10 +34,13 @@ use screen_wire::proto::{
     CURSOR_FORMAT_COLOR_BGRA, CURSOR_FORMAT_MASKED_COLOR, CURSOR_FORMAT_MONO,
 };
 
+use std::time::Instant;
+
 use crate::backend::{
     CaptureFrame, Consent, CursorPos, CursorShape, DesktopState, Monitor, ScreenBackend, Tile,
     TILE_SIZE,
 };
+use crate::stall::{CapturePath, DxgiStall, SwitchReason};
 
 use super::banner::Banner;
 use super::desktop::DesktopFollower;
@@ -70,6 +73,15 @@ pub struct WindowsBackend {
     pending_desktop: Option<DesktopState>,
     // GDI fallback per-tile hashes, to send only changed tiles.
     gdi_hashes: HashMap<(u16, u16), u64>,
+    // Diagnostics (§6/§9): log the capture path and the first frame once each.
+    logged_path: bool,
+    logged_first_frame: bool,
+    logged_bridge: bool,
+    // DXGI stall detection (§6.2): DuplicateOutput can succeed on a virtual GPU
+    // yet never deliver a frame; this bridges/switches to GDI so the viewer still
+    // gets an image. Monotonic clock for the current duplication generation.
+    clock: Instant,
+    stall: DxgiStall,
 }
 
 impl WindowsBackend {
@@ -94,7 +106,34 @@ impl WindowsBackend {
             banner: Banner::start(control, operator),
             pending_desktop: None,
             gdi_hashes: HashMap::new(),
+            logged_path: false,
+            logged_first_frame: false,
+            logged_bridge: false,
+            clock: Instant::now(),
+            stall: DxgiStall::default(),
         })
+    }
+
+    /// Record the chosen capture path once (§6/§9 diagnostics).
+    fn log_path(&mut self, msg: &str) {
+        if !self.logged_path {
+            self.logged_path = true;
+            crate::diag::log(msg);
+        }
+    }
+
+    /// Milliseconds since this duplication generation started (for the stall
+    /// state machine).
+    fn now_ms(&self) -> u64 {
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    /// Start a fresh duplication generation (session start, desktop switch,
+    /// monitor change, mode change/ACCESS_LOST): reset the clock and give DXGI a
+    /// clean chance before bridging/switching to GDI again.
+    fn reinit_generation(&mut self) {
+        self.clock = Instant::now();
+        self.stall.reinit(0);
     }
 
     fn active_monitor(&self) -> Monitor {
@@ -119,11 +158,15 @@ impl WindowsBackend {
         };
         let adapter = match unsafe { self.factory.EnumAdapters1(entry.adapter) } {
             Ok(a) => a,
-            Err(_) => {
+            Err(e) => {
                 self.use_gdi = true;
+                self.log_path(&format!("capture path: GDI fallback (EnumAdapters1 failed: {e:?})"));
                 return false;
             }
         };
+        let adapter_name = unsafe { adapter.GetDesc1() }
+            .map(|d| wstr_to_string(&d.Description))
+            .unwrap_or_else(|_| "?".into());
         let levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0];
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
@@ -142,20 +185,26 @@ impl WindowsBackend {
         };
         if created.is_err() || device.is_none() || context.is_none() {
             self.use_gdi = true;
+            self.log_path(&format!("capture path: GDI fallback (D3D11CreateDevice failed on adapter '{adapter_name}')"));
             return false;
         }
         let device = device.unwrap();
         let output = match unsafe { adapter.EnumOutputs(entry.output) } {
             Ok(o) => o,
-            Err(_) => {
+            Err(e) => {
                 self.use_gdi = true;
+                self.log_path(&format!("capture path: GDI fallback (EnumOutputs failed: {e:?})"));
                 return false;
             }
         };
+        let output_name = unsafe { output.GetDesc() }
+            .map(|d| wstr_to_string(&d.DeviceName))
+            .unwrap_or_else(|_| "?".into());
         let output1: IDXGIOutput1 = match output.cast() {
             Ok(o) => o,
-            Err(_) => {
+            Err(e) => {
                 self.use_gdi = true;
+                self.log_path(&format!("capture path: GDI fallback (IDXGIOutput1 cast failed: {e:?})"));
                 return false;
             }
         };
@@ -164,11 +213,13 @@ impl WindowsBackend {
                 self.context = Some(context.unwrap());
                 self.dup = Some(dup);
                 self.device = Some(device);
+                self.log_path(&format!("capture path: DXGI duplication (adapter '{adapter_name}', output '{output_name}')"));
                 true
             }
-            Err(_) => {
+            Err(e) => {
                 // Hybrid-GPU / non-DWM / disconnected: GDI fallback (§6.2).
                 self.use_gdi = true;
+                self.log_path(&format!("capture path: GDI fallback (DuplicateOutput failed on adapter '{adapter_name}': {e:?})"));
                 false
             }
         }
@@ -201,10 +252,10 @@ impl WindowsBackend {
         tex
     }
 
-    fn dxgi_capture(&mut self, mut frame: CaptureFrame) -> CaptureFrame {
-        if !self.ensure_dup() {
-            return self.gdi_capture(frame);
-        }
+    /// One DXGI acquire+encode, assuming `ensure_dup` already succeeded. Returns
+    /// the frame and whether a DXGI frame was actually acquired this tick (used
+    /// by the stall detector: a tick that only times out is not an acquire).
+    fn dxgi_capture_inner(&mut self, mut frame: CaptureFrame) -> (CaptureFrame, bool) {
         let dup = self.dup.clone().unwrap();
         let context = self.context.clone().unwrap();
 
@@ -212,14 +263,17 @@ impl WindowsBackend {
         let mut res: Option<IDXGIResource> = None;
         match unsafe { dup.AcquireNextFrame(15, &mut fi, &mut res) } {
             Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return frame,
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return (frame, false),
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                // A desktop switch / mode change: drop the duplication and give
+                // DXGI a fresh generation (bridging to GDI during the gap, §6.2).
                 self.dup = None;
-                return frame;
+                self.reinit_generation();
+                return (frame, false);
             }
             Err(_) => {
                 self.dup = None;
-                return frame;
+                return (frame, false);
             }
         }
 
@@ -282,7 +336,20 @@ impl WindowsBackend {
         unsafe {
             let _ = dup.ReleaseFrame();
         }
-        frame
+        (frame, true)
+    }
+
+    /// Drain and log a one-shot switch-to-GDI reason (§6.2). The structural
+    /// `InitFailed` case is already described in detail by `ensure_dup`'s
+    /// `log_path`, so only the "no frames" stall switch is logged here.
+    fn log_switch_reason(&mut self) {
+        if let Some(reason) = self.stall.take_switch_reason() {
+            if reason == SwitchReason::NoFrames {
+                crate::diag::log(
+                    "capture path: switched to GDI (DXGI initialized but delivered no frame within the stall window)",
+                );
+            }
+        }
     }
 
     /// GDI BitBlt fallback (§6.2): whole active-monitor grab, per-tile hash diff.
@@ -371,6 +438,7 @@ impl ScreenBackend for WindowsBackend {
             self.staging = None;
             self.gdi_hashes.clear();
             self.keyframe_pending = true;
+            self.reinit_generation(); // give DXGI a fresh chance on the new output
             true
         } else {
             false
@@ -390,7 +458,48 @@ impl ScreenBackend for WindowsBackend {
         if let Some(ds) = self.pending_desktop.take() {
             frame.desktop_change = Some(ds);
         }
-        self.dxgi_capture(frame)
+
+        // §6.2 stall detection: DuplicateOutput can succeed on a virtual GPU yet
+        // never deliver a frame. Decide DXGI / GDI-bridge / GDI for this tick.
+        let path = self.stall.decide(self.now_ms());
+        self.log_switch_reason();
+
+        let frame = match path {
+            CapturePath::Gdi => self.gdi_capture(frame),
+            CapturePath::Dxgi | CapturePath::GdiBridge => {
+                if !self.ensure_dup() {
+                    // Duplication failed to initialize: GDI for this generation.
+                    self.stall.force_gdi();
+                    self.log_switch_reason();
+                    self.gdi_capture(frame)
+                } else {
+                    let (frame, acquired) = self.dxgi_capture_inner(frame);
+                    if acquired {
+                        self.stall.on_frame();
+                        frame
+                    } else if path == CapturePath::GdiBridge {
+                        // DXGI is stalled but still being probed; serve the
+                        // keyframe via GDI so the viewer gets an initial image.
+                        if !self.logged_bridge {
+                            self.logged_bridge = true;
+                            crate::diag::log(
+                                "capture path: GDI bridge (DXGI stalled; serving an image via GDI while still probing DXGI)",
+                            );
+                        }
+                        self.gdi_capture(frame)
+                    } else {
+                        frame
+                    }
+                }
+            }
+        };
+
+        if !frame.tiles.is_empty() && !self.logged_first_frame {
+            self.logged_first_frame = true;
+            let keyframe = frame.tiles.iter().any(|t| t.keyframe);
+            crate::diag::log(&format!("first frame captured: {} tile(s), keyframe={keyframe}", frame.tiles.len()));
+        }
+        frame
     }
 
     fn inject(&mut self, ev: &InputEvent) {
@@ -404,17 +513,21 @@ impl ScreenBackend for WindowsBackend {
 
     fn follow_input_desktop(&mut self) {
         if let Some(state) = self.desktop.follow() {
+            crate::diag::log(&format!("desktop switch: {} signed_in={}", state.name, state.signed_in));
             // A desktop switch invalidates duplication and the banner window.
             self.dup = None;
             self.staging = None;
             self.keyframe_pending = true;
+            self.reinit_generation(); // retry DXGI on the new desktop before bridging
             self.banner.note_desktop_switch();
             self.pending_desktop = Some(state);
         }
     }
 
     fn request_consent(&mut self, control: bool, operator: Option<&str>) -> Consent {
-        if self.banner.request_consent(control, operator) {
+        let allowed = self.banner.request_consent(control, operator);
+        crate::diag::log(&format!("consent prompt (control={control}): {}", if allowed { "allowed" } else { "denied" }));
+        if allowed {
             Consent::Allowed
         } else {
             Consent::Denied
@@ -427,6 +540,12 @@ impl ScreenBackend for WindowsBackend {
 }
 
 // --- free helpers -----------------------------------------------------------
+
+/// A fixed-size wide (UTF-16) Win32 name field (NUL-padded) as a Rust String.
+fn wstr_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
 
 fn enumerate_monitors(factory: &IDXGIFactory1) -> Vec<MonEntry> {
     let mut out = Vec::new();

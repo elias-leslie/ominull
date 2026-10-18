@@ -30,8 +30,8 @@ use windows::Win32::System::Power::{
 };
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
-use screen_wire::framing::{read_frame, FrameKind};
-use screen_wire::proto::parse_in;
+use screen_wire::framing::{read_frame, write_frame, FrameKind};
+use screen_wire::proto::{parse_in, OutMsg};
 
 use crate::backend::ScreenBackend;
 use crate::session::{Flow, Session};
@@ -63,22 +63,51 @@ fn keep_awake_end() {
 pub fn run() -> i32 {
     harden_process();
 
+    // Diagnostics go to C:\ProgramData\Ominull\logs\screen-helper.log (§6/§9),
+    // not to NUL as the launcher's stderr once did.
+    crate::diag::init(r"C:\ProgramData\Ominull\logs");
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match Args::parse(argv) {
         Some(a) => a,
         None => {
+            crate::diag::log("fatal: bad arguments (need --mode control|view)");
             eprintln!("usage: ominull-screen-helper --mode <control|view> [--unattended] [--ask-first] [--operator <name>]");
             return 2;
         }
     };
+    crate::diag::log(&format!(
+        "helper start mode={} unattended={} ask_first={}",
+        if args.mode == crate::session::Mode::Control { "control" } else { "view" },
+        args.unattended,
+        args.ask_first
+    ));
 
     let backend = match WindowsBackend::new(args.mode == crate::session::Mode::Control, args.operator.as_deref()) {
-        Ok(b) => b,
+        Ok(b) => {
+            crate::diag::log("backend init ok");
+            b
+        }
         Err(e) => {
-            eprintln!("screen backend init failed: {e:?}");
+            crate::diag::log(&format!("fatal: backend init failed: {e:?}"));
+            // Tell the hub (and so the viewer/ctl) the session failed to start,
+            // rather than exiting silently and leaving a generic timeout (§9).
+            // `bye` is the existing agent->operator end message the hub already
+            // relays and the viewer already surfaces (screen/wire proto.rs).
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            let _ = write_frame(&mut out, FrameKind::Text, OutMsg::Bye { reason: "backend init failed".into() }.to_json().as_bytes());
+            let _ = out.flush();
             return 1;
         }
     };
+
+    // The monitor list the viewer will receive in `hello` (geometry only).
+    {
+        let mons = backend.monitors();
+        let geo: Vec<String> = mons.iter().map(|m| format!("{}:{}x{}@{},{}{}", m.id, m.w, m.h, m.x, m.y, if m.primary { "*" } else { "" })).collect();
+        crate::diag::log(&format!("monitor list ({}): {}", mons.len(), geo.join(" ")));
+    }
 
     let code = run_loop(backend, args);
     keep_awake_end();

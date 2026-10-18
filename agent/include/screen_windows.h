@@ -106,6 +106,37 @@ static inline bool ScreenFrame_DecodeFrom(const unsigned char* buf, size_t buf_l
     return true;
 }
 
+/* ---------------------------------------------------------------------------
+ * §6 diagnostics log: a small, bounded append-only text log so a failed screen
+ * session is not blind (REMOTE_SCREEN.md §6, §9 diagnostics). One line per
+ * event, each prefixed with a UTC timestamp. The file lives at
+ * C:\ProgramData\Ominull\logs\screen.log (SYSTEM/Admins ACL, inherited from
+ * ProgramData\Ominull); it is kept under ~256 KiB by rotating to screen.log.1.
+ * Never written here: connect tokens, typed text, or any payload contents.
+ *
+ * The line formatting and the rotation decision are pure so a host build can
+ * unit-test them; the file I/O is under the Windows guard below.
+ * ------------------------------------------------------------------------- */
+
+#define SCREEN_LOG_MAX_BYTES (256u * 1024u)
+
+/* True when appending add_len bytes to a log already cur_size bytes long would
+ * push it over the cap, so the caller rotates first. */
+static inline bool Screen_LogShouldRotate(unsigned long long cur_size, size_t add_len) {
+    return cur_size + (unsigned long long)add_len > (unsigned long long)SCREEN_LOG_MAX_BYTES;
+}
+
+/* Formats one log line "YYYY-MM-DDTHH:MM:SSZ <msg>\n" into out. Returns the
+ * length written (excluding the NUL), or 0 if it would not fit. */
+static inline size_t Screen_LogFormatLine(char* out, size_t cap, int year, int month, int day,
+                                          int hour, int minute, int second, const char* msg) {
+    if (!out || cap == 0) return 0;
+    int n = snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02dZ %s\n",
+                     year, month, day, hour, minute, second, msg ? msg : "");
+    if (n < 0 || (size_t)n >= cap) return 0;
+    return (size_t)n;
+}
+
 #ifdef _WIN32
 
 #ifndef _WIN32_WINNT
@@ -130,6 +161,58 @@ static inline bool ScreenFrame_DecodeFrom(const unsigned char* buf, size_t buf_l
 #include "response_dispatcher.h"
 
 #define SCREEN_HELPER_EXE_NAME "ominull-screen-helper.exe"
+
+#define SCREEN_LOG_DIR  "C:\\ProgramData\\Ominull\\logs"
+#define SCREEN_LOG_PATH SCREEN_LOG_DIR "\\screen.log"
+#define SCREEN_LOG_PATH_1 SCREEN_LOG_DIR "\\screen.log.1"
+
+/* Append one diagnostics line to the agent-side screen log, rotating to
+ * screen.log.1 first when the file would pass ~256 KiB (§6/§9 diagnostics).
+ * Best-effort: any failure is swallowed (diagnostics never break a session).
+ * Callers must pass only safe text — never a connect token, typed text, or
+ * payload bytes. */
+static inline void Screen_LogAppend(const char* msg) {
+    CreateDirectoryA("C:\\ProgramData", NULL);
+    CreateDirectoryA("C:\\ProgramData\\Ominull", NULL);
+    CreateDirectoryA(SCREEN_LOG_DIR, NULL);
+
+    SYSTEMTIME st;
+    GetSystemTime(&st);
+    char line[512];
+    size_t len = Screen_LogFormatLine(line, sizeof(line), st.wYear, st.wMonth, st.wDay,
+                                      st.wHour, st.wMinute, st.wSecond, msg);
+    if (len == 0) return;
+
+    /* Rotate if the existing file plus this line would exceed the cap. */
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExA(SCREEN_LOG_PATH, GetFileExInfoStandard, &fad)) {
+        unsigned long long cur =
+            ((unsigned long long)fad.nFileSizeHigh << 32) | (unsigned long long)fad.nFileSizeLow;
+        if (Screen_LogShouldRotate(cur, len)) {
+            DeleteFileA(SCREEN_LOG_PATH_1);
+            MoveFileA(SCREEN_LOG_PATH, SCREEN_LOG_PATH_1);
+        }
+    }
+
+    HANDLE h = CreateFileA(SCREEN_LOG_PATH, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, NULL, FILE_END);
+    DWORD wrote = 0;
+    WriteFile(h, line, (DWORD)len, &wrote, NULL);
+    CloseHandle(h);
+}
+
+/* Convenience: log "<event>: <detail>" for a screen session, tagging the
+ * session id (safe charset, never a token). detail may be NULL. */
+static inline void Screen_LogSession(const char* session_id, const char* event, const char* detail) {
+    char msg[384];
+    if (detail && detail[0])
+        snprintf(msg, sizeof(msg), "session=%s %s: %s", session_id ? session_id : "?", event, detail);
+    else
+        snprintf(msg, sizeof(msg), "session=%s %s", session_id ? session_id : "?", event);
+    Screen_LogAppend(msg);
+}
 
 /* Bumped by the service (service.c) on SERVICE_CONTROL_SESSIONCHANGE; a live
  * screen worker watches it and respawns the helper into the new active console
@@ -315,7 +398,8 @@ static inline bool Screen_HexEqConst(const char* a, const char* b) {
 /* Hash the already-open helper file and compare to the release-pinned digest in
  * constant time. The handle is opened FILE_SHARE_READ only and stays open until
  * the process has started, so the file cannot be swapped between hash and launch. */
-static inline bool Screen_HelperDigestOk(HANDLE hFile) {
+static inline bool Screen_HelperDigestOk(HANDLE hFile, char actual_hex[65]) {
+    if (actual_hex) actual_hex[0] = '\0';
     if (hFile == INVALID_HANDLE_VALUE) return false;
     if (SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) return false;
     ResponseSHA256Context ctx;
@@ -331,6 +415,7 @@ static inline bool Screen_HelperDigestOk(HANDLE hFile) {
     Response_SHA256_Final(&ctx, digest);
     char hex[65];
     Response_BytesToHex(digest, 32, hex);
+    if (actual_hex) memcpy(actual_hex, hex, 65);
     return Screen_HexEqConst(hex, OMINULL_SCREEN_HELPER_SHA256);
 }
 #endif
@@ -353,6 +438,11 @@ static inline ScreenLaunchResult Screen_LaunchHelperConsole(const ScreenSessionP
 
     DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) return SCREEN_LAUNCH_RETRY; /* no console session; caller retries */
+    {
+        char d[48];
+        snprintf(d, sizeof(d), "%lu", (unsigned long)sessionId);
+        Screen_LogSession(params->session_id, "console session chosen", d);
+    }
 
     WCHAR helperPathW[MAX_PATH];
     if (!Screen_HelperPathW(helperPathW, sizeof(helperPathW) / sizeof(helperPathW[0]))) return SCREEN_LAUNCH_FAILED;
@@ -364,9 +454,17 @@ static inline ScreenLaunchResult Screen_LaunchHelperConsole(const ScreenSessionP
                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hHelperFile == INVALID_HANDLE_VALUE) return SCREEN_LAUNCH_FAILED;
 #ifdef OMINULL_SCREEN_HELPER_SHA256
-    if (!Screen_HelperDigestOk(hHelperFile)) {
-        CloseHandle(hHelperFile);
-        return SCREEN_LAUNCH_DIGEST_FAIL;
+    {
+        char actual_hex[65];
+        bool digest_ok = Screen_HelperDigestOk(hHelperFile, actual_hex);
+        char detail[200];
+        snprintf(detail, sizeof(detail), "expected=%s actual=%s", OMINULL_SCREEN_HELPER_SHA256,
+                 actual_hex[0] ? actual_hex : "<hash-failed>");
+        Screen_LogSession(params->session_id, digest_ok ? "helper digest ok" : "helper digest MISMATCH", detail);
+        if (!digest_ok) {
+            CloseHandle(hHelperFile);
+            return SCREEN_LAUNCH_DIGEST_FAIL;
+        }
     }
 #else
     {
@@ -506,9 +604,13 @@ static inline ScreenLaunchResult Screen_LaunchHelperConsole(const ScreenSessionP
         envBlock, NULL, &six.StartupInfo, &pi);
 
     if (!created) {
+        char detail[64];
+        snprintf(detail, sizeof(detail), "GetLastError=%lu", (unsigned long)GetLastError());
+        Screen_LogSession(params->session_id, "CreateProcessAsUserW failed", detail);
         CloseHandle(hJob);
         goto done;
     }
+    Screen_LogSession(params->session_id, "helper launched", NULL);
 
     if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
         TerminateProcess(pi.hProcess, 1);
@@ -830,6 +932,14 @@ static inline int Screen_RunWindowsWorker(const AGENT_CONFIG* config, const Scre
         bSend = WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0);
     }
     if (!bSend || !WinHttpReceiveResponse(hRequest, NULL)) goto fail;
+    {
+        DWORD status = 0, sz = (DWORD)sizeof(status);
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+        char detail[48];
+        snprintf(detail, sizeof(detail), "HTTP %lu", (unsigned long)status);
+        Screen_LogSession(session_id, "websocket connect", detail);
+    }
     if (!Hub_VerifyRequestPin(hRequest, config)) goto fail;
 
     hWS = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
@@ -849,6 +959,9 @@ static inline int Screen_RunWindowsWorker(const AGENT_CONFIG* config, const Scre
     ScreenHelperProc proc;
     LONG epoch = g_ScreenSessionEpoch;
     ScreenLaunchResult lr = Screen_LaunchWithRetry(params, &proc, &inCtx.running);
+    Screen_LogSession(session_id, "launch result",
+                      lr == SCREEN_LAUNCH_OK ? "ok" :
+                      lr == SCREEN_LAUNCH_DIGEST_FAIL ? "digest mismatch" : "failed");
     if (lr == SCREEN_LAUNCH_DIGEST_FAIL) {
         Screen_SendWSText(hWS, "{\"type\":\"bye\",\"reason\":\"helper_digest_mismatch\"}");
     }
@@ -906,6 +1019,15 @@ static inline int Screen_RunWindowsWorker(const AGENT_CONFIG* config, const Scre
         /* Tear down the current helper (closing stdin ends it; the job kill is
          * the fail-closed backstop), then join the out-pump that owns the read
          * end. */
+        {
+            DWORD code = 0;
+            char detail[64];
+            if (GetExitCodeProcess(proc.hProcess, &code) && code != STILL_ACTIVE)
+                snprintf(detail, sizeof(detail), "exit code %lu", (unsigned long)code);
+            else
+                snprintf(detail, sizeof(detail), "still running at teardown");
+            Screen_LogSession(session_id, "helper exit", detail);
+        }
         EnterCriticalSection(&inCtx.lock);
         inCtx.hStdinWrite = NULL;
         LeaveCriticalSection(&inCtx.lock);
@@ -922,12 +1044,16 @@ static inline int Screen_RunWindowsWorker(const AGENT_CONFIG* config, const Scre
     WinHttpCloseHandle(hWS);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
+    Screen_LogSession(session_id, "session ended",
+                      (lr == SCREEN_LAUNCH_OK) ? "relay closed" :
+                      (lr == SCREEN_LAUNCH_DIGEST_FAIL) ? "helper digest mismatch" : "helper never launched");
     return (lr == SCREEN_LAUNCH_OK || lr == SCREEN_LAUNCH_DIGEST_FAIL) ? 0 : -1;
 
 fail:
     if (hRequest) WinHttpCloseHandle(hRequest);
     if (hConnect) WinHttpCloseHandle(hConnect);
     if (hSession) WinHttpCloseHandle(hSession);
+    Screen_LogSession(session_id, "session ended", "hub websocket connect failed");
     return -1;
 }
 

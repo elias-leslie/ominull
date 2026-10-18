@@ -558,6 +558,30 @@ Scheme registration is part of installing the viewer:
 - Windows: `HKCU\Software\Classes\ominull-screen` (URL Protocol, shell\open\command
   -> `"...\ominull-screen.exe" "%1"`), via a small PowerShell installer.
 
+### 9.3 Diagnostics (so a failed session is not blind)
+
+A screen session that never reaches the viewer leaves a trail on the **endpoint**,
+under `C:\ProgramData\Ominull\logs\` (SYSTEM/Admins ACL, inherited from
+`ProgramData\Ominull`). Two bounded, append-only logs, each kept under ~256 KiB by
+rotating to a single `.1` generation, one line per event with a UTC timestamp.
+Neither ever records connect tokens, typed text, or payload/pixel contents.
+
+- `screen.log` — the **C agent**: each screen offer received (session id, mode),
+  any refusal with its exact reason (manifest / ceiling / grant / digest / replay),
+  the ACK result, the helper digest check (expected vs actual sha256), the console
+  session id chosen, the `CreateProcessAsUserW` result (+`GetLastError`), the
+  helper exit code, the hub WebSocket connect result/HTTP status, and the session
+  end reason.
+- `screen-helper.log` — the **Rust helper** (its stderr no longer goes to `NUL`):
+  backend init result, which capture path is in use (DXGI duplication vs GDI
+  fallback) and why, adapter/output names, the monitor list sent, desktop switches,
+  consent result, the first frame captured, and fatal errors.
+
+On a **fatal init failure** the helper also sends the existing `bye` control frame
+to the hub before exiting, so `ctl` and the viewer show the reason instead of a bare
+timeout. When `ctl` times out waiting for the monitor list it says the endpoint
+never sent its screen (it may not have accepted the session) and points here.
+
 ## 10. Linux (design only; build after Windows works)
 
 Decision (prior-art, 2026-10-17): to match the Windows helper's reach — the

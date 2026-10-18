@@ -221,6 +221,18 @@ impl Attached {
 
     fn monitors(&self) -> Result<(Vec<MonitorInfo>, Option<u32>), String> {
         self.wait(HELLO_WAIT, "the screen's monitor list", |p| (!p.monitors.is_empty()).then(|| (p.monitors.clone(), p.active)))
+            .map_err(|e| {
+                // A timeout here means the endpoint never sent its screen: most
+                // often it did not accept the session at all. Point at the
+                // endpoint's log instead of a bare "timed out" (REMOTE_SCREEN.md §9).
+                if e.starts_with("timed out") {
+                    "the endpoint never sent its screen, so it may not have accepted the session. \
+                     Check C:\\ProgramData\\Ominull\\logs\\screen.log on the endpoint."
+                        .to_string()
+                } else {
+                    e
+                }
+            })
     }
 
     /// Ends the attachment: `end` closes the session, otherwise detach.

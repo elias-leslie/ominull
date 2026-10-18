@@ -135,6 +135,35 @@ static void test_partial_and_streamed(void) {
     expect("stream fully consumed", pos == off);
 }
 
+static void test_log_line_format(void) {
+    printf("[*] Diagnostics log line format and rotation threshold (pure helpers)\n");
+    char line[512];
+    size_t n = Screen_LogFormatLine(line, sizeof(line), 2026, 10, 17, 22, 45, 51,
+                                    "session=abc offer refused: manifest");
+    expect("line has a length", n > 0);
+    expect("UTC timestamp prefix",
+           strncmp(line, "2026-10-17T22:45:51Z ", 21) == 0);
+    expect("message follows the stamp",
+           strcmp(line + 21, "session=abc offer refused: manifest\n") == 0);
+    expect("length matches strlen", n == strlen(line));
+
+    /* Zero-padding of single-digit fields. */
+    char line2[128];
+    Screen_LogFormatLine(line2, sizeof(line2), 5, 1, 2, 3, 4, 9, "x");
+    expect("fields are zero-padded", strncmp(line2, "0005-01-02T03:04:09Z x\n", 23) == 0);
+
+    /* A buffer too small to hold the whole line yields 0, never a partial. */
+    char tiny[8];
+    expect("too-small buffer refused",
+           Screen_LogFormatLine(tiny, sizeof(tiny), 2026, 1, 1, 0, 0, 0, "overflowing message") == 0);
+
+    /* Rotation threshold: at/below the cap stays, over the cap rotates. */
+    expect("below cap does not rotate", !Screen_LogShouldRotate(SCREEN_LOG_MAX_BYTES - 100, 100));
+    expect("at cap does not rotate", !Screen_LogShouldRotate(SCREEN_LOG_MAX_BYTES - 100, 99));
+    expect("over cap rotates", Screen_LogShouldRotate(SCREEN_LOG_MAX_BYTES - 100, 101));
+    expect("full file rotates on any add", Screen_LogShouldRotate(SCREEN_LOG_MAX_BYTES, 1));
+}
+
 static void test_encode_bounds(void) {
     printf("[*] Encoder refuses a buffer too small or a bad kind\n");
     unsigned char small[4];
@@ -152,6 +181,7 @@ int main(void) {
     test_rejects_bad_headers();
     test_partial_and_streamed();
     test_encode_bounds();
+    test_log_line_format();
     if (failures) {
         printf("\n[-] %d framing assertion(s) failed\n", failures);
         return 1;
