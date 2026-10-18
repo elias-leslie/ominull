@@ -620,7 +620,8 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 		Program            string `json:"program"`
 		MaxDurationSeconds int    `json:"max_duration_seconds"`
 	}
-	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseRemoteAccess(w, req.EndpointID) {
+	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) || s.refuseRemoteAccess(w, req.EndpointID) ||
+		s.refuseLocked(w, "terminal", req.EndpointID) {
 		return nil, false
 	}
 	program, _, ok := s.terminalProgram(w, req.EndpointID, req.Program)

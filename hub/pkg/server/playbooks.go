@@ -374,7 +374,7 @@ func (s *Server) resolvePlaybookRun(w http.ResponseWriter, r *http.Request, body
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
-	if _, ok := s.scopedEndpointIDs(w, r, plan.req.EndpointIDs); !ok {
+	if _, ok := s.scopedEndpointIDs(w, r, plan.req.EndpointIDs); !ok || s.refuseLocked(w, "script", plan.req.EndpointIDs...) {
 		return nil, false
 	}
 	return &approvalPlan{

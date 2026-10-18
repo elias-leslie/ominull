@@ -26,7 +26,11 @@ the ceiling. An unknown level is refused (exit 1) and nothing is written; an unr
 | `engagement` | everything | |
 
 Terminal and remote screen are refused by the agent under `monitor`, `isolate`, `signed-scripts` and
-`monitor-signed-scripts`. The hub's per-machine "remote access off" setting (docs/REMOTE_SCREEN.md §7) refuses them
+`monitor-signed-scripts`. The hub refuses those requests itself, from the machine's latest trust report, before any
+owner ask: a terminal under those levels, hub-signed scripts (one-off, maintenance, playbook) under `monitor`, `isolate`
+and `respond`, under `(monitor-)signed-scripts` without a host authority, and on any host that pins one (those take
+`ominullctl host-script run`); remote screen has its own preflight. The agent's refusal stays the real guard. The
+hub's per-machine "remote access off" setting (docs/REMOTE_SCREEN.md §7) refuses them
 on the hub side as well; set it for the same machines.
 
 Capability names (manifest and ceiling): `update`, `isolate`, `mesh`, `collect`, `script`, `terminal`, `screen`.
