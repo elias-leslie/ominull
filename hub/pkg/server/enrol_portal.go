@@ -201,7 +201,7 @@ func (s *Server) portalMint(w http.ResponseWriter, r *http.Request, addr string,
 		HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL,
 		LocationID: window.LocationID, RoleTag: window.Role,
 		AgentVersion: s.agentVersion, EnrollmentCode: code,
-		UseSystemCA: s.agentUsesSystemCA(),
+		UseSystemCA: s.agentUsesSystemCA(), RoutineFloor: s.routineFloor(),
 	})
 	view.Code = code
 	view.ProfileID = profile.ID

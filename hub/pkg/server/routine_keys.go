@@ -175,3 +175,34 @@ func (s *Server) releaseSignedByRoutine(version string) bool {
 	}
 	return false
 }
+
+// routineFloor is the epoch of the held routine key list (0 when none). The
+// bootstrap scripts carry it, so a new install refuses an older list than
+// the one the hub holds (say a cached copy of a retired one).
+func (s *Server) routineFloor() int64 {
+	if rk, _ := s.routineKeys(); rk != nil {
+		return rk.Epoch
+	}
+	return 0
+}
+
+// handleRoutineKeysDownload serves the held list, exactly as agents get it in
+// the heartbeat ({epoch, keys, sig}), to new installs: their bootstrap script
+// verifies it against the release key it embeds before it accepts a package
+// signed by a routine key. The list is public (keys and the release key's
+// signature only); 404 when the hub holds none.
+func (s *Server) handleRoutineKeysDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rk, _ := s.routineKeys()
+	if rk == nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	raw, _ := json.Marshal(rk)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(append(raw, '\n'))
+}

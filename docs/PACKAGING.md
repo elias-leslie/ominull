@@ -62,3 +62,16 @@ for that package and never lets it move the release key pin. Such a release
 rolls out canaries first (`OMINULL_ROUTINE_CANARIES`, default the lab VM), and
 the hub and the authority refuse a routine-signed rollout without canaries.
 Agents from 1.8.89 accept routine keys for agent packages only.
+
+New installs take a routine-signed package too. The bootstrap scripts
+(`/bootstrap.sh`, `/bootstrap.ps1` and the enrolment pages' scripts) install a
+package the embedded release key signed as before; otherwise they fetch
+`/download/routine-keys.json` (the hub's held list, the heartbeat's
+`{epoch, keys, sig}`, no credential) and the package's `.release.sig`, and
+install only when the list is strictly formed, signed by the embedded release
+key, not empty, at an epoch no lower than the one the hub held when it rendered
+the script, and one listed key signed both the package and its
+`OMINULL-RELEASE-V1` statement. No list, a bad signature or an older or empty
+list refuses. The release gate (`TestPublishedPackagesVerifyForFreshInstall`)
+runs both scripts' check on `dist/` with `dist/routine-keys.json` (the Windows
+one under PowerShell 7 when `OMINULL_PWSH` or `pwsh` is found).

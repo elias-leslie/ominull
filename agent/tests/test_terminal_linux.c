@@ -182,9 +182,15 @@ static void test_child_tree_kill() {
     Terminal_KillChildTree(child_pid);
     close(master_fd);
 
-    // Verify process group is completely dead (kill should return ESRCH)
-    assert(kill(-child_pid, 0) < 0);
-    assert(errno == ESRCH);
+    // Verify process group is completely dead (kill should return ESRCH). The
+    // grandchild was reparented, and a killed process stays visible to kill()
+    // until its new parent reaps it, so wait (bounded) for the reaping.
+    int gone = 0;
+    for (int i = 0; i < 500 && !gone; i++) {
+        if (kill(-child_pid, 0) < 0 && errno == ESRCH) gone = 1;
+        else usleep(10000); // up to 5s
+    }
+    assert(gone);
 
     printf("[+] Child-tree kill containment verified.\n");
 }

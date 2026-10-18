@@ -114,3 +114,62 @@ func TestRoutineKeysSignedReleaseRollsStaged(t *testing.T) {
 		t.Fatalf("a retired version rolled again: %d %v", code, m)
 	}
 }
+
+// New installs fetch the held routine key list (no credential) and the
+// package's release statement signature; their script carries the held epoch
+// as its floor.
+func TestRoutineKeysServedToNewInstalls(t *testing.T) {
+	s, db := setupTestServer(t)
+	defer db.Close()
+	get := func(path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		return w
+	}
+	if w := get("/download/routine-keys.json"); w.Code != http.StatusNotFound {
+		t.Fatalf("no list held: %d", w.Code)
+	}
+	if w := get("/bootstrap.sh"); !strings.Contains(w.Body.String(), "ROUTINE_FLOOR=0") {
+		t.Fatal("bootstrap.sh without a held list should carry floor 0")
+	}
+	rel, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	routine, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s.trust.mu.Lock()
+	s.trust.releasePub = []byte(pemOf(t, rel))
+	s.trust.mu.Unlock()
+	xy, _ := response.RoutineKeyXY(pemOf(t, routine))
+	line, _ := response.FormatRoutineKeyList([]response.RoutineKey{{ID: "0123456789abcdef", XY: xy}})
+	stmt, _ := response.RoutineKeysStatement(2, line)
+	sum := sha256.Sum256([]byte(stmt))
+	sig, _ := ecdsa.SignASN1(rand.Reader, rel, sum[:])
+	held := response.RoutineKeys{Epoch: 2, Keys: line, Sig: base64.StdEncoding.EncodeToString(sig)}
+	raw, _ := json.Marshal(held)
+	if err := s.store.SetSetting(routineKeysSetting, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	w := get("/download/routine-keys.json")
+	var got response.RoutineKeys
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil || got != held || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("held list: %d %q", w.Code, w.Body.String())
+	}
+	if _, err := response.VerifyRoutineKeys([]byte(pemOf(t, rel)), &got); err != nil {
+		t.Fatalf("served list does not verify: %v", err)
+	}
+	if w := get("/bootstrap.sh"); !strings.Contains(w.Body.String(), "ROUTINE_FLOOR=2") {
+		t.Fatal("bootstrap.sh does not carry the held epoch")
+	}
+	if w := get("/bootstrap.ps1"); !strings.Contains(w.Body.String(), "$RoutineFloor = 2") {
+		t.Fatal("bootstrap.ps1 does not carry the held epoch")
+	}
+	if !downloadAllowed("ominull-agent_1.8.90_amd64.deb.release.sig") || !downloadAllowed("ominull-agent-windows-1.8.90.msi.release.sig") {
+		t.Fatal("release statement signatures are not downloadable")
+	}
+	// A list that no longer verifies (another release key) is not served.
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s.trust.mu.Lock()
+	s.trust.releasePub = []byte(pemOf(t, other))
+	s.trust.mu.Unlock()
+	if w := get("/download/routine-keys.json"); w.Code != http.StatusNotFound {
+		t.Fatalf("a list the release key did not sign was served: %d", w.Code)
+	}
+}

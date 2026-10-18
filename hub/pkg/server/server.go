@@ -1755,7 +1755,7 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
 		return
 	}
-	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA(), RoutineFloor: s.routineFloor()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
@@ -1770,7 +1770,7 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
 		return
 	}
-	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA(), RoutineFloor: s.routineFloor()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
@@ -1921,7 +1921,7 @@ func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 // name. Anything else is not found, whether or not it is on disk.
 var (
 	releaseVersion   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
-	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.msi|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.sha256)?$`)
+	downloadArtifact = regexp.MustCompile(`^ominull-(agent_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb|agent-windows-[0-9]+\.[0-9]+\.[0-9]+\.msi|hub_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb)(\.sig|\.release\.sig|\.sha256)?$`)
 	downloadPayloads = map[string]bool{
 		// Native installers fetch only signed package artifacts. Raw binaries
 		// are intentionally not an install surface.
@@ -3796,6 +3796,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
 	mux.HandleFunc("/download/", s.handleDownload)
+	mux.HandleFunc("/download/routine-keys.json", s.handleRoutineKeysDownload)
 
 	// 3. Multi-Tenant REST API & Hierarchy
 	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
