@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -525,5 +526,14 @@ func TestScreenTypeStdinAndAgent(t *testing.T) {
 	}
 	if !strings.Contains(agentsSeen(), "POST /api/v1/screen/sessions env-agent") {
 		t.Fatalf("env fallback not sent: %s", agentsSeen())
+	}
+}
+
+func TestHubEndReason(t *testing.T) {
+	if got := hubEndReason(errors.New("409: session is no longer live (ended: operator closed)")); got != "the hub says it is no longer live (ended: operator closed)" {
+		t.Fatalf("got %q", got)
+	}
+	if got := hubEndReason(errors.New("409: session is no longer live")); got != "the hub says it is no longer live" {
+		t.Fatalf("got %q", got)
 	}
 }

@@ -141,6 +141,9 @@ func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, bod
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
+	if _, ok := s.scopedEndpointIDs(w, r, req.EndpointIDs); !ok {
+		return nil, false
+	}
 	return &approvalPlan{
 		Kind:    response.ActionKindScriptExec,
 		Action:  "Run a one-off script",

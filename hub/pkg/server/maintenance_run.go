@@ -202,6 +202,9 @@ func (s *Server) resolveMaintenanceRun(w http.ResponseWriter, r *http.Request, b
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
+	if _, ok := s.scopedEndpointIDs(w, r, req.EndpointIDs); !ok {
+		return nil, false
+	}
 	names := make([]string, 0, len(items))
 	for _, it := range items {
 		names = append(names, it.Script.Name)

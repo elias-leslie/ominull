@@ -301,7 +301,7 @@ func (s *Server) handleScreenSessionAttach(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !sess.IsLive() {
-		writeJSONError(w, http.StatusConflict, "session is no longer live and cannot be attached")
+		writeJSONError(w, http.StatusConflict, s.screenNotLive(req.SessionID, "session is no longer live and cannot be attached"))
 		return
 	}
 	token, err := s.terminalMgr.RotateOperatorToken(req.SessionID)
@@ -477,7 +477,7 @@ func (s *Server) handleScreenLaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !sess.IsLive() {
-		writeJSONError(w, http.StatusConflict, "session is no longer live")
+		writeJSONError(w, http.StatusConflict, s.screenNotLive(id, "session is no longer live"))
 		return
 	}
 	code := screenCreds.IssueLaunchCode(id, operator, screen.AttachControl)
@@ -513,7 +513,7 @@ func (s *Server) handleScreenWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !sess.IsLive() {
-		writeJSONError(w, http.StatusConflict, "session is no longer live")
+		writeJSONError(w, http.StatusConflict, s.screenNotLive(id, "session is no longer live"))
 		return
 	}
 	if n := s.terminalMgr.WatcherCount(id); n >= screen.MaxWatchers {
@@ -805,4 +805,19 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 		Targets: []string{req.EndpointID}, Payload: payload, SessionSeconds: int64(d / time.Second),
 		AskFirst: askFirst,
 	}, true
+}
+
+// screenNotLive adds why the session ended, so a client holding a key that
+// cannot inspect sessions still learns the hub's reason.
+func (s *Server) screenNotLive(sessionID, msg string) string {
+	_, state, reason, _, ok := s.terminalMgr.SessionEnd(sessionID)
+	switch {
+	case !ok:
+		return msg
+	case reason != "":
+		return msg + " (ended: " + reason + ")"
+	case state != "":
+		return msg + " (" + string(state) + ")"
+	}
+	return msg
 }

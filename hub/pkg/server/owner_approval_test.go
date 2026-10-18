@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -256,4 +257,33 @@ func TestBulkIsolationNeedsAnExplicitScope(t *testing.T) {
 	if targets, err := store.BulkIsolationTargets("", "unknown", ""); err != nil || len(targets) != 0 {
 		t.Fatalf("an unknown scope matched %v (%v)", targets, err)
 	}
+}
+
+// An owner approval never names a machine that does not exist: unknown ids
+// (a stray "--help" from the CLI) are refused before anything is asked, on
+// every route that asks the owner; several known ids make one approval.
+func TestOwnerApprovalRefusesUnknownEndpoints(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedPlain(t, store, "ep-1", "ep-2")
+	for _, c := range []struct{ path, body string }{
+		{"/api/v1/agents/update", `{"endpoint_ids":["--help"],"version":"1.2.0"}`},
+		{"/api/v1/agents/update", `{"endpoint_ids":["ep-1","nope"],"version":"1.2.0"}`},
+		{"/api/v1/endpoints/isolate", `{"endpoint_id":"--help","reason":"x"}`},
+		{"/api/v1/endpoints/unisolate", `{"endpoint_id":"nope"}`},
+		{"/api/v1/maintenance/run", `{"endpoint_ids":["nope"],"packages":["windows-cleanup"],"mode":"audit"}`},
+	} {
+		if w := adminPost(srv, c.path, c.body, ""); w.Code != http.StatusNotFound {
+			t.Errorf("%s %s: want 404 before any approval, got %d %s", c.path, c.body, w.Code, w.Body.String())
+		}
+	}
+	if w := adminPost(srv, "/api/v1/agents/update", `{"endpoint_ids":[],"version":"1.2.0"}`, ""); w.Code != http.StatusBadRequest {
+		t.Errorf("empty ids: %d %s", w.Code, w.Body.String())
+	}
+	if list, err := srv.responseAuth.PendingApprovals(context.Background()); err != nil || len(list) != 0 {
+		n := len(list)
+		t.Fatalf("%d approvals were asked for unknown machines", n)
+	}
+	pendingID(t, adminPost(srv, "/api/v1/agents/update", `{"endpoint_ids":["ep-1","ep-2"],"version":"1.2.0"}`, ""))
 }

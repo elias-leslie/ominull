@@ -68,9 +68,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	client := newAPIClient(cfg)
 	subcmd := subArgs[0]
 	rest := subArgs[1:]
+	if wantsHelp(rest) {
+		if subcmd == "screen" {
+			fmt.Print(screenHelp)
+		} else {
+			printUsage()
+		}
+		return
+	}
+	client := newAPIClient(cfg)
 
 	var err error
 	switch subcmd {
@@ -603,19 +611,9 @@ func (c *APIClient) cmdAgents(args []string) error {
 		return nil
 	}
 	if args[0] == "update" {
-		if len(args) < 2 {
-			return fmt.Errorf("usage: ominullctl agents update <endpoint_id|all> [version]")
-		}
-		target := args[1]
-		ver := ""
-		if len(args) > 2 {
-			ver = args[2]
-		}
-		var body map[string]interface{}
-		if target == "all" {
-			body = map[string]interface{}{"all": true, "version": ver}
-		} else {
-			body = map[string]interface{}{"endpoint_ids": []string{target}, "version": ver}
+		body, err := agentUpdateBody(args[1:])
+		if err != nil {
+			return err
 		}
 		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/agents/update", body)
 		if err != nil {
@@ -624,7 +622,11 @@ func (c *APIClient) cmdAgents(args []string) error {
 		var res interface{}
 		_ = json.Unmarshal(raw, &res)
 		c.printOutput(res, func() {
-			fmt.Printf("[+] Dispatched agent update for %s\n", target)
+			if ids, ok := body["endpoint_ids"].([]string); ok {
+				fmt.Printf("[+] Dispatched agent update for %s\n", strings.Join(ids, ", "))
+			} else {
+				fmt.Println("[+] Dispatched agent update for the whole fleet")
+			}
 		})
 		return nil
 	}
@@ -1624,6 +1626,75 @@ func fatalIf(err error) {
 	}
 }
 
+const agentUpdateUsage = "usage: ominullctl agents update <endpoint_id...|all> [--version V | V]"
+
+// agentUpdateBody: several endpoint ids make one rollout (one owner
+// approval). The version is --version V, or a trailing bare version
+// (digits and dots) as before.
+func agentUpdateBody(args []string) (map[string]interface{}, error) {
+	var ids []string
+	ver := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--version" && i+1 < len(args):
+			ver = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--version="):
+			ver = strings.TrimPrefix(a, "--version=")
+		case strings.HasPrefix(a, "-"):
+			return nil, fmt.Errorf("unknown flag %q\n%s", a, agentUpdateUsage)
+		case i == len(args)-1 && len(ids) > 0 && isVersionText(a):
+			ver = a
+		default:
+			for _, id := range strings.Split(a, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("%s", agentUpdateUsage)
+	}
+	if len(ids) == 1 && ids[0] == "all" {
+		return map[string]interface{}{"all": true, "version": ver}, nil
+	}
+	for _, id := range ids {
+		if id == "all" {
+			return nil, fmt.Errorf("\"all\" cannot be combined with endpoint ids\n%s", agentUpdateUsage)
+		}
+	}
+	return map[string]interface{}{"endpoint_ids": ids, "version": ver}, nil
+}
+
+func isVersionText(s string) bool {
+	s = strings.TrimPrefix(s, "v")
+	if s == "" || !strings.Contains(s, ".") {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// wantsHelp: --help or -h anywhere before "--" asks for usage and never
+// reaches the hub (a stray flag must not become an endpoint id).
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `Ominull Unified Control CLI (ominullctl)
 
@@ -1642,7 +1713,7 @@ Fleet & CyberOps Commands:
   learning windows|open|close             Inspect, open and close learning windows
   learning proposals|apply                Read what a window learned and apply named proposals
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
-  agents versions|update <id|all>         Inspect fleet version currency and publish releases
+  agents versions|update <id...|all> [--version V]  Inspect fleet versions; update several machines in one approval
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
   maint run ENDPOINT PKG... --mode M      Run maintenance packages (owner tap or package rule; --no-wait prints ids)
   maint wait ID... [--all] [--timeout D]  Block until a job, run or playbook run ends or needs attention

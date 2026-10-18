@@ -470,7 +470,7 @@ func (c *APIClient) screenAttach(h *heldScreen) (string, error) {
 	if err != nil {
 		switch status {
 		case http.StatusNotFound, http.StatusConflict, http.StatusGone:
-			return "", markScreenEnded(h.Endpoint, "the hub says it is no longer live")
+			return "", markScreenEnded(h.Endpoint, hubEndReason(err))
 		}
 		return "", err
 	}
@@ -768,7 +768,7 @@ func (c *APIClient) screenWatch(args []string, out io.Writer) error {
 	raw, status, err := c.doRequestWith(http.MethodPost, "/api/v1/screen/sessions/watch", map[string]string{"session_id": h.SessionID}, nil)
 	if err != nil {
 		if status == http.StatusNotFound || status == http.StatusGone || (status == http.StatusConflict && strings.Contains(err.Error(), "no longer live")) {
-			return markScreenEnded(endpoint, "the hub says it is no longer live")
+			return markScreenEnded(endpoint, hubEndReason(err))
 		}
 		return err
 	}
@@ -896,4 +896,20 @@ func (c *APIClient) screenSettings(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "(already set that way; nothing changed)")
 	}
 	return nil
+}
+
+// hubEndReason is "the hub says it is no longer live", with the hub's end
+// reason when its answer carries one ("... (ended: <reason>)").
+func hubEndReason(err error) string {
+	const base = "the hub says it is no longer live"
+	if err == nil {
+		return base
+	}
+	msg := err.Error()
+	if i := strings.LastIndex(msg, "(ended: "); i >= 0 {
+		if j := strings.Index(msg[i:], ")"); j > 0 {
+			return base + " (" + msg[i+1:i+j] + ")"
+		}
+	}
+	return base
 }

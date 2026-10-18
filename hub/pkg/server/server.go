@@ -2462,18 +2462,29 @@ func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endp
 // scopedEndpointIDs rejects a bulk request when any requested endpoint is
 // outside the caller's tenant. The whole request fails rather than silently
 // applying to a partial set.
+// scopedEndpointIDs refuses any id that is not a registered endpoint (for
+// admin too: an owner approval must never name a machine that does not
+// exist) or that lies outside a tenant caller's scope.
 func (s *Server) scopedEndpointIDs(w http.ResponseWriter, r *http.Request, ids []string) ([]string, bool) {
-	if r.Header.Get("X-Role") == "admin" {
-		return ids, true
+	tenantID := ""
+	if r.Header.Get("X-Role") != "admin" {
+		tenantID = r.Header.Get("X-Tenant-ID")
 	}
-	tenantID := r.Header.Get("X-Tenant-ID")
 	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			writeJSONError(w, http.StatusBadRequest, "an endpoint id is empty")
+			return nil, false
+		}
 		ep, err := s.store.GetEndpoint(id)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return nil, false
 		}
-		if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {
+		if ep == nil {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no such endpoint: %q", id))
+			return nil, false
+		}
+		if tenantID != "" && ep.TenantID != tenantID {
 			log.Printf("[!] %s (tenant %q) requested endpoint %q outside its scope; refused.", clientIP(r), tenantID, id)
 			writeJSONError(w, http.StatusNotFound, "one or more endpoints are not in this scope")
 			return nil, false
@@ -2487,13 +2498,17 @@ func (s *Server) endpointInScope(w http.ResponseWriter, r *http.Request, endpoin
 		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
 		return false
 	}
-	if r.Header.Get("X-Role") == "admin" {
-		return true
+	tenantID := ""
+	if r.Header.Get("X-Role") != "admin" {
+		tenantID = r.Header.Get("X-Tenant-ID")
 	}
-	tenantID := r.Header.Get("X-Tenant-ID")
 	ep, err := s.store.GetEndpoint(endpointID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if ep == nil && r.Header.Get("X-Role") == "admin" {
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no such endpoint: %q", endpointID))
 		return false
 	}
 	if ep == nil || (tenantID != "" && ep.TenantID != tenantID) {

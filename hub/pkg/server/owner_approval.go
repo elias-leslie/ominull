@@ -676,6 +676,15 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 			}
 		}
 	}
+	if !req.All {
+		if len(targets) == 0 {
+			writeJSONError(w, http.StatusBadRequest, "endpoint_ids or all is required")
+			return nil, false
+		}
+		if _, ok := s.scopedEndpointIDs(w, r, append(append([]string{}, targets...), req.Canary...)); !ok {
+			return nil, false
+		}
+	}
 	scope := s.endpointLabels(sortedTargets(targets))
 	if req.All {
 		scope = "the whole fleet (" + scope + ")"
