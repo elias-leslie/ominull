@@ -35,7 +35,7 @@ func newSignedFixture(t *testing.T, role string) *signedFixture {
 
 // report records the endpoint's trust report as its agent would send it.
 func (f *signedFixture) report(hostAuthority bool, role string) {
-	rep := response.AgentTrustReport{V: 1, HostAuthority: hostAuthority}
+	rep := response.AgentTrustReport{V: 1, HostAuthority: hostAuthority, Profile: "engagement", Ceiling: "signed-scripts"}
 	if hostAuthority {
 		rep.HostKeys = []response.HostKeyReport{{ID: f.keyID, Role: role}}
 	}
@@ -224,3 +224,63 @@ func TestGrantV3Canonical(t *testing.T) {
 }
 
 const grantV3Golden = "000000194f4d494e554c4c2d454e44504f494e542d4752414e542d56330000000300000003672d310000000764656661756c740000000465702d310000000b7363726970745f6578656300000040616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261620000000e6e6967687473686966743a746170000000000000000068e778000000000068e77a580000000430306666000000056a6f622d310000004063646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364"
+
+// The reserve route builds a released package's payload the way a
+// maintenance run would, so the signer is shown the source that runs.
+func TestSignedJobReservePackage(t *testing.T) {
+	t.Parallel()
+	f := newSignedFixture(t, "auto")
+	w := adminDo(f.srv, http.MethodPost, "/api/v1/endpoints/ep-lap/jobs/signed/reserve", `{"package":"windows-cleanup","mode":"audit"}`)
+	var r reserveAnswer
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &r) != nil {
+		t.Fatalf("reserve package: %d %s", w.Code, w.Body.String())
+	}
+	var p response.ScriptExecPayload
+	if err := json.Unmarshal([]byte(r.PayloadJSON), &p); err != nil || p.Parameters["mode"] != "audit" || !strings.Contains(p.Source, "windows-cleanup") {
+		t.Fatalf("payload: %v %+v", err, p.Parameters)
+	}
+	g := f.grant(r, response.OperatorNightshiftAuto)
+	if code, body := f.submit(r.PayloadJSON, g); code != http.StatusOK {
+		t.Fatalf("submit: %d %s", code, body)
+	}
+	// maint wait follows it like any package run.
+	ww := adminDo(f.srv, http.MethodGet, "/api/v1/maintenance/wait?ids="+r.JobID+"&wait=0", "")
+	if ww.Code != http.StatusOK || !strings.Contains(ww.Body.String(), r.JobID) || strings.Contains(ww.Body.String(), `"unknown":["`) {
+		t.Fatalf("wait: %d %s", ww.Code, ww.Body.String())
+	}
+
+	for body, want := range map[string]string{
+		`{"package":"windows-nope"}`:                 "no package",
+		`{"package":"windows-cleanup","mode":"fix"}`: "mode must be",
+		`{}`: "not both",
+		`{"package":"windows-cleanup","payload":{"a":1}}`: "not both",
+	} {
+		w := adminDo(f.srv, http.MethodPost, "/api/v1/endpoints/ep-lap/jobs/signed/reserve", body)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), want) {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+// An endpoint whose lock level or manifest refuses scripts is refused before
+// anyone is asked to sign.
+func TestSignedJobLockRefusal(t *testing.T) {
+	t.Parallel()
+	f := newSignedFixture(t, "tap")
+	for _, c := range []struct{ ceiling, profile, want string }{
+		{"isolate", "engagement", "lock level"},
+		{"monitor", "engagement", "lock level"},
+		{"monitor-signed-scripts", "respond", "capability profile"},
+		{"", "", "capability profile"},
+	} {
+		f.srv.trust.mu.Lock()
+		seen := f.srv.trust.reports["ep-lap"]
+		seen.report.Ceiling, seen.report.Profile = c.ceiling, c.profile
+		f.srv.trust.reports["ep-lap"] = seen
+		f.srv.trust.mu.Unlock()
+		w := adminDo(f.srv, http.MethodPost, "/api/v1/endpoints/ep-lap/jobs/signed/reserve", `{"package":"windows-cleanup"}`)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), c.want) {
+			t.Errorf("%+v: %d %s", c, w.Code, w.Body.String())
+		}
+	}
+}

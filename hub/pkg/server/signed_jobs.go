@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
 )
 
@@ -22,7 +24,7 @@ import (
 // scripts. The hub carries those grants and never signs them, and never asks
 // the OmniNull authority:
 //
-//	POST /api/v1/endpoints/{id}/jobs/signed/reserve  {"payload":{...}}
+//	POST /api/v1/endpoints/{id}/jobs/signed/reserve  {"payload":{...}} or {"package":"name","mode":"audit"}
 //	  -> {"job_id","payload_json","action_digest","tenant_id","endpoint_id","expires_at"}
 //	POST /api/v1/endpoints/{id}/jobs/signed          {"payload":{...},"grant":{...}}
 //	  -> {"job_id","state":"queued"}
@@ -110,8 +112,67 @@ func (s *Server) hostAuthorityEndpoint(id string) (*storage.Endpoint, *response.
 	if !seen.report.HostAuthority {
 		return nil, nil, http.StatusForbidden, "the endpoint pins no host authority; signed jobs are only for hosts that do"
 	}
+	if why := signedJobLockRefusal(&seen.report); why != "" {
+		return nil, nil, http.StatusForbidden, why
+	}
 	rep := seen.report
 	return ep, &rep, 0, ""
+}
+
+// signedJobLockRefusal says why an endpoint would refuse any script, from its
+// trust report: a lock level (ceiling) without scripts, or a signed manifest
+// that does not carry them. The agent decides; this only spares a tap on a
+// job it would refuse.
+func signedJobLockRefusal(rep *response.AgentTrustReport) string {
+	switch rep.Ceiling {
+	case "", "signed-scripts", "monitor-signed-scripts", "engagement":
+	default:
+		return fmt.Sprintf("the endpoint's lock level %q does not allow scripts (signed-scripts or monitor-signed-scripts does)", rep.Ceiling)
+	}
+	if rep.Profile != "engagement" {
+		p := rep.Profile
+		if p == "" {
+			p = "none"
+		}
+		return fmt.Sprintf("the endpoint's capability profile is %q, which carries no scripts; it needs engagement (one owner approval), and its lock level then limits it", p)
+	}
+	return ""
+}
+
+// signedPackagePayload builds the payload a maintenance run of a released
+// package would send this endpoint, from the library and its settings, so the
+// signer sees exactly what runs.
+func (s *Server) signedPackagePayload(tenant, endpointID, name, mode string) (json.RawMessage, error) {
+	if mode == "" {
+		mode = "audit"
+	}
+	if !scripts.RunModes[mode] {
+		return nil, errors.New("mode must be audit, enforce or revert")
+	}
+	sc, err := s.findPackage(tenant, strings.TrimSpace(name))
+	if err != nil {
+		return nil, err
+	}
+	windows, err := s.packageHosts(tenant, []string{endpointID})
+	if err != nil {
+		return nil, err
+	}
+	settings, err := s.maintenanceSettings(tenant)
+	if err != nil {
+		return nil, err
+	}
+	it, _, err := s.buildPackageItem(tenant, sc, mode, []string{endpointID}, windows, settings, nil)
+	if err != nil {
+		return nil, err
+	}
+	var p response.ScriptExecPayload
+	if err := json.Unmarshal([]byte(it.Raw), &p); err != nil {
+		return nil, err
+	}
+	if _, ok := responseauth.ReleasedPackages()[strings.ToLower(p.ScriptDigest)]; !ok {
+		return nil, fmt.Errorf("%s in the library is not a released package source", sc.Name)
+	}
+	return json.RawMessage(it.Raw), nil
 }
 
 func (s *Server) handleSignedJobReserve(w http.ResponseWriter, r *http.Request, endpointID string) {
@@ -121,15 +182,29 @@ func (s *Server) handleSignedJobReserve(w http.ResponseWriter, r *http.Request, 
 	}
 	var body struct {
 		Payload json.RawMessage `json:"payload"`
+		Package string          `json:"package"`
+		Mode    string          `json:"mode"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, signedJobMaxBody)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if (len(bytes.TrimSpace(body.Payload)) > 0) == (body.Package != "") {
+		writeJSONError(w, http.StatusBadRequest, `send "payload", or "package" (and "mode"), not both`)
 		return
 	}
 	ep, _, status, why := s.hostAuthorityEndpoint(endpointID)
 	if ep == nil {
 		writeJSONError(w, status, why)
 		return
+	}
+	if body.Package != "" {
+		raw, err := s.signedPackagePayload(endpointTenant(ep), ep.ID, body.Package, body.Mode)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		body.Payload = raw
 	}
 	payload, digest, err := canonicalScriptPayload(body.Payload)
 	if err != nil {

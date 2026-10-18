@@ -116,15 +116,19 @@ written, the new grant is refused, never an old entry dropped. Files: `/var/lib/
 
 ## Courier: signed jobs through the hub
 
-For endpoints whose latest trust report (under 15 minutes old) says `"host_authority":true`. Admin API key
-(`X-API-Key`). The hub never calls the OmniNull authority on this path and never signs.
+For endpoints whose latest trust report (under 15 minutes old) says `"host_authority":true`, a lock level that
+allows scripts (`signed-scripts`, `monitor-signed-scripts`, `engagement` or none) and the `engagement` profile;
+otherwise 403 with the reason, before anyone is asked to sign. Admin API key (`X-API-Key`). The hub never calls the
+OmniNull authority on this path and never signs. `ominullctl host-script run` (below) does all three steps.
 
 1. **Reserve** a job id for the payload:
 
    `POST /api/v1/endpoints/{id}/jobs/signed/reserve` with `{"payload":{...}}`, a `script_exec` payload object:
    `script_id`, `script_version` (≥ 1), `script_digest` (sha256 of `source`), `interpreter`, `source` (≤ 64 KiB),
    optional `parameters` (string map), `timeout_seconds` (1 to 3600), `max_output_bytes` (0 to 5 MiB); unknown
-   fields are refused. Answer:
+   fields are refused. Or `{"package":"<name>","mode":"audit"|"enforce"|"revert"}` (mode defaults to audit): the
+   hub builds the payload a maintenance run of that library package would send this endpoint (its settings and
+   window), and refuses a package whose source is not a released one (`released_packages.json`). Answer:
 
    ```json
    {"job_id":"<uuid>","payload_json":"<canonical payload>","action_digest":"<sha256 of payload_json>",
@@ -150,6 +154,28 @@ For endpoints whose latest trust report (under 15 minutes old) says `"host_autho
 The job then runs like any script job: supervised (docs/RESPONSE_SUPERVISOR.md), `maint wait` works on its id, and
 the console's job history shows it as "signed by Nightshift (owner tap)" or "(allow-listed package)". The hub audits
 `SIGNED_JOB_QUEUED`.
+
+## ominullctl host-script run
+
+Runs on the machine that holds Nightshift's signer (the workstation), never on the hub, so the hub never holds the
+signing keys. Nightshift's timers call it.
+
+```
+ominullctl host-script run ENDPOINT --package NAME [--mode audit|enforce|revert] [--auto] [--host LABEL]
+                           [--timeout 30m] [--no-wait]
+```
+
+1. Reserves with `{"package","mode"}` using its admin key.
+2. Writes the reserve answer to a private temp file and runs `nightshift sign host-grant FILE [--host LABEL] [--auto]`
+   (`OMINULL_HOST_SIGNER` names another command). Without `--auto` the owner taps on Nightshift's approve page,
+   which shows the whole script. With `--auto` the always-on signer signs only allow-listed packages.
+3. Submits the payload byte for byte as reserved, with the grant the signer printed.
+4. Prints `job <id> <endpoint> <package>` and waits like `maint wait` (the hub holds each request open).
+
+Exit codes: 0 ok, 3 the run failed, 4 needs attention, 5 `--timeout` passed (as `maint wait`); 6 the endpoint
+refuses signed scripts (lock level, profile, no host authority, or no fresh trust report); 7 the reservation lapsed
+or was used (run again); 8 Nightshift did not sign (owner declined, no standing rule, signer closed); 9 the hub
+refused the signed grant.
 
 ## Trust report
 

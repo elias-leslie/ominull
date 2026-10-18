@@ -114,6 +114,8 @@ func main() {
 		err = client.cmdScripts(rest)
 	case "maint":
 		err = client.cmdMaint(rest)
+	case "host-script":
+		err = client.cmdHostScript(rest)
 	case "shell":
 		err = client.cmdShell(rest)
 	case "screen":
@@ -1653,6 +1655,9 @@ Fleet & CyberOps Commands:
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
                                           Change a fleet default or a host override
   maint rules|forget-rule [ID]            Show or remove approve-all rules for maintenance packages
+  host-script run EP --package NAME [--mode M] [--auto] [--timeout D] [--no-wait]
+                                          Run a released package on a host-authority host: reserve, Nightshift signs, submit, wait
+                                          (exit 6 endpoint refuses, 7 reservation lapsed, 8 signer refused, 9 hub refused the grant)
   install reports [list|show]             Inspect bootstrap error reports
   enrol list|open|close                   LAN self-enrolment windows (open waits for the owner's tap)
 
