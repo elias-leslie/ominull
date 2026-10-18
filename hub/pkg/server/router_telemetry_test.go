@@ -86,7 +86,8 @@ func TestRouterTelemetryReplyCarriesNoInstructions(t *testing.T) {
 		"dns_accepted": true, "dns_rejected": true,
 		"resolutions_accepted": true, "resolutions_rejected": true,
 		"clients_accepted": true, "clients_rejected": true,
-		"assets_touched": true,
+		"assets_touched":  true,
+		"health_accepted": true, "health_rejected": true,
 	}
 	for k := range raw {
 		if !allowed[k] {
@@ -390,5 +391,112 @@ func TestRouterDHCPFingerprintRemainsObservedEvidence(t *testing.T) {
 	}
 	if a.OS != "" {
 		t.Fatalf("self-reported fingerprint invented OS: %q", a.OS)
+	}
+}
+
+const healthPoll = `{"router_id":"gw","label":"living room","health":{
+	"uptime_s":86400,"mem_total_kb":524288,"mem_avail_kb":262144,"overlay_kb":1000,"overlay_used_kb":400,
+	"conntrack_count":100,"conntrack_max":1000,"wan_up":true,"wan_ipv4":true,"load1":0.4,
+	"firmware":{"glversion":"4.8.3","openwrt":"23.05.4","kernel":"5.4.0"},
+	"auth_pw":[1792000001,-5],"auth_pre":[],"upnp":[1,1],"upnp_n":2,"upnp_maps":["tcp:51413:deadbeef","evil;rm -rf /"]}}`
+
+func getRouterHealth(t *testing.T, srv *Server, path, key string) []storage.RouterHealthRecord {
+	t.Helper()
+	w := feedRequest(srv, http.MethodGet, path, key)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s returned %d: %s", path, w.Code, w.Body.String())
+	}
+	var doc struct {
+		Schema  string                       `json:"schema"`
+		Routers []storage.RouterHealthRecord `json:"routers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil || doc.Schema != "ominull.router-health/v1" {
+		t.Fatalf("unreadable health document: %v %s", err, w.Body.String())
+	}
+	return doc.Routers
+}
+
+// The gateway's own condition rides in the poll, is bounded on the way in and
+// is readable by operators and by Nightshift's feed key (and nobody else).
+func TestRouterHealthIsStoredBoundedAndReadable(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	if got := getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token"); len(got) != 0 {
+		t.Fatalf("health before any poll = %+v", got)
+	}
+	if w := postTelemetry(t, srv, healthPoll); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"health_accepted":true`) {
+		t.Fatalf("poll with health = %d %s", w.Code, w.Body.String())
+	}
+	got := getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token")
+	if len(got) != 1 || got[0].RouterID != "gw" || got[0].Label != "living room" {
+		t.Fatalf("health rows = %+v", got)
+	}
+	h := got[0].Health
+	if !h.WANUp || h.UptimeS != 86400 || h.MemAvailKB != 262144 || h.ConntrackMax != 1000 {
+		t.Fatalf("health values lost: %+v", h)
+	}
+	if len(h.AuthPW) != 1 || h.AuthPW[0] != 1792000001 {
+		t.Fatalf("a negative stamp was kept: %v", h.AuthPW)
+	}
+	if len(h.UPnPMaps) != 1 || h.UPnPMaps[0] != "tcp:51413:deadbeef" {
+		t.Fatalf("an unhashed or malformed UPnP mapping was kept: %v", h.UPnPMaps)
+	}
+	if got[0].Firmware != "GL 4.8.3 / OpenWrt 23.05.4 / kernel 5.4.0" || got[0].FirmwareChangedAt != nil {
+		t.Fatalf("first reading must not read as a firmware change: %+v", got[0])
+	}
+
+	key := issueFeedKey(t, srv)
+	if len(getRouterHealth(t, srv, "/api/v1/integrations/nightshift/router-health", key)) != 1 {
+		t.Fatal("Nightshift's feed key cannot read router health")
+	}
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/router/health", key); w.Code == http.StatusOK {
+		t.Fatal("the feed key opened the operator route")
+	}
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/router-health", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous read = %d", w.Code)
+	}
+}
+
+// A new firmware string is recorded once, with the one it replaced; a reading
+// that cannot say what it runs changes nothing.
+func TestRouterHealthRecordsFirmwareChange(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	postTelemetry(t, srv, healthPoll)
+	postTelemetry(t, srv, `{"router_id":"gw","health":{"uptime_s":5,"firmware":{"glversion":"","openwrt":"","kernel":""}}}`)
+	got := getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token")
+	if got[0].FirmwareChangedAt != nil || got[0].Firmware == "" || got[0].Health.UptimeS != 5 {
+		t.Fatalf("an unreadable firmware must keep the last known one: %+v", got[0])
+	}
+	postTelemetry(t, srv, strings.Replace(healthPoll, "4.8.3", "4.8.4", 1))
+	got = getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token")
+	if got[0].FirmwareChangedAt == nil || got[0].FirmwarePrevious != "GL 4.8.3 / OpenWrt 23.05.4 / kernel 5.4.0" ||
+		!strings.Contains(got[0].Firmware, "4.8.4") {
+		t.Fatalf("firmware change not recorded: %+v", got[0])
+	}
+	changed := *got[0].FirmwareChangedAt
+	postTelemetry(t, srv, strings.Replace(healthPoll, "4.8.3", "4.8.4", 1))
+	got = getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token")
+	if !got[0].FirmwareChangedAt.Equal(changed) {
+		t.Fatalf("a repeat of the same firmware moved the change time: %v -> %v", changed, got[0].FirmwareChangedAt)
+	}
+}
+
+// A health block the hub cannot read must not cost the leases beside it.
+func TestRouterHealthGarbageDoesNotCostTheOtherSections(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	w := postTelemetry(t, srv, `{"router_id":"gw","leases":[{"mac":"aa:bb:cc:dd:ee:01","ip":"10.0.0.9"}],"health":"nonsense"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"leases_accepted":1`) || !strings.Contains(w.Body.String(), `"health_rejected":true`) {
+		t.Fatalf("garbage health = %d %s", w.Code, w.Body.String())
+	}
+	if got := getRouterHealth(t, srv, "/api/v1/router/health", "mock_admin_token"); len(got) != 0 {
+		t.Fatalf("garbage was stored: %+v", got)
 	}
 }

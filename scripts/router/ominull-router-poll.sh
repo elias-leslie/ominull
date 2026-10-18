@@ -13,6 +13,11 @@
 #             host. Off by default because it costs throughput.
 #   clients - per-client cumulative byte counters, where the firmware keeps
 #             them (GL.iNet "ubus call gl-clients list").
+#   health  - the gateway's own condition: WAN state, uptime, memory, config
+#             storage, connection table, firmware version, failed ssh logins
+#             (stamps only) and UPnP mappings (hashed internal side). Counts and
+#             versions, no per-client data. The hub keeps the latest reading and
+#             tells Nightshift when the firmware changed.
 #
 # It only ever reads. Nothing here changes gateway state, and the hub's reply is
 # a count, never an instruction - a gateway that has been taken over must not be
@@ -36,6 +41,7 @@
 #   DNS_LOG="0"
 #   DNS_LOG_FILE="/tmp/dnsmasq.log"            # dnsmasq logfacility; empty reads logread
 #   LAN_CIDR=""          # optional override, e.g. 192.0.2.0/24
+#   HEALTH="1"           # 0 stops the gateway-condition block
 #
 # DNS from a log file is read by byte offset. The offset advances only after
 # the hub answers 200, so a hub outage delays queries instead of losing them.
@@ -83,8 +89,10 @@ CONF=${OMINULL_ROUTER_CONF:-/etc/ominull-router.conf}
 : "${DNS_TRUNCATE_AT:=1048576}"
 : "${DNS_FILE_CAP:=16777216}"
 : "${GL_CLIENTS:=1}"
+: "${HEALTH:=1}"
 : "${WORK_BASE:=/tmp}"
 : "${LOGGER:=logger}"
+: "${LOGREAD:=logread}"
 
 # The lease file is not authoritative about what is on this network. It keeps
 # records from earlier configurations - a router that once served a different
@@ -131,7 +139,7 @@ in_lan() {
 }
 
 WORK=$(mktemp -d "$WORK_BASE/ominull-poll.XXXXXX") || exit 1
-trap 'rm -f "$WORK/leases.json" "$WORK/flows.json" "$WORK/dns.json" "$WORK/resolutions.json" "$WORK/body.json" "$WORK/reply.json" "$WORK/dns.chunk" "$WORK/clients.json" "$WORK/code" "$WORK/err"; rmdir "$WORK"' EXIT INT TERM
+trap 'rm -f "$WORK/leases.json" "$WORK/flows.json" "$WORK/dns.json" "$WORK/resolutions.json" "$WORK/body.json" "$WORK/reply.json" "$WORK/dns.chunk" "$WORK/clients.json" "$WORK/health.json" "$WORK/code" "$WORK/err"; rmdir "$WORK"' EXIT INT TERM
 
 # json_escape keeps a device-chosen hostname from breaking the document. The
 # hub bounds these again on arrival; doing it here too means a malformed name
@@ -340,6 +348,59 @@ if [ "$GL_CLIENTS" = "1" ] && command -v ubus >/dev/null 2>&1; then
 	fi
 fi
 
+# ---- health ----------------------------------------------------------------
+# The gateway's own condition, read the same way Nightshift's forced-command
+# status script reads it, so one poller owns it. Every value is reduced to
+# digits or [A-Za-z0-9._+-] before it is written, so a hostile or odd reading
+# cannot break the document; a reading that is missing is 0 or empty, and the
+# hub decides what that means.
+h_num() { case "$1" in '' | *[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
+h_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40; }
+h_stamps() { sed -n 's/^[^[]*\[\([0-9]*\)\.[0-9]*\].*$/\1/p' | tail -n 50 | tr '\n' ',' | sed 's/,$//'; }
+collect_health() {
+	_up=$(h_num "$(cut -d. -f1 /proc/uptime 2>/dev/null)")
+	_mt=$(h_num "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)")
+	_ma=$(h_num "$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)")
+	set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{print $2, $3}')
+	_ot=$(h_num "${1:-}"); _ou=$(h_num "${2:-}")
+	_cc=$(h_num "$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)")
+	_cm=$(h_num "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)")
+	_wst=$(ifstatus wan 2>/dev/null)
+	_wan=false; [ "$(printf '%s' "$_wst" | jsonfilter -e '@.up' 2>/dev/null)" = true ] && _wan=true
+	_wip=false; [ -n "$(printf '%s' "$_wst" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _wip=true
+	_load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null | tr -cd '0-9.')
+	case "$_load" in ''|.*|*.|*.*.*) _load=0 ;; esac
+	_gl=$(h_word "$(cat /etc/glversion 2>/dev/null)")
+	_ow=$(h_word "$(. /etc/openwrt_release 2>/dev/null; echo "${DISTRIB_RELEASE:-}")")
+	_kn=$(h_word "$(uname -r 2>/dev/null)")
+	_auth=$($LOGREAD -t -e dropbear 2>/dev/null)
+	_pw=$(printf '%s\n' "$_auth" | grep -E 'Bad password attempt|Login attempt for nonexistent user|Max auth tries' | h_stamps)
+	_pre=$(printf '%s\n' "$_auth" | grep -F 'Exit before auth' | h_stamps)
+	# UPnP / NAT-PMP: installed, running, mapping count and up to 50 mappings as
+	# proto:external-port:<8-hex hash of the internal address:port>.
+	_upi=0; { [ -x /usr/sbin/miniupnpd ] || [ -e /etc/init.d/miniupnpd ]; } && _upi=1
+	_upr=0; pgrep -x miniupnpd >/dev/null 2>&1 && _upr=1
+	_upm=''; _upn=0
+	if [ "$_upi" = 1 ]; then
+		_lf=$(uci -q get upnpd.config.upnp_lease_file 2>/dev/null)
+		_rows=$(cat "${_lf:-/var/run/miniupnpd.leases}" /var/run/miniupnpd.leases /tmp/upnp.leases 2>/dev/null |
+			sed -nE 's/^([Tt][Cc][Pp]|[Uu][Dd][Pp]):([0-9]{1,5}):([0-9A-Fa-f.:]{1,45}):([0-9]{1,5}):.*$/\1 \2 \3:\4/p' | sort -u)
+		_upn=$(h_num "$(printf '%s\n' "$_rows" | grep -c .)")
+		_upm=$(printf '%s\n' "$_rows" | head -n 50 | while read -r _p _e _t; do [ -n "$_t" ] || continue
+			printf '"%s:%s:%s",' "$(printf %s "$_p" | tr 'A-Z' 'a-z')" "$_e" "$(printf %s "$_t" | sha256sum | cut -c1-8)"; done | sed 's/,$//')
+	fi
+	printf '{"uptime_s":%s,"mem_total_kb":%s,"mem_avail_kb":%s,"overlay_kb":%s,"overlay_used_kb":%s,' "$_up" "$_mt" "$_ma" "$_ot" "$_ou"
+	printf '"conntrack_count":%s,"conntrack_max":%s,"wan_up":%s,"wan_ipv4":%s,"load1":%s,' "$_cc" "$_cm" "$_wan" "$_wip" "$_load"
+	printf '"firmware":{"glversion":"%s","openwrt":"%s","kernel":"%s"},' "$_gl" "$_ow" "$_kn"
+	printf '"auth_pw":[%s],"auth_pre":[%s],"upnp":[%s,%s],"upnp_n":%s,"upnp_maps":[%s]}' "$_pw" "$_pre" "$_upi" "$_upr" "$_upn" "$_upm"
+}
+# A reading that fails must never spoil the poll: the hub then simply has no health this round.
+if [ "$HEALTH" = "1" ]; then
+	( collect_health ) > "$WORK/health.json" 2>/dev/null || printf 'null' > "$WORK/health.json"
+else
+	printf 'null' > "$WORK/health.json"
+fi
+
 # ---- post ------------------------------------------------------------------
 {
 	printf '{"router_id":"%s","label":"%s","leases":' \
@@ -354,6 +415,8 @@ fi
 	cat "$WORK/resolutions.json"
 	printf ',"gl_clients":'
 	cat "$WORK/clients.json"
+	printf ',"health":'
+	cat "$WORK/health.json"
 	printf '}'
 } > "$WORK/body.json"
 

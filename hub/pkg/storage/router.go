@@ -117,6 +117,10 @@ type RouterIngestResult struct {
 	AssetsTouched       int `json:"assets_touched"`
 	ClientsAccepted     int `json:"clients_accepted"`
 	ClientsRejected     int `json:"clients_rejected"`
+	// HealthAccepted: the gateway's own condition was stored. Rejected: it
+	// arrived but could not be read.
+	HealthAccepted bool `json:"health_accepted,omitempty"`
+	HealthRejected bool `json:"health_rejected,omitempty"`
 }
 
 func (s *Store) initRouterSchema() error {
@@ -145,6 +149,15 @@ func (s *Store) initRouterSchema() error {
 		label TEXT NOT NULL DEFAULT '',
 		last_seen_at TIMESTAMP,
 		last_result TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE TABLE IF NOT EXISTS router_health (
+		router_id TEXT PRIMARY KEY,
+		reported_at TIMESTAMP NOT NULL,
+		health TEXT NOT NULL,
+		firmware TEXT NOT NULL DEFAULT '',
+		firmware_prev TEXT NOT NULL DEFAULT '',
+		firmware_changed_at TIMESTAMP
 	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {

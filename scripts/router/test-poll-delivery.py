@@ -39,6 +39,14 @@ cat "$STUB/code"
 JSONFILTER = '''#!/usr/bin/env python3
 import json, sys
 try:
+    if '-i' not in sys.argv:  # health: "-e EXPR" over stdin (ifstatus wan)
+        doc = json.load(sys.stdin)
+        expr = sys.argv[sys.argv.index('-e') + 1]
+        if expr == '@.up':
+            print('true' if doc.get('up') else 'false')
+        elif 'ipv4-address' in expr:
+            print((doc.get('ipv4-address') or [{}])[0].get('address', ''))
+        sys.exit(0)
     doc = json.load(open(sys.argv[sys.argv.index('-i') + 1]))
 except Exception:
     sys.exit(1)
@@ -61,6 +69,8 @@ class PollDelivery(unittest.TestCase):
         self.write_exec('jsonfilter', JSONFILTER)
         self.write_exec('logger', '#!/bin/sh\necho "$@" >> "$STUB/log"\n')
         self.write_exec('uci', '#!/bin/sh\ncase "$*" in *ipaddr*) echo 10.0.0.1 ;; *netmask*) echo 255.255.255.0 ;; *) exit 1 ;; esac\n')
+        self.write_exec('ifstatus', '#!/bin/sh\ncat "$STUB/wan" 2>/dev/null || exit 1\n')
+        self.write_exec('logread', '#!/bin/sh\ncat "$STUB/logread" 2>/dev/null\n')
         self.write_exec('ubus', '#!/bin/sh\ncat "$STUB/ubus" 2>/dev/null || exit 1\n')
         self.log = self.dir / 'dnsmasq.log'
         self.log.write_text('')
@@ -84,7 +94,7 @@ class PollDelivery(unittest.TestCase):
             'TLS_KEY': '/x/router.key', 'ROUTER_ID': 'gw', 'DNS_LOG': '1', 'DNS_LOG_FILE': str(self.log),
             'DNS_STATE': str(self.dir / 'offset'), 'LEASEFILE': str(self.dir / 'leases'),
             'CONNTRACK': str(self.dir / 'conntrack'), 'DHCP_CACHE': str(self.dir / 'dhcp'),
-            'WORK_BASE': str(self.dir), 'LOGGER': str(self.bin / 'logger'), 'DNS_TRUNCATE_AT': '1000000',
+            'WORK_BASE': str(self.dir), 'LOGGER': str(self.bin / 'logger'), 'LOGREAD': str(self.bin / 'logread'), 'DNS_TRUNCATE_AT': '1000000',
         }
         values.update(extra)
         self.conf.write_text(''.join(f'{k}="{v}"\n' for k, v in values.items()))
@@ -163,6 +173,30 @@ class PollDelivery(unittest.TestCase):
         (self.stub / 'ubus').write_text('{"clients": {broken')
         self.assertEqual(self.run_poller().returncode, 0)
         self.assertIsNone(self.last_body()['gl_clients'])
+
+    def test_health_block_reports_the_gateway_condition(self):
+        (self.stub / 'wan').write_text('{"up": true, "ipv4-address": [{"address": "192.0.2.7"}]}')
+        (self.stub / 'logread').write_text(
+            'Sun Oct 18 10:00:00 2026 [1792000001.123] authpriv.warn dropbear[1]: Bad password attempt for root\n'
+            'Sun Oct 18 10:00:00 2026 [1792000002.5] authpriv.info dropbear[1]: Exit before auth from <x>: (user)\n'
+            'Sun Oct 18 10:00:00 2026 [1792000003.9] authpriv.warn dropbear[1]: Login attempt for nonexistent user\n')
+        self.assertEqual(self.run_poller().returncode, 0)
+        health = self.last_body()['health']
+        self.assertTrue(health['wan_up'] and health['wan_ipv4'])
+        self.assertEqual(health['auth_pw'], [1792000001, 1792000003])
+        self.assertEqual(health['auth_pre'], [1792000002])
+        self.assertGreater(health['uptime_s'], 0)
+        self.assertGreater(health['mem_total_kb'], 0)
+        self.assertEqual(set(health['firmware']), {'glversion', 'openwrt', 'kernel'})
+        self.assertEqual(health['upnp'], [0, 0])
+
+        (self.stub / 'wan').unlink()
+        self.assertEqual(self.run_poller().returncode, 0)
+        self.assertFalse(self.last_body()['health']['wan_up'], 'an unreadable WAN must read as down, not up')
+
+        self.configure(HEALTH='0')
+        self.assertEqual(self.run_poller().returncode, 0)
+        self.assertIsNone(self.last_body()['health'])
 
     def test_legacy_key_without_certificate(self):
         self.configure(TLS_CERT='', TLS_KEY='', TLS_CA='', HUB_URL='http://hub.invalid:9999', HUB_KEY='k')

@@ -3756,6 +3756,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/router/identity", s.authMiddleware(s.handleRouterIdentity))
 	mux.HandleFunc("/api/v1/storage/report", s.authMiddleware(s.handleStorageReport))
 	mux.HandleFunc("/api/v1/router/clients", s.authMiddleware(s.handleRouterClients))
+	mux.HandleFunc("/api/v1/router/health", s.authMiddleware(s.handleRouterHealth))
+	// Nightshift's router check reads the same document with its feed key.
+	mux.HandleFunc("/api/v1/integrations/nightshift/router-health", s.nightshiftFeedAuth(s.handleRouterHealth))
 	mux.HandleFunc("/api/v1/integrations/nightshift/findings", s.nightshiftFeedAuth(s.handleNightshiftFeed))
 	mux.HandleFunc("/api/v1/integrations/nightshift/key", s.authMiddleware(s.handleNightshiftFeedKey))
 	// The approval relay: Nightshift carries pending owner approvals to the

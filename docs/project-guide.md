@@ -258,6 +258,7 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
 | `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
 | `/api/v1/router/clients` | GET | per-client daily traffic from the gateway's own counters |
+| `/api/v1/router/health` | GET | the gateway's latest own-condition reading (WAN, uptime, memory, config storage, connection table, firmware and when it last changed, failed ssh logins, UPnP mappings); Nightshift reads the same document at `/api/v1/integrations/nightshift/router-health` with its feed key |
 | `/api/v1/router/identity` | POST | admin: issue a gateway client certificate; reissuing revokes the previous one |
 | `/api/v1/integrations/nightshift/findings` | GET | summarised findings for Nightshift (`nightshift.findings/v1`), with the feed key or admin |
 | `/api/v1/integrations/nightshift/key` | POST | admin: issue the Nightshift feed key, shown once and kept as a hash; reissuing revokes |

@@ -22,6 +22,18 @@ and `TLS_KEY` in the configuration. The certificate is accepted only for
 for the same router revokes the old one. `HUB_KEY` remains a fallback for
 gateways without a certificate.
 
+## Gateway health
+
+Every poll also carries a `health` block: WAN up and IPv4, uptime, memory,
+config storage (overlay), connection table, load, firmware (GL.iNet, OpenWrt,
+kernel), stamps of failed ssh logins, and UPnP mappings with the internal side
+hashed. Counts and versions only, no per-client data. The hub keeps the latest
+reading per router and notes when the firmware string changes (previous value
+and time). Read it at `/api/v1/router/health`; Nightshift's router check reads
+it through its feed key and raises the findings. `HEALTH="0"` in the
+configuration stops the block. Reading failures send `null` and never spoil the
+poll.
+
 ## DNS from a tmpfs log file
 
 With query logging on, dnsmasq's default destination is the shared system log

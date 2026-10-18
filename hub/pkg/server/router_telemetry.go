@@ -50,6 +50,10 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 		// unparsed so the gateway needs no JSON tooling.
 		Clients   []storage.RouterClient `json:"clients"`
 		GLClients json.RawMessage        `json:"gl_clients"`
+		// Health is the gateway's own condition (WAN, uptime, memory,
+		// firmware, ...). Raw so a reading this hub cannot parse is counted
+		// and dropped without failing the rest of the poll.
+		Health json.RawMessage `json:"health"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, routerIngestLimit)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "unreadable telemetry: "+err.Error())
@@ -119,17 +123,63 @@ func (s *Server) handleRouterTelemetry(w http.ResponseWriter, r *http.Request) {
 		out.ClientsAccepted, out.ClientsRejected = a, out.ClientsRejected+rj
 	}
 
-	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d names %d/%d clients %d/%d",
+	if len(req.Health) > 0 && string(req.Health) != "null" {
+		if h, ok := storage.NormaliseRouterHealth(req.Health); !ok {
+			out.HealthRejected = true
+		} else if err := s.store.RecordRouterHealth(routerID, h, now); err != nil {
+			log.Printf("[!] router %s: health ingest failed: %v", routerID, err)
+			out.HealthRejected = true
+		} else {
+			out.HealthAccepted = true
+		}
+	}
+
+	summary := fmt.Sprintf("leases %d/%d flows %d/%d dns %d/%d names %d/%d clients %d/%d health %s",
 		out.LeasesAccepted, out.LeasesAccepted+out.LeasesRejected,
 		out.FlowsAccepted, out.FlowsAccepted+out.FlowsRejected,
 		out.DNSAccepted, out.DNSAccepted+out.DNSRejected,
 		out.ResolutionsAccepted, out.ResolutionsAccepted+out.ResolutionsRejected,
-		out.ClientsAccepted, out.ClientsAccepted+out.ClientsRejected)
+		out.ClientsAccepted, out.ClientsAccepted+out.ClientsRejected, healthWord(out))
 	if err := s.store.TouchRouterSource(routerID, req.Label, summary, now); err != nil {
 		log.Printf("[!] router %s: could not record the source: %v", routerID, err)
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+func healthWord(r storage.RouterIngestResult) string {
+	switch {
+	case r.HealthAccepted:
+		return "ok"
+	case r.HealthRejected:
+		return "rejected"
+	}
+	return "none"
+}
+
+// handleRouterHealth returns the latest reading of every gateway that sent
+// one, with the firmware it runs and when that last changed. Read-only; the
+// same document serves operators and Nightshift's router check, which owns the
+// history and the alerting.
+func (s *Server) handleRouterHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rows, err := s.store.ListRouterHealth()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []storage.RouterHealthRecord{}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"schema":       "ominull.router-health/v1",
+		"generated_at": time.Now().UTC(),
+		"routers":      rows,
+	})
 }
 
 // routerDNSLine is one query the gateway's resolver answered.
