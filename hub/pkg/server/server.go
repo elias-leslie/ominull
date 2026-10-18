@@ -736,6 +736,7 @@ func (s *Server) Start(addr string) error {
 	go s.agentRolloutLoop()
 	go s.maintenanceScheduleLoop()
 	go s.sessionJobsLoop()
+	go s.stewardSessionLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
@@ -1170,6 +1171,20 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
 				r.Header.Set("X-Auth-Method", "api-key")
+				proceed(w, r)
+				return
+			}
+			if s.stewardKeyMatches(key) {
+				// The steward's own key: its own role and name, and only
+				// the routes in stewardRoutes (steward.go).
+				s.throttle.succeed(addr)
+				r.Header.Set("X-Role", "steward")
+				r.Header.Set("X-Username", stewardUsername)
+				r.Header.Set("X-Auth-Method", stewardAuthMethod)
+				if !stewardAllowed(r) {
+					writeJSONError(w, http.StatusForbidden, "the steward key reaches only maintenance runs, escalation, its own approvals and the screen for a stuck run")
+					return
+				}
 				proceed(w, r)
 				return
 			}
@@ -3926,6 +3941,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/screen/sessions/watch", s.authMiddleware(s.responseGate(s.handleScreenWatch)))
 	// The viewer's only credential is the launch code itself.
 	mux.HandleFunc("/api/v1/screen/launch/redeem", s.responseGate(s.handleScreenLaunchRedeem))
+	mux.HandleFunc("/api/v1/screen/steward", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveStewardScreen, s.handleStewardScreen))))
+	mux.HandleFunc("/api/v1/integrations/nightshift/steward-screen", s.approvalRelayAuth(s.responseGate(s.ownerApproved(s.resolveStewardScreen, s.handleStewardScreen))))
+	mux.HandleFunc("/api/v1/integrations/steward/key", s.authMiddleware(s.handleStewardKey))
 	mux.HandleFunc("/api/v1/screen/settings", s.authMiddleware(s.responseGate(s.handleScreenSettings)))
 	mux.HandleFunc("/api/v1/remote-access/settings", s.authMiddleware(s.responseGate(s.handleRemoteAccess)))
 

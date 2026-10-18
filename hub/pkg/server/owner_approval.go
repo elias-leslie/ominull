@@ -91,6 +91,13 @@ type approvalPlan struct {
 	// AskFirst: a screen session asks the person at the keyboard first;
 	// shown to the owner, not digested.
 	AskFirst bool
+	// The steward's screen request: the stuck run, the owner's rule token
+	// and Nightshift's narrowing; StewardRule raises a machine's steward
+	// screen setting (responseauth/steward_screen_rule.go).
+	StewardRun       string
+	StewardRuleToken string
+	StewardNarrow    *responseauth.StewardScreenNarrow
+	StewardRule      *responseauth.StewardScreenAsk
 	// OnRequested is told the approval id once one is created for this plan.
 	OnRequested func(approvalID string)
 }
@@ -261,6 +268,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				TenantID: tenantID, Requester: requester, Kind: plan.Kind, Action: plan.Action,
 				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
 				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
+				StewardRun: plan.StewardRun, StewardRule: plan.StewardRule, StewardRuleToken: plan.StewardRuleToken, StewardNarrow: plan.StewardNarrow,
 			})
 			if err != nil {
 				s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
@@ -281,7 +289,11 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				// The authority approved it under the owner's approve-all rule
 				// (an owner-signed agent rollout); it is spent below like any
 				// approval, and the authority still checks it there.
-				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking under the owner's approve-all rule for owner-signed rollouts: %s", plan.Action, v.ID, plan.Summary))
+				rule := "the owner's approve-all rule"
+				if plan.StewardRun != "" {
+					rule = "the owner's steward screen rule"
+				}
+				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking under %s: %s", plan.Action, v.ID, rule, plan.Summary))
 				id = v.ID
 			} else {
 				s.audit(r, "OWNER_APPROVAL_REQUESTED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s): %s", plan.Action, v.ID, plan.Summary))
@@ -300,7 +312,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		sum := sha256.Sum256(payload)
 		grants, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{
 			ID: id, TenantID: tenantID, Requester: requester, Kind: plan.Kind, Digest: hex.EncodeToString(sum[:]), Targets: plan.Targets,
-			SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
+			SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label, StewardRun: plan.StewardRun,
 		})
 		if err != nil {
 			s.audit(r, "OWNER_APPROVAL_REFUSED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s with approval %s: %v", plan.Action, id, err))

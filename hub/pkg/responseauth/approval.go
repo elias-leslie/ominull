@@ -130,6 +130,20 @@ type ApprovalRequestInput struct {
 	// owner as a claim, never as an identity. Only an admin-key requester
 	// may carry one.
 	AgentLabel string `json:"agent_label,omitempty"`
+	// StewardRun is the stuck maintenance run (job id) a steward screen
+	// request is for: shown to the owner and audited, not digested, and
+	// required for a steward screen rule to approve it.
+	StewardRun string `json:"steward_run,omitempty"`
+	// StewardRule raises a machine's "Steward remote screen" setting: the
+	// owner's tap stores a steward screen rule and signs nothing
+	// (steward_screen_rule.go).
+	StewardRule *StewardScreenAsk `json:"steward_rule,omitempty"`
+	// StewardRuleToken is the owner's steward screen rule for the target, as
+	// Nightshift keeps it (a token this authority signed when the owner
+	// tapped), and StewardNarrow Nightshift's narrowing of it. Read only to
+	// decide whether the rule covers a steward session.
+	StewardRuleToken string               `json:"steward_rule_token,omitempty"`
+	StewardNarrow    *StewardScreenNarrow `json:"steward_narrow,omitempty"`
 }
 
 // ApprovalView is the readable state of an approval. Statement and Signature
@@ -154,6 +168,9 @@ type ApprovalView struct {
 	ApproverID string        `json:"approver_id,omitempty"`
 	Method     string        `json:"method,omitempty"` // passkey | rule | unverified
 	Offer      string        `json:"offer,omitempty"`
+	// StewardRule is the signed rule token an approved steward screen rule
+	// ask yields, for Nightshift to keep (steward_screen_rule.go).
+	StewardRule string `json:"steward_rule,omitempty"`
 }
 
 // ApprovalAssertion is the owner's WebAuthn assertion, all base64url.
@@ -187,6 +204,7 @@ type ApprovalConsumeRequest struct {
 	SessionSeconds int64  `json:"session_seconds,omitempty"`
 	AskFirst       bool   `json:"ask_first,omitempty"`
 	AgentLabel     string `json:"agent_label,omitempty"`
+	StewardRun     string `json:"steward_run,omitempty"`
 }
 
 // Approver is one pinned owner passkey (ES256, raw P-256 coordinates).
@@ -226,6 +244,8 @@ type approvalRecord struct {
 	sessionSeconds int64
 	askFirst       bool
 	agentLabel     string
+	stewardRun     string
+	stewardRule    *StewardScreenAsk
 }
 
 type approvalBook struct {
@@ -397,12 +417,33 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			return nil, errors.New("only a request made with the hub admin key carries an agent label")
 		}
 	}
+	if in.StewardRun != "" {
+		if in.Kind != response.ActionKindScreenSession || !IsStewardRequester(requester) {
+			return nil, errors.New("only the steward's screen request names a maintenance run")
+		}
+		if len(in.StewardRun) > stewardRunMax || cleanText(in.StewardRun, stewardRunMax) != in.StewardRun {
+			return nil, errors.New("invalid maintenance run id")
+		}
+	}
+	var stewardAsk response.ScreenSessionPayload
+	if in.StewardRule != nil {
+		p, err := a.stewardScreenAskCheck(in, targets)
+		if err != nil {
+			return nil, err
+		}
+		stewardAsk = p
+	}
 	action, summary, err := describeApproval(in.Kind, in.Payload, targets, requester)
 	if err == nil && in.Kind == response.ActionKindTerminalSession {
 		action, summary, err = describeTerminal(in.Payload, targets, requester, in.SessionSeconds, in.AgentLabel)
 	}
 	if err == nil && in.Kind == response.ActionKindScreenSession {
 		action, summary, err = describeScreen(in.Payload, targets, requester, in.SessionSeconds, in.AskFirst, in.AgentLabel)
+		if err == nil && in.StewardRule != nil {
+			action, summary = describeStewardScreenAsk(stewardAsk, in.AskFirst || stewardAsk.AskFirst, targets, in.StewardRule)
+		} else if err == nil && in.StewardRun != "" {
+			summary += "; to unstick maintenance run " + in.StewardRun
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -426,6 +467,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	if in.RuleOnly && !pkgAuto {
 		return nil, ErrRuleNotCovered
 	}
+	// A steward session for a stuck run under the machine's steward screen
+	// rule: approved now, no rate limit (the owner already allowed it).
+	stewardRule, stewardPayload, stewardAuto := a.stewardScreenMatch(in, targets, time.Now())
 	digest := sha256.Sum256(in.Payload)
 	ttl := approvalDefaultTTL
 	if in.TTLSeconds > 0 {
@@ -446,7 +490,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	recent := b.created[in.TenantID]
 	pending += b.reserved[in.TenantID]
-	if !pkgAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
+	if !pkgAuto && !stewardAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
 		b.mu.Unlock()
 		a.auditApproval(in.TenantID, in.Requester, "approval_refused", string(in.Kind), "", "", "denied", ErrApprovalRateLimit.Error())
 		return nil, ErrApprovalRateLimit
@@ -454,7 +498,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// Take both slots now, under the same lock as the check: concurrent
 	// callers must not all pass on the same stale counts. The hourly slot is
 	// spent even if signing fails below; the pending slot is handed back.
-	reserved := !pkgAuto
+	reserved := !pkgAuto && !stewardAuto
 	if reserved {
 		b.created[in.TenantID] = append(recent, now)
 		b.reserved[in.TenantID]++
@@ -537,6 +581,8 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		sessionSeconds: in.SessionSeconds,
 		askFirst:       in.AskFirst,
 		agentLabel:     in.AgentLabel,
+		stewardRun:     in.StewardRun,
+		stewardRule:    in.StewardRule,
 		view: ApprovalView{
 			ID:        stmt.ID,
 			TenantID:  stmt.TenantID,
@@ -555,7 +601,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			Offer:     stmt.Offer,
 		},
 	}
-	if auto || pkgAuto {
+	if auto || pkgAuto || stewardAuto {
 		t := now.UTC()
 		useBy := t.Add(approvalUseWindow)
 		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
@@ -565,6 +611,9 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		}
 		if pkgBaseline {
 			rec.view.Method, rec.view.ApproverID = "baseline", ""
+		}
+		if stewardAuto {
+			rec.view.ApproverID = stewardRule.ApproverID
 		}
 	}
 	b.mu.Lock()
@@ -593,6 +642,11 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
 			fmt.Sprintf("approved without asking under the package rule the owner made %s (approval %s, approver %s): %s",
 				time.Unix(pkgRule.Created, 0).UTC().Format(time.RFC3339), pkgRule.ID, pkgRule.ApproverID, evidence))
+	}
+	if stewardAuto {
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), targets[0], stmt.ID, "success",
+			fmt.Sprintf("approved without asking under the steward screen rule the owner made %s (approval %s, approver %s): %s session up to %s for maintenance run %s",
+				time.Unix(stewardRule.Created, 0).UTC().Format(time.RFC3339), stewardRule.ApprovalID, stewardRule.ApproverID, stewardPayload.Mode, spanText(in.SessionSeconds), in.StewardRun))
 	}
 	return &view, nil
 }
@@ -849,9 +903,18 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 		r.view.State = ApprovalDenied
 	}
 	v, payload := r.view, r.payload
+	stewardRec := r.stewardRule != nil
 	b.mu.Unlock()
 	a.auditApproval(v.TenantID, v.Requester, "approval_"+string(v.State), v.Kind, strings.Join(v.Targets, ","), v.ID, "success", "method="+method+" approver="+approverID)
-	if ans.Decision == "rule" && r.stmt.Offer == packageRuleOffer {
+	if stewardRec && ans.Decision != "deny" {
+		// The owner's tap: the rule token Nightshift keeps.
+		if token := a.mintStewardRule(v, r, approverID, t); token != "" {
+			b.mu.Lock()
+			r.view.StewardRule = token
+			v = r.view
+			b.mu.Unlock()
+		}
+	} else if ans.Decision == "rule" && r.stmt.Offer == packageRuleOffer {
 		a.createPackageRule(v, r.stmt.Targets, payload, approverID, t)
 	} else if ans.Decision == "rule" {
 		// The owner's one tap: this rollout is approved either way; the rule
@@ -896,14 +959,22 @@ func (a *Authority) ConsumeApproval(req *ApprovalConsumeRequest) ([]*response.En
 	targets := sortedUnique(req.Targets)
 	if r.kind != req.Kind || !strings.EqualFold(r.digest, req.Digest) || strings.Join(targets, "\x00") != strings.Join(r.stmt.Targets, "\x00") ||
 		cleanText(req.Requester, 80) != r.stmt.Requester ||
-		req.SessionSeconds != r.sessionSeconds || req.AskFirst != r.askFirst || req.AgentLabel != r.agentLabel {
+		req.SessionSeconds != r.sessionSeconds || req.AskFirst != r.askFirst || req.AgentLabel != r.agentLabel || req.StewardRun != r.stewardRun {
 		b.mu.Unlock()
 		a.auditApproval(req.TenantID, "", "approval_consume_refused", string(req.Kind), strings.Join(targets, ","), req.ID, "denied", "action differs from the approved one")
 		return nil, ErrApprovalMismatch
 	}
 	r.view.State = ApprovalConsumed
 	requester, stmt, payload := r.stmt.Requester, r.stmt, r.payload
+	stewardRec := r.stewardRule != nil
 	b.mu.Unlock()
+
+	if stewardRec {
+		// The owner's tap stored the steward screen rule; there is no
+		// session to sign for.
+		a.auditApproval(req.TenantID, requester, "approval_consumed", string(req.Kind), strings.Join(targets, ","), stmt.ID, "success", "steward screen rule "+stmt.Digest)
+		return nil, nil
+	}
 
 	if req.Kind == response.ActionKindScriptExec {
 		return a.signPackageGrants(req, requester, stmt, payload, targets, now)

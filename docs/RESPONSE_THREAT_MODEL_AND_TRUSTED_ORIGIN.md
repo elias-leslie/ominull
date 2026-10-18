@@ -162,6 +162,15 @@ Ominull separates operational concerns into three independent, non-interchangeab
   - **Signing custody:** `scripts/sign-release.sh` has swappable backends: `file` (including an AES-256 encrypted PEM on removable media, written by `scripts/release-key-offline.sh`) and `command` (a token or HSM that never exports the key). Manifests are signed by the separate policy key, never the release key; the release key also signs each tenant's trust bundle (`scripts/sign-trust-bundle.sh`, same backends). `release-key-offline.sh export` refuses a destination on the key's or the root filesystem (device ids).
   - Package builds require byte-for-byte reproducibility against published SHA-256 release manifests.
 
+#### Threat 11: A Pre-Approved Steward Abusing the Screen
+- **Threat:** Nightshift's steward (an automated agent) holds a standing permission to use the remote screen without a per-session tap; a stolen steward key, a compromised hub, or a confused steward uses it beyond what the owner meant.
+- **Mitigation:**
+  - **Own key, short route list:** the steward authenticates with its own key (`nss_…`, hash stored hub-side, issued and revoked by an administrator, never a tenant key). The hub admits it only on maintenance wait/escalate/list, approval list, and screen session open/attach/close; everything else is 403.
+  - **Owner-signed rule, kept by Nightshift:** raising the per-machine rule (mode, minutes per session, ask-first, inside-window) takes one owner tap; the authority signs it (`OMINULL-STEWARD-SCREEN-RULE-V1`, tenant response key, 90 days) and hands back a token that Nightshift's Approvals page stores. OmniNull keeps no second rule store. The steward can narrow the rule per request, never widen it; a forged or edited token simply asks the owner.
+  - **Only to unstick a run:** a covered session must name a maintenance run on that machine that is waiting on a dialog or stalled; the run id is bound into the grant, the session closes when the run moves on, and ask-first and the banner still apply.
+  - **Never the owner's infrastructure:** rules are refused for non-Windows machines and machines whose signed profile lacks the screen; host-locked machines (a host authority file) refuse steward sessions outright.
+  - Every steward session is audited (`STEWARD_SCREEN_OPENED`, `SCREEN_SESSION_CLOSED` with `steward_run_resolved`).
+
 ---
 
 ## 4. The Trusted-Origin Decision & Specification

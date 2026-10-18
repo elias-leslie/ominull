@@ -638,3 +638,28 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
 - No recording by default means a session leaves an audit trail (who/when/mode)
   but not a video the owner must then protect. That is deliberate for a home
   machine.
+
+## 12. The steward (pre-approved, bound to a stuck run)
+
+Nightshift's steward can open a screen session without a per-session tap when
+the owner has raised a steward screen rule for that machine:
+
+- **Key:** `POST /api/v1/integrations/steward/key` (administrator) returns the
+  key once; `DELETE` revokes it. The steward reaches only its route list.
+- **Raising the rule (one tap):** `POST /api/v1/screen/steward`
+  (administrator, console) or `POST /api/v1/integrations/nightshift/steward-screen`
+  (Nightshift relay) with `{endpoint_id, mode, max_minutes (5-240, default 30),
+  ask_first (default true), only_in_window (default true)}`. After the tap the
+  reply carries `rule_token` and `rule`; `GET ?approval_id=` returns them again.
+  Nightshift stores the token; lowering the rule is Nightshift's narrowing and
+  needs no tap.
+- **Opening:** the steward sends `POST /api/v1/screen/sessions` with
+  `steward_run` (a maintenance job on that machine in needs_hands or stalled),
+  `rule_token`, and optional `narrow {mode, max_seconds, ask_first,
+  only_in_window}`. Covered requests are approved by the rule (method `rule`);
+  anything else asks the owner, naming the steward and the run.
+- **Ending:** the hub checks bound sessions every 15 s and closes one when its
+  run is no longer stuck, or when the rule's time runs out.
+- Windows machines with the screen in their signed profile only; host-locked
+  machines refuse.
+

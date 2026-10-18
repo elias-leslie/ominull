@@ -217,6 +217,10 @@ func describeScreen(payload []byte, targets []string, requester string, seconds 
 		claim := AgentClaim(label)
 		who = strings.ToUpper(claim[:1]) + claim[1:] + " (admin key)"
 	}
+	if IsStewardRequester(requester) {
+		// The steward key is its own credential, not a self-declared label.
+		agent, who = true, "Nightshift's steward (steward key)"
+	}
 	var action, summary string
 	switch {
 	case p.Mode == response.ScreenModeControl && agent:
