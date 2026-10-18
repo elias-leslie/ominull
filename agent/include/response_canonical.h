@@ -139,6 +139,55 @@ static inline size_t EncodeGrantV2Canonical(
 }
 
 /*
+ * EncodeGrantCanonical encodes an EndpointGrant of version 2 or 3. V3
+ * (OMINULL-ENDPOINT-GRANT-V3) is V2 with job_id, the hub job the grant is
+ * for, written as a string right after the nonce; signer_key_id stays last.
+ * docs/HOST_AUTHORITY.md has the byte layout. Returns 0 for any other
+ * version, on overflow, or for a V3 grant without a job id.
+ */
+static inline size_t EncodeGrantCanonical(
+    uint32_t version,
+    const char* grant_id,
+    const char* tenant_id,
+    const char* endpoint_id,
+    const char* action_kind,
+    const char* action_digest,
+    const char* operator_id,
+    const char* response_session_id,
+    int64_t issued_at,
+    int64_t expires_at,
+    const char* nonce,
+    const char* job_id,
+    const char* signer_key_id,
+    uint8_t* out,
+    size_t out_cap
+) {
+    if (version == 2) {
+        return EncodeGrantV2Canonical(version, grant_id, tenant_id, endpoint_id, action_kind, action_digest, operator_id,
+                                      response_session_id, issued_at, expires_at, nonce, signer_key_id, out, out_cap);
+    }
+    if (version != 3 || !job_id || !job_id[0]) return 0;
+    ResponseCanonicalBuffer b;
+    CanonicalBuf_Init(&b, out, out_cap);
+    if (!CanonicalBuf_WriteString(&b, "OMINULL-ENDPOINT-GRANT-V3")) return 0;
+    if (!CanonicalBuf_WriteUint32(&b, version)) return 0;
+    if (!CanonicalBuf_WriteString(&b, grant_id)) return 0;
+    if (!CanonicalBuf_WriteString(&b, tenant_id)) return 0;
+    if (!CanonicalBuf_WriteString(&b, endpoint_id)) return 0;
+    if (!CanonicalBuf_WriteString(&b, action_kind)) return 0;
+    if (!CanonicalBuf_WriteHexNormalized(&b, action_digest)) return 0;
+    if (!CanonicalBuf_WriteString(&b, operator_id)) return 0;
+    if (!CanonicalBuf_WriteString(&b, response_session_id)) return 0;
+    if (!CanonicalBuf_WriteInt64(&b, issued_at)) return 0;
+    if (!CanonicalBuf_WriteInt64(&b, expires_at)) return 0;
+    if (!CanonicalBuf_WriteHexNormalized(&b, nonce)) return 0;
+    if (!CanonicalBuf_WriteString(&b, job_id)) return 0;
+    if (!CanonicalBuf_WriteHexNormalized(&b, signer_key_id)) return 0;
+    if (b.overflow) return 0;
+    return b.len;
+}
+
+/*
  * EncodeProofV2Canonical encodes an ActionProof V2 into deterministic canonical bytes.
  * Returns the number of bytes written, or 0 on overflow or failure.
  */

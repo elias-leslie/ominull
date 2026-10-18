@@ -94,6 +94,13 @@ const char* Agent_TrustOfferRefusal(const char* kind, const void* grant) {
     return why;
 }
 
+const char* Agent_TrustOfferGrantRefusal(const char* job_id, const void* grant, const char* payload_json, const char* endpoint_id) {
+    if (!g_TrustLoaded) return "trust state not loaded";
+    const char* why = Trust_OfferGrantRefusal(&g_Trust, job_id, (const ResponseGrant*)grant, payload_json, endpoint_id);
+    if (why) Trust_Refuse(&g_Trust, (int64_t)time(NULL), "response offer refused: %s", why);
+    return why;
+}
+
 bool Agent_TrustResponseKey(uint8_t out[32]) {
     if (!g_TrustLoaded || !g_Trust.have_key[TRUST_KEY_RESPONSE]) return false;
     memcpy(out, g_Trust.keys[TRUST_KEY_RESPONSE], 32);

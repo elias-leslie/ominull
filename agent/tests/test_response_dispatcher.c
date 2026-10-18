@@ -110,6 +110,38 @@ static void test_replay_cache(void) {
     bool r4 = ReplayCache_CheckAndRecord(tmp_cache, "grant-102", "nonce-102", now + 300);
     expect("distinct grant-102 succeeds", r4, true);
 
+    /* Kept through the verifier's grace: a grant 30 s past expiry still
+     * verifies (60 s skew), so its entry must still refuse it. */
+    expect("grant just past expiry recorded", ReplayCache_CheckAndRecord(tmp_cache, "grant-grace", "nonce-grace", now - 30), true);
+    expect("its replay inside the grace is still refused",
+           ReplayCache_CheckAndRecord(tmp_cache, "grant-grace", "nonce-other", now + 300) == false, true);
+
+    /* Entries past expiry plus grace are dropped. */
+    FILE* f = fopen(tmp_cache, "a");
+    if (f) {
+        fprintf(f, "grant-old nonce-old %lld\n", (long long)(now - 120));
+        fclose(f);
+    }
+    expect("a grant long expired no longer blocks its id",
+           ReplayCache_CheckAndRecord(tmp_cache, "grant-old", "nonce-new", now + 300), true);
+    unlink(tmp_cache);
+
+    /* Full: refuse the new grant, never drop a live entry. */
+    f = fopen(tmp_cache, "w");
+    if (f) {
+        for (int i = 0; i < REPLAY_CACHE_MAX; i++) fprintf(f, "g-%d n-%d %lld\n", i, i, (long long)(now + 600));
+        fclose(f);
+    }
+    expect("a full cache refuses a new grant", ReplayCache_CheckAndRecord(tmp_cache, "grant-new", "nonce-new", now + 300) == false, true);
+    expect("and keeps every live entry (the first still refuses)",
+           ReplayCache_CheckAndRecord(tmp_cache, "g-0", "n-x", now + 300) == false, true);
+    f = fopen(tmp_cache, "w");
+    if (f) {
+        for (int i = 0; i < REPLAY_CACHE_MAX - 1; i++) fprintf(f, "g-%d n-%d %lld\n", i, i, (long long)(now + 600));
+        fclose(f);
+    }
+    expect("one slot free: the grant is taken", ReplayCache_CheckAndRecord(tmp_cache, "grant-new", "nonce-new", now + 300), true);
+
     unlink(tmp_cache);
 }
 

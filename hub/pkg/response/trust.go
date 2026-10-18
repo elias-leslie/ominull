@@ -253,6 +253,36 @@ type AgentTrustReport struct {
 	Refused         string `json:"refused"`
 	RefusedAt       int64  `json:"refused_at"`
 	Ceiling         string `json:"ceiling"` // local capability ceiling set on the host, "" = none
+	// Host authority (agents from 1.8.81): keys pinned on the host itself
+	// (Nightshift's), whose grants alone run scripts there.
+	HostAuthority bool              `json:"host_authority"`
+	HostKeys      []HostKeyReport   `json:"host_keys,omitempty"`
+	HostAllow     []HostAllowReport `json:"host_allow,omitempty"`
+	HostError     string            `json:"host_error,omitempty"`
+}
+
+// HostKeyReport is one pinned host-authority key: its signer_key_id and role
+// (tap: any script; auto: allow-listed packages only).
+type HostKeyReport struct {
+	ID   string `json:"id"`
+	Role string `json:"role"`
+}
+
+// HostAllowReport is one package auto grants may run on the host.
+type HostAllowReport struct {
+	Name   string   `json:"name"`
+	SHA256 string   `json:"sha256"`
+	Modes  []string `json:"modes"`
+}
+
+// HostKey returns the reported host key with this signer id.
+func (r *AgentTrustReport) HostKey(signerKeyID string) *HostKeyReport {
+	for i := range r.HostKeys {
+		if strings.EqualFold(r.HostKeys[i].ID, signerKeyID) {
+			return &r.HostKeys[i]
+		}
+	}
+	return nil
 }
 
 // IsolationBaseline binds the exceptions an isolation leaves open (DNS, DHCP,

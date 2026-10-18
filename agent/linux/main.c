@@ -623,8 +623,9 @@ static void PrintUsage(const char* prog) {
     printf("  --configure-stdin  Install enrollment material from stdin.\n");
     printf("  --cleanup          Remove Ominull-owned host enforcement state (local recovery: also\n");
     printf("                     records that isolation and quarantines were lifted here).\n");
-    printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, respond,\n");
-    printf("                     engagement; none removes it). Set at the host, never by the hub.\n");
+    printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, isolate,\n");
+    printf("                     signed-scripts, respond, engagement; none removes it). Set at the host,\n");
+    printf("                     never by the hub. signed-scripts runs scripts only with a host authority key.\n");
     printf("  --repin-trust      Forget the pinned response authority keys; the next contact with\n");
     printf("                     the hub pins the keys it offers with a release-key-signed bundle (rotation).\n");
 }
@@ -2739,7 +2740,7 @@ static int RunScriptJobWorker(const LINUX_AGENT_CONFIG* config, const char* job_
     bool posted = false;
     if (res_body) {
         snprintf(res_body, body_sz,
-            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s%s}",
+            "{\"job_id\":\"%.63s\",\"lease_id\":\"%.63s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s%s}",
             job_id, lease_id, state, exit_code, (long long)run.duration_ms,
             (escaped_out ? ",\"stdout\":\"" : ""),
             (escaped_out ? escaped_out : ""),
@@ -2785,9 +2786,13 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
             Trust_Refuse(&g_Trust, (int64_t)time(NULL), "response offer refused: %s", refusal);
             continue;
         }
-        /* Against the pinned key in memory (trust.pin), never a file copy. */
-        if (!VerifyResponseGrantKey(&offer->grant, offer->payload_json, config->endpoint_id, g_Trust.keys[TRUST_KEY_RESPONSE])) {
-            // Drop offer silently: no ACK, no result
+        /* Against the pinned key in memory (trust.pin), never a file copy; a
+         * script on a host-authority host against its host key. V3 grants
+         * must name this job. */
+        refusal = Trust_OfferGrantRefusal(&g_Trust, offer->job_id, &offer->grant, offer->payload_json, config->endpoint_id);
+        if (refusal) {
+            // No ACK, no result; the reason goes into the trust report
+            Trust_Refuse(&g_Trust, (int64_t)time(NULL), "response offer refused: %s", refusal);
             continue;
         }
 
@@ -2801,7 +2806,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
         char ack_url[sizeof(config->hub_url) + 64];
         snprintf(ack_url, sizeof(ack_url), "%s/api/v1/response/jobs/ack", config->hub_url);
         char ack_body[256];
-        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"accepted\":true}", offer->job_id, offer->lease_id);
+        snprintf(ack_body, sizeof(ack_body), "{\"job_id\":\"%.63s\",\"lease_id\":\"%.63s\",\"accepted\":true}", offer->job_id, offer->lease_id);
         char ack_resp[1024] = {0};
         if (!RunHubCurl(config, ack_url, ack_body, ack_resp, sizeof(ack_resp))) {
             continue;
@@ -2925,7 +2930,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
                 char res_body[1024];
                 snprintf(res_body, sizeof(res_body),
-                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s}",
+                    "{\"job_id\":\"%.63s\",\"lease_id\":\"%.63s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s}",
                     offer->job_id, offer->lease_id, (exit_code == 0 ? "succeeded" : "failed"), exit_code,
                     (long long)duration_ms,
                     (manifest_sha[0] ? ",\"manifest_sha256\":\"" : ""),
@@ -2981,7 +2986,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
                 char res_body[512];
                 snprintf(res_body, sizeof(res_body),
-                    "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"failed\",\"exit_code\":1,\"duration_ms\":0,\"error_code\":\"INVALID_PAYLOAD\"}",
+                    "{\"job_id\":\"%.63s\",\"lease_id\":\"%.63s\",\"state\":\"failed\",\"exit_code\":1,\"duration_ms\":0,\"error_code\":\"INVALID_PAYLOAD\"}",
                     offer->job_id, offer->lease_id);
                 char res_resp[1024] = {0};
                 RunHubCurl(config, res_url, res_body, res_resp, sizeof(res_resp));
@@ -3104,7 +3109,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                                config->provenance_status,
                                config->evidence_pubkey_hex};
     char header[sizeof(rawHeader) / sizeof(rawHeader[0])][1537];
-    char trustReport[768];
+    char trustReport[4096];
     Trust_ReportJSON(&g_Trust, trustReport, sizeof(trustReport));
     static uint64_t nonce;
     while (!nonce && syscall(SYS_getrandom, &nonce, sizeof(nonce), 0) != (long)sizeof(nonce))
@@ -3605,7 +3610,7 @@ int main(int argc, char* argv[]) {
         }
         Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
         if (!Trust_SetCeiling(&g_Trust, setCeiling)) {
-            fprintf(stderr, "[-] --capability-ceiling takes monitor, respond, engagement or none.\n");
+            fprintf(stderr, "[-] --capability-ceiling takes monitor, isolate, signed-scripts, respond, engagement or none.\n");
             return 1;
         }
         printf("[+] Capability ceiling %s recorded; restart the agent.\n", setCeiling);

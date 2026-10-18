@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install or refresh OmniNull's forced-command keys on davion-gem (idempotent).
+# Install or refresh OmniNull's forced-command keys on the Proxmox host (idempotent).
 #
 #   sudo scripts/pve/install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF]
 #       as root: the authorized_keys change is an install receipt, not a tripwire ask
@@ -35,8 +35,9 @@ done
 [ -z "$recipient" ] || [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "--recipient must be one age1... public key" >&2; exit 2; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-PVE="${PVE_HOST:-proxmox-gem}"
-FROM="${OMINULL_PVE_FROM:-192.168.86.128}"  # The workstation; every root key on PVE is pinned to it.
+# Both come from the environment: no host name or address is kept in the repo.
+PVE="${PVE_HOST:?set PVE_HOST to the ssh alias of the Proxmox host}"
+FROM="${OMINULL_PVE_FROM:?set OMINULL_PVE_FROM to the workstation address every root key on PVE is pinned to}"
 admin="${SUDO_USER:-$(id -un)}"
 as_admin() { if [ "$(id -u)" = 0 ]; then sudo -u "$admin" -H "$@"; else "$@"; fi; }
 # shellcheck disable=SC2016  # expanded by the admin shell

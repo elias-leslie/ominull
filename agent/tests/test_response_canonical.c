@@ -76,6 +76,27 @@ int main(int argc, char** argv) {
         expect("canonical grant bytes match Go-generated fixture byte-for-byte", match, true);
     }
 
+    /* V3: the hub's pinned bytes (hub/pkg/server/signed_jobs_test.go
+     * TestGrantV3Canonical), job_id after the nonce. */
+    {
+        static const char* want3 = "000000194f4d494e554c4c2d454e44504f494e542d4752414e542d56330000000300000003672d310000000764656661756c740000000465702d310000000b7363726970745f6578656300000040616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261620000000e6e6967687473686966743a746170000000000000000068e778000000000068e77a580000000430306666000000056a6f622d310000004063646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364";
+        uint8_t got3[1024];
+        char hex3[2100];
+        size_t n3 = EncodeGrantCanonical(3, "g-1", "default", "ep-1", "script_exec",
+                                         "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB", "nightshift:tap", "",
+                                         1760000000, 1760000600, "00FF", "job-1",
+                                         "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", got3, sizeof(got3));
+        expect("V3 canonical encoding succeeded", n3 > 0 && n3 * 2 < sizeof(hex3), true);
+        if (n3 > 0 && n3 * 2 < sizeof(hex3)) {
+            for (size_t i = 0; i < n3; i++) snprintf(hex3 + 2 * i, 3, "%02x", got3[i]);
+            expect("V3 canonical bytes match the hub's byte-for-byte", strcmp(hex3, want3) == 0, true);
+        }
+        expect("V3 without a job id does not encode",
+               EncodeGrantCanonical(3, "g-1", "default", "ep-1", "script_exec", "ab", "op", "", 1, 2, "00", "", "cd", got3, sizeof(got3)) == 0, true);
+        expect("unknown version does not encode",
+               EncodeGrantCanonical(4, "g-1", "default", "ep-1", "script_exec", "ab", "op", "", 1, 2, "00", "j", "cd", got3, sizeof(got3)) == 0, true);
+    }
+
     /* Test proof encoding */
     const char* targets[] = {"ep-1", "ep-2"};
     uint8_t proofBytes[512];

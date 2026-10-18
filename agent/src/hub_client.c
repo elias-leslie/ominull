@@ -466,7 +466,7 @@ char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *ev
         APPEND("%s", OMINULL_CAPS_WINDOWS_END);
     }
     {
-        char trust[768];
+        char trust[4096];
         Agent_TrustReport(trust, sizeof(trust));
         APPEND(",\"trust\":%s", trust);
     }

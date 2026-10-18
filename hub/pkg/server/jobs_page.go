@@ -228,7 +228,7 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 		}
 		body.Rows = append(body.Rows, jobRow{
 			ID: j.ID, Short: shortJobID(j.ID), HostID: j.EndpointID, Host: host(j.EndpointID),
-			Action: action, Who: j.RequestedBy, When: stamp(j.RequestedAt),
+			Action: action, Who: requesterLabel(j.RequestedBy), When: stamp(j.RequestedAt),
 			Label: label, Tone: tone, ErrorCode: j.ErrorCode, Attempt: j.Attempt,
 		})
 	}
@@ -252,7 +252,7 @@ func (s *Server) buildJobView(job *response.JobRecord, hostName string, stamp fu
 	}
 	add("Host", hostName)
 	add("Action", v.Action)
-	add("Requested by", job.RequestedBy)
+	add("Requested by", requesterLabel(job.RequestedBy))
 	add("Requested", stamp(job.RequestedAt))
 	if job.StartedAt != nil {
 		add("Started", stamp(*job.StartedAt))
@@ -300,6 +300,19 @@ func (s *Server) buildJobView(job *response.JobRecord, hostName string, stamp fu
 
 // jobActor names who moved a job: the agent on its host, the hub's scheduler,
 // or the operator.
+// requesterLabel names who asked for a job. Jobs from the host-authority
+// courier were signed by Nightshift: a tap key (the owner approved this
+// script) or the auto key (an allow-listed package).
+func requesterLabel(by string) string {
+	switch by {
+	case response.OperatorNightshiftTap:
+		return "signed by Nightshift (owner tap)"
+	case response.OperatorNightshiftAuto:
+		return "signed by Nightshift (allow-listed package)"
+	}
+	return by
+}
+
 func jobActor(actor, endpointID, hostName string) string {
 	switch actor {
 	case "endpoint:" + endpointID:

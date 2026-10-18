@@ -304,14 +304,13 @@ void ProcessResponseOffersWindows(const AGENT_CONFIG* config, const char* respJs
 
         // 1. Verify EndpointGrant V2, against the pinned key, for this kind,
         //    inside this endpoint's capability manifest
-        if (Agent_TrustOfferRefusal(offer->kind, &offer->grant)) continue;
-        /* Against the pinned key in memory (trust.pin), never a file copy. */
-        uint8_t responseKey[32];
-        if (!Agent_TrustResponseKey(responseKey) ||
-            !VerifyResponseGrantKey(&offer->grant, offer->payload_json, config->endpoint_id, responseKey)) {
-            // Drop offer silently: no ACK, no result
-            continue;
-        }
+        const char* refuse1 = Agent_TrustOfferRefusal(offer->kind, &offer->grant);
+        if (refuse1) continue;
+        /* Against the pinned key in memory (trust.pin), never a file copy; a
+         * script on a host-authority host against its host key. V3 grants
+         * must name this job. No ACK, no result on a refusal. */
+        const char* refuse2 = Agent_TrustOfferGrantRefusal(offer->job_id, &offer->grant, offer->payload_json, config->endpoint_id);
+        if (refuse2) continue;
 
         // 2. Durable Replay Cache check (C:\ProgramData\Ominull\replay_cache.state)
         if (!ReplayCache_CheckAndRecord(NULL, offer->grant.grant_id, offer->grant.nonce, offer->grant.expires_at)) {

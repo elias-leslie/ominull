@@ -100,6 +100,9 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if err := s.migrateSupervision(); err != nil {
 		return nil, fmt.Errorf("response store migration failed: %w", err)
 	}
+	if err := s.migrateReservations(); err != nil {
+		return nil, fmt.Errorf("response store migration failed: %w", err)
+	}
 	return s, nil
 }
 
@@ -221,6 +224,14 @@ func (s *Store) CreateJob(tenantID, endpointID string, kind ActionKind, requeste
 	}
 
 	jobID := uuid.New().String()
+	if grant.Version == GrantVersionJob {
+		// A V3 grant names its job: the job takes that id (the courier route
+		// reserved it), so the agent can check the grant is for this job.
+		if _, err := uuid.Parse(grant.JobID); err != nil {
+			return nil, errors.New("a V3 grant's job_id must be a reserved job id")
+		}
+		jobID = grant.JobID
+	}
 	job := &JobRecord{
 		ID:                   jobID,
 		TenantID:             tenantID,

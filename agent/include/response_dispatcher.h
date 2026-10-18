@@ -312,6 +312,7 @@ typedef struct {
     int64_t  issued_at;
     int64_t  expires_at;
     char     nonce[65];
+    char     job_id[64];        /* V3: the hub job this grant is for */
     char     signer_key_id[65];
     char     signature[130];
 } ResponseGrant;
@@ -426,6 +427,8 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
             if (!ParseInt64Field(p, &grant->expires_at)) return false;
         } else if (strcmp(key, "nonce") == 0) {
             if (!ParseBoundedString(p, grant->nonce, sizeof(grant->nonce))) return false;
+        } else if (strcmp(key, "job_id") == 0) {
+            if (!ParseBoundedString(p, grant->job_id, sizeof(grant->job_id))) return false;
         } else if (strcmp(key, "signer_key_id") == 0) {
             if (!ParseBoundedString(p, grant->signer_key_id, sizeof(grant->signer_key_id))) return false;
         } else if (strcmp(key, "signature") == 0) {
@@ -451,7 +454,9 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
         }
     }
 
-    if (grant->version != 2 || grant->grant_id[0] == '\0' ||
+    /* V2, or V3 which binds the hub job id (an empty one is no V3 grant). */
+    if ((grant->version != 2 && grant->version != 3) || (grant->version == 3 && grant->job_id[0] == '\0') ||
+        grant->grant_id[0] == '\0' ||
         grant->endpoint_id[0] == '\0' || grant->action_kind[0] == '\0' ||
         grant->action_digest[0] == '\0' || grant->signature[0] == '\0') {
         return false;
@@ -603,8 +608,9 @@ static inline bool VerifyResponseGrantKey(
 ) {
     if (!grant || !expected_endpoint_id || !pub_bytes) return false;
 
-    // 1. Version must be strictly 2
-    if (grant->version != 2) return false;
+    // 1. Version 2, or 3 (V2 plus the hub job id; the caller compares it with the offer's)
+    if (grant->version != 2 && grant->version != 3) return false;
+    if (grant->version == 3 && !grant->job_id[0]) return false;
 
     // 2. Strict endpoint binding
     if (strcmp(grant->endpoint_id, expected_endpoint_id) != 0) return false;
@@ -661,9 +667,9 @@ static inline bool VerifyResponseGrantKey(
         }
     }
 
-    // 5. Binary canonical encoding (OMINULL-ENDPOINT-GRANT-V2)
+    // 5. Binary canonical encoding (OMINULL-ENDPOINT-GRANT-V2 or -V3)
     uint8_t canonical_bytes[1024];
-    size_t canonical_len = EncodeGrantV2Canonical(
+    size_t canonical_len = EncodeGrantCanonical(
         grant->version,
         grant->grant_id,
         grant->tenant_id,
@@ -675,6 +681,7 @@ static inline bool VerifyResponseGrantKey(
         grant->issued_at,
         grant->expires_at,
         grant->nonce,
+        grant->job_id,
         grant->signer_key_id,
         canonical_bytes,
         sizeof(canonical_bytes)
@@ -703,7 +710,23 @@ static inline bool VerifyResponseGrant(
 
 /* ---------------------------------------------------------------------------
  * Durable Replay Cache
+ *
+ * One line per accepted grant: "grant_id nonce expires_at". A grant is
+ * accepted at most once: its grant id and its nonce are each refused while
+ * the entry is kept. Entries are kept until expires_at plus the verifier's
+ * clock grace (REPLAY_CACHE_GRACE_SECONDS), so a grant that still verifies
+ * can never find its entry gone. The cache fails closed: when it holds
+ * REPLAY_CACHE_MAX live entries, cannot allocate, or cannot be written, the
+ * new grant is refused rather than an old entry dropped.
  * ------------------------------------------------------------------------- */
+
+#define REPLAY_CACHE_MAX 4096
+#define REPLAY_CACHE_GRACE_SECONDS 60
+
+/* ReplayCache_Keep: whether an entry expiring at exp still guards at now. */
+static inline bool ReplayCache_Keep(int64_t exp, int64_t now) {
+    return exp > now - REPLAY_CACHE_GRACE_SECONDS;
+}
 
 #ifdef _WIN32
 static inline bool ReplayCache_CheckAndRecord(
@@ -726,64 +749,59 @@ static inline bool ReplayCache_CheckAndRecord(
         return false;
     }
 
+    bool accepted = false;
     DWORD fileSize = GetFileSize(hFile, NULL);
-    char* buf = (char*)malloc(fileSize + 1);
-    if (!buf) {
-        UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &ov);
-        CloseHandle(hFile);
-        return false;
-    }
-
+    char* buf = fileSize == INVALID_FILE_SIZE ? NULL : (char*)malloc((size_t)fileSize + 1);
+    char** retained = (char**)malloc(REPLAY_CACHE_MAX * sizeof(char*));
+    size_t retained_count = 0;
     DWORD bytesRead = 0;
-    ReadFile(hFile, buf, fileSize, &bytesRead, NULL);
+    if (!buf || !retained || !ReadFile(hFile, buf, fileSize, &bytesRead, NULL)) goto done;
     buf[bytesRead] = '\0';
 
     int64_t now = (int64_t)time(NULL);
-    bool replay_detected = false;
-
-    char** retained = (char**)malloc(1024 * sizeof(char*));
-    size_t retained_count = 0;
-
+    bool ok = true;
     char* line = strtok(buf, "\r\n");
-    while (line) {
+    while (line && ok) {
         char g_id[64] = {0}, n_id[65] = {0};
-        int64_t exp = 0;
-        if (sscanf(line, "%63s %64s %lld", g_id, n_id, (long long*)&exp) >= 1) {
-            if (strcmp(g_id, grant_id) == 0 || (nonce && nonce[0] && strcmp(n_id, nonce) == 0)) {
-                replay_detected = true;
-            }
-            if (exp > now && retained && retained_count < 1024) {
-                retained[retained_count++] = strdup(line);
+        long long exp = 0;
+        if (sscanf(line, "%63s %64s %lld", g_id, n_id, &exp) >= 1) {
+            if (!ReplayCache_Keep((int64_t)exp, now)) {
+                /* past expiry plus grace: its grant no longer verifies; dropped */
+            } else if (strcmp(g_id, grant_id) == 0 || (nonce && nonce[0] && strcmp(n_id, nonce) == 0)) {
+                ok = false; /* replay */
+            } else {
+                if (retained_count >= REPLAY_CACHE_MAX - 1) ok = false;   /* full: refuse, never drop */
+                else if (!(retained[retained_count] = _strdup(line))) ok = false;
+                else retained_count++;
             }
         }
         line = strtok(NULL, "\r\n");
     }
-    free(buf);
+    if (!ok) goto done;
 
-    if (!replay_detected) {
-        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-        SetEndOfFile(hFile);
-        DWORD written = 0;
-        for (size_t i = 0; i < retained_count; i++) {
-            WriteFile(hFile, retained[i], (DWORD)strlen(retained[i]), &written, NULL);
-            WriteFile(hFile, "\r\n", 2, &written, NULL);
-        }
-        char new_entry[256];
-        int nlen = snprintf(new_entry, sizeof(new_entry), "%s %s %lld\r\n", grant_id, nonce ? nonce : "-", (long long)expires_at);
-        if (nlen > 0) {
-            WriteFile(hFile, new_entry, (DWORD)nlen, &written, NULL);
-        }
-        FlushFileBuffers(hFile);
+    SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+    if (!SetEndOfFile(hFile)) goto done;
+    DWORD written = 0;
+    ok = true;
+    for (size_t i = 0; i < retained_count && ok; i++) {
+        ok = WriteFile(hFile, retained[i], (DWORD)strlen(retained[i]), &written, NULL) &&
+             WriteFile(hFile, "\r\n", 2, &written, NULL);
     }
+    char new_entry[256];
+    int nlen = snprintf(new_entry, sizeof(new_entry), "%s %s %lld\r\n", grant_id, nonce && nonce[0] ? nonce : "-", (long long)expires_at);
+    ok = ok && nlen > 0 && (size_t)nlen < sizeof(new_entry) && WriteFile(hFile, new_entry, (DWORD)nlen, &written, NULL) &&
+         written == (DWORD)nlen && FlushFileBuffers(hFile);
+    accepted = ok;
 
+done:
     if (retained) {
         for (size_t i = 0; i < retained_count; i++) free(retained[i]);
         free(retained);
     }
-
+    free(buf);
     UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &ov);
     CloseHandle(hFile);
-    return !replay_detected;
+    return accepted;
 }
 #else
 static inline bool ReplayCache_CheckAndRecord(
@@ -812,33 +830,40 @@ static inline bool ReplayCache_CheckAndRecord(
 
     int64_t now = (int64_t)time(NULL);
     char line[256];
-    bool replay_detected = false;
-
-    char** retained = (char**)malloc(1024 * sizeof(char*));
+    bool ok = true, accepted = false;
+    char** retained = (char**)malloc(REPLAY_CACHE_MAX * sizeof(char*));
     size_t retained_count = 0;
+    if (!retained) ok = false;
 
-    while (fgets(line, sizeof(line), fp)) {
+    while (ok && fgets(line, sizeof(line), fp)) {
         char g_id[64] = {0}, n_id[65] = {0};
-        int64_t exp = 0;
-        if (sscanf(line, "%63s %64s %ld", g_id, n_id, &exp) >= 1) {
-            if (strcmp(g_id, grant_id) == 0 || (nonce && nonce[0] && strcmp(n_id, nonce) == 0)) {
-                replay_detected = true;
-            }
-            if (exp > now && retained && retained_count < 1024) {
-                retained[retained_count++] = strdup(line);
+        long long exp = 0;
+        if (sscanf(line, "%63s %64s %lld", g_id, n_id, &exp) >= 1) {
+            if (!ReplayCache_Keep((int64_t)exp, now)) {
+                /* past expiry plus grace: its grant no longer verifies; dropped */
+            } else if (strcmp(g_id, grant_id) == 0 || (nonce && nonce[0] && strcmp(n_id, nonce) == 0)) {
+                ok = false; /* replay */
+            } else {
+                if (retained_count >= REPLAY_CACHE_MAX - 1) ok = false;   /* full: refuse, never drop */
+                else if (!(retained[retained_count] = strdup(line))) ok = false;
+                else retained_count++;
             }
         }
     }
+    if (ok && ferror(fp)) ok = false;
 
-    if (!replay_detected) {
+    if (ok) {
         fseek(fp, 0, SEEK_SET);
         if (ftruncate(fd, 0) == 0) {
-            for (size_t i = 0; i < retained_count; i++) {
-                fputs(retained[i], fp);
+            for (size_t i = 0; i < retained_count && ok; i++) {
+                size_t l = strlen(retained[i]);
+                if (fputs(retained[i], fp) < 0) ok = false;
+                else if (l && retained[i][l - 1] != '\n' && fputc('\n', fp) == EOF) ok = false;
             }
-            fprintf(fp, "%s %s %ld\n", grant_id, nonce ? nonce : "-", expires_at);
-            fflush(fp);
-            fsync(fd);
+            if (ok && fprintf(fp, "%s %s %lld\n", grant_id, nonce && nonce[0] ? nonce : "-", (long long)expires_at) < 0) ok = false;
+            if (ok && fflush(fp) != 0) ok = false;
+            if (ok && fsync(fd) != 0) ok = false;
+            accepted = ok;
         }
     }
 
@@ -849,7 +874,7 @@ static inline bool ReplayCache_CheckAndRecord(
 
     flock(fd, LOCK_UN);
     fclose(fp);
-    return !replay_detected;
+    return accepted;
 }
 #endif
 

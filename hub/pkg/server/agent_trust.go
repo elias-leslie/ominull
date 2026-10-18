@@ -732,23 +732,29 @@ func (s *Server) afterProfileChange(ctx context.Context, endpointID string) {
 // ------------------------------------------------------------- fleet view
 
 type fleetTrustRow struct {
-	EndpointID      string   `json:"endpoint_id"`
-	Hostname        string   `json:"hostname"`
-	AgentVersion    string   `json:"agent_version"`
-	Verification    string   `json:"verification"` // agent | hub-only | unknown
-	Keys            string   `json:"keys,omitempty"`
-	TrustBundle     string   `json:"trust_bundle"` // signed | unsigned | unavailable (the tenant's)
-	MissingKeys     []string `json:"missing_keys,omitempty"`
-	Profile         string   `json:"profile,omitempty"`
-	Ceiling         string   `json:"ceiling,omitempty"`
-	ManifestSeq     int64    `json:"manifest_seq,omitempty"`
-	HubIsolated     bool     `json:"hub_isolated"`
-	AgentIsolated   *bool    `json:"agent_isolated,omitempty"`
-	IsolationSource string   `json:"isolation_source,omitempty"`
-	Disagrees       bool     `json:"disagrees,omitempty"`
-	Refused         string   `json:"refused,omitempty"`
-	RefusedAt       int64    `json:"refused_at,omitempty"`
-	ReportedAt      string   `json:"reported_at,omitempty"`
+	EndpointID   string   `json:"endpoint_id"`
+	Hostname     string   `json:"hostname"`
+	AgentVersion string   `json:"agent_version"`
+	Verification string   `json:"verification"` // agent | hub-only | unknown
+	Keys         string   `json:"keys,omitempty"`
+	TrustBundle  string   `json:"trust_bundle"` // signed | unsigned | unavailable (the tenant's)
+	MissingKeys  []string `json:"missing_keys,omitempty"`
+	Profile      string   `json:"profile,omitempty"`
+	Ceiling      string   `json:"ceiling,omitempty"`
+	// Host authority: keys pinned on the host (ids and roles), the auto
+	// allow-list, and why a host file was not used.
+	HostAuthority   bool                       `json:"host_authority,omitempty"`
+	HostKeys        []response.HostKeyReport   `json:"host_keys,omitempty"`
+	HostAllow       []response.HostAllowReport `json:"host_allow,omitempty"`
+	HostError       string                     `json:"host_error,omitempty"`
+	ManifestSeq     int64                      `json:"manifest_seq,omitempty"`
+	HubIsolated     bool                       `json:"hub_isolated"`
+	AgentIsolated   *bool                      `json:"agent_isolated,omitempty"`
+	IsolationSource string                     `json:"isolation_source,omitempty"`
+	Disagrees       bool                       `json:"disagrees,omitempty"`
+	Refused         string                     `json:"refused,omitempty"`
+	RefusedAt       int64                      `json:"refused_at,omitempty"`
+	ReportedAt      string                     `json:"reported_at,omitempty"`
 }
 
 // handleFleetTrust is the fleet's trust report: which agents verify grants
@@ -809,6 +815,7 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 				row.MissingKeys = append(row.MissingKeys, "policy")
 			}
 			row.Profile, row.ManifestSeq, row.Ceiling = rep.Profile, rep.ManifestSeq, rep.Ceiling
+			row.HostAuthority, row.HostKeys, row.HostAllow, row.HostError = rep.HostAuthority, rep.HostKeys, rep.HostAllow, rep.HostError
 			iso := rep.Isolated
 			row.AgentIsolated = &iso
 			row.IsolationSource = rep.IsolationSource

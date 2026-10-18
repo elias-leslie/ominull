@@ -37,8 +37,19 @@ const (
 	ActionKindScreenSession ActionKind = "screen_session"
 )
 
-// GrantVersion is the current version of the endpoint grant protocol.
+// GrantVersion is the version the OmniNull authority signs.
 const GrantVersion = 2
+
+// GrantVersionJob is OMINULL-ENDPOINT-GRANT-V3: V2 plus job_id, the hub job
+// the grant is for, after the nonce. Host-authority grants (Nightshift) are
+// always V3; agents from 1.8.81 accept both. docs/HOST_AUTHORITY.md.
+const GrantVersionJob = 3
+
+// Host-authority operators: who signed a grant brought by the courier route.
+const (
+	OperatorNightshiftTap  = "nightshift:tap"
+	OperatorNightshiftAuto = "nightshift:auto"
+)
 
 // EndpointGrant is an immutable, cryptographically signed authorization token
 // issued by a tenant's response authority. The endpoint verifies this grant before
@@ -52,16 +63,21 @@ type EndpointGrant struct {
 	ActionDigest      string     `json:"action_digest"` // hex sha256 of canonical action payload
 	OperatorID        string     `json:"operator_id"`
 	ResponseSessionID string     `json:"response_session_id"`
-	IssuedAt          int64      `json:"issued_at"`     // unix seconds
-	ExpiresAt         int64      `json:"expires_at"`    // unix seconds
-	Nonce             string     `json:"nonce"`         // hex random nonce
-	SignerKeyID       string     `json:"signer_key_id"` // hex sha256 fingerprint of public key
-	Signature         string     `json:"signature"`     // hex ed25519 signature
+	IssuedAt          int64      `json:"issued_at"`        // unix seconds
+	ExpiresAt         int64      `json:"expires_at"`       // unix seconds
+	Nonce             string     `json:"nonce"`            // hex random nonce
+	JobID             string     `json:"job_id,omitempty"` // V3: the hub job this grant is for
+	SignerKeyID       string     `json:"signer_key_id"`    // hex sha256 fingerprint of public key
+	Signature         string     `json:"signature"`        // hex ed25519 signature
 }
 
 // CanonicalBytes returns the deterministic length-prefixed bytes for signature verification.
 func (g *EndpointGrant) CanonicalBytes() []byte {
-	enc := NewCanonicalEncoder("OMINULL-ENDPOINT-GRANT-V2")
+	tag := "OMINULL-ENDPOINT-GRANT-V2"
+	if g.Version == GrantVersionJob {
+		tag = "OMINULL-ENDPOINT-GRANT-V3"
+	}
+	enc := NewCanonicalEncoder(tag)
 	enc.WriteUint32(uint32(g.Version))
 	enc.WriteString(g.GrantID)
 	enc.WriteString(g.TenantID)
@@ -73,6 +89,9 @@ func (g *EndpointGrant) CanonicalBytes() []byte {
 	enc.WriteInt64(g.IssuedAt)
 	enc.WriteInt64(g.ExpiresAt)
 	enc.WriteHexNormalized(g.Nonce)
+	if g.Version == GrantVersionJob {
+		enc.WriteString(g.JobID)
+	}
 	enc.WriteHexNormalized(g.SignerKeyID)
 	return enc.Bytes()
 }
@@ -102,8 +121,8 @@ func (g *EndpointGrant) CanonicalDigest() [32]byte {
 
 // Verify checks the signature against the provided tenant response Ed25519 public key.
 func (g *EndpointGrant) Verify(pubKey ed25519.PublicKey, now time.Time) error {
-	if g.Version != GrantVersion {
-		return fmt.Errorf("unsupported grant version: %d (expected %d)", g.Version, GrantVersion)
+	if err := g.checkVersion(); err != nil {
+		return err
 	}
 	if g.GrantID == "" || g.TenantID == "" || g.EndpointID == "" {
 		return errors.New("missing required grant identifiers")
@@ -142,8 +161,8 @@ func (g *EndpointGrant) Verify(pubKey ed25519.PublicKey, now time.Time) error {
 
 // Validate checks that all required fields of the grant are present and well-formed.
 func (g *EndpointGrant) Validate() error {
-	if g.Version != GrantVersion {
-		return fmt.Errorf("unsupported grant version: %d (expected %d)", g.Version, GrantVersion)
+	if err := g.checkVersion(); err != nil {
+		return err
 	}
 	if g.GrantID == "" {
 		return errors.New("missing grant_id")
@@ -165,7 +184,7 @@ func (g *EndpointGrant) Validate() error {
 	if g.OperatorID == "" {
 		return errors.New("missing operator_id")
 	}
-	if g.ResponseSessionID == "" {
+	if g.ResponseSessionID == "" && !g.HostAuthority() {
 		return errors.New("missing response_session_id")
 	}
 	if g.IssuedAt <= 0 || g.ExpiresAt <= 0 || g.ExpiresAt <= g.IssuedAt {
@@ -181,6 +200,27 @@ func (g *EndpointGrant) Validate() error {
 		return fmt.Errorf("invalid signature length: %d (expected %d)", len(g.Signature), hex.EncodedLen(ed25519.SignatureSize))
 	}
 	return nil
+}
+
+// checkVersion: V2, or V3 naming its job.
+func (g *EndpointGrant) checkVersion() error {
+	switch g.Version {
+	case GrantVersion:
+		return nil
+	case GrantVersionJob:
+		if g.JobID == "" {
+			return errors.New("a V3 grant must name its job_id")
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported grant version: %d (expected %d or %d)", g.Version, GrantVersion, GrantVersionJob)
+}
+
+// HostAuthority says the grant claims a host-authority signer (Nightshift):
+// a V3 grant with a nightshift operator. Only the agent can check the
+// signature, against the key pinned on the host.
+func (g *EndpointGrant) HostAuthority() bool {
+	return g.Version == GrantVersionJob && (g.OperatorID == OperatorNightshiftTap || g.OperatorID == OperatorNightshiftAuto)
 }
 
 // Validate checks that all required fields of the job offer are present and valid.

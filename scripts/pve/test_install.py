@@ -49,13 +49,13 @@ if "-i" in args:
             sys.exit(sandbox([match.group(1)], {"SSH_ORIGINAL_COMMAND": original}))
     sys.exit(255)
 alias = args[0]
-assert alias == "proxmox-gem" and args[1:3] == ["bash", "-s"], args
+assert alias == "pve-host" and args[1:3] == ["bash", "-s"], args
 # Like sshd: the remote arguments arrive joined with spaces and the login shell re-splits them.
 sys.exit(sandbox(["bash", "-c", " ".join(args[1:])]))
 '''
 
 FAKE_PVE_BIN = {
-    "hostname": "#!/bin/sh\necho davion-gem\n",
+    "hostname": "#!/bin/sh\necho pve-host\n",
     "pvesh": "#!/bin/sh\necho '{\"status\": \"running\"}'\n",
     "pct": "#!/bin/sh\n[ \"$1 $2 $3 $4\" = 'exec 150 -- dpkg-query' ] || exit 2\nprintf 'install ok installed 1.8.67'\n",
 }
@@ -88,7 +88,8 @@ class InstallTests(unittest.TestCase):
         (tools / "ssh").write_text(FAKE_SSH)
         (tools / "ssh").chmod(0o755)
         self.env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"], "FAKE_PVE": str(self.pve),
-                    "OMINULL_PVE_KEY_DIR": str(self.dir / "keys"), "HOME": str(self.dir)}
+                    "OMINULL_PVE_KEY_DIR": str(self.dir / "keys"), "HOME": str(self.dir),
+                    "PVE_HOST": "pve-host", "OMINULL_PVE_FROM": "198.51.100.128"}
         (self.dir / ".ssh").mkdir()
 
     def install(self, *args):
@@ -107,7 +108,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(lines[0].split()[-1], "owner")
         self.assertEqual([line.split()[-1] for line in lines[1:]], ["ominull-backup", "ominull-observe", "ominull-hub-install"])
         for line, command in zip(lines[1:], ("ominull-backup-dispatch", "ominull-observe-dispatch", "ominull-hub-install")):
-            self.assertTrue(line.startswith('restrict,from="192.168.86.128",command="/usr/local/sbin/' + command + '" ssh-ed25519 '))
+            self.assertTrue(line.startswith('restrict,from="198.51.100.128",command="/usr/local/sbin/' + command + '" ssh-ed25519 '))
         for name in ("ominull-backup-dispatch", "ominull-observe-dispatch", "ominull-hub-install"):
             self.assertTrue(os.access(self.pve / "sbin" / name, os.X_OK))
         for role in ("backup", "observe", "hub-install"):
@@ -135,7 +136,10 @@ class InstallTests(unittest.TestCase):
         original = pin.read_bytes()
         # A rotation commit pins a new key; --release-key-ref keeps the outgoing one that signs the rotation release.
         header = self.repo / "agent/include/release_key.h"
-        header.write_text(header.read_text().replace(original.decode().splitlines()[1], "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUczKMOE8yfDzAWxOC6WPJiSTz/Oo"))
+        # A fresh key's first base64 line stands in for the rotated key (any fixed line may become the real one).
+        fresh = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"], capture_output=True, check=True).stdout
+        fresh_pem = subprocess.run(["openssl", "ec", "-pubout"], input=fresh, capture_output=True, check=True).stdout.decode()
+        header.write_text(header.read_text().replace(original.decode().splitlines()[1], fresh_pem.splitlines()[1]))
         git = ["git", "-C", str(self.repo), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid"]
         subprocess.run([*git, "commit", "-q", "-am", "rotation"], check=True)
         result = self.install("--repin-release-key", "--release-key-ref", "HEAD~1")

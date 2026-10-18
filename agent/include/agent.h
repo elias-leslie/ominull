@@ -250,6 +250,7 @@ int Agent_TrustAllow(char out[][64], int cap);
 int Agent_TrustPeers(char out[][64], int cap);
 int Agent_TrustDeadmanBeats(int unsupervisedBeats, int beatMillis);
 const char* Agent_TrustOfferRefusal(const char* kind, const void* grant);
+const char* Agent_TrustOfferGrantRefusal(const char* job_id, const void* grant, const char* payload_json, const char* endpoint_id);
 void Agent_TrustResponseKeyPath(char* out, size_t cap);
 /* Agent_TrustResponseKey copies the pinned response key (false when none). */
 bool Agent_TrustResponseKey(uint8_t out[32]);

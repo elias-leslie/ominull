@@ -53,6 +53,14 @@ typedef struct { uint8_t key[32]; int64_t seq; } TrustFloor;
 #define TRUST_MAX_GRANTS 8
 #define TRUST_MAX_RULES 64
 #define TRUST_SKEW_SECONDS 60
+/* Host authority (docs/HOST_AUTHORITY.md): keys an administrator pins on the
+ * host itself, outside the hub's trust bundle. The agent never writes these
+ * files and a re-pin leaves them alone. */
+#define TRUST_HOST_KEYS_FILE  "host_authority.json"
+#define TRUST_HOST_ALLOW_FILE "host_auto_allow.json"
+#define TRUST_MAX_HOST_KEYS   4
+#define TRUST_MAX_HOST_ALLOW  16
+#define TRUST_MAX_HOST_MODES  4
 /* A released mesh slot is remembered this long so an older quarantine grant
  * that is still inside its validity window cannot be replayed over it. */
 #define TRUST_MESH_FORGET_SECONDS (25 * 3600)
@@ -434,6 +442,22 @@ typedef struct {
     int  port;
 } TrustRule;
 
+/* One pinned host-authority key. role tap: any script_exec; auto: only
+ * packages on the host's allow-list, in an allowed mode. */
+typedef struct {
+    char    id[65];          /* signer_key_id: lowercase hex sha256 of the key */
+    uint8_t key[32];
+    bool    autoRole;
+} TrustHostKey;
+
+/* One allow-listed package for auto grants. */
+typedef struct {
+    char name[64];
+    char sha256[65];         /* sha256 of the package source (script_digest) */
+    char modes[TRUST_MAX_HOST_MODES][16];
+    int  modeCount;
+} TrustHostAllow;
+
 /* Trust_ReleaseVerifier checks a DER ECDSA-P256/SHA-256 signature over msg
  * against the release key compiled into this agent (openssl on Linux, CNG on
  * Windows). It is the trust root for pinning the authority's keys. */
@@ -467,6 +491,15 @@ typedef struct {
     int64_t epoch;               /* of the pinned bundle */
     int64_t epoch_floor;         /* highest epoch ever pinned here, or one above a revoked pin (survives --repin-trust) */
     char    ceiling[16];         /* local capability ceiling (capability.ceiling), "" = none */
+    /* Host authority: host_present once host_authority.json exists (then
+     * script_exec takes only host-authority grants, even when the file is
+     * unreadable and no key loaded: it fails closed). */
+    bool    host_present;
+    TrustHostKey host_keys[TRUST_MAX_HOST_KEYS];
+    int     hostKeyCount;
+    TrustHostAllow host_allow[TRUST_MAX_HOST_ALLOW];
+    int     hostAllowCount;
+    char    host_error[96];      /* why a host file was not used; reported, never secret */
     /* manifest.floor: the highest manifest seq taken under each recent policy
      * key, kept across --repin-trust (a manifest only verifies under its own
      * key, so a key that comes back keeps its floor). Oldest entry first. */
@@ -711,23 +744,175 @@ static inline bool Trust_ManifestHas(const TrustManifest* m, const char* cap) {
 
 /* Trust_CeilingHas: the local ceiling, set by an administrator on the host
  * (--capability-ceiling), caps what any manifest can grant. A hub cannot
- * raise it; an unreadable ceiling reads as monitor. */
+ * raise it; an unreadable ceiling reads as monitor. Levels
+ * (docs/HOST_AUTHORITY.md):
+ *   monitor         updates only
+ *   isolate         isolation, mesh quarantine, evidence collection, updates
+ *   signed-scripts  isolate plus scripts, and those only with a pinned host
+ *                   authority key (Trust_Allows)
+ *   respond         everything but scripts
+ *   engagement      everything */
 static inline bool Trust_CeilingHas(const char* ceiling, const char* cap) {
     if (!ceiling || !ceiling[0]) return true;
     if (!cap) return false;
     if (strcmp(cap, "update") == 0) return true;
     if (strcmp(ceiling, "engagement") == 0) return true;
     if (strcmp(ceiling, "respond") == 0) return strcmp(cap, "script") != 0;
+    bool isolateLevel = strcmp(cap, "isolate") == 0 || strcmp(cap, "mesh") == 0 || strcmp(cap, "collect") == 0;
+    if (strcmp(ceiling, "isolate") == 0) return isolateLevel;
+    if (strcmp(ceiling, "signed-scripts") == 0) return isolateLevel || strcmp(cap, "script") == 0;
     return false;
 }
 
+/* Manifest profiles (signed by the authority). */
 static inline bool Trust_ProfileName(const char* p) {
     return p && (strcmp(p, "monitor") == 0 || strcmp(p, "respond") == 0 || strcmp(p, "engagement") == 0);
 }
 
+/* Ceiling levels (set on the host): the profiles plus isolate and
+ * signed-scripts. */
+static inline bool Trust_CeilingName(const char* p) {
+    return Trust_ProfileName(p) || (p && (strcmp(p, "isolate") == 0 || strcmp(p, "signed-scripts") == 0));
+}
+
 static inline bool Trust_Allows(const TrustContext* t, const char* kind) {
     const char* cap = Trust_CapabilityFor(kind);
-    return Trust_ManifestHas(&t->manifest, cap) && Trust_CeilingHas(t->ceiling, cap);
+    if (!Trust_ManifestHas(&t->manifest, cap) || !Trust_CeilingHas(t->ceiling, cap)) return false;
+    /* signed-scripts: scripts only where a host authority key is pinned. */
+    if (cap && strcmp(cap, "script") == 0 && strcmp(t->ceiling, "signed-scripts") == 0 && t->hostKeyCount == 0) return false;
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Host authority files (docs/HOST_AUTHORITY.md). Root/SYSTEM-owned, read at
+ * start, never written by the agent.
+ *   host_authority.json  {"v":1,"keys":[{"id":"<sha256 hex of key>","role":"tap"|"auto","ed25519":"<64 hex>"}]}
+ *   host_auto_allow.json {"v":1,"packages":[{"name":"..","sha256":"<64 hex>","modes":["audit","enforce"]}]}
+ * ------------------------------------------------------------------------- */
+
+static inline bool Trust_Hex64(const char* s) {
+    if (!s || strlen(s) != 64) return false;
+    for (const char* c = s; *c; c++) if (!isxdigit((unsigned char)*c)) return false;
+    return true;
+}
+
+static inline void Trust_Lower(char* s) {
+    for (; *s; s++) *s = (char)tolower((unsigned char)*s);
+}
+
+/* Trust_EachElement walks a JSON array: calls fn on each element's span.
+ * Returns the count, or -1 when the array is malformed, longer than cap, or
+ * fn refuses an element. */
+typedef bool (*Trust_ElementFn)(const char* v, const char* ve, void* ctx, int i);
+static inline int Trust_EachElement(const char* v, const char* vend, int cap, Trust_ElementFn fn, void* ctx) {
+    const char* p = TJ_Ws(v, vend);
+    if (p >= vend || *p != '[') return -1;
+    p = TJ_Ws(p + 1, vend);
+    if (p < vend && *p == ']') return 0;
+    int n = 0;
+    for (;;) {
+        p = TJ_Ws(p, vend);
+        const char* e = TJ_SkipValue(p, vend, 1);
+        if (!e || n >= cap || !fn(p, e, ctx, n)) return -1;
+        n++;
+        p = TJ_Ws(e, vend);
+        if (p >= vend) return -1;
+        if (*p == ',') { p++; continue; }
+        if (*p == ']') return n;
+        return -1;
+    }
+}
+
+static inline bool Trust_HostKeyElement(const char* v, const char* ve, void* ctx, int i) {
+    TrustHostKey* keys = (TrustHostKey*)ctx;
+    TrustHostKey* k = &keys[i];
+    char role[8], hex[80];
+    memset(k, 0, sizeof(*k));
+    if (!TJ_MemberPlain(v, ve, "id", k->id, sizeof(k->id)) || !Trust_Hex64(k->id)) return false;
+    if (!TJ_MemberPlain(v, ve, "role", role, sizeof(role))) return false;
+    if (strcmp(role, "tap") == 0) k->autoRole = false;
+    else if (strcmp(role, "auto") == 0) k->autoRole = true;
+    else return false;
+    if (!TJ_MemberPlain(v, ve, "ed25519", hex, sizeof(hex)) || !Trust_Hex64(hex) || !Trust_HexKey(hex, k->key)) return false;
+    /* The id is the key's fingerprint, as the grant's signer_key_id carries it. */
+    uint8_t fp[32];
+    char fphex[65];
+    Response_SHA256_Sum(k->key, 32, fp);
+    Response_BytesToHex(fp, 32, fphex);
+    Trust_Lower(k->id);
+    if (strcasecmp(fphex, k->id) != 0) return false;
+    for (int j = 0; j < i; j++) if (strcmp(keys[j].id, k->id) == 0) return false;
+    return true;
+}
+
+static inline bool Trust_HostAllowElement(const char* v, const char* ve, void* ctx, int i) {
+    TrustHostAllow* a = &((TrustHostAllow*)ctx)[i];
+    memset(a, 0, sizeof(*a));
+    if (!TJ_MemberPlain(v, ve, "name", a->name, sizeof(a->name)) || !a->name[0]) return false;
+    if (!TJ_MemberPlain(v, ve, "sha256", a->sha256, sizeof(a->sha256)) || !Trust_Hex64(a->sha256)) return false;
+    Trust_Lower(a->sha256);
+    const char *mv, *mve;
+    char modes[TRUST_MAX_HOST_MODES][64];
+    if (TJ_Member(v, ve, "modes", &mv, &mve) != 1) return false;
+    int n = TJ_PlainArray(mv, mve, modes, TRUST_MAX_HOST_MODES);
+    if (n <= 0) return false;
+    for (int j = 0; j < n; j++) {
+        size_t l = strlen(modes[j]);
+        if (l == 0 || l >= sizeof(a->modes[0])) return false;
+        for (const char* c = modes[j]; *c; c++) if (!(islower((unsigned char)*c) || *c == '_' || *c == '-')) return false;
+        snprintf(a->modes[j], sizeof(a->modes[j]), "%s", modes[j]);
+    }
+    a->modeCount = n;
+    return true;
+}
+
+/* Trust_HostVersion1: the document is an object whose "v" is 1. */
+static inline bool Trust_HostVersion1(const char* buf, const char* end) {
+    const char *v, *ve;
+    int64_t ver = 0;
+    return TJ_Member(buf, end, "v", &v, &ve) == 1 && TJ_Int(v, ve, &ver) && ver == 1;
+}
+
+static inline void Trust_LoadHostAuthority(TrustContext* t) {
+    char path[260], buf[8192];
+    t->hostKeyCount = 0;
+    t->hostAllowCount = 0;
+    t->host_error[0] = '\0';
+    Trust_Path(t, false, TRUST_HOST_KEYS_FILE, path, sizeof(path));
+    t->host_present = Trust_PathExists(path);
+    if (!t->host_present) return;
+    const char *v, *ve;
+    if (!Trust_ReadSmallFile(t, path, buf, sizeof(buf))) {
+        snprintf(t->host_error, sizeof(t->host_error), "host_authority.json is not root-owned, too big, or unreadable");
+        return;
+    }
+    const char* end = buf + strlen(buf);
+    TrustHostKey keys[TRUST_MAX_HOST_KEYS];
+    int n = -1;
+    if (Trust_HostVersion1(buf, end) && TJ_Member(buf, end, "keys", &v, &ve) == 1)
+        n = Trust_EachElement(v, ve, TRUST_MAX_HOST_KEYS, Trust_HostKeyElement, keys);
+    if (n <= 0) {
+        snprintf(t->host_error, sizeof(t->host_error), "host_authority.json is malformed or has no valid key");
+        return;
+    }
+    memcpy(t->host_keys, keys, sizeof(keys));
+    t->hostKeyCount = n;
+
+    Trust_Path(t, false, TRUST_HOST_ALLOW_FILE, path, sizeof(path));
+    if (!Trust_PathExists(path)) return;
+    TrustHostAllow allow[TRUST_MAX_HOST_ALLOW];
+    n = -1;
+    if (Trust_ReadSmallFile(t, path, buf, sizeof(buf))) {
+        end = buf + strlen(buf);
+        if (Trust_HostVersion1(buf, end) && TJ_Member(buf, end, "packages", &v, &ve) == 1)
+            n = Trust_EachElement(v, ve, TRUST_MAX_HOST_ALLOW, Trust_HostAllowElement, allow);
+    }
+    if (n < 0) {
+        snprintf(t->host_error, sizeof(t->host_error), "host_auto_allow.json is not root-owned or malformed; auto grants are refused");
+        return;
+    }
+    memcpy(t->host_allow, allow, sizeof(allow));
+    t->hostAllowCount = n;
 }
 
 /* ---------------------------------------------------------------------------
@@ -973,7 +1158,7 @@ static inline void Trust_Init(TrustContext* t, const char* endpoint_id, const ch
     Trust_Path(t, false, "capability.ceiling", path, sizeof(path));
     if (Trust_PathExists(path)) {
         char c[32] = "";
-        if (!Trust_ReadSmallFile(t, path, buf, sizeof(buf)) || sscanf(buf, "%31s", c) != 1 || !Trust_ProfileName(c))
+        if (!Trust_ReadSmallFile(t, path, buf, sizeof(buf)) || sscanf(buf, "%31s", c) != 1 || !Trust_CeilingName(c))
             snprintf(c, sizeof(c), "monitor");
         snprintf(t->ceiling, sizeof(t->ceiling), "%s", c);
     }
@@ -990,6 +1175,7 @@ static inline void Trust_Init(TrustContext* t, const char* endpoint_id, const ch
             line = nl + 1;
         }
     }
+    Trust_LoadHostAuthority(t);
     Trust_LoadManifestState(t);
     Trust_LoadState(t);
     t->loaded = true;
@@ -1004,6 +1190,9 @@ static inline void Trust_Distrust(TrustContext* t) {
     t->tenant[0] = '\0';
     memset(&t->manifest, 0, sizeof(t->manifest));
     memset(&t->state, 0, sizeof(t->state));
+    memset(t->host_keys, 0, sizeof(t->host_keys));   /* host_present stays: scripts stay refused */
+    t->hostKeyCount = 0;
+    t->hostAllowCount = 0;
     t->state.exists = true;   /* nothing to adopt into */
     snprintf(t->state.source, sizeof(t->state.source), "none");
     t->untrusted = true;
@@ -1288,7 +1477,7 @@ static inline const char* Trust_ParseAction(const char* payload, size_t len, con
 static inline const char* Trust_VerifyGrantCore(const TrustContext* t, const ResponseGrant* g, const uint8_t* payload, size_t len, int64_t now,
                                                 bool* genuine) {
     if (genuine) *genuine = false;
-    if (g->version != 2) return "unsupported grant version";
+    if (g->version != 2 && g->version != 3) return "unsupported grant version";
     bool autoKind = strcmp(g->action_kind, "auto_isolate") == 0;
     int key = autoKind ? TRUST_KEY_AUTO : TRUST_KEY_RESPONSE;
     if (!t->have_key[key]) return autoKind ? "no auto-isolation key is pinned" : "no response key is pinned";
@@ -1299,9 +1488,9 @@ static inline const char* Trust_VerifyGrantCore(const TrustContext* t, const Res
     Response_BytesToHex(hash, 32, hex);
     if (strcasecmp(hex, g->action_digest) != 0) return "payload does not match the grant digest";
     uint8_t canon[1024], sig[64];
-    size_t clen = EncodeGrantV2Canonical(g->version, g->grant_id, g->tenant_id, g->endpoint_id, g->action_kind, g->action_digest,
-                                         g->operator_id, g->response_session_id, g->issued_at, g->expires_at, g->nonce,
-                                         g->signer_key_id, canon, sizeof(canon));
+    size_t clen = EncodeGrantCanonical(g->version, g->grant_id, g->tenant_id, g->endpoint_id, g->action_kind, g->action_digest,
+                                       g->operator_id, g->response_session_id, g->issued_at, g->expires_at, g->nonce, g->job_id,
+                                       g->signer_key_id, canon, sizeof(canon));
     if (!clen || strlen(g->signature) != 128 || !Response_HexToBytes(g->signature, sig, 64)) return "grant signature unreadable";
     if (!Ed25519_Verify(sig, canon, clen, t->keys[key])) return "grant signature does not verify";
     if (genuine) *genuine = true;
@@ -1614,7 +1803,7 @@ static inline int Trust_DeadmanBeats(const TrustContext* t, int unsupervisedBeat
 }
 
 /* Trust_OfferRefusal checks a response job offer (collection, script,
- * terminal) beyond its signature: the offer's kind must be the kind the grant
+ * terminal, screen) beyond its signature: the offer's kind must be the kind the grant
  * signs (so an isolation or update grant can never open a terminal), and the
  * manifest must allow it. Returns NULL when the offer may run. */
 static inline const char* Trust_OfferRefusal(const TrustContext* t, const char* offerKind, const ResponseGrant* g) {
@@ -1622,14 +1811,119 @@ static inline const char* Trust_OfferRefusal(const TrustContext* t, const char* 
     if (strcmp(g->tenant_id, t->tenant) != 0) return "grant for another tenant";
     if (!offerKind || strcmp(offerKind, g->action_kind) != 0) return "the offer's kind differs from the kind its grant signs";
     if (strcmp(offerKind, "forensic_collection") != 0 && strcmp(offerKind, "script_exec") != 0 &&
-        strcmp(offerKind, "terminal_session") != 0)
+        strcmp(offerKind, "terminal_session") != 0 && strcmp(offerKind, "screen_session") != 0)
         return "not a response job kind";
     if (!Trust_Allows(t, offerKind)) return "this endpoint's capability manifest does not allow it";
     return NULL;
 }
 
+/* Trust_TextCount counts occurrences of needle in hay. */
+static inline int Trust_TextCount(const char* hay, const char* needle) {
+    int n = 0;
+    size_t l = strlen(needle);
+    for (const char* p = hay; (p = strstr(p, needle)) != NULL; p += l) n++;
+    return n;
+}
+
+/* Trust_HostAutoRefusal: an auto-role grant runs only a package on the host's
+ * allow-list (script_digest equals its sha256) in one of its modes
+ * (parameters.mode). The executor reads the payload with plain string
+ * search, so the fields read here must each occur exactly once in the text:
+ * then both readers see the same digest and parameters. */
+static inline const char* Trust_HostAutoRefusal(const TrustContext* t, const char* payload_json) {
+    if (!payload_json) return "no payload";
+    const char* end = payload_json + strlen(payload_json);
+    if (Trust_TextCount(payload_json, "\"script_digest\"") != 1 || Trust_TextCount(payload_json, "\"parameters\"") != 1 ||
+        Trust_TextCount(payload_json, "\"source\"") != 1)
+        return "auto grant payload is ambiguous";
+    char digest[80], mode[32];
+    const char *pv, *pve;
+    if (!TJ_MemberPlain(payload_json, end, "script_digest", digest, sizeof(digest)) || !Trust_Hex64(digest))
+        return "auto grant payload has no script digest";
+    if (TJ_Member(payload_json, end, "parameters", &pv, &pve) != 1 || !TJ_MemberPlain(pv, pve, "mode", mode, sizeof(mode)))
+        return "auto grant payload has no mode";
+    for (int i = 0; i < t->hostAllowCount; i++) {
+        const TrustHostAllow* a = &t->host_allow[i];
+        if (strcasecmp(a->sha256, digest) != 0) continue;
+        for (int j = 0; j < a->modeCount; j++) if (strcmp(a->modes[j], mode) == 0) return NULL;
+        return "auto grant: this mode is not allowed for the package here";
+    }
+    return "auto grant: the package is not on this host's allow-list";
+}
+
+/* Trust_OfferGrantRefusal checks a response offer's grant signature, after
+ * Trust_OfferRefusal. A V3 grant must name the offered job. Where a host
+ * authority is pinned (host_authority.json), script_exec runs only on a V3
+ * grant signed by one of its keys: operator nightshift:tap for a tap key,
+ * nightshift:auto for an auto key (then also the allow-list); the hub's
+ * response key no longer runs scripts there. Everything else verifies
+ * against the pinned response key. Returns NULL when the grant is good. */
+static inline const char* Trust_OfferGrantRefusal(const TrustContext* t, const char* job_id, const ResponseGrant* g, const char* payload_json,
+                                                  const char* endpoint_id) {
+    if (g->version == 3 && (!job_id || strcmp(g->job_id, job_id) != 0)) return "the grant is for another job";
+    if (strcmp(g->action_kind, "script_exec") == 0 && t->host_present) {
+        if (g->version != 3) return "scripts here need a host-authority grant (V3)";
+        const TrustHostKey* k = NULL;
+        for (int i = 0; i < t->hostKeyCount; i++)
+            if (strcasecmp(t->host_keys[i].id, g->signer_key_id) == 0) k = &t->host_keys[i];
+        if (!k) return "the grant's signer is not a pinned host-authority key";
+        if (strcmp(g->operator_id, k->autoRole ? "nightshift:auto" : "nightshift:tap") != 0)
+            return "the grant's operator does not match its host-authority key's role";
+        if (!VerifyResponseGrantKey(g, payload_json, endpoint_id, k->key)) return "host-authority grant does not verify";
+        return k->autoRole ? Trust_HostAutoRefusal(t, payload_json) : NULL;
+    }
+    if (!t->have_key[TRUST_KEY_RESPONSE]) return "no response key is pinned";
+    if (!VerifyResponseGrantKey(g, payload_json, endpoint_id, t->keys[TRUST_KEY_RESPONSE])) return "grant does not verify";
+    return NULL;
+}
+
 static inline void Trust_ResponseKeyPath(const TrustContext* t, char* out, size_t cap) {
     Trust_Path(t, false, TRUST_KEY_FILES[TRUST_KEY_RESPONSE], out, cap);
+}
+
+/* Trust_HostReportJSON appends the host authority to a report that is
+ * still open (no closing brace) and closes it: key ids and roles, the
+ * allow-list, and why a file was not used. Public facts only. When it does
+ * not fit, only host_authority and a count are written, so the report stays
+ * valid JSON. */
+static inline void Trust_HostReportJSON(const TrustContext* t, char* out, size_t cap) {
+    size_t len = strlen(out);
+    if (len + 2 > cap) {   /* cannot happen with the agent's buffers; keep it valid */
+        if (cap >= 5) snprintf(out, cap, "null");
+        else if (cap) out[0] = '\0';
+        return;
+    }
+    char host[2600];
+    size_t h = 0;
+#define TRUST_HOST_APPEND(...) do { int _n = snprintf(host + h, sizeof(host) - h, __VA_ARGS__); \
+        if (_n < 0 || (size_t)_n >= sizeof(host) - h) { h = sizeof(host); } else h += (size_t)_n; } while (0)
+    TRUST_HOST_APPEND(",\"host_authority\":%s", t->hostKeyCount > 0 ? "true" : "false");
+    if (t->host_present) {
+        TRUST_HOST_APPEND(",\"host_keys\":[");
+        for (int i = 0; i < t->hostKeyCount && h < sizeof(host); i++)
+            TRUST_HOST_APPEND("%s{\"id\":\"%s\",\"role\":\"%s\"}", i ? "," : "", t->host_keys[i].id, t->host_keys[i].autoRole ? "auto" : "tap");
+        TRUST_HOST_APPEND("],\"host_allow\":[");
+        for (int i = 0; i < t->hostAllowCount && h < sizeof(host); i++) {
+            const TrustHostAllow* a = &t->host_allow[i];
+            TRUST_HOST_APPEND("%s{\"name\":\"", i ? "," : "");
+            for (const char* c = a->name; *c && h < sizeof(host); c++)
+                TRUST_HOST_APPEND("%c", (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) ? ' ' : *c);
+            TRUST_HOST_APPEND("\",\"sha256\":\"%s\",\"modes\":[", a->sha256);
+            for (int j = 0; j < a->modeCount; j++) TRUST_HOST_APPEND("%s\"%s\"", j ? "," : "", a->modes[j]);
+            TRUST_HOST_APPEND("]}");
+        }
+        TRUST_HOST_APPEND("]");
+        if (t->host_error[0]) TRUST_HOST_APPEND(",\"host_error\":\"%s\"", t->host_error);
+    }
+#undef TRUST_HOST_APPEND
+    if (h >= sizeof(host) || len + h + 2 > cap) {
+        h = (size_t)snprintf(host, sizeof(host), ",\"host_authority\":%s,\"host_keys_count\":%d",
+                             t->hostKeyCount > 0 ? "true" : "false", t->hostKeyCount);
+        if (len + h + 2 > cap) h = 0;
+    }
+    memcpy(out + len, host, h);
+    out[len + h] = '}';
+    out[len + h + 1] = '\0';
 }
 
 /* Trust_ReportJSON is what this agent tells the hub about its trust state:
@@ -1650,11 +1944,12 @@ static inline void Trust_ReportJSON(const TrustContext* t, char* out, size_t cap
     snprintf(out, cap,
              "{\"v\":1,\"keys\":\"%s\",\"response_key\":%s,\"auto_isolate_key\":%s,\"policy_key\":%s,"
              "\"manifest_seq\":%lld,\"profile\":\"%s\",\"iso_seen\":%lld,\"mesh_seen\":%lld,"
-             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\"}",
+             "\"isolated\":%s,\"isolation_source\":\"%s\",\"peers\":%d,\"refused\":\"%s\",\"refused_at\":%lld,\"ceiling\":\"%s\"",
              keys, t->have_key[0] ? "true" : "false", t->have_key[1] ? "true" : "false", t->have_key[2] ? "true" : "false",
              (long long)(t->manifest.have ? t->manifest.seq : 0), t->manifest.have ? t->manifest.profile : "",
              (long long)t->state.iso_seen, (long long)t->state.mesh_seen, Trust_EffectiveIsolated(t) ? "true" : "false",
              t->state.source, npeers, refused, (long long)t->refused_at, t->ceiling);
+    Trust_HostReportJSON(t, out, cap);
 }
 
 /* Trust_Repin removes the pinned bundle so the next contact pins the hub's
@@ -1667,7 +1962,7 @@ static inline bool Trust_SetCeiling(const TrustContext* t, const char* profile) 
     char path[260], line[32];
     Trust_Path(t, false, "capability.ceiling", path, sizeof(path));
     if (profile && strcmp(profile, "none") == 0) return Trust_RemoveFile(path);
-    if (!Trust_ProfileName(profile)) return false;
+    if (!Trust_CeilingName(profile)) return false;
     snprintf(line, sizeof(line), "%s\n", profile);
     return Trust_WriteFile(t, path, line, false);
 }

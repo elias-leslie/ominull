@@ -58,7 +58,7 @@ static void make_dir(void) {
 
 static void remove_dir(void) {
     const char* files[] = {"response.pub", "auto_isolate.pub", "policy.pub", "trust.pin", "trust.epoch", "manifest.state", "manifest.floor",
-                           "capability.ceiling", "enforcement.state"};
+                           "capability.ceiling", "enforcement.state", "host_authority.json", "host_auto_allow.json"};
     char path[400];
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         snprintf(path, sizeof(path), "%s" TRUST_SEP "%s", g_dir, files[i]);
@@ -495,6 +495,207 @@ static void test_offers_and_updates(int64_t now) {
     remove_dir();
 }
 
+/* ---- host authority (docs/HOST_AUTHORITY.md) ---- */
+
+static uint8_t hk_pub[2][32], hk_sec[2][64];
+static char hk_id[2][65];
+
+static void host_keys_setup(void) {
+    for (int i = 0; i < 2; i++) {
+        uint8_t seed[32], fp[32];
+        memset(seed, 0x30 + i, sizeof(seed));
+        Ed25519_CreateKeypairFromSeed(hk_pub[i], hk_sec[i], seed);
+        Response_SHA256_Sum(hk_pub[i], 32, fp);
+        Response_BytesToHex(fp, 32, hk_id[i]);
+    }
+}
+
+static void write_host_file(const char* leaf, const char* body) {
+    char path[400];
+    snprintf(path, sizeof(path), "%s" TRUST_SEP "%s", g_dir, leaf);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fputs(body, f);
+        fclose(f);
+    }
+}
+
+static void remove_host_file(const char* leaf) {
+    char path[400];
+    snprintf(path, sizeof(path), "%s" TRUST_SEP "%s", g_dir, leaf);
+    remove(path);
+}
+
+static char hk_payload[2048];
+static char hk_digest[65];
+
+/* A script_exec payload as the hub encodes it, for the source given. */
+static void host_payload(const char* source, const char* mode) {
+    uint8_t h[32];
+    char sd[65];
+    Response_SHA256_Sum((const uint8_t*)source, strlen(source), h);
+    Response_BytesToHex(h, 32, sd);
+    snprintf(hk_payload, sizeof(hk_payload),
+             "{\"script_id\":\"scrub\",\"script_version\":1,\"script_digest\":\"%s\",\"interpreter\":\"/bin/sh\",\"source\":\"%s\","
+             "\"parameters\":{\"mode\":\"%s\"},\"timeout_seconds\":60,\"max_output_bytes\":4096}",
+             sd, source, mode);
+    snprintf(hk_digest, sizeof(hk_digest), "%s", sd);
+}
+
+/* A V3 grant over hk_payload signed by host key k. */
+static void host_grant(ResponseGrant* g, int k, int version, const char* job, const char* op) {
+    memset(g, 0, sizeof(*g));
+    int64_t now = (int64_t)time(NULL);
+    uint8_t h[32];
+    g->version = (uint32_t)version;
+    snprintf(g->grant_id, sizeof(g->grant_id), "ns-1");
+    snprintf(g->tenant_id, sizeof(g->tenant_id), "default");
+    snprintf(g->endpoint_id, sizeof(g->endpoint_id), FX_ENDPOINT);
+    snprintf(g->action_kind, sizeof(g->action_kind), "script_exec");
+    Response_SHA256_Sum((const uint8_t*)hk_payload, strlen(hk_payload), h);
+    Response_BytesToHex(h, 32, g->action_digest);
+    snprintf(g->operator_id, sizeof(g->operator_id), "%s", op);
+    g->issued_at = now;
+    g->expires_at = now + 600;
+    snprintf(g->nonce, sizeof(g->nonce), "00ff00ff");
+    if (job) snprintf(g->job_id, sizeof(g->job_id), "%s", job);
+    snprintf(g->signer_key_id, sizeof(g->signer_key_id), "%s", hk_id[k]);
+    uint8_t canon[1024], sig[64];
+    size_t n = EncodeGrantCanonical(g->version, g->grant_id, g->tenant_id, g->endpoint_id, g->action_kind, g->action_digest, g->operator_id,
+                                    g->response_session_id, g->issued_at, g->expires_at, g->nonce, g->job_id, g->signer_key_id, canon,
+                                    sizeof(canon));
+    if (n == 0) n = EncodeGrantV2Canonical(2, g->grant_id, g->tenant_id, g->endpoint_id, g->action_kind, g->action_digest, g->operator_id,
+                                           g->response_session_id, g->issued_at, g->expires_at, g->nonce, g->signer_key_id, canon,
+                                           sizeof(canon));
+    Ed25519_Sign(sig, canon, n, hk_sec[k]);
+    Response_BytesToHex(sig, 64, g->signature);
+}
+
+static void test_host_authority(int64_t now) {
+    (void)now;
+    printf("[*] ceilings isolate and signed-scripts, host authority\n");
+    make_dir();
+    host_keys_setup();
+    init();
+    beat(FX_T0 - 4 * 86400, offer(0, FX_KEYS_JSON, FX_TB_SIG), FX_M_ENGAGEMENT_1, NULL, 0);
+    expect("engagement manifest taken", T.manifest.have && strcmp(T.manifest.profile, "engagement") == 0);
+    ResponseGrant g;
+    memset(&g, 0, sizeof(g));
+    snprintf(g.tenant_id, sizeof(g.tenant_id), "default");
+    snprintf(g.action_kind, sizeof(g.action_kind), "screen_session");
+    expect("screen offers are a response kind (allowed under engagement)", Trust_OfferRefusal(&T, "screen_session", &g) == NULL);
+
+    expect("ceiling isolate accepted", Trust_SetCeiling(&T, "isolate"));
+    init();
+    expect("isolate: isolation, mesh, collection, updates", Trust_Allows(&T, "isolation_change") && Trust_Allows(&T, "mesh_quarantine") &&
+                                                            Trust_Allows(&T, "forensic_collection") && Trust_Allows(&T, "agent_update"));
+    expect("isolate: no terminal, screen or scripts", !Trust_Allows(&T, "terminal_session") && !Trust_Allows(&T, "screen_session") &&
+                                                       !Trust_Allows(&T, "script_exec"));
+    expect("isolate: a screen offer is refused", Trust_OfferRefusal(&T, "screen_session", &g) != NULL);
+
+    expect("ceiling signed-scripts accepted", Trust_SetCeiling(&T, "signed-scripts"));
+    init();
+    expect("signed-scripts without a host key: no scripts", !Trust_Allows(&T, "script_exec") && Trust_Allows(&T, "isolation_change") &&
+                                                             !Trust_Allows(&T, "terminal_session"));
+    char report[4096];
+    Trust_ReportJSON(&T, report, sizeof(report));
+    expect("report: no host authority", strstr(report, "\"host_authority\":false") && strstr(report, "\"ceiling\":\"signed-scripts\""));
+
+    char hf[1024];
+    snprintf(hf, sizeof(hf), "{\"v\":1,\"keys\":[{\"id\":\"%s\",\"role\":\"tap\",\"ed25519\":\"", hk_id[0]);
+    size_t o = strlen(hf);
+    for (int i = 0; i < 32; i++) o += (size_t)snprintf(hf + o, sizeof(hf) - o, "%02x", hk_pub[0][i]);
+    o += (size_t)snprintf(hf + o, sizeof(hf) - o, "\"},{\"id\":\"%s\",\"role\":\"auto\",\"ed25519\":\"", hk_id[1]);
+    for (int i = 0; i < 32; i++) o += (size_t)snprintf(hf + o, sizeof(hf) - o, "%02x", hk_pub[1][i]);
+    snprintf(hf + o, sizeof(hf) - o, "\"}]}");
+    write_host_file("host_authority.json", hf);
+    host_payload("echo scrub", "audit");
+    char af[512];
+    snprintf(af, sizeof(af), "{\"v\":1,\"packages\":[{\"name\":\"scrub\",\"sha256\":\"%s\",\"modes\":[\"audit\"]}]}", hk_digest);
+    write_host_file("host_auto_allow.json", af);
+    init();
+    expect("two host keys and one allow-listed package loaded", T.host_present && T.hostKeyCount == 2 && T.hostAllowCount == 1);
+    expect("signed-scripts with a host key: scripts allowed", Trust_Allows(&T, "script_exec"));
+    Trust_ReportJSON(&T, report, sizeof(report));
+    expect("report: host authority, key ids and roles, allow-list",
+           strstr(report, "\"host_authority\":true") && strstr(report, hk_id[0]) && strstr(report, "\"role\":\"auto\"") &&
+               strstr(report, "\"name\":\"scrub\"") && strstr(report, "\"modes\":[\"audit\"]"));
+    expect("report is one JSON object", report[0] == '{' && report[strlen(report) - 1] == '}');
+
+    host_grant(&g, 0, 3, "job-1", "nightshift:tap");
+    expect("tap-signed V3 script grant for this job verifies", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) == NULL);
+    expect("the same grant for another job is refused", Trust_OfferGrantRefusal(&T, "job-2", &g, hk_payload, FX_ENDPOINT) != NULL);
+    char edited[2048];
+    snprintf(edited, sizeof(edited), "%s", hk_payload);
+    edited[strlen(edited) - 2] = '5';   /* max_output_bytes 4096 -> 4095 */
+    expect("an edited payload is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, edited, FX_ENDPOINT) != NULL);
+    expect("another endpoint is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, "ep-other") != NULL);
+    host_grant(&g, 0, 2, NULL, "nightshift:tap");
+    expect("a V2 grant (no job id) never runs a script here", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+    host_grant(&g, 0, 3, "job-1", "nightshift:auto");
+    expect("tap key with the auto operator is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+    host_grant(&g, 0, 3, "job-1", "operator-secops");
+    expect("an OmniNull operator on a host-key grant is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+
+    host_grant(&g, 1, 3, "job-1", "nightshift:auto");
+    expect("auto key: allow-listed package in an allowed mode runs", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) == NULL);
+    host_payload("echo scrub", "enforce");
+    host_grant(&g, 1, 3, "job-1", "nightshift:auto");
+    expect("auto key: a mode not allowed is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL &&
+                                                      strstr(Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT), "mode"));
+    host_payload("echo other", "audit");
+    host_grant(&g, 1, 3, "job-1", "nightshift:auto");
+    expect("auto key: a package off the allow-list is refused",
+           Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+    host_grant(&g, 0, 3, "job-1", "nightshift:tap");
+    expect("tap key: any script runs", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) == NULL);
+    host_payload("echo scrub", "audit");
+    {
+        /* A second script_digest (an extra member the executor's string
+         * search would read first) makes the payload ambiguous. */
+        char amb[2200];
+        snprintf(amb, sizeof(amb), "{\"x\":{\"script_digest\":\"%s\"},%s", hk_digest, hk_payload + 1);
+        if (strlen(amb) < sizeof(hk_payload)) memcpy(hk_payload, amb, strlen(amb) + 1);
+        host_grant(&g, 1, 3, "job-1", "nightshift:auto");
+        expect("auto key: an ambiguous payload is refused", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+        host_payload("echo scrub", "audit");
+    }
+
+    expect("a re-pin leaves the host authority alone", Trust_Repin(&T) >= 0);
+    init();
+    expect("host keys still loaded after the re-pin", T.hostKeyCount == 2);
+
+    remove_host_file("host_auto_allow.json");
+    init();
+    host_grant(&g, 1, 3, "job-1", "nightshift:auto");
+    expect("auto key without an allow-list runs nothing", Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+
+    write_host_file("host_authority.json", "{\"v\":1,\"keys\":[{\"id\":\"00\",\"role\":\"tap\"}]}");
+    init();
+    host_grant(&g, 0, 3, "job-1", "nightshift:tap");
+    expect("a malformed host file fails closed: present, no keys, scripts refused",
+           T.host_present && T.hostKeyCount == 0 && !Trust_Allows(&T, "script_exec") &&
+               Trust_OfferGrantRefusal(&T, "job-1", &g, hk_payload, FX_ENDPOINT) != NULL);
+    Trust_ReportJSON(&T, report, sizeof(report));
+    expect("report says why", strstr(report, "\"host_authority\":false") && strstr(report, "host_error"));
+
+    {
+        /* An id that is not the key's fingerprint is refused. */
+        char bad[1024];
+        snprintf(bad, sizeof(bad), "%s", hf);
+        char* idp = strstr(bad, hk_id[0]);
+        if (idp) idp[0] = idp[0] == '0' ? '1' : '0';
+        write_host_file("host_authority.json", bad);
+        init();
+        expect("a key whose id is not its fingerprint is refused", T.hostKeyCount == 0);
+    }
+    remove_host_file("host_authority.json");
+    Trust_SetCeiling(&T, "none");
+    init();
+    expect("without a host file scripts go back to the response key", !T.host_present);
+    remove_dir();
+}
+
 int main(void) {
     int64_t now = FX_T0 + 100;
     test_versions();
@@ -506,6 +707,7 @@ int main(void) {
     remove_dir();
     test_monitor_release(now);
     test_offers_and_updates(now);
+    test_host_authority(now);
     if (failures) {
         printf("[-] agent trust: %d failure(s)\n", failures);
         return 1;

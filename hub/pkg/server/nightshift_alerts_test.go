@@ -220,18 +220,18 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 		}
 	}
 
-	codex := describeAlert(storage.AnomalyAlert{ID: "c", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "davion-sidarli",
+	codex := describeAlert(storage.AnomalyAlert{ID: "c", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "workstation-1",
 		Title:       "codex reached a destination it never has: sdmntprpolandcentral.oaiusercontent.com@cloudflare, inc.",
-		ProcessPath: "/home/u/.local/lib/node_modules/@openai/codex/vendor/bin/codex", DstIP: "172.64.144.52", DstPort: 443,
+		ProcessPath: "/home/u/.local/lib/node_modules/@openai/codex/vendor/bin/codex", DstIP: "198.51.100.52", DstPort: 443,
 		Evidence: `{"destination_owner":"Cloudflare, Inc."}`}, storage.DefaultDetectionTuning()) // the makers are the tuning's agent_runtime_vendors
-	if codex.What != "codex on davion-sidarli reached sdmntprpolandcentral.oaiusercontent.com (172.64.144.52:443, Cloudflare, Inc.) for the first time" ||
+	if codex.What != "codex on workstation-1 reached sdmntprpolandcentral.oaiusercontent.com (198.51.100.52:443, Cloudflare, Inc.) for the first time" ||
 		codex.Expected != "" || !strings.Contains(codex.Cause, "OpenAI") {
 		t.Fatalf("codex = %+v", codex)
 	}
 	// Claude Code's native build runs as its version number; the runtime comes
 	// from agent_runtimes, so its own service is still named as the cause.
-	claude := describeAlert(storage.AnomalyAlert{ID: "n", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "davion-sidarli",
-		ProcessPath: "/home/u/.local/share/claude/versions/2.1.301", DstIP: "160.79.104.10", DstPort: 443,
+	claude := describeAlert(storage.AnomalyAlert{ID: "n", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "workstation-1",
+		ProcessPath: "/home/u/.local/share/claude/versions/2.1.301", DstIP: "198.51.100.10", DstPort: 443,
 		Evidence: `{"domain":"api.anthropic.com"}`}, storage.DefaultDetectionTuning())
 	if claude.Expected != "" || claude.Cause != "Probably claude itself: api.anthropic.com is Anthropic's own service" {
 		t.Fatalf("native claude = %+v", claude)
@@ -265,7 +265,7 @@ func TestDescribeAlertActor(t *testing.T) {
 	t.Parallel()
 	tuning := storage.DetectionTuning{}
 	sweep := func(actor string) feedAlert {
-		ev, _ := json.Marshal(map[string]any{"sweep_actor": actor, "sweep_targets": []map[string]any{{"ip": "192.168.86.10", "ports": []int{22}}},
+		ev, _ := json.Marshal(map[string]any{"sweep_actor": actor, "sweep_targets": []map[string]any{{"ip": "192.168.50.10", "ports": []int{22}}},
 			"floor_ports": []int{}})
 		return describeAlert(storage.AnomalyAlert{ID: "s", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
 			ProcessPath: "/usr/bin/ssh", Evidence: string(ev)}, tuning)
@@ -288,7 +288,7 @@ func TestDescribeAlertActor(t *testing.T) {
 	// owner-writable binary can claim to be an agent.
 	for _, ports := range [][]int{{445}, {22, 3389}, {23}, {135, 80}} {
 		ev, _ := json.Marshal(map[string]any{"sweep_actor": "agent:claude:fb39ca7b", "sweep_targets": []map[string]any{
-			{"ip": "192.168.86.10", "ports": ports}, {"ip": "192.168.86.11", "ports": []int{22}}}, "floor_ports": []int{}})
+			{"ip": "192.168.50.10", "ports": ports}, {"ip": "192.168.50.11", "ports": []int{22}}}, "floor_ports": []int{}})
 		got := describeAlert(storage.AnomalyAlert{ID: "f", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
 			ProcessPath: "/home/u/.local/share/claude/versions/9/x", Evidence: string(ev)}, tuning)
 		if got.Expected != "" || !strings.Contains(got.Cause, "It still asks because it reached SMB, RDP") {
@@ -297,7 +297,7 @@ func TestDescribeAlertActor(t *testing.T) {
 	}
 	// The same holds without an actor and with the single-target shape.
 	if got := describeAlert(storage.AnomalyAlert{ID: "g", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
-		DstIP: "192.168.86.10", DstPort: 445, Evidence: `{"sweep_actor":"agent:claude:fb39ca7b"}`}, tuning); got.Expected != "" {
+		DstIP: "192.168.50.10", DstPort: 445, Evidence: `{"sweep_actor":"agent:claude:fb39ca7b"}`}, tuning); got.Expected != "" {
 		t.Fatalf("single-target floor sweep = %+v", got)
 	}
 	// The evidence lists ten hosts; floor_ports covers the whole window. A
@@ -305,11 +305,11 @@ func TestDescribeAlertActor(t *testing.T) {
 	// a floor sweep, and says so.
 	var ten []map[string]any
 	for i := 10; i < 20; i++ {
-		ten = append(ten, map[string]any{"ip": fmt.Sprintf("192.168.86.%d", i), "ports": []int{80}})
+		ten = append(ten, map[string]any{"ip": fmt.Sprintf("192.168.50.%d", i), "ports": []int{80}})
 	}
 	ev, _ := json.Marshal(map[string]any{"sweep_actor": "agent:claude:fb39ca7b", "sweep_targets": ten, "floor_ports": []int{445}})
 	hidden := describeAlert(storage.AnomalyAlert{ID: "h", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "CRITICAL", Hostname: "ws",
-		Title: "Lateral Port Sweep / Internal Fan-Out (20 Hosts)", ProcessPath: "/home/u/.local/bin/x", DstIP: "192.168.86.19", DstPort: 80,
+		Title: "Lateral Port Sweep / Internal Fan-Out (20 Hosts)", ProcessPath: "/home/u/.local/bin/x", DstIP: "192.168.50.19", DstPort: 80,
 		Evidence: string(ev)}, tuning)
 	if hidden.Expected != "" || !strings.Contains(hidden.Cause, "It still asks because it reached SMB, RDP") ||
 		!strings.Contains(hidden.What, "20 hosts") || !strings.Contains(hidden.What, "445") {
@@ -317,10 +317,10 @@ func TestDescribeAlertActor(t *testing.T) {
 	}
 	// Evidence that does not record the window's floor ports (older alerts,
 	// or unreadable evidence) is read as a floor sweep.
-	for _, raw := range []string{`{"sweep_actor":"agent:claude:fb39ca7b","sweep_targets":[{"ip":"192.168.86.10","ports":[22]}]}`,
+	for _, raw := range []string{`{"sweep_actor":"agent:claude:fb39ca7b","sweep_targets":[{"ip":"192.168.50.10","ports":[22]}]}`,
 		`{"sweep_actor":"agent:claude:fb39ca7b","floor_ports":"none"}`, `not json`, ``} {
 		got := describeAlert(storage.AnomalyAlert{ID: "u", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
-			ProcessPath: "/usr/bin/ssh", DstIP: "192.168.86.10", DstPort: 22, Evidence: raw}, storage.DetectionTuning{AdminFanoutSources: []string{"ws"}})
+			ProcessPath: "/usr/bin/ssh", DstIP: "192.168.50.10", DstPort: 22, Evidence: raw}, storage.DetectionTuning{AdminFanoutSources: []string{"ws"}})
 		if got.Expected != "" {
 			t.Errorf("evidence %q without floor ports explained: %+v", raw, got)
 		}
