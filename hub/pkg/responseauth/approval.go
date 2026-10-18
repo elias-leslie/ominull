@@ -124,6 +124,9 @@ type ApprovalRequestInput struct {
 	// Release is the signed agent packages an agent update installs; it is
 	// read only to decide whether a rollout rule covers the request.
 	Release []ReleaseEvidence `json:"release,omitempty"`
+	// RoutineKeys: the routine release keys the hub holds, as the pinned
+	// release key signed them; the authority verifies the list itself.
+	RoutineKeys *response.RoutineKeys `json:"routine_keys,omitempty"`
 	// RuleOnly asks for a package run that a live package rule covers and
 	// nothing else: an uncovered request is refused (ErrRuleNotCovered)
 	// without recording or asking anyone. The hub's schedule uses it.
@@ -408,6 +411,13 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	if len(in.Payload) == 0 || len(in.Payload) > maxPayload || !json.Valid(in.Payload) {
 		return nil, fmt.Errorf("approval payload must be valid JSON up to %d KiB", maxPayload/1024)
+	}
+	if in.Kind == ActionKindAgentUpdate {
+		// A release signed in the owner's session always rolls out
+		// canaries first, whoever approves it.
+		if _, _, routine, canary, err := a.rolloutEvidence(in); err == nil && routine && len(targets) > 1 && len(canary) == 0 {
+			return nil, errors.New("a release signed with a routine key rolls out canaries first: name the canaries")
+		}
 	}
 	if in.RuleOnly && in.Kind != response.ActionKindScriptExec {
 		return nil, errors.New("only a package run can be asked for under a rule alone")

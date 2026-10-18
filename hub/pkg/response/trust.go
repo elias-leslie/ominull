@@ -289,6 +289,10 @@ type AgentTrustReport struct {
 	// UTCOffset is the machine's clock offset east of UTC in minutes (agents
 	// from 1.8.82), for maintenance windows in machine time.
 	UTCOffset *int `json:"utc_offset_minutes,omitempty"`
+	// Routine release keys pinned (agents from 1.8.89): the epoch of the
+	// signed list (0: none) and how many keys it holds.
+	RoutineEpoch int64 `json:"routine_epoch,omitempty"`
+	RoutineKeys  int   `json:"routine_keys,omitempty"`
 }
 
 // HostKeyReport is one pinned host-authority key: its signer_key_id and role

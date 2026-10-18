@@ -54,7 +54,10 @@ func (a *Authority) blastFor(in *ApprovalRequestInput, targets []string, ri RowI
 	switch in.Kind {
 	case ActionKindAgentUpdate:
 		if _, _, err := a.rolloutRuleCovers(in, targets); err == nil {
-			return Blast{"agent_update", BlastUndoable, "an owner-signed release, rolled out canaries first; agents can go back to the previous signed version"}
+			if _, _, routine, _, _ := a.rolloutEvidence(in); routine {
+				return Blast{"agent_update", BlastUndoable, "a release signed in the owner's session, rolled out canaries first; agents can be rolled back"}
+			}
+			return Blast{"agent_update", BlastUndoable, "an owner-signed release, rolled out canaries first; agents can be rolled back"}
 		}
 		return Blast{"agent_update", BlastDangerous, "an agent build that is not an owner-signed release"}
 	case response.ActionKindTerminalSession:

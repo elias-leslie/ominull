@@ -390,51 +390,83 @@ func rolloutVersion(payload []byte) string {
 // endpoint. Only kind, payload and release evidence are read; the summary the
 // hub wrote is not.
 func (a *Authority) rolloutRuleCovers(in *ApprovalRequestInput, targets []string) (string, string, error) {
+	ev, version, _, canary, err := a.rolloutEvidence(in)
+	if err != nil {
+		return "", "", err
+	}
+	if len(targets) > 1 && len(canary) == 0 {
+		return "", "", errors.New("a rollout to more than one endpoint must be staged with canaries")
+	}
+	return ev, version, nil
+}
+
+// rolloutEvidence checks an agent rollout's release evidence: every agent
+// package of the version signed with the pinned release key, or with a
+// routine key the pinned release key listed (response.RoutineKeys, which
+// the hub passes and this authority verifies itself). routine says a
+// routine key signed it; such a release always rolls out canaries first.
+func (a *Authority) rolloutEvidence(in *ApprovalRequestInput) (string, string, bool, []string, error) {
 	if in.Kind != ActionKindAgentUpdate {
-		return "", "", errors.New("not an agent rollout")
+		return "", "", false, nil, errors.New("not an agent rollout")
 	}
 	var p routedPayload
 	if err := decodeJSON(in.Payload, &p); err != nil || p.Route != rolloutRoute {
-		return "", "", errors.New("not the agent rollout route")
+		return "", "", false, nil, errors.New("not the agent rollout route")
 	}
 	var body struct {
 		Version string   `json:"version"`
 		Canary  []string `json:"canary"`
 	}
 	if err := decodeJSON(p.Body, &body); err != nil || !releaseVersionRE.MatchString(body.Version) {
-		return "", "", errors.New("the rollout names no release version")
+		return "", "", false, nil, errors.New("the rollout names no release version")
 	}
-	if len(targets) > 1 && len(sortedUnique(body.Canary)) == 0 {
-		return "", "", errors.New("a rollout to more than one endpoint must be staged with canaries")
-	}
+	canary := sortedUnique(body.Canary)
 	want := map[string]bool{
 		"ominull-agent_" + body.Version + "_amd64.deb":   false,
 		"ominull-agent-windows-" + body.Version + ".msi": false,
 	}
 	if len(in.Release) != len(want) {
-		return "", "", errors.New("the release evidence must cover every agent package of the version")
+		return "", "", false, nil, errors.New("the release evidence must cover every agent package of the version")
 	}
 	pub := a.releasePublicKey()
+	var routineKeys []response.RoutineKey
+	if in.RoutineKeys != nil {
+		// An unverifiable list is ignored: only the pinned key then counts.
+		routineKeys, _ = response.VerifyRoutineKeys(pub, in.RoutineKeys)
+	}
 	var parts []string
+	signers := map[string]bool{}
 	for _, ev := range in.Release {
 		seen, ok := want[ev.Package]
 		if !ok || seen {
-			return "", "", fmt.Errorf("release evidence names an unexpected package %q", cleanText(ev.Package, 80))
+			return "", "", false, nil, fmt.Errorf("release evidence names an unexpected package %q", cleanText(ev.Package, 80))
 		}
 		want[ev.Package] = true
 		sha := strings.ToLower(ev.SHA256)
 		if b, err := hex.DecodeString(sha); err != nil || len(b) != sha256.Size {
-			return "", "", fmt.Errorf("%s: digest is not SHA-256", ev.Package)
+			return "", "", false, nil, fmt.Errorf("%s: digest is not SHA-256", ev.Package)
 		}
 		der, err := base64.StdEncoding.DecodeString(ev.Sig)
 		if err != nil || len(der) == 0 || len(der) > 512 {
-			return "", "", fmt.Errorf("%s: release signature unreadable", ev.Package)
+			return "", "", false, nil, fmt.Errorf("%s: release signature unreadable", ev.Package)
 		}
-		if err := response.VerifyReleaseSignature(pub, []byte(ReleaseStatement(ev.Package, body.Version, sha)), der); err != nil {
-			return "", "", fmt.Errorf("%s %s is not signed with the pinned release key", ev.Package, body.Version)
+		signer, err := response.VerifyReleaseWithRoutine(pub, routineKeys, []byte(ReleaseStatement(ev.Package, body.Version, sha)), der)
+		if err != nil {
+			return "", "", false, nil, fmt.Errorf("%s %s is not signed with the pinned release key or a routine key it listed", ev.Package, body.Version)
 		}
+		signers[signer] = true
 		parts = append(parts, ev.Package+"="+sha[:16])
 	}
 	sort.Strings(parts)
-	return "release " + body.Version + " owner-signed (" + strings.Join(parts, ", ") + ")", body.Version, nil
+	routine := !signers["release"] || len(signers) > 1
+	how := "owner-signed"
+	if routine {
+		var names []string
+		for s := range signers {
+			names = append(names, s)
+		}
+		sort.Strings(names)
+		how = "signed in the owner's session (" + strings.Join(names, ", ") + ")"
+	}
+	return "release " + body.Version + " " + how + " (" + strings.Join(parts, ", ") + ")", body.Version, routine, canary, nil
 }

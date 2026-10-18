@@ -1491,6 +1491,31 @@ func (s *Store) CompleteAgentUpdate(endpointID string) error {
 	return err
 }
 
+// CancelAgentUpdates drops the queued, undelivered update jobs for a version
+// (a retired release); it returns the endpoints whose job was dropped.
+func (s *Store) CancelAgentUpdates(version string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query("SELECT endpoint_id FROM agent_update_jobs WHERE desired_version = ? AND completed_at IS NULL", version)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if _, err := s.db.Exec("DELETE FROM agent_update_jobs WHERE desired_version = ? AND completed_at IS NULL", version); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // ListEndpoints returns endpoints in a stable order. Ordering by last_seen_at made rows
 // reshuffle on every telemetry heartbeat, which moves a host out from under the operator's
 // cursor between refreshes — an isolate click could land on the wrong machine. Hostname is

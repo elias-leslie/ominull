@@ -234,6 +234,11 @@ func (s *Server) addTrustControl(ctx context.Context, resp map[string]interface{
 			resp["trust"] = k
 		}
 	}
+	// The release-key signed routine keys, until the agent reports pinning
+	// this epoch (older agents ignore the field).
+	if rk, _ := s.routineKeys(); rk != nil && report.RoutineEpoch < rk.Epoch {
+		resp["routine_keys"] = rk
+	}
 	profile := ""
 	if ep.MonitorOnly {
 		profile = s.monitorOnlyClamp(ep.ID, report.Profile)

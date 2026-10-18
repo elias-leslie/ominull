@@ -85,6 +85,9 @@ type approvalPlan struct {
 	// authority approves an owner-signed rollout under the owner's
 	// approve-all rule when it verifies them, and otherwise asks.
 	Release []responseauth.ReleaseEvidence
+	// RoutineKeys is the signed routine key list beside Release; the
+	// authority verifies it against the pinned release key itself.
+	RoutineKeys *response.RoutineKeys
 	// SessionSeconds is how long a terminal may run; the authority shows it
 	// to the owner (it is not part of the digest).
 	SessionSeconds int64
@@ -266,7 +269,7 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		if id == "" {
 			v, err := s.responseAuth.RequestApproval(r.Context(), &responseauth.ApprovalRequestInput{
 				TenantID: tenantID, Requester: requester, Kind: plan.Kind, Action: plan.Action,
-				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release,
+				Summary: plan.Summary, Targets: plan.Targets, Payload: payload, Release: plan.Release, RoutineKeys: plan.RoutineKeys,
 				SessionSeconds: plan.SessionSeconds, AskFirst: plan.AskFirst, AgentLabel: label,
 				StewardRun: plan.StewardRun, StewardRule: plan.StewardRule, StewardRuleToken: plan.StewardRuleToken, StewardNarrow: plan.StewardNarrow,
 				Facts: s.approvalFacts(plan.Targets),
@@ -667,6 +670,10 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		return nil, false
 	}
 	version := strings.TrimSpace(req.Version)
+	if s.agentVersionRetired(version) {
+		writeJSONError(w, http.StatusConflict, "agent "+version+" was retired (rolled back); release a newer version instead")
+		return nil, false
+	}
 	var newBody []byte
 	if version == "" {
 		// The version the owner approves is the one installed: resolve it
@@ -715,6 +722,11 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		scope = "the whole fleet (" + scope + ")"
 	}
 	summary := "Install agent " + version + " on " + scope
+	rk, _ := s.routineKeys()
+	if len(sortedTargets(targets)) > 1 && len(sortedTargets(req.Canary)) == 0 && s.releaseSignedByRoutine(version) {
+		writeJSONError(w, http.StatusConflict, "agent "+version+" was signed in the owner's session with a routine key, so it rolls out canaries first: name the canaries")
+		return nil, false
+	}
 	if canary := sortedTargets(req.Canary); len(canary) > 0 {
 		if p := canaryProblem(canary, sortedTargets(targets)); p != "" {
 			writeJSONError(w, http.StatusBadRequest, p)
@@ -724,7 +736,7 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 			s.endpointLabels(canary), len(sortedTargets(targets))-len(canary), version, int(rolloutCanaryDeadline/time.Minute))
 	}
 	return &approvalPlan{Kind: responseauth.ActionKindAgentUpdate, Action: "Update agents",
-		Summary: summary, Targets: targets, Body: newBody, Release: s.releaseEvidence(version)}, true
+		Summary: summary, Targets: targets, Body: newBody, Release: s.releaseEvidence(version), RoutineKeys: rk}, true
 }
 
 // releaseEvidence is the published agent packages of version with their
