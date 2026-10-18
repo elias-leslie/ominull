@@ -414,6 +414,32 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     $Detail = [ordered]@{}; $Mode = 'revert'; Invoke-Package
     Check 'audit: revert does not apply' ($script:State -eq 'na' -and $Detail.reason)
 }
+# Invoke-Native for real: a real process, real arguments, real exit code, with PATHEXT gone (the
+# agent's environment). No stand-in: this is the call shape the restart takes.
+foreach ($n in $Names) {
+    & {
+        . ([scriptblock]::Create((Get-Defs (Join-Path $Dir "$n.ps1"))))
+        $savedExt = $env:PATHEXT; Remove-Item Env:PATHEXT -ErrorAction SilentlyContinue
+        try {
+            if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+                $r = Invoke-Native 'cmd.exe' @('/d', '/c', 'echo a b& exit 3')
+                Check "${n}: native tool runs without PATHEXT" ($r.code -eq 3 -and ($r.out -join '|') -match 'a b')
+                $r = Invoke-Native 'shutdown.exe' @('/?')
+                Check "${n}: shutdown.exe runs as a program" ($r.code -ge 0 -and ($r.out -join ' ') -notmatch 'document')
+            } else {
+                $r = Invoke-Native '/bin/sh' @('-c', 'echo "$1|$2|$3"; exit 3', 'sh', 'two words', 'quo"te', 'tail\')
+                Check "${n}: native tool runs with its exit code" ($r.code -eq 3)
+                Check "${n}: native arguments arrive whole" (($r.out -join "`n") -eq 'two words|quo"te|tail\')
+                $r = Invoke-Native '/bin/sh' @('-c', 'echo out; echo err >&2')
+                Check "${n}: native stdout and stderr are both kept" ($r.code -eq 0 -and $r.out -contains 'out' -and $r.out -contains 'err')
+            }
+            $r = Invoke-Native 'no-such-tool-omninull.exe' @()
+            Check "${n}: a missing tool is a result, not an exception" ($r.code -eq -1 -and ($r.out -join ' ') -match 'was not found')
+            $r = Invoke-Native $PSCommandPath @()
+            Check "${n}: a file that cannot start is a result, not an exception" ($r.code -eq -1 -and ($r.out -join ' ') -match 'could not be started')
+        } finally { if ($null -ne $savedExt) { $env:PATHEXT = $savedExt } }
+    }
+}
 foreach ($n in 'cleanup', 'updates') {
     & {
         . ([scriptblock]::Create((Get-Defs (Join-Path $Dir "$n.ps1"))))
@@ -706,6 +732,9 @@ foreach ($n in 'cleanup', 'updates') {
         $script:code = -1; $script:out = @('shutdown.exe was not found'); $err = ''; try { Run 'enforce' } catch { $err = "$_" }
         Check 'rb: a missing shutdown.exe says so instead of exit -1 alone' ($err -match '^shutdown /r exit -1: shutdown\.exe was not found')
         $script:taskFail = $false; $script:out = @()
+        $script:code = -1; $script:out = @('shutdown.exe could not be started: Cannot run a document in the middle of a pipeline'); Run 'enforce'
+        Check 'rb: shutdown.exe failing to start falls back to the scheduled restart' ($script:State -eq 'fixed' -and $Detail.shutdown_error -match 'could not be started' -and ($Changed -join ' ') -match 'scheduled task')
+        Remove-Item -LiteralPath (Get-MarkerFile) -Force; $script:code = 0; $script:out = @()
         $fixed = Repair-Path 'C:\Windows\system32\cmd.exe' 'C:\Windows\system32'
         Check 'rb: a broken PATH gets the system folders back' ($fixed -like 'C:\Windows\system32;C:\Windows;C:\Windows\system32\Wbem;C:\Windows\system32\WindowsPowerShell\v1.0;C:\Windows\system32\cmd.exe')
         Check 'rb: a sound PATH is left alone' ((Repair-Path $fixed 'C:\Windows\system32') -eq $fixed)

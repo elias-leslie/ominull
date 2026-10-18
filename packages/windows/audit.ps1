@@ -16,7 +16,8 @@ function Initialize-Env {
   $want = [ordered]@{ SystemRoot = $sr; windir = $sr; SystemDrive = (Split-Path -Qualifier $sys); ProgramData = $pd; ALLUSERSPROFILE = $pd
     ProgramFiles = $pf; 'ProgramFiles(x86)' = (& $f 'ProgramFilesX86'); COMPUTERNAME = [Environment]::MachineName
     LOCALAPPDATA = (& $f 'LocalApplicationData'); APPDATA = (& $f 'ApplicationData'); USERPROFILE = (& $f 'UserProfile')
-    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules" }
+    PSModulePath = "$pf\WindowsPowerShell\Modules;$sr\system32\WindowsPowerShell\v1.0\Modules"
+    PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC' }
   foreach ($k in $want.Keys) { if (-not [Environment]::GetEnvironmentVariable($k)) { [Environment]::SetEnvironmentVariable($k, $want[$k]) } }
   $env:PATH = Repair-Path $env:PATH $sys
   $script:Root = Join-Path $pd 'OminullMaintenance'
@@ -59,11 +60,29 @@ function Start-Log([int]$Keep) {
   $script:LogFile = "$d\$Pkg-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
 function Write-Log([string]$Message) { if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value "$(Get-Date -Format s) $Message" -Encoding UTF8 } catch {} } }
+# Native tools run as plain processes: no PowerShell pipeline, so a missing PATHEXT (the agent's
+# environment) cannot turn shutdown.exe into a "document", and a failure to start is a result.
+function ConvertTo-NativeArg([string]$A) {
+  if ($A -and $A -notmatch '[\s"]') { return $A }
+  '"' + (($A -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+function Resolve-Native([string]$Exe) {
+  if ([IO.Path]::IsPathRooted($Exe)) { if (Test-Path -LiteralPath $Exe) { return $Exe }; return $null }
+  $s = if ([Environment]::SystemDirectory) { Join-Path ([Environment]::SystemDirectory) $Exe }
+  if ($s -and (Test-Path -LiteralPath $s)) { return $s }
+  $c = @(Get-Command $Exe -CommandType Application -ErrorAction SilentlyContinue)[0]
+  if ($c) { return $c.Source }; $null
+}
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
-  if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { $full = if ([Environment]::SystemDirectory) { Join-Path ([Environment]::SystemDirectory) $Exe }; if ($full -and (Test-Path -LiteralPath $full)) { $Exe = $full } else { return @{ code = -1; out = @("$Exe was not found") } } }
-  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-  try { $o = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
-  @{ code = $c; out = $o }
+  $path = Resolve-Native $Exe
+  if (-not $path) { return @{ code = -1; out = @("$Exe was not found") } }
+  try {
+    $si = New-Object Diagnostics.ProcessStartInfo $path
+    $si.Arguments = (@($Arguments) | ForEach-Object { ConvertTo-NativeArg $_ }) -join ' '
+    $si.UseShellExecute = $false; $si.RedirectStandardOutput = $true; $si.RedirectStandardError = $true; $si.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($si); $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync(); $p.WaitForExit()
+    @{ code = $p.ExitCode; out = @("$($o.Result)`n$($e.Result)" -split "`r?`n" | Where-Object { $_ -ne '' }) }
+  } catch { @{ code = -1; out = @("$Exe could not be started: $($_.Exception.Message)") } }
 }
 # quser IDLE TIME: ./none (active), 5 (min), 1:05 (h:mm), 2+03:04 (d+h:mm).
 function ConvertFrom-QuserIdle([string]$Idle) {

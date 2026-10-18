@@ -1,46 +1,46 @@
 {
- "00270e32daa972ebf87129e59f61d70ce93ca63d877d60831092b7b861316c7e": {
+ "1207109d36a2bcffbaae32f853880fb0aef878f7220822276241775388104524": {
+  "name": "windows-performance",
+  "risk": "safe"
+ },
+ "1e0c11c53faec3d204637aa303cad68a3684085132be229141caa27fa8dc2d92": {
   "name": "windows-debloat",
   "risk": "careful"
  },
- "23ab5df4ee259b6cf9a6a80d055794dc2c8a770b568d188bccabb2bd321cf116": {
-  "name": "windows-privacy",
-  "risk": "safe"
- },
- "2ae772aa745208a7449319f49ddf1872e4b8c53d0a92e18842102025599c5fcb": {
-  "name": "windows-software-removal",
-  "risk": "careful"
- },
- "34240b5772214e8735077cd85a20aaf9fe78640708558c36f47f5bace10c0d4e": {
-  "name": "windows-reboot",
-  "risk": "careful"
- },
- "49eb1c3721461548806257e642de3ad04be1744c29b00320da7f22accfc84563": {
+ "33cb21392188569a4cb338247da13ef62e0160ec033dbe43c1bd5a2ae649ccd3": {
   "name": "windows-audit",
   "risk": "safe"
  },
- "504ac4e9c49c05040a5695b8ac835dc0436f0391883cb15dc928e6643062ad6d": {
+ "37ef548d28f88c11bf66500753ecbc00d1929c30b1a63f42535f3c165b1d691c": {
+  "name": "windows-updates",
+  "risk": "safe"
+ },
+ "56688d8cd040b4bf7906244564b25eb5e160756bb4f85dce7b838be84f521938": {
   "name": "windows-maintenance-mode",
   "risk": "safe"
  },
- "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
-  "name": "linux-maintenance-mode",
-  "risk": "safe"
- },
- "90244a72769bf91e0b11eb367ba2ada2d07799497097d1070eca45cd5cace2f9": {
+ "699d91cbb5db9fd6c797eb0a41e29a5f44fb1e7f88ad1969a8674c864d6cdcf7": {
   "name": "windows-cleanup",
   "risk": "safe"
  },
- "967ce55005f7dbc92e4da4a2de5b25d140dd1a5744827534b1267e6b734da817": {
-  "name": "windows-updates",
+ "74a5937f25679d33ef16544aa3e1c0742b0dd845caa812646244af4dd143d5a9": {
+  "name": "windows-software-removal",
+  "risk": "careful"
+ },
+ "833a4651cdab1750510dd2b6c6329965ee07a4cca6ab71e804185011abd958e9": {
+  "name": "windows-reboot",
+  "risk": "careful"
+ },
+ "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
+  "name": "linux-maintenance-mode",
   "risk": "safe"
  },
  "bcf8f4d5f9adc5de1778d419336a19dc119990463da3b836268c2bd1802bff17": {
   "name": "linux-reboot",
   "risk": "careful"
  },
- "c9eee513c54f7e4b4d23bb0f9e39d6a9cbf1f7e9ccacc126051c5191816d71ea": {
-  "name": "windows-performance",
+ "eda36d34c8eb4a6b02ec7065265574f82086bfe0cc962bb9d041856e96107b4b": {
+  "name": "windows-privacy",
   "risk": "safe"
  }
 }
