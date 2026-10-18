@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -94,6 +95,9 @@ func waitLine(e waitEntry) string {
 	return strings.Join(parts, " ")
 }
 
+// waitPollSeconds is how long the hub may hold one wait request.
+var waitPollSeconds = 25
+
 // waitRuns long-polls the hub until any run (all with all) ends or one needs
 // attention, prints one line per run and returns the exit code. The hub
 // holds each request open and answers on the event; nothing here polls.
@@ -102,7 +106,15 @@ func (c *APIClient) waitRuns(ids []string, all bool, timeout time.Duration) erro
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
-	q := url.Values{"ids": {strings.Join(ids, ",")}, "wait": {"25"}}
+	// The hub holds each request up to waitPollSeconds; the ordinary 15 s
+	// client timeout would cut every quiet poll short and give up after a
+	// few minutes of nothing happening, so the wait gets its own client.
+	if c.httpClient.Timeout > 0 && c.httpClient.Timeout < time.Duration(waitPollSeconds+15)*time.Second {
+		hc := *c.httpClient
+		hc.Timeout = time.Duration(waitPollSeconds+15) * time.Second
+		c = &APIClient{cfg: c.cfg, httpClient: &hc}
+	}
+	q := url.Values{"ids": {strings.Join(ids, ",")}, "wait": {strconv.Itoa(waitPollSeconds)}}
 	if all {
 		q.Set("all", "1")
 	}
