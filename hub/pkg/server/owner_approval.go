@@ -294,6 +294,15 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 				// ask runs without asking; spent below like any approval.
 				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking under the owner's Approvals row %s: %s", plan.Action, v.ID, v.Row, plan.Summary))
 				id = v.ID
+			} else if v.State == responseauth.ApprovalApproved && (v.Method == "session" || v.Method == "learned") {
+				// The owner's open work session, or a job shape the owner
+				// approved three times: nobody was asked.
+				why := "the owner's work session is open"
+				if v.Method == "learned" {
+					why = "the owner approved this exact job before"
+				}
+				s.audit(r, autoApprovedAudit, strings.Join(plan.Targets, ","), fmt.Sprintf("%s (approval %s) approved without asking: %s: %s", plan.Action, v.ID, why, plan.Summary))
+				id = v.ID
 			} else if v.State == responseauth.ApprovalApproved && v.Method == "rule" {
 				// The authority approved it under the owner's approve-all rule
 				// (an owner-signed agent rollout); it is spent below like any

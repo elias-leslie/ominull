@@ -208,9 +208,10 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 			TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
 			Summary: c.wording, Targets: []string{c.target}, Payload: payload,
 		})
-		if err == nil && v.State == responseauth.ApprovalApproved && v.Method == "row" {
-			// The owner's Approvals row lets this change through; spent below.
-			s.audit(r, autoApprovedAudit, c.target, fmt.Sprintf("%s (approval %s) approved without asking under the owner's Approvals row %s: %s", v.Action, v.ID, v.Row, v.Summary))
+		if err == nil && v.State == responseauth.ApprovalApproved && (v.Method == "row" || v.Method == "session" || v.Method == "learned") {
+			// The owner's Approvals row, open work session or a job shape
+			// the owner approved before lets this change through; spent below.
+			s.audit(r, autoApprovedAudit, c.target, fmt.Sprintf("%s (approval %s) approved without asking (%s; row %s): %s", v.Action, v.ID, v.Method, v.Row, v.Summary))
 			id = v.ID
 		} else if err != nil {
 			s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", c.target, "detection policy: "+err.Error())

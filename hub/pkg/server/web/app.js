@@ -1353,6 +1353,7 @@
     }
     return {
       window: DEMO_MAINT_WINDOW,
+      approvals: { rows: { "maintenance.in": "auto", "maintenance.out": "session", "security.in": "auto", "security.out": "session", "reboot.in": "auto", "reboot.out": "session" }, session_open: false, stored: true },
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
         var defaults = { __interval: d[4] };
@@ -9620,7 +9621,25 @@
         cat ? maintOverrideNote(cat.override) : null),
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
         : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet.")), null, true,
-      "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking; anything else asks you to approve on your phone. Packages never reboot the machine; Restart is its own package.");
+      "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking. " + maintAskText(sw && sw.data) + " Packages never reboot the machine; Restart is its own package.");
+  }
+
+  /* Whether enforce runs ask the owner: the owner's Approvals rows on
+     Nightshift decide (approvals in the settings answer). Automatic runs
+     without asking at any time; a work-session row only while a session is
+     open. Careful packages always ask. */
+  function maintAskText(d) {
+    var a = d && d.approvals;
+    if (!a || !a.rows) return "Enforce runs ask you on your phone unless your Approvals page on Nightshift lets them run on their own. Careful packages always ask.";
+    var say = function (c) {
+      if (c === "auto") return "run without asking";
+      if (c === "session") return a.session_open ? "run without asking while your work session is open" : "ask you unless a work session is open";
+      return "ask you on your phone";
+    };
+    var inW = say(a.rows["maintenance.in"]), outW = say(a.rows["maintenance.out"]);
+    var text = inW === outW ? "Enforce runs " + inW + ", inside the machine's window or not."
+      : "Enforce runs inside the machine's window " + inW + "; outside it they " + outW + ".";
+    return text + " Your Approvals page on Nightshift sets this. Careful packages always ask.";
   }
 
   /* Maintenance mode: keeps the machine awake while maintenance runs (sleep
@@ -9867,7 +9886,7 @@
       });
       holder.appendChild(stackOnPhone(simpleTable(["Setting", "Value", "Comes from", ""], rows, { sortable: false })));
       if (!scheduled) holder.appendChild(h("p", { cls: "pending", text: (pkg.role === "reboot" ? "Takes effect the next time a playbook restarts a machine." : "Takes effect the next time maintenance mode is turned on.") + " Saving runs nothing by itself." }));
-      else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. Switching to enforce, turning on a careful package or step, or changing a setting asks you to approve on your phone before the next run. Turning a package off or back to audit never asks." }));
+      else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. " + maintAskText(epID ? (state.maintSettingsByEndpoint[epID] || {}).data : state.maintSettings) + " Turning a package off or back to audit never asks." }));
       if (epID && editable && (pkg.endpoint && (pkg.endpoint.enabled !== undefined || pkg.endpoint.mode || pkg.endpoint.interval || pkg.endpoint.params))) {
         holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Use the fleet defaults for this machine",
           on: { click: function () { save({ reset: true }); } } })));
@@ -9918,7 +9937,7 @@
     } } });
     openSheet("Run " + pkg.title + " on " + asset.name, h("div", { cls: "stack" },
       h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
-      h("p", { cls: "pending", text: "Runs with this machine's settings. An audit with default settings goes straight through; anything else asks you to approve on your phone." })),
+      h("p", { cls: "pending", text: "Runs with this machine's settings. An audit with default settings goes straight through. " + maintAskText((state.maintSettingsByEndpoint[asset.endpoint.id] || {}).data) })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
@@ -10040,7 +10059,7 @@
       h("label", { cls: "field" }, h("span", { text: "Package" }), pick),
       h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
       hostBox,
-      h("p", { cls: "dim-2 u-t2", text: "Runs with each machine's settings; machines whose settings differ need separate runs. An audit with default settings goes straight through; anything else asks your phone first." })),
+      h("p", { cls: "dim-2 u-t2", text: "Runs with each machine's settings; machines whose settings differ need separate runs. An audit with default settings goes straight through. " + maintAskText(state.maintSettings) })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 

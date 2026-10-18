@@ -214,7 +214,38 @@ func (s *Server) getMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 		}
 		pkgs = append(pkgs, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"categories": cats, "packages": pkgs, "window": s.maintenanceWindow()})
+	out := map[string]interface{}{"categories": cats, "packages": pkgs, "window": s.maintenanceWindow()}
+	if a := s.maintenanceApprovals(r, tenantID); a != nil {
+		out["approvals"] = a
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// maintenanceApprovalsView is what decides whether a package run asks the
+// owner: the owner's Approvals rows on Nightshift for package runs (auto runs
+// without asking at any time, session only while a work session is open,
+// ask always asks), as the response authority holds them.
+type maintenanceApprovalsView struct {
+	Rows        map[string]string `json:"rows"`
+	SessionOpen bool              `json:"session_open"`
+	Stored      bool              `json:"stored"` // false: the built-in defaults
+}
+
+func (s *Server) maintenanceApprovals(r *http.Request, tenantID string) *maintenanceApprovalsView {
+	if s.responseAuth == nil {
+		return nil
+	}
+	v, err := s.responseAuth.ApprovalRows(r.Context(), tenantID)
+	if err != nil || v == nil || v.Error != "" {
+		return nil
+	}
+	out := &maintenanceApprovalsView{Rows: map[string]string{}, SessionOpen: v.SessionOpen, Stored: v.Stored}
+	for _, k := range []string{"maintenance", "security", "reboot"} {
+		for _, w := range []string{".in", ".out"} {
+			out.Rows[k+w] = v.Rows["ominull."+k+w]
+		}
+	}
+	return out
 }
 
 // settingsChange is one PUT: a package or a category, fleet or endpoint.

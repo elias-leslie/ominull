@@ -1715,7 +1715,7 @@ Fleet & CyberOps Commands:
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
   agents versions|update <id...|all> [--version V]  Inspect fleet versions; update several machines in one approval
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
-  maint run ENDPOINT PKG... --mode M      Run maintenance packages (owner tap or package rule; --no-wait prints ids)
+  maint run ENDPOINT PKG... --mode M      Run maintenance packages (Approvals row, rule or owner tap; --no-wait prints ids)
   maint wait ID... [--all] [--timeout D]  Block until a job, run or playbook run ends or needs attention
                                           (exit 0 ok, 3 failed, 4 needs attention, 5 timeout)
   maint script EP --file F --reason TEXT  Run a one-off script (one owner tap; --no-wait prints run and job ids)

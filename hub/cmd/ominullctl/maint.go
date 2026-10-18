@@ -72,7 +72,7 @@ func (c *APIClient) cmdMaint(args []string) error {
 			return nil
 		}
 		if len(out.Rules) == 0 {
-			fmt.Println("No approve-all rule for maintenance packages.")
+			fmt.Println("No approve-all rule for maintenance packages. Your Approvals page on Nightshift still decides: a row set to Automatic runs without asking.")
 		}
 		for _, r := range out.Rules {
 			fmt.Printf("%s  %s (ends %s)\n", r.ID, r.Label, r.EndsAt.Local().Format("2006-01-02"))
