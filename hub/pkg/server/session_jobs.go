@@ -1,9 +1,14 @@
 package server
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -44,6 +49,7 @@ func (s *Server) reconcileSessionJobs(now time.Time) int {
 		}
 		if s.responseStore.EndSessionJob(j.JobID, code, detail) == nil {
 			n++
+			s.auditSessionJobEnd(j, detail, now)
 		}
 	}
 	if n > 0 {
@@ -76,4 +82,27 @@ func sessionJobOutcome(m *terminal.Manager, j response.OpenSessionJob, now time.
 		return "", "", false
 	}
 	return "session_unknown", "the hub no longer knows this session", true
+}
+
+// auditSessionJobEnd leaves a SCREEN_SESSION_ENDED row for a screen session
+// the hub ended on its own (an agent frame it refuses, the agent leaving, a
+// time limit), so its reason is in the audit log and not only in the job.
+// A session the operator closed already has SCREEN_SESSION_CLOSED.
+func (s *Server) auditSessionJobEnd(j response.OpenSessionJob, detail string, now time.Time) {
+	if j.Kind != response.ActionKindScreenSession || strings.HasSuffix(detail, ": operator_closed") {
+		return
+	}
+	resource := j.SessionID
+	if resource == "" {
+		resource = j.JobID
+	}
+	_ = s.store.RecordAudit(storage.AuditEntry{
+		ID:        uuid.New().String(),
+		TenantID:  j.TenantID,
+		Username:  "hub",
+		Action:    "SCREEN_SESSION_ENDED",
+		Resource:  resource,
+		Details:   fmt.Sprintf("The screen session on %s ended without the operator closing it (%s)", j.EndpointID, detail),
+		Timestamp: now,
+	})
 }

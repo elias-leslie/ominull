@@ -29,6 +29,7 @@ const (
 // Agent -> operator JSON frame types.
 const (
 	agHello          = "hello"
+	agDesktop        = "desktop"
 	agFrameEnd       = "frame_end"
 	agCursorPos      = "cursor_pos"
 	agResized        = "resized"
@@ -131,7 +132,7 @@ func (p *policy) Agent(msgType int, data []byte) terminal.FrameDecision {
 		return closeWith("malformed_agent_frame")
 	}
 	switch f.Type {
-	case agHello, agFrameEnd, agCursorPos, agResized, agSASUnavailable:
+	case agHello, agDesktop, agFrameEnd, agCursorPos, agResized, agSASUnavailable:
 		return terminal.FrameDecision{}
 	case agBye:
 		reason := "agent_bye"

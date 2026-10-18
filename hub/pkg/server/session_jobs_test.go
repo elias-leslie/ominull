@@ -71,6 +71,21 @@ func TestSessionJobsEndWithTheirSession(t *testing.T) {
 	if n := srv.reconcileSessionJobs(time.Now().UTC()); n != 0 {
 		t.Fatalf("second pass ended %d", n)
 	}
+	// The screen session the hub ended leaves its reason in the audit log;
+	// terminal sessions do not get a screen row.
+	logs, err := srv.store.ListAuditLogs("", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := map[string]string{}
+	for _, e := range logs {
+		if e.Action == "SCREEN_SESSION_ENDED" {
+			ended[e.Resource] = e.Details
+		}
+	}
+	if len(ended) != 1 || !strings.Contains(ended[neverSess], "ep-lap") || !strings.Contains(ended[neverSess], "operator closed") {
+		t.Fatalf("SCREEN_SESSION_ENDED rows: %v", ended)
+	}
 
 	// A session the hub has lost ends its job after a day, not before.
 	lost := response.OpenSessionJob{JobID: "x", SessionID: "gone", RequestedAt: time.Now().Add(-time.Hour)}
