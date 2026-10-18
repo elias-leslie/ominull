@@ -460,7 +460,7 @@ static void test_long_path_reaches_script(void) {
     n += snprintf(longPath + n, sizeof(longPath) - (size_t)n, ";C:\\omninull-path-tail-marker");
     SetEnvironmentVariableA("PATH", longPath);
 
-    const char* script_body = "@echo off\r\necho PATHIS=%PATH%\r\n";
+    const char* script_body = "@echo off\r\necho PATHIS=%PATH%\r\necho EXTIS=%PATHEXT%\r\n";
     size_t script_len = strlen(script_body);
     uint8_t hash[32];
     Response_SHA256_Sum((const uint8_t*)script_body, script_len, hash);
@@ -489,6 +489,7 @@ static void test_long_path_reaches_script(void) {
 
     expect("long PATH: exit code is 0", exit_code == 0);
     expect("long PATH: tail of PATH reaches the script", strstr(output, "omninull-path-tail-marker") != NULL);
+    expect("PATHEXT reaches the script", strstr(output, "EXTIS=") != NULL && (strstr(output, ".EXE") != NULL || strstr(output, ".exe") != NULL));
     expect("long PATH: PATH is not the ComSpec value", strstr(output, "PATHIS=C:\\windows\\system32\\cmd.exe\r") == NULL &&
                                                         strstr(output, "PATHIS=C:\\Windows\\System32\\cmd.exe\r") == NULL);
 }

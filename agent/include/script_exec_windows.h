@@ -771,12 +771,14 @@ static inline int ScriptExec_RunSupervisedWin(
     {
         char* envVal = (char*)malloc(ENV_VALUE_MAX);
         char* envLine = (char*)malloc(ENV_VALUE_MAX + 32);
-        static const char* const names[] = {"SystemRoot", "SystemDrive", "ComSpec", "PATH"};
+        static const char* const names[] = {"SystemRoot", "SystemDrive", "ComSpec", "PATH", "PATHEXT"};
         static const char* const fallbacks[] = {
             "SystemRoot=C:\\Windows",
             "SystemDrive=C:",
             "ComSpec=C:\\Windows\\System32\\cmd.exe",
             "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+            // Without PATHEXT PowerShell treats an .exe as a document.
+            "PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC",
         };
         for (size_t v = 0; v < sizeof(names) / sizeof(names[0]); v++) {
             DWORD n = (envVal && envLine) ? GetEnvironmentVariableA(names[v], envVal, ENV_VALUE_MAX) : 0;
