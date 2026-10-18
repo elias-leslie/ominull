@@ -284,3 +284,16 @@ func TestSignedJobLockRefusal(t *testing.T) {
 		}
 	}
 }
+
+// A hypervisor at monitor-scripts under monitor-signed-scripts takes signed
+// scripts; respond and monitor still carry none.
+func TestSignedJobLockRefusalMonitorScripts(t *testing.T) {
+	if r := signedJobLockRefusal(&response.AgentTrustReport{Ceiling: "monitor-signed-scripts", Profile: "monitor-scripts"}); r != "" {
+		t.Fatalf("monitor-scripts refused: %s", r)
+	}
+	for _, p := range []string{"respond", "monitor", ""} {
+		if r := signedJobLockRefusal(&response.AgentTrustReport{Ceiling: "monitor-signed-scripts", Profile: p}); r == "" {
+			t.Fatalf("profile %q accepted", p)
+		}
+	}
+}

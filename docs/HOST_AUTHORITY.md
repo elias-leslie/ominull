@@ -30,8 +30,11 @@ Terminal and remote screen are refused by the agent under `monitor`, `isolate`, 
 on the hub side as well; set it for the same machines.
 
 Capability names (manifest and ceiling): `update`, `isolate`, `mesh`, `collect`, `script`, `terminal`, `screen`.
-Under `signed-scripts` and `monitor-signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must be `engagement`
-(one owner tap on the hub); the ceiling then cuts it down.
+Under `signed-scripts` and `monitor-signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must
+carry it (one owner tap on the hub); the ceiling then cuts it down. The workstation uses `engagement`. A hypervisor the
+hub keeps monitor-only uses `monitor-scripts` (collect, script and update; no isolate, mesh, terminal or screen). That
+profile adds no isolation, so it stands while monitor-only stays set; `engagement` on a monitor-only host is narrowed
+straight back to `monitor`.
 
 ## Host authority files
 
@@ -118,7 +121,7 @@ written, the new grant is refused, never an old entry dropped. Files: `/var/lib/
 ## Courier: signed jobs through the hub
 
 For endpoints whose latest trust report (under 15 minutes old) says `"host_authority":true`, a lock level that
-allows scripts (`signed-scripts`, `monitor-signed-scripts`, `engagement` or none) and the `engagement` profile;
+allows scripts (`signed-scripts`, `monitor-signed-scripts`, `engagement` or none) and the `engagement` or `monitor-scripts` profile;
 otherwise 403 with the reason, before anyone is asked to sign. Admin API key (`X-API-Key`). The hub never calls the
 OmniNull authority on this path and never signs. `ominullctl host-script run` (below) does all three steps.
 

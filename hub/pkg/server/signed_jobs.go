@@ -129,12 +129,12 @@ func signedJobLockRefusal(rep *response.AgentTrustReport) string {
 	default:
 		return fmt.Sprintf("the endpoint's lock level %q does not allow scripts (signed-scripts or monitor-signed-scripts does)", rep.Ceiling)
 	}
-	if rep.Profile != "engagement" {
+	if rep.Profile != "engagement" && rep.Profile != "monitor-scripts" {
 		p := rep.Profile
 		if p == "" {
 			p = "none"
 		}
-		return fmt.Sprintf("the endpoint's capability profile is %q, which carries no scripts; it needs engagement (one owner approval), and its lock level then limits it", p)
+		return fmt.Sprintf("the endpoint's capability profile is %q, which carries no scripts; it needs engagement, or monitor-scripts on a monitor-only host (one owner approval), and its lock level then limits it", p)
 	}
 	return ""
 }

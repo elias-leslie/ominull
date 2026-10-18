@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -442,5 +444,64 @@ func TestApprovedAddressesAreNormalizedBeforeSigning(t *testing.T) {
 	rec = httptest.NewRecorder()
 	if _, _, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":["host.example"]}`), []string{"host.example"}, true); ok || rec.Code != http.StatusBadRequest {
 		t.Fatalf("a non-address allow entry was accepted (%d)", rec.Code)
+	}
+}
+
+// monitor-scripts (collect, script, update) stands on a monitor-only host:
+// it adds no isolation. A hub restart (empty manifest cache) and later beats
+// keep it; a raise to engagement is still narrowed back to monitor; and moving
+// a respond host to it is a raise, never a silent narrowing.
+func TestMonitorScriptsProfile(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-h", ResponseCapabilities: `{"isolate":true}`})
+	monitorOnly(t, srv, "ep-h")
+	trustBeat(t, srv, "ep-h", &response.AgentTrustReport{V: 1, Keys: "missing"})
+	change := func(profile string) string {
+		body := `{"endpoint_id":"ep-h","profile":"` + profile + `","reason":"signed upkeep"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/capabilities", strings.NewReader(body))
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := serveApproved(t, srv, srv.Handler(), req, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("capability change %s: %d %s", profile, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	if b := change("monitor-scripts"); strings.Contains(b, "still_monitor_only") || !strings.Contains(b, `"profile":"monitor-scripts"`) ||
+		!strings.Contains(b, `"caps":["collect","script","update"]`) {
+		t.Fatalf("monitor-scripts on a monitor-only host: %s", b)
+	}
+	beat := func(seq int64, profile string) response.CapabilityManifest {
+		out := trustBeat(t, srv, "ep-h", &response.AgentTrustReport{V: 1, Keys: "pinned", ManifestSeq: seq, Profile: profile})
+		var m response.CapabilityManifest
+		if raw, ok := out["capability_manifest"]; ok {
+			_ = json.Unmarshal(raw, &m)
+		}
+		return m
+	}
+	m := beat(1, "monitor")
+	if m.Profile != "monitor-scripts" {
+		t.Fatalf("heartbeat narrowed it: %+v", m)
+	}
+	srv.trust.mu.Lock()
+	srv.trust.manifests = map[string]*response.CapabilityManifest{}
+	srv.trust.mu.Unlock()
+	if again := beat(m.Seq, "monitor-scripts"); again.Profile != "" && again.Profile != "monitor-scripts" {
+		t.Fatalf("after a hub restart: %+v", again)
+	}
+	srv.afterProfileChange(context.Background(), "ep-h")
+	if again := beat(m.Seq, "monitor-scripts"); again.Profile != "" && again.Profile != "monitor-scripts" {
+		t.Fatalf("after a profile refresh: %+v", again)
+	}
+	if b := change("engagement"); !strings.Contains(b, "still_monitor_only") || !strings.Contains(b, `"profile":"monitor"`) {
+		t.Fatalf("engagement on a monitor-only host: %s", b)
+	}
+
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-r", ResponseCapabilities: `{"isolate":true}`})
+	trustBeat(t, srv, "ep-r", &response.AgentTrustReport{V: 1, Keys: "missing"})
+	got, err := srv.responseAuth.EndpointManifest(context.Background(), &responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-r", Profile: "monitor-scripts"})
+	if err != nil || got.Profile != "respond" {
+		t.Fatalf("respond -> monitor-scripts was signed without approval: %+v %v", got, err)
 	}
 }

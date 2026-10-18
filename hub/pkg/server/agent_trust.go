@@ -157,7 +157,7 @@ func (s *Server) endpointManifest(ctx context.Context, tenantID, endpointID, pro
 	c.init()
 	m, ok := c.manifests[endpointID]
 	c.mu.Unlock()
-	if ok && !refresh && m.MatchesProfile() && (profile == "" || response.ProfileRank(profile) >= response.ProfileRank(m.Profile)) {
+	if ok && !refresh && m.MatchesProfile() && (profile == "" || !response.ProfileNarrows(m.Profile, profile)) {
 		return m
 	}
 	m, err := s.responseAuth.EndpointManifest(ctx, &responseauth.ManifestRequest{TenantID: tenantID, EndpointID: endpointID, Profile: profile})
@@ -169,6 +169,32 @@ func (s *Server) endpointManifest(ctx context.Context, tenantID, endpointID, pro
 	c.manifests[endpointID] = m
 	c.mu.Unlock()
 	return m
+}
+
+func knownProfile(p string) bool {
+	_, ok := response.ProfileCaps(p)
+	return ok
+}
+
+// monitorOnlyClamp is the profile a monitor-only host is held to: monitor,
+// unless its manifest is already a profile that adds no isolation
+// (monitor-scripts, which the owner approved), which then stands.
+func (s *Server) monitorOnlyClamp(endpointID, reported string) string {
+	s.trust.mu.Lock()
+	s.trust.init()
+	m := s.trust.manifests[endpointID]
+	if seen, ok := s.trust.reports[endpointID]; ok && reported == "" {
+		reported = seen.report.Profile
+	}
+	s.trust.mu.Unlock()
+	cur := reported
+	if m != nil {
+		cur = m.Profile
+	}
+	if cur != "monitor" && response.MonitorOnlyProfile(cur) {
+		return cur
+	}
+	return "monitor"
 }
 
 // initialProfile is what an endpoint's first manifest pins: monitor for a
@@ -210,7 +236,7 @@ func (s *Server) addTrustControl(ctx context.Context, resp map[string]interface{
 	}
 	profile := ""
 	if ep.MonitorOnly {
-		profile = "monitor"
+		profile = s.monitorOnlyClamp(ep.ID, report.Profile)
 	} else if report.ManifestSeq == 0 {
 		profile = initialProfile(ep)
 	}
@@ -648,8 +674,8 @@ func decodeCapabilityRequest(w http.ResponseWriter, body []byte) (capabilityRequ
 	case req.EndpointID == "":
 		writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
 		return req, false
-	case response.ProfileRank(req.Profile) == 0:
-		writeJSONError(w, http.StatusBadRequest, "profile must be monitor, respond or engagement")
+	case !knownProfile(req.Profile):
+		writeJSONError(w, http.StatusBadRequest, "profile must be monitor, monitor-scripts, respond or engagement")
 		return req, false
 	case req.Reason == "" || len(req.Reason) > 300:
 		writeJSONError(w, http.StatusBadRequest, "reason is required (at most 300 characters)")
@@ -702,7 +728,7 @@ func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Reque
 	m := s.endpointManifest(r.Context(), endpointTenant(ep), req.EndpointID, "", true)
 	s.audit(r, "ENDPOINT_CAPABILITIES_CHANGED", req.EndpointID, "profile "+req.Profile+": "+req.Reason)
 	out := map[string]interface{}{"endpoint_id": req.EndpointID, "profile": req.Profile}
-	if ep.MonitorOnly && req.Profile != "monitor" {
+	if ep.MonitorOnly && !response.MonitorOnlyProfile(req.Profile) {
 		m = s.endpointManifest(r.Context(), endpointTenant(ep), req.EndpointID, "monitor", true)
 		out["profile"] = "monitor"
 		out["still_monitor_only"] = "lift monitor-only with allow-isolation first: " + ep.MonitorOnlyReason()
@@ -724,7 +750,7 @@ func (s *Server) afterProfileChange(ctx context.Context, endpointID string) {
 	}
 	profile := ""
 	if ep.MonitorOnly {
-		profile = "monitor"
+		profile = s.monitorOnlyClamp(endpointID, "")
 	}
 	s.endpointManifest(ctx, endpointTenant(ep), endpointID, profile, true)
 }

@@ -505,7 +505,7 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 			m = n
 		}
 		// Narrowing needs no approval: it can only take capabilities away.
-		if profile != "" && response.ProfileRank(profile) > 0 && response.ProfileRank(profile) < response.ProfileRank(m.Profile) {
+		if profile != "" && response.ProfileNarrows(m.Profile, profile) {
 			n, err := a.signManifestLocked(req.TenantID, ep, profile, m.Seq+1)
 			if err != nil {
 				return nil, err
@@ -610,8 +610,8 @@ func (a *Authority) applyCapabilityApproval(tenantID string, stmt ApprovalStatem
 	}
 	if p.Route == allowIsolationRoute {
 		// Lifting monitor-only is the owner's raise to "respond"; a host
-		// already at respond or above keeps its manifest.
-		if have && response.ProfileRank(cur.Profile) >= response.ProfileRank("respond") {
+		// whose manifest already carries isolation keeps it.
+		if have && response.ProfileHas(cur.Profile, response.CapIsolate) {
 			return nil
 		}
 		body.Profile = "respond"

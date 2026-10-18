@@ -55,11 +55,15 @@ const (
 // never be cut off). respond: containment and collection; the terminal is
 // here by the owner's decision (2026-10-14: home machines keep a full
 // terminal, each session still takes its own phone approval). engagement:
-// adds hub-pushed scripts.
+// adds hub-pushed scripts. monitor-scripts: a hypervisor's profile under the
+// monitor-signed-scripts lock level: evidence collection, updates and scripts,
+// no isolation, mesh, terminal or screen, so it stands while the hub keeps the
+// host monitor-only (it adds no isolation).
 var profileCaps = map[string][]string{
-	"monitor":    {CapUpdate},
-	"respond":    {CapCollect, CapIsolate, CapMesh, CapScreen, CapTerminal, CapUpdate},
-	"engagement": {CapCollect, CapIsolate, CapMesh, CapScreen, CapScript, CapTerminal, CapUpdate},
+	"monitor":         {CapUpdate},
+	"monitor-scripts": {CapCollect, CapScript, CapUpdate},
+	"respond":         {CapCollect, CapIsolate, CapMesh, CapScreen, CapTerminal, CapUpdate},
+	"engagement":      {CapCollect, CapIsolate, CapMesh, CapScreen, CapScript, CapTerminal, CapUpdate},
 }
 
 // ProfileCaps returns the sorted capability list of a profile.
@@ -91,17 +95,40 @@ func (m *CapabilityManifest) MatchesProfile() bool {
 	return true
 }
 
-// ProfileRank orders profiles by reach, for "is this a raise" checks.
-func ProfileRank(profile string) int {
-	switch profile {
-	case "monitor":
-		return 1
-	case "respond":
-		return 2
-	case "engagement":
-		return 3
+// ProfileNarrows reports whether moving from profile from to profile to only
+// takes capabilities away (to's set is a strict subset of from's). Profiles
+// are not a line: monitor-scripts adds scripts to what monitor holds but lacks
+// respond's isolation, so a move between those is a raise either way.
+func ProfileNarrows(from, to string) bool {
+	f, ok1 := profileCaps[from]
+	t, ok2 := profileCaps[to]
+	if !ok1 || !ok2 || len(t) >= len(f) {
+		return false
 	}
-	return 0
+	for _, c := range t {
+		if !ProfileHas(from, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// ProfileHas reports whether a profile holds a capability.
+func ProfileHas(profile, capability string) bool {
+	for _, c := range profileCaps[profile] {
+		if c == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// MonitorOnlyProfile: the profiles that add no isolation, so they may stand
+// while the hub keeps a host monitor-only.
+func MonitorOnlyProfile(profile string) bool {
+	_, ok := profileCaps[profile]
+	return ok && !ProfileHas(profile, CapIsolate) && !ProfileHas(profile, CapMesh) &&
+		!ProfileHas(profile, CapTerminal) && !ProfileHas(profile, CapScreen)
 }
 
 // CapabilityManifest is what one endpoint may be asked to do, signed by the
