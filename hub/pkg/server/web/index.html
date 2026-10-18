@@ -143,7 +143,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
   <nav class="rail" aria-label="Console sections">
     <button class="rail-mark" id="nav-toggle" type="button" aria-label="Expand navigation" aria-expanded="false">☰</button>
 
-    <span class="rail-group">Monitor</span>
+    <span class="rail-group">Fleet</span>
     <button class="rail-btn" type="button" data-section="assets" aria-current="true">
       <svg class="ic"><use href="#i-assets"/></svg>
       <span class="tip" aria-hidden="true">Assets</span>
@@ -165,12 +165,13 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span class="tip" aria-hidden="true">Alerts</span>
       <span class="sr">Alerts</span>
     </button>
-    <span class="rail-group">Investigate</span>
-    <a class="rail-btn" href="/console/timeline">
-      <svg class="ic"><use href="#i-audit"/></svg>
-      <span class="tip" aria-hidden="true">Timeline</span>
-      <span class="sr">Timeline</span>
-    </a>
+    <span class="rail-group">Act</span>
+    <button class="rail-btn rail-btn-alerts" type="button" data-section="maintenance" aria-current="false">
+      <svg class="ic"><use href="#i-maintenance"/></svg>
+      <span class="rail-alert-badge rail-attn-badge" id="rail-maint-badge" data-n="0">0</span>
+      <span class="tip" aria-hidden="true">Maintenance</span>
+      <span class="sr">Maintenance</span>
+    </button>
     <button class="rail-btn" type="button" data-section="response" aria-current="false">
       <svg class="ic"><use href="#i-unlock"/></svg>
       <span class="tip" aria-hidden="true">Response</span>
@@ -181,26 +182,26 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
       <span class="tip" aria-hidden="true">Forensics</span>
       <span class="sr">Forensics</span>
     </button>
-    <span class="rail-group">Administer</span>
+    <a class="rail-btn" href="/console/timeline">
+      <svg class="ic"><use href="#i-audit"/></svg>
+      <span class="tip" aria-hidden="true">Timeline</span>
+      <span class="sr">Timeline</span>
+    </a>
+    <span class="rail-group">Settings</span>
     <button class="rail-btn" type="button" data-section="policy" aria-current="false">
       <svg class="ic"><use href="#i-policy"/></svg>
       <span class="tip" aria-hidden="true">Policy</span>
       <span class="sr">Policy</span>
     </button>
-    <button class="rail-btn" type="button" data-section="maintenance" aria-current="false">
-      <svg class="ic"><use href="#i-maintenance"/></svg>
-      <span class="tip" aria-hidden="true">Maintenance</span>
-      <span class="sr">Maintenance</span>
+    <button class="rail-btn" type="button" data-section="access" aria-current="false" id="rail-access" hidden>
+      <svg class="ic"><use href="#i-access"/></svg>
+      <span class="tip" aria-hidden="true">Access</span>
+      <span class="sr">Access</span>
     </button>
     <button class="rail-btn" type="button" data-section="audit" aria-current="false">
       <svg class="ic"><use href="#i-audit"/></svg>
       <span class="tip" aria-hidden="true">Audit</span>
       <span class="sr">Audit</span>
-    </button>
-    <button class="rail-btn" type="button" data-section="access" aria-current="false" id="rail-access" hidden>
-      <svg class="ic"><use href="#i-access"/></svg>
-      <span class="tip" aria-hidden="true">Access</span>
-      <span class="sr">Access</span>
     </button>
     <span class="rail-gap"></span>
 
@@ -216,7 +217,7 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
     <header class="topbar">
       <div class="crumb"><span id="crumb-main">Assets</span> <span class="sub" id="crumb-sub"></span></div>
 
-      <button class="omni" type="button" id="omni">
+      <button class="omni" type="button" id="omni" aria-label="Jump to host, action, or IP">
         <svg class="ic ic-s"><use href="#i-search"/></svg>
         <span class="fill">Jump to host, action, or IP</span>
         <kbd id="omni-kbd">Ctrl K</kbd>
@@ -229,17 +230,6 @@ window.OMINULL = { key: "{{ADMIN_KEY}}", version: "{{HUB_VERSION}}", operator: "
         <svg class="ic ic-s"><use href="#i-lock"/></svg>
         <span class="btn-response-dot" id="response-status-dot"></span>
         <span id="response-status-text">Response Locked</span>
-      </button>
-
-      <button class="btn btn-sweep" type="button" id="topbar-sweep-btn" title="Subnet Sweep & Asset Discovery">
-        <svg class="ic ic-s"><use href="#i-sweep"/></svg>
-        <span class="sweep-dot" id="sweep-pulse-dot"></span>
-        <span id="sweep-label-text">Subnet Sweep</span>
-      </button>
-
-      <button class="btn btn-primary btn-install" type="button" id="topbar-install-btn" title="Install an Ominull Agent">
-        <svg class="ic ic-s"><use href="#i-plus"/></svg>
-        <span>Install Agent</span>
       </button>
 
       <button class="btn-avatar" type="button" id="user-avatar-btn" aria-haspopup="true" aria-expanded="false" title="Account & Hub Settings">

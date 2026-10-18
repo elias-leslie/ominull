@@ -42,11 +42,11 @@
     { id: "assets", label: "Assets" },
     { id: "topology", label: "Topology" },
     { id: "traffic", label: "Traffic" },
-    { id: "policy", label: "Policy" },
-    { id: "maintenance", label: "Maintenance" },
     { id: "alerts", label: "Alerts" },
+    { id: "maintenance", label: "Maintenance" },
     { id: "response", label: "Response" },
     { id: "forensics", label: "Forensics" },
+    { id: "policy", label: "Policy" },
     { id: "audit", label: "Audit" }
   ];
 
@@ -1386,6 +1386,15 @@
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
         if (base === "/api/v1/maintenance/decisions") { resolve(demoDecisions()); return; }
+        /* Host-scoped reads (the asset view) answer for that host only, in
+           the hub's paged shape, so the view's counts and lists agree. */
+        var q = new URLSearchParams(path.split("?")[1] || "");
+        if (base === "/api/v1/anomalies" && q.get("endpoint_id")) {
+          var mine = arrayOf(DEMO_CACHE[base]).filter(function (a) { return a.endpoint_id === q.get("endpoint_id") && (!q.get("unacknowledged_only") || !a.acknowledged); });
+          resolve({ alerts: mine, total: mine.length, unacknowledged_total: mine.length });
+          return;
+        }
+        if (base === "/api/v1/traffic/flows" && (q.get("endpoint_id") || q.get("src_ip"))) { resolve({ total: 0, flows: [] }); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -3346,7 +3355,18 @@
       h("span", {}, h("i", { "data-on": "none" }), h("span", { text: "nothing yet" })),
       h("span", { text: "j/k move \u00b7 Ctrl/Shift+Click range select \u00b7 i isolate \u00b7 r rescan \u00b7 enter open" }));
 
+    var scanning = !!(state.scanStatus && state.scanStatus.active);
+    var tools = pageTools(needsYouBar(), h("div", { cls: "row-acts" },
+      h("button", { cls: "btn", type: "button", disabled: READ_ONLY, title: READ_ONLY ? "Read-only access" : "Find devices on a subnet",
+        on: { click: openSweepModal } },
+        icon("i-sweep", true), h("span", { cls: "sweep-dot" + (scanning ? " scanning" : "") }),
+        h("span", { text: scanning ? "Sweeping " + (state.scanStatus.progress || 0) + "%" : "Sweep subnet" })),
+      h("button", { cls: "btn btn-primary", type: "button", disabled: READ_ONLY, title: READ_ONLY ? "Read-only access" : "Install an agent on a machine",
+        on: { click: function () { openInstallerSheet({ platform: "linux" }); } } },
+        icon("i-plus", true), h("span", { text: "Install agent" }))));
+
     clear(view);
+    view.appendChild(tools);
     view.appendChild(wrap);
     view.appendChild(key);
     view.appendChild(h("div", {cls: "asset-pages", role: "navigation", "aria-label": "Asset pages"},
@@ -3432,10 +3452,85 @@
 
   /* ------------------------------------------------------- other sections */
 
-  function card(title, body, actions, wide) {
+  /* help: one paragraph that explains the card, shown on demand behind a "?"
+     in the head instead of always sitting in the body. */
+  function card(title, body, actions, wide, help) {
     var head = h("h3", {}, h("span", { cls: "fill", text: title }));
-    if (actions) actions.forEach(function (a) { head.appendChild(a); });
-    return h("section", { cls: wide ? "card card-wide" : "card" }, head, body);
+    var tip = help ? helpTip(title, help) : null;
+    if (actions) actions.forEach(function (a) { if (a) head.appendChild(a); });
+    if (tip) head.appendChild(tip.button);
+    return h("section", { cls: wide ? "card card-wide" : "card" }, head, tip ? tip.text : null, body);
+  }
+
+  /* Open state lives outside the DOM so a five-second repaint keeps a help
+     paragraph open while it is being read. */
+  var helpOpen = {};
+  var helpSeq = 0;
+  function helpTip(key, text) {
+    var id = "help-" + (++helpSeq);
+    var p = h("p", { cls: "help-text", id: id, text: text, hidden: !helpOpen[key] });
+    var b = h("button", {
+      cls: "btn-help", type: "button", text: "?", title: "What is this?",
+      "aria-label": "About " + key, "aria-controls": id, "aria-expanded": helpOpen[key] ? "true" : "false",
+      on: { click: function (e) {
+        e.stopPropagation();
+        helpOpen[key] = !helpOpen[key];
+        p.hidden = !helpOpen[key];
+        b.setAttribute("aria-expanded", helpOpen[key] ? "true" : "false");
+      } }
+    });
+    return { button: b, text: p };
+  }
+
+  /* A reference list (catalog, indicators, library) starts folded to its
+     first few rows; the full list is one click away and stays open across
+     repaints. Returns the rows to render and the toggle to show under them. */
+  var foldOpen = {};
+  function foldRows(key, rows, keep, noun) {
+    keep = keep || 5;
+    if (rows.length <= keep + 2) return { rows: rows, toggle: null };
+    var open = !!foldOpen[key];
+    var toggle = h("button", {
+      cls: "btn mini fold-toggle", type: "button", "aria-expanded": open ? "true" : "false",
+      text: open ? "Show fewer" : "Show all " + rows.length + (noun ? " " + noun : ""),
+      on: { click: function () { foldOpen[key] = !open; render(); if (state.routeKey) renderRoute(); } }
+    });
+    return { rows: open ? rows : rows.slice(0, keep), toggle: h("div", { cls: "fold-row" }, toggle) };
+  }
+
+  /* What needs the owner now, from anywhere in the console. Each item names a
+     count and where it is answered; the list is empty when nothing waits. */
+  function needsYouItems() {
+    var items = [];
+    var stats = assetStats();
+    var decisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
+    if (decisions) items.push({ n: decisions, label: decisions === 1 ? "decision" : "decisions", tone: "warn", title: "Answer on the Maintenance page",
+      run: function () { go("maintenance"); } });
+    var unack = state.unackAlertsTotal || 0;
+    if (unack) items.push({ n: unack, label: unack === 1 ? "open alert" : "open alerts", tone: "crit", title: "Review on the Alerts page",
+      run: function () { go("alerts"); } });
+    if (stats.quarantined) items.push({ n: stats.quarantined, label: "quarantined", tone: "crit", title: "Show quarantined hosts",
+      run: function () { state.filters = { quarantined: true }; go("assets"); } });
+    if (stats.outdated) items.push({ n: stats.outdated, label: stats.outdated === 1 ? "agent outdated" : "agents outdated", tone: "warn", title: "Show hosts with an outdated agent",
+      run: function () { state.filters = { outdated: true }; go("assets"); } });
+    return items;
+  }
+
+  function needsYouBar() {
+    var items = needsYouItems();
+    if (!items.length) return h("div", { cls: "needs-you", "data-empty": "true" }, h("span", { cls: "st", "data-state": "ok" }, icon("g-online", true), h("span", { text: "Nothing needs you" })));
+    return h("div", { cls: "needs-you", role: "group", "aria-label": "Needs you" },
+      h("span", { cls: "needs-you-l", text: "Needs you" }),
+      items.map(function (it) {
+        return h("button", { cls: "attn", type: "button", "data-tone": it.tone, title: it.title, on: { click: it.run } },
+          h("b", { text: String(it.n) }), h("span", { text: it.label }));
+      }));
+  }
+
+  /* Page head: what needs the owner on the left, the page's actions on the
+     right with the primary one last. */
+  function pageTools(left, actions) {
+    return h("div", { cls: "page-tools" }, left, h("span", { cls: "fill" }), actions);
   }
 
   /* Text of a rendered cell, for sorting. Cells arrive as strings or as nodes,
@@ -9236,6 +9331,15 @@
   }
 
   var hostScopes = Object.create(null);
+  /* A host-scoped read's total: the hub's count when it sent one, else the
+     length of the list it did send, else "unknown" - never "undefined". */
+  function scopeTotal(data, listKey) {
+    if (!data) return "unknown";
+    if (typeof data.total === "number") return String(data.total);
+    var list = Array.isArray(data) ? data : data[listKey];
+    return Array.isArray(list) ? String(list.length) : "unknown";
+  }
+
   function loadHostScope(key) {
     var asset = state.assetByKey[key];
     if (!asset) return;
@@ -10354,10 +10458,10 @@
       ? h("p", {role: "status", text: "Host alerts unavailable: " + hostScope.alertsError})
       : hostScope.alertsLoading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
       : !ep && !asset.assetId ? h("p", {text: "No stored source identity for this asset. Destination references are not alerts raised on this host."})
-      : h("div", {}, h("p", {text: (hostScope.alerts ? hostScope.alerts.total : "Unknown") + " open alerts · raised, unacknowledged · latest 50 shown" + (!ep ? " · recorded source identity only; older unattributed findings excluded" : " · all retained history")}),
+      : h("div", {}, h("p", {text: scopeTotal(hostScope.alerts, "alerts") + (scopeTotal(hostScope.alerts, "alerts") === "1" ? " open alert" : " open alerts") + " · raised, unacknowledged · latest 50 shown" + (!ep ? " · recorded source identity only; older unattributed findings excluded" : " · all retained history")}),
         alerts.map(function (a) { return alertCardNode(a, true); }),
         h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep ? ep.id : "", asset_id:ep ? "" : asset.assetId, unacknowledged_only:true}; go("alerts"); }}})), null, true);
-    flowCard.appendChild(h("p", {role: "status", text: hostScope.flowsError ? "Recent flows unavailable: " + hostScope.flowsError : hostScope.flowsLoading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + (hostScope.flows ? hostScope.flows.total : "unknown") + " matching"}));
+    flowCard.appendChild(h("p", {role: "status", text: hostScope.flowsError ? "Recent flows unavailable: " + hostScope.flowsError : hostScope.flowsLoading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + scopeTotal(hostScope.flows, "flows") + " matching"}));
     flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
 
     var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
@@ -10707,6 +10811,8 @@
       });
     });
 
+    items.push({ group: "Act", label: "Install an agent", iconId: "i-plus", hint: "assets", run: function () { openInstallerSheet({ platform: "linux" }); } });
+    items.push({ group: "Act", label: "Sweep a subnet", iconId: "i-sweep", hint: "assets", run: openSweepModal });
     items.push({ group: "Act", label: "Isolate selected hosts", iconId: "i-lock", hint: "bulk", run: function () { bulkIsolate(true); } });
     items.push({ group: "Act", label: "Release selected hosts", iconId: "i-unlock", hint: "bulk", run: function () { bulkIsolate(false); } });
     items.push({ group: "Act", label: "Push agent updates to the fleet", iconId: "i-download", hint: "agents", run: pushAgentUpdates });
@@ -11031,6 +11137,13 @@
       var count = state.unackAlertsTotal !== undefined ? state.unackAlertsTotal : state.anomalies.filter(function (a) { return !a.acknowledged; }).length;
       badge.textContent = String(count);
       badge.setAttribute("data-n", String(count));
+    }
+    var maintBadge = $("rail-maint-badge");
+    if (maintBadge) {
+      var waiting = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
+      maintBadge.textContent = String(waiting);
+      maintBadge.setAttribute("data-n", String(waiting));
+      maintBadge.setAttribute("title", waiting + " waiting for you");
     }
 
     var health = $("health");
@@ -11400,6 +11513,17 @@
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts/schedules").then(function (d) { state.scriptSchedules = arrayOf(d && d.schedules || d); }).catch(function () {}));
+    }
+    /* Open decisions feed the rail badge and the needs-you strip on every
+       page, so they are read in the background too, at most once a minute.
+       A hub without the response subsystem answers 404; that stops the
+       background read and is not reported as the hub being degraded. */
+    if (state.section !== "maintenance" && !state.maintDecisionsOff && Date.now() - (state.maintDecisionsAt || 0) > 60000) {
+      state.maintDecisionsAt = Date.now();
+      jobs.push(request("/api/v1/maintenance/decisions").then(function (d) { state.maintDecisions = d || null; }, function (e) {
+        if (e && (e.status === 404 || e.status === 403)) state.maintDecisionsOff = true;
+        if (resources["/api/v1/maintenance/decisions"]) delete resources["/api/v1/maintenance/decisions"].error;
+      }));
     }
     if (state.section === "maintenance") {
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));

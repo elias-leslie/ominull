@@ -18,6 +18,19 @@
   assert(!container.querySelector('img') && !window.fixtureExecuted,'Text interpreted as HTML');
   container.remove();
  });
+ await check('needs-you strip and Maintenance badge count what waits on the owner', async () => {
+  const saved={d:a.state.maintDecisions,u:a.state.unackAlertsTotal};
+  a.state.maintDecisions={open:[{key:'k1',group:'g',group_title:'G',endpoint_id:'e',package:'p',item:{id:'i',name:'n',reason:'r'},answers:['handled']}]};
+  a.state.unackAlertsTotal=0; a.state.section='assets'; a.render();
+  const chips=[...document.querySelectorAll('.needs-you .attn')].map(b=>b.textContent);
+  assert(chips.includes('1decision'),'Decision missing from needs-you: '+chips.join(','));
+  assert(!chips.some(c=>/open alert/.test(c)),'Zero alerts shown as needing the owner');
+  const badge=document.getElementById('rail-maint-badge');
+  assert(badge && badge.dataset.n==='1','Maintenance badge does not count the open decision');
+  a.state.maintDecisions={open:[]}; a.render();
+  assert(document.getElementById('rail-maint-badge').dataset.n==='0','Badge stays after decisions close');
+  a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.render();
+ });
  await check('all asset comparators accept real row types and retain sort focus', () => {
   for (let col=2; col<=9; col++) for (const dir of ['asc','desc']) { a.state.assetSort={col,dir}; a.sortAssetRows(a.state.assets); a.render(); }
   a.state.assetSort=null; a.render();

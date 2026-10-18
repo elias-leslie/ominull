@@ -4948,3 +4948,100 @@ tfoot {
 /* The maintenance window row: label, two times and buttons; wraps on a phone. */
 .maint-window { row-gap: var(--s-1); }
 .pb-hosts { border: 1px solid var(--line, currentColor); border-radius: 4px; padding: 8px 12px; display: grid; gap: 6px; margin: 0; }
+
+/* ------------------------------------------------ console UX: shared patterns
+   Page tools (needs-you on the left, page actions on the right), help on
+   demand behind a "?", and folded reference lists. See docs/CONSOLE_UX.md. */
+.page-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+.page-tools > .fill { flex: 1; }
+.page-tools .btn { display: inline-flex; align-items: center; gap: 6px; }
+
+.needs-you {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.needs-you-l {
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.attn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--r-b);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: var(--t-3);
+  cursor: pointer;
+}
+.attn b { font-family: var(--f-mono); font-size: var(--t-4); }
+.attn[data-tone="warn"] { border-left-color: var(--warn); }
+.attn[data-tone="warn"] b { color: var(--warn); }
+.attn[data-tone="crit"] { border-left-color: var(--crit); }
+.attn[data-tone="crit"] b { color: var(--crit); }
+.attn:hover { border-color: var(--ink-3); }
+.attn:focus-visible, .btn-help:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.btn-help {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--f-sans);
+  font-size: var(--t-2);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.btn-help:hover, .btn-help[aria-expanded="true"] { color: var(--ink); border-color: var(--ink-3); }
+.help-text {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink-2);
+  font-size: var(--t-3);
+  line-height: 1.5;
+  max-width: 90ch;
+}
+.help-text[hidden] { display: none; }
+
+.fold-row { padding: var(--s-2) var(--s-3); }
+.fold-toggle { color: var(--ink-2); }
+
+.rail-attn-badge { background: var(--warn); color: var(--ground); }
+
+@media (max-width: 600px) {
+  /* The lock state stays readable as its icon and dot; the word is kept for
+     screen readers so the top bar fits one row on a phone. */
+  #response-status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .topbar { flex-wrap: nowrap; }
+  .topbar .omni { min-width: 0; margin-left: auto; }
+  .topbar .omni kbd { display: none; }
+  #topbar-actions { flex: 1 1 auto; min-width: 0; display: flex; }
+  #topbar-actions #filter-input { width: 100%; min-width: 0; }
+}
+@media (max-width: 640px) {
+  .page-tools { padding: var(--s-2); }
+  .page-tools .row-acts { width: 100%; justify-content: flex-end; }
+}
