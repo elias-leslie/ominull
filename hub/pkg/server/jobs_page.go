@@ -444,6 +444,11 @@ func addPackageResult(v *jobView, job *response.JobRecord, meta *scripts.Package
 				jc.Label, jc.Tone = "Fixed", "ok"
 			case "fail":
 				jc.Label, jc.Tone = "Fail", "crit"
+			case "accepted":
+				jc.Label, jc.Tone = "Accepted", "idle"
+				if c.Accepted != nil && c.Accepted.Reason != "" {
+					jc.Actual += " (accepted: " + c.Accepted.Reason + ")"
+				}
 			default:
 				jc.Label, jc.Tone = "Not applicable", "idle"
 			}

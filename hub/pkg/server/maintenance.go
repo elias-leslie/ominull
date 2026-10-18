@@ -302,6 +302,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	drift, runs := 0, 0
 	compliance := map[string]map[string]int{} // category -> pass/fail
 	libraries := map[string][]*scripts.Script{}
+	acceptedAll := s.allAcceptedRisks()
 	for _, ep := range eps {
 		if ep.Status == "retired" {
 			continue
@@ -324,6 +325,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 				continue
 			}
 			run := derivePackageRun(job, now)
+			applyAcceptedRisks(run, acceptedAll[ep.ID])
 			runs++
 			switch run.State {
 			case "failed", "no_result":

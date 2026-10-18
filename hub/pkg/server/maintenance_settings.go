@@ -215,6 +215,9 @@ func (s *Server) getMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 		pkgs = append(pkgs, v)
 	}
 	out := map[string]interface{}{"categories": cats, "packages": pkgs, "window": s.maintenanceWindow()}
+	if ep != "" {
+		out["accepted_risks"] = s.acceptedRiskList(ep)
+	}
 	if a := s.maintenanceApprovals(r, tenantID); a != nil {
 		out["approvals"] = a
 	}
@@ -263,6 +266,10 @@ type settingsChange struct {
 	ExpiresAt  json.RawMessage             `json:"expires_at"` // RFC 3339 or YYYY-MM-DD; null clears
 	Reset      bool                        `json:"reset"`
 	Window     *string                     `json:"window"` // alone: the fleet maintenance window ("" clears)
+	// AcceptRisk (with endpoint_id, accepted, reason) accepts a failing check
+	// on one machine; see accepted_risks.go.
+	AcceptRisk *string `json:"accept_risk"`
+	Accepted   *bool   `json:"accepted"`
 }
 
 // optString reads an optional field: absent -> keep, null -> clear.
@@ -309,6 +316,10 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 			writeJSONError(w, http.StatusBadRequest, "endpoint not found")
 			return
 		}
+	}
+	if c.AcceptRisk != nil {
+		s.putAcceptedRisk(w, r, tenantID, c)
+		return
 	}
 	if c.Window != nil {
 		if c.Package != "" || c.Category != "" || c.EndpointID != "" {

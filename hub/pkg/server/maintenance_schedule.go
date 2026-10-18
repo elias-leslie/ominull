@@ -151,11 +151,12 @@ func packageRunDue(jobs []*response.JobRecord, interval time.Duration, now time.
 // a scheduled audit that finished with drift, and nothing ran after it. One
 // fix per drifting audit: if the fix fails or is declined, the next scheduled
 // audit decides again.
-func driftNeedsFix(jobs []*response.JobRecord) bool {
+func driftNeedsFix(jobs []*response.JobRecord, accepted map[string]acceptedRisk) bool {
 	if len(jobs) == 0 || jobs[0].RequestedBy != schedulerName {
 		return false
 	}
 	run := derivePackageRun(jobs[0], time.Now())
+	applyAcceptedRisks(run, accepted) // drift the owner accepted needs no fix
 	return run.State == "drift" && run.Mode == "audit" && run.CompletedAt != nil
 }
 
@@ -221,6 +222,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 	if err != nil {
 		return err
 	}
+	acceptedAll := s.allAcceptedRisks()
 	busy := s.playbookBusyHosts() // a playbook running there has the machine
 	for _, d := range defs {
 		// Maintenance mode is switched on for a while and a restart is a
@@ -247,7 +249,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 			}
 			mode := ""
 			if !packageRunDue(jobs, interval, now) {
-				if eff.OnDrift != "enforce" || eff.Mode != "audit" || !driftNeedsFix(jobs) {
+				if eff.OnDrift != "enforce" || eff.Mode != "audit" || !driftNeedsFix(jobs, acceptedAll[ep.ID]) {
 					continue
 				}
 				mode = "enforce" // audit-then-enforce: the scheduled audit found drift

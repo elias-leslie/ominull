@@ -57,6 +57,16 @@ type Control struct {
 	Actual   string `json:"actual,omitempty"`
 	State    string `json:"state"`          // pass | fail | fixed | na
 	Risk     string `json:"risk,omitempty"` // safe | careful
+	// Accepted is set by the hub, never by an agent: the owner accepted this
+	// failing control on this machine (state "accepted").
+	Accepted *AcceptedNote `json:"accepted,omitempty"`
+}
+
+// AcceptedNote says who accepted a control's failure on a machine, when, and why.
+type AcceptedNote struct {
+	Reason string    `json:"reason,omitempty"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 var controlStates = map[string]bool{"pass": true, "fail": true, "fixed": true, "na": true}
@@ -81,8 +91,8 @@ func (r *PackageResult) Controls() []Control {
 	return out
 }
 
-// Compliance counts controls: passed (pass or fixed) and failed; na counts
-// for neither.
+// Compliance counts controls: passed (pass or fixed) and failed; na and
+// accepted (an owner-accepted failure) count for neither.
 func Compliance(controls []Control) (pass, fail int) {
 	for _, c := range controls {
 		switch c.State {

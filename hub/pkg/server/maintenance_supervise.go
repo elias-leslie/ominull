@@ -96,12 +96,14 @@ func minutesText(secs int) string {
 // liveRuns derives each job's run with its latest heartbeat.
 func (s *Server) liveRuns(tenantID string, jobs []*response.JobRecord, now time.Time) map[string]*packageRun {
 	out := make(map[string]*packageRun, len(jobs))
+	accepted := s.allAcceptedRisks()
 	var open []string
 	for _, j := range jobs {
 		if j == nil {
 			continue
 		}
 		out[j.ID] = derivePackageRun(j, now)
+		applyAcceptedRisks(out[j.ID], accepted[j.EndpointID])
 		if out[j.ID].State == "running" {
 			open = append(open, j.ID)
 		}

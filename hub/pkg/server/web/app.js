@@ -9577,7 +9577,7 @@
           last.reason ? h("span", { cls: "dim-2", text: "· " + last.reason }) : null,
           last.changed && last.changed.length ? h("span", { cls: "dim-2", text: "· " + last.changed.length + " changed" }) : null,
           (last.controls && last.controls.length) ? h("button", { cls: "btn mini", type: "button", text: "Controls", "aria-label": "Controls checked by " + p.title,
-            on: { click: function () { openSheet(p.title + " on " + asset.name, h("div", { cls: "stack" }, maintCompliance(last.pass || 0, last.fail || 0), maintControlsTable(last.controls)),
+            on: { click: function () { openSheet(p.title + " on " + asset.name, h("div", { cls: "stack" }, maintCompliance(last.pass || 0, last.fail || 0), maintControlsTable(last.controls, asset)),
               [h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } })]); } } }) : null,
           maintCompliance(last.pass || 0, last.fail || 0));
       }
@@ -9619,6 +9619,7 @@
         catSel ? h("label", { cls: "uf uf-g1" }, h("span", { cls: "dim-2", text: "Scheduled runs" }), catSel) : null,
         catNote,
         cat ? maintOverrideNote(cat.override) : null),
+      acceptedRisksLine(asset, settings && settings.accepted_risks),
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
         : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet.")), null, true,
       "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking. " + maintAskText(sw && sw.data) + " Packages never reboot the machine; Restart is its own package.");
@@ -9962,13 +9963,60 @@
     return wrap;
   }
 
-  function maintControlsTable(controls) {
-    var CONTROL_STATES = { pass: ["ok", "Pass"], fixed: ["ok", "Fixed"], fail: ["crit", "Fail"], na: ["idle", "Not applicable"] };
-    return simpleTable(["Control", "Reference", "Expected", "Found", "Result"], arrayOf(controls).map(function (c) {
+  function maintControlsTable(controls, asset) {
+    var CONTROL_STATES = { pass: ["ok", "Pass"], fixed: ["ok", "Fixed"], fail: ["crit", "Fail"], na: ["idle", "Not applicable"], accepted: ["idle", "Accepted"] };
+    var head = ["Control", "Reference", "Expected", "Found", "Result"];
+    if (asset && IS_ADMIN) head.push("");
+    return simpleTable(head, arrayOf(controls).map(function (c) {
       var st = CONTROL_STATES[c.state] || ["idle", c.state];
-      return [h("div", {}, h("b", { text: c.id }), c.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null),
-        c.cis || "—", c.expected || "—", c.actual || "—", chip(st[0], st[1])];
+      var row = [h("div", {}, h("b", { text: c.id }), c.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null),
+        c.cis || "—", c.expected || "—",
+        h("div", {}, c.actual || "—", c.state === "accepted" && c.accepted ? h("div", { cls: "dim-2", text: "Accepted" + (c.accepted.reason ? ": " + c.accepted.reason : "") }) : null),
+        chip(st[0], st[1])];
+      if (asset && IS_ADMIN) row.push(c.state === "fail" ? h("button", { cls: "btn mini", type: "button", text: "Accept risk…", disabled: READ_ONLY,
+        "aria-label": "Accept the risk of " + c.id + " on " + asset.name, on: { click: function () { openAcceptRiskSheet(asset, c.id); } } })
+        : c.state === "accepted" ? h("button", { cls: "btn mini", type: "button", text: "Stop accepting", disabled: READ_ONLY,
+          "aria-label": "Stop accepting " + c.id + " on " + asset.name, on: { click: function () { putAcceptedRisk(asset, c.id, false, ""); } } }) : "");
+      return row;
     }), { sortable: true, key: "maint-controls" });
+  }
+
+  /* An accepted risk: the owner says a failing check is fine on this one
+     machine. It reads Accepted, leaves the score and asks nothing. */
+  function putAcceptedRisk(asset, control, accepted, reason) {
+    var change = { endpoint_id: asset.endpoint.id, accept_risk: control, accepted: accepted };
+    if (accepted && reason) change.reason = reason;
+    return putMaintSetting(change, function () {
+      requestCloseSheet();
+      loadMaintenance(asset.endpoint.id);
+      toast(accepted ? "Risk accepted on " + asset.name : "No longer accepted on " + asset.name, "ok");
+    }).catch(function () {});
+  }
+
+  function openAcceptRiskSheet(asset, control) {
+    var reason = h("input", { type: "text", maxlength: "160", placeholder: "e.g. Kids' gaming laptop, no sensitive data", "aria-label": "Reason (optional)" });
+    var go = h("button", { cls: "btn btn-primary", type: "button", text: "Accept risk", on: { click: function () {
+      go.disabled = true;
+      putAcceptedRisk(asset, control, true, reason.value.trim()).then(function () { go.disabled = false; });
+    } } });
+    openSheet("Accept " + control + " on " + asset.name, h("div", { cls: "stack" },
+      h("p", { text: "This check stops counting against " + asset.name + ": no failure, no score deduction, no fix suggested. You can undo it any time." }),
+      h("label", { cls: "field" }, h("span", { text: "Reason (optional)" }), reason)),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    reason.focus();
+  }
+
+  /* The accepted risks on a machine, always in view with the way back. */
+  function acceptedRisksLine(asset, list) {
+    list = arrayOf(list);
+    if (!list.length) return null;
+    return h("div", { cls: "card-body" }, h("b", { text: "Accepted risks" }),
+      h("ul", { cls: "stack" }, list.map(function (a) {
+        return h("li", { cls: "uf uf-wrap uf-g1" }, chip("idle", "Accepted"), h("b", { text: a.control }),
+          h("span", { cls: "dim-2", text: (a.reason ? a.reason + " · " : "") + (a.by || "owner") + ", " + maintDateText(a.at) }),
+          IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Stop accepting", disabled: READ_ONLY,
+            "aria-label": "Stop accepting " + a.control + " on " + asset.name, on: { click: function () { putAcceptedRisk(asset, a.control, false, ""); } } }) : null);
+      })));
   }
 
   /* The maintenance window: inside it (each machine's own clock) runs that

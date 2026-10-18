@@ -56,6 +56,7 @@ func complianceRecord(ep storage.Endpoint, runs []complianceRun) map[string]any 
 	sec, maint := complianceCount{}, complianceCount{}
 	var newest time.Time
 	var failedSec, failedMaint []string
+	accepted := []map[string]string{} // owner-accepted failures: listed, never counted
 	seen := false
 	for _, r := range runs {
 		if r.Run == nil || len(r.Run.Controls) == 0 || r.Run.CompletedAt == nil {
@@ -75,6 +76,13 @@ func complianceRecord(ep storage.Endpoint, runs []complianceRun) map[string]any 
 			if c.State == "fail" {
 				*failed = append(*failed, controlTitle(c))
 			}
+			if c.State == "accepted" && len(accepted) < complianceFailedMax {
+				a := map[string]string{"title": controlTitle(c)}
+				if c.Accepted != nil && c.Accepted.Reason != "" {
+					a["reason"] = c.Accepted.Reason
+				}
+				accepted = append(accepted, a)
+			}
 		}
 	}
 	if !seen {
@@ -89,15 +97,17 @@ func complianceRecord(ep storage.Endpoint, runs []complianceRun) map[string]any 
 	}
 	return map[string]any{
 		"endpoint_id": ep.ID, "hostname": ep.Hostname, "at": newest.UTC().Format(time.RFC3339),
-		"security": sec, "maintenance": maint, "failed": failed,
+		"security": sec, "maintenance": maint, "failed": failed, "accepted": accepted,
 	}
 }
 
 // latestControlsRun is the newest finished run of a package that reported
 // controls, among its last few.
-func (s *Server) latestControlsRun(ep storage.Endpoint, sc *scripts.Script, latest *response.JobRecord, now time.Time) (*packageRun, error) {
+func (s *Server) latestControlsRun(ep storage.Endpoint, sc *scripts.Script, latest *response.JobRecord, now time.Time, accepted map[string]acceptedRisk) (*packageRun, error) {
 	if latest != nil {
-		if run := derivePackageRun(latest, now); run.CompletedAt != nil && len(run.Controls) > 0 {
+		run := derivePackageRun(latest, now)
+		applyAcceptedRisks(run, accepted)
+		if run.CompletedAt != nil && len(run.Controls) > 0 {
 			return run, nil
 		}
 	}
@@ -106,7 +116,9 @@ func (s *Server) latestControlsRun(ep storage.Endpoint, sc *scripts.Script, late
 		return nil, err
 	}
 	for _, j := range jobs {
-		if run := derivePackageRun(j, now); run.CompletedAt != nil && len(run.Controls) > 0 {
+		run := derivePackageRun(j, now)
+		applyAcceptedRisks(run, accepted)
+		if run.CompletedAt != nil && len(run.Controls) > 0 {
 			return run, nil
 		}
 	}
@@ -123,6 +135,7 @@ func (s *Server) complianceFindings(now time.Time) ([]feedFinding, error) {
 		return nil, err
 	}
 	libraries := map[string][]*scripts.Script{}
+	acceptedAll := s.allAcceptedRisks()
 	var out []feedFinding
 	for _, ep := range eps {
 		if ep.Status == "retired" {
@@ -144,7 +157,7 @@ func (s *Server) complianceFindings(now time.Time) ([]feedFinding, error) {
 			if sc.Package() == nil || latest[sc.ID] == nil {
 				continue
 			}
-			run, err := s.latestControlsRun(ep, sc, latest[sc.ID], now)
+			run, err := s.latestControlsRun(ep, sc, latest[sc.ID], now, acceptedAll[ep.ID])
 			if err != nil {
 				return nil, err
 			}

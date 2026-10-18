@@ -105,7 +105,7 @@ func TestAuditThenEnforce(t *testing.T) {
 
 	// Only a scheduled audit's drift counts.
 	hand := &response.JobRecord{RequestedBy: "admin"}
-	if driftNeedsFix([]*response.JobRecord{hand}) || driftNeedsFix(nil) {
+	if driftNeedsFix([]*response.JobRecord{hand}, nil) || driftNeedsFix(nil, nil) {
 		t.Fatal("a hand run or no run triggered a fix")
 	}
 }
