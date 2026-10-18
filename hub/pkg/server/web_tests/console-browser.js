@@ -31,6 +31,26 @@
   assert(document.getElementById('rail-maint-badge').dataset.n==='0','Badge stays after decisions close');
   a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.render();
  });
+ await check('Maintenance Run picks a runnable package and only machines it fits', async () => {
+  const saved={s:a.state.maintSettings,sec:a.state.section,tab:a.state.maintTab};
+  const pk=(name,title,platform,role)=>({name,title,platform,role,category:'maintenance',description:title+' does a thing.',version:1,params:[],fleet_effective:{enabled:false}});
+  a.state.maintSettings={window:'',categories:[{name:'maintenance',fleet_enabled:true}],packages:[pk('w-clean','Cleanup','windows'),pk('l-up','Updates','linux'),pk('w-reboot','Restart','windows','reboot')]};
+  a.state.maintTab='maintenance'; a.state.section='maintenance'; document.getElementById('view').dataset.section=''; a.render();
+  const run=[...document.querySelectorAll('.page-tools .btn-primary')].find(b=>/^Run/.test(b.textContent));
+  assert(run && !run.disabled,'Maintenance has no Run button');
+  run.click(); await wait();
+  const sel=document.querySelector('.sheet select[aria-label="Package"]');
+  assert(sel,'Run sheet has no package picker');
+  const opts=[...sel.options].map(o=>o.value);
+  assert(opts.join(',')==='w-clean,l-up','Run offers '+opts.join(','));
+  const names=()=>[...document.querySelectorAll('.sheet .pb-hosts legend, .sheet .empty, .sheet .emptybox')].map(e=>e.textContent).join('|');
+  const first=names();
+  sel.value='l-up'; sel.dispatchEvent(new Event('change')); await wait();
+  assert(names()!==first && /Linux/.test(names()),'Machines do not follow the package platform: '+first+' -> '+names());
+  a.closeAllSheets();
+  assert(document.querySelectorAll('details.pkg-desc').length===3,'Package descriptions are not on demand');
+  a.state.maintSettings=saved.s; a.state.maintTab=saved.tab; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
+ });
  await check('all asset comparators accept real row types and retain sort focus', () => {
   for (let col=2; col<=9; col++) for (const dir of ['asc','desc']) { a.state.assetSort={col,dir}; a.sortAssetRows(a.state.assets); a.render(); }
   a.state.assetSort=null; a.render();

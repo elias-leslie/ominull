@@ -1309,6 +1309,18 @@
   }
 
   var DEMO_MAINT_WINDOW = "01:00-05:00";
+  var DEMO_PKG_NOTES = {
+    "windows-audit": "Checks BitLocker, Defender, firewall, update age, free disk space, TPM and Secure Boot without changing anything.",
+    "windows-cleanup": "Deletes old temp files, crash dumps, error reports and update caches, then compacts the component store.",
+    "windows-debloat": "Removes a listed set of bundled extras and stops sponsored apps from installing for new users.",
+    "windows-performance": "Turns on Game Mode and GPU scheduling where supported and turns off background game recording.",
+    "windows-privacy": "Sets telemetry to the lowest level the edition allows and turns off ads, suggestions and activity history.",
+    "windows-software-removal": "Uninstalls programs in the hub's software catalog with their official uninstallers.",
+    "windows-updates": "Installs pending updates, skipping previews and optional updates, and reports whether a restart is needed.",
+    "windows-maintenance-mode": "Keeps the computer awake while maintenance runs, until the end time.",
+    "windows-reboot": "Restarts the computer after an on-screen warning, by default only when a restart is pending.",
+    "linux-maintenance-mode": "Keeps the computer awake while maintenance runs, until the end time."
+  };
   function demoMaintSettings(path) {
     var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
     if (!DEMO_MAINT_ROWS) {
@@ -1349,7 +1361,7 @@
           return { name: p[0], type: p[1], default: p[2], min: p[3], max: p[4], max_items: p[1] === "list" ? 32 : undefined, description: p[5], careful: p[0] === "disable_vbs" };
         });
         var fe = eff(d[0], defaults, ""); delete fe.params.__interval;
-        var out = { script_id: "demo-" + d[0], name: d[0], title: d[1], description: "", category: d[2], risk: d[3], version: 3, role: d[6], platform: d[7] || "windows",
+        var out = { script_id: "demo-" + d[0], name: d[0], title: d[1], description: DEMO_PKG_NOTES[d[0]] || "", category: d[2], risk: d[3], version: 3, role: d[6], platform: d[7] || "windows",
           default_interval: d[4], params: params, fleet: DEMO_MAINT_ROWS[d[0] + "|"] || null, fleet_effective: fe };
         if (ep) { out.endpoint = DEMO_MAINT_ROWS[d[0] + "|" + ep] || null; out.effective = eff(d[0], defaults, ep); delete out.effective.params.__interval; }
         return out;
@@ -9700,7 +9712,7 @@
   function maintTabs(current, onPick) {
     return h("div", { cls: "uf uf-g1", role: "tablist", "aria-label": "Package category" }, MAINT_CATEGORIES.map(function (c) {
       var on = c.id === current;
-      return h("button", { cls: "btn mini" + (on ? " btn-primary" : ""), type: "button", role: "tab", "aria-selected": on ? "true" : "false",
+      return h("button", { cls: "btn mini", type: "button", role: "tab", "aria-selected": on ? "true" : "false",
         text: c.label, on: { click: function () { onPick(c.id); } } });
     }));
   }
@@ -9958,11 +9970,78 @@
       save(from.value + "-" + to.value);
     } } });
     var off = cur && IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Turn off", on: { click: function () { save(""); } } }) : null;
-    return h("div", {},
-      h("div", { cls: "uf uf-g1 uf-wrap maint-window" }, h("b", { text: "Maintenance window" }), from, h("span", { text: "to" }), to, set, off),
-      h("div", { cls: "pending u-mt1", text: cur
-        ? "Between " + cur.replace("-", " and ") + " on each machine's own clock, runs that change something go ahead even if someone is using the machine or a game is open. Outside it they skip, or wait in a playbook. Battery and Windows Update still hold a run back."
-        : "No window. Runs that change something skip while someone is using the machine or a game is open; in a playbook they wait for it to be free." }));
+    return h("div", { cls: "uf uf-g1 uf-wrap maint-window" }, h("b", { text: "Window" }), from, h("span", { text: "to" }), to, set, off);
+  }
+
+  function maintWindowHelp(cur) {
+    return cur
+      ? "Between " + cur.replace("-", " and ") + " on each machine's own clock, runs that change something go ahead even if someone is using the machine or a game is open. Outside it they skip, or wait in a playbook. Battery and Windows Update still hold a run back."
+      : "With no window, runs that change something skip while someone is using the machine or a game is open; in a playbook they wait for it to be free.";
+  }
+
+  function maintPlatformChip(p) {
+    return chip("idle", p.platform === "linux" ? "Linux" : "Windows");
+  }
+
+  /* Packages that can be run on their own; maintenance mode and restart run
+     from a machine's page or as playbook steps. */
+  function maintRunnablePackages(tab) {
+    return arrayOf(state.maintSettings && state.maintSettings.packages).filter(function (p) {
+      return !p.role && (!tab || (p.category || "maintenance") === tab);
+    });
+  }
+
+  function maintHostsFor(linux) {
+    return arrayOf(state.assets).filter(function (a) {
+      return a.endpoint && a.endpoint.status !== "retired" && /windows/i.test(a.endpoint.os || "") !== linux;
+    }).sort(function (x, y) { return x.name < y.name ? -1 : 1; });
+  }
+
+  /* Run one package on machines picked from the fleet. One run carries one
+     set of settings, so the hub refuses machines whose settings differ. */
+  function openFleetRunSheet(pkgName, tab) {
+    var pkgs = maintRunnablePackages(tab);
+    if (!pkgs.length) { toast("No package here can be run on its own.", "warn"); return; }
+    var pick = h("select", { "aria-label": "Package" }, pkgs.map(function (p) {
+      return h("option", { value: p.name, text: p.title + " (" + (p.platform === "linux" ? "Linux" : "Windows") + ")", selected: p.name === pkgName });
+    }));
+    var mode = h("select", { "aria-label": "Mode" },
+      h("option", { value: "audit", text: "Audit — report what would change" }),
+      h("option", { value: "enforce", text: "Enforce — make the changes" }),
+      h("option", { value: "revert", text: "Revert — restore what it changed first" }));
+    var hostBox = h("div");
+    var boxes = [];
+    function current() { return pkgs.filter(function (p) { return p.name === pick.value; })[0] || pkgs[0]; }
+    function drawHosts() {
+      clear(hostBox);
+      var linux = current().platform === "linux";
+      var hosts = maintHostsFor(linux);
+      boxes = hosts.map(function (a) { return { a: a, box: h("input", { type: "checkbox", "aria-label": a.name }) }; });
+      hostBox.appendChild(hosts.length
+        ? h("fieldset", { cls: "pb-hosts" }, h("legend", { text: linux ? "Linux machines" : "Windows machines" }),
+          boxes.map(function (b) { return h("label", { cls: "uf uf-g1" }, b.box, h("span", { text: b.a.name })); }))
+        : emptyBox("No " + (linux ? "Linux" : "Windows") + " machines with an agent."));
+    }
+    pick.addEventListener("change", drawHosts);
+    drawHosts();
+    var go = h("button", { cls: "btn btn-primary", type: "button", text: "Run", disabled: READ_ONLY, on: { click: function () {
+      var p = current(), m = mode.value;
+      var picked = boxes.filter(function (b) { return b.box.checked; });
+      if (!picked.length) { toast("Pick at least one machine.", "warn"); return; }
+      var ids = picked.map(function (b) { return b.a.endpoint.id; });
+      var where = picked.length === 1 ? picked[0].a.name : picked.length + " machines";
+      go.disabled = true;
+      ownerApproved("/api/v1/maintenance/run", { endpoint_ids: ids, packages: [p.name], mode: m },
+        { label: "Run " + p.title + " (" + m + ") on " + where, onPending: function () { requestCloseSheet(); } })
+        .then(function () { requestCloseSheet(); toast(p.title + " sent to " + where, "ok"); })
+        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+    } } });
+    openSheet("Run a package", h("div", { cls: "stack" },
+      h("label", { cls: "field" }, h("span", { text: "Package" }), pick),
+      h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
+      hostBox,
+      h("p", { cls: "dim-2 u-t2", text: "Runs with each machine's settings; machines whose settings differ need separate runs. An audit with default settings goes straight through; anything else asks your phone first." })),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
   function renderMaintenanceSection() {
@@ -9974,35 +10053,60 @@
     var tab = state.maintTab || "maintenance";
     var cat = arrayOf(d && d.categories).filter(function (c) { return c.name === tab; })[0] || { fleet_enabled: true };
     var pkgs = arrayOf(d && d.packages).filter(function (p) { return (p.category || "maintenance") === tab; });
+    var win = (d && d.window) || "";
     var catBox = h("input", { type: "checkbox", checked: !!cat.fleet_enabled, disabled: !IS_ADMIN, "aria-label": "Run scheduled " + tab + " packages",
       on: { change: function (e) { putMaintSetting({ category: tab, enabled: e.target.checked }, function () { renderBody(); }); } } });
-    var head = h("div", { cls: "card-body stack" },
+    var openDecisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
+
+    var status = h("div", { cls: "uf uf-wrap uf-g2" },
       maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
-      h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: (tab === "security" ? "Run scheduled security packages" : "Run scheduled maintenance packages") + " across the fleet" })),
-      h("p", { cls: "pending", text: "Fleet defaults for every machine the package fits (Windows or Linux). A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }),
-      maintWindowRow(d));
+      chip(cat.fleet_enabled ? "ok" : "idle", cat.fleet_enabled ? "Schedule on" : "Schedule off"),
+      chip(win ? "info" : "idle", win ? "Window " + win.replace("-", "–") : "No window"),
+      openDecisions ? chip("warn", openDecisions + (openDecisions === 1 ? " decision" : " decisions")) : null);
+    var runnable = maintRunnablePackages(tab).length > 0;
+    var tools = pageTools(status, [
+      tab === "maintenance" && IS_ADMIN && state.maintPlaybooks && !state.maintPlaybooks.error
+        ? h("button", { cls: "btn", type: "button", text: "New playbook", on: { click: function () { openPlaybookSheet(null); } } }) : null,
+      h("button", { cls: "btn btn-primary", type: "button", text: "Run…", disabled: READ_ONLY || !runnable,
+        title: runnable ? "Run a package on machines you pick" : "No package here can be run on its own",
+        on: { click: function () { openFleetRunSheet("", tab); } } })
+    ].filter(Boolean));
+
+    var schedule = card("Schedule",
+      h("div", { cls: "card-body uf uf-wrap uf-g4" },
+        h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: "Run scheduled " + (tab === "security" ? "security" : "maintenance") + " packages across the fleet" })),
+        maintWindowRow(d)),
+      null, true,
+      "Schedules and settings below are fleet defaults for every machine a package fits. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first. " + maintWindowHelp(win));
+
     var rows = pkgs.map(function (p) {
       var eff = p.fleet_effective || {};
       var changed = maintChangedCount(p, eff);
+      var name = h("div", { cls: "uf uf-wrap uf-g1" }, h("b", { text: p.title }), maintPlatformChip(p),
+        p.risk === "careful" ? chip("warn", "careful") : null);
       return [
-        h("div", {}, h("b", { text: p.title }), p.platform === "linux" ? h("span", { cls: "u-ml2" }, chip("idle", "Linux")) : null,
-          p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
-          h("div", { cls: "dim-2", text: p.description || "" })),
+        p.description ? h("details", { cls: "pkg-desc" }, h("summary", {}, name), h("p", { cls: "dim-2", text: p.description })) : name,
         p.role ? h("span", { cls: "dim-2", text: p.role === "reboot" ? "Runs as a playbook step" : "Turned on from a machine's page" }) : maintEffectiveText(eff),
         changed ? changed + " changed" : h("span", { cls: "dim-2", text: "defaults" }),
-        "v" + p.version,
-        h("button", { cls: "btn mini", type: "button", text: IS_ADMIN ? "Edit…" : "View…", "aria-label": "Settings for " + p.title,
-          on: { click: function () { openMaintSettingsSheet(p.name, "", ""); } } })
+        h("span", { cls: "dim-2", text: "v" + p.version }),
+        h("div", { cls: "uf uf-g1" },
+          p.role ? null : h("button", { cls: "btn mini", type: "button", text: "Run…", disabled: READ_ONLY, "aria-label": "Run " + p.title,
+            on: { click: function () { openFleetRunSheet(p.name, tab); } } }),
+          h("button", { cls: "btn mini", type: "button", text: IS_ADMIN ? "Edit…" : "View…", "aria-label": "Settings for " + p.title,
+            on: { click: function () { openMaintSettingsSheet(p.name, "", ""); } } }))
       ];
     });
     var usesCatalog = pkgs.some(function (p) { return arrayOf(p.params).some(function (x) { return x.type === "catalog"; }); });
     view.appendChild(h("div", { cls: "pad stack" },
+      tools,
       maintDecisionsCard(),
-      card("Package settings", head, null, true),
-      card(tab === "security" ? "Security packages" : "Maintenance packages",
-        pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
-          : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true),
+      tab === "maintenance" ? maintRunsCard() : null,
       tab === "maintenance" ? maintPlaybooksCard() : null,
+      card((tab === "security" ? "Security packages" : "Maintenance packages") + " · " + pkgs.length,
+        pkgs.length ? stackOnPhone(simpleTable(["Package", "Schedule", "Settings", "Version", ""], rows, { sortable: false }))
+          : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."), null, true,
+        "Open a package's name for what it does. Run sends it now to machines you pick; Edit changes its fleet schedule and settings."),
+      schedule,
       usesCatalog ? maintCatalogCard() : null));
   }
 
@@ -10048,8 +10152,7 @@
       if (!groups[x.group]) { groups[x.group] = []; order.push(x.group); }
       groups[x.group].push(x);
     });
-    var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "pending", text: "Things a run could not settle by itself. Keep leaves it on that machine for good (it becomes that machine's setting, with your reason). Handled closes it; it comes back only if a later run finds it again." }));
+    var body = h("div", { cls: "card-body stack" });
     order.forEach(function (g) {
       var list = groups[g];
       body.appendChild(h("h4", { text: list[0].group_title }));
@@ -10067,7 +10170,8 @@
         ];
       }), { sortable: false })));
     });
-    return card("Decisions for you", body, null, true);
+    return card("Decisions for you \u00b7 " + arrayOf(d.open).length, body, null, true,
+      "Things a run could not settle by itself. Keep leaves it on that machine for good (it becomes that machine's setting, with your reason). Handled closes it; it comes back only if a later run finds it again.");
   }
 
   function decisionHost(x) {
@@ -10106,8 +10210,7 @@
       on: { click: function () { openPlaybookSheet(null); } } })] : null;
     if (!d) return card("Playbooks", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Loading playbooks…" })), actions, true);
     if (d.error) return card("Playbooks", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Playbooks unavailable: " + d.error })), null, true);
-    var body = h("div", { cls: "card-body stack" },
-      h("p", { cls: "pending", text: "A playbook runs packages in order on the machines you pick. Each run asks you once on your phone for every step on every machine; the steps then run one after another on each machine. With maintenance mode on, the machines stay awake for the run and may sleep again when it ends." }));
+    var body = h("div", { cls: "card-body stack" });
     var books = arrayOf(d.playbooks);
     body.appendChild(books.length ? stackOnPhone(simpleTable(["Playbook", "Steps", ""], books.map(function (b) {
       return [
@@ -10120,6 +10223,16 @@
           IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove " + b.name, on: { click: function () { playbookRemove(b); } } }) : null)
       ];
     }), { sortable: false })) : emptyBox("No playbooks yet." + (IS_ADMIN ? " Add one to run several packages in order with one approval." : "")));
+    return card("Playbooks \u00b7 " + books.length, body, actions, true,
+      "A playbook runs packages in order on the machines you pick. Each run asks you once on your phone for every step on every machine; the steps then run one after another on each machine. With maintenance mode on, the machines stay awake for the run and may sleep again when it ends.");
+  }
+
+  /* Playbook runs, newest first: which step each machine is on, or how
+     its steps ended. Hidden until there is a run. */
+  function maintRunsCard() {
+    var d = state.maintPlaybooks;
+    if (!d || d.error) return null;
+    var body = h("div", { cls: "card-body stack" });
     var runs = arrayOf(d.runs).slice(0, 10);
     if (runs.length) {
       var rows = [];
@@ -10133,10 +10246,12 @@
           ]);
         });
       });
-      body.appendChild(h("h4", { text: "Recent runs" }));
       body.appendChild(stackOnPhone(simpleTable(["Run", "Machine", "Progress"], rows, { sortable: false })));
     }
-    return card("Playbooks", body, actions, true);
+    if (!runs.length) return null;
+    var running = runs.filter(function (r) { return !r.done; }).length;
+    return card("Playbook runs", body,
+      [running ? chip("warn", running + " running") : chip("idle", "none running")], true);
   }
 
   function maintPlaybooksRedraw(d) {
@@ -10264,7 +10379,9 @@
     if (!c) return card("Software removal catalog", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Loading the catalog…" })), actions, true);
     if (c.error) return card("Software removal catalog", h("div", { cls: "card-body" }, h("p", { role: "status", text: "Catalog unavailable: " + c.error })), null, true);
     var cats = c.categories || {}, methods = c.methods || {};
-    var rows = arrayOf(c.entries).map(function (e) {
+    var entries = arrayOf(c.entries);
+    var folded = foldRows("maint-catalog", entries, 3, "entries");
+    var rows = folded.rows.map(function (e) {
       var how = (methods[e.kind] || {})[e.method] || e.method;
       return [
         h("div", {}, h("b", { text: e.name }), e.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
@@ -10280,11 +10397,12 @@
           : null
       ];
     });
-    var body = h("div", { cls: "card-body stack" },
-      h("p", { cls: "pending", text: "Software removal uninstalls only what matches an entry here, in the categories a machine's settings pick, using the entry's own uninstall method. Adding an entry or changing what one removes asks you on your phone." + (c.saved ? "" : " This is the list shipped with the hub; nothing has been changed yet.") }));
+    var body = h("div", { cls: "card-body stack" });
     body.appendChild(rows.length ? stackOnPhone(simpleTable(["Software", "Matches", "Category", "How it is removed", ""], rows, { sortable: false }))
       : emptyBox("The catalog is empty, so Software removal finds nothing to remove."));
-    return card("Software removal catalog", body, actions, true);
+    if (folded.toggle) body.appendChild(folded.toggle);
+    return card("Software removal catalog \u00b7 " + entries.length + (c.saved ? "" : " \u00b7 as shipped"), body, actions, true,
+      "Software removal uninstalls only what matches an entry here, in the categories a machine's settings pick, using the entry's own uninstall method. Adding an entry or changing what one removes asks you on your phone." + (c.saved ? "" : " This is the list shipped with the hub; nothing has been changed yet."));
   }
 
   /* The page skips a rebuild while focus is inside it; a catalog change is

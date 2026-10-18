@@ -5101,3 +5101,11 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 /* A toggle or view switch shows which one is on. */
 .btn[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); background: var(--raised); }
 .role-note { margin: var(--s-2) 0 0; }
+/* Maintenance: a package's description opens from its name. */
+.pkg-desc summary { cursor: pointer; list-style: none; }
+.pkg-desc summary::-webkit-details-marker { display: none; }
+.pkg-desc summary > div::after { content: "\25B8"; color: var(--ink-3); font-size: var(--t-2); }
+.pkg-desc[open] summary > div::after { content: "\25BE"; }
+.pkg-desc summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.pkg-desc p { margin: var(--s-1) 0 0; white-space: normal; max-width: 60ch; }
+.btn[role="tab"][aria-selected="true"] { border-color: var(--brand); color: var(--brand); background: var(--raised); }

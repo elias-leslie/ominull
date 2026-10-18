@@ -222,3 +222,27 @@ Rendered from synthetic events (22 events on 14 lines):
 
 ![Jobs, after](images/console-ux/after-desk-jobs.png)
 ![Jobs narrowed to one state, phone, after](images/console-ux/after-phone-jobs.png)
+
+### Maintenance
+
+- Page head: Maintenance / Security tabs, then chips for schedule on or off,
+  the window ("Window 01:00–05:00" or "No window") and open decisions.
+  **Run…** (primary) opens one sheet: pick a package, a mode and the machines
+  it fits (the list follows the package's Linux or Windows platform); one
+  approval covers the run. **New playbook** sits beside it.
+- Order: Decisions for you → Playbook runs (shown when there is one, with a
+  "1 running" chip) → Playbooks → Packages → Schedule → Software removal
+  catalog. Each card's explanation is behind "?".
+- Package rows show name, a Linux or Windows chip on every row (the two
+  "Maintenance mode" packages no longer look like duplicates) and careful;
+  the description opens from the name. Each runnable package has its own
+  **Run…** next to Edit.
+- Schedule is one compact row: the fleet toggle and the window.
+- The software removal catalog folds after 3 entries with its size in the
+  head ("6 · as shipped").
+- Demo mode now carries package descriptions so the page reads as it does on
+  a hub.
+
+![Maintenance, after](images/console-ux/after-desk-maintenance.png)
+![Maintenance, phone, after](images/console-ux/after-phone-maintenance.png)
+![Run sheet, phone](images/console-ux/after-phone-maintenance-run.png)
