@@ -24,6 +24,14 @@ func (s *Server) retiredAgentVersions() []string {
 	return list
 }
 
+// retiredAgentVersionsList is the retired releases for JSON: never null.
+func (s *Server) retiredAgentVersionsList() []string {
+	if list := s.retiredAgentVersions(); list != nil {
+		return list
+	}
+	return []string{}
+}
+
 func (s *Server) agentVersionRetired(version string) bool {
 	for _, v := range s.retiredAgentVersions() {
 		if v == version {

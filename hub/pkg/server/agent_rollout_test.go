@@ -338,3 +338,33 @@ func healthyCanary(t *testing.T, s *Server, id, version string) {
 		t.Fatal(err)
 	}
 }
+
+// The update status lists the retired agent releases, so the console can name
+// them next to the routine release keys.
+func TestUpdateStatusListsRetiredReleases(t *testing.T) {
+	t.Parallel()
+	s, db := setupTestServer(t)
+	defer db.Close()
+	get := func() []string {
+		r := httptest.NewRequest("GET", "/api/v1/agents/update-status", nil)
+		r.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		var body struct {
+			Retired *[]string `json:"retired_versions"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Retired == nil {
+			t.Fatalf("retired_versions missing or null: %s", w.Body.String())
+		}
+		return *body.Retired
+	}
+	if got := get(); len(got) != 0 {
+		t.Fatalf("fresh hub lists retired releases: %v", got)
+	}
+	if err := db.SetSetting(retiredAgentVersionsSetting, `["1.8.88"]`); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); len(got) != 1 || got[0] != "1.8.88" {
+		t.Fatalf("retired releases not listed: %v", got)
+	}
+}

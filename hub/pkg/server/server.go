@@ -1731,6 +1731,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 		"endpoints":         observed,
 		"outdated":          outdated,
 		"retired":           retired,
+		"retired_versions":  s.retiredAgentVersionsList(),
 		"provenance_issues": provenanceIssues,
 		"native_converged":  len(outdated) == 0 && len(provenanceIssues) == 0,
 		"pending":           pending,
