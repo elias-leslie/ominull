@@ -43,7 +43,10 @@ for file in "${deb}" "${deb}.sig" "${deb}.release.sig"; do
 done
 
 echo "[*] Installing hub package v${VERSION} through ${ALIAS}."
-tar -C "${DIST_DIR}" --owner=0 --group=0 --numeric-owner -cf - "${deb}" "${deb}.sig" "${deb}.release.sig" |
+# A release signed with a routine key carries the signed routine key list for the installer.
+extra=()
+[ "${OMINULL_SIGNING_ROUTINE:-0}" != 1 ] || extra=(routine-keys.json)
+tar -C "${DIST_DIR}" --owner=0 --group=0 --numeric-owner -cf - "${deb}" "${deb}.sig" "${deb}.release.sig" "${extra[@]}" |
     ssh "${ssh_opts[@]}" -- "${ALIAS}" "install ${VERSION}"
 
 hdr() {

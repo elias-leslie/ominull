@@ -18,6 +18,9 @@ DO_HUB=1
 DO_AGENTS=1
 WAIT_FOR_AGENTS=1
 CANARY_IDS=""
+# A release signed with a routine key (OMINULL_SIGNING_ROUTINE=1) always rolls
+# out canaries first; the lab machines are the standing canaries.
+ROUTINE_CANARIES="${OMINULL_ROUTINE_CANARIES:-linux-ominull-target-linux}"
 
 usage() {
     sed -n '2,8p' "$0"
@@ -46,6 +49,10 @@ while [ "$#" -gt 0 ]; do
         *) echo "[-] Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ] && [ -z "${CANARY_IDS}" ]; then
+    CANARY_IDS="${ROUTINE_CANARIES}"
+    echo "[*] Routine-signed release: canaries first (${CANARY_IDS})."
+fi
 
 if [ "${DO_HUB}" -eq 1 ]; then
     [ -x "${DEPLOY_CMD}" ] || {

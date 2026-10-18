@@ -47,3 +47,18 @@ downgrade refusal, remove, reinstall, purge, service registration, and durable
 state preservation in an isolated package root. The actual production release
 workflow deploys the hub first, then retained Linux and Windows canaries, then
 the remaining agents after native provenance and heartbeat convergence.
+
+### Session signing (routine release keys)
+
+Inside the owner's work session, Nightshift's signer can sign with a routine
+release key instead of the tap key: run the release with
+`OMINULL_SIGNING_ROUTINE=1`. The signing backend asks the signer for
+`pubkey routine` and refuses a key that is not on the hub's list signed by the
+pinned release key (`GET /api/v1/trust/routine-keys`). It verifies every
+signature against that routine key and writes the signed list to
+`dist/routine-keys.json`. `deploy-hub.sh` sends that file with the hub package,
+and `ominull-hub-install` on Proxmox (from 1.8.89) accepts the routine key only
+for that package and never lets it move the release key pin. Such a release
+rolls out canaries first (`OMINULL_ROUTINE_CANARIES`, default the lab VM), and
+the hub and the authority refuse a routine-signed rollout without canaries.
+Agents from 1.8.89 accept routine keys for agent packages only.

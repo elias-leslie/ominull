@@ -70,8 +70,26 @@ with_pass() {
 signing_pubkey() {
     case "${BACKEND}" in
     file) with_pass openssl ec -in "${KEY}" "${passin[@]}" -pubout 2>/dev/null ;;
-    command) "${OMINULL_SIGNING_COMMAND}" pubkey ;;
+    command)
+        if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ]; then
+            "${OMINULL_SIGNING_COMMAND}" pubkey routine
+        else
+            "${OMINULL_SIGNING_COMMAND}" pubkey
+        fi ;;
     esac
+}
+
+# Routine mode (OMINULL_SIGNING_ROUTINE=1, Nightshift's session signing): the
+# signer's routine key must be one the pinned release key listed on the hub
+# (GET /api/v1/trust/routine-keys). That signed list goes beside the packages
+# as dist/routine-keys.json, which the hub installer on Proxmox reads; agents
+# get it from the hub.
+routine_list() {
+    # OMINULL_ROUTINE_LIST: a saved copy of that GET (offline checks and tests).
+    if [ -n "${OMINULL_ROUTINE_LIST:-}" ]; then cat "${OMINULL_ROUTINE_LIST}"; return; fi
+    local url="${OMINULL_HUB_URL:?routine signing needs OMINULL_HUB_URL}" ca="${OMINULL_HUB_CA:-/etc/ominull/ca.crt}"
+    curl -fsS --max-time 20 --cacert "${ca}" -K <(printf 'header = "X-API-Key: %s"\n' "${OMINULL_ADMIN_KEY:?routine signing needs OMINULL_ADMIN_KEY}") \
+        "${url}/api/v1/trust/routine-keys"
 }
 
 # sign_file IN OUT writes the DER ECDSA-SHA256 signature over IN to OUT.
@@ -121,7 +139,20 @@ if [ -z "${signing_pub}" ]; then
     echo "[-] Could not read the public half of the signing key (wrong passphrase?)." >&2
     exit 1
 fi
-if [ "${embedded}" != "${signing_pub}" ]; then
+if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ]; then
+    [ "${BACKEND}" = command ] || { echo "[-] Routine signing needs the command backend (Nightshift's signer)." >&2; exit 1; }
+    list="$(routine_list)" || { echo "[-] Could not read the hub's routine release keys." >&2; exit 1; }
+    signing_xy="$(printf '%s\n' "${signing_pub}" | openssl pkey -pubin -outform DER 2>/dev/null | tail -c 64 | od -An -v -tx1 | tr -d ' \n')"
+    routine_id="$(printf '%s' "${list}" | jq -r --arg xy "${signing_xy}" '.keys[] | select(.xy == $xy) | .id')"
+    if [ "${#signing_xy}" -ne 128 ] || [ -z "${routine_id}" ]; then
+        echo "[-] The signer's routine key is not on the hub's list signed by the pinned release key." >&2
+        exit 1
+    fi
+    printf '%s' "${list}" | jq -c '{epoch: .epoch, keys: ([.keys[] | .id + ":" + .xy] | sort | join(",")), sig: .signature}' \
+        > "${DIST_DIR:-${ROOT_DIR}/dist}/routine-keys.json"
+    echo "[*] Routine signing in the owner's session with routine key ${routine_id} (epoch $(printf '%s' "${list}" | jq -r .epoch))." >&2
+    embedded="${signing_pub}"
+elif [ "${embedded}" != "${signing_pub}" ]; then
     echo "[-] The ${BACKEND} signing key is not the key pinned in agent/include/release_key.h." >&2
     echo "    Agents would reject every package signed with it. Rotate deliberately, not by accident." >&2
     exit 1

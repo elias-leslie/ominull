@@ -159,6 +159,43 @@ class HubInstallTests(unittest.TestCase):
         self.assertEqual(list(self.work.glob("install-*")), [])
         self.assertEqual(hi.run(["version"], io.BytesIO())["installed"], "1.8.68")
 
+    def routine_member(self, epoch, names=("next",), signer="release", line=None):
+        """routine-keys.json listing the named fixture keys, signed by signer."""
+        import base64
+        entries = []
+        for i, name in enumerate(names):
+            der = openssl("pkey", "-pubin", "-outform", "DER", data=self.keys[name][1])
+            entries.append(("%016x" % (i + 1), der[-64:].hex()))
+        line = ",".join("%s:%s" % e for e in sorted(entries)) if line is None else line
+        statement = "OMINULL-ROUTINE-KEYS-V1\nepoch=%d\nkeys=%s\n" % (epoch, line)
+        sig = openssl("dgst", "-sha256", "-sign", str(self.keys[signer][0]), data=statement.encode())
+        return {hi.ROUTINE_MEMBER: json.dumps({"epoch": epoch, "keys": line, "sig": base64.b64encode(sig).decode()}).encode()}
+
+    def test_routine_key_listed_by_the_pin_installs_but_never_moves_the_pin(self):
+        deb = self.deb("1.8.68", pins="release")
+        files = self.signed(deb, "1.8.68", key="next")
+        self.assert_refused("signature", "1.8.68", files)
+        self.assert_refused("not signed by the pinned release key", "1.8.68", files,
+                            extra=self.routine_member(2, signer="next"))
+        result = self.install("1.8.68", files, extra=self.routine_member(2))
+        self.assertEqual(result["signer"], "routine:0000000000000001")
+        self.assertFalse(result["pin_rotated"])
+        (self.state / "calls.log").unlink()
+        # A lower epoch is replayed after the floor moved; a routine key cannot rotate the pin.
+        newer = self.deb("1.8.69", pins="release")
+        self.assert_refused("older than epoch 2", "1.8.69", self.signed(newer, "1.8.69", key="next"),
+                            extra=self.routine_member(1))
+        rotating = self.deb("1.8.70", pins="next")
+        with self.assertRaisesRegex(hi.Refused, "cannot move the release key pin"):
+            self.install("1.8.70", self.signed(rotating, "1.8.70", key="next"), extra=self.routine_member(2))
+        self.assertEqual(self.pin.read_bytes(), self.keys["release"][1])
+        (self.state / "calls.log").unlink()
+        # An empty list (a revocation) installs nothing signed by the old routine key.
+        self.assert_refused("signature", "1.8.69", self.signed(newer, "1.8.69", key="next"),
+                            extra=self.routine_member(3, line=""))
+        bad = self.routine_member(4, line="0000000000000001:" + "AB" * 64)
+        self.assert_refused("routine keys list", "1.8.69", self.signed(newer, "1.8.69", key="next"), extra=bad)
+
     def test_rotation_release_signed_by_the_outgoing_key_moves_the_pin(self):
         deb = self.deb("1.8.68", pins="next")
         result = self.install("1.8.68", self.signed(deb, "1.8.68", key="release"))

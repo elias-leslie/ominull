@@ -12,6 +12,13 @@ key can install only a hub package signed by the pinned release key:
                        refuse a version older than the installed one, then
                        dpkg -i it in CT 150 and wait for both units and :9443
 
+A routine release key (opened only inside the owner's work session) may sign the
+package instead when the stream also carries routine-keys.json: the pinned key's
+signature over OMINULL-ROUTINE-KEYS-V1 (epoch and id:X||Y list, as the hub and
+agents read it), at an epoch no lower than the highest seen here
+(WORK/routine.epoch). A routine-signed package never moves the pin: a rotation
+needs the release key itself.
+
 The package's postinst publishes the agent packages bundled inside it, so no
 other file reaches the container. A signed hub package carries the release key
 its build pins (usr/share/ominull/release-public.pem); once that package is
@@ -20,6 +27,7 @@ this pin the same way it moves every agent's.
 """
 import fcntl
 import hashlib
+import base64
 import json
 import os
 import re
@@ -51,6 +59,11 @@ READY_SECONDS = 60
 # dpkg states in which the package's files are (partly) on disk: its version is the floor.
 PRESENT = {"installed", "half-installed", "unpacked", "half-configured", "triggers-awaited", "triggers-pending"}
 OWNER = 0  # Only root may name the release key or hold the work directory.
+ROUTINE_MEMBER = "routine-keys.json"
+ROUTINE_ENTRY = re.compile(r"[0-9a-f]{16}:[0-9a-f]{128}")
+ROUTINE_MAX = 4
+# P-256 SubjectPublicKeyInfo DER up to the uncompressed point (04 || X || Y).
+ROUTINE_SPKI = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
 
 
 class Refused(Exception):
@@ -96,9 +109,52 @@ def pinned():
 
 
 def verify(key_file, data_file, signature_file):
+    need(verifies(key_file, data_file, signature_file),
+         "signature does not verify against the pinned release key: " + data_file.name)
+
+
+def verifies(key_file, data_file, signature_file):
     result = command("openssl", "dgst", "-sha256", "-verify", str(key_file), "-signature", str(signature_file),
                      str(data_file), timeout=120)
-    need(result.returncode == 0, "signature does not verify against the pinned release key: " + data_file.name)
+    return result.returncode == 0
+
+
+def routine_keys(path, directory, key_file):
+    """{id: PEM} of the routine keys the pinned key listed in path, after the epoch floor."""
+    raw = path.read_bytes()
+    need(len(raw) <= MAX_SIGNATURE, "routine keys size")
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        raise Refused("routine keys are not JSON")
+    need(isinstance(doc, dict) and set(doc) == {"epoch", "keys", "sig"}, "routine keys fields")
+    epoch, line, sig = doc["epoch"], doc["keys"], doc["sig"]
+    need(type(epoch) is int and epoch >= 1 and isinstance(line, str) and isinstance(sig, str), "routine keys fields")
+    entries = line.split(",") if line else []
+    need(len(entries) <= ROUTINE_MAX and all(ROUTINE_ENTRY.fullmatch(e) for e in entries), "routine keys list")
+    ids = [e[:16] for e in entries]
+    need(ids == sorted(set(ids)), "routine keys must be sorted by id, once each")
+    statement = directory / "routine-statement"
+    statement.write_text("OMINULL-ROUTINE-KEYS-V1\nepoch=%d\nkeys=%s\n" % (epoch, line))
+    signature = directory / "routine-statement.sig"
+    try:
+        signature.write_bytes(base64.b64decode(sig, validate=True))
+    except ValueError:
+        raise Refused("routine keys signature is not base64")
+    need(verifies(key_file, statement, signature), "routine keys are not signed by the pinned release key")
+    floor_file = WORK / "routine.epoch"
+    floor = int(floor_file.read_text()) if floor_file.exists() else 0
+    need(epoch >= floor, "routine keys older than epoch %d seen here" % floor)
+    if epoch > floor:
+        temporary = floor_file.with_name("routine.epoch.new")
+        temporary.write_text(str(epoch))
+        os.replace(temporary, floor_file)
+    keys = {}
+    for entry in entries:
+        der = ROUTINE_SPKI + bytes.fromhex(entry[17:])
+        b64 = base64.b64encode(der).decode()
+        keys[entry[:16]] = ("-----BEGIN PUBLIC KEY-----\n%s\n%s\n-----END PUBLIC KEY-----\n" % (b64[:64], b64[64:])).encode()
+    return keys
 
 
 def digest(path):
@@ -171,7 +227,7 @@ def timed_out(signum, frame):
     raise Refused("stream not received within %d s" % RECEIVE_SECONDS)
 
 
-def receive(stream, directory, names):
+def receive(stream, directory, names, optional=()):
     """Write exactly the expected regular files from the tar on stream.
 
     Bounded per member (Bounded) and timed: a stalled sender would otherwise
@@ -180,15 +236,15 @@ def receive(stream, directory, names):
     previous = signal.signal(signal.SIGALRM, timed_out)
     signal.alarm(RECEIVE_SECONDS)
     try:
-        return receive_members(Bounded(stream), directory, names)
+        return receive_members(Bounded(stream), directory, names, optional)
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
 
 
-def receive_members(stream, directory, names):
+def receive_members(stream, directory, names, optional=()):
     seen = {}
-    limits = {name: (MAX_PACKAGE if name.endswith(".deb") else MAX_SIGNATURE) for name in names}
+    limits = {name: (MAX_PACKAGE if name.endswith(".deb") else MAX_SIGNATURE) for name in [*names, *optional]}
     with tarfile.open(fileobj=stream, mode="r|") as archive:
         for member in archive:
             need(member.name in limits and member.name not in seen, "unexpected member: " + member.name)
@@ -202,7 +258,7 @@ def receive_members(stream, directory, names):
                 shutil.copyfileobj(source, out, 1024 * 1024)
             need(path.stat().st_size == member.size, "short member: " + member.name)
             seen[member.name] = path
-    need(set(seen) == set(names), "missing package or signature")
+    need(set(names) <= set(seen), "missing package or signature")
     return seen
 
 
@@ -271,20 +327,31 @@ def install(version, stream):
         directory = WORK / ("install-" + secrets.token_hex(8))
         directory.mkdir(mode=0o700)
         try:
-            files = receive(stream, directory, names)
+            files = receive(stream, directory, names, (ROUTINE_MEMBER,))
             deb = files[deb_name]
             key_file = directory / "pin.pem"
             key_file.write_bytes(key)
-            verify(key_file, deb, files[deb_name + ".sig"])
             sha = digest(deb)
             statement = directory / "statement"
             statement.write_text("OMINULL-RELEASE-V1\npackage=%s\nversion=%s\nsha256=%s\n" % (deb_name, version, sha))
+            signer = "release"
+            if not verifies(key_file, statement, files[deb_name + ".release.sig"]) and ROUTINE_MEMBER in files:
+                # The pinned key did not sign it: a routine key it listed may have.
+                for key_id, pem in routine_keys(files[ROUTINE_MEMBER], directory, key_file).items():
+                    candidate = directory / ("routine-" + key_id + ".pem")
+                    candidate.write_bytes(pem)
+                    if verifies(candidate, statement, files[deb_name + ".release.sig"]):
+                        key_file, signer = candidate, "routine:" + key_id
+                        break
+            verify(key_file, deb, files[deb_name + ".sig"])
             verify(key_file, statement, files[deb_name + ".release.sig"])
             fields = package_fields(deb)
             need(fields == {"Package": "ominull-hub", "Version": version, "Architecture": "amd64"}, "package identity")
             previous = installed_version()
             need(previous is None or as_tuple(version) >= as_tuple(previous), "older than the installed hub " + str(previous))
             next_pin = package_pin(deb, directory)
+            need(signer == "release" or next_pin is None or next_pin == key,
+                 "a package signed with a routine key cannot move the release key pin")
             pushed = command("pct", "push", GUEST, str(deb), GUEST_DEB, "--perms", "0600", timeout=300)
             need(pushed.returncode == 0, "push to CT " + GUEST)
             try:
@@ -298,7 +365,8 @@ def install(version, stream):
                 write_pin(next_pin)
             wait_ready()
             return {"installed": version, "previous": previous, "sha256": sha,
-                    "pin_sha256": hashlib.sha256(next_pin if rotated else key).hexdigest(), "pin_rotated": rotated}
+                    "pin_sha256": hashlib.sha256(next_pin if rotated else key).hexdigest(), "pin_rotated": rotated,
+                    "signer": signer}
         finally:
             shutil.rmtree(directory, ignore_errors=True)
 
