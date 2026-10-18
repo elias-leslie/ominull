@@ -225,6 +225,11 @@ func (s *Server) openDecisions(now time.Time) ([]ownerDecision, error) {
 			}
 		}
 	}
+	hosts := map[string]string{}
+	for _, ep := range eps {
+		hosts[ep.ID] = ep.Hostname
+	}
+	out = append(out, s.escalatedDecisions(answers, hosts)...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Group != out[j].Group {
 			return out[i].Group < out[j].Group

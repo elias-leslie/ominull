@@ -3940,6 +3940,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/maintenance/catalog", s.authMiddleware(s.responseGate(s.handleSoftwareCatalog)))
 	mux.HandleFunc("/api/v1/maintenance/playbooks", s.authMiddleware(s.responseGate(s.handlePlaybooks)))
 	mux.HandleFunc("/api/v1/maintenance/decisions", s.authMiddleware(s.responseGate(s.handleDecisions)))
+	mux.HandleFunc("/api/v1/maintenance/escalate", s.authMiddleware(s.responseGate(s.handleMaintenanceEscalate)))
 	mux.HandleFunc("/api/v1/maintenance/playbooks/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolvePlaybookRun, s.handlePlaybookRun)))))
 	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
 	mux.HandleFunc("/api/v1/maintenance/script", s.authMiddleware(s.responseGate(s.handleOneOffScriptRoute())))

@@ -450,6 +450,17 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
 - `ominull.decisions.<run>`: one per run with items waiting for the owner
   (below), medium (board only), listing each item; resolved for a week once
   every item of the run is answered.
+- `ominull.run.<endpoint>.<package>`: one per run that needs someone: `needs_hands` (waiting on a window) and
+  `stalled` at low severity, `failed` (finished in the last day) at medium. `unmapped` carries `endpoint_id`,
+  `endpoint`, `package`, `state`, `reason`, `window` (title, process, pid, session), `mode`, `job_id`, `since` and
+  `next_move` (needs_hands: take a steward remote-screen session for the run and click the dialog). At most 20, the
+  neediest first. When the run clears, the record reads resolved for a day, then drops (the raised set is the
+  settings row `maintenance.run_records`).
+
+**Escalation.** `POST /api/v1/maintenance/escalate {"job_id","reason"}` (admin) hands a run to the owner: it becomes
+one decision (group `job:<id>`, answer `handled`) on the decisions card and in Nightshift's inbox, audited
+`MAINTENANCE_ESCALATED`. `404` unknown job, `400` no reason or not a script run. Escalating the same job again
+replaces the reason; the newest 50 are kept (settings row `maintenance.escalations`).
 
 ## Owner decisions
 
