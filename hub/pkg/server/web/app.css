@@ -1129,6 +1129,17 @@ tr.grp .tw[aria-expanded="false"] .ic-twist {
   color: var(--ink-3);
 }
 
+/* The live line of a running or stalled maintenance run (progress, window,
+   reason, last word). It can be long, so it wraps inside its row instead of
+   widening the phone card. */
+.run-live {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .ver {
   font-family: var(--f-mono);
   font-size: var(--t-2);
