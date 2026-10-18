@@ -50,7 +50,7 @@ $forbidden = @{
 foreach ($n in $Names) {
     $path = Join-Path $Dir "$n.ps1"
     $bytes = [System.IO.File]::ReadAllBytes($path)
-    Check "$n size < 24576 bytes ($($bytes.Length))" ($bytes.Length -lt 24576)
+    Check "$n size < 32768 bytes ($($bytes.Length))" ($bytes.Length -lt 32768)
     Check "$n is ASCII without BOM" (-not ($bytes | Where-Object { $_ -gt 127 }))
     $text = [System.Text.Encoding]::ASCII.GetString($bytes)
     $lines = $text -split "`n"
@@ -392,6 +392,63 @@ namespace OmniNullTest { public static class FakeWts {
     $script:Started = Get-Date
     Check 'cleanup: DISM limits come from params' ((Get-DismSeconds $Opt.dism_cleanup_minutes) -eq 45 * 60 -and (Get-PkgParams (Join-Path $Dir 'cleanup.ps1')).dism_analyze_minutes -eq 15)
     Remove-Item -Recurse -Force $script:Root
+}
+& {
+    # Recycle Bin: the guard admits only <drive>:\$Recycle.Bin\<SID>\$I/$R items; age is the deletion time in $I.
+    . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'cleanup.ps1'))))
+    $Opt = Get-PkgParams (Join-Path $Dir 'cleanup.ps1')
+    $oldRoot = $env:SystemRoot; $oldPd = $env:ProgramData
+    $env:SystemRoot = 'C:\Windows'; $env:ProgramData = 'C:\ProgramData'
+    foreach ($p in 'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\$IABC123.txt', 'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\$RABC123', 'D:\$Recycle.Bin\S-1-5-18\$RABC123\Users\x\a.txt') {
+        Check "cleanup: bin item allowed $p" (Test-Allowed $p)
+    }
+    foreach ($p in 'C:\$Recycle.Bin', 'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001', 'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\desktop.ini', 'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\$RABC123\..\..\..\Users\x',
+        'C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\$RABC123\..\..\Windows\Temp', 'C:\Users\nadia\$Recycle.Bin\S-1-5-21\$RABC', 'C:\Windows\$Recycle.Bin\S-1-5-21\$RABC', '\\srv\share\$Recycle.Bin\S-1-5-21\$RABC') {
+        Check "cleanup: bin path refused $p" (-not (Test-Allowed $p))
+    }
+    Check 'cleanup: recycle_bin_days defaults to 30, minimum 0' ($Opt.recycle_bin_days -eq 30 -and (Get-Content (Join-Path $Dir 'cleanup.ps1') -TotalCount 1) -match '"name":"recycle_bin_days","type":"int","default":30,"min":0')
+    $env:SystemRoot = $oldRoot; $env:ProgramData = $oldPd
+    $bin = Join-Path ([IO.Path]::GetTempPath()) ("omt-bin-" + [guid]::NewGuid().ToString('N')); $sid = Join-Path $bin 'S-1-5-21-1-2-3-1001'
+    New-Item -ItemType Directory -Force (Join-Path $sid '$RDIR001\sub') | Out-Null
+    function Get-BinRoots { $bin }
+    function Test-Allowed { $true }
+    function Add-BinItem([string]$Id, [int]$DaysAgo, [int]$Bytes, [bool]$Dir, [int]$Version = 2) {
+        $meta = New-Object byte[] 24; [BitConverter]::GetBytes([int64]$Version).CopyTo($meta, 0); [BitConverter]::GetBytes([int64]$Bytes).CopyTo($meta, 8)
+        [BitConverter]::GetBytes((Get-Date).AddDays(-$DaysAgo).ToFileTime()).CopyTo($meta, 16)
+        $i = Join-Path $sid ('$I' + $Id); [IO.File]::WriteAllBytes($i, $meta); (Get-Item $i).LastWriteTime = Get-Date   # file mtime says "new" on purpose
+        $r = Join-Path $sid ('$R' + $Id)
+        if ($Dir) { New-Item -ItemType Directory -Force (Join-Path $r 'sub') | Out-Null; [IO.File]::WriteAllBytes((Join-Path $r 'sub\f.bin'.Replace('\', [IO.Path]::DirectorySeparatorChar)), (New-Object byte[] $Bytes)) }
+        else { [IO.File]::WriteAllBytes($r, (New-Object byte[] $Bytes)) }
+    }
+    Remove-Item -Recurse -Force (Join-Path $sid '$RDIR001')
+    Add-BinItem 'OLDFIL' 40 1000 $false; Add-BinItem 'OLDDIR' 45 5000 $true 1; Add-BinItem 'NEWFIL' 2 700 $false; Add-BinItem 'EDGE30' 29 300 $false
+    Set-Content (Join-Path $sid 'desktop.ini') 'x'; [IO.File]::WriteAllBytes((Join-Path $sid '$IORPHAN'), (New-Object byte[] 24))
+    $Opt = Get-PkgParams (Join-Path $Dir 'cleanup.ps1')
+    $got = @(Get-BinItems | ForEach-Object { (Split-Path -Leaf $_.i) + ':' + $_.bytes } | Sort-Object)
+    Check "cleanup: bin items are aged by the deletion time, not the file time ($($got -join ','))" (($got -join ',') -eq '$IOLDDIR:5000,$IOLDFIL:1000,$IORPHAN:0')
+    $Opt.recycle_bin_days = 0
+    $got = @(Get-BinItems | ForEach-Object { Split-Path -Leaf $_.i } | Sort-Object)
+    Check 'cleanup: recycle_bin_days 0 takes every item' ($got.Count -eq 5 -and $got -contains '$INEWFIL')
+    $Opt.recycle_bin_days = 30
+    $Detail = [ordered]@{}; $script:Root = Join-Path $bin 'root'
+    $m = Measure-Targets
+    Check "cleanup: reclaimable counts the bin ($($m['recycle_bin']))" ($m['recycle_bin'] -eq 6000)
+    function Invoke-Native([string]$Exe, [string[]]$Arguments) { Remove-Item -Recurse -Force -LiteralPath $Arguments[-1]; @{ code = 0; out = @() } }
+    $freed = Remove-Bin
+    $left = @(Get-ChildItem -LiteralPath $sid | ForEach-Object { $_.Name } | Sort-Object)
+    Check "cleanup: old items go, new ones and desktop.ini stay ($($left -join ','), freed $freed)" ($freed -eq 6000 -and ($left -join ',') -eq '$IEDGE30,$INEWFIL,$REDGE30,$RNEWFIL,desktop.ini')
+    $Opt.recycle_bin_days = 0
+    $freed = Remove-Bin
+    Check "cleanup: days 0 flushes the rest ($freed)" ($freed -eq 1000 -and @(Get-ChildItem -LiteralPath $sid).Count -eq 1)
+    # A $R that cannot be removed keeps its $I and is not counted.
+    Add-BinItem 'STUCK01' 90 400 $false
+    & {
+        function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch]$Force, [switch]$Recurse) throw 'in use' }
+        $script:freed = Remove-Bin
+    }
+    $freed = $script:freed
+    Check 'cleanup: an item that cannot be removed keeps its metadata and is not counted' ($freed -eq 0 -and (Test-Path (Join-Path $sid '$ISTUCK01')))
+    Remove-Item -Recurse -Force $bin
 }
 & {
     . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'debloat.ps1'))))

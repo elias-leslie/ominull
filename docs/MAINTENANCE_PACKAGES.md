@@ -142,14 +142,16 @@ packages but small: a handful of machines, one owner, no new stores.
   01:00-05:00[,..] [--clock machine|utc]`, `maint window reset EP|--default`.
 - Packages never restart the machine themselves; they report `reboot`.
   Only the Restart package (below) restarts, with a warning on screen.
-- Each script stays under 24 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.
+- Each script stays under 32 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.
 
 ## Windows safety rules
 
 - Packages run as LocalSystem with the agent's stripped environment and
   `TEMP=C:\ProgramData\Ominull`. They never touch `$env:TEMP`,
-  `ProgramData\Ominull`, user folders, Downloads or the Recycle Bin. Cleanup
-  deletes from an explicit path list with age filters and never follows links.
+  `ProgramData\Ominull`, user folders or Downloads. Cleanup deletes from an
+  explicit path list with age filters and never follows links. Its one
+  Recycle Bin exception: `$I`/`$R` item pairs under `<fixed drive>:\$Recycle.Bin\<SID>\`,
+  aged by the deletion time stored in `$I` (not the file time).
 - Per-user settings go through HKLM policy and the Default-user hive only, so
   they reach new profiles; machine-wide policies cover everyone.
 - Never: disable Defender, the firewall, Windows Update, SmartScreen or
@@ -166,7 +168,7 @@ All seven are `maintenance`. Every package but audit also takes `idle_minutes`
 | Package | Risk | Timeout | Every | What enforce does | Parameters |
 |---|---|---|---|---|---|
 | `windows-updates` | safe | 3600 s | daily | Installs pending software and driver updates through the Windows Update API; reports reboot. | `exclude` (firmware, preview, feature_update, optional; `driver` allowed) |
-| `windows-cleanup` | safe | 3600 s | weekly | Clears Windows\Temp, update downloads (Windows Update idle), Delivery Optimization cache, crash dumps, old error reports; DISM `/StartComponentCleanup`. Each DISM call is time-boxed and its process tree ended at the limit; a DISM left over from an earlier run is ended first; a timed-out step reports `component_cleanup: skipped: timed out` and the run carries on. | age per kind (`temp_days` 7, `minidump_days` 14, `memory_dump_days` 7, `error_report_days` 30, `update_download_days` 0), `min_reclaim_mb`, `component_store`, `dism_analyze_minutes` 15, `dism_cleanup_minutes` 45, `service_stop_seconds` |
+| `windows-cleanup` | safe | 3600 s | weekly | Clears Windows\Temp, update downloads (Windows Update idle), Delivery Optimization cache, crash dumps, old error reports, Recycle Bin items (every user, every fixed drive); DISM `/StartComponentCleanup`. Each DISM call is time-boxed and its process tree ended at the limit; a DISM left over from an earlier run is ended first; a timed-out step reports `component_cleanup: skipped: timed out` and the run carries on. | age per kind (`temp_days` 7, `minidump_days` 14, `memory_dump_days` 7, `error_report_days` 30, `update_download_days` 0, `recycle_bin_days` 30, 0 empties it fully), `min_reclaim_mb`, `component_store`, `dism_analyze_minutes` 15, `dism_cleanup_minutes` 45, `service_stop_seconds` |
 | `windows-privacy` | safe | 300 s | daily | Turns off the groups in `turn_off`: telemetry at the edition's minimum (DiagTrack and dmwappushservice disabled), advertising ID, tailored experiences, activity history, consumer suggestions, web results in Start, Copilot, Recall. Location is left alone. | `turn_off` (all 9 groups by default) |
 | `windows-debloat` | careful | 900 s | weekly | Removes the listed bundled apps for all users and from the image; drops sponsored apps from the image; disables the listed services. Xbox, Store, GPU and OEM tools stay. | `remove_apps`, `deprovision_apps`, `services` |
 | `windows-performance` | safe | 300 s | weekly | Game Mode on, background game recording off by policy; hardware-accelerated GPU scheduling only when its careful step is on (reboot). | `game_mode`, `block_game_recording`, `gpu_scheduling` (careful, off) |

@@ -32,7 +32,7 @@ const (
 	oneOffMaxSource   = 64 * 1024
 	oneOffMaxOutput   = 1024 * 1024
 	oneOffDefaultTime = 600
-	promoteMaxSource  = 24 * 1024 // the library's package bound (ominullctl scripts sync)
+	promoteMaxSource  = 32 * 1024 // the library's package bound (ominullctl scripts sync)
 )
 
 var oneOffMu sync.Mutex

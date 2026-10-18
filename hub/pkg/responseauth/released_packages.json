@@ -31,16 +31,16 @@
   "name": "linux-maintenance-mode",
   "risk": "safe"
  },
+ "adc5189ed35794199e4e9b940b02ae000c66132364ca314da0353db35ee28ed8": {
+  "name": "windows-cleanup",
+  "risk": "safe"
+ },
  "bcf8f4d5f9adc5de1778d419336a19dc119990463da3b836268c2bd1802bff17": {
   "name": "linux-reboot",
   "risk": "careful"
  },
  "bd714eba761ee0ae38f6c1d85da91d1d7e9812b2bb2f1d71dc774d43eab52ee9": {
   "name": "windows-audit",
-  "risk": "safe"
- },
- "c7f478dd1a57ba51081a27415307f4b2e54244bac7e3dc2ee8ff110e90f88f3f": {
-  "name": "windows-cleanup",
   "risk": "safe"
  }
 }

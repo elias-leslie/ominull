@@ -1,4 +1,4 @@
-# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports and update caches, then compacts the component store.","category":"maintenance","risk":"safe","reboot":true,"timeout":3600,"interval":"weekly","params":[{"name":"temp_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete Windows Temp files older than this many days"},{"name":"minidump_days","type":"int","default":14,"min":1,"max":3650,"description":"Delete crash minidumps older than this many days"},{"name":"memory_dump_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete the full memory dump once it is this many days old"},{"name":"error_report_days","type":"int","default":30,"min":1,"max":3650,"description":"Delete Windows error reports older than this many days"},{"name":"update_download_days","type":"int","default":0,"min":0,"max":3650,"description":"Delete Windows Update download cache files older than this many days"},{"name":"min_reclaim_mb","type":"int","default":100,"min":0,"max":1048576,"description":"Clean only when at least this many MB can be freed (or the component store needs it)"},{"name":"component_store","type":"bool","default":true,"description":"Compact the component store when Windows recommends it"},{"name":"dism_analyze_minutes","type":"int","default":15,"min":1,"max":60,"description":"Give up checking the component store after this many minutes (DISM can hang)"},{"name":"dism_cleanup_minutes","type":"int","default":45,"min":1,"max":60,"description":"Give up compacting the component store after this many minutes (DISM can hang)"},{"name":"service_stop_seconds","type":"int","default":60,"min":5,"max":600,"description":"How long to wait for Windows Update to stop before clearing its download cache"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports, update caches and old Recycle Bin items, then compacts the component store.","category":"maintenance","risk":"safe","reboot":true,"timeout":3600,"interval":"weekly","params":[{"name":"temp_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete Windows Temp files older than this many days"},{"name":"minidump_days","type":"int","default":14,"min":1,"max":3650,"description":"Delete crash minidumps older than this many days"},{"name":"memory_dump_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete the full memory dump once it is this many days old"},{"name":"error_report_days","type":"int","default":30,"min":1,"max":3650,"description":"Delete Windows error reports older than this many days"},{"name":"update_download_days","type":"int","default":0,"min":0,"max":3650,"description":"Delete Windows Update download cache files older than this many days"},{"name":"recycle_bin_days","type":"int","default":30,"min":0,"max":3650,"description":"Empty Recycle Bin items deleted more than this many days ago"},{"name":"min_reclaim_mb","type":"int","default":100,"min":0,"max":1048576,"description":"Clean only when at least this many MB can be freed (or the component store needs it)"},{"name":"component_store","type":"bool","default":true,"description":"Compact the component store when Windows recommends it"},{"name":"dism_analyze_minutes","type":"int","default":15,"min":1,"max":60,"description":"Give up checking the component store after this many minutes (DISM can hang)"},{"name":"dism_cleanup_minutes","type":"int","default":45,"min":1,"max":60,"description":"Give up compacting the component store after this many minutes (DISM can hang)"},{"name":"service_stop_seconds","type":"int","default":60,"min":5,"max":600,"description":"How long to wait for Windows Update to stop before clearing its download cache"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
 $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
@@ -185,7 +185,7 @@ function Invoke-InPkgTemp([scriptblock]$Block) {
   try { & $Block } finally { foreach ($v in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($v, $old[$v]) } }
 }
 # --- package temp end ---
-# Deletes only here: never Users, the Recycle Bin, the agent's TEMP or ProgramData\Ominull.
+# Deletes only here (and old Recycle Bin items): never Users, the agent's TEMP or ProgramData\Ominull.
 function Get-Targets {
   $sr = $env:SystemRoot; $pd = $env:ProgramData
   @(
@@ -199,6 +199,7 @@ function Get-Targets {
 }
 function Test-Allowed([string]$Path) {
   $p = $Path.TrimEnd('\') + '\'
+  if ($p -match '^[A-Za-z]:\\\$Recycle\.Bin\\S-1-[\d-]+\\\$[IR][^\\]+\\' -and $p -notmatch '\\\.\.?\\') { return $true }
   if ($p -match '\\Users\\|\\Ominull\\|\$Recycle\.Bin') { return $false }
   $p.StartsWith("$($env:SystemRoot)\", 'OrdinalIgnoreCase') -or $p.StartsWith("$($env:ProgramData)\Microsoft\Windows\WER\", 'OrdinalIgnoreCase')
 }
@@ -222,6 +223,35 @@ function Get-OldFiles([string]$Path, [datetime]$Cutoff) {
   }
   ,$out
 }
+# Recycle Bin: <drive>\$Recycle.Bin\<SID>\$I<id> holds the deletion time (byte 16), $R<id> the item. Age = deletion time.
+function Get-BinRoots { foreach ($d in [IO.DriveInfo]::GetDrives()) { if ($d.DriveType -eq 'Fixed' -and $d.IsReady) { "$($d.Name)`$Recycle.Bin" } } }
+function Get-BinItems {
+  $cut = (Get-Date).AddDays(-$Opt.recycle_bin_days)
+  foreach ($root in Get-BinRoots) {
+    try { $metas = @(([IO.DirectoryInfo]$root).GetDirectories() | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object { $_.GetFiles('$I*') }) } catch { continue }
+    foreach ($i in $metas) {
+      $when = $i.LastWriteTime
+      try { $b = [IO.File]::ReadAllBytes($i.FullName); if ($b.Length -ge 24) { $when = [DateTime]::FromFileTime([BitConverter]::ToInt64($b, 16)) } } catch {}
+      if ($Opt.recycle_bin_days -gt 0 -and $when -ge $cut) { continue }
+      $r = Join-Path $i.DirectoryName ('$R' + $i.Name.Substring(2)); $sum = 0
+      foreach ($f in (Get-OldFiles $r (Get-Date).AddDays(1))) { $sum += $f.Length }
+      @{ i = $i.FullName; r = $r; bytes = $sum }
+    }
+  }
+}
+function Remove-Bin {
+  $freed = 0
+  foreach ($b in @(Get-BinItems)) {
+    try {
+      if (-not ((Test-Allowed $b.r) -and (Test-Allowed $b.i))) { continue }
+      if (Test-Path -LiteralPath $b.r -PathType Leaf) { Remove-Item -LiteralPath $b.r -Force }
+      elseif (Test-Path -LiteralPath $b.r) { $null = Invoke-Native 'cmd.exe' @('/c', 'rd', '/s', '/q', $b.r) }
+      if (Test-Path -LiteralPath $b.r) { Write-Log "kept (in use): $($b.r)"; continue }
+      Remove-Item -LiteralPath $b.i -Force; $freed += $b.bytes
+    } catch { Write-Log "kept: $($b.r) $_" }
+  }
+  $freed
+}
 function Measure-Targets {
   $m = [ordered]@{}
   foreach ($t in Get-Targets) {
@@ -229,6 +259,7 @@ function Measure-Targets {
     $sum = 0; foreach ($f in $files) { $sum += $f.Length }
     $m[$t.id] = $sum
   }
+  $sum = 0; foreach ($b in @(Get-BinItems)) { $sum += $b.bytes }; $m['recycle_bin'] = $sum
   $do = "$($env:SystemRoot)\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"
   $sum = 0; if (Test-Path -LiteralPath $do) { foreach ($f in (Get-OldFiles $do (Get-Date).AddDays(1))) { $sum += $f.Length } }
   $m['delivery_optimization'] = $sum
@@ -309,6 +340,7 @@ function Invoke-Package {
     } else { $freed[$t.id] = Remove-Old $t }
     if ($freed[$t.id] -gt 0) { $Changed.Add("$($t.id) $([math]::Round($freed[$t.id] / 1MB)) MB") }
   }
+  if ($before['recycle_bin'] -gt 0) { $freed['recycle_bin'] = Remove-Bin; if ($freed['recycle_bin'] -gt 0) { $Changed.Add("recycle_bin $([math]::Round($freed['recycle_bin'] / 1MB)) MB") } }
   if ($before['delivery_optimization'] -gt 0 -and (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) {
     try { Delete-DeliveryOptimizationCache -Force | Out-Null; $freed['delivery_optimization'] = $before['delivery_optimization']; $Changed.Add('delivery_optimization') }
     catch { $errors += "delivery optimization: $_" }

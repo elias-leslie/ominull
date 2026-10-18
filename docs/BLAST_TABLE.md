@@ -42,8 +42,9 @@ An unreadable package run is **core**.
 Notes:
 
 1. windows-cleanup deletes old temp files, crash dumps, error reports and
-   update caches, then compacts the component store. The header calls it
-   safe, so it classes **undoable**, but the deleted files do not come back.
+   update caches, empties Recycle Bin items deleted more than `recycle_bin_days`
+   (30 by default) ago on every fixed drive, then compacts the component store.
+   The header calls it safe, so it classes **undoable**, but the deleted files do not come back.
    They are regenerable by design, which is why it stays out of dangerous.
    If Nightshift wants to count deletion as dangerous, change the package risk
    to careful or add a

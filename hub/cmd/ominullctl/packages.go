@@ -20,7 +20,7 @@ import (
 
 const (
 	// A script_exec approval carries the source; keep packages well inside it.
-	maxPackageBytes = 24 * 1024 // well inside the library's and the agent's 64 KiB source bound
+	maxPackageBytes = 32 * 1024 // well inside the library's and the agent's 64 KiB source bound
 )
 
 // packageExt is the file extension of each platform's packages.
