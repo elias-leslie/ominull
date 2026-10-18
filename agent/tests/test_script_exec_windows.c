@@ -494,6 +494,45 @@ static void test_long_path_reaches_script(void) {
                                                         strstr(output, "PATHIS=C:\\Windows\\System32\\cmd.exe\r") == NULL);
 }
 
+/* Windows environment names ignore case: a parameter arrives once, as
+ * OMINULL_PARAM_<UPPER>. Sending OMINULL_PARAM_mode as well made PowerShell's
+ * Start-Process fail with "Item has already been added. Key in dictionary:
+ * 'OMINULL_PARAM_MODE' Key being added: 'OMINULL_PARAM_mode'". */
+static void test_parameter_once_per_name(void) {
+    printf("[*] Testing each parameter reaches the script once...\n");
+    const char* script_body = "@echo off\r\nset OMINULL_PARAM_\r\n";
+    size_t script_len = strlen(script_body);
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)script_body, script_len, hash);
+    char digest_hex[65];
+    for (int i = 0; i < 32; i++) snprintf(digest_hex + (i * 2), 3, "%02x", hash[i]);
+    ScriptExecParamsWin params;
+    memset(&params, 0, sizeof(params));
+    snprintf(params.script_id, sizeof(params.script_id), "scr-param-once");
+    params.script_version = 1;
+    snprintf(params.script_digest, sizeof(params.script_digest), "%s", digest_hex);
+    snprintf(params.interpreter, sizeof(params.interpreter), "cmd.exe");
+    snprintf(params.source, sizeof(params.source), "%s", script_body);
+    params.source_len = script_len;
+    params.timeout_seconds = 10;
+    params.max_output_bytes = 65536;
+    const char* pjson = "{\"mode\":\"audit\"}";
+    snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
+    params.parameters_len = strlen(pjson);
+    ScriptExec_ParseParametersObjectWin(pjson, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    char output[4096] = {0};
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+    char error_code[64] = {0};
+    int exit_code = ScriptExec_RunContainedWin(&params, "job-win-param-once", output, sizeof(output), &truncated, &timed_out,
+                                               &duration_ms, error_code, sizeof(error_code));
+    int lines = 0;
+    for (const char* p = output; (p = strstr(p, "=audit")) != NULL; p++) lines++;
+    expect("param once: exit code is 0", exit_code == 0);
+    expect("param once: OMINULL_PARAM_MODE arrives", strstr(output, "OMINULL_PARAM_MODE=audit") != NULL);
+    expect("param once: no lowercase duplicate", strstr(output, "OMINULL_PARAM_mode=") == NULL && lines == 1);
+}
+
 int main(void) {
     printf("=== Starting Windows Script Exec Worker C Tests (Slice 5C) ===\n");
 
@@ -503,6 +542,7 @@ int main(void) {
     test_payload_parsing();
     test_cmd_simple_exec();
     test_parameter_delivery();
+    test_parameter_once_per_name();
     test_digest_tamper_rejection();
     test_output_truncation();
     test_timeout_containment();

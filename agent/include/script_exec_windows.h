@@ -820,12 +820,11 @@ static inline int ScriptExec_RunSupervisedWin(
         const char* pname = params->params[i].name;
         const char* pval = params->params[i].value;
 
-        // OMINULL_PARAM_<NAME>
-        char var1[256 + 2048];
-        snprintf(var1, sizeof(var1), "OMINULL_PARAM_%s=%s", pname, pval);
-        APPEND_ENV(var1);
-
-        // OMINULL_PARAM_<UPPER_NAME>
+        // OMINULL_PARAM_<UPPER_NAME> only: Windows environment names ignore
+        // case, so OMINULL_PARAM_<name> as well would be a duplicate that
+        // PowerShell's Start-Process (and .NET's environment dictionary)
+        // refuses with "Item has already been added". $env:OMINULL_PARAM_mode
+        // still reads it.
         char upper_name[64];
         strncpy(upper_name, pname, sizeof(upper_name) - 1);
         upper_name[sizeof(upper_name) - 1] = '\0';
