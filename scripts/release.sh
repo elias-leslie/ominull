@@ -111,6 +111,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
         -o "${ROOT_DIR}/build/test_der_sig" "${ROOT_DIR}/agent/tests/test_der_sig.c"
     "${ROOT_DIR}/build/test_der_sig"
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_response_dispatcher" "${ROOT_DIR}/agent/tests/test_response_dispatcher.c"
+    (cd "${ROOT_DIR}" && ./build/test_response_dispatcher)
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_data_inventory_linux" "${ROOT_DIR}/agent/tests/test_data_inventory_linux.c"
     "${ROOT_DIR}/build/test_data_inventory_linux"
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
