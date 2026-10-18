@@ -290,6 +290,30 @@ Rendered from synthetic events (22 events on 14 lines):
 ![Playbook runs, desktop](images/console-ux/after-desk-maint-runstates.png)
 ![Playbook runs, phone](images/console-ux/after-phone-maint-runstates.png)
 
+### Maintenance windows
+
+- A machine's Maintenance card has a **Window** line under maintenance mode
+  (also on a Linux host that only has maintenance mode): the ranges
+  ("12:00-13:30, 22:00-02:00"), where they come from (this machine's own
+  window, the fleet window, or the standard window nobody changed), and
+  whether it is **Open now** or "Opens in 4 hours 15 minutes". A machine that
+  has not reported its clock (and a window on its own clock) says "Machine
+  clock not reported yet" instead of guessing.
+- **Change...** opens a sheet: one to four from/to time rows (a range may
+  cross midnight; the row says "ends the next day"), Add a range, Remove, and
+  a clock choice (the machine's own clock, or UTC). **Use fleet window**
+  drops a machine's own window. The Maintenance page's Schedule card shows the
+  fleet window with the same sheet, **Back to 01:00-05:00**, and names the
+  machines that have their own window. Setting a window runs nothing.
+- The old single from/to fields and "Turn off" are gone (there is always a
+  window). Uses `GET/PUT /api/v1/maintenance/windows` (admin to change);
+  the demo console answers it too, with a two-range override on one host.
+
+![Window line on a machine](images/console-ux/after-desk-route-window.png)
+![Window sheet, phone](images/console-ux/after-phone-window-sheet.png)
+![Fleet window on the Maintenance page](images/console-ux/after-desk-maint-window.png)
+![Fleet window on the Maintenance page, phone](images/console-ux/after-phone-maint-window.png)
+
 ### Asset view
 
 - Head: name, state, evidence strip, and chips for OS, role and agent version

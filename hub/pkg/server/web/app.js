@@ -486,6 +486,9 @@
     /* Maintenance packages per endpoint: {at, packages} or {at, error}. */
     maintenanceByEndpoint: {},
     maintSettingsByEndpoint: {},
+    /* Maintenance windows: the fleet read ({default, endpoints}) and one read per machine. */
+    maintWindows: null,
+    maintWindowByEndpoint: {},
     maintSettings: null,
     maintCatalog: null,
     maintPlaybooks: null,
@@ -1317,7 +1320,51 @@
     return JSON.parse(JSON.stringify(DEMO_TERMINAL_LIMITS));
   }
 
-  var DEMO_MAINT_WINDOW = "01:00-05:00";
+  /* Maintenance windows in the demo: the fleet default plus a two-range
+     override on the second Windows host. Machines on Windows report their
+     clock (offset 0); the Linux demo host has not reported one yet. */
+  var DEMO_WINDOWS = null;
+  function demoWindowState() {
+    if (!DEMO_WINDOWS) {
+      DEMO_WINDOWS = { fleet: null, endpoints: {} };
+      var win = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return /windows/i.test(e.os || ""); })[1];
+      if (win) DEMO_WINDOWS.endpoints[win.id] = { ranges: ["12:00-13:30", "22:00-02:00"], clock: "machine" };
+    }
+    return DEMO_WINDOWS;
+  }
+  function demoFleetWindow() { return demoWindowState().fleet || { ranges: ["01:00-05:00"], clock: "machine" }; }
+  function demoWindowView(w, source, epID) {
+    var v = { ranges: w.ranges.slice(), clock: w.clock, source: source };
+    if (!epID) return v;
+    v.endpoint_id = epID;
+    var ep = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === epID; })[0];
+    if (w.clock !== "utc" && ep && !/windows/i.test(ep.os || "")) return v; /* machine clock not reported */
+    v.utc_offset_minutes = 0;
+    var now = new Date(), cur = now.getUTCHours() * 60 + now.getUTCMinutes(), open = false, soon = 1440;
+    var mins = function (t) { var q = t.split(":"); return parseInt(q[0], 10) * 60 + parseInt(q[1], 10); };
+    w.ranges.forEach(function (r) {
+      var q = r.split("-"), a = mins(q[0]), b = mins(q[1]);
+      if (a < b ? cur >= a && cur < b : cur >= a || cur < b) open = true;
+      var wait = (a - cur + 1440) % 1440;
+      if (wait > 0 && wait < soon) soon = wait;
+    });
+    v.open_now = open;
+    v.next_start = new Date(now.getTime() - now.getSeconds() * 1000 - now.getMilliseconds() + soon * 60000).toISOString();
+    return v;
+  }
+  function demoWindows(path) {
+    var st = demoWindowState();
+    var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
+    var src = st.fleet ? "fleet" : "default";
+    if (ep) return st.endpoints[ep] ? demoWindowView(st.endpoints[ep], "endpoint", ep) : demoWindowView(demoFleetWindow(), src, ep);
+    var eps = {};
+    Object.keys(st.endpoints).sort().forEach(function (id) { eps[id] = demoWindowView(st.endpoints[id], "endpoint", id); });
+    return { default: demoWindowView(demoFleetWindow(), src, ""), endpoints: eps };
+  }
+  function demoWindowParam() {
+    var w = demoFleetWindow();
+    return w.ranges.join(",") + (w.clock === "utc" ? "Z" : "");
+  }
   var DEMO_PKG_NOTES = {
     "windows-audit": "Checks BitLocker, Defender, firewall, update age, free disk space, TPM and Secure Boot without changing anything.",
     "windows-cleanup": "Deletes old temp files, crash dumps, error reports and update caches, then compacts the component store.",
@@ -1361,7 +1408,7 @@
       return { enabled: on, package_enabled: on, category_enabled: true, mode: e.mode || f.mode || "audit", interval: e.interval || f.interval || defaults.__interval, params: params };
     }
     return {
-      window: DEMO_MAINT_WINDOW,
+      window: demoWindowParam(),
       approvals: { rows: { "maintenance.in": "auto", "maintenance.out": "session", "security.in": "auto", "security.out": "session", "reboot.in": "auto", "reboot.out": "session" }, session_open: false, stored: true },
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
@@ -1404,6 +1451,7 @@
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
+        if (base === "/api/v1/maintenance/windows") { resolve(demoWindows(path)); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
@@ -1640,9 +1688,23 @@
       DEMO_CATALOG.saved = true;
       return Object.assign(JSON.parse(JSON.stringify(DEMO_CATALOG)), { changed: true });
     }
+    if (base === "/api/v1/maintenance/windows") {
+      var wst = demoWindowState();
+      var wep = body.endpoint_id || decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
+      if (body.reset) {
+        if (wep) delete wst.endpoints[wep]; else wst.fleet = null;
+      } else {
+        var nw = { ranges: arrayOf(body.ranges).slice(0, 4), clock: body.clock === "utc" ? "utc" : "machine" };
+        if (wep) wst.endpoints[wep] = nw; else wst.fleet = nw;
+      }
+      return Object.assign(demoWindows(wep ? "?endpoint_id=" + encodeURIComponent(wep) : ""), { changed: true });
+    }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
-      if (body.window !== undefined) { DEMO_MAINT_WINDOW = body.window; return demoMaintSettings(""); }
+      if (body.window !== undefined) {
+        demoWindowState().fleet = body.window ? { ranges: body.window.replace(/Z$/, "").split(","), clock: /Z$/.test(body.window) ? "utc" : "machine" } : null;
+        return demoMaintSettings("");
+      }
       var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
       var row = body.reset ? {} : (DEMO_MAINT_ROWS[key] || {});
       ["enabled", "mode", "interval", "reason", "expires_at"].forEach(function (k) { if (body[k] !== undefined) { if (body[k] === null) delete row[k]; else row[k] = body[k]; } });
@@ -9581,7 +9643,7 @@
     arrayOf(settings && settings.packages).forEach(function (p) { byName[p.name] = p; });
 
     /* A host whose only package is maintenance mode (Linux today) shows just that line. */
-    if (!all.some(notMaintMode)) return card("Maintenance and security", maintModeLine(m.mode, asset, byName), null, true);
+    if (!all.some(notMaintMode)) return card("Maintenance and security", h("div", {}, maintModeLine(m.mode, asset, byName), maintWindowLine(asset)), null, true);
     var tab = state.maintCardTab || "maintenance";
     var pkgs = all.filter(function (p) { return notMaintMode(p) && (p.category || "maintenance") === tab; });
     var pass = 0, fail = 0;
@@ -9638,6 +9700,7 @@
       h("option", { value: "off", text: "Off for this machine", selected: cat.endpoint === false })) : null;
     return card("Maintenance and security", h("div", {},
       maintModeLine(m.mode, asset, byName),
+      maintWindowLine(asset),
       h("div", { cls: "card-body uf uf-wrap uf-g1" },
         maintTabs(tab, function (id) { state.maintCardTab = id; renderRoute(); }),
         h("span", { cls: "u-grow" }),
@@ -9938,7 +10001,7 @@
       if (!reason.value.trim()) { toast("Say why this machine differs from the fleet default.", "warn"); reason.focus(); return; }
       var change = { category: category, endpoint_id: asset.endpoint.id, enabled: on, reason: reason.value.trim() };
       if (ends.value) change.expires_at = ends.value;
-      putMaintSetting(change, function () { requestCloseSheet(); renderRoute(); toast("Saved", "ok"); }).catch(function () {});
+      putMaintSetting(change, function () { closeSheet(); renderRoute(); toast("Saved", "ok"); }).catch(function () {});
     } } });
     openSheet(label, h("div", { cls: "stack" },
       h("label", { cls: "field" }, h("span", { text: "Reason" }), reason),
@@ -10045,31 +10108,177 @@
       })));
   }
 
-  /* The maintenance window: inside it (each machine's own clock) runs that
-     change something go ahead even if someone is using the machine. */
-  function maintWindowRow(d) {
-    var cur = (d && d.window) || "";
-    var parts = cur.split("-");
-    var from = h("input", { type: "time", value: parts[0] || "", disabled: !IS_ADMIN, "aria-label": "Maintenance window starts" });
-    var to = h("input", { type: "time", value: parts[1] || "", disabled: !IS_ADMIN, "aria-label": "Maintenance window ends" });
-    function save(v) {
-      putMaintSetting({ window: v }, function () {
-        toast(v ? "Maintenance window " + v.replace("-", " to ") : "Maintenance window off", "ok");
-        $("view").dataset.section = ""; renderBody();
-      }).catch(function () {});
-    }
-    var set = h("button", { cls: "btn mini", type: "button", text: "Save", disabled: !IS_ADMIN, on: { click: function () {
-      if (!from.value || !to.value || from.value === to.value) { toast("Pick a start and an end time that differ.", "warn"); return; }
-      save(from.value + "-" + to.value);
-    } } });
-    var off = cur && IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Turn off", on: { click: function () { save(""); } } }) : null;
-    return h("div", { cls: "uf uf-g1 uf-wrap maint-window" }, h("b", { text: "Window" }), from, h("span", { text: "to" }), to, set, off);
+  /* The maintenance window: inside it, runs that change something go ahead
+     even if someone is using the machine. One to four HH:MM-HH:MM ranges (a
+     range may cross midnight), read on the machine's own clock or on UTC.
+     GET/PUT /api/v1/maintenance/windows: the fleet window, and an optional
+     window per machine that replaces it for that machine only. */
+  function maintRangesText(ranges) {
+    return arrayOf(ranges).map(function (r) { return r.replace("-", "–"); }).join(", ");
+  }
+  function maintWindowText(w) {
+    return maintRangesText(w && w.ranges) + (w && w.clock === "utc" ? " UTC" : "");
+  }
+  function maintWindowSource(src) {
+    return src === "endpoint" ? "this machine's own window" : src === "fleet" ? "fleet window" : "standard window";
   }
 
-  function maintWindowHelp(cur) {
-    return cur
-      ? "Between " + cur.replace("-", " and ") + " on each machine's own clock, runs that change something go ahead even if someone is using the machine or a game is open. Outside it they skip, or wait in a playbook. Battery and Windows Update still hold a run back."
-      : "With no window, runs that change something skip while someone is using the machine or a game is open; in a playbook they wait for it to be free.";
+  function loadMaintWindow(epID) {
+    var cur = state.maintWindowByEndpoint[epID];
+    if (cur && cur.loading) return;
+    state.maintWindowByEndpoint[epID] = { loading: true, data: cur && cur.data, at: cur && cur.at };
+    request("/api/v1/maintenance/windows?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
+      state.maintWindowByEndpoint[epID] = { data: d || null, at: Date.now() };
+      if (state.routeKey) renderRoute();
+    }).catch(function (e) {
+      state.maintWindowByEndpoint[epID] = { error: (e && e.message) || "request failed", at: Date.now() };
+      if (state.routeKey) renderRoute();
+    });
+  }
+
+  function loadMaintWindows() {
+    return request("/api/v1/maintenance/windows").then(function (d) { state.maintWindows = d || null; });
+  }
+
+  /* Redraw what shows a window after a save: the asset view and the page. */
+  function refreshWindowViews() {
+    if (state.routeKey) renderRoute();
+    if (state.section === "maintenance") { $("view").dataset.section = ""; renderBody(); }
+  }
+
+  function putMaintWindow(change) {
+    return request("/api/v1/maintenance/windows", "PUT", change).then(function (d) {
+      if (change.endpoint_id) {
+        state.maintWindowByEndpoint[change.endpoint_id] = { data: d, at: Date.now() };
+      } else {
+        /* Every machine that follows the fleet window changed with it. */
+        Object.keys(state.maintWindowByEndpoint).forEach(function (k) { state.maintWindowByEndpoint[k].at = 0; });
+      }
+      return loadMaintWindows().catch(function () {}).then(function () { refreshWindowViews(); return d; });
+    }).catch(function (e) {
+      toast("Not saved: " + ((e && e.message) || "request failed"), "crit");
+      throw e;
+    });
+  }
+
+  /* opts: epID ("" = the fleet window), name, win ({ranges, clock, source}). */
+  function openMaintWindowSheet(opts) {
+    var epID = opts.epID || "";
+    var cur = opts.win && arrayOf(opts.win.ranges).length ? opts.win : { ranges: ["01:00-05:00"], clock: "machine" };
+    var rows = cur.ranges.map(function (r) { var q = r.split("-"); return { from: q[0] || "", to: q[1] || "" }; });
+    var holder = h("div", { cls: "stack win-ranges" });
+    var clock = h("select", { "aria-label": "Clock the window runs on" },
+      h("option", { value: "machine", text: "The machine's own clock", selected: cur.clock !== "utc" }),
+      h("option", { value: "utc", text: "UTC, the same moment everywhere", selected: cur.clock === "utc" }));
+    var add = h("button", { cls: "btn mini", type: "button", text: "Add a range", on: { click: function () {
+      if (rows.length >= 4) return;
+      rows.push({ from: "", to: "" }); draw();
+      var ins = holder.querySelectorAll("input[type=time]"); if (ins.length) ins[ins.length - 2].focus();
+    } } });
+    function draw() {
+      clear(holder);
+      rows.forEach(function (r, i) {
+        var note = h("span", { cls: "dim-2 win-next", text: r.from && r.to && r.to < r.from ? "ends the next day" : "" });
+        function upd() { note.textContent = r.from && r.to && r.to < r.from ? "ends the next day" : ""; }
+        holder.appendChild(h("div", { cls: "uf uf-g1 uf-wrap win-range" },
+          h("input", { type: "time", value: r.from, "aria-label": "Range " + (i + 1) + " starts", on: { input: function (e) { r.from = e.target.value; upd(); } } }),
+          h("span", { text: "to" }),
+          h("input", { type: "time", value: r.to, "aria-label": "Range " + (i + 1) + " ends", on: { input: function (e) { r.to = e.target.value; upd(); } } }),
+          note,
+          rows.length > 1 ? h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove range " + (i + 1),
+            on: { click: function () { rows.splice(i, 1); draw(); } } }) : null));
+      });
+      add.disabled = rows.length >= 4;
+    }
+    draw();
+    var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save", disabled: READ_ONLY || !IS_ADMIN, on: { click: function () {
+      for (var i = 0; i < rows.length; i++) {
+        if (!rows[i].from || !rows[i].to || rows[i].from === rows[i].to) { toast("Range " + (i + 1) + " needs a start and an end that differ.", "warn"); return; }
+      }
+      var change = { ranges: rows.map(function (r) { return r.from + "-" + r.to; }), clock: clock.value };
+      if (epID) change.endpoint_id = epID;
+      save.disabled = true;
+      putMaintWindow(change).then(function () {
+        closeSheet();
+        toast((epID ? "Window for " + opts.name : "Fleet window") + " " + maintWindowText(change), "ok");
+      }).catch(function () { save.disabled = false; });
+    } } });
+    var actions = [save];
+    if (epID ? opts.win && opts.win.source === "endpoint" : true) {
+      actions.push(h("button", { cls: "btn", type: "button", text: epID ? "Use fleet window" : "Back to 01:00–05:00", disabled: READ_ONLY || !IS_ADMIN, on: { click: function () {
+        putMaintWindow(epID ? { endpoint_id: epID, reset: true } : { reset: true }).then(function () {
+          closeSheet();
+          toast(epID ? opts.name + " follows the fleet window again" : "Fleet window back to 01:00–05:00", "ok");
+        }).catch(function () {});
+      } } }));
+    }
+    actions.push(h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } }));
+    openSheet(epID ? "Maintenance window for " + opts.name : "Fleet maintenance window", h("div", { cls: "stack" },
+      h("p", { cls: "pending", text: "Inside a window, runs that change something go ahead even if someone is using the machine. Outside it they skip, or wait in a playbook. Up to four ranges; one can cross midnight (22:00 to 02:00)." + (epID ? " This replaces the fleet window for this machine only." : " Machines with their own window keep it.") }),
+      holder, add,
+      h("label", { cls: "field" }, h("span", { text: "Clock" }), clock)),
+      actions);
+  }
+
+  /* A machine's window in the asset view: the ranges, where they come from,
+     and whether it is open now (the hub knows only when the machine has
+     reported its clock, or the window is on UTC). */
+  function maintWindowLine(asset) {
+    var ep = asset.endpoint, name = asset.name;
+    var ww = state.maintWindowByEndpoint[ep.id];
+    if (!ww || (!ww.loading && (!ww.at || Date.now() - ww.at > 60000))) loadMaintWindow(ep.id);
+    var d = ww && ww.data;
+    var body;
+    if (!d) {
+      body = h("span", { cls: "dim-2", role: "status", text: ww && ww.error ? "Window unavailable: " + ww.error : "Reading the window…" });
+    } else {
+      var when;
+      if (d.open_now === true) {
+        when = chip("ok", "Open now");
+      } else if (d.open_now === false) {
+        var ns = parseTime(d.next_start);
+        var secs = ns ? Math.max(0, Math.round((ns.getTime() - Date.now()) / 1000)) : 0;
+        when = h("span", { text: secs < 60 ? "Opens in under a minute" : "Opens in " + spanWords(secs) });
+      } else {
+        when = h("span", { cls: "dim-2", text: "Machine clock not reported yet" });
+      }
+      body = h("span", { cls: "uf uf-wrap uf-g1" }, h("span", { text: maintWindowText(d) }),
+        h("span", { cls: "dim-2", text: "· " + maintWindowSource(d.source) + " ·" }), when);
+    }
+    var canEdit = !!d && IS_ADMIN && !READ_ONLY;
+    return h("div", { cls: "card-body uf uf-wrap uf-g1 maint-window" },
+      h("b", { text: "Window" }), body, h("span", { cls: "u-grow" }),
+      h("button", { cls: "btn mini", type: "button", text: "Change…", disabled: !canEdit, "aria-label": "Change the maintenance window on " + name,
+        on: { click: function () { openMaintWindowSheet({ epID: ep.id, name: name, win: d }); } } }),
+      d && d.source === "endpoint" ? h("button", { cls: "btn mini", type: "button", text: "Use fleet window", disabled: !canEdit, "aria-label": name + " follows the fleet window",
+        on: { click: function () {
+          putMaintWindow({ endpoint_id: ep.id, reset: true }).then(function () { toast(name + " follows the fleet window again", "ok"); }).catch(function () {});
+        } } }) : null);
+  }
+
+  /* The Maintenance page: the fleet window and who differs from it. */
+  function maintWindowRow() {
+    var w = state.maintWindows;
+    var d = w && w.default;
+    var own = Object.keys((w && w.endpoints) || {});
+    var names = own.map(function (id) {
+      var a = arrayOf(state.assets).filter(function (x) { return x.endpoint && x.endpoint.id === id; })[0];
+      return { name: a ? a.name : id, win: w.endpoints[id] };
+    }).sort(function (x, y) { return x.name < y.name ? -1 : 1; });
+    var shown = names.slice(0, 3).map(function (n) { return n.name + " (" + maintWindowText(n.win) + ")"; }).join(", ");
+    return h("div", { cls: "maint-window-wrap" },
+      h("div", { cls: "uf uf-g1 uf-wrap maint-window" }, h("b", { text: "Window" }),
+        d ? h("span", { text: maintWindowText(d) }) : h("span", { cls: "dim-2", role: "status", text: "Reading the window…" }),
+        d ? h("span", { cls: "dim-2", text: "· " + maintWindowSource(d.source) }) : null,
+        h("button", { cls: "btn mini", type: "button", text: "Change…", disabled: !d || !IS_ADMIN || READ_ONLY, "aria-label": "Change the fleet maintenance window",
+          on: { click: function () { openMaintWindowSheet({ epID: "", name: "the fleet", win: d }); } } })),
+      names.length ? h("p", { cls: "dim-2 maint-window-own", text: names.length + (names.length === 1 ? " machine has" : " machines have") + " its own window: " + shown + (names.length > 3 ? " and " + (names.length - 3) + " more" : "") + "." }) : null);
+  }
+
+  function maintWindowHelp(d) {
+    return "In a window, runs that change something go ahead even if someone is using the machine or a game is open. Outside it they skip, or wait in a playbook. " +
+      (d ? "The fleet window is " + maintWindowText(d) + (d.clock === "utc" ? "" : ", read on each machine's own clock") + "; a machine can have its own from its asset page. " : "") +
+      "Battery and Windows Update still hold a run back.";
   }
 
   function maintPlatformChip(p) {
@@ -10146,7 +10355,8 @@
     var tab = state.maintTab || "maintenance";
     var cat = arrayOf(d && d.categories).filter(function (c) { return c.name === tab; })[0] || { fleet_enabled: true };
     var pkgs = arrayOf(d && d.packages).filter(function (p) { return (p.category || "maintenance") === tab; });
-    var win = (d && d.window) || "";
+    var wd = state.maintWindows && state.maintWindows.default;
+    var win = wd ? maintWindowText(wd) : "";
     var catBox = h("input", { type: "checkbox", checked: !!cat.fleet_enabled, disabled: !IS_ADMIN, "aria-label": "Run scheduled " + tab + " packages",
       on: { change: function (e) { putMaintSetting({ category: tab, enabled: e.target.checked }, function () { renderBody(); }); } } });
     var openDecisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
@@ -10154,7 +10364,7 @@
     var status = h("div", { cls: "uf uf-wrap uf-g2" },
       maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
       chip(cat.fleet_enabled ? "ok" : "idle", cat.fleet_enabled ? "Schedule on" : "Schedule off"),
-      chip(win ? "info" : "idle", win ? "Window " + win.replace("-", "–") : "No window"),
+      win ? chip("info", "Window " + (wd.ranges.length > 1 ? maintRangesText(wd.ranges.slice(0, 1)) + " +" + (wd.ranges.length - 1) : win)) : null,
       openDecisions ? chip("warn", openDecisions + (openDecisions === 1 ? " decision" : " decisions")) : null);
     var runnable = maintRunnablePackages(tab).length > 0;
     var tools = pageTools(status, [
@@ -10168,9 +10378,9 @@
     var schedule = card("Schedule",
       h("div", { cls: "card-body uf uf-wrap uf-g4" },
         h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: "Run scheduled " + (tab === "security" ? "security" : "maintenance") + " packages across the fleet" })),
-        maintWindowRow(d)),
+        maintWindowRow()),
       null, true,
-      "Schedules and settings below are fleet defaults for every machine a package fits. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first. " + maintWindowHelp(win));
+      "Schedules and settings below are fleet defaults for every machine a package fits. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first. " + maintWindowHelp(wd));
 
     var rows = pkgs.map(function (p) {
       var eff = p.fleet_effective || {};
@@ -11826,6 +12036,7 @@
     }
     if (state.section === "maintenance") {
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
+      jobs.push(loadMaintWindows().catch(function () {}));
       jobs.push(request("/api/v1/maintenance/decisions").then(function (d) { state.maintDecisions = d || null; },
         function (e) { state.maintDecisions = { error: (e && e.message) || "request failed" }; }));
       jobs.push(request("/api/v1/maintenance/playbooks").then(function (d) { state.maintPlaybooks = d || null; },

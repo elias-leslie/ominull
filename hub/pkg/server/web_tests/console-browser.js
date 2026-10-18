@@ -102,6 +102,58 @@
   assert(/no output, CPU or disk activity for 9 min/.test(text),'Stalled reason missing');
   a.state.maintPlaybooks=saved.p; a.state.maintDecisions=saved.d; a.state.unackAlertsTotal=saved.u; a.state.maintenanceByEndpoint=saved.m; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });
+ await check('maintenance windows: line on the asset card, ranges sheet, per-machine override and fleet reset', async () => {
+  const until = async (fn, what) => { for (let i = 0; i < 100; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 50)); } throw new Error('Timed out waiting for ' + what); };
+  const saved = {tab:a.state.routeTab,key:a.state.routeTabKey,sec:a.state.section,w:a.state.maintWindows,b:a.state.maintWindowByEndpoint};
+  a.state.maintWindows=null; a.state.maintWindowByEndpoint={};
+  const open = key => { a.state.routeTab='maintenance'; a.state.routeTabKey=key; a.openRoute(key); };
+  const line = () => { const el=[...document.querySelectorAll('.maint-window')].find(e=>/^Window/.test(e.textContent)); return el ? el.textContent : ''; };
+  const win = a.state.assets.find(x=>x.endpoint && x.endpoint.id==='win11-fin-11');
+  open(win.key);
+  await until(() => /12:00.13:30, 22:00.02:00/.test(line()), 'the machine window line');
+  assert(/this machine's own window/.test(line()),'Source missing: '+line());
+  assert(/Open now|Opens in/.test(line()),'Open now or next start missing: '+line());
+  assert(!!document.querySelector('button[aria-label^="win11"], button[aria-label$="follows the fleet window"]'),'Use fleet window missing');
+  document.querySelector('button[aria-label^="Change the maintenance window"]').click(); await wait();
+  const rows = () => document.querySelectorAll('.sheet .win-range').length;
+  assert(rows()===2,'Sheet shows '+rows()+' ranges, not 2');
+  const add = [...document.querySelectorAll('.sheet button')].find(b=>b.textContent==='Add a range');
+  add.click(); add.click(); await wait();
+  assert(rows()===4 && add.disabled,'Four ranges should be the limit');
+  document.querySelector('.sheet button[aria-label="Remove range 4"]').click(); document.querySelector('.sheet button[aria-label="Remove range 3"]').click(); await wait();
+  assert(rows()===2,'Remove did not drop the rows');
+  const f=document.querySelector('.sheet input[aria-label="Range 1 starts"]'), t=document.querySelector('.sheet input[aria-label="Range 1 ends"]');
+  f.value='06:00'; f.dispatchEvent(new Event('input',{bubbles:true})); t.value='06:00'; t.dispatchEvent(new Event('input',{bubbles:true}));
+  [...document.querySelectorAll('.sheet button')].find(b=>b.textContent==='Save').click(); await wait();
+  assert(document.querySelector('.sheet'),'Equal start and end saved');
+  t.value='07:30'; t.dispatchEvent(new Event('input',{bubbles:true}));
+  document.querySelector('.sheet select').value='utc';
+  [...document.querySelectorAll('.sheet button')].find(b=>b.textContent==='Save').click();
+  await until(() => !document.querySelector('.sheet'), 'the sheet to close after Save');
+  await until(() => /06:00.07:30, 22:00.02:00 UTC/.test(line()), 'the saved ranges');
+  assert((await a.request('/api/v1/maintenance/windows?endpoint_id=win11-fin-11')).clock==='utc','PUT did not store the clock');
+  const own = [...document.querySelectorAll('button')].find(b=>/follows the fleet window$/.test(b.getAttribute('aria-label')||''));
+  own.click();
+  await until(() => /(standard|fleet) window ·/.test(line()), 'the machine to follow the fleet window');
+  assert(!document.querySelector('button[aria-label$="follows the fleet window"]'),'Use fleet window stays after reset');
+  /* A Linux machine has not reported its clock: the line says so instead of guessing. */
+  a.closeRoute();
+  const lin = a.state.assets.find(x=>x.endpoint && /linux/i.test(x.endpoint.os||''));
+  open(lin.key);
+  await until(() => /01:00.05:00/.test(line()), 'the Linux window line');
+  assert(/Machine clock not reported yet/.test(line()),'Linux line should say the clock is not reported: '+line());
+  a.closeRoute();
+  /* The fleet window: up to four ranges; machines with their own window are named. */
+  a.state.section='maintenance'; document.getElementById('view').dataset.section=''; a.render();
+  await until(() => a.state.maintWindows, 'the fleet window read'); document.getElementById('view').dataset.section=''; a.render();
+  const page = () => (document.querySelector('.maint-window-wrap')||{}).textContent||'';
+  assert(/01:00.05:00/.test(page()),'Fleet window missing: '+page());
+  document.querySelector('button[aria-label="Change the fleet maintenance window"]').click(); await wait();
+  assert(/Fleet maintenance window/.test(document.querySelector('.sheet').getAttribute('aria-label')),'Fleet sheet title');
+  assert(!![...document.querySelectorAll('.sheet button')].find(b=>/^Back to 01:00/.test(b.textContent)),'Fleet sheet has no way back to 01:00-05:00');
+  a.closeAllSheets();
+  a.state.maintWindows=saved.w; a.state.maintWindowByEndpoint=saved.b; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
+ });
  await check('navigation links never contain sentinel credential', () => {
   a.openAccountPop(); assert(![...document.querySelectorAll('a')].some(x=>x.href.includes('AUDIT_SENTINEL')), 'Credential in navigation URL'); a.closeAccountPop();
  });
