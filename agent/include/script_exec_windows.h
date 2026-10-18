@@ -28,6 +28,7 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include "console_idle_windows.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -813,6 +814,26 @@ static inline int ScriptExec_RunSupervisedWin(
         APPEND_ENV(buf);
         snprintf(buf, sizeof(buf), "OMINULL_SCRIPT_ID=%s", params->script_id);
         APPEND_ENV(buf);
+    }
+
+    // Console presence (console_idle_windows.h): Windows tells a service
+    // nothing about input at the console, so the agent measures it inside the
+    // session. Only when it worked, and never beside a parameter of the same
+    // name in any case (a duplicate breaks Start-Process).
+    {
+        DWORD conSession = 0, conIdle = 0;
+        bool clash = false;
+        for (size_t i = 0; i < params->param_count; i++) {
+            if (_stricmp(params->params[i].name, "OMINULL_CONSOLE_SESSION") == 0 ||
+                _stricmp(params->params[i].name, "OMINULL_CONSOLE_IDLE_SECONDS") == 0) clash = true;
+        }
+        if (!clash && ConsoleIdle_Probe(&conSession, &conIdle)) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "OMINULL_CONSOLE_SESSION=%lu", (unsigned long)conSession);
+            APPEND_ENV(buf);
+            snprintf(buf, sizeof(buf), "OMINULL_CONSOLE_IDLE_SECONDS=%lu", (unsigned long)conIdle);
+            APPEND_ENV(buf);
+        }
     }
 
     // Delivered parameter variables

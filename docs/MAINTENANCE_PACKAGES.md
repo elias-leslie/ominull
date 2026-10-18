@@ -93,6 +93,17 @@ packages but small: a handful of machines, one owner, no new stores.
   (TiWorker using CPU over a 10 s sample; an idle TiWorker, which lingers
   after any update scan, does not count). The updates package checks this
   before it searches, since its own search starts TiWorker.
+- Windows reports no last-input time for the local console session to a
+  SYSTEM service (WTS returns 0 there, also through WTSSessionInfoEx and
+  WinStationQueryInformation), so a signed-in console read as in use even
+  when nobody had touched it for hours. Agents from 1.8.88 measure it inside
+  the session: before each script job the agent starts its own exe there as
+  the signed-in user (`ominulld.exe --console-idle`, no window), which exits
+  with `GetLastInputInfo`'s idle seconds, and the script gets
+  `OMINULL_CONSOLE_SESSION` and `OMINULL_CONSOLE_IDLE_SECONDS` when that
+  worked. The prelude uses them for that session only when WTS reports
+  nothing; without them (older agents, nobody signed in, the probe failed) an
+  unreported console still counts as in use.
 - Packages start native tools as plain processes, never with
   `Start-Process -Redirect*/-NoNewWindow`: in Windows PowerShell that copies
   the environment into a case-insensitive map, which throws on names that

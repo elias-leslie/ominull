@@ -533,8 +533,54 @@ static void test_parameter_once_per_name(void) {
     expect("param once: no lowercase duplicate", strstr(output, "OMINULL_PARAM_mode=") == NULL && lines == 1);
 }
 
+static bool probe_idle(DWORD* sessionId, DWORD* idleSeconds) { *sessionId = 3; *idleSeconds = 1234; return true; }
+static bool probe_fail(DWORD* sessionId, DWORD* idleSeconds) { (void)sessionId; (void)idleSeconds; return false; }
+
+static int run_console_env(const char* pjson, char* output, size_t cap) {
+    const char* script_body = "@echo off\r\nset OMINULL_CONSOLE_\r\nexit /b 0\r\n";
+    size_t script_len = strlen(script_body);
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)script_body, script_len, hash);
+    ScriptExecParamsWin params;
+    memset(&params, 0, sizeof(params));
+    snprintf(params.script_id, sizeof(params.script_id), "scr-console-idle");
+    params.script_version = 1;
+    for (int i = 0; i < 32; i++) snprintf(params.script_digest + (i * 2), 3, "%02x", hash[i]);
+    snprintf(params.interpreter, sizeof(params.interpreter), "cmd.exe");
+    snprintf(params.source, sizeof(params.source), "%s", script_body);
+    params.source_len = script_len;
+    params.timeout_seconds = 10;
+    params.max_output_bytes = 65536;
+    snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
+    params.parameters_len = strlen(pjson);
+    ScriptExec_ParseParametersObjectWin(pjson, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    memset(output, 0, cap);
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+    char error_code[64] = {0};
+    return ScriptExec_RunContainedWin(&params, "job-win-console-idle", output, cap, &truncated, &timed_out,
+                                      &duration_ms, error_code, sizeof(error_code));
+}
+
+static void test_console_idle_env(void) {
+    printf("[*] Testing console presence reaches the script...\n");
+    char output[4096];
+    g_ConsoleIdleProbe = probe_idle;
+    run_console_env("{\"mode\":\"enforce\"}", output, sizeof(output));
+    expect("console idle: session arrives", strstr(output, "OMINULL_CONSOLE_SESSION=3") != NULL);
+    expect("console idle: idle seconds arrive", strstr(output, "OMINULL_CONSOLE_IDLE_SECONDS=1234") != NULL);
+    run_console_env("{\"OMINULL_console_session\":\"9\"}", output, sizeof(output));
+    expect("console idle: a same-named parameter suppresses both", strstr(output, "OMINULL_CONSOLE_IDLE_SECONDS") == NULL);
+    g_ConsoleIdleProbe = probe_fail;
+    run_console_env("{\"mode\":\"enforce\"}", output, sizeof(output));
+    expect("console idle: nothing when the measurement fails", strstr(output, "OMINULL_CONSOLE_SESSION=") == NULL);
+    g_ConsoleIdleProbe = probe_fail;
+}
+
 int main(void) {
     printf("=== Starting Windows Script Exec Worker C Tests (Slice 5C) ===\n");
+    /* Never the real console probe here: it would start this test exe. */
+    g_ConsoleIdleProbe = probe_fail;
 
     test_interpreter_allowlist();
     test_json_unescaping();
@@ -543,6 +589,7 @@ int main(void) {
     test_cmd_simple_exec();
     test_parameter_delivery();
     test_parameter_once_per_name();
+    test_console_idle_env();
     test_digest_tamper_rejection();
     test_output_truncation();
     test_timeout_containment();

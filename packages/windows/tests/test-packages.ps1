@@ -140,6 +140,40 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
         $why = Get-SessionReason 15
         Check 'sessions: an unanswerable query is busy, not nobody' ($why -like 'it cannot tell whether someone is using the computer*')
     }
+    # The console session: WTS reports no last input there (LastInputTime 0), so the agent measures it in the
+    # session and passes OMINULL_CONSOLE_SESSION / OMINULL_CONSOLE_IDLE_SECONDS. A stand-in WTS returns one
+    # active, unlocked session (id 77, user nadia) with no idle, as Windows does for the console.
+    Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+namespace OmniNullTest { public static class FakeWts {
+  public static bool WTSEnumerateSessionsW(IntPtr s, int r, int v, out IntPtr p, out int n) {
+    n = 1; p = Marshal.AllocHGlobal(IntPtr.Size * 3); Marshal.WriteInt32(p, 0, 77); return true; }
+  public static bool WTSQuerySessionInformationW(IntPtr s, int id, int c, out IntPtr p, out int n) {
+    n = 216; p = Marshal.AllocHGlobal(n); for (int i = 0; i < n; i++) Marshal.WriteByte(p, i, 0);
+    Marshal.WriteInt32(p, 0, 0); Marshal.WriteInt32(p, 4, id);
+    char[] u = "nadia".ToCharArray(); Marshal.Copy(u, 0, IntPtr.Add(p, 130), u.Length);
+    Marshal.WriteInt64(p, 208, 134368027668320512L); return true; }
+  public static void WTSFreeMemory(IntPtr p) { Marshal.FreeHGlobal(p); } } }
+'@
+    & {
+        function Get-WtsType { [OmniNullTest.FakeWts] }
+        $env:OMINULL_CONSOLE_SESSION = $null; $env:OMINULL_CONSOLE_IDLE_SECONDS = $null
+        $s = @(Get-Sessions)
+        Check 'console: stand-in session read' ($s.Count -eq 1 -and $s[0].user -ceq 'nadia' -and $s[0].state -eq 0 -and $null -eq $s[0].idle)
+        Check 'console: no idle from the agent still counts as in use' ((Get-SessionReason 15) -eq 'someone is using the computer')
+        $env:OMINULL_CONSOLE_SESSION = '77'; $env:OMINULL_CONSOLE_IDLE_SECONDS = '7200'
+        Check 'console: idle from the agent is read in minutes' ((@(Get-Sessions))[0].idle -eq 120)
+        Check 'console: 2 hours idle is away' ($null -eq (Get-SessionReason 15))
+        $env:OMINULL_CONSOLE_IDLE_SECONDS = '840'
+        Check 'console: 14 min idle is present' ((Get-SessionReason 15) -eq 'someone is using the computer')
+        $env:OMINULL_CONSOLE_IDLE_SECONDS = '900'
+        Check 'console: 15 min idle is away' ($null -eq (Get-SessionReason 15))
+        $env:OMINULL_CONSOLE_SESSION = '3'; $env:OMINULL_CONSOLE_IDLE_SECONDS = '7200'
+        Check 'console: idle for another session is ignored' ((Get-SessionReason 15) -eq 'someone is using the computer')
+        $env:OMINULL_CONSOLE_SESSION = '77'; $env:OMINULL_CONSOLE_IDLE_SECONDS = '-5'
+        Check 'console: a malformed idle is ignored' ((Get-SessionReason 15) -eq 'someone is using the computer')
+        $env:OMINULL_CONSOLE_SESSION = $null; $env:OMINULL_CONSOLE_IDLE_SECONDS = $null
+    }
 
     # Params: defaults come from line 1, a run overrides them, bad values fail.
     $tmpPkg = Join-Path ([IO.Path]::GetTempPath()) ("omp-" + [guid]::NewGuid().ToString('N') + '.ps1')

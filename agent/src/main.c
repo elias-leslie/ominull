@@ -1,5 +1,6 @@
 #include "../include/agent.h"
 #include "../include/forensics_windows.h"
+#include "../include/console_idle_windows.h"
 
 #define OMINULL_DEFAULT_CA_PATH "C:\\Program Files\\Ominull\\ca.crt"
 #define OMINULL_DEFAULT_PFX_PATH "C:\\Program Files\\Ominull\\client.pfx"
@@ -79,6 +80,11 @@ static void PrintUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+    /* The console idle probe (console_idle_windows.h): started by the agent
+     * inside the signed-in session as that user. It does nothing else. */
+    if (argc == 2 && strcmp(argv[1], "--console-idle") == 0) {
+        ExitProcess(ConsoleIdle_ChildSeconds());
+    }
     /* Line-buffered, like the Linux daemon. Block buffering is the default when
      * stdout is not a console, which is every way this agent is ever actually
      * read: a service redirect, an SSH pipe, a support transcript. A probe that

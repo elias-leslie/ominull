@@ -2,8 +2,8 @@
 $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-privacy'
 # --- prelude begin (identical in every package; tests compare) ---
-# Runs as SYSTEM with a stripped environment; TEMP is the agent's. Stdout: one JSON line.
-# Agents before 1.8.86 could pass PATH=<cmd.exe> (long PATH): put the system folders back first.
+# SYSTEM, a stripped environment, the agent's TEMP. Stdout: one JSON line.
+# Old agents could pass PATH=<cmd.exe>: the system folders go back first.
 function Repair-Path([string]$Path, [string]$Sys) {
   if (-not $Sys) { return $Path }
   $parts = @("$Path" -split ';' | Where-Object { $_ }); $sr = $Sys -replace '[\\/][^\\/]+$', ''
@@ -82,7 +82,7 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     @{ code = $p.ExitCode; out = @("$($o.Result)`n$($e.Result)" -split "`r?`n" | Where-Object { $_ -ne '' }) }
   } catch { @{ code = -1; out = @("$Exe could not be started: $($_.Exception.Message)") } }
 }
-# Presence without quser (not on Home): WTS sessions; idle null when not reported; locked = LogonUI in it.
+# Presence without quser (not on Home): WTS sessions; WTS has no console idle, the agent passes it; locked = LogonUI.
 $script:WtsSource = @'
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct WtsInfo {
   public int State, Id, A, B, C, D, E, F;
@@ -105,6 +105,7 @@ function Get-Sessions {
       if ($id -eq 0 -or -not $t::WTSQuerySessionInformationW([IntPtr]::Zero, $id, 24, [ref]$b, [ref]$len)) { continue }
       try { $w = $m::PtrToStructure($b, [type][OmniNull.Wts+WtsInfo]) } finally { $t::WTSFreeMemory($b) }
       $idle = $null; if ($w.LastInputTime -gt 0 -and $w.CurrentTime -ge $w.LastInputTime) { $idle = [int][math]::Floor(($w.CurrentTime - $w.LastInputTime) / 6e8) }
+      $c = $env:OMINULL_CONSOLE_IDLE_SECONDS; if ($null -eq $idle -and "$id" -eq $env:OMINULL_CONSOLE_SESSION -and $c -match '^\d+$') { $idle = [int][math]::Floor([int]$c / 60) }
       @{ id = $id; state = $w.State; user = "$($w.User)"; idle = $idle; locked = $locked -contains $id }
     }
   } finally { $t::WTSFreeMemory($p) }
