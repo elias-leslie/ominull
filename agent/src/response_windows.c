@@ -37,6 +37,99 @@ typedef struct {
     char* payload_json;
 } ScriptWorkerThreadArgsWin;
 
+/* Heartbeats of one script job (docs/RESPONSE_SUPERVISOR.md). The job thread
+ * only drops the latest body here and moves on; a helper thread posts it, so
+ * the hub's speed (and the shared WinHTTP connection's lock) never holds up
+ * the output drain or the timeout. A newer body replaces one not yet sent.
+ * A reply carrying "cancel":true sets the cancel flag. The poster is freed by
+ * whichever of the two threads lets go of it last. */
+typedef struct {
+    AGENT_CONFIG config;
+    CRITICAL_SECTION lock;
+    HANDLE wake;
+    char* pending;
+    volatile LONG cancel;
+    volatile LONG stop;
+    volatile LONG refs;
+} ScriptHeartbeatPosterWin;
+
+static void ScriptHeartbeatReleaseWin(ScriptHeartbeatPosterWin* poster) {
+    if (InterlockedDecrement(&poster->refs) != 0) return;
+    free(poster->pending);
+    CloseHandle(poster->wake);
+    DeleteCriticalSection(&poster->lock);
+    free(poster);
+}
+
+static DWORD WINAPI ScriptHeartbeatThreadProcWin(LPVOID lpParam) {
+    ScriptHeartbeatPosterWin* poster = (ScriptHeartbeatPosterWin*)lpParam;
+    for (;;) {
+        WaitForSingleObject(poster->wake, INFINITE);
+        EnterCriticalSection(&poster->lock);
+        char* body = poster->pending;
+        poster->pending = NULL;
+        LeaveCriticalSection(&poster->lock);
+        if (InterlockedCompareExchange(&poster->stop, 0, 0)) {
+            free(body);
+            break;
+        }
+        if (!body) continue;
+        char reply[512] = {0};
+        if (Hub_PostPathJSON(&poster->config, "/api/v1/response/jobs/progress", body, reply, sizeof(reply)) &&
+            Supervisor_ReplyCancels(reply)) {
+            InterlockedExchange(&poster->cancel, 1);
+        }
+        free(body);
+    }
+    ScriptHeartbeatReleaseWin(poster);
+    return 0;
+}
+
+static void ScriptHeartbeatPostWin(void* ctx, const char* body) {
+    ScriptHeartbeatPosterWin* poster = (ScriptHeartbeatPosterWin*)ctx;
+    if (!poster || !body) return;
+    char* copy = _strdup(body);
+    if (!copy) return;
+    EnterCriticalSection(&poster->lock);
+    free(poster->pending);
+    poster->pending = copy;
+    LeaveCriticalSection(&poster->lock);
+    SetEvent(poster->wake);
+}
+
+static bool ScriptHeartbeatCancelledWin(void* ctx) {
+    ScriptHeartbeatPosterWin* poster = (ScriptHeartbeatPosterWin*)ctx;
+    return poster && InterlockedCompareExchange(&poster->cancel, 0, 0) != 0;
+}
+
+/* NULL when the thread cannot start: the job then runs without heartbeats. */
+static ScriptHeartbeatPosterWin* ScriptHeartbeatStartWin(const AGENT_CONFIG* config) {
+    ScriptHeartbeatPosterWin* poster = (ScriptHeartbeatPosterWin*)calloc(1, sizeof(*poster));
+    if (!poster) return NULL;
+    memcpy(&poster->config, config, sizeof(AGENT_CONFIG));
+    InitializeCriticalSection(&poster->lock);
+    poster->wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    poster->refs = 2;
+    HANDLE thread = poster->wake ? CreateThread(NULL, 0, ScriptHeartbeatThreadProcWin, poster, 0, NULL) : NULL;
+    if (!thread) {
+        if (poster->wake) CloseHandle(poster->wake);
+        DeleteCriticalSection(&poster->lock);
+        free(poster);
+        return NULL;
+    }
+    CloseHandle(thread);
+    return poster;
+}
+
+/* Drops any unsent beat and lets the helper finish its post in flight on its
+ * own; the result is posted without waiting for it. */
+static void ScriptHeartbeatStopWin(ScriptHeartbeatPosterWin* poster) {
+    if (!poster) return;
+    InterlockedExchange(&poster->stop, 1);
+    SetEvent(poster->wake);
+    ScriptHeartbeatReleaseWin(poster);
+}
+
 static DWORD WINAPI ScriptWorkerThreadProcWin(LPVOID lpParam) {
     ScriptWorkerThreadArgsWin* args = (ScriptWorkerThreadArgsWin*)lpParam;
     if (!args) return 1;
@@ -61,41 +154,52 @@ static DWORD WINAPI ScriptWorkerThreadProcWin(LPVOID lpParam) {
         return 1;
     }
 
-    bool truncated = false;
-    bool timed_out = false;
-    int64_t duration_ms = 0;
     char error_code[64] = {0};
+    ScriptRunResult run;
+    ScriptHeartbeatPosterWin* poster = ScriptHeartbeatStartWin(&args->config);
+    ScriptSupervisorHooks hooks = {
+        .settings = Supervisor_DefaultSettings(),
+        .job_id = args->job_id,
+        .lease_id = args->lease_id,
+        .post = poster ? ScriptHeartbeatPostWin : NULL,
+        .cancel_requested = poster ? ScriptHeartbeatCancelledWin : NULL,
+        .ctx = poster,
+    };
 
-    int exit_code = ScriptExec_RunContainedWin(
+    int exit_code = ScriptExec_RunSupervisedWin(
         &params,
         args->job_id,
         output_buf,
         out_alloc,
-        &truncated,
-        &timed_out,
-        &duration_ms,
+        &hooks,
+        &run,
         error_code,
         sizeof(error_code)
     );
+    ScriptHeartbeatStopWin(poster);
 
-    const char* state = (exit_code == 0) ? "succeeded" : "failed";
-    if (timed_out && error_code[0] == '\0') {
+    const char* state = run.cancelled ? "cancelled" : (exit_code == 0) ? "succeeded" : "failed";
+    if (run.cancelled) {
+        snprintf(error_code, sizeof(error_code), "CANCELLED");
+    } else if (run.timed_out && error_code[0] == '\0') {
         strncpy(error_code, "TIMED_OUT", sizeof(error_code) - 1);
     }
+    int64_t duration_ms = run.duration_ms;
 
     char* escaped_out = ScriptExec_EscapeJSONWin(output_buf);
     size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
     char* res_body = (char*)malloc(body_sz);
     if (res_body) {
         snprintf(res_body, body_sz,
-            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s%s}",
             args->job_id, args->lease_id, state, exit_code, (long long)duration_ms,
             (escaped_out ? ",\"stdout\":\"" : ""),
             (escaped_out ? escaped_out : ""),
             (escaped_out ? "\"" : ""),
             (error_code[0] ? ",\"error_code\":\"" : ""),
             (error_code[0] ? error_code : ""),
-            (error_code[0] ? "\"" : ""));
+            (error_code[0] ? "\"" : ""),
+            (run.truncated ? ",\"truncated\":true" : ""));
         Hub_PostPathJSON(&args->config, "/api/v1/response/jobs/result", res_body, NULL, 0);
         free(res_body);
     }

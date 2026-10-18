@@ -2667,42 +2667,87 @@ static bool ReportHubRejection(const LINUX_AGENT_CONFIG* config, long status) {
  * Next-Gen Response Dispatcher & Execution (Slice 1D.1)
  * ------------------------------------------------------------------------- */
 
+/* Heartbeats of one script job (docs/RESPONSE_SUPERVISOR.md): posted from the
+ * worker's supervising loop on a curl handle of its own with a 5-second
+ * ceiling, so a slow or absent hub delays the loop by at most that and never
+ * fails the job. A reply carrying "cancel":true is remembered. */
+typedef struct {
+    const LINUX_AGENT_CONFIG* config;
+    CURL* curl;
+    bool cancel;
+} ScriptHeartbeatSink;
+
+static void ScriptHeartbeatPost(void* ctx, const char* body) {
+    ScriptHeartbeatSink* sink = (ScriptHeartbeatSink*)ctx;
+    if (!sink || !body) return;
+    if (!sink->curl) sink->curl = curl_easy_init();
+    if (!sink->curl) return;
+    char url[sizeof(sink->config->hub_url) + 64];
+    snprintf(url, sizeof(url), "%s/api/v1/response/jobs/progress", sink->config->hub_url);
+    char reply[1024] = {0};
+    HUB_RESPONSE_BUFFER response = { .data = reply, .cap = sizeof(reply), .len = 0, .overflow = false };
+    struct curl_slist* headers = SetupHubCurl(sink->curl, sink->config, url, body, strlen(body), NULL, &response, 5000L);
+    if (!headers) return;
+    long status = 0;
+    if (curl_easy_perform(sink->curl) == CURLE_OK)
+        curl_easy_getinfo(sink->curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    if (status >= 200 && status < 300 && Supervisor_ReplyCancels(reply))
+        sink->cancel = true;
+}
+
+static bool ScriptHeartbeatCancelled(void* ctx) {
+    ScriptHeartbeatSink* sink = (ScriptHeartbeatSink*)ctx;
+    return sink && sink->cancel;
+}
+
 /* RunScriptJobWorker runs one script job to completion inside a detached
  * worker process and posts its result to the hub. */
 static int RunScriptJobWorker(const LINUX_AGENT_CONFIG* config, const char* job_id, const char* lease_id,
                               ScriptExecParams* params) {
-    static char output_buf[65536];
-    bool truncated = false;
-    bool timed_out = false;
-    int64_t duration_ms = 0;
+    /* The payload's output limit (1 MiB default, 5 MiB at most) plus room for
+     * the truncation note and an error line. */
+    size_t max_out = params->max_output_bytes;
+    if (max_out == 0 || max_out > SCRIPT_EXEC_MAX_MAX_OUT) max_out = SCRIPT_EXEC_MAX_MAX_OUT;
+    size_t output_cap = max_out + 256;
+    char* output_buf = (char*)calloc(1, output_cap);
+    if (!output_buf) {
+        fprintf(stderr, "[!] Could not allocate the output buffer of script job %s\n", job_id);
+        return 1;
+    }
 
-    int exit_code = ScriptExec_RunContained(
-        params,
-        job_id,
-        output_buf,
-        sizeof(output_buf),
-        &truncated,
-        &timed_out,
-        &duration_ms
-    );
+    ScriptHeartbeatSink sink = { .config = config, .curl = NULL, .cancel = false };
+    ScriptSupervisorHooks hooks = {
+        .settings = Supervisor_DefaultSettings(),
+        .job_id = job_id,
+        .lease_id = lease_id,
+        .post = ScriptHeartbeatPost,
+        .cancel_requested = ScriptHeartbeatCancelled,
+        .ctx = &sink,
+    };
+    ScriptRunResult run;
+    int exit_code = ScriptExec_RunSupervised(params, job_id, output_buf, output_cap, &hooks, &run);
+    if (sink.curl) curl_easy_cleanup(sink.curl);
 
-    const char* state = (exit_code == 0) ? "succeeded" : "failed";
-    const char* error_code = timed_out ? "TIMED_OUT" : "";
+    const char* state = run.cancelled ? "cancelled" : (exit_code == 0) ? "succeeded" : "failed";
+    const char* error_code = run.cancelled ? "CANCELLED" : run.timed_out ? "TIMED_OUT" : "";
 
     char* escaped_out = ScriptExec_EscapeJSON(output_buf);
+    free(output_buf);
     size_t body_sz = (escaped_out ? strlen(escaped_out) : 0) + 1024;
     char* res_body = (char*)malloc(body_sz);
     bool posted = false;
     if (res_body) {
         snprintf(res_body, body_sz,
-            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s}",
-            job_id, lease_id, state, exit_code, (long long)duration_ms,
+            "{\"job_id\":\"%s\",\"lease_id\":\"%s\",\"state\":\"%s\",\"exit_code\":%d,\"duration_ms\":%lld%s%s%s%s%s%s%s}",
+            job_id, lease_id, state, exit_code, (long long)run.duration_ms,
             (escaped_out ? ",\"stdout\":\"" : ""),
             (escaped_out ? escaped_out : ""),
             (escaped_out ? "\"" : ""),
             (error_code[0] ? ",\"error_code\":\"" : ""),
             (error_code[0] ? error_code : ""),
-            (error_code[0] ? "\"" : ""));
+            (error_code[0] ? "\"" : ""),
+            (run.truncated ? ",\"truncated\":true" : ""));
         char res_url[sizeof(config->hub_url) + 64];
         snprintf(res_url, sizeof(res_url), "%s/api/v1/response/jobs/result", config->hub_url);
         CURL* curl = curl_easy_init();

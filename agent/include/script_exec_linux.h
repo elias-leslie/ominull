@@ -41,7 +41,10 @@
 #include <errno.h>
 #include <ctype.h>
 
+#include <dirent.h>
+
 #include "response_dispatcher.h"
+#include "script_supervisor.h"
 
 /* Where job scripts and their parameters are written: root-owned, never /tmp.
  * Tests point it at a private directory of their own. */
@@ -396,22 +399,167 @@ static inline char* ScriptExec_EscapeJSON(const char* str) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Process tree sampling (/proc) for the supervisor (script_supervisor.h)
+ * ------------------------------------------------------------------------- */
+
+static inline int64_t ScriptExec_NowMs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Reads the process group, state and CPU ticks (own + reaped children) of one
+ * process. */
+static inline bool ScriptExec_ReadProcStat(const char* pid, long* pgrp, char* state, uint64_t* ticks) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%s/stat", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    /* The command name may hold spaces and parentheses: fields start after
+     * the last ')'. Field 3 is state, 5 pgrp, 14-17 utime stime cutime cstime. */
+    char* p = strrchr(buf, ')');
+    if (!p) return false;
+    p++;
+    char st = 0;
+    long ppid = 0, grp = 0, session = 0, tty = 0, tpgid = 0;
+    unsigned long flags = 0, minflt = 0, cminflt = 0, majflt = 0, cmajflt = 0;
+    unsigned long long utime = 0, stime = 0;
+    long long cutime = 0, cstime = 0;
+    if (sscanf(p, " %c %ld %ld %ld %ld %ld %lu %lu %lu %lu %lu %llu %llu %lld %lld",
+               &st, &ppid, &grp, &session, &tty, &tpgid, &flags, &minflt, &cminflt, &majflt, &cmajflt,
+               &utime, &stime, &cutime, &cstime) != 15)
+        return false;
+    *pgrp = grp;
+    *state = st;
+    *ticks = utime + stime + (uint64_t)(cutime > 0 ? cutime : 0) + (uint64_t)(cstime > 0 ? cstime : 0);
+    return true;
+}
+
+/* read_bytes + write_bytes from /proc/<pid>/io (rchar + wchar when those are
+ * missing); 0 when unreadable. */
+static inline uint64_t ScriptExec_ReadProcIO(const char* pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%s/io", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    unsigned long long rchar = 0, wchar = 0, rb = 0, wb = 0;
+    bool have_rb = false, have_wb = false;
+    for (char* line = buf; line && *line; ) {
+        char* next = strchr(line, '\n');
+        if (next) *next++ = '\0';
+        if (sscanf(line, "rchar: %llu", &rchar) == 1) {}
+        else if (sscanf(line, "wchar: %llu", &wchar) == 1) {}
+        else if (sscanf(line, "read_bytes: %llu", &rb) == 1) have_rb = true;
+        else if (sscanf(line, "write_bytes: %llu", &wb) == 1) have_wb = true;
+        line = next;
+    }
+    if (have_rb || have_wb) return rb + wb;
+    return rchar + wchar;
+}
+
+/* Sums the job's process group: every /proc entry whose pgrp is pgid. Zombies
+ * count toward CPU but not as live processes. */
+static inline void ScriptExec_SampleTree(pid_t pgid, ScriptTreeSample* out) {
+    memset(out, 0, sizeof(*out));
+    static long tick_hz = 0;
+    if (tick_hz <= 0) tick_hz = sysconf(_SC_CLK_TCK);
+    if (tick_hz <= 0) tick_hz = 100;
+    DIR* dir = opendir("/proc");
+    if (!dir) return;
+    uint64_t ticks_total = 0;
+    struct dirent* de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        long grp = 0;
+        char state = 0;
+        uint64_t ticks = 0;
+        if (!ScriptExec_ReadProcStat(de->d_name, &grp, &state, &ticks) || grp != (long)pgid) continue;
+        ticks_total += ticks;
+        if (state != 'Z' && state != 'X') {
+            out->processes++;
+            out->io_bytes += ScriptExec_ReadProcIO(de->d_name);
+        }
+    }
+    closedir(dir);
+    out->cpu_ms = ticks_total * 1000 / (uint64_t)tick_hz;
+}
+
+/* Ends every process left in the group: SIGTERM, up to 250 ms for them to go,
+ * then SIGKILL. The leader must still be unreaped (a zombie keeps the group id
+ * from being reused). */
+static inline void ScriptExec_KillGroup(pid_t pgid) {
+    ScriptTreeSample s;
+    ScriptExec_SampleTree(pgid, &s);
+    if (s.processes == 0) return;
+    if (kill(-pgid, SIGTERM) != 0) return;
+    for (int i = 0; i < 10; i++) {
+        usleep(25000);
+        ScriptExec_SampleTree(pgid, &s);
+        if (s.processes == 0) return;
+    }
+    kill(-pgid, SIGKILL);
+}
+
+/* Appends one read to the capture (up to limit bytes) and to the supervisor. */
+static inline void ScriptExec_TakeOutput(const char* chunk, size_t n, char* output_buf, size_t* bytes_read,
+                                         size_t limit, bool* truncated, ScriptSupervisor* sup, int64_t now_ms) {
+    if (*bytes_read + n <= limit) {
+        memcpy(output_buf + *bytes_read, chunk, n);
+        *bytes_read += n;
+    } else {
+        size_t room = limit > *bytes_read ? limit - *bytes_read : 0;
+        if (room > 0) {
+            memcpy(output_buf + *bytes_read, chunk, room);
+            *bytes_read += room;
+        }
+        *truncated = true;
+    }
+    Supervisor_FeedOutput(sup, chunk, n, now_ms);
+}
+
+/* Reads what the pipe holds now. Returns false once it is at EOF or broken. */
+static inline bool ScriptExec_DrainReady(int fd, char* output_buf, size_t* bytes_read, size_t limit,
+                                         bool* truncated, ScriptSupervisor* sup) {
+    char chunk[4096];
+    for (;;) {
+        ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n > 0) {
+            ScriptExec_TakeOutput(chunk, (size_t)n, output_buf, bytes_read, limit, truncated, sup, ScriptExec_NowMs());
+            continue;
+        }
+        if (n == 0) return false;
+        if (errno == EINTR) continue;
+        return errno == EAGAIN || errno == EWOULDBLOCK;
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * Contained Worker Execution
  * ------------------------------------------------------------------------- */
 
-static inline int ScriptExec_RunContained(
+/* Runs one script job under the supervisor: heartbeats through hooks (NULL:
+ * none), hang detection, cancel, and the whole process group cleaned up
+ * however it ends. Returns the exit code (124 timed out, 130 cancelled). */
+static inline int ScriptExec_RunSupervised(
     const ScriptExecParams* params,
     const char* job_id,
     char* output_buf,
     size_t output_cap,
-    bool* out_truncated,
-    bool* out_timed_out,
-    int64_t* out_duration_ms
+    const ScriptSupervisorHooks* hooks,
+    ScriptRunResult* result
 ) {
+    if (result) memset(result, 0, sizeof(*result));
     if (!params || !job_id || !output_buf || output_cap == 0) return -1;
-    if (out_truncated) *out_truncated = false;
-    if (out_timed_out) *out_timed_out = false;
-    if (out_duration_ms) *out_duration_ms = 0;
     output_buf[0] = '\0';
 
     // 1. Verify interpreter allowlist
@@ -570,6 +718,8 @@ static inline int ScriptExec_RunContained(
 
     // Parent process
     close(pipefd[1]);
+    /* Also from this side, so the group exists before the first sample. */
+    setpgid(pid, pid);
 
     // Set non-blocking on pipe read end
     int flags = fcntl(pipefd[0], F_GETFL, 0);
@@ -579,92 +729,75 @@ static inline int ScriptExec_RunContained(
     size_t limit = params->max_output_bytes < output_cap ? params->max_output_bytes : output_cap - 1;
     bool truncated = false;
     bool timed_out = false;
+    bool cancelled = false;
+    bool pipe_open = true;
 
-    struct timespec loop_start;
-    clock_gettime(CLOCK_MONOTONIC, &loop_start);
+    int64_t loop_start = ScriptExec_NowMs();
+    int64_t timeout_ms = (int64_t)params->timeout_seconds * 1000;
+    ScriptSupervisor sup;
+    Supervisor_Init(&sup, hooks ? &hooks->settings : NULL, loop_start);
+    if (hooks && hooks->post) {
+        ScriptTreeSample first;
+        ScriptExec_SampleTree(pid, &first);
+        Supervisor_ApplySample(&sup, loop_start, &first);
+    }
+    Supervisor_MaybePost(&sup, hooks, loop_start);
 
-    struct pollfd pfd_in;
-    pfd_in.fd = pipefd[0];
-    pfd_in.events = POLLIN;
-
-    while (1) {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        int64_t elapsed_ms = (now.tv_sec - loop_start.tv_sec) * 1000 + (now.tv_nsec - loop_start.tv_nsec) / 1000000;
-        int64_t timeout_ms = (int64_t)params->timeout_seconds * 1000;
-        if (elapsed_ms >= timeout_ms) {
+    /* Runs until the script exits, times out or is cancelled. The script
+     * closing its output is not the end: the deadline and a cancel still
+     * apply while it runs on with stdout gone. */
+    for (;;) {
+        int64_t now = ScriptExec_NowMs();
+        if (now - loop_start >= timeout_ms) {
             timed_out = true;
-            // Escalate termination: SIGTERM -> grace -> SIGKILL
-            kill(-pid, SIGTERM);
-            usleep(250000); // 250ms grace
-            int status = 0;
-            if (waitpid(pid, &status, WNOHANG) <= 0) {
-                kill(-pid, SIGKILL);
-            }
+            break;
+        }
+        if (Supervisor_CancelRequested(hooks)) {
+            cancelled = true;
             break;
         }
 
-        int poll_timeout_ms = (int)(timeout_ms - elapsed_ms);
-        if (poll_timeout_ms > 100) poll_timeout_ms = 100;
-        if (poll_timeout_ms <= 0) poll_timeout_ms = 10;
-
-        int pr = poll(&pfd_in, 1, poll_timeout_ms);
-        if (pr > 0 && (pfd_in.revents & POLLIN)) {
-            char chunk[4096];
-            ssize_t n = read(pipefd[0], chunk, sizeof(chunk));
-            if (n > 0) {
-                if (bytes_read + n <= limit) {
-                    memcpy(output_buf + bytes_read, chunk, n);
-                    bytes_read += n;
-                } else {
-                    size_t room = limit > bytes_read ? limit - bytes_read : 0;
-                    if (room > 0) {
-                        memcpy(output_buf + bytes_read, chunk, room);
-                        bytes_read += room;
-                    }
-                    truncated = true;
-                }
-            } else if (n == 0) {
-                // EOF reached
-                break;
-            }
-        } else if (pr > 0 && (pfd_in.revents & (POLLHUP | POLLERR))) {
-            // Check if remaining data in pipe
-            char chunk[4096];
-            ssize_t n;
-            while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
-                if (bytes_read + n <= limit) {
-                    memcpy(output_buf + bytes_read, chunk, n);
-                    bytes_read += n;
-                } else {
-                    size_t room = limit > bytes_read ? limit - bytes_read : 0;
-                    if (room > 0) {
-                        memcpy(output_buf + bytes_read, chunk, room);
-                        bytes_read += room;
-                    }
-                    truncated = true;
-                }
-            }
-            break;
+        int wait_ms = (int)(timeout_ms - (now - loop_start));
+        if (wait_ms > 100) wait_ms = 100;
+        if (wait_ms <= 0) wait_ms = 1;
+        if (pipe_open) {
+            struct pollfd pfd_in = { .fd = pipefd[0], .events = POLLIN, .revents = 0 };
+            int pr = poll(&pfd_in, 1, wait_ms);
+            if (pr > 0)
+                pipe_open = ScriptExec_DrainReady(pipefd[0], output_buf, &bytes_read, limit, &truncated, &sup);
+        } else {
+            usleep((useconds_t)wait_ms * 1000);
         }
 
-        // Check if child exited
-        int status = 0;
-        pid_t wp = waitpid(pid, &status, WNOHANG);
-        if (wp == pid) {
-            // Drain any lingering bytes
-            char chunk[4096];
-            ssize_t n;
-            while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
-                if (bytes_read + n <= limit) {
-                    memcpy(output_buf + bytes_read, chunk, n);
-                    bytes_read += n;
-                } else {
-                    truncated = true;
-                }
-            }
+        /* Exited? Looked at without reaping: the zombie holds the group id
+         * until the leftovers in the group are killed below. */
+        siginfo_t si;
+        memset(&si, 0, sizeof(si));
+        if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) == 0 && si.si_pid == pid)
             break;
+
+        now = ScriptExec_NowMs();
+        if (Supervisor_SampleDue(&sup, now)) {
+            ScriptTreeSample sample;
+            ScriptExec_SampleTree(pid, &sample);
+            if (Supervisor_ApplySample(&sup, now, &sample))
+                Supervisor_SetIdlePhase(&sup, NULL);   /* no windows on Linux */
         }
+        Supervisor_MaybePost(&sup, hooks, now);
+    }
+
+    /* Whatever is still ready, then the rest of the group (background
+     * children of a finished script, or the whole tree on timeout/cancel),
+     * then the pipe to EOF with a deadline: a process that left the group
+     * could hold it open for ever. */
+    if (pipe_open)
+        pipe_open = ScriptExec_DrainReady(pipefd[0], output_buf, &bytes_read, limit, &truncated, &sup);
+    ScriptExec_KillGroup(pid);
+    int64_t drain_deadline = ScriptExec_NowMs() + 1000;
+    while (pipe_open && ScriptExec_NowMs() < drain_deadline) {
+        struct pollfd pfd_in = { .fd = pipefd[0], .events = POLLIN, .revents = 0 };
+        if (poll(&pfd_in, 1, 50) > 0)
+            pipe_open = ScriptExec_DrainReady(pipefd[0], output_buf, &bytes_read, limit, &truncated, &sup);
     }
 
     close(pipefd[0]);
@@ -672,16 +805,17 @@ static inline int ScriptExec_RunContained(
 
     int status = 0;
     int exit_code = 1;
+    pid_t reaped;
+    while ((reaped = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
     if (timed_out) {
-        waitpid(pid, &status, 0);
         exit_code = 124; // standard command timeout exit status
-    } else {
-        if (waitpid(pid, &status, 0) == pid) {
-            if (WIFEXITED(status)) {
-                exit_code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                exit_code = 128 + WTERMSIG(status);
-            }
+    } else if (cancelled) {
+        exit_code = 130;
+    } else if (reaped == pid) {
+        if (WIFEXITED(status)) {
+            exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            exit_code = 128 + WTERMSIG(status);
         }
     }
     sigaction(SIGCHLD, &sa_old, NULL);
@@ -690,7 +824,6 @@ static inline int ScriptExec_RunContained(
     int64_t duration_ms = (ts_end.tv_sec - ts_start.tv_sec) * 1000 +
                           (ts_end.tv_nsec - ts_start.tv_nsec) / 1000000;
     if (duration_ms < 0) duration_ms = 0;
-    if (out_duration_ms) *out_duration_ms = duration_ms;
 
     // Append truncation marker if needed
     if (truncated) {
@@ -698,15 +831,37 @@ static inline int ScriptExec_RunContained(
         if (bytes_read + sizeof(trunc_msg) < output_cap) {
             strcat(output_buf, trunc_msg);
         }
-        if (out_truncated) *out_truncated = true;
     }
-    if (out_timed_out) *out_timed_out = timed_out;
+    if (result) {
+        result->truncated = truncated;
+        result->timed_out = timed_out;
+        result->cancelled = cancelled;
+        result->duration_ms = duration_ms;
+    }
 
     // Unlink temporary execution files
     unlink(script_path);
     unlink(params_path);
 
     return exit_code;
+}
+
+/* The unsupervised form: no heartbeats, default timings. */
+static inline int ScriptExec_RunContained(
+    const ScriptExecParams* params,
+    const char* job_id,
+    char* output_buf,
+    size_t output_cap,
+    bool* out_truncated,
+    bool* out_timed_out,
+    int64_t* out_duration_ms
+) {
+    ScriptRunResult r;
+    int code = ScriptExec_RunSupervised(params, job_id, output_buf, output_cap, NULL, &r);
+    if (out_truncated) *out_truncated = r.truncated;
+    if (out_timed_out) *out_timed_out = r.timed_out;
+    if (out_duration_ms) *out_duration_ms = r.duration_ms;
+    return code;
 }
 
 #endif /* OMINULL_SCRIPT_EXEC_LINUX_H */

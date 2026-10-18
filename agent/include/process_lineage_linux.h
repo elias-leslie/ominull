@@ -108,7 +108,7 @@ static inline const char* ProcessLineage_GetBootID(void) {
     }
 
     // 2. Fallback: Parse btime from /proc/stat
-    char statPath[256];
+    char statPath[384]; /* a test proc root may be 255 bytes long */
     ProcessLineage_ProcPath(statPath, sizeof(statPath), "stat");
     FILE* fp = fopen(statPath, "r");
     if (!fp && strcmp(OMINULL_PROC_ROOT, "/proc") != 0) {
@@ -147,7 +147,7 @@ static inline bool ProcessLineage_ReadStat(uint32_t pid, unsigned long long* out
     *outPPID = 0;
 
     char statSuffix[64];
-    char statPath[256];
+    char statPath[384]; /* a test proc root may be 255 bytes long */
     snprintf(statSuffix, sizeof(statSuffix), "%u/stat", pid);
     ProcessLineage_ProcPath(statPath, sizeof(statPath), statSuffix);
 

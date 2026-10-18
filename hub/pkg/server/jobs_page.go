@@ -283,6 +283,9 @@ func (s *Server) buildJobView(job *response.JobRecord, hostName string, stamp fu
 				add("Took", (time.Duration(res.DurationMs) * time.Millisecond).String())
 			}
 			v.Stdout, v.Stderr = res.Stdout, strings.TrimRight(res.Stderr, "\n")
+			if res.Truncated {
+				add("Output", "cut at the size limit")
+			}
 		}
 	}
 

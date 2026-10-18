@@ -37,6 +37,7 @@
 #include <ctype.h>
 
 #include "response_dispatcher.h"
+#include "script_supervisor.h"
 
 #define SCRIPT_EXEC_MAX_SOURCE_BYTES  65536   // 64 KiB
 #define SCRIPT_EXEC_MAX_PARAMS_BYTES  16384   // 16 KiB
@@ -457,25 +458,207 @@ static inline void ScriptExec_GetStateDirWin(char* out, size_t out_cap) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Process tree sampling and window probe for the supervisor (script_supervisor.h)
+ * ------------------------------------------------------------------------- */
+
+#define SCRIPT_EXEC_WIN_MAX_PIDS 256
+
+static inline int64_t ScriptExec_NowMsWin(void) {
+    return (int64_t)GetTickCount64();
+}
+
+static inline uint64_t ScriptExec_FileTimeMs(FILETIME ft) {
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return u.QuadPart / 10000ULL;
+}
+
+/* The job's live process ids; without a job, the main process alone while it
+ * runs. Returns the count. */
+static inline DWORD ScriptExec_JobPidsWin(HANDLE hJob, HANDLE hProcess, DWORD mainPid, DWORD* pids, DWORD cap) {
+    if (hJob) {
+        size_t size = sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + (SCRIPT_EXEC_WIN_MAX_PIDS - 1) * sizeof(ULONG_PTR);
+        JOBOBJECT_BASIC_PROCESS_ID_LIST* list = (JOBOBJECT_BASIC_PROCESS_ID_LIST*)calloc(1, size);
+        DWORD count = 0;
+        if (list) {
+            list->NumberOfAssignedProcesses = SCRIPT_EXEC_WIN_MAX_PIDS;
+            if (QueryInformationJobObject(hJob, JobObjectBasicProcessIdList, list, (DWORD)size, NULL) ||
+                GetLastError() == ERROR_MORE_DATA) {
+                for (DWORD i = 0; i < list->NumberOfProcessIdsInList && count < cap; i++)
+                    pids[count++] = (DWORD)list->ProcessIdList[i];
+            }
+            free(list);
+        }
+        return count;
+    }
+    if (cap > 0 && WaitForSingleObject(hProcess, 0) == WAIT_TIMEOUT) {
+        pids[0] = mainPid;
+        return 1;
+    }
+    return 0;
+}
+
+/* CPU (user + kernel), IO (read + write bytes) and live process count of the
+ * job; totals include processes that already ended. Without a job, the main
+ * process alone. */
+static inline void ScriptExec_SampleTreeWin(HANDLE hJob, HANDLE hProcess, ScriptTreeSample* out) {
+    memset(out, 0, sizeof(*out));
+    if (hJob) {
+        JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION info;
+        ZeroMemory(&info, sizeof(info));
+        if (QueryInformationJobObject(hJob, JobObjectBasicAndIoAccountingInformation, &info, sizeof(info), NULL)) {
+            out->cpu_ms = (uint64_t)(info.BasicInfo.TotalUserTime.QuadPart + info.BasicInfo.TotalKernelTime.QuadPart) / 10000ULL;
+            out->io_bytes = info.IoInfo.ReadTransferCount + info.IoInfo.WriteTransferCount;
+            out->processes = info.BasicInfo.ActiveProcesses;
+        }
+        return;
+    }
+    FILETIME created, exited, kernel, user;
+    if (GetProcessTimes(hProcess, &created, &exited, &kernel, &user))
+        out->cpu_ms = ScriptExec_FileTimeMs(kernel) + ScriptExec_FileTimeMs(user);
+    IO_COUNTERS io;
+    if (GetProcessIoCounters(hProcess, &io))
+        out->io_bytes = io.ReadTransferCount + io.WriteTransferCount;
+    out->processes = WaitForSingleObject(hProcess, 0) == WAIT_TIMEOUT ? 1 : 0;
+}
+
+typedef struct {
+    const DWORD* pids;
+    DWORD count;
+    HWND foreground;
+    HWND best;
+    int best_rank;      /* 3 foreground, 2 titled, 1 untitled */
+} ScriptWindowSearchWin;
+
+static BOOL CALLBACK ScriptExec_WindowEnumProcWin(HWND hwnd, LPARAM lParam) {
+    ScriptWindowSearchWin* search = (ScriptWindowSearchWin*)lParam;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    bool ours = false;
+    for (DWORD i = 0; i < search->count; i++) {
+        if (search->pids[i] == pid) { ours = true; break; }
+    }
+    if (!ours) return TRUE;
+    /* GetWindowTextW reads another process's caption without sending it a
+     * message, so a hung installer cannot hang this probe
+     * (GetWindowTextLengthW would). */
+    WCHAR probe[4];
+    int rank = GetWindowTextW(hwnd, probe, 4) > 0 ? 2 : 1;
+    if (hwnd == search->foreground) rank = 3;
+    if (rank > search->best_rank) {
+        search->best = hwnd;
+        search->best_rank = rank;
+    }
+    return TRUE;
+}
+
+/* A visible top-level window owned by a process of the job (the foreground
+ * one first, then one with a title), on the desktop this thread sees: the one
+ * the job's processes inherited. */
+static inline bool ScriptExec_FindJobWindowWin(const DWORD* pids, DWORD count, ScriptSupervisorWindow* out) {
+    memset(out, 0, sizeof(*out));
+    if (count == 0) return false;
+    ScriptWindowSearchWin search = { pids, count, GetForegroundWindow(), NULL, 0 };
+    EnumWindows(ScriptExec_WindowEnumProcWin, (LPARAM)&search);
+    if (!search.best) return false;
+
+    WCHAR wtitle[512];
+    int n = GetWindowTextW(search.best, wtitle, (int)(sizeof(wtitle) / sizeof(wtitle[0])));
+    if (n > 0) {
+        char utf8[1024];
+        int len = WideCharToMultiByte(CP_UTF8, 0, wtitle, n, utf8, (int)sizeof(utf8), NULL, NULL);
+        if (len > 0) Supervisor_CleanText(utf8, (size_t)len, out->title, SUPERVISOR_TEXT_MAX);
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(search.best, &pid);
+    out->pid = pid;
+    DWORD session = 0;
+    if (ProcessIdToSessionId(pid, &session)) out->session = session;
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hProc) {
+        WCHAR wpath[MAX_PATH];
+        DWORD wlen = MAX_PATH;
+        if (QueryFullProcessImageNameW(hProc, 0, wpath, &wlen) && wlen > 0) {
+            const WCHAR* base = wpath;
+            for (DWORD i = 0; i < wlen; i++) {
+                if (wpath[i] == L'\\' || wpath[i] == L'/') base = wpath + i + 1;
+            }
+            char utf8[MAX_PATH * 3];
+            int len = WideCharToMultiByte(CP_UTF8, 0, base, (int)(wlen - (DWORD)(base - wpath)), utf8, (int)sizeof(utf8), NULL, NULL);
+            if (len > 0) Supervisor_CleanText(utf8, (size_t)len, out->process, SUPERVISOR_TEXT_MAX);
+        }
+        CloseHandle(hProc);
+    }
+    out->present = true;
+    return true;
+}
+
+/* Appends one read to the capture (truncation note once the limit is hit)
+ * and to the supervisor. */
+static inline void ScriptExec_TakeOutputWin(const char* chunk, size_t n, char* output_buf, size_t* total_read,
+                                            size_t max_out, size_t out_cap, bool* truncated,
+                                            ScriptSupervisor* sup) {
+    Supervisor_FeedOutput(sup, chunk, n, ScriptExec_NowMsWin());
+    if (*truncated) return;
+    if (*total_read + n <= max_out && *total_read + n + 1 < out_cap) {
+        memcpy(output_buf + *total_read, chunk, n);
+        *total_read += n;
+        return;
+    }
+    *truncated = true;
+    size_t space = (*total_read < max_out) ? (max_out - *total_read) : 0;
+    if (space > n) space = n;
+    if (space > 0 && *total_read + space + 1 < out_cap) {
+        memcpy(output_buf + *total_read, chunk, space);
+        *total_read += space;
+    }
+    const char* truncMsg = "\n[...output truncated by ominull worker...]\n";
+    size_t tlen = strlen(truncMsg);
+    if (*total_read + tlen + 1 < out_cap) {
+        memcpy(output_buf + *total_read, truncMsg, tlen);
+        *total_read += tlen;
+    }
+}
+
+/* Reads only what the pipe holds now; never blocks. Returns false once the
+ * pipe is broken (every writer gone). */
+static inline bool ScriptExec_DrainReadyWin(HANDLE hRead, char* output_buf, size_t* total_read, size_t max_out,
+                                            size_t out_cap, bool* truncated, ScriptSupervisor* sup) {
+    char chunk[4096];
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(hRead, NULL, 0, NULL, &avail, NULL)) return false;
+        if (avail == 0) return true;
+        DWORD toRead = avail < sizeof(chunk) ? avail : (DWORD)sizeof(chunk);
+        DWORD got = 0;
+        if (!ReadFile(hRead, chunk, toRead, &got, NULL) || got == 0) return false;
+        ScriptExec_TakeOutputWin(chunk, got, output_buf, total_read, max_out, out_cap, truncated, sup);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * Contained Worker Execution (Windows Job Object & Process Containment)
  * ------------------------------------------------------------------------- */
 
-static inline int ScriptExec_RunContainedWin(
+/* Runs one script job under the supervisor: heartbeats through hooks (NULL:
+ * none), hang and needs-hands detection, cancel, and the whole job object
+ * ended however it finishes. Returns the exit code (124 timed out, 1223
+ * cancelled). */
+static inline int ScriptExec_RunSupervisedWin(
     const ScriptExecParamsWin* params,
     const char* job_id,
     char* output_buf,
     size_t out_cap,
-    bool* out_truncated,
-    bool* out_timed_out,
-    int64_t* out_duration_ms,
+    const ScriptSupervisorHooks* hooks,
+    ScriptRunResult* result,
     char* out_error_code,
     size_t error_code_cap
 ) {
+    if (result) memset(result, 0, sizeof(*result));
     if (!params || !job_id || !output_buf || out_cap == 0) return 1;
     output_buf[0] = '\0';
-    if (out_truncated) *out_truncated = false;
-    if (out_timed_out) *out_timed_out = false;
-    if (out_duration_ms) *out_duration_ms = 0;
     if (out_error_code && error_code_cap > 0) out_error_code[0] = '\0';
 
     // 1. In-process SHA-256 Digest Verification
@@ -761,111 +944,107 @@ static inline int ScriptExec_RunContainedWin(
         return 1;
     }
 
-    // Bind process to Job Object
-    if (hJob != NULL) {
-        AssignProcessToJobObject(hJob, pi.hProcess);
+    // Bind process to Job Object. Without one, the timeout and a cancel still
+    // end the main process, but its descendants are out of reach and only the
+    // main process is sampled (docs/RESPONSE_SUPERVISOR.md).
+    if (hJob != NULL && !AssignProcessToJobObject(hJob, pi.hProcess)) {
+        printf("[!] A script job's process could not be placed in its job object (error %lu); "
+               "only the main process is supervised and killed.\n", (unsigned long)GetLastError());
+        CloseHandle(hJob);
+        hJob = NULL;
+    } else if (hJob == NULL) {
+        printf("[!] A script job object could not be created; only the main process is supervised and killed.\n");
     }
 
     // Start execution
-    DWORD startTime = GetTickCount();
+    int64_t startTime = ScriptExec_NowMsWin();
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     pi.hThread = NULL;
 
-    // 9. Output Capture & Timeout Monitoring Loop
+    // 9. Output capture, supervision and timeout loop
     size_t total_read = 0;
-    char chunk[4096];
-    DWORD bytesRead = 0;
-    DWORD bytesAvailable = 0;
-    DWORD timeoutMs = (DWORD)params->timeout_seconds * 1000;
+    int64_t timeoutMs = (int64_t)params->timeout_seconds * 1000;
     bool timedOut = false;
+    bool cancelled = false;
     bool isTruncated = false;
+    bool pipeOpen = true;
 
-    while (1) {
+    ScriptSupervisor sup;
+    Supervisor_Init(&sup, hooks ? &hooks->settings : NULL, startTime);
+    if (hooks && hooks->post) {
+        ScriptTreeSample first;
+        ScriptExec_SampleTreeWin(hJob, pi.hProcess, &first);
+        Supervisor_ApplySample(&sup, startTime, &first);
+    }
+    Supervisor_MaybePost(&sup, hooks, startTime);
+
+    for (;;) {
         DWORD waitRes = WaitForSingleObject(pi.hProcess, 50);
 
-        // Drain available bytes from pipe
-        while (PeekNamedPipe(hStdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
-            DWORD toRead = sizeof(chunk);
-            if (toRead > bytesAvailable) toRead = bytesAvailable;
-            if (ReadFile(hStdOutRead, chunk, toRead, &bytesRead, NULL) && bytesRead > 0) {
-                if (!isTruncated) {
-                    if (total_read + bytesRead <= params->max_output_bytes && total_read + bytesRead + 1 < out_cap) {
-                        memcpy(output_buf + total_read, chunk, bytesRead);
-                        total_read += bytesRead;
-                    } else {
-                        isTruncated = true;
-                        size_t space = (total_read < params->max_output_bytes) ? (params->max_output_bytes - total_read) : 0;
-                        if (space > 0 && total_read + space + 1 < out_cap) {
-                            memcpy(output_buf + total_read, chunk, space);
-                            total_read += space;
-                        }
-                        const char* truncMsg = "\n[...output truncated by ominull worker...]\n";
-                        size_t tlen = strlen(truncMsg);
-                        if (total_read + tlen + 1 < out_cap) {
-                            memcpy(output_buf + total_read, truncMsg, tlen);
-                            total_read += tlen;
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
-        }
+        if (pipeOpen)
+            pipeOpen = ScriptExec_DrainReadyWin(hStdOutRead, output_buf, &total_read, params->max_output_bytes,
+                                                out_cap, &isTruncated, &sup);
+        if (waitRes == WAIT_OBJECT_0) break;
 
-        if (waitRes == WAIT_OBJECT_0) {
-            // Process completed, drain any remaining output
-            while (ReadFile(hStdOutRead, chunk, sizeof(chunk), &bytesRead, NULL) && bytesRead > 0) {
-                if (!isTruncated) {
-                    if (total_read + bytesRead <= params->max_output_bytes && total_read + bytesRead + 1 < out_cap) {
-                        memcpy(output_buf + total_read, chunk, bytesRead);
-                        total_read += bytesRead;
-                    } else {
-                        isTruncated = true;
-                        size_t space = (total_read < params->max_output_bytes) ? (params->max_output_bytes - total_read) : 0;
-                        if (space > 0 && total_read + space + 1 < out_cap) {
-                            memcpy(output_buf + total_read, chunk, space);
-                            total_read += space;
-                        }
-                        const char* truncMsg = "\n[...output truncated by ominull worker...]\n";
-                        size_t tlen = strlen(truncMsg);
-                        if (total_read + tlen + 1 < out_cap) {
-                            memcpy(output_buf + total_read, truncMsg, tlen);
-                            total_read += tlen;
-                        }
-                    }
-                }
-            }
-            break;
-        }
-
-        // Millisecond accurate timeout check
-        DWORD elapsed = GetTickCount() - startTime;
-        if (elapsed >= timeoutMs) {
+        int64_t now = ScriptExec_NowMsWin();
+        if (now - startTime >= timeoutMs) {
             timedOut = true;
-            if (hJob != NULL) {
-                TerminateJobObject(hJob, 124);
-            }
-            TerminateProcess(pi.hProcess, 124);
-            WaitForSingleObject(pi.hProcess, 1000);
             break;
         }
+        if (Supervisor_CancelRequested(hooks)) {
+            cancelled = true;
+            break;
+        }
+        if (Supervisor_SampleDue(&sup, now)) {
+            ScriptTreeSample sample;
+            ScriptExec_SampleTreeWin(hJob, pi.hProcess, &sample);
+            if (Supervisor_ApplySample(&sup, now, &sample)) {
+                DWORD pids[SCRIPT_EXEC_WIN_MAX_PIDS];
+                DWORD count = ScriptExec_JobPidsWin(hJob, pi.hProcess, pi.dwProcessId, pids, SCRIPT_EXEC_WIN_MAX_PIDS);
+                ScriptSupervisorWindow window;
+                ScriptExec_FindJobWindowWin(pids, count, &window);
+                Supervisor_SetIdlePhase(&sup, &window);
+            }
+        }
+        Supervisor_MaybePost(&sup, hooks, now);
+    }
+
+    // 10. End the whole tree, however the main process ended: a descendant
+    // still holding the pipe would otherwise keep the final drain waiting for
+    // ever. The main process's own exit code is already fixed.
+    DWORD killCode = timedOut ? 124 : cancelled ? ERROR_CANCELLED : 0;
+    if (hJob != NULL) TerminateJobObject(hJob, killCode);
+    if (timedOut || cancelled) {
+        TerminateProcess(pi.hProcess, killCode);
+        WaitForSingleObject(pi.hProcess, 1000);
+    }
+
+    // Final drain: never a blocking read; stop at a broken pipe or after a
+    // short deadline (a process outside the job may still hold it).
+    int64_t drainDeadline = ScriptExec_NowMsWin() + 1000;
+    while (pipeOpen) {
+        pipeOpen = ScriptExec_DrainReadyWin(hStdOutRead, output_buf, &total_read, params->max_output_bytes,
+                                            out_cap, &isTruncated, &sup);
+        if (!pipeOpen || ScriptExec_NowMsWin() >= drainDeadline) break;
+        Sleep(20);
     }
 
     output_buf[total_read] = '\0';
 
-    // 10. Exit Code & Duration
+    // 11. Exit Code & Duration
     DWORD dwExitCode = 0;
     GetExitCodeProcess(pi.hProcess, &dwExitCode);
     if (timedOut) {
         dwExitCode = 124;
+    } else if (cancelled) {
+        dwExitCode = ERROR_CANCELLED;   /* 1223 */
     }
 
-    DWORD endTime = GetTickCount();
-    int64_t duration = (int64_t)(endTime - startTime);
+    int64_t duration = ScriptExec_NowMsWin() - startTime;
     if (duration < 0) duration = 0;
 
-    // 11. Resource Cleanup
+    // 12. Resource Cleanup
     CloseHandle(pi.hProcess);
     if (hJob != NULL) {
         CloseHandle(hJob);
@@ -875,11 +1054,34 @@ static inline int ScriptExec_RunContainedWin(
     DeleteFileA(script_path);
     DeleteFileA(param_path);
 
-    if (out_truncated) *out_truncated = isTruncated;
-    if (out_timed_out) *out_timed_out = timedOut;
-    if (out_duration_ms) *out_duration_ms = duration;
+    if (result) {
+        result->truncated = isTruncated;
+        result->timed_out = timedOut;
+        result->cancelled = cancelled;
+        result->duration_ms = duration;
+    }
 
     return (int)dwExitCode;
+}
+
+/* The unsupervised form: no heartbeats, default timings. */
+static inline int ScriptExec_RunContainedWin(
+    const ScriptExecParamsWin* params,
+    const char* job_id,
+    char* output_buf,
+    size_t out_cap,
+    bool* out_truncated,
+    bool* out_timed_out,
+    int64_t* out_duration_ms,
+    char* out_error_code,
+    size_t error_code_cap
+) {
+    ScriptRunResult r;
+    int code = ScriptExec_RunSupervisedWin(params, job_id, output_buf, out_cap, NULL, &r, out_error_code, error_code_cap);
+    if (out_truncated) *out_truncated = r.truncated;
+    if (out_timed_out) *out_timed_out = r.timed_out;
+    if (out_duration_ms) *out_duration_ms = r.duration_ms;
+    return code;
 }
 
 #endif /* OMINULL_SCRIPT_EXEC_WINDOWS_H */

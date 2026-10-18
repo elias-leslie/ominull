@@ -10,6 +10,9 @@
  * - Output truncation bounds enforcement.
  * - Hard execution timeout escalation (SIGTERM -> SIGKILL) and exit code 124.
  * - Non-zero exit code reporting.
+ * - Supervisor: progress lines, phase and post timing, heartbeats through a
+ *   fake sink, stall, cancel of a whole tree, timeout with output closed,
+ *   grandchildren killed after exit, max_output_bytes past 64 KiB.
  */
 
 #include <stdio.h>
@@ -356,6 +359,337 @@ static void test_state_dir_fails_closed(const char* private_dir) {
     unlink(target);
 }
 
+/* ---------------------------------------------------------------------------
+ * Supervisor (script_supervisor.h): pure parts, shared with Windows
+ * ------------------------------------------------------------------------- */
+
+static void test_progress_line_parsing(void) {
+    printf("[*] Testing Progress Line Parsing...\n");
+    int pct = 0;
+    char msg[SUPERVISOR_TEXT_MAX + 1];
+    const char* a = "::progress:: 40% removing Wave Tool";
+    expect("line with pct is progress", Supervisor_ParseProgressLine(a, strlen(a), &pct, msg, sizeof(msg)));
+    expect("pct 40", pct == 40);
+    expect("message after pct", strcmp(msg, "removing Wave Tool") == 0);
+
+    const char* b = "::progress:: checking updates";
+    expect("line without pct is progress", Supervisor_ParseProgressLine(b, strlen(b), &pct, msg, sizeof(msg)));
+    expect("no pct is -1", pct == -1);
+    expect("message kept whole", strcmp(msg, "checking updates") == 0);
+
+    const char* c = "::progress::100%";
+    expect("bare 100% parsed", Supervisor_ParseProgressLine(c, strlen(c), &pct, msg, sizeof(msg)) && pct == 100 && msg[0] == '\0');
+
+    const char* d = "::progress:: 150% too much";
+    expect("pct over 100 stays text", Supervisor_ParseProgressLine(d, strlen(d), &pct, msg, sizeof(msg)) && pct == -1 &&
+           strcmp(msg, "150% too much") == 0);
+
+    const char* e = "progress:: 40% nope";
+    expect("other lines are not progress", !Supervisor_ParseProgressLine(e, strlen(e), &pct, msg, sizeof(msg)));
+    const char* f = "  ::progress:: 40% indented";
+    expect("progress must start the line", !Supervisor_ParseProgressLine(f, strlen(f), &pct, msg, sizeof(msg)));
+
+    const char* g = "::progress:: 5% tab\there\x1b[0m bell\x07";
+    Supervisor_ParseProgressLine(g, strlen(g), &pct, msg, sizeof(msg));
+    expect("control characters stripped", pct == 5 && strcmp(msg, "tabhere[0m bell") == 0);
+
+    /* 300 bytes of two-byte characters: capped at 200 without splitting one. */
+    char longline[512];
+    size_t n = (size_t)snprintf(longline, sizeof(longline), "::progress:: x");
+    for (int i = 0; i < 150; i++) { longline[n++] = (char)0xC3; longline[n++] = (char)0xA9; }
+    longline[n] = '\0';
+    Supervisor_ParseProgressLine(longline, n, &pct, msg, sizeof(msg));
+    size_t mlen = strlen(msg);
+    expect("message capped at 200 bytes", mlen <= SUPERVISOR_TEXT_MAX && mlen >= SUPERVISOR_TEXT_MAX - 1);
+    expect("cap does not split a UTF-8 character", mlen > 0 && (unsigned char)msg[mlen - 1] == 0xA9);
+
+    /* Incremental: split across reads, CRLF, and ordinary output around it. */
+    ScriptSupervisor s;
+    Supervisor_Init(&s, NULL, 0);
+    const char* parts[] = { "hello\n::prog", "ress:: 4", "0% removing", " Wave Tool\r", "\nmore output\n" };
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++)
+        Supervisor_FeedOutput(&s, parts[i], strlen(parts[i]), (int64_t)i);
+    expect("split progress line: pct", s.progress_pct == 40);
+    expect("split progress line: message", strcmp(s.message, "removing Wave Tool") == 0);
+    expect("split progress line: marked new", s.progress_dirty);
+    Supervisor_FeedOutput(&s, "::progress:: next step\n", 23, 10);
+    expect("line without pct keeps the last pct", s.progress_pct == 40 && strcmp(s.message, "next step") == 0);
+    Supervisor_FeedOutput(&s, "::progress:: 60% partial", 24, 11);
+    expect("unfinished line not taken yet", s.progress_pct == 40);
+    Supervisor_FeedOutput(&s, "\n", 1, 12);
+    expect("line taken at its newline", s.progress_pct == 60 && strcmp(s.message, "partial") == 0);
+}
+
+static void test_supervisor_state_machine(void) {
+    printf("[*] Testing Supervisor Phase and Post Timing...\n");
+    ScriptSupervisorSettings set = { 1000, 100, 30000, 5000 };
+    ScriptSupervisor s;
+    Supervisor_Init(&s, &set, 0);
+    char body[1536];
+
+    expect("first heartbeat due at once", Supervisor_ShouldPost(&s, 0));
+    ScriptTreeSample sample = { 100, 0, 1 };
+    Supervisor_ApplySample(&s, 0, &sample);
+    size_t len = Supervisor_BuildPost(&s, "job-1", "lease-1", 0, body, sizeof(body));
+    expect("running body built", len > 0);
+    expect("running body exact",
+           strcmp(body, "{\"job_id\":\"job-1\",\"lease_id\":\"lease-1\",\"phase\":\"running\",\"progress_pct\":-1,"
+                        "\"cpu_ms\":100,\"io_bytes\":0,\"idle_seconds\":0,\"processes\":1}") == 0);
+    expect("nothing due right after", !Supervisor_ShouldPost(&s, 1000));
+
+    Supervisor_FeedOutput(&s, "::progress:: 40% removing Wave Tool\n", 36, 2000);
+    expect("new progress waits out the 5 s gap", !Supervisor_ShouldPost(&s, 4999));
+    expect("new progress posts after the gap", Supervisor_ShouldPost(&s, 5000));
+    Supervisor_BuildPost(&s, "job-1", "lease-1", 5000, body, sizeof(body));
+    expect("progress in body", strstr(body, "\"progress_pct\":40,\"message\":\"removing Wave Tool\"") != NULL);
+    expect("progress posted once", !Supervisor_ShouldPost(&s, 12000));
+    expect("plain heartbeat every 30 s", Supervisor_ShouldPost(&s, 35000));
+
+    /* CPU below 200 ms and IO below 64 KiB are not activity. */
+    sample.cpu_ms = 250; sample.io_bytes = 1000;
+    expect("small growth: still not idle", !Supervisor_ApplySample(&s, 2900, &sample));
+    sample.cpu_ms = 300; sample.io_bytes = 2000;
+    expect("idle past threshold", Supervisor_ApplySample(&s, 3100, &sample));
+    Supervisor_SetIdlePhase(&s, NULL);
+    expect("no window: stalled", s.phase == SUPERVISOR_PHASE_STALLED);
+    expect("phase change posts after the gap", Supervisor_ShouldPost(&s, 10000));
+    Supervisor_BuildPost(&s, "job-1", "lease-1", 10000, body, sizeof(body));
+    expect("stalled body", strstr(body, "\"phase\":\"stalled\"") != NULL && strstr(body, "\"idle_seconds\":8") != NULL &&
+           strstr(body, "\"window\"") == NULL);
+
+    ScriptSupervisorWindow w;
+    memset(&w, 0, sizeof(w));
+    w.present = true;
+    snprintf(w.title, sizeof(w.title), "Wave Tool Setup \"Error\"");
+    snprintf(w.process, sizeof(w.process), "msiexec.exe");
+    w.pid = 1234;
+    w.session = 1;
+    expect("still idle", Supervisor_ApplySample(&s, 10100, &sample));
+    Supervisor_SetIdlePhase(&s, &w);
+    expect("window: needs_hands", s.phase == SUPERVISOR_PHASE_NEEDS_HANDS);
+    Supervisor_BuildPost(&s, "job-1", "lease-1", 15100, body, sizeof(body));
+    expect("needs_hands body has the window",
+           strstr(body, "\"phase\":\"needs_hands\"") != NULL &&
+           strstr(body, ",\"window\":{\"title\":\"Wave Tool Setup \\\"Error\\\"\",\"process\":\"msiexec.exe\",\"pid\":1234,\"session\":1}}") != NULL);
+
+    /* A total that fell (a process left) restarts the baseline, no activity. */
+    sample.cpu_ms = 10;
+    expect("falling cpu is not activity", Supervisor_ApplySample(&s, 15200, &sample));
+    sample.cpu_ms = 260;
+    expect("cpu grew 250 ms: active", !Supervisor_ApplySample(&s, 15300, &sample));
+    expect("back to running", s.phase == SUPERVISOR_PHASE_RUNNING && !s.window.present);
+    sample.io_bytes += 70000;
+    Supervisor_ApplySample(&s, 16400, &sample);
+    expect("io grew 70 KB: activity clock reset", Supervisor_IdleMs(&s, 16400) == 0);
+    Supervisor_FeedOutput(&s, "x", 1, 20000);
+    expect("output is activity", Supervisor_IdleMs(&s, 20000) == 0);
+
+    /* Output flips a stalled job back to running at once. */
+    Supervisor_ApplySample(&s, 22000, &sample);
+    Supervisor_SetIdlePhase(&s, NULL);
+    Supervisor_FeedOutput(&s, "y", 1, 22100);
+    expect("output resumes running", s.phase == SUPERVISOR_PHASE_RUNNING);
+
+    expect("reply cancel true", Supervisor_ReplyCancels("{\"ok\":true,\"cancel\":true}"));
+    expect("reply cancel spaced", Supervisor_ReplyCancels("{\"ok\": true, \"cancel\" : true}"));
+    expect("reply cancel false", !Supervisor_ReplyCancels("{\"ok\":true,\"cancel\":false}"));
+    expect("reply without cancel", !Supervisor_ReplyCancels("{\"ok\":true}"));
+    expect("no reply", !Supervisor_ReplyCancels(NULL));
+
+    /* Ids are escaped; the body never breaks out of its strings. */
+    ScriptSupervisor t;
+    Supervisor_Init(&t, &set, 0);
+    Supervisor_BuildPost(&t, "j\"1", "l\\1", 0, body, sizeof(body));
+    expect("ids escaped", strstr(body, "\"job_id\":\"j\\\"1\",\"lease_id\":\"l\\\\1\"") != NULL);
+}
+
+/* ---------------------------------------------------------------------------
+ * Supervised execution (real processes, fake heartbeat sink)
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    char bodies[256][1600];
+    int count;
+    const char* cancel_on;      /* cancel once a body contains this */
+    bool cancel;
+} FakeSink;
+
+static void fake_post(void* ctx, const char* body) {
+    FakeSink* sink = (FakeSink*)ctx;
+    if (sink->count < 256) {
+        snprintf(sink->bodies[sink->count], sizeof(sink->bodies[0]), "%s", body);
+        sink->count++;
+    }
+    if (sink->cancel_on && strstr(body, sink->cancel_on)) sink->cancel = true;
+}
+
+static bool fake_cancelled(void* ctx) {
+    return ((FakeSink*)ctx)->cancel;
+}
+
+static bool sink_has(const FakeSink* sink, const char* needle) {
+    for (int i = 0; i < sink->count; i++)
+        if (strstr(sink->bodies[i], needle)) return true;
+    return false;
+}
+
+static ScriptSupervisorHooks fast_hooks(FakeSink* sink) {
+    ScriptSupervisorHooks h;
+    memset(&h, 0, sizeof(h));
+    h.settings.idle_threshold_ms = 1000;
+    h.settings.sample_interval_ms = 200;
+    h.settings.heartbeat_interval_ms = 30000;
+    h.settings.min_post_gap_ms = 200;
+    h.job_id = "job-sup";
+    h.lease_id = "lease-sup";
+    h.post = fake_post;
+    h.cancel_requested = fake_cancelled;
+    h.ctx = sink;
+    return h;
+}
+
+static void script_params(ScriptExecParams* params, const char* source, int timeout, size_t max_out) {
+    memset(params, 0, sizeof(*params));
+    strncpy(params->script_id, "scr-sup", sizeof(params->script_id) - 1);
+    params->script_version = 1;
+    strncpy(params->interpreter, "/bin/sh", sizeof(params->interpreter) - 1);
+    snprintf(params->source, sizeof(params->source), "%s", source);
+    params->source_len = strlen(params->source);
+    params->timeout_seconds = timeout;
+    params->max_output_bytes = max_out;
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)params->source, params->source_len, hash);
+    Response_BytesToHex(hash, 32, params->script_digest);
+}
+
+static int64_t now_ms(void) {
+    return ScriptExec_NowMs();
+}
+
+/* Alive = in /proc and not a zombie. Waits up to a second for it to go. */
+static bool pid_gone(long pid) {
+    for (int i = 0; i < 40; i++) {
+        char path[64], buf[512];
+        snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        FILE* f = fopen(path, "r");
+        if (!f) return true;
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        char* p = strrchr(buf, ')');
+        if (p && (p[2] == 'Z' || p[2] == 'X')) return true;
+        usleep(25000);
+    }
+    return false;
+}
+
+static long bg_pid(const char* output) {
+    const char* p = strstr(output, "bg=");
+    return p ? strtol(p + 3, NULL, 10) : 0;
+}
+
+static void test_supervised_heartbeats_and_stall(void) {
+    printf("[*] Testing Supervised Heartbeats, Progress and Stall...\n");
+    static FakeSink sink;
+    memset(&sink, 0, sizeof(sink));
+    ScriptSupervisorHooks hooks = fast_hooks(&sink);
+    ScriptExecParams params;
+    script_params(&params, "echo '::progress:: 40% removing Wave Tool'\nsleep 2.5\necho done\n", 20, 4096);
+    char output[4096];
+    ScriptRunResult run;
+    int code = ScriptExec_RunSupervised(&params, "job-sup-1", output, sizeof(output), &hooks, &run);
+    expect("supervised job exits 0", code == 0 && !run.timed_out && !run.cancelled);
+    expect("progress line stays in the output", strstr(output, "::progress:: 40% removing Wave Tool") != NULL);
+    static const char first[] = "{\"job_id\":\"job-sup\",\"lease_id\":\"lease-sup\",\"phase\":\"running\"";
+    expect("first heartbeat is running with ids", sink.count > 0 &&
+           strncmp(sink.bodies[0], first, strlen(first)) == 0);
+    expect("first heartbeat counts the process", strstr(sink.bodies[0], "\"processes\":0") == NULL);
+    expect("progress heartbeat posted", sink_has(&sink, "\"progress_pct\":40,\"message\":\"removing Wave Tool\""));
+    expect("sleeping script reported stalled", sink_has(&sink, "\"phase\":\"stalled\""));
+    expect("stalled heartbeat carries idle_seconds", sink_has(&sink, "\"idle_seconds\":1"));
+    expect("no needs_hands on Linux", !sink_has(&sink, "needs_hands"));
+}
+
+static void test_supervised_cancel_kills_tree(void) {
+    printf("[*] Testing Cancel Kills the Whole Tree...\n");
+    static FakeSink sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.cancel_on = "waiting";
+    ScriptSupervisorHooks hooks = fast_hooks(&sink);
+    ScriptExecParams params;
+    script_params(&params, "sleep 30 &\necho \"bg=$!\"\necho '::progress:: 10% waiting'\nsleep 30\n", 60, 4096);
+    char output[4096];
+    ScriptRunResult run;
+    int64_t t0 = now_ms();
+    int code = ScriptExec_RunSupervised(&params, "job-sup-cancel", output, sizeof(output), &hooks, &run);
+    int64_t took = now_ms() - t0;
+    expect("cancel: flagged", run.cancelled && !run.timed_out);
+    expect("cancel: exit 130", code == 130);
+    expect("cancel: prompt", took < 5000);
+    expect("cancel: output so far kept", strstr(output, "::progress:: 10% waiting") != NULL);
+    long pid = bg_pid(output);
+    expect("cancel: background grandchild killed", pid > 0 && pid_gone(pid));
+}
+
+static void test_timeout_with_stdout_closed(void) {
+    printf("[*] Testing Timeout After the Script Closes Its Output...\n");
+    const char* sources[] = { "exec >/dev/null\nsleep 30\n", "exec >/dev/null 2>&1\nsleep 30\n" };
+    for (int i = 0; i < 2; i++) {
+        ScriptExecParams params;
+        script_params(&params, sources[i], 2, 4096);
+        char output[1024];
+        ScriptRunResult run;
+        int64_t t0 = now_ms();
+        int code = ScriptExec_RunSupervised(&params, "job-sup-closed", output, sizeof(output), NULL, &run);
+        int64_t took = now_ms() - t0;
+        expect(i == 0 ? "stdout closed: exit 124" : "stdout+stderr closed: exit 124", code == 124 && run.timed_out);
+        expect(i == 0 ? "stdout closed: ends near the 2 s deadline" : "stdout+stderr closed: ends near the 2 s deadline",
+               took >= 1900 && took < 6000);
+    }
+}
+
+static void test_grandchild_killed_after_exit(void) {
+    printf("[*] Testing Grandchildren Killed After the Script Exits...\n");
+    ScriptExecParams params;
+    /* The background sleep holds the output pipe open. */
+    script_params(&params, "sleep 30 &\necho \"bg=$!\"\nexit 3\n", 20, 4096);
+    char output[1024];
+    ScriptRunResult run;
+    int64_t t0 = now_ms();
+    int code = ScriptExec_RunSupervised(&params, "job-sup-bg", output, sizeof(output), NULL, &run);
+    int64_t took = now_ms() - t0;
+    expect("exit code of the script kept", code == 3 && !run.timed_out);
+    expect("does not wait for the background child", took < 4000);
+    long pid = bg_pid(output);
+    expect("background child holding the pipe killed", pid > 0 && pid_gone(pid));
+
+    script_params(&params, "sleep 30 >/dev/null 2>&1 &\necho \"bg=$!\"\n", 20, 4096);
+    code = ScriptExec_RunSupervised(&params, "job-sup-bg2", output, sizeof(output), NULL, &run);
+    pid = bg_pid(output);
+    expect("detached-output background child killed", code == 0 && pid > 0 && pid_gone(pid));
+}
+
+static void test_max_output_honoured(void) {
+    printf("[*] Testing max_output_bytes Honoured Past 64 KiB...\n");
+    size_t cap = SCRIPT_EXEC_MAX_MAX_OUT + 256;
+    char* output = (char*)malloc(cap);
+    if (!output) { expect("allocate output", false); return; }
+    ScriptExecParams params;
+    ScriptRunResult run;
+
+    script_params(&params, "head -c 2097152 /dev/zero | tr '\\000' a\n", 20, 3 * 1024 * 1024);
+    int code = ScriptExec_RunSupervised(&params, "job-sup-big", output, cap, NULL, &run);
+    expect("2 MiB output captured whole", code == 0 && !run.truncated && strlen(output) == 2097152);
+
+    script_params(&params, "head -c 4194304 /dev/zero | tr '\\000' a\n", 20, 3 * 1024 * 1024);
+    code = ScriptExec_RunSupervised(&params, "job-sup-trunc", output, cap, NULL, &run);
+    size_t len = strlen(output);
+    expect("4 MiB output truncated at 3 MiB", code == 0 && run.truncated);
+    expect("3 MiB kept plus the note", len > 3 * 1024 * 1024 && len < 3 * 1024 * 1024 + 128 &&
+           strstr(output + 3 * 1024 * 1024, "output truncated") != NULL);
+    free(output);
+}
+
 int main(void) {
     printf("=== Starting Linux Script Execution Worker C Tests ===\n");
     /* A private state directory of the test's own; the agent's is root-owned. */
@@ -378,6 +712,13 @@ int main(void) {
     test_nonzero_exit();
     test_json_escaping();
     test_state_dir_fails_closed(state_dir);
+    test_progress_line_parsing();
+    test_supervisor_state_machine();
+    test_supervised_heartbeats_and_stall();
+    test_supervised_cancel_kills_tree();
+    test_timeout_with_stdout_closed();
+    test_grandchild_killed_after_exit();
+    test_max_output_honoured();
     rmdir(state_dir);
 
     printf("\nTotal Failures: %d\n", failures);

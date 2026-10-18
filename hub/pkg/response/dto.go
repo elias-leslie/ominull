@@ -280,6 +280,8 @@ type JobResult struct {
 	ExitCode       int      `json:"exit_code"`
 	DurationMs     int64    `json:"duration_ms"`
 	ManifestSHA256 string   `json:"manifest_sha256,omitempty"` // For forensic collections
+	// Truncated says the output was cut at the payload's max_output_bytes.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // ForensicCollectionPayload defines parameters for a forensic snapshot.
