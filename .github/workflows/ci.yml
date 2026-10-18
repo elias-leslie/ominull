@@ -102,6 +102,9 @@ jobs:
       - name: Verify isolated IPv6 neighbor discovery
         run: bash scripts/test-ipv6-discovery.sh
 
+      - name: Linux maintenance package checks
+        run: bash packages/linux/tests/run.sh
+
       - name: Check reachable Go vulnerabilities
         working-directory: hub
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

@@ -22,7 +22,7 @@ packages but small: a handful of machines, one owner, no new stores.
   `# ominull-package: {"name","title","description","category","risk","reboot","timeout","interval","params"}`,
   optionally followed by `"platform"` (`windows`, the default, run by
   `powershell.exe`; or `linux`, run by `/bin/sh` as root, file extension
-  `.sh`) and `"role"` (`maintenance_mode`, below). A package runs only on
+  `.sh`) and `"role"` (`maintenance_mode` or `reboot`, below). A package runs only on
   hosts of its platform.
   Security compliance packages are the same system with `category:
   "security"`; none ship yet.
@@ -86,7 +86,22 @@ packages but small: a handful of machines, one owner, no new stores.
   always-on helpers such as Epic Online Services are not games), the machine
   is on battery, or, for updates and cleanup, Windows Update is installing.
   Audit runs are never skipped.
-- Packages never reboot; they report `reboot` and Windows active hours handle it.
+- **Run options** (`when_busy`, `window`) are set by the hub, never declared
+  in a header, and gate the people checks (someone using the machine, a game)
+  of enforce and revert runs; battery and Windows Update always count. The
+  owner sees them in the approval.
+  - `when_busy`: `skip` (the default: report `skipped`), `wait` (check again
+    every minute for up to half the package's time limit, then skip) or `run`
+    (do not wait for open apps or games). Playbook steps that change
+    something use `wait`, or `run` when the run is started with "Don't wait
+    for open apps".
+  - `window`: the fleet maintenance window, `HH:MM-HH:MM` in each machine's
+    own time (it may cross midnight). Inside it people do not count. The hub
+    adds it to every enforce and revert run (console, schedule, playbook)
+    once it is set, maintenance mode excepted. Setting it changes those runs'
+    payloads, so standing approve-all rules ask once more.
+- Packages never restart the machine themselves; they report `reboot`.
+  Only the Restart package (below) restarts, with a warning on screen.
 - Each script stays under 24 KiB (the library and agents take 64 KiB) and runs on Windows PowerShell 5.1.
 
 ## Windows safety rules
@@ -149,6 +164,29 @@ per-machine override, as for any package; "How long..." on the card).
 Turning it on or off from the card is an ordinary run (enforce / revert),
 so it asks on the phone; an audit does not.
 
+### Restart
+
+`windows-reboot` and `linux-reboot` (role `reboot`, careful, time limit 60
+minutes) restart a machine after a warning. The role means the hub never
+schedules them; they run as a playbook step or as a direct run from a
+machine's page, and both ask on the phone. Parameters: `only_if_needed`
+(true: restart only when the system says a restart is pending),
+`warn_minutes` (10, 1-60) and `idle_minutes` (15).
+
+- **Audit** reads a pending restart as `drift` (Windows: the Component Based
+  Servicing and Windows Update reboot keys; Linux: `/var/run/reboot-required`
+  or `needs-restarting -r`).
+- **Enforce** runs the preflight with the run options, then
+  `shutdown.exe /r /t N /d p:4:1 /c "OmniNull maintenance: this computer
+  restarts in N minutes ... Save your work now."` on Windows or
+  `shutdown -r +N` with the same message on Linux (sent to logged-in users).
+  It returns `fixed` with `detail.restart_in_seconds` and leaves a marker with
+  the restart time. A restart already scheduled (its own, or someone else's)
+  is left alone and reads `ok`. On Linux, someone using the machine means an
+  active local `loginctl` session not idle for `idle_minutes`.
+- **Revert** cancels a restart this package scheduled that has not happened
+  yet (`shutdown /a`, `shutdown -c`); it never cancels anyone else's.
+
 ### Software removal
 
 `windows-software-removal` uninstalls third-party software the hub's
@@ -208,19 +246,27 @@ settings row (`maintenance.playbooks`), edited from the Maintenance page or
 "name","steps":[{"package","mode"}],"maintenance_mode","note"}}`, admin).
 Saving checks every step against the library (a live package, not
 maintenance mode itself, all on one platform), runs nothing and asks nobody.
+A Restart step is allowed anywhere in the list.
 
 - **Running one.** `POST /api/v1/maintenance/playbooks/run
-  {"playbook_id","endpoint_ids"}` (admin) asks the owner once for every step
-  on every machine. With maintenance mode on, the run is maintenance mode on
+  {"playbook_id","endpoint_ids","dont_wait"}` (admin) asks the owner once for
+  every step on every machine. Steps that change something (not audits) wait
+  while someone is using the machine or a game is open (`when_busy=wait`);
+  `dont_wait` sends `run` instead. With maintenance mode on, the run is maintenance mode on
   (its `hours` set to the run's window), the steps, then maintenance mode
   off. Each step uses the machines' effective settings for that package, so
   machines that differ need separate runs (as for any package run).
 - **Window.** Each step's time limit plus 10 minutes (and 10 minutes for
-  each maintenance mode run), rounded up to whole hours; a playbook that
+  each maintenance mode run, 75 more for each Restart step), rounded up to
+  whole hours; a playbook that
   would need more than 24 hours is refused. The payload the owner approves
   (`PackageRunPayload.playbook {name, window_seconds}`, route
   `/api/v1/maintenance/playbooks/run`) carries the window, the approval reads
-  "one step after another, all within N hours" with the steps numbered, and
+  "one step after another, all within N hours" with the steps numbered (or,
+  when that does not fit the 300 characters an approval shows, a compact form:
+  short names, the mode only when it is not enforce, options said once; every
+  step, risk and changed setting is still named, and a playbook that still
+  does not fit is refused), and
   the authority signs every grant of that run for exactly the window. A
   playbook run is never a baseline and never offered an approve-all rule.
 - **One step at a time.** The agent starts every job it is offered at once,
@@ -233,11 +279,15 @@ maintenance mode itself, all on one platform), runs nothing and asks nobody.
   settings row `maintenance.playbook_runs` (script payloads and unused grants
   are dropped when a run ends; the 20 newest finished runs are kept).
   Scheduled package runs leave a machine alone while a playbook runs on it.
+- **After a restart.** When a Restart step returns `fixed`, the machine's
+  next step waits until the restart time plus 2 minutes has passed and the
+  machine has checked in since, so no step is handed to a machine going
+  down.
 - **Console.** The Maintenance tab's **Playbooks** card lists playbooks
   with their steps (*Run…*, *Edit…*, *Remove*) and recent runs with each
   machine's progress ("Step 2 of 5: Cleanup (enforce), running", or the
   results once done). *Run…* picks Windows or Linux machines to match the
-  steps and waits for the phone.
+  steps, offers "Don't wait for open apps", and waits for the phone.
 
 ## Settings
 
@@ -259,6 +309,9 @@ One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
   categories. `PUT` (admin) takes `{"package"|"category","endpoint_id",
   "enabled","mode","interval","params":{name: value|null},"reason",
   "expires_at","reset"}`; `null` clears a field, `reset` clears the row.
+  `PUT {"window":"22:00-06:00"}` alone sets the fleet maintenance window
+  (settings row `maintenance.window`; `""` clears it); GET returns it as
+  `window`. The Package settings card has the same field.
   Every change is audited (`MAINTENANCE_SETTINGS_CHANGED`) and starts a
   schedule pass.
 - Saving a setting runs nothing and needs no tap. What needs the owner is
@@ -348,7 +401,7 @@ gets a Nightshift push and taps once, and the repeated call (with
 
 Every 5 minutes (and right after a settings change) the hub walks each
 package × online host of its platform with the effective settings
-(maintenance mode excepted: it never runs on a schedule). A package is due
+(maintenance mode and Restart excepted: they never run on a schedule). A package is due
 on a host when it and its category are on there, the host is online (seen in
 the last 30 s), no run of it is open there, its last success (`ok`, `fixed`,
 `drift`) is older than the interval and its last attempt is at least an hour
@@ -397,12 +450,21 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
 - `packages/windows/tests/run.sh` (pwsh from `PATH` or `$OMINULL_PWSH`) parses
   each script, rejects PowerShell 7-only syntax and forbidden operations, and
   unit-tests parameters, the result line, controls, `na`, careful gating,
-  revert recording and restoring, the preflight rules and maintenance mode
+  revert recording and restoring, the preflight rules and run options
+  (window across midnight, wait, run), Restart, and maintenance mode
   (powercfg parsing, enforce/extend/revert/audit, expiry, the saved dump);
   the Windows CI job runs it.
 - `ominullctl` tests also run each `packages/linux/*.sh` under `sh -n`, a
   read-only audit (one result line, exit code matching the state) and a bad
   parameter (fails before changing anything).
+- `packages/linux/tests/run.sh` runs a copy of each Linux package under
+  `/bin/sh` with its fixed paths moved to a temp folder and stand-in
+  `loginctl`, `shutdown` and `sleep` first in `PATH`: Restart's audit, warned
+  enforce, `only_if_needed`, skip / wait / run, the window, battery, revert of
+  its own restart only, bad parameters. The Linux CI job runs it.
+- `hub/pkg/server/playbooks_test.go`: saving, one step at a time, the window
+  and its end, "Don't wait", the hold after a restart, the maintenance window
+  setting and the schedule never restarting a machine.
 - `hub/pkg/server/maintenance_mode_test.go`: each platform gets its own
   package, the card state from the latest run, expiry, a Linux audit without a
   tap and the schedule never running maintenance mode.

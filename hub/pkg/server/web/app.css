@@ -4945,4 +4945,6 @@ tfoot {
 .pb-step-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pb-step-row select { flex: 1 1 12em; min-width: 0; }
 .pb-step-n { min-width: 1.6em; }
+/* The maintenance window row: label, two times and buttons; wraps on a phone. */
+.maint-window { row-gap: var(--s-1); }
 .pb-hosts { border: 1px solid var(--line, currentColor); border-radius: 4px; padding: 8px 12px; display: grid; gap: 6px; margin: 0; }

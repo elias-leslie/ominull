@@ -1,38 +1,46 @@
 {
- "11dae68c32292aca0483ec93ab919e54e8a67bca40dd48dc560bb948c7f25a59": {
-  "name": "windows-performance",
-  "risk": "safe"
- },
- "15a0c826422d7930ca1faacffa549983071585a79b68d392e53088932ccd1817": {
+ "0051c45e185272f5c24b8a7e81310cbbc4d63fa48f2f60cd196826120013dddc": {
   "name": "windows-updates",
   "risk": "safe"
  },
- "1bb398177971f123efac6a46d597f1155fc4ce0270b087ebd0b14c5a9e005e63": {
+ "3fb1c82f1936b5add09c80c250e55acadc1104fefa6499442f53dd28942c2b76": {
   "name": "windows-cleanup",
   "risk": "safe"
  },
- "482331ff8bc6ab17eaafd5e3814782a2fcc1453b12b1db46d0e5337a12b96fa4": {
-  "name": "windows-software-removal",
-  "risk": "careful"
- },
- "842c115fcd912b2cf9f93f5015300263b6dee1d86f8294be5e2fca3dd38be992": {
+ "59b2518b303d12a108338a959c795b2d769597ee39a19ba10afcd640eddd762f": {
   "name": "windows-privacy",
   "risk": "safe"
+ },
+ "5da7d476965ab22e704b3645a2cae14338f834bd92e4bab142904b9a8cc51907": {
+  "name": "windows-performance",
+  "risk": "safe"
+ },
+ "6f71037b896e520ec39fc16fdb9c8ebbfbbeea94d2c0cd51039b76981dffe2ea": {
+  "name": "linux-reboot",
+  "risk": "careful"
+ },
+ "78baef84bb45e7501e4250f9d2873c2a5b577b19c0df5620f3fecf699c2d09b3": {
+  "name": "windows-debloat",
+  "risk": "careful"
+ },
+ "7f6dc58a0cf7963730783a007cbaa30fc16bd265fffa26137a610ef79ef85a2d": {
+  "name": "windows-reboot",
+  "risk": "careful"
+ },
+ "897c0e204868b5c6628732af1328febe358b0160f2b8c384aac3378db5adae8a": {
+  "name": "windows-software-removal",
+  "risk": "careful"
  },
  "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
   "name": "linux-maintenance-mode",
   "risk": "safe"
  },
- "91616b515d0f257fb7ee229181143f5543fffe3144f673a0791803707242988a": {
-  "name": "windows-audit",
+ "a2335ba4314ce105b10eb9102c59565d78ba90cbb4e6d83222cdde9918590311": {
+  "name": "windows-maintenance-mode",
   "risk": "safe"
  },
- "d4eb87f533624b872b97bf91138eb2a0dcbfc1126fc1350ec2cf9f5f5dcfc321": {
-  "name": "windows-debloat",
-  "risk": "careful"
- },
- "d68129055293ce6e2eb3818b94c01798e3c51beed8f9638589ab381603d6d729": {
-  "name": "windows-maintenance-mode",
+ "b06e2e1d4e81f731e2277b1eb235f186f0d92cf00dd53d46566c5de297990752": {
+  "name": "windows-audit",
   "risk": "safe"
  }
 }

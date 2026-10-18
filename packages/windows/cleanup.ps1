@@ -34,8 +34,8 @@ function ConvertFrom-PkgParam($Def, [string]$V) {
   throw "$n is not a valid $($Def.type)"
 }
 function Get-PkgParams([string]$Path) {
-  $o = @{}
-  foreach ($d in @(((Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json).params)) {
+  $o = @{}; $h = (Get-Content -LiteralPath $Path -TotalCount 1) -replace '^# ominull-package:' | ConvertFrom-Json; $script:PkgTimeout = [int]$h.timeout
+  foreach ($d in @($h.params)) {
     $v = [Environment]::GetEnvironmentVariable('OMINULL_PARAM_' + $d.name.ToUpper())
     # The agent cuts a variable at 2047 bytes; a catalog comes whole in the signed parameters file.
     if ($d.type -eq 'catalog') { $v = $(if ($env:OMINULL_PARAMS_FILE) { (Get-Content -LiteralPath $env:OMINULL_PARAMS_FILE -Raw | ConvertFrom-Json).($d.name) }) }
@@ -69,11 +69,34 @@ function Test-GamePath([string]$Path) {
   $Path -and ($Path -match '\\steamapps\\common\\|\\Epic Games\\(?!Launcher\\|Epic Online Services\\)|\\Riot Games\\(?!Riot Client\\)|\\XboxGames\\|\\EA Games\\|\\Ubisoft Game Launcher\\games\\|\\GOG Galaxy\\Games\\|\\WindowsApps\\Microsoft\.Minecraft|\\(Overwatch|World of Warcraft|Diablo IV|Diablo III|Hearthstone|StarCraft II|Call of Duty)\\')
 }
 function Test-OnBattery($Batteries) { [bool](@($Batteries) | Where-Object { $_ -and [int]$_.BatteryStatus -eq 1 }) }
-function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+function Get-PeopleReason([int]$IdleMinutes) {
   $q = Invoke-Native 'quser.exe' @()
   if ($q.code -ge 0 -and (Test-UserActive $q.out $IdleMinutes)) { return 'someone is using the computer' }
   foreach ($p in @(Get-CimInstance Win32_Process -Property ExecutablePath -ErrorAction SilentlyContinue)) {
     if (Test-GamePath $p.ExecutablePath) { return "a game is running ($(Split-Path -Leaf $p.ExecutablePath))" }
+  }
+}
+# Maintenance window "HH:MM-HH:MM" in machine time; it may cross midnight.
+function Test-InWindow([string]$Window, [datetime]$Now) {
+  if ($Window -cnotmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)\z') { return $false }
+  $s = [int]$matches[1] * 60 + [int]$matches[2]; $e = [int]$matches[3] * 60 + [int]$matches[4]; $n = $Now.Hour * 60 + $Now.Minute
+  if ($s -le $e) { $n -ge $s -and $n -lt $e } else { $n -ge $s -or $n -lt $e }
+}
+# Run options from the hub: when_busy skip (default) | wait (up to half the timeout) | run (no people checks);
+# inside the window people do not count. Battery and Windows Update always do.
+function Get-RunOptions {
+  $b = "$env:OMINULL_PARAM_WHEN_BUSY"; if (-not $b) { $b = 'skip' }; $w = "$env:OMINULL_PARAM_WINDOW"
+  if ('skip', 'wait', 'run' -cnotcontains $b) { throw 'param when_busy is not skip, wait or run' }
+  if ($w -and $w -cnotmatch '^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d\z') { throw 'param window is not HH:MM-HH:MM' }
+  @{ busy = $b; window = $w }
+}
+function Get-PreflightReason([bool]$CheckUpdates, [int]$IdleMinutes) {
+  $o = Get-RunOptions; $until = (Get-Date).AddSeconds([math]::Max(0, $script:PkgTimeout) / 2)
+  while ($o.busy -cne 'run' -and -not (Test-InWindow $o.window (Get-Date))) {
+    $why = Get-PeopleReason $IdleMinutes
+    if (-not $why) { break }
+    if ($o.busy -cne 'wait' -or (Get-Date).AddSeconds(60) -gt $until) { return $why }
+    Write-Log "waiting: $why"; Start-Sleep -Seconds 60
   }
   if (Test-OnBattery (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { return 'running on battery' }
   if ($CheckUpdates) {

@@ -87,8 +87,9 @@ func TestPlaybookRunInOrder(t *testing.T) {
 	}
 	// cleanup 60 min + audit 5 min + 10 min slack per step and for each
 	// maintenance mode run: 1 h 45 min, so a 2-hour window.
-	for _, want := range []string{`Playbook "Weekly tidy"`, "one step after another, all within 2 hours",
-		"1. windows-maintenance-mode (enforce)", "2. windows-cleanup (enforce)", "3. windows-audit (audit)", "4. windows-maintenance-mode (revert)"} {
+	// Steps that change something wait for people by default.
+	for _, want := range []string{`Playbook "Weekly tidy"`, "in order within 2 hours",
+		"keep awake on, settings hours=2; cleanup; audit (audit); keep awake off", "Steps that change something: waits while someone is using the machine"} {
 		if !strings.Contains(v.Summary, want) {
 			t.Fatalf("summary lacks %q: %s", want, v.Summary)
 		}
@@ -119,6 +120,9 @@ func TestPlaybookRunInOrder(t *testing.T) {
 		}
 		if i == 0 && (p.Parameters["mode"] != "enforce" || p.Parameters["hours"] != "2") {
 			t.Fatalf("maintenance mode should be on for the window: %v", p.Parameters)
+		}
+		if (i == 1) != (p.Parameters["when_busy"] == "wait") {
+			t.Fatalf("step %d: only the cleanup waits for people: %v", i+1, p.Parameters)
 		}
 		if i == 3 && p.Parameters["mode"] != "revert" {
 			t.Fatalf("maintenance mode should end the run: %v", p.Parameters)
@@ -183,4 +187,151 @@ func TestPlaybookRunWindowEnds(t *testing.T) {
 	if n := finishJobs(t, srv, "ep-lap"); n != 0 {
 		t.Fatalf("a step started after the window: %d", n)
 	}
+}
+
+// "Don't wait for open apps" runs the changing steps even with someone at
+// the machine, and the owner sees that in the ask.
+func TestPlaybookRunDontWait(t *testing.T) {
+	t.Parallel()
+	srv := playbookTestServer(t)
+	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/playbooks", testPlaybook); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	run := `{"playbook_id":"weekly-tidy","endpoint_ids":["ep-lap"],"dont_wait":true}`
+	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
+	owner := ownerOf(t, srv)
+	v, err := owner.auth.GetApproval(id, "")
+	if err != nil || !strings.Contains(v.Summary, "does not wait for open apps or games") {
+		t.Fatalf("summary: %v %+v", err, v)
+	}
+	owner.approve(t, id)
+	if w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id); w.Code != http.StatusCreated {
+		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	}
+	finishJobs(t, srv, "ep-lap") // maintenance mode on
+	srv.advancePlaybookRuns(time.Now().UTC())
+	offers, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute)
+	if len(offers) != 1 {
+		t.Fatalf("want the cleanup offered, got %d", len(offers))
+	}
+	var p response.ScriptExecPayload
+	_ = json.Unmarshal([]byte(offers[0].PayloadJSON), &p)
+	if p.Parameters["when_busy"] != "run" {
+		t.Fatalf("cleanup should not wait: %v", p.Parameters)
+	}
+}
+
+// A restart step holds the next one until the restart time has passed and
+// the machine has checked in again.
+func TestPlaybookWaitsForTheRestart(t *testing.T) {
+	t.Parallel()
+	srv := playbookTestServer(t)
+	syncRealPackage(t, srv, "reboot.ps1")
+	book := `{"playbook":{"id":"patch","name":"Patch","steps":[{"package":"windows-reboot","mode":"enforce"},{"package":"windows-audit","mode":"audit"}]}}`
+	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/playbooks", book); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	run := `{"playbook_id":"patch","endpoint_ids":["ep-lap"]}`
+	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
+	owner := ownerOf(t, srv)
+	v, _ := owner.auth.GetApproval(id, "")
+	if !strings.Contains(v.Summary, "windows-reboot (enforce)") || !strings.Contains(v.Summary, "careful") {
+		t.Fatalf("the restart must show as careful: %s", v.Summary)
+	}
+	owner.approve(t, id)
+	if w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id); w.Code != http.StatusCreated {
+		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	}
+	offers, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute)
+	if len(offers) != 1 {
+		t.Fatalf("restart step: %d offers", len(offers))
+	}
+	o := offers[0]
+	_ = srv.responseStore.AcknowledgeJob("default", "ep-lap", o.JobID, o.LeaseID, true, "")
+	if err := srv.responseStore.CompleteJob("default", "ep-lap", o.JobID, o.LeaseID, &response.JobResult{JobID: o.JobID, LeaseID: o.LeaseID,
+		State: response.StateSucceeded, Stdout: `{"v":1,"state":"fixed","reboot":false,"changed":["restart in 10 min"],"detail":{"restart_in_seconds":600}}`}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	srv.advancePlaybookRuns(now)
+	srv.advancePlaybookRuns(now.Add(5 * time.Minute))
+	if n, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute); len(n) != 0 {
+		t.Fatal("the next step started before the restart")
+	}
+	srv.advancePlaybookRuns(now.Add(15 * time.Minute)) // past the hold, but not seen since
+	if n, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute); len(n) != 0 {
+		t.Fatal("the next step started before the machine came back")
+	}
+	ep, _ := srv.store.GetEndpoint("ep-lap")
+	ep.LastSeenAt = now.Add(14 * time.Minute)
+	if err := srv.store.UpsertEndpoint(*ep); err != nil {
+		t.Fatal(err)
+	}
+	srv.advancePlaybookRuns(now.Add(15 * time.Minute))
+	if n, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute); len(n) != 1 {
+		t.Fatal("the audit should start once the machine is back")
+	}
+}
+
+// The maintenance window is one fleet setting that enforce runs carry and
+// audits do not; the schedule never restarts a machine.
+func TestMaintenanceWindowSetting(t *testing.T) {
+	t.Parallel()
+	srv := playbookTestServer(t)
+	syncRealPackage(t, srv, "reboot.ps1")
+	for body, want := range map[string]string{
+		`{"window":"25:00-02:00"}`:                             "HH:MM-HH:MM",
+		`{"window":"02:00-02:00"}`:                             "start and end different",
+		`{"window":"01:00-05:00","package":"windows-cleanup"}`: "on its own",
+	} {
+		if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", body); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), want) {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", `{"window":"22:00-06:00"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"window":"22:00-06:00"`) {
+		t.Fatalf("set: %d %s", w.Code, w.Body.String())
+	}
+	tenant := "default"
+	windows, _ := srv.packageHosts(tenant, []string{"ep-lap"})
+	settings, _ := srv.maintenanceSettings(tenant)
+	for mode, want := range map[string]string{"enforce": "22:00-06:00", "audit": ""} {
+		sc, _ := srv.findPackage(tenant, "windows-cleanup")
+		it, _, err := srv.buildPackageItem(tenant, sc, mode, []string{"ep-lap"}, windows, settings, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p response.ScriptExecPayload
+		_ = json.Unmarshal([]byte(it.Raw), &p)
+		if p.Parameters["window"] != want {
+			t.Errorf("%s run carries window %q, want %q", mode, p.Parameters["window"], want)
+		}
+	}
+	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", `{"window":""}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"window":""`) {
+		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
+	}
+	// Enabled with enforce on the fleet, the restart package still never runs on a schedule.
+	if w := adminDo(srv, http.MethodPut, "/api/v1/maintenance/settings", `{"package":"windows-reboot","enabled":true,"mode":"enforce"}`); w.Code != http.StatusOK {
+		t.Fatalf("enable: %d %s", w.Code, w.Body.String())
+	}
+	srv.maintBlocks.kicks.Wait()
+	srv.runMaintenanceSchedules(time.Now().UTC())
+	for _, b := range srv.maintBlocks.list() {
+		if strings.Contains(b.Package, "reboot") {
+			t.Fatalf("the schedule asked to restart: %+v", b)
+		}
+	}
+	jobs, _ := srv.responseStore.ScriptJobs(tenant, "ep-lap", mustScriptID(t, srv, "windows-reboot"), 5)
+	if len(jobs) != 0 {
+		t.Fatalf("the schedule restarted the machine: %d jobs", len(jobs))
+	}
+}
+
+func mustScriptID(t *testing.T, srv *Server, name string) string {
+	t.Helper()
+	sc, err := srv.findPackage("default", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sc.ID
 }

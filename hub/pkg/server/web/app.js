@@ -1208,7 +1208,7 @@
   function demoMaintMode(ep, platform) {
     var cur = DEMO_MAINT_MODE[ep];
     var on = !!(cur && cur.until > Date.now());
-    var hours = parseInt(((demoMaintSettings("?endpoint_id=" + ep).packages.filter(function (p) { return p.role; })[0] || {}).effective || { params: {} }).params.hours || "6", 10);
+    var hours = parseInt(((demoMaintSettings("?endpoint_id=" + ep).packages.filter(function (p) { return p.role === "maintenance_mode"; })[0] || {}).effective || { params: {} }).params.hours || "6", 10);
     return { script_id: "demo-" + platform + "-maintenance-mode", package: platform + "-maintenance-mode", on: on, hours: hours,
       until: on ? new Date(cur.until).toISOString() : undefined };
   }
@@ -1244,7 +1244,8 @@
       pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
       pkg("windows-privacy", "Privacy", "Sets telemetry, advertising, suggestions, Copilot and Recall policies.", "safe", 300, run("ok", "audit", 2880)),
       pkg("windows-updates", "Windows updates", "Installs pending software and driver updates.", "safe", 3600, run("running", "enforce", 4, { job_state: "running", completed_at: null })),
-      Object.assign(pkg("windows-maintenance-mode", "Maintenance mode", "Keeps the computer awake while maintenance runs.", "safe", 120, null), { role: "maintenance_mode" })
+      Object.assign(pkg("windows-maintenance-mode", "Maintenance mode", "Keeps the computer awake while maintenance runs.", "safe", 120, null), { role: "maintenance_mode" }),
+      Object.assign(pkg("windows-reboot", "Restart", "Restarts the computer after an on-screen warning, by default only when Windows is waiting for a restart.", "careful", 3600, run("drift", "audit", 1440, { reason: "Windows is waiting for a restart" })), { role: "reboot" })
     ], maintenance_mode: demoMaintMode(ep, "windows") };
   }
 
@@ -1292,6 +1293,7 @@
     return JSON.parse(JSON.stringify(DEMO_TERMINAL_LIMITS));
   }
 
+  var DEMO_MAINT_WINDOW = "01:00-05:00";
   function demoMaintSettings(path) {
     var ep = decodeURIComponent((path.split("endpoint_id=")[1] || "").split("&")[0]);
     if (!DEMO_MAINT_ROWS) {
@@ -1311,6 +1313,7 @@
       ["windows-software-removal", "Software removal", "maintenance", "careful", "weekly", [["categories", "list", "adware,oem_bloat,trialware", null, null, "Catalog categories to remove (games, game_addons, oem_bloat, trialware, adware)"], ["catalog", "catalog", "[]", null, null, "The software catalog, filled in by the hub"]]],
       ["windows-updates", "Windows updates", "maintenance", "safe", "daily", [["exclude", "list", "Firmware", null, null, "Update classes never installed."]]],
       ["windows-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before the machine's own sleep settings come back"]], "maintenance_mode", "windows"],
+      ["windows-reboot", "Restart", "maintenance", "careful", "weekly", [["only_if_needed", "bool", "true", null, null, "Restart only when Windows is waiting for a restart"], ["warn_minutes", "int", "10", 1, 60, "Minutes the on-screen warning gives people to save their work before the restart"]], "reboot", "windows"],
       ["linux-maintenance-mode", "Maintenance mode", "maintenance", "safe", "daily", [["hours", "int", "6", 1, 24, "How long maintenance mode lasts before sleep is allowed again"]], "maintenance_mode", "linux"]
     ];
     function eff(name, defaults, scopeEp) {
@@ -1322,6 +1325,7 @@
       return { enabled: on, package_enabled: on, category_enabled: true, mode: e.mode || f.mode || "audit", interval: e.interval || f.interval || defaults.__interval, params: params };
     }
     return {
+      window: DEMO_MAINT_WINDOW,
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
         var defaults = { __interval: d[4] };
@@ -1584,6 +1588,7 @@
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
+      if (body.window !== undefined) { DEMO_MAINT_WINDOW = body.window; return demoMaintSettings(""); }
       var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
       var row = body.reset ? {} : (DEMO_MAINT_ROWS[key] || {});
       ["enabled", "mode", "interval", "reason", "expires_at"].forEach(function (k) { if (body[k] !== undefined) { if (body[k] === null) delete row[k]; else row[k] = body[k]; } });
@@ -9395,9 +9400,9 @@
     arrayOf(settings && settings.packages).forEach(function (p) { byName[p.name] = p; });
 
     /* A host whose only package is maintenance mode (Linux today) shows just that line. */
-    if (!all.some(function (p) { return !p.role; })) return card("Maintenance and security", maintModeLine(m.mode, asset, byName), null, true);
+    if (!all.some(notMaintMode)) return card("Maintenance and security", maintModeLine(m.mode, asset, byName), null, true);
     var tab = state.maintCardTab || "maintenance";
-    var pkgs = all.filter(function (p) { return !p.role && (p.category || "maintenance") === tab; });
+    var pkgs = all.filter(function (p) { return notMaintMode(p) && (p.category || "maintenance") === tab; });
     var pass = 0, fail = 0;
     pkgs.forEach(function (p) { if (p.last) { pass += p.last.pass || 0; fail += p.last.fail || 0; } });
     var cat = arrayOf(settings && settings.categories).filter(function (c) { return c.name === tab; })[0];
@@ -9535,6 +9540,8 @@
   }
 
   /* One PUT; the answer is the whole settings view for that scope. */
+  function notMaintMode(p) { return p.role !== "maintenance_mode"; }
+
   function putMaintSetting(change, after) {
     return request("/api/v1/maintenance/settings", "PUT", change).then(function (d) {
       if (change.endpoint_id) state.maintSettingsByEndpoint[change.endpoint_id] = { data: d, at: Date.now() };
@@ -9640,7 +9647,8 @@
           on: { click: function () { save(change, name); } } }) : null;
       }
       var rows = [];
-      var scheduled = !pkg.role; /* maintenance mode is turned on by hand or by a playbook, never on a schedule */
+      var scheduled = !pkg.role; /* maintenance mode is turned on by hand or by a playbook and a restart is a playbook step: never on a schedule */
+      if (pkg.role === "reboot") rows.push([h("b", { text: "Scheduled" }), h("span", { text: "Never" }), h("span", { cls: "dim-2", text: "Runs as a playbook step, or from a machine's page" }), null]);
       var enabledSet = row.enabled !== undefined && row.enabled !== null;
       var enabledBox = h("input", { type: "checkbox", "data-field": "enabled", checked: !!eff.package_enabled, disabled: !editable,
         "aria-label": "Run " + pkg.title + " on a schedule", on: { change: function (e) { save({ enabled: e.target.checked }, "enabled"); } } });
@@ -9703,7 +9711,7 @@
         ]);
       });
       holder.appendChild(stackOnPhone(simpleTable(["Setting", "Value", "Comes from", ""], rows, { sortable: false })));
-      if (!scheduled) holder.appendChild(h("p", { cls: "pending", text: "Takes effect the next time maintenance mode is turned on. Saving runs nothing by itself." }));
+      if (!scheduled) holder.appendChild(h("p", { cls: "pending", text: (pkg.role === "reboot" ? "Takes effect the next time a playbook restarts a machine." : "Takes effect the next time maintenance mode is turned on.") + " Saving runs nothing by itself." }));
       else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. Switching to enforce, turning on a careful package or step, or changing a setting asks you to approve on your phone before the next run. Turning a package off or back to audit never asks." }));
       if (epID && editable && (pkg.endpoint && (pkg.endpoint.enabled !== undefined || pkg.endpoint.mode || pkg.endpoint.interval || pkg.endpoint.params))) {
         holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Use the fleet defaults for this machine",
@@ -9789,6 +9797,31 @@
     }), { sortable: true, key: "maint-controls" });
   }
 
+  /* The maintenance window: inside it (each machine's own clock) runs that
+     change something go ahead even if someone is using the machine. */
+  function maintWindowRow(d) {
+    var cur = (d && d.window) || "";
+    var parts = cur.split("-");
+    var from = h("input", { type: "time", value: parts[0] || "", disabled: !IS_ADMIN, "aria-label": "Maintenance window starts" });
+    var to = h("input", { type: "time", value: parts[1] || "", disabled: !IS_ADMIN, "aria-label": "Maintenance window ends" });
+    function save(v) {
+      putMaintSetting({ window: v }, function () {
+        toast(v ? "Maintenance window " + v.replace("-", " to ") : "Maintenance window off", "ok");
+        $("view").dataset.section = ""; renderBody();
+      }).catch(function () {});
+    }
+    var set = h("button", { cls: "btn mini", type: "button", text: "Save", disabled: !IS_ADMIN, on: { click: function () {
+      if (!from.value || !to.value || from.value === to.value) { toast("Pick a start and an end time that differ.", "warn"); return; }
+      save(from.value + "-" + to.value);
+    } } });
+    var off = cur && IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Turn off", on: { click: function () { save(""); } } }) : null;
+    return h("div", {},
+      h("div", { cls: "uf uf-g1 uf-wrap maint-window" }, h("b", { text: "Maintenance window" }), from, h("span", { text: "to" }), to, set, off),
+      h("div", { cls: "pending u-mt1", text: cur
+        ? "Between " + cur.replace("-", " and ") + " on each machine's own clock, runs that change something go ahead even if someone is using the machine or a game is open. Outside it they skip, or wait in a playbook. Battery and Windows Update still hold a run back."
+        : "No window. Runs that change something skip while someone is using the machine or a game is open; in a playbook they wait for it to be free." }));
+  }
+
   function renderMaintenanceSection() {
     var view = $("view");
     /* Same as Access: a poll must not rebuild under an open control. */
@@ -9803,7 +9836,8 @@
     var head = h("div", { cls: "card-body stack" },
       maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
       h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: (tab === "security" ? "Run scheduled security packages" : "Run scheduled maintenance packages") + " across the fleet" })),
-      h("p", { cls: "pending", text: "Fleet defaults for every machine the package fits (Windows or Linux). A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }));
+      h("p", { cls: "pending", text: "Fleet defaults for every machine the package fits (Windows or Linux). A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first." }),
+      maintWindowRow(d));
     var rows = pkgs.map(function (p) {
       var eff = p.fleet_effective || {};
       var changed = maintChangedCount(p, eff);
@@ -9811,7 +9845,7 @@
         h("div", {}, h("b", { text: p.title }), p.platform === "linux" ? h("span", { cls: "u-ml2" }, chip("idle", "Linux")) : null,
           p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
           h("div", { cls: "dim-2", text: p.description || "" })),
-        p.role ? h("span", { cls: "dim-2", text: "Turned on from a machine's page" }) : maintEffectiveText(eff),
+        p.role ? h("span", { cls: "dim-2", text: p.role === "reboot" ? "Runs as a playbook step" : "Turned on from a machine's page" }) : maintEffectiveText(eff),
         changed ? changed + " changed" : h("span", { cls: "dim-2", text: "defaults" }),
         "v" + p.version,
         h("button", { cls: "btn mini", type: "button", text: IS_ADMIN ? "Edit…" : "View…", "aria-label": "Settings for " + p.title,
@@ -9920,7 +9954,7 @@
 
   function openPlaybookSheet(book) {
     var max = (state.maintPlaybooks && state.maintPlaybooks.max_steps) || 8;
-    var pkgs = arrayOf(state.maintSettings && state.maintSettings.packages).filter(function (p) { return !p.role; });
+    var pkgs = arrayOf(state.maintSettings && state.maintSettings.packages).filter(notMaintMode);
     var b = book ? JSON.parse(JSON.stringify(book)) : { id: "", name: "", maintenance_mode: true, steps: [], note: "" };
     var name = h("input", { type: "text", maxlength: "80", value: b.name, "aria-label": "Name" });
     var id = h("input", { type: "text", maxlength: "48", value: b.id, disabled: !!book, "aria-label": "Id" });
@@ -9987,11 +10021,12 @@
     var boxes = hosts.map(function (a) {
       return { a: a, box: h("input", { type: "checkbox", "aria-label": a.name }) };
     });
+    var dontWait = h("input", { type: "checkbox", "aria-label": "Don't wait for open apps" });
     var go = h("button", { cls: "btn btn-primary", type: "button", text: "Run", disabled: READ_ONLY || !hosts.length, on: { click: function () {
       var ids = boxes.filter(function (b) { return b.box.checked; }).map(function (b) { return b.a.endpoint.id; });
       if (!ids.length) { toast("Pick at least one machine.", "warn"); return; }
       go.disabled = true;
-      ownerApproved("/api/v1/maintenance/playbooks/run", { playbook_id: book.id, endpoint_ids: ids },
+      ownerApproved("/api/v1/maintenance/playbooks/run", { playbook_id: book.id, endpoint_ids: ids, dont_wait: dontWait.checked },
         { label: "Run " + book.name + " on " + ids.length + (ids.length === 1 ? " machine" : " machines"), onPending: function () { closeSheet(); } })
         .then(function () {
           closeSheet(); toast(book.name + " started", "ok");
@@ -10006,6 +10041,8 @@
       hosts.length ? h("fieldset", { cls: "pb-hosts" }, h("legend", { text: linux ? "Linux machines" : "Windows machines" }),
         boxes.map(function (b) { return h("label", { cls: "uf uf-g1" }, b.box, h("span", { text: b.a.name })); }))
         : emptyBox("No " + (linux ? "Linux" : "Windows") + " machines with an agent."),
+      h("label", { cls: "uf uf-g1" }, dontWait, h("span", { text: "Don't wait for open apps" })),
+      h("p", { cls: "pending", text: "By default a step that changes something waits while someone is using the machine or a game is open, for up to half its time limit. Ticked, it goes ahead anyway; a restart still warns on screen first." }),
       h("p", { cls: "pending", text: "One approval on your phone covers every step on every machine you pick. Machines with different settings for a package need separate runs." })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }

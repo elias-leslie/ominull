@@ -204,9 +204,11 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		return err
 	}
 	busy := s.playbookBusyHosts() // a playbook running there has the machine
+	window := s.maintenanceWindow()
 	for _, d := range defs {
-		// Maintenance mode is switched on for a while, never on a schedule.
-		if d.Script.Interpreter != d.Header.Interpreter() || d.Header.Role == scripts.RoleMaintenanceMode {
+		// Maintenance mode is switched on for a while and a restart is a
+		// playbook step; neither runs on a schedule.
+		if d.Script.Interpreter != d.Header.Interpreter() || d.Header.Role != "" {
 			continue
 		}
 		groups := map[string]*pendingAsk{} // item digest -> run
@@ -230,6 +232,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 				continue
 			}
 			params := eff.RunParams("")
+			addWindow(d.Header, params, window)
 			if s.fillCatalogParams(d.Header, params) != nil || d.Header.CheckRun(params) != nil {
 				continue
 			}

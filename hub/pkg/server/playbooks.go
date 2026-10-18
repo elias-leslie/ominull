@@ -44,7 +44,10 @@ const (
 	playbookMaxCount    = 50
 	playbookRunsKept    = 20
 	playbookStepSlack   = 10 * time.Minute // per step, for an agent that polls late
-	playbookTick        = 30 * time.Second
+	// A restart step's warning (at most 60 min) and the machine coming back.
+	playbookRestartSlack  = 75 * time.Minute
+	playbookRestartSettle = 2 * time.Minute
+	playbookTick          = 30 * time.Second
 )
 
 var (
@@ -129,8 +132,8 @@ func (s *Server) savePlaybooks(list []playbook) error {
 	return s.store.SetSetting(playbooksSetting, string(raw))
 }
 
-// checkPlaybookPackages: every step is a live package that is not a role
-// package, and all steps run on one platform.
+// checkPlaybookPackages: every step is a live package other than maintenance
+// mode (the playbook switches that itself), and all steps run on one platform.
 func (s *Server) checkPlaybookPackages(tenantID string, p *playbook) error {
 	platform := ""
 	for i, st := range p.Steps {
@@ -138,7 +141,7 @@ func (s *Server) checkPlaybookPackages(tenantID string, p *playbook) error {
 		if err != nil {
 			return fmt.Errorf("step %d: %v", i+1, err)
 		}
-		if m := sc.Package(); m != nil && m.Role != "" {
+		if m := sc.Package(); m != nil && m.Role == scripts.RoleMaintenanceMode {
 			return fmt.Errorf("step %d: %s is switched by the playbook itself, not run as a step", i+1, sc.Name)
 		}
 		pl := "linux"
@@ -158,6 +161,9 @@ func (s *Server) checkPlaybookPackages(tenantID string, p *playbook) error {
 type playbookRunStep struct {
 	Label string `json:"label"`          // "windows-cleanup (enforce)"
 	Item  string `json:"item,omitempty"` // the exact payload; dropped when the run ends
+	// Reboot marks a restart step: the next step waits for the machine to
+	// come back from it.
+	Reboot bool `json:"reboot,omitempty"`
 }
 
 type playbookHostStep struct {
@@ -165,6 +171,9 @@ type playbookHostStep struct {
 	JobID  string                  `json:"job_id,omitempty"`
 	Result string                  `json:"result,omitempty"` // the package run's state once done
 	Grant  *response.EndpointGrant `json:"grant,omitempty"`  // until the step starts
+	// HoldUntil: after a restart step, the next step waits until then and
+	// until the machine has checked in since.
+	HoldUntil *time.Time `json:"hold_until,omitempty"`
 }
 
 type playbookRun struct {
@@ -225,6 +234,9 @@ func (s *Server) playbookBusyHosts() map[string]bool {
 type playbookRunRequest struct {
 	PlaybookID  string   `json:"playbook_id"`
 	EndpointIDs []string `json:"endpoint_ids"`
+	// DontWait: steps that change something run even when someone is using
+	// the machine or a game is open (by default they wait).
+	DontWait bool `json:"dont_wait"`
 }
 
 type playbookPlan struct {
@@ -232,6 +244,7 @@ type playbookPlan struct {
 	book   playbook
 	items  []packageRunItem
 	labels []string
+	reboot []bool
 	window int64 // seconds
 }
 
@@ -272,14 +285,28 @@ func (s *Server) playbookRunPlan(tenantID string, body []byte) (*playbookPlan, e
 	add := func(it packageRunItem, h *scripts.PackageHeader, mode string) {
 		plan.items = append(plan.items, it)
 		plan.labels = append(plan.labels, h.Name+" ("+mode+")")
+		plan.reboot = append(plan.reboot, h.Role == scripts.RoleReboot && mode == "enforce")
 		total += time.Duration(scripts.ClampTimeout(h.Timeout))*time.Second + playbookStepSlack
+		if h.Role == scripts.RoleReboot && mode == "enforce" {
+			total += playbookRestartSlack
+		}
+	}
+	// Steps that change something wait while someone is using the machine,
+	// unless the run says not to.
+	opts := map[string]string{"when_busy": "wait"}
+	if req.DontWait {
+		opts["when_busy"] = "run"
 	}
 	for _, st := range book.Steps {
 		sc, err := s.findPackage(tenantID, st.Package)
 		if err != nil {
 			return nil, err
 		}
-		it, h, err := s.buildPackageItem(tenantID, sc, st.Mode, req.EndpointIDs, windows, settings, nil)
+		var over map[string]string
+		if st.Mode != "audit" {
+			over = opts
+		}
+		it, h, err := s.buildPackageItem(tenantID, sc, st.Mode, req.EndpointIDs, windows, settings, over)
 		if err != nil {
 			return nil, err
 		}
@@ -307,6 +334,7 @@ func (s *Server) playbookRunPlan(tenantID string, body []byte) (*playbookPlan, e
 			return nil, err
 		}
 		plan.items = append(append([]packageRunItem{on}, plan.items...), off)
+		plan.reboot = append(append([]bool{false}, plan.reboot...), false)
 		plan.labels = append(append([]string{h.Name + " (enforce)"}, plan.labels...), h.Name+" (revert)")
 	}
 	return plan, nil
@@ -402,7 +430,7 @@ func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for i, it := range plan.items {
-		run.Steps = append(run.Steps, playbookRunStep{Label: plan.labels[i], Item: it.Raw})
+		run.Steps = append(run.Steps, playbookRunStep{Label: plan.labels[i], Item: it.Raw, Reboot: plan.reboot[i]})
 	}
 	for _, ep := range plan.req.EndpointIDs {
 		for _, it := range plan.items {
@@ -483,6 +511,14 @@ func (s *Server) advancePlaybookHost(run *playbookRun, ep string, steps []*playb
 				pr.State = "not_run" // offline past the window: its grant has expired
 			}
 			st.State, st.Result, *changed = "done", pr.State, true
+			if run.Steps[i].Reboot && pr.State == "fixed" {
+				end := now
+				if pr.CompletedAt != nil {
+					end = *pr.CompletedAt
+				}
+				hold := end.Add(time.Duration(pr.RestartIn)*time.Second + playbookRestartSettle)
+				st.HoldUntil = &hold
+			}
 			continue
 		}
 		// pending: start it while the grants still live.
@@ -492,6 +528,9 @@ func (s *Server) advancePlaybookHost(run *playbookRun, ep string, steps []*playb
 			}
 			*changed = true
 			return false
+		}
+		if i > 0 && steps[i-1].HoldUntil != nil && !s.backFromRestart(ep, *steps[i-1].HoldUntil, now) {
+			return true
 		}
 		job, err := s.responseStore.CreateJob(run.Tenant, ep, response.ActionKindScriptExec, run.Requester, st.Grant, run.Steps[i].Item, "")
 		if err != nil {
@@ -503,6 +542,16 @@ func (s *Server) advancePlaybookHost(run *playbookRun, ep string, steps []*playb
 		return true
 	}
 	return false
+}
+
+// backFromRestart: the hold after a restart step has passed and the machine
+// has checked in since, so a next step is not handed to a machine going down.
+func (s *Server) backFromRestart(ep string, hold, now time.Time) bool {
+	if now.Before(hold) {
+		return false
+	}
+	e, err := s.store.GetEndpoint(ep)
+	return err == nil && e != nil && e.LastSeenAt.After(hold)
 }
 
 func (s *Server) playbookLoop() {

@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $Dir = Split-Path -Parent $PSScriptRoot
-$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode', 'software-removal'
+$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode', 'software-removal', 'reboot'
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Passed = 0
 function Check([string]$What, [bool]$Ok) {
@@ -64,7 +64,7 @@ foreach ($n in $Names) {
         Check "$n header timeout 1..3600" (($meta.timeout -is [long] -or $meta.timeout -is [int]) -and $meta.timeout -ge 1 -and $meta.timeout -le 3600)
         Check "$n header key order" ((@($meta.PSObject.Properties.Name) -join ',') -match '^name,title,description,category,risk,reboot,timeout,interval,params(,platform)?(,role)?$')
         if ($meta.PSObject.Properties.Name -contains 'platform') { Check "$n header platform" ($meta.platform -ceq 'windows') }
-        if ($meta.PSObject.Properties.Name -contains 'role') { Check "$n header role" ($meta.role -ceq 'maintenance_mode' -and $n -eq 'maintenance-mode') }
+        if ($meta.PSObject.Properties.Name -contains 'role') { Check "$n header role" (($meta.role -ceq 'maintenance_mode' -and $n -eq 'maintenance-mode') -or ($meta.role -ceq 'reboot' -and $n -eq 'reboot')) }
         Check "$n header category" (@('maintenance', 'security') -contains $meta.category)
         Check "$n header interval" (@('hourly', 'daily', 'weekly') -contains $meta.interval)
         $headers[$n] = $meta
@@ -93,7 +93,8 @@ foreach ($n in $Names) {
     $ps7 = @($ast.FindAll({ param($x) $x.GetType().Name -in 'TernaryExpressionAst', 'PipelineChainAst' }, $true))
     $ps7 += @($tokens | Where-Object { $_.Kind -in 'QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot', 'QuestionLBracket', 'AndAnd', 'OrOr' })
     Check "$n uses no PowerShell 7-only syntax" ($ps7.Count -eq 0)
-    foreach ($k in $forbidden.Keys) { Check "$n never touches $k" ($text -notmatch $forbidden[$k]) }
+    # Only the restart package may restart the machine.
+    foreach ($k in $forbidden.Keys) { if ($n -eq 'reboot' -and $k -eq 'reboots the machine') { continue }; Check "$n never touches $k" ($text -notmatch $forbidden[$k]) }
     Check "$n writes stdout once" (([regex]::Matches($text, '\[Console\]::Out\.WriteLine')).Count -eq 1)
     if ($text -match '(?s)# --- prelude begin.*?# --- prelude end ---') { $preludes[$n] = $matches[0] }
     Check "$n has the shared prelude" ($preludes.ContainsKey($n))
@@ -104,7 +105,7 @@ foreach ($n in $Names) {
 }
 Check 'prelude identical in every package' (@($preludes.Values | Sort-Object -Unique).Count -eq 1)
 foreach ($b in $blocks.Keys) { Check "block '$b' identical wherever present" (@($blocks[$b] | Sort-Object -Unique).Count -eq 1) }
-Check 'debloat and privacy share the registry/original-value helpers' ($blocks['original values'].Count -eq 3 -and $blocks['registry helpers'].Count -eq 2 -and $blocks['reboot check'].Count -eq 2 -and $blocks['package temp'].Count -eq 2)
+Check 'debloat and privacy share the registry/original-value helpers' ($blocks['original values'].Count -eq 3 -and $blocks['registry helpers'].Count -eq 2 -and $blocks['reboot check'].Count -eq 3 -and $blocks['package temp'].Count -eq 2)
 
 # ------------------------------------------------------- unit checks: prelude
 & {
@@ -206,6 +207,35 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check 'preflight: update check only when asked' ($null -eq (Get-PreflightReason $false 15))
     $script:Busy = $false; $script:Ti = [pscustomobject]@{ Name = 'TiWorker' }
     Check 'preflight: TiWorker running' ((Get-PreflightReason $true 15) -match 'Windows Update')
+    $script:Ti = $null
+    # Run options: the window (may cross midnight), wait and run.
+    Check 'window: inside' (Test-InWindow '01:00-05:00' ([datetime]'2026-10-17 03:30'))
+    Check 'window: end is outside' (-not (Test-InWindow '01:00-05:00' ([datetime]'2026-10-17 05:00')))
+    Check 'window: across midnight, late' (Test-InWindow '22:00-06:00' ([datetime]'2026-10-17 23:10'))
+    Check 'window: across midnight, early' (Test-InWindow '22:00-06:00' ([datetime]'2026-10-17 05:59'))
+    Check 'window: across midnight, day' (-not (Test-InWindow '22:00-06:00' ([datetime]'2026-10-17 12:00')))
+    Check 'window: none' (-not (Test-InWindow '' ([datetime]'2026-10-17 03:30')))
+    Check 'window: bad text' (-not (Test-InWindow '1:00-5:00' ([datetime]'2026-10-17 03:30')))
+    $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }
+    $env:OMINULL_PARAM_WHEN_BUSY = 'run'
+    Check 'when_busy run: people do not count' ($null -eq (Get-PreflightReason $false 15))
+    $script:Batt = [pscustomobject]@{ BatteryStatus = 1 }
+    Check 'when_busy run: battery still counts' ((Get-PreflightReason $false 15) -match 'battery')
+    $script:Batt = $null
+    $env:OMINULL_PARAM_WHEN_BUSY = 'skip'; $env:OMINULL_PARAM_WINDOW = '00:00-23:59'
+    Check 'inside the window people do not count' ($null -eq (Get-PreflightReason $false 15))
+    $env:OMINULL_PARAM_WINDOW = ''
+    Check 'skip: someone using it skips' ((Get-PreflightReason $false 15) -match 'using the computer')
+    $env:OMINULL_PARAM_WHEN_BUSY = 'wait'; $script:PkgTimeout = 600; $script:Slept = 0
+    function Start-Sleep { param($Seconds) $script:Slept++; if ($script:Slept -ge 2) { $script:Quser = @{ code = 1; out = @() } } }
+    Check 'wait: runs once nobody is using it' ($null -eq (Get-PreflightReason $false 15) -and $script:Slept -eq 2)
+    $script:Quser = @{ code = 0; out = @($hdr, '>nadia  console  1  Active  none  10/17/2026 9:00 AM') }; $script:PkgTimeout = 60
+    Check 'wait: gives up within half the timeout' ((Get-PreflightReason $false 15) -match 'using the computer')
+    $env:OMINULL_PARAM_WHEN_BUSY = 'sometimes'
+    Check 'when_busy: a bad value fails' ($(try { Get-PreflightReason $false 15; $false } catch { "$_" -match 'when_busy' }))
+    $env:OMINULL_PARAM_WHEN_BUSY = ''; $env:OMINULL_PARAM_WINDOW = '25:00-01:00'
+    Check 'window: a bad value fails' ($(try { Get-PreflightReason $false 15; $false } catch { "$_" -match 'window' }))
+    Remove-Item Env:OMINULL_PARAM_WHEN_BUSY, Env:OMINULL_PARAM_WINDOW -ErrorAction SilentlyContinue
 }
 
 # --------------------------------------------------- unit checks: per package
@@ -601,6 +631,37 @@ foreach ($n in 'cleanup', 'updates') {
         $Opt.catalog = @([pscustomobject]@{ id = 'bad'; kind = 'program'; match = 'Wave Tool'; category = 'adware'; method = 'registry'; flag = '/S & calc' })
         $threw = $false; try { Invoke-Package } catch { $threw = $true }
         Check 'sr: a flag outside the list fails the run' $threw
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# Restart: audit flags a pending restart; enforce warns and schedules; revert cancels only its own.
+& {
+    . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'reboot.ps1'))))
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "ominull-test-rb-$PID"; $script:Root = $tmp; $Pkg = 'windows-reboot'
+    $script:pending = $false; $script:calls = @(); $script:code = 0; $script:why = $null
+    function Test-PendingReboot { $script:pending }
+    function Get-LastBoot { [datetime]::UtcNow.AddDays(-1) }
+    function Get-PreflightReason { $script:why }
+    function Invoke-Native([string]$Exe, [string[]]$Arguments) { $script:calls += , (@($Exe) + $Arguments); @{ code = $script:code; out = @() } }
+    function Run([string]$M) { $script:Mode = $M; $script:Changed = New-Object System.Collections.Generic.List[string]; $script:Detail = [ordered]@{}; $script:State = 'failed'; Invoke-Package }
+    try {
+        $Opt = @{ only_if_needed = $true; warn_minutes = 10; idle_minutes = 15 }
+        Run 'audit'; Check 'rb: audit without a pending restart is ok' ($script:State -eq 'ok' -and -not $script:calls.Count)
+        $script:pending = $true; Run 'audit'; Check 'rb: audit with a pending restart is drift' ($script:State -eq 'drift')
+        $script:pending = $false; Run 'enforce'; Check 'rb: only_if_needed and nothing pending: no restart' ($script:State -eq 'ok' -and -not $script:calls.Count)
+        $script:pending = $true; $script:why = 'someone is using the computer'; Run 'enforce'
+        Check 'rb: preflight skips' ($script:State -eq 'skipped' -and -not $script:calls.Count)
+        $script:why = $null; Run 'enforce'; $c = $script:calls[-1]
+        Check 'rb: enforce schedules a warned restart' ($script:State -eq 'fixed' -and $c[0] -eq 'shutdown.exe' -and ($c -join ' ') -match '^shutdown\.exe /r /t 600 /d p:4:1 /c OmniNull maintenance: this computer restarts in 10 minutes' -and $Detail.restart_in_seconds -eq 600)
+        Check 'rb: enforce writes the marker' (Test-Path -LiteralPath (Get-MarkerFile))
+        $n = $script:calls.Count; Run 'enforce'; Check 'rb: a second enforce leaves the scheduled restart' ($script:State -eq 'ok' -and $script:calls.Count -eq $n)
+        Run 'revert'; Check 'rb: revert cancels its own restart' ($script:State -eq 'fixed' -and ($script:calls[-1] -join ' ') -eq 'shutdown.exe /a' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
+        $n = $script:calls.Count; Run 'revert'; Check 'rb: revert without its own restart touches nothing' ($script:State -eq 'ok' -and $script:calls.Count -eq $n)
+        $Opt.only_if_needed = $false; $script:pending = $false; $script:code = 1190; Run 'enforce'
+        Check 'rb: a shutdown already scheduled elsewhere is left be' ($script:State -eq 'ok' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
+        $script:code = 5; $threw = $false; try { Run 'enforce' } catch { $threw = $true }; Check 'rb: a shutdown.exe error fails' $threw
+        $script:code = 0; @{ at = [datetime]::UtcNow.AddDays(-2).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath (Get-MarkerFile)
+        Run 'revert'; Check 'rb: a restart that already happened is forgotten' ($script:State -eq 'ok' -and -not (Test-Path -LiteralPath (Get-MarkerFile)))
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

@@ -476,3 +476,36 @@ func TestPlaybookRunsAskAndLiveForTheWindow(t *testing.T) {
 		}
 	}
 }
+
+// A full tune-up (keep awake, seven packages, keep awake off) still fits one
+// approval: short names, the shared options said once, nothing dropped.
+func TestLongPlaybookFitsOneApproval(t *testing.T) {
+	auth, _, _, _ := newRuleAuthority(t)
+	wait := []string{"when_busy", "wait"}
+	items := []string{
+		packageItem(t, "windows-maintenance-mode", "safe", "enforce", 300, "hours", "6"),
+		packageItem(t, "windows-updates", "safe", "enforce", 3600, wait...),
+		packageItem(t, "windows-cleanup", "safe", "enforce", 3600, wait...),
+		packageItem(t, "windows-debloat", "careful", "enforce", 1800, wait...),
+		packageItem(t, "windows-privacy", "safe", "enforce", 600, wait...),
+		packageItem(t, "windows-performance", "safe", "enforce", 600, wait...),
+		packageItem(t, "windows-software-removal", "careful", "enforce", 3600, wait...),
+		packageItem(t, "windows-audit", "safe", "audit", 300),
+		packageItem(t, "windows-maintenance-mode", "safe", "revert", 300),
+	}
+	pb := &responseauth.PlaybookRun{Name: "Laptop tune-up", WindowSeconds: 6 * 3600}
+	v, err := auth.RequestApproval(playbookRequest([]string{"ep-a"}, pb, responseauth.PlaybookRunRoute, items...))
+	if err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	for _, want := range []string{`Playbook "Laptop tune-up"`, "within 6 hours", "keep awake on", "updates", "cleanup", "debloat, careful",
+		"privacy", "performance", "software-removal, careful", "audit (audit)", "keep awake off", "waits while someone is using the machine"} {
+		if !strings.Contains(v.Summary, want) {
+			t.Errorf("summary lacks %q: %s", want, v.Summary)
+		}
+	}
+	if strings.Count(v.Summary, "waits while") != 1 {
+		t.Errorf("shared option should be said once: %s", v.Summary)
+	}
+	t.Logf("%d: %s", len([]rune(v.Summary)), v.Summary)
+}

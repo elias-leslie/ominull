@@ -122,7 +122,8 @@ func (s *Server) packageHosts(tenantID string, ids []string) (map[string]bool, e
 
 // buildPackageItem is one package's run payload for hosts that share its
 // effective settings (windows says which hosts run Windows). override sets
-// parameters over the settings (a playbook's maintenance mode length).
+// parameters over the settings (a playbook's maintenance mode length, its
+// run options).
 func (s *Server) buildPackageItem(tenantID string, sc *scripts.Script, mode string, endpointIDs []string, windows map[string]bool,
 	settings scripts.Settings, override map[string]string) (packageRunItem, *scripts.PackageHeader, error) {
 	for _, id := range endpointIDs {
@@ -141,8 +142,10 @@ func (s *Server) buildPackageItem(tenantID string, sc *scripts.Script, mode stri
 	// One run is one payload on every named host, so the hosts must
 	// share the package's effective settings.
 	var params map[string]string
+	window := s.maintenanceWindow()
 	for _, id := range endpointIDs {
 		p := settings.Effective(h, id).RunParams(mode)
+		addWindow(h, p, window)
 		for k, v := range override {
 			p[k] = v
 		}

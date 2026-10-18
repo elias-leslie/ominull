@@ -104,10 +104,70 @@ var PackagePlatforms = map[string]struct{ Interpreter, OS string }{
 }
 
 // PackageRoles are the roles a header may name.
-var PackageRoles = map[string]bool{"maintenance_mode": true}
+var PackageRoles = map[string]bool{RoleMaintenanceMode: true, RoleReboot: true}
 
-// RoleMaintenanceMode is the role of the keep-awake package.
-const RoleMaintenanceMode = "maintenance_mode"
+const (
+	// RoleMaintenanceMode is the role of the keep-awake package: switched on
+	// from a machine's page or by a playbook, never scheduled.
+	RoleMaintenanceMode = "maintenance_mode"
+	// RoleReboot is the role of the restart package: a playbook step (the
+	// hub waits for the machine to come back before the next step), never
+	// scheduled.
+	RoleReboot = "reboot"
+)
+
+// Run options: what a package run does when someone is using the machine,
+// and the maintenance window. The hub sets them for a run (never saved per
+// package), the owner sees them in the approval, and they gate enforce and
+// revert only; an audit never waits.
+//
+//	when_busy: skip (the default: report "skipped" and stop), wait (check
+//	           again every minute, for up to half the package's time limit),
+//	           run (do not wait for open apps or games).
+//	window:    HH:MM-HH:MM in the machine's own time; inside it the run does
+//	           not wait for people (battery and Windows Update still count).
+var (
+	RunOptionNames = map[string]bool{"when_busy": true, "window": true}
+	WhenBusyValues = map[string]bool{"skip": true, "wait": true, "run": true}
+	windowRe       = regexp.MustCompile(`^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$`)
+)
+
+// CheckWindow checks a maintenance window: "HH:MM-HH:MM", start and end
+// different (it may cross midnight).
+func CheckWindow(v string) error {
+	m := windowRe.FindStringSubmatch(v)
+	if m == nil || m[1]+m[2] == m[3]+m[4] {
+		return errors.New("a maintenance window is HH:MM-HH:MM (24-hour, machine time), start and end different")
+	}
+	return nil
+}
+
+func checkRunOption(k, v string) error {
+	switch k {
+	case "when_busy":
+		if !WhenBusyValues[v] {
+			return errors.New("when_busy is skip, wait or run")
+		}
+	case "window":
+		return CheckWindow(v)
+	}
+	return nil
+}
+
+// RunOptionText says what a run's options do, in the owner's words.
+func RunOptionText(params map[string]string) []string {
+	var out []string
+	switch params["when_busy"] {
+	case "wait":
+		out = append(out, "waits while someone is using the machine")
+	case "run":
+		out = append(out, "does not wait for open apps or games")
+	}
+	if w := params["window"]; w != "" {
+		out = append(out, "inside "+w+" (machine time) it does not wait for people")
+	}
+	return out
+}
 
 // PlatformName is the header's platform, windows when unset.
 func (h *PackageHeader) PlatformName() string {
@@ -136,7 +196,7 @@ var (
 	// fields, the run mode, and environment variables a script relies on
 	// (agents also export each parameter under its bare name).
 	reservedPackageParams = map[string]bool{
-		"mode": true, "script_id": true, "script_version": true, "script_digest": true, "interpreter": true, "source": true,
+		"mode": true, "when_busy": true, "window": true, "script_id": true, "script_version": true, "script_digest": true, "interpreter": true, "source": true,
 		"parameters": true, "timeout_seconds": true, "max_output_bytes": true,
 		"path": true, "pathext": true, "temp": true, "tmp": true, "windir": true, "systemroot": true, "systemdrive": true,
 		"comspec": true, "psmodulepath": true, "programdata": true, "programfiles": true, "allusersprofile": true,
@@ -173,7 +233,7 @@ func ParsePackageHeader(source string) (*PackageHeader, error) {
 	case h.Platform != "" && PackagePlatforms[h.Platform].Interpreter == "":
 		return nil, errors.New("platform must be windows or linux")
 	case h.Role != "" && !PackageRoles[h.Role]:
-		return nil, errors.New("role must be maintenance_mode or left out")
+		return nil, errors.New("role must be maintenance_mode, reboot or left out")
 	}
 	if _, ok := RecurrenceInterval(h.Interval); !ok {
 		return nil, errors.New("interval must be hourly, daily or weekly")
@@ -362,8 +422,17 @@ func (h *PackageHeader) CheckRun(params map[string]string) error {
 	if !RunModes[params["mode"]] {
 		return errors.New("mode must be audit, enforce or revert")
 	}
-	if len(params) != len(h.Params)+1 {
-		return fmt.Errorf("a run of %s carries mode and its %d params, nothing else", h.Name, len(h.Params))
+	opts := 0
+	for k, v := range params {
+		if RunOptionNames[k] {
+			if err := checkRunOption(k, v); err != nil {
+				return err
+			}
+			opts++
+		}
+	}
+	if len(params)-opts != len(h.Params)+1 {
+		return fmt.Errorf("a run of %s carries mode, its %d params and the run options, nothing else", h.Name, len(h.Params))
 	}
 	for _, p := range h.Params {
 		v, ok := params[p.Name]

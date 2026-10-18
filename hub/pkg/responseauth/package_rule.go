@@ -424,11 +424,26 @@ func (it PackageItem) riskNote() string {
 
 // settingsNote names the parameters that differ from the package defaults.
 func (it PackageItem) settingsNote(short bool) string {
+	return it.changesNote(short) + it.optionsNote()
+}
+
+func (it PackageItem) changesNote(short bool) string {
 	if it.Header == nil {
 		return ""
 	}
 	if ch := it.Header.Changes(it.Exec.Parameters, short); len(ch) > 0 {
 		return ", settings " + strings.Join(ch, ", ")
+	}
+	return ""
+}
+
+// optionsNote: the run options (when_busy, window) in the owner's words.
+func (it PackageItem) optionsNote() string {
+	if it.Header == nil {
+		return ""
+	}
+	if t := scripts.RunOptionText(it.Exec.Parameters); len(t) > 0 {
+		return "; " + strings.Join(t, "; ")
 	}
 	return ""
 }
@@ -481,24 +496,69 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 	return "Run maintenance", short, nil
 }
 
-// describePlaybookRun: the steps in order, each with its time limit, risk
-// and changed settings, and the window the grants live for.
+// describePlaybookRun: the steps in order, each with its risk and changed
+// settings, the window the grants live for, and the run options (said once
+// when every step that has them agrees). A long playbook is shown in a
+// compact form (no time limits, short names, the mode only when it is not
+// enforce); one that still does not fit is refused, never cut.
 func describePlaybookRun(pb *PlaybookRun, items []PackageItem, targets []string) (string, string, error) {
-	lead := fmt.Sprintf("Playbook %q as SYSTEM on %s, one step after another, all within %s: ", pb.Name, listTargets(targets), spanText(pb.WindowSeconds))
-	for _, short := range []bool{false, true} {
+	common, same := "", true
+	for _, it := range items {
+		if n := it.optionsNote(); n != "" {
+			if common != "" && n != common {
+				same = false
+			}
+			common = n
+		}
+	}
+	for _, compact := range []bool{false, true} {
+		lead := fmt.Sprintf("Playbook %q as SYSTEM on %s, one step after another, all within %s", pb.Name, listTargets(targets), spanText(pb.WindowSeconds))
+		if compact {
+			lead = fmt.Sprintf("Playbook %q on %s, in order within %s, enforce unless marked", pb.Name, listTargets(targets), spanText(pb.WindowSeconds))
+		}
 		parts := make([]string, 0, len(items))
 		for i, it := range items {
-			step := fmt.Sprintf("%d. %s", i+1, it.Label())
-			if !short {
-				step += fmt.Sprintf(", up to %d min", (it.Exec.TimeoutSeconds+59)/60)
+			note := it.settingsNote(false)
+			if same {
+				note = it.changesNote(false)
 			}
-			parts = append(parts, step+it.riskNote()+it.settingsNote(false))
+			if compact {
+				parts = append(parts, it.shortLabel()+it.riskNote()+note)
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%d. %s, up to %d min", i+1, it.Label(), (it.Exec.TimeoutSeconds+59)/60)+it.riskNote()+note)
 		}
-		if full := lead + strings.Join(parts, "; "); len([]rune(full)) <= approvalMaxSummary {
+		tail := ""
+		if same && common != "" {
+			tail = ". Steps that change something: " + strings.TrimPrefix(common, "; ")
+		}
+		if full := lead + ": " + strings.Join(parts, "; ") + tail; len([]rune(full)) <= approvalMaxSummary {
 			return "Run playbook", full, nil
 		}
 	}
 	return "", "", errors.New("too much to show in one approval; give the playbook fewer steps or change fewer settings")
+}
+
+// shortLabel: the package without its platform prefix ("keep awake" for
+// maintenance mode), and the mode unless it is enforce.
+func (it PackageItem) shortLabel() string {
+	mode := it.Exec.Parameters["mode"]
+	if it.Header == nil {
+		return it.Label()
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(it.Name, "windows-"), "linux-")
+	if it.Header.Role == scripts.RoleMaintenanceMode {
+		if mode == "revert" {
+			return "keep awake off"
+		}
+		if mode == "enforce" {
+			return "keep awake on"
+		}
+	}
+	if mode != "enforce" {
+		name += " (" + mode + ")"
+	}
+	return name
 }
 
 // packageRuleCovers says whether a request is one a package rule may cover

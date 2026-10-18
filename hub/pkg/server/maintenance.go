@@ -36,6 +36,8 @@ type packageRun struct {
 	Fail        int               `json:"fail,omitempty"`
 	RequestedAt time.Time         `json:"requested_at"`
 	CompletedAt *time.Time        `json:"completed_at,omitempty"`
+	// RestartIn is a restart package's warning time (detail.restart_in_seconds).
+	RestartIn int `json:"restart_in_seconds,omitempty"`
 }
 
 type packageStatus struct {
@@ -95,9 +97,12 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 				run.State, run.Reboot, run.Changed = pr.State, pr.Reboot, pr.Changed
 				run.Controls = pr.Controls()
 				run.Pass, run.Fail = scripts.Compliance(run.Controls)
-				var d struct{ Reason, Error string }
+				var d struct {
+					Reason, Error string
+					RestartIn     int `json:"restart_in_seconds"`
+				}
 				if json.Unmarshal(pr.Detail, &d) == nil {
-					run.Reason = d.Reason
+					run.Reason, run.RestartIn = d.Reason, d.RestartIn
 					if run.Reason == "" {
 						run.Reason = d.Error
 					}

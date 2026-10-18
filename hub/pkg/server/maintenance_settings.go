@@ -19,6 +19,27 @@ import (
 	"ominull/hub/pkg/scripts"
 )
 
+// maintenanceWindowSetting holds the fleet maintenance window: "HH:MM-HH:MM"
+// in each machine's own time, inside which enforce and revert runs do not
+// wait for people (battery and Windows Update still count).
+const maintenanceWindowSetting = "maintenance.window"
+
+func (s *Server) maintenanceWindow() string {
+	v, err := s.store.GetSetting(maintenanceWindowSetting)
+	if err != nil || scripts.CheckWindow(v) != nil {
+		return ""
+	}
+	return v
+}
+
+// addWindow gives an enforce or revert run the maintenance window; audits
+// and maintenance mode have no preflight to change.
+func addWindow(h *scripts.PackageHeader, params map[string]string, window string) {
+	if window != "" && params["mode"] != "audit" && h.Role != scripts.RoleMaintenanceMode {
+		params["window"] = window
+	}
+}
+
 // packageDef is one library package with its parsed header.
 type packageDef struct {
 	Script  *scripts.Script
@@ -191,7 +212,7 @@ func (s *Server) getMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 		}
 		pkgs = append(pkgs, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"categories": cats, "packages": pkgs})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"categories": cats, "packages": pkgs, "window": s.maintenanceWindow()})
 }
 
 // settingsChange is one PUT: a package or a category, fleet or endpoint.
@@ -207,6 +228,7 @@ type settingsChange struct {
 	Reason     *string                     `json:"reason"`     // required on an endpoint override
 	ExpiresAt  json.RawMessage             `json:"expires_at"` // RFC 3339 or YYYY-MM-DD; null clears
 	Reset      bool                        `json:"reset"`
+	Window     *string                     `json:"window"` // alone: the fleet maintenance window ("" clears)
 }
 
 // optString reads an optional field: absent -> keep, null -> clear.
@@ -253,6 +275,31 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 			writeJSONError(w, http.StatusBadRequest, "endpoint not found")
 			return
 		}
+	}
+	if c.Window != nil {
+		if c.Package != "" || c.Category != "" || c.EndpointID != "" {
+			writeJSONError(w, http.StatusBadRequest, "the maintenance window is one fleet setting; send it on its own")
+			return
+		}
+		v := strings.TrimSpace(*c.Window)
+		if v != "" {
+			if err := scripts.CheckWindow(v); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if err := s.store.SetSetting(maintenanceWindowSetting, v); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		what := "cleared"
+		if v != "" {
+			what = "set to " + v + " (machine time)"
+		}
+		s.audit(r, "MAINTENANCE_SETTINGS_CHANGED", maintenanceWindowSetting, "maintenance window "+what)
+		r.URL.RawQuery = ""
+		s.getMaintenanceSettings(w, r, tenantID)
+		return
 	}
 	var key string
 	var h *scripts.PackageHeader
