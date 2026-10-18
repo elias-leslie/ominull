@@ -28,8 +28,8 @@ build/test_agent_trust
 gcc -O1 -g -fsanitize=undefined,address -fno-sanitize-recover=undefined -Wall -Wextra -Iagent/include \
     agent/tests/test_agent_trust.c -o build/test_agent_trust_san
 build/test_agent_trust_san >/dev/null
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
-    agent/tests/test_agent_trust.c -o build/test_agent_trust.exe -ladvapi32
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include -DOMINULL_TEST_BCRYPT \
+    agent/tests/test_agent_trust.c -o build/test_agent_trust.exe -ladvapi32 -lbcrypt
 if command -v wine >/dev/null 2>&1; then
     WINEDEBUG=-all wine build/test_agent_trust.exe
 fi

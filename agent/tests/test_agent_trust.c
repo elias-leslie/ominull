@@ -769,10 +769,11 @@ static void init_routine(void) {
 }
 
 static void routine_offer(int64_t now, const char* epoch, const char* keys, const char* sig) {
-    static char trust[16384];
-    snprintf(trust, sizeof(trust), "{\"routine_keys\":{\"epoch\":%s,\"keys\":\"%s\",\"sig\":\"%s\"}}", epoch, keys, sig);
+    /* At the top level of the heartbeat answer, as the hub sends it. */
+    snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"is_isolated\":false,\"routine_keys\":{\"epoch\":%s,\"keys\":\"%s\",\"sig\":\"%s\"}}",
+             epoch, keys, sig);
     T.refused[0] = '\0';
-    beat(now, trust, NULL, NULL, 0);
+    Trust_ProcessHeartbeat(&T, resp, strlen(resp), now);
 }
 
 /* An agent update as the updaters check it: the key that verifies the
@@ -810,6 +811,7 @@ static void test_routine_keys(int64_t now) {
     char st[1024];
     Trust_RoutineStatement(5, FXR_LIST_AB, st, sizeof(st));
     expect("routine-keys statement bytes", strcmp(st, FXR_STMT_5_AB) == 0);
+    expect("routine-keys statement matches the Go form byte for byte", strcmp(st, FX_ROUTINE_STATEMENT) == 0);
     Trust_RoutineStatement(6, "", st, sizeof(st));
     expect("empty routine-keys statement bytes", strcmp(st, "OMINULL-ROUTINE-KEYS-V1\nepoch=6\nkeys=\n") == 0);
     char pem[200];

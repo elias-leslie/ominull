@@ -1345,7 +1345,8 @@ static inline void Trust_PinKeys(TrustContext* t, const char* obj, const char* e
 /* ---------------------------------------------------------------------------
  * Routine release keys.
  *
- * The hub's heartbeat answer carries trust.routine_keys = {epoch, keys, sig}:
+ * The hub's heartbeat answer carries routine_keys = {epoch, keys, sig}
+ * (top level, sent while the reported routine_epoch is behind):
  * keys is "<id>:<xy>,..." (0 to 4 entries, ids 16 lowercase hex and strictly
  * ascending, xy the 128 lowercase hex of a raw P-256 point), sig a base64 DER
  * signature by the compiled-in release key over
@@ -1977,11 +1978,8 @@ static inline bool Trust_ProcessHeartbeat(TrustContext* t, const char* resp, siz
     const char* end = resp + len;
     const char *v, *ve;
     if (!t->routine_loaded && t->verify_release) Trust_LoadRoutine(t);
-    if (TJ_Member(resp, end, "trust", &v, &ve) == 1) {
-        Trust_PinKeys(t, v, ve, now);
-        const char *rv, *rve;
-        if (TJ_Member(v, ve, "routine_keys", &rv, &rve) == 1) Trust_AcceptRoutineKeys(t, rv, rve, now);
-    }
+    if (TJ_Member(resp, end, "trust", &v, &ve) == 1) Trust_PinKeys(t, v, ve, now);
+    if (TJ_Member(resp, end, "routine_keys", &v, &ve) == 1) Trust_AcceptRoutineKeys(t, v, ve, now);
     if (t->mfloor_dirty && !t->untrusted && Trust_WriteFloors(t, t->mfloor, t->mfloorCount)) t->mfloor_dirty = false;
     if (TJ_Member(resp, end, "capability_manifest", &v, &ve) == 1) {
         if (t->mfloor_dirty) Trust_Refuse(t, now, "the manifest floor could not be made durable; no manifest is taken until it is%s", "");

@@ -177,7 +177,21 @@ func cString(s string) string {
 	return b.String()
 }
 
-func buildTrustFixtures() []byte {
+// fixtureRoutineStatement is the routine-keys statement the agent's trust
+// test rebuilds byte for byte (Trust_RoutineStatement).
+func fixtureRoutineStatement(t *testing.T) string {
+	t.Helper()
+	// The two routine keys of agent/tests/routine_fixtures.h.
+	const a = "f18106cc279beb0f3411d37577f5c8257012b03d4aee6a7e7d4fee7ee16c47927c8d9b5bd650515cf5e73509ba0bc745280824ea65d7bc67cad25b620709b0e5"
+	const b = "616bbff13edb8680eedd4c0b06077fd26473d14123f96cb6c9f72e71999722fb6ac8c6666d39617eea79a544efd4099ab9541ff611cdcfdf71f177a5256dacee"
+	st, err := RoutineKeysStatement(5, "1111111111111111:"+a+",2222222222222222:"+b)
+	if err != nil {
+		t.Fatalf("routine keys statement: %v", err)
+	}
+	return st
+}
+
+func buildTrustFixtures(t *testing.T) []byte {
 	resp, auto, pol, evil := fixtureKey("response"), fixtureKey("auto"), fixtureKey("policy"), fixtureKey("attacker")
 	ep := fixtureEndpoint
 	day, tenMin := int64(86400), int64(600)
@@ -265,6 +279,7 @@ func buildTrustFixtures() []byte {
 	fmt.Fprintf(&out, "#define FX_RESPONSE_PUB %s\n#define FX_AUTO_PUB %s\n#define FX_POLICY_PUB %s\n", cString(pubHex(resp)), cString(pubHex(auto)), cString(pubHex(pol)))
 	fmt.Fprintf(&out, "#define FX_ATTACKER_PUB %s\n", cString(pubHex(evil)))
 	fmt.Fprintf(&out, "#define FX_RELEASE_STATEMENT %s\n", cString(ReleaseStatement("ominull-agent_9.9.9_amd64.deb", "9.9.9", strings.Repeat("AB", 32))))
+	fmt.Fprintf(&out, "#define FX_ROUTINE_STATEMENT %s\n", cString(fixtureRoutineStatement(t)))
 	fmt.Fprintf(&out, "#define FX_TB_PUB_PEM %s\n", cString(fixtureReleasePubPEM()))
 	relKey, wrong := fixtureReleaseKey("release"), fixtureReleaseKey("not-the-release-key")
 	for _, b := range fixtureBundles() {
@@ -292,7 +307,7 @@ func buildTrustFixtures() []byte {
 }
 
 func TestAgentTrustFixtures(t *testing.T) {
-	want := buildTrustFixtures()
+	want := buildTrustFixtures(t)
 	path := filepath.Join("..", "..", "..", "agent", "tests", "trust_fixtures.h")
 	if os.Getenv("OMINULL_UPDATE_FIXTURES") == "1" {
 		if err := os.WriteFile(path, want, 0644); err != nil {

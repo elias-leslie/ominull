@@ -69,8 +69,9 @@ release keys, and only for agent updates: the package `.sig` and its
 grants, key rotation and routine-key statements still verify against the
 compiled-in key alone.
 
-The hub sends them in the heartbeat answer as
-`trust.routine_keys = {"epoch": N, "keys": "<list>", "sig": "<base64 DER>"}`.
+The hub sends them at the top level of the heartbeat answer, while the
+agent's reported `routine_epoch` is below the hub's, as
+`"routine_keys": {"epoch": N, "keys": "<list>", "sig": "<base64 DER>"}`.
 The agent rebuilds the statement
 
 ```
