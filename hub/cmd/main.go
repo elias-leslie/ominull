@@ -33,7 +33,7 @@ const banner = `
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
 const (
-	defaultAgentVersion = "1.8.89"
+	defaultAgentVersion = "1.8.90"
 )
 
 func main() {
