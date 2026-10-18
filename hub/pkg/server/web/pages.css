@@ -398,6 +398,38 @@ body.page .btn[disabled] {
   border-bottom-color: var(--brand);
 }
 
+/* State chips above the jobs list: each narrows the list to one state. */
+.job-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.job-states a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 32px;
+  padding: 2px var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: var(--t-3);
+}
+
+.job-states a:hover,
+.job-states a:focus-visible {
+  border-color: var(--ink-3);
+}
+
+.job-states a[aria-current="true"] {
+  border-color: var(--brand);
+  color: var(--ink);
+  background: var(--raised);
+}
+
 .job-meta {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(8.5em, 1fr));

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,10 +54,21 @@ type jobControl struct {
 	Careful                                bool
 }
 
+// jobStateFilter is one state chip above the list: how many jobs in this
+// tab are in that state, and the link that shows only them.
+type jobStateFilter struct {
+	Label, Tone, Href string
+	Count             int
+	Current           bool
+}
+
 type jobsPageBody struct {
 	Off      bool
 	History  bool
 	Rows     []jobRow
+	States   []jobStateFilter
+	State    string // the state the list is narrowed to, if any
+	Shown    int    // rows in this tab before narrowing
 	Open     int
 	Done     int
 	Zone     string
@@ -137,6 +149,7 @@ func (s *Server) handleJobsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	body := s.buildJobsPage(viewer, q.Get("id"), q.Get("view") == "history", time.Now())
+	body.narrowToState(q.Get("state"))
 	data := pageData{Title: "Response jobs", Operator: viewer.Email, Role: viewer.Role, Back: "response", Body: body}
 	if body.View != nil && body.Gone == "" {
 		data.Script = "jobs.js"
@@ -232,7 +245,42 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 			Label: label, Tone: tone, ErrorCode: j.ErrorCode, Attempt: j.Attempt,
 		})
 	}
+	body.Shown = len(body.Rows)
 	return body
+}
+
+// narrowToState lists each state present in this tab, in the order it first
+// appears (newest job first), and keeps only the rows in state when it names
+// one of them. The labels are the hub's own (Running, Stalled, Taken by the
+// agent...), so a filter never invents a state.
+func (b *jobsPageBody) narrowToState(state string) {
+	base := "/console/jobs?"
+	if b.History {
+		base = "/console/jobs?view=history&"
+	}
+	index := map[string]int{}
+	for _, r := range b.Rows {
+		i, ok := index[r.Label]
+		if !ok {
+			i = len(b.States)
+			index[r.Label] = i
+			b.States = append(b.States, jobStateFilter{Label: r.Label, Tone: r.Tone, Href: base + "state=" + url.QueryEscape(r.Label)})
+		}
+		b.States[i].Count++
+	}
+	i, ok := index[state]
+	if !ok || len(b.States) < 2 {
+		return
+	}
+	b.State = state
+	b.States[i].Current = true
+	kept := b.Rows[:0]
+	for _, r := range b.Rows {
+		if r.Label == state {
+			kept = append(kept, r)
+		}
+	}
+	b.Rows = kept
 }
 
 func (s *Server) buildJobView(job *response.JobRecord, hostName string, stamp func(time.Time) string, canAct bool) *jobView {

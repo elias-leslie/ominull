@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +130,40 @@ func TestJobsPage(t *testing.T) {
 	}
 	if body := get("?id=nope", "admin").Body.String(); !strings.Contains(body, "No response job with ID \u201cnope\u201d.") || strings.Contains(body, "jobs.js") {
 		t.Error("an unknown job id is not explained")
+	}
+}
+
+// The state chips list the hub's own labels with counts, newest first, and a
+// chip narrows the list to that state; an unknown state shows everything.
+func TestJobsPageStateFilter(t *testing.T) {
+	t.Parallel()
+	rows := func() []jobRow {
+		return []jobRow{
+			{ID: "1", Label: "Running", Tone: "warn"},
+			{ID: "2", Label: "Taken by the agent", Tone: "info"},
+			{ID: "3", Label: "Running", Tone: "warn"},
+			{ID: "4", Label: "Stalled", Tone: "crit"},
+		}
+	}
+	b := jobsPageBody{Rows: rows(), Shown: 4}
+	b.narrowToState("Taken by the agent")
+	if len(b.Rows) != 1 || b.Rows[0].ID != "2" || b.State != "Taken by the agent" {
+		t.Fatalf("narrowed rows %+v", b.Rows)
+	}
+	var got []string
+	for _, f := range b.States {
+		got = append(got, f.Label+"="+strconv.Itoa(f.Count)+"|"+strconv.FormatBool(f.Current))
+	}
+	if strings.Join(got, ",") != "Running=2|false,Taken by the agent=1|true,Stalled=1|false" {
+		t.Errorf("states %q", got)
+	}
+	if b.States[0].Href != "/console/jobs?state=Running" {
+		t.Errorf("href %q", b.States[0].Href)
+	}
+
+	h := jobsPageBody{History: true, Rows: rows(), Shown: 4}
+	h.narrowToState("nonsense")
+	if len(h.Rows) != 4 || h.State != "" || h.States[1].Href != "/console/jobs?view=history&state=Taken+by+the+agent" {
+		t.Errorf("unknown state: %d rows, state %q, href %q", len(h.Rows), h.State, h.States[1].Href)
 	}
 }

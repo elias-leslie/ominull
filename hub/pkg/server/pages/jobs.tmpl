@@ -67,6 +67,10 @@
   <a href="/console/jobs?view=history"{{if .History}} aria-current="page"{{end}}>Finished <span class="dim-3">{{.Done}}</span></a>
 </nav>
 {{range .Problems}}<p class="page-problem" role="alert">{{.}}</p>{{end}}
+{{if gt (len .States) 1}}<nav class="job-states" aria-label="Show jobs in one state">
+  <a href="/console/jobs{{if .History}}?view=history{{end}}"{{if not .State}} aria-current="true"{{end}}>All <span class="dim-3">{{.Shown}}</span></a>
+  {{range .States}}<a href="{{.Href}}"{{if .Current}} aria-current="true"{{end}}><span class="st" data-state="{{.Tone}}">{{.Label}}</span> <span class="dim-3">{{.Count}}</span></a>{{end}}
+</nav>{{end}}
 <section class="card page-card">
   {{if .Rows}}
   <ul class="term-list">
@@ -75,7 +79,6 @@
       <div class="term-list-what"><a href="/console/jobs?id={{.ID}}"><b>{{.Action}}</b></a> on <b>{{.Host}}</b>
         <span class="st" data-state="{{.Tone}}">{{.Label}}</span>{{if .ErrorCode}} <span class="dim-3">{{.ErrorCode}}</span>{{end}}{{if gt .Attempt 1}} <span class="dim-3">attempt {{.Attempt}}</span>{{end}}
         <span class="dim-3">{{.When}}{{if .Who}} · {{.Who}}{{end}}</span></div>
-      <a class="btn mini" href="/console/jobs?id={{.ID}}">Details</a>
     </li>
   {{end}}
   </ul>

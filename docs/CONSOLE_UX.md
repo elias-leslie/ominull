@@ -104,8 +104,9 @@ Assets page head, so the phone top bar fits on one row.
 
 - Response page: **Unlock** primary in the head; script library rows compact with
   descriptions on demand.
-- Jobs page: state filter chips; runs offered or taken but silent for over an
-  hour show a "stuck?" chip.
+- Jobs page: state filter chips built from the hub's own state labels. No
+  generic "stuck?" rule: the hub labels stalled and waiting runs itself, and
+  terminal and screen jobs that never closed are closed at the source.
 - Timeline: one line per event (time, kind, title, host); detail on expand.
 
 ### Decisions
@@ -208,3 +209,16 @@ Rendered from synthetic events (22 events on 14 lines):
 
 ![Timeline, after](images/console-ux/after-desk-timeline.png)
 ![Timeline, phone, after](images/console-ux/after-phone-timeline.png)
+
+### Jobs
+
+- Above the list, one chip per state in the current tab (In flight or
+  Finished) with its count, using the hub's own labels (Running, Stalled,
+  Taken by the agent...). A chip narrows the list to that state; All shows
+  everything again. The labels come from the hub, so the page never invents a
+  state.
+- Each job is one line (action, host, state, when, who); the action is the
+  link to the job, so the separate Details button is gone.
+
+![Jobs, after](images/console-ux/after-desk-jobs.png)
+![Jobs narrowed to one state, phone, after](images/console-ux/after-phone-jobs.png)
