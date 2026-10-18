@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,12 @@ type timelineItem struct {
 	HostID string
 	Who    string
 	Detail string
+	// Repeats of the same event in a row (same kind, title, host and actor)
+	// share one line: Count says how many, Since is the earliest clock and
+	// Details holds their distinct details, newest first.
+	Count   int
+	Since   string
+	Details []string
 }
 
 type timelineDay struct {
@@ -61,11 +68,16 @@ type timelineOption struct {
 type timelineBody struct {
 	Hosts     []timelineOption
 	Ranges    []timelineOption
+	Kinds     []timelineOption
 	HostName  string
 	RangeName string
 	Zone      string
 	Days      []timelineDay
 	Count     int
+	Lines     int
+	KindName  string
+	events    []timelineItem
+	loc       *time.Location
 	Truncated bool
 	Problems  []string
 }
@@ -76,6 +88,7 @@ func (s *Server) handleTimelinePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := s.buildTimeline(r.URL.Query().Get("endpoint"), r.URL.Query().Get("range"), time.Now())
+	body.filterKind(r.URL.Query().Get("kind"))
 	s.servePage(w, r, "timeline", pageData{Title: "Timeline", Operator: viewer.Email, Role: viewer.Role, Back: "alerts", Body: body})
 }
 
@@ -162,17 +175,83 @@ func (s *Server) buildTimeline(endpointID, rangeValue string, now time.Time) tim
 		items = items[:timelineShown]
 		body.Truncated = true
 	}
-	body.Count = len(items)
-	for _, it := range items {
-		local := it.At.In(loc)
-		it.Clock = local.Format("15:04")
-		label := local.Format("Monday, January 2")
-		if n := len(body.Days); n == 0 || body.Days[n-1].Label != label {
-			body.Days = append(body.Days, timelineDay{Label: label})
-		}
-		body.Days[len(body.Days)-1].Items = append(body.Days[len(body.Days)-1].Items, it)
-	}
+	body.events, body.loc = items, loc
+	body.group("")
 	return body
+}
+
+// group lays the events out by day, one line per event, and folds repeats
+// that follow each other into one line. kind keeps only that kind.
+func (b *timelineBody) group(kind string) {
+	b.Days, b.Count, b.Lines = nil, 0, 0
+	for _, it := range b.events {
+		if kind != "" && it.Kind != kind {
+			continue
+		}
+		b.Count++
+		local := it.At.In(b.loc)
+		it.Clock = local.Format("15:04")
+		it.Since = it.Clock
+		it.Count = 1
+		if it.Detail != "" {
+			it.Details = []string{it.Detail}
+		}
+		label := local.Format("Monday, January 2")
+		if n := len(b.Days); n == 0 || b.Days[n-1].Label != label {
+			b.Days = append(b.Days, timelineDay{Label: label})
+		}
+		day := &b.Days[len(b.Days)-1]
+		if n := len(day.Items); n > 0 && sameTimelineEvent(day.Items[n-1], it) {
+			prev := &day.Items[n-1]
+			prev.Count++
+			prev.Since = it.Clock
+			if it.Detail != "" && !containsString(prev.Details, it.Detail) {
+				prev.Details = append(prev.Details, it.Detail)
+			}
+			continue
+		}
+		day.Items = append(day.Items, it)
+		b.Lines++
+	}
+}
+
+func sameTimelineEvent(a, b timelineItem) bool {
+	return a.Kind == b.Kind && a.Title == b.Title && a.HostID == b.HostID && a.Host == b.Host && a.Who == b.Who && a.Tone == b.Tone
+}
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// filterKind keeps one kind of event ("Finding", "Containment", ...) and
+// lists every kind present, with its count, for the filter. An unknown kind
+// shows everything.
+func (b *timelineBody) filterKind(kind string) {
+	counts := map[string]int{}
+	var order []string
+	for _, it := range b.events {
+		if counts[it.Kind] == 0 {
+			order = append(order, it.Kind)
+		}
+		counts[it.Kind]++
+	}
+	sort.Strings(order)
+	if counts[kind] == 0 {
+		kind = ""
+	}
+	b.Kinds = []timelineOption{{Value: "", Label: "Everything", Selected: kind == ""}}
+	for _, k := range order {
+		b.Kinds = append(b.Kinds, timelineOption{Value: k, Label: k + " (" + strconv.Itoa(counts[k]) + ")", Selected: k == kind})
+	}
+	if kind != "" {
+		b.KindName = strings.ToLower(kind)
+		b.group(kind)
+	}
 }
 
 // timelineRelatedIDs collects the ids audit entries use for things that

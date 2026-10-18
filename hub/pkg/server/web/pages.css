@@ -116,7 +116,7 @@ body.page {
   grid-template-columns: 3.5em 8.5em minmax(0, 1fr);
   gap: var(--s-3);
   align-items: baseline;
-  padding: var(--s-2) var(--s-3);
+  padding: 6px var(--s-3);
   border-top: 1px solid var(--line);
 }
 
@@ -130,18 +130,53 @@ body.page {
   color: var(--ink-2);
 }
 
-.tl-what p {
+.tl-what {
   margin: 0;
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.tl-what summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.tl-what summary::-webkit-details-marker {
+  display: none;
+}
+
+.tl-what summary::after {
+  content: " \25B8";
+  color: var(--ink-3);
+  font-size: var(--t-2);
+}
+
+.tl-what[open] summary::after {
+  content: " \25BE";
+}
+
+.tl-what summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 
 .tl-title {
   font-size: var(--t-4);
 }
 
+.tl-n {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-c);
+  padding: 0 4px;
+}
+
 .tl-meta {
   font-size: var(--t-3);
-  color: var(--ink-2);
+  color: var(--ink-3);
+  margin-left: var(--s-2);
 }
 
 .tl-meta a {
@@ -150,7 +185,8 @@ body.page {
 
 .tl-detail {
   font-size: var(--t-3);
-  color: var(--ink-3);
+  color: var(--ink-2);
+  margin: var(--s-1) 0 0;
 }
 
 @media (max-width: 600px) {

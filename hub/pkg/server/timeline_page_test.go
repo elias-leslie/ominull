@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,5 +126,63 @@ func TestTimelineTerminalEntries(t *testing.T) {
 	}
 	if strings.Join(titles, "|") != "Ended a terminal|Opened a terminal" {
 		t.Errorf("terminal entries %q", titles)
+	}
+}
+
+// Repeats of the same event in a row share one line with a count, and the
+// What filter keeps one kind of event, folding its repeats even when other
+// kinds sat between them.
+func TestTimelineFoldsRepeatsAndFiltersKind(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-web", TenantID: "t-01", Hostname: "web-01", IP: "10.0.0.11"}); err != nil {
+		t.Fatal(err)
+	}
+	// Noon yesterday on the hub's clock, so the five events never straddle midnight.
+	loc := store.GetDetectionTuning().Location()
+	y, mo, d := time.Now().In(loc).AddDate(0, 0, -1).Date()
+	now := time.Date(y, mo, d, 12, 0, 0, 0, loc)
+	at := func(m int) time.Time { return now.Add(-time.Duration(m) * time.Minute).UTC() }
+	for i, e := range []storage.AuditEntry{
+		{Action: "CONSOLE_SIGNIN", Details: "admin key", Timestamp: at(10)},
+		{Action: "CONSOLE_SIGNIN", Details: "admin key", Timestamp: at(20)},
+		{Action: "CONSOLE_SIGNIN", Details: "passkey", Timestamp: at(30)},
+		{Action: "ISOLATE_HOST", Resource: "ep-web", Timestamp: at(40)},
+		{Action: "CONSOLE_SIGNIN", Details: "admin key", Timestamp: at(50)},
+	} {
+		e.ID, e.TenantID, e.Username = "au-"+strconv.Itoa(i), "t-01", "owner@example.invalid"
+		if err := store.RecordAudit(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body := srv.buildTimeline("", "24h", now)
+	if body.Count != 5 || body.Lines != 3 {
+		t.Fatalf("count %d lines %d, want 5 events on 3 lines", body.Count, body.Lines)
+	}
+	first := body.Days[0].Items[0]
+	if first.Title != "Console signin" || first.Count != 3 || strings.Join(first.Details, "|") != "admin key|passkey" {
+		t.Errorf("folded line %+v", first)
+	}
+
+	body.filterKind("Sign-in")
+	if body.Count != 4 || body.Lines != 1 || body.Days[0].Items[0].Count != 4 {
+		t.Errorf("sign-in filter: count %d lines %d", body.Count, body.Lines)
+	}
+	if len(body.Kinds) != 3 || !body.Kinds[2].Selected || body.Kinds[2].Label != "Sign-in (4)" {
+		t.Errorf("kinds %+v", body.Kinds)
+	}
+	body.filterKind("nonsense")
+	if !body.Kinds[0].Selected {
+		t.Error("an unknown kind does not fall back to everything")
+	}
+
+	req := httptest.NewRequest("GET", "/console/timeline?range=7d&kind=Containment", nil)
+	req.AddCookie(sessionFor(t, srv, "admin", "admin"))
+	rec := httptest.NewRecorder()
+	srv.handleTimelinePage(rec, req)
+	page := rec.Body.String()
+	if !strings.Contains(page, "Isolate host") || strings.Contains(page, "Console signin") || !strings.Contains(page, `<option value="Containment" selected>Containment (1)</option>`) {
+		t.Errorf("containment filter page does not hold just the isolation")
 	}
 }

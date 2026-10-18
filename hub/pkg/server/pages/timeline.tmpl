@@ -6,10 +6,13 @@
   <label>When
     <select name="range">{{range .Ranges}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
   </label>
+  {{if .Kinds}}<label>What
+    <select name="kind">{{range .Kinds}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  </label>{{end}}
   <button class="btn btn-primary" type="submit">Show</button>
 </form>
 {{range .Problems}}<p class="page-problem" role="alert">{{.}}</p>{{end}}
-<p class="page-note">{{if .Count}}{{.Count}} {{if eq .Count 1}}event{{else}}events{{end}} for {{.HostName}}, {{.RangeName}}. Times in {{.Zone}}.{{if .Truncated}} Only the newest are shown; pick one host or a shorter window to see the rest.{{end}}{{else}}Nothing recorded for {{.HostName}} in the {{.RangeName}}.{{end}}</p>
+<p class="page-note">{{if .Count}}{{.Count}} {{if .KindName}}{{.KindName}} {{end}}{{if eq .Count 1}}event{{else}}events{{end}} for {{.HostName}}, {{.RangeName}}{{if lt .Lines .Count}}; repeats in a row share a line{{end}}. Times in {{.Zone}}.{{if .Truncated}} Only the newest are shown; pick one host or a shorter window to see the rest.{{end}}{{else}}Nothing recorded for {{.HostName}} in the {{.RangeName}}.{{end}}</p>
 {{range .Days}}
 <section class="tl-day">
   <h2>{{.Label}}</h2>
@@ -18,11 +21,11 @@
     <li class="tl-item">
       <time datetime="{{.At.UTC.Format "2006-01-02T15:04:05Z07:00"}}">{{.Clock}}</time>
       <span class="st" data-state="{{.Tone}}">{{.Kind}}</span>
-      <div class="tl-what">
-        <p class="tl-title">{{.Title}}</p>
-        <p class="tl-meta">{{if .Host}}<a href="/console/timeline?endpoint={{.HostID}}">{{.Host}}</a>{{end}}{{if and .Host .Who}} · {{end}}{{.Who}}</p>
-        {{if .Detail}}<p class="tl-detail">{{.Detail}}</p>{{end}}
-      </div>
+      {{if .Details}}<details class="tl-what">
+        <summary><span class="tl-title">{{.Title}}</span>{{if gt .Count 1}} <span class="tl-n" title="{{.Count}} times from {{.Since}} to {{.Clock}}">×{{.Count}}</span>{{end}}{{if or .Host .Who}} <span class="tl-meta">{{if .Host}}<a href="/console/timeline?endpoint={{.HostID}}">{{.Host}}</a>{{end}}{{if and .Host .Who}} · {{end}}{{.Who}}</span>{{end}}</summary>
+        {{if gt .Count 1}}<p class="tl-detail">{{.Count}} times, {{.Since}} to {{.Clock}}.</p>{{end}}
+        {{range .Details}}<p class="tl-detail">{{.}}</p>{{end}}
+      </details>{{else}}<p class="tl-what"><span class="tl-title">{{.Title}}</span>{{if gt .Count 1}} <span class="tl-n" title="{{.Count}} times from {{.Since}} to {{.Clock}}">×{{.Count}}</span>{{end}}{{if or .Host .Who}} <span class="tl-meta">{{if .Host}}<a href="/console/timeline?endpoint={{.HostID}}">{{.Host}}</a>{{end}}{{if and .Host .Who}} · {{end}}{{.Who}}</span>{{end}}</p>{{end}}
     </li>
   {{end}}
   </ol>

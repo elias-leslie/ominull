@@ -191,3 +191,20 @@ in demo mode, with the fixture browser suite and the axe responsive check.
 ![Policy, phone, after](images/console-ux/after-phone-policy.png)
 ![Access, after](images/console-ux/after-desk-access.png)
 ![Audit, after](images/console-ux/after-desk-audit.png)
+
+### Timeline
+
+- One line per event: time, kind, title, then host and who on the same line.
+  The detail opens with the line (a native disclosure, so it works without a
+  script and from the keyboard).
+- The same event repeated in a row (same kind, title, host and actor) shares
+  one line with a count ("×6") and opens to the time span and each distinct
+  detail. The page line says when repeats were folded.
+- A **What** filter keeps one kind (Finding, Hunt lead, Containment,
+  Approval, Sign-in...), with each kind's count; repeats of that kind fold
+  even when other kinds sat between them.
+
+Rendered from synthetic events (22 events on 14 lines):
+
+![Timeline, after](images/console-ux/after-desk-timeline.png)
+![Timeline, phone, after](images/console-ux/after-phone-timeline.png)
