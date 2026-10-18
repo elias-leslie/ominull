@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
