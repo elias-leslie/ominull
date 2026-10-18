@@ -16,6 +16,12 @@ package server
 // for it; the run is dispatched once approved. An ask the owner declines or
 // lets expire is not filed again for the same settings for a day. Disabling a
 // package or switching it to audit never asks.
+//
+// Audit-then-enforce: a safe package whose setting on_drift is "enforce"
+// (mode audit) keeps auditing on its interval; when a host's newest run is a
+// scheduled audit that found drift, the next pass asks for one enforce run
+// there, inside the host's maintenance window, through the same ask (a
+// package rule covering that enforce run approves it at once).
 
 import (
 	"context"
@@ -141,6 +147,18 @@ func packageRunDue(jobs []*response.JobRecord, interval time.Duration, now time.
 	return lastAttempt.IsZero() || now.Sub(lastAttempt) >= maintenanceRetry
 }
 
+// driftNeedsFix: the host's newest run of the package (jobs newest first) is
+// a scheduled audit that finished with drift, and nothing ran after it. One
+// fix per drifting audit: if the fix fails or is declined, the next scheduled
+// audit decides again.
+func driftNeedsFix(jobs []*response.JobRecord) bool {
+	if len(jobs) == 0 || jobs[0].RequestedBy != schedulerName {
+		return false
+	}
+	run := derivePackageRun(jobs[0], time.Now())
+	return run.State == "drift" && run.Mode == "audit" && run.CompletedAt != nil
+}
+
 func (s *Server) runMaintenanceSchedules(now time.Time) {
 	if s.scriptsStore == nil || s.responseStore == nil || s.responseAuth == nil {
 		return
@@ -227,10 +245,14 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 			if err != nil {
 				return err
 			}
+			mode := ""
 			if !packageRunDue(jobs, interval, now) {
-				continue
+				if eff.OnDrift != "enforce" || eff.Mode != "audit" || !driftNeedsFix(jobs) {
+					continue
+				}
+				mode = "enforce" // audit-then-enforce: the scheduled audit found drift
 			}
-			params := eff.RunParams("")
+			params := eff.RunParams(mode)
 			addWindow(d.Header, params, s.windowParams([]string{ep.ID})[ep.ID])
 			if params["window"] != "" && !s.windowOpenOrUnknown(params["window"], ep.ID, now) {
 				continue // enforce waits for the machine's window
@@ -245,8 +267,12 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 			dg := responseauth.ItemDigest(raw)
 			g := groups[dg]
 			if g == nil {
+				label := d.Header.Name + " (" + params["mode"] + ")"
+				if mode == "enforce" {
+					label = d.Header.Name + " (enforce: the scheduled audit found drift)"
+				}
 				g = &pendingAsk{Tenant: tenant, Items: []packageRunItem{{Raw: raw, Digest: dg, Script: d.Script, Version: d.Version.Version}},
-					Label: d.Header.Name + " (" + params["mode"] + ")"}
+					Label: label}
 				groups[dg] = g
 			}
 			g.Targets = append(g.Targets, ep.ID)

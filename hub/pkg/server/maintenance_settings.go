@@ -226,6 +226,7 @@ type settingsChange struct {
 	Enabled    json.RawMessage             `json:"enabled"`
 	Mode       json.RawMessage             `json:"mode"`
 	Interval   json.RawMessage             `json:"interval"`
+	OnDrift    json.RawMessage             `json:"on_drift"` // "enforce" or null
 	Params     map[string]*json.RawMessage `json:"params"`
 	Reason     *string                     `json:"reason"`     // required on an endpoint override
 	ExpiresAt  json.RawMessage             `json:"expires_at"` // RFC 3339 or YYYY-MM-DD; null clears
@@ -327,7 +328,7 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 			writeJSONError(w, http.StatusBadRequest, "category must be maintenance or security")
 			return
 		}
-		if c.Mode != nil || c.Interval != nil || len(c.Params) > 0 {
+		if c.Mode != nil || c.Interval != nil || c.OnDrift != nil || len(c.Params) > 0 {
 			writeJSONError(w, http.StatusBadRequest, "a category has only an enable switch")
 			return
 		}
@@ -411,6 +412,17 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 			writeJSONError(w, http.StatusBadRequest, "interval must be hourly, daily or weekly")
 			return
 		}
+	}
+	if row.OnDrift, err = optString(c.OnDrift, row.OnDrift); err != nil || (row.OnDrift != nil && *row.OnDrift != "enforce" && *row.OnDrift != "") {
+		writeJSONError(w, http.StatusBadRequest, "on_drift must be enforce or null")
+		return
+	}
+	if row.OnDrift != nil && *row.OnDrift == "" {
+		row.OnDrift = nil
+	}
+	if row.OnDrift != nil && (h.Risk != "safe" || h.Role != "") {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("%s is not a safe package; a fix after drift would need your approval every time, so run enforce by hand", h.Name))
+		return
 	}
 	if len(c.Params) > 0 {
 		next := map[string]string{}

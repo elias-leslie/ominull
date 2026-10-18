@@ -321,7 +321,7 @@ One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
 - API: `GET /api/v1/maintenance/settings[?endpoint_id=]` returns packages
   (fleet, endpoint and effective values, parameter definitions) and
   categories. `PUT` (admin) takes `{"package"|"category","endpoint_id",
-  "enabled","mode","interval","params":{name: value|null},"reason",
+  "enabled","mode","interval","on_drift","params":{name: value|null},"reason",
   "expires_at","reset"}`; `null` clears a field, `reset` clears the row.
   `PUT {"window":"22:00-06:00"}` alone sets the fleet maintenance window
   (settings row `maintenance.window`; `""` clears it); GET returns it as
@@ -427,6 +427,14 @@ run dispatches at once; anything else files one ask on the owner's phone and
 waits for it (a host dropping offline keeps the same ask). Once approved the
 run is dispatched to the hosts still due and online. A declined or expired
 ask is not asked again for 24 hours, or until the settings change.
+
+**Audit-then-enforce.** A safe package (not careful, not maintenance mode or Restart) may set `on_drift` to
+`"enforce"` at fleet or machine level (`null` clears it; it applies only while mode is audit). It keeps auditing on
+its interval. When a host's newest run of it is a scheduled audit that finished with `drift`, the next pass asks for
+one enforce run on that host, inside its maintenance window, the same way as any enforce run: a package rule covering
+that enforce payload approves it at once, otherwise it's one owner tap ("PACKAGE (enforce: the scheduled audit found
+drift)"). Nothing more is asked until the next scheduled audit; a hand-run audit's drift never triggers it. Careful
+packages are refused (`400`) because no rule can cover them, so they'd ask every time; run their enforce by hand.
 
 ## Nightshift feed
 

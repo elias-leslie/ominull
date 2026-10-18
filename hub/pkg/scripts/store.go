@@ -128,6 +128,11 @@ func (s *Store) migrate() error {
 	if err := s.initSettings(); err != nil {
 		return err
 	}
+	// Settings tables created before audit-then-enforce.
+	if _, err := s.db.Exec(`ALTER TABLE maintenance_settings ADD COLUMN on_drift TEXT`); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
 	// Libraries created before scripts carried metadata.
 	if _, err := s.db.Exec(`ALTER TABLE scripts ADD COLUMN metadata_json TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {

@@ -212,6 +212,7 @@ type PackageSetting struct {
 	Enabled    *bool             `json:"enabled,omitempty"`
 	Mode       *string           `json:"mode,omitempty"`
 	Interval   *string           `json:"interval,omitempty"`
+	OnDrift    *string           `json:"on_drift,omitempty"` // "enforce": a scheduled audit that finds drift asks for an enforce run
 	Params     map[string]string `json:"params,omitempty"`
 	Reason     string            `json:"reason,omitempty"`     // required on an endpoint override
 	ExpiresAt  *time.Time        `json:"expires_at,omitempty"` // an expired override no longer applies
@@ -221,7 +222,7 @@ type PackageSetting struct {
 
 // Empty: the row overrides nothing.
 func (p *PackageSetting) Empty() bool {
-	return p.Enabled == nil && p.Mode == nil && p.Interval == nil && len(p.Params) == 0
+	return p.Enabled == nil && p.Mode == nil && p.Interval == nil && p.OnDrift == nil && len(p.Params) == 0
 }
 
 func (s *Store) initSettings() error {
@@ -246,7 +247,7 @@ func (s *Store) initSettings() error {
 func (s *Store) ListSettings(tenantID string) ([]PackageSetting, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT package, endpoint_id, enabled, mode, interval, params_json, updated_at, updated_by, reason, expires_at
+	rows, err := s.db.Query(`SELECT package, endpoint_id, enabled, mode, interval, on_drift, params_json, updated_at, updated_by, reason, expires_at
 		FROM maintenance_settings WHERE tenant_id = ? ORDER BY package, endpoint_id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -256,10 +257,10 @@ func (s *Store) ListSettings(tenantID string) ([]PackageSetting, error) {
 	for rows.Next() {
 		var r PackageSetting
 		var enabled sql.NullInt64
-		var mode, interval sql.NullString
+		var mode, interval, onDrift sql.NullString
 		var params string
 		var expires sql.NullTime
-		if err := rows.Scan(&r.Package, &r.EndpointID, &enabled, &mode, &interval, &params, &r.UpdatedAt, &r.UpdatedBy, &r.Reason, &expires); err != nil {
+		if err := rows.Scan(&r.Package, &r.EndpointID, &enabled, &mode, &interval, &onDrift, &params, &r.UpdatedAt, &r.UpdatedBy, &r.Reason, &expires); err != nil {
 			return nil, err
 		}
 		if expires.Valid {
@@ -275,6 +276,9 @@ func (s *Store) ListSettings(tenantID string) ([]PackageSetting, error) {
 		}
 		if interval.Valid {
 			r.Interval = &interval.String
+		}
+		if onDrift.Valid {
+			r.OnDrift = &onDrift.String
 		}
 		_ = json.Unmarshal([]byte(params), &r.Params)
 		out = append(out, r)
@@ -298,7 +302,10 @@ func (s *Store) PutSetting(tenantID string, r PackageSetting) error {
 			enabled = 1
 		}
 	}
-	var mode, interval interface{}
+	var mode, interval, onDrift interface{}
+	if r.OnDrift != nil {
+		onDrift = *r.OnDrift
+	}
 	if r.Mode != nil {
 		mode = *r.Mode
 	}
@@ -313,12 +320,12 @@ func (s *Store) PutSetting(tenantID string, r PackageSetting) error {
 	if r.ExpiresAt != nil {
 		expires = r.ExpiresAt.UTC()
 	}
-	_, err := s.db.Exec(`INSERT INTO maintenance_settings (tenant_id, package, endpoint_id, enabled, mode, interval, params_json, updated_at, updated_by, reason, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO maintenance_settings (tenant_id, package, endpoint_id, enabled, mode, interval, on_drift, params_json, updated_at, updated_by, reason, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id, package, endpoint_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode,
-		interval = excluded.interval, params_json = excluded.params_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+		interval = excluded.interval, on_drift = excluded.on_drift, params_json = excluded.params_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by,
 		reason = excluded.reason, expires_at = excluded.expires_at`,
-		tenantID, r.Package, r.EndpointID, enabled, mode, interval, string(params), time.Now().UTC(), r.UpdatedBy, r.Reason, expires)
+		tenantID, r.Package, r.EndpointID, enabled, mode, interval, onDrift, string(params), time.Now().UTC(), r.UpdatedBy, r.Reason, expires)
 	return err
 }
 
@@ -329,7 +336,8 @@ type EffectiveSetting struct {
 	CategoryEnabled bool              `json:"category_enabled"` // its category's switch
 	Mode            string            `json:"mode"`
 	Interval        string            `json:"interval"`
-	Params          map[string]string `json:"params"` // every declared param
+	OnDrift         string            `json:"on_drift"` // "" or "enforce" (only acted on while mode is audit)
+	Params          map[string]string `json:"params"`   // every declared param
 }
 
 // Settings indexes a tenant's rows.
@@ -394,6 +402,9 @@ func (st Settings) Effective(h *PackageHeader, endpointID string) EffectiveSetti
 		}
 		if r.Interval != nil {
 			e.Interval = *r.Interval
+		}
+		if r.OnDrift != nil {
+			e.OnDrift = *r.OnDrift
 		}
 		for k, v := range r.Params {
 			if p := h.Param(k); p != nil && p.Type != "catalog" && p.Check(v) == nil {
