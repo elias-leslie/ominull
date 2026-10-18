@@ -447,6 +447,52 @@ static void test_json_escaping_win(void) {
     if (escaped) free(escaped);
 }
 
+static void test_long_path_reaches_script(void) {
+    printf("[*] Testing a PATH longer than MAX_PATH reaches the script whole...\n");
+
+    char saved[32768] = {0};
+    DWORD had = GetEnvironmentVariableA("PATH", saved, sizeof(saved));
+    char longPath[32768];
+    int n = snprintf(longPath, sizeof(longPath), "%s", had > 0 && had < sizeof(saved) ? saved : "C:\\Windows\\System32");
+    for (int i = 0; i < 12 && n < 30000; i++) {
+        n += snprintf(longPath + n, sizeof(longPath) - (size_t)n, ";C:\\Program Files\\OmniNull Long Path Padding %02d", i);
+    }
+    n += snprintf(longPath + n, sizeof(longPath) - (size_t)n, ";C:\\omninull-path-tail-marker");
+    SetEnvironmentVariableA("PATH", longPath);
+
+    const char* script_body = "@echo off\r\necho PATHIS=%PATH%\r\n";
+    size_t script_len = strlen(script_body);
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)script_body, script_len, hash);
+    char digest_hex[65];
+    for (int i = 0; i < 32; i++) snprintf(digest_hex + (i * 2), 3, "%02x", hash[i]);
+
+    ScriptExecParamsWin params;
+    memset(&params, 0, sizeof(params));
+    snprintf(params.script_id, sizeof(params.script_id), "scr-test-win-path");
+    params.script_version = 1;
+    snprintf(params.script_digest, sizeof(params.script_digest), "%s", digest_hex);
+    snprintf(params.interpreter, sizeof(params.interpreter), "cmd.exe");
+    snprintf(params.source, sizeof(params.source), "%s", script_body);
+    params.source_len = script_len;
+    params.timeout_seconds = 10;
+    params.max_output_bytes = 65536;
+
+    char output[8192] = {0};
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+    char error_code[64] = {0};
+    int exit_code = ScriptExec_RunContainedWin(&params, "job-win-path", output, sizeof(output),
+        &truncated, &timed_out, &duration_ms, error_code, sizeof(error_code));
+
+    if (had > 0 && had < sizeof(saved)) SetEnvironmentVariableA("PATH", saved);
+
+    expect("long PATH: exit code is 0", exit_code == 0);
+    expect("long PATH: tail of PATH reaches the script", strstr(output, "omninull-path-tail-marker") != NULL);
+    expect("long PATH: PATH is not the ComSpec value", strstr(output, "PATHIS=C:\\windows\\system32\\cmd.exe\r") == NULL &&
+                                                        strstr(output, "PATHIS=C:\\Windows\\System32\\cmd.exe\r") == NULL);
+}
+
 int main(void) {
     printf("=== Starting Windows Script Exec Worker C Tests (Slice 5C) ===\n");
 
@@ -461,6 +507,7 @@ int main(void) {
     test_timeout_containment();
     test_nonzero_exit_code();
     test_json_escaping_win();
+    test_long_path_reaches_script();
 
     printf("\n=== Results: %d tests, %d failures ===\n", g_tests_run, g_failures);
     return g_failures == 0 ? 0 : 1;

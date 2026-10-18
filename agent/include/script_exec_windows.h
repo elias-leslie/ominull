@@ -763,39 +763,34 @@ static inline int ScriptExec_RunSupervisedWin(
         } \
     } while(0)
 
-    // Base system variables
-    char envTmp[MAX_PATH];
-    if (GetEnvironmentVariableA("SystemRoot", envTmp, sizeof(envTmp)) > 0) {
-        char buf[MAX_PATH + 32];
-        snprintf(buf, sizeof(buf), "SystemRoot=%s", envTmp);
-        APPEND_ENV(buf);
-    } else {
-        APPEND_ENV("SystemRoot=C:\\Windows");
+    // Base system variables. Read each into a buffer big enough for any
+    // environment value (32767 chars): GetEnvironmentVariableA returns the
+    // needed size and leaves the buffer untouched when it is too small, which
+    // used to hand scripts a PATH holding the previous variable's value.
+    #define ENV_VALUE_MAX 32768
+    {
+        char* envVal = (char*)malloc(ENV_VALUE_MAX);
+        char* envLine = (char*)malloc(ENV_VALUE_MAX + 32);
+        static const char* const names[] = {"SystemRoot", "SystemDrive", "ComSpec", "PATH"};
+        static const char* const fallbacks[] = {
+            "SystemRoot=C:\\Windows",
+            "SystemDrive=C:",
+            "ComSpec=C:\\Windows\\System32\\cmd.exe",
+            "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+        };
+        for (size_t v = 0; v < sizeof(names) / sizeof(names[0]); v++) {
+            DWORD n = (envVal && envLine) ? GetEnvironmentVariableA(names[v], envVal, ENV_VALUE_MAX) : 0;
+            if (n > 0 && n < ENV_VALUE_MAX) {
+                snprintf(envLine, ENV_VALUE_MAX + 32, "%s=%s", names[v], envVal);
+                APPEND_ENV(envLine);
+            } else {
+                APPEND_ENV(fallbacks[v]);
+            }
+        }
+        free(envVal);
+        free(envLine);
     }
-
-    if (GetEnvironmentVariableA("SystemDrive", envTmp, sizeof(envTmp)) > 0) {
-        char buf[MAX_PATH + 32];
-        snprintf(buf, sizeof(buf), "SystemDrive=%s", envTmp);
-        APPEND_ENV(buf);
-    } else {
-        APPEND_ENV("SystemDrive=C:");
-    }
-
-    if (GetEnvironmentVariableA("ComSpec", envTmp, sizeof(envTmp)) > 0) {
-        char buf[MAX_PATH + 32];
-        snprintf(buf, sizeof(buf), "ComSpec=%s", envTmp);
-        APPEND_ENV(buf);
-    } else {
-        APPEND_ENV("ComSpec=C:\\Windows\\System32\\cmd.exe");
-    }
-
-    if (GetEnvironmentVariableA("PATH", envTmp, sizeof(envTmp)) > 0) {
-        char buf[MAX_PATH + 32];
-        snprintf(buf, sizeof(buf), "PATH=%s", envTmp);
-        APPEND_ENV(buf);
-    } else {
-        APPEND_ENV("PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\WindowsPowerShell\\v1.0");
-    }
+    #undef ENV_VALUE_MAX
 
     {
         char buf[MAX_PATH + 32];
