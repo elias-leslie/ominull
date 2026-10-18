@@ -7,7 +7,7 @@
   "name": "windows-software-removal",
   "risk": "careful"
  },
- "3fb1c82f1936b5add09c80c250e55acadc1104fefa6499442f53dd28942c2b76": {
+ "48442cea0420cd709b5f47c7535d2803494ee11c9d495153681ab8d3ffe1431f": {
   "name": "windows-cleanup",
   "risk": "safe"
  },

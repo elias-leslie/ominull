@@ -1,4 +1,4 @@
-# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports and update caches, then compacts the component store.","category":"maintenance","risk":"safe","reboot":true,"timeout":3600,"interval":"weekly","params":[{"name":"temp_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete Windows Temp files older than this many days"},{"name":"minidump_days","type":"int","default":14,"min":1,"max":3650,"description":"Delete crash minidumps older than this many days"},{"name":"memory_dump_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete the full memory dump once it is this many days old"},{"name":"error_report_days","type":"int","default":30,"min":1,"max":3650,"description":"Delete Windows error reports older than this many days"},{"name":"update_download_days","type":"int","default":0,"min":0,"max":3650,"description":"Delete Windows Update download cache files older than this many days"},{"name":"min_reclaim_mb","type":"int","default":100,"min":0,"max":1048576,"description":"Clean only when at least this many MB can be freed (or the component store needs it)"},{"name":"component_store","type":"bool","default":true,"description":"Compact the component store when Windows recommends it"},{"name":"service_stop_seconds","type":"int","default":60,"min":5,"max":600,"description":"How long to wait for Windows Update to stop before clearing its download cache"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
+# ominull-package: {"name":"windows-cleanup","title":"Cleanup","description":"Deletes old Windows temp files, crash dumps, error reports and update caches, then compacts the component store.","category":"maintenance","risk":"safe","reboot":true,"timeout":3600,"interval":"weekly","params":[{"name":"temp_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete Windows Temp files older than this many days"},{"name":"minidump_days","type":"int","default":14,"min":1,"max":3650,"description":"Delete crash minidumps older than this many days"},{"name":"memory_dump_days","type":"int","default":7,"min":1,"max":3650,"description":"Delete the full memory dump once it is this many days old"},{"name":"error_report_days","type":"int","default":30,"min":1,"max":3650,"description":"Delete Windows error reports older than this many days"},{"name":"update_download_days","type":"int","default":0,"min":0,"max":3650,"description":"Delete Windows Update download cache files older than this many days"},{"name":"min_reclaim_mb","type":"int","default":100,"min":0,"max":1048576,"description":"Clean only when at least this many MB can be freed (or the component store needs it)"},{"name":"component_store","type":"bool","default":true,"description":"Compact the component store when Windows recommends it"},{"name":"dism_analyze_minutes","type":"int","default":15,"min":1,"max":60,"description":"Give up checking the component store after this many minutes (DISM can hang)"},{"name":"dism_cleanup_minutes","type":"int","default":45,"min":1,"max":60,"description":"Give up compacting the component store after this many minutes (DISM can hang)"},{"name":"service_stop_seconds","type":"int","default":60,"min":5,"max":600,"description":"How long to wait for Windows Update to stop before clearing its download cache"},{"name":"idle_minutes","type":"int","default":15,"min":1,"max":1440,"description":"Enforce waits if someone used the computer within this many minutes"},{"name":"log_keep","type":"int","default":20,"min":1,"max":200,"description":"Run logs of this package kept on the machine"}]}
 $ErrorActionPreference = 'Stop'; $ProgressPreference = $WarningPreference = $VerbosePreference = $InformationPreference = 'SilentlyContinue'
 $Pkg = 'windows-cleanup'
 # --- prelude begin (identical in every package; tests compare) ---
@@ -172,10 +172,45 @@ function Measure-Targets {
   $m['delivery_optimization'] = $sum
   $m
 }
+# DISM can hang for hours at no CPU (seen on two laptops, worse with a DISM left from an earlier run).
+# A leftover Dism.exe is ended before starting, and every DISM call is time-boxed: on the limit its whole
+# process tree is killed and the component cleanup is reported skipped, not failed.
+function Stop-StaleDism {
+  foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='Dism.exe'" -ErrorAction SilentlyContinue)) {
+    Write-Log "ending leftover Dism.exe pid $($p.ProcessId) from an earlier run"
+    $null = Invoke-Native 'taskkill.exe' @('/PID', "$($p.ProcessId)", '/T', '/F')
+    $script:Detail.dism_leftover_ended = 1 + [int]$script:Detail.dism_leftover_ended
+  }
+}
+$DismExe = 'dism.exe'
+# Seconds a DISM call may take: its param, never past the package time limit (less 3 minutes to report).
+function Get-DismSeconds([int]$Minutes) {
+  if (-not $script:Started) { $script:Started = Get-Date }
+  $left = $script:PkgTimeout - ((Get-Date) - $script:Started).TotalSeconds - 180
+  [int][math]::Max(0, [math]::Min($Minutes * 60, $left))
+}
+function Invoke-Dism([string[]]$Arguments, [int]$Seconds) {
+  if ($Seconds -le 0) { return @{ code = -2; out = @(); timed_out = $true } }
+  if (-not (Get-Command $DismExe -ErrorAction SilentlyContinue)) { return @{ code = -1; out = @(); timed_out = $false } }
+  $dir = "$($script:Root)\tmp"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $out = Join-Path $dir 'dism.out'; $err = Join-Path $dir 'dism.err'
+  $p = Start-Process -FilePath $DismExe -ArgumentList $Arguments -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+  $null = $p.Handle   # keeps the exit code readable after the process ends
+  if (-not $p.WaitForExit($Seconds * 1000)) {
+    if ((Invoke-Native 'taskkill.exe' @('/PID', "$($p.Id)", '/T', '/F')).code -eq -1) { try { $p.Kill() } catch {} }
+    try { $null = $p.WaitForExit(30000) } catch {}
+    Write-Log "dism timed out after $Seconds s, process tree ended: $($Arguments -join ' ')"
+    return @{ code = -2; out = @(); timed_out = $true }
+  }
+  $p.WaitForExit()   # exited; this also waits for its output to be written out
+  @{ code = $p.ExitCode; out = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue); timed_out = $false }
+}
+function Send-ProgressLine([string]$Text) { [Console]::Error.WriteLine("::progress:: $Text") }
 function Test-ComponentCleanup {
-  $r = Invoke-InPkgTemp { Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore', '/English') }
-  Write-Log "dism analyze exit $($r.code)"
-  [bool]($r.out | Where-Object { $_ -match 'Component Store Cleanup Recommended\s*:\s*Yes' })
+  Send-ProgressLine "checking the component store (up to $($Opt.dism_analyze_minutes) min)"
+  $r = Invoke-InPkgTemp { Invoke-Dism @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore', '/English') (Get-DismSeconds $Opt.dism_analyze_minutes) }
+  Write-Log "dism analyze exit $($r.code) timed_out=$($r.timed_out)"
+  @{ timed_out = $r.timed_out; recommended = [bool]($r.out | Where-Object { $_ -match 'Component Store Cleanup Recommended\s*:\s*Yes' }) }
 }
 function Remove-Old($Target) {
   $freed = 0
@@ -188,7 +223,12 @@ function Remove-Old($Target) {
 function Invoke-Package {
   if ($Mode -eq 'revert') { $script:State = 'na'; $Detail.reason = 'cleanup only deletes files'; return }
   $before = Measure-Targets; $total = 0; foreach ($v in $before.Values) { $total += $v }
-  $dism = $Opt.component_store -and (Test-ComponentCleanup)
+  $dism = $false
+  if ($Opt.component_store) {
+    Stop-StaleDism
+    $a = Test-ComponentCleanup
+    if ($a.timed_out) { $Detail.component_cleanup = 'skipped: timed out' } else { $dism = $a.recommended }
+  }
   $Detail.reclaimable_bytes = $before; $Detail.component_cleanup_recommended = $dism
   Write-Log "reclaimable=$total component_cleanup=$dism"
   if ($total -lt $Opt.min_reclaim_mb * 1MB -and -not $dism) { $script:State = 'ok'; return }
@@ -215,16 +255,20 @@ function Invoke-Package {
   }
   if ($dism) {
     Write-Log 'dism StartComponentCleanup'
-    $r = Invoke-InPkgTemp { Invoke-Native 'dism.exe' @('/Online', '/Cleanup-Image', '/StartComponentCleanup', '/Quiet', '/NoRestart') }
-    $Detail.component_cleanup_exit = $r.code
-    if ($r.code -eq 0 -or $r.code -eq 3010) { $Changed.Add('component_store') } else { $errors += "DISM exit $($r.code)" }
-    if ($r.code -eq 3010) { $script:Reboot = $true }
+    Send-ProgressLine "compacting the component store (up to $($Opt.dism_cleanup_minutes) min)"
+    $r = Invoke-InPkgTemp { Invoke-Dism @('/Online', '/Cleanup-Image', '/StartComponentCleanup', '/Quiet', '/NoRestart') (Get-DismSeconds $Opt.dism_cleanup_minutes) }
+    if ($r.timed_out) { $Detail.component_cleanup = 'skipped: timed out' }
+    else {
+      $Detail.component_cleanup_exit = $r.code
+      if ($r.code -eq 0 -or $r.code -eq 3010) { $Changed.Add('component_store') } else { $errors += "DISM exit $($r.code)" }
+      if ($r.code -eq 3010) { $script:Reboot = $true }
+    }
   }
   $Detail.freed_bytes = $freed
   $Detail.remaining_bytes = Measure-Targets
   if ($errors.Count) { $Detail.errors = $errors; $script:State = 'failed' } else { $script:State = 'fixed' }
 }
-$Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false
+$Changed = New-Object 'System.Collections.Generic.List[string]'; $Detail = [ordered]@{}; $State = 'failed'; $Reboot = $false; $script:Started = Get-Date
 try {
   Initialize-Env; $Opt = Get-PkgParams $PSCommandPath; Start-Log $Opt.log_keep
   $Mode = Get-Mode $env:OMINULL_PARAM_MODE $env:mode; $Detail.mode = $Mode; Write-Log "start $Pkg mode=$Mode"

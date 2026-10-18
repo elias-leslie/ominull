@@ -293,6 +293,28 @@ Check 'debloat and privacy share the registry/original-value helpers' ($blocks['
     Check "cleanup: age filter finds only old files ($($found -join ','))" (($found -join ',') -eq 'old.txt,old2.txt')
     if ($linked) { Check 'cleanup: links are not followed' ($found -notcontains 'precious.txt') }
     Remove-Item -Recurse -Force $tmp, $outside
+    # DISM time box (it hung for hours on two laptops): a hung DISM is killed at its limit and reported timed out.
+    $script:Root = Join-Path ([IO.Path]::GetTempPath()) ("omt-dism-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $script:Root | Out-Null
+    function Write-Log { }
+    if (-not $IsWindows) {
+        $DismExe = Join-Path $script:Root 'fake-dism'
+        Set-Content -LiteralPath $DismExe "#!/bin/sh`nsleep 30`n"; chmod +x $DismExe
+        $t0 = Get-Date; $r = Invoke-Dism @('/Online') 1; $took = ((Get-Date) - $t0).TotalSeconds
+        Check "cleanup: a hung DISM is cut at its limit ($([math]::Round($took, 1)) s)" ($r.timed_out -and $took -lt 15)
+        Set-Content -LiteralPath $DismExe "#!/bin/sh`necho 'Component Store Cleanup Recommended : Yes'`n"
+        $a = Test-ComponentCleanup
+        Check 'cleanup: analyze reads the recommendation' ($a.recommended -and -not $a.timed_out)
+        Set-Content -LiteralPath $DismExe "#!/bin/sh`nsleep 30`n"
+        $Opt.dism_analyze_minutes = 1; $script:PkgTimeout = 185; $script:Started = Get-Date
+        $t0 = Get-Date; $a = Test-ComponentCleanup; $took = ((Get-Date) - $t0).TotalSeconds
+        Check "cleanup: the time box never runs past the package limit ($([math]::Round($took, 1)) s)" ($a.timed_out -and $took -lt 15)
+    }
+    $script:PkgTimeout = 3600; $script:Started = (Get-Date).AddSeconds(-3500)
+    Check 'cleanup: no time left means no DISM call' ((Get-DismSeconds 15) -eq 0 -and (Invoke-Dism @('/Online') 0).timed_out)
+    $script:Started = Get-Date
+    Check 'cleanup: DISM limits come from params' ((Get-DismSeconds $Opt.dism_cleanup_minutes) -eq 45 * 60 -and (Get-PkgParams (Join-Path $Dir 'cleanup.ps1')).dism_analyze_minutes -eq 15)
+    Remove-Item -Recurse -Force $script:Root
 }
 & {
     . ([scriptblock]::Create((Get-Defs (Join-Path $Dir 'debloat.ps1'))))

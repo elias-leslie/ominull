@@ -610,6 +610,27 @@ static void test_supervised_heartbeats_and_stall(void) {
     expect("no needs_hands on Linux", !sink_has(&sink, "needs_hands"));
 }
 
+/* A hung child tool (the shape of windows-cleanup's DISM hang: a child
+ * process alive at no CPU, no output, no progress) reads as stalled while
+ * the tree stays alive; stalled never kills, only the time limit does. */
+static void test_supervised_hung_child_stalls(void) {
+    printf("[*] Testing a Hung Child Tool Reads Stalled...\n");
+    static FakeSink sink;
+    memset(&sink, 0, sizeof(sink));
+    ScriptSupervisorHooks hooks = fast_hooks(&sink);
+    ScriptExecParams params;
+    script_params(&params, "echo '::progress:: 70% analyzing the component store'\nsh -c 'sleep 3; exit 0'\necho after\n", 20, 4096);
+    char output[4096];
+    ScriptRunResult run;
+    int code = ScriptExec_RunSupervised(&params, "job-sup-hung", output, sizeof(output), &hooks, &run);
+    expect("hung child: run not killed, finishes after the child", code == 0 && !run.timed_out && !run.cancelled &&
+                                                                  strstr(output, "after") != NULL);
+    expect("hung child: reported stalled", sink_has(&sink, "\"phase\":\"stalled\""));
+    expect("hung child: stalled heartbeat keeps the last progress line",
+           sink_has(&sink, "\"phase\":\"stalled\",\"progress_pct\":70"));
+    expect("hung child: the child tool is counted in the tree", sink_has(&sink, "\"processes\":2") || sink_has(&sink, "\"processes\":3"));
+}
+
 static void test_supervised_cancel_kills_tree(void) {
     printf("[*] Testing Cancel Kills the Whole Tree...\n");
     static FakeSink sink;
@@ -715,6 +736,7 @@ int main(void) {
     test_progress_line_parsing();
     test_supervisor_state_machine();
     test_supervised_heartbeats_and_stall();
+    test_supervised_hung_child_stalls();
     test_supervised_cancel_kills_tree();
     test_timeout_with_stdout_closed();
     test_grandchild_killed_after_exit();
