@@ -151,8 +151,11 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ominullctl error: %v\n", err)
-		os.Exit(1)
+		code, msg := exitCodeOf(err)
+		if code != exitWaitAttention && code != exitWaitFailed && code != exitWaitTimeout {
+			fmt.Fprintf(os.Stderr, "ominullctl error: %s\n", msg)
+		}
+		os.Exit(code)
 	}
 }
 
@@ -1639,7 +1642,12 @@ Fleet & CyberOps Commands:
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
   agents versions|update <id|all>         Inspect fleet version currency and publish releases
   agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
-  maint run ENDPOINT PKG... --mode M      Run maintenance packages (waits for the owner's tap or package rule)
+  maint run ENDPOINT PKG... --mode M      Run maintenance packages (owner tap or package rule; --no-wait prints ids)
+  maint wait ID... [--all] [--timeout D]  Block until a job, run or playbook run ends or needs attention
+                                          (exit 0 ok, 3 failed, 4 needs attention, 5 timeout)
+  maint script EP --file F --reason TEXT  Run a one-off script (one owner tap; --no-wait prints run and job ids)
+  maint promote JOB_ID | --file F         Add a script with a package header to the library
+  maint cancel JOB_ID                     Stop a running job (the agent kills it and its children)
   maint status ENDPOINT                   Latest result of each package on a host
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]

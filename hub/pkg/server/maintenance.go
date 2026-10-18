@@ -41,6 +41,16 @@ type packageRun struct {
 	// NeedsOwner is what the run left for the owner to decide
 	// (detail.needs_owner), cleaned of anything an endpoint could abuse.
 	NeedsOwner []ownerItem `json:"needs_owner,omitempty"`
+	// Line is the last line of a finished run's output (capped).
+	Line string `json:"line,omitempty"`
+	// Live supervision of a running job (applySupervision): the phase the
+	// endpoint reports, its progress line, and the window a needs_hands run
+	// waits on.
+	Phase    string                     `json:"phase,omitempty"`
+	Progress *runProgress               `json:"progress,omitempty"`
+	Window   *response.SupervisedWindow `json:"window,omitempty"`
+	// OneOff marks an agent's or operator's one-off script (not a package).
+	OneOff bool `json:"one_off,omitempty"`
 }
 
 type packageStatus struct {
@@ -77,6 +87,7 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 	timeout := scripts.DefaultTimeoutSeconds
 	if p, ok := scriptJobPayload(job); ok {
 		run.Mode, run.Version, timeout = p.Parameters["mode"], p.ScriptVersion, p.TimeoutSeconds
+		run.OneOff = isOneOffScript(p.ScriptID)
 	}
 	switch job.State {
 	case response.StateQueued, response.StateOffered:
@@ -96,7 +107,21 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 		run.State = "failed"
 		var res response.JobResult
 		if json.Unmarshal([]byte(job.ResultJSON), &res) == nil {
-			if pr, ok := scripts.ParsePackageResult(res.Stdout); ok {
+			run.Line = lastLine(res.Stdout)
+			if run.OneOff {
+				// A one-off script has no result contract: its exit code says.
+				switch {
+				case job.State == response.StateSucceeded:
+					run.State = "ok"
+				case res.ErrorCode == "TIMED_OUT":
+					run.Reason = "stopped at its time limit"
+				default:
+					run.Reason = fmt.Sprintf("exit code %d", res.ExitCode)
+					if res.ErrorCode != "" {
+						run.Reason += " (" + res.ErrorCode + ")"
+					}
+				}
+			} else if pr, ok := scripts.ParsePackageResult(res.Stdout); ok {
 				run.State, run.Reboot, run.Changed = pr.State, pr.Reboot, pr.Changed
 				run.Controls = pr.Controls()
 				run.Pass, run.Fail = scripts.Compliance(run.Controls)
@@ -122,6 +147,16 @@ func derivePackageRun(job *response.JobRecord, now time.Time) *packageRun {
 		run.Reason = job.ErrorCode
 	}
 	return run
+}
+
+// lastLine is the last non-empty line of a run's output, capped.
+func lastLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\r\n\t "), "\n")
+	l := strings.TrimSpace(lines[len(lines)-1])
+	if len(l) > 300 {
+		l = l[:300]
+	}
+	return strings.ToValidUTF8(l, "")
 }
 
 // packageForJob returns the package a script job ran, or nil.
@@ -191,7 +226,7 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 			st.Title = sc.Name
 		}
 		if job := latest[sc.ID]; job != nil {
-			st.Last = derivePackageRun(job, now)
+			st.Last = s.liveRun(job, now)
 		}
 		out = append(out, st)
 	}
@@ -221,6 +256,12 @@ func packageStateLabel(state string) (string, string) {
 		return "Cancelled", "idle"
 	case "no_result":
 		return "No result came back", "crit"
+	case "stalled":
+		return "Stalled", "crit"
+	case "needs_hands":
+		return "Waiting on a window", "crit"
+	case "not_run":
+		return "Not run", "idle"
 	}
 	return "Failed", "crit"
 }

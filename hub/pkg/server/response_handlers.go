@@ -195,6 +195,7 @@ func (s *Server) handleResponseJobsCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.jobWake.notify()
 	s.audit(r, "RESPONSE_JOB_CANCELLED", req.JobID, fmt.Sprintf("Cancelled response job %s", req.JobID))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -244,6 +245,7 @@ func (s *Server) handleResponseAck(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "failed to record ack: "+err.Error())
 		return
 	}
+	s.jobWake.notify()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -278,6 +280,7 @@ func (s *Server) handleResponseResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.jobWake.notify()
 	s.audit(r, "RESPONSE_JOB_COMPLETED", res.JobID, fmt.Sprintf("Completed response job %s state=%s exit_code=%d", res.JobID, res.State, res.ExitCode))
 
 	w.Header().Set("Content-Type", "application/json")

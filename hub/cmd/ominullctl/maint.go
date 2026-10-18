@@ -25,7 +25,7 @@ import (
 
 func (c *APIClient) cmdMaint(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ominullctl maint run|status|settings|set|rules|forget-rule")
+		return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|status|settings|set|rules|forget-rule")
 	}
 	switch args[0] {
 	case "settings":
@@ -38,6 +38,14 @@ func (c *APIClient) cmdMaint(args []string) error {
 		return c.maintSet(args[1:])
 	case "run":
 		return c.maintRun(args[1:])
+	case "wait":
+		return c.maintWait(args[1:])
+	case "script":
+		return c.maintScript(args[1:])
+	case "promote":
+		return c.maintPromote(args[1:])
+	case "cancel":
+		return c.maintCancel(args[1:])
 	case "status":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: ominullctl maint status ENDPOINT")
@@ -78,7 +86,7 @@ func (c *APIClient) cmdMaint(args []string) error {
 		}
 		return err
 	}
-	return fmt.Errorf("usage: ominullctl maint run|status|settings|set|rules|forget-rule")
+	return fmt.Errorf("usage: ominullctl maint run|wait|script|promote|cancel|status|settings|set|rules|forget-rule")
 }
 
 // splitMaintArgs separates --mode/--every/--no-wait from positional words.
@@ -123,76 +131,7 @@ func (c *APIClient) maintRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	var out struct {
-		Jobs []struct {
-			JobID      string `json:"job_id"`
-			EndpointID string `json:"endpoint_id"`
-			Package    string `json:"package"`
-		} `json:"jobs"`
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(raw, &out) != nil || len(out.Jobs) == 0 {
-		return fmt.Errorf("the hub created no jobs: %s", strings.TrimSpace(string(raw)))
-	}
-	for _, j := range out.Jobs {
-		fmt.Fprintf(os.Stderr, "[*] %s on %s: job %s\n", j.Package, j.EndpointID, j.JobID)
-	}
-	if flags["no-wait"] != "" {
-		return nil
-	}
-	// Each package prints one JSON result line; packages run up to an hour.
-	failed := 0
-	for _, j := range out.Jobs {
-		line, state, err := c.waitPackageJob(j.JobID, 75*time.Minute)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%s %s %s\n", j.EndpointID, j.Package, line)
-		if state != "succeeded" {
-			failed++
-		}
-	}
-	if failed > 0 {
-		return fmt.Errorf("%d of %d package runs did not succeed", failed, len(out.Jobs))
-	}
-	return nil
-}
-
-// waitPackageJob polls one job until it finishes and returns its result line.
-func (c *APIClient) waitPackageJob(id string, limit time.Duration) (string, string, error) {
-	deadline := time.Now().Add(limit)
-	for time.Now().Before(deadline) {
-		raw, err := c.doRequest(http.MethodGet, "/api/v1/response/jobs?id="+url.QueryEscape(id), nil)
-		if err == nil {
-			var job struct {
-				State      string `json:"state"`
-				ResultJSON string `json:"result_json"`
-				ErrorCode  string `json:"error_code"`
-			}
-			if json.Unmarshal(raw, &job) == nil {
-				switch job.State {
-				case "succeeded", "failed", "cancelled":
-					var res struct {
-						Stdout    string `json:"stdout"`
-						ErrorCode string `json:"error_code"`
-					}
-					_ = json.Unmarshal([]byte(job.ResultJSON), &res)
-					lines := strings.Split(strings.TrimRight(res.Stdout, "\r\n\t "), "\n")
-					last := strings.TrimSpace(lines[len(lines)-1])
-					if !strings.HasPrefix(last, "{") {
-						code := res.ErrorCode
-						if code == "" {
-							code = job.ErrorCode
-						}
-						last = fmt.Sprintf(`{"state":"%s","detail":{"error":"no result line","code":%q}}`, job.State, code)
-					}
-					return last, job.State, nil
-				}
-			}
-		}
-		time.Sleep(10 * time.Second)
-	}
-	return "", "", fmt.Errorf("job %s did not finish within %s; check later with: ominullctl maint status", id, limit)
+	return c.afterRun(raw, flags["no-wait"] != "")
 }
 
 func (c *APIClient) maintStatus(endpoint string) error {

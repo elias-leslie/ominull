@@ -184,7 +184,7 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 		}
 		body.View = s.buildJobView(job, host(job.EndpointID), stamp, body.CanAct)
 		if meta := s.packageForJob(job); meta != nil {
-			addPackageResult(body.View, job, meta, now)
+			addPackageResult(body.View, job, meta, s.liveRun(job, now))
 		}
 		return body
 	}
@@ -221,8 +221,8 @@ func (s *Server) buildJobsPage(viewer accessOperator, jobID string, history bool
 		if j.Kind == response.ActionKindScriptExec && len(packages) > 0 {
 			if p, ok := scriptJobPayload(j); ok && packages[p.ScriptID] != "" {
 				action = packages[p.ScriptID] + " package"
-				if !jobInFlight(j.State) {
-					label, tone = packageStateLabel(derivePackageRun(j, now).State)
+				if run := s.liveRun(j, now); !jobInFlight(j.State) || runAttention(run.State) {
+					label, tone = packageStateLabel(run.State)
 				}
 			}
 		}
@@ -328,12 +328,25 @@ func jobStepDetail(details string) string {
 
 // addPackageResult names a package run and puts what its result line says
 // (state, reboot, changes) at the top of the job's details.
-func addPackageResult(v *jobView, job *response.JobRecord, meta *scripts.PackageMeta, now time.Time) {
+func addPackageResult(v *jobView, job *response.JobRecord, meta *scripts.PackageMeta, run *packageRun) {
 	v.Action = meta.Title + " package"
-	run := derivePackageRun(job, now)
 	var meta2 []jobMeta
 	if run.Mode != "" {
 		meta2 = append(meta2, jobMeta{"Mode", run.Mode})
+	}
+	if jobInFlight(job.State) && run.Progress != nil {
+		if runAttention(run.State) {
+			v.Label, v.Tone = packageStateLabel(run.State)
+			meta2 = append(meta2, jobMeta{"Why", run.Reason})
+		}
+		if p := run.Progress; p.Message != "" || p.Pct >= 0 {
+			text := p.Message
+			if p.Pct >= 0 {
+				text = strings.TrimSpace(fmt.Sprintf("%d%% %s", p.Pct, p.Message))
+			}
+			meta2 = append(meta2, jobMeta{"Progress", text})
+		}
+		meta2 = append(meta2, jobMeta{"Last heartbeat", run.Progress.HeartbeatAt.Format("15:04:05 MST")})
 	}
 	if !jobInFlight(job.State) {
 		v.Label, v.Tone = packageStateLabel(run.State)

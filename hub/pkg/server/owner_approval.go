@@ -319,6 +319,9 @@ func (s *Server) ownerApproved(resolve approvalResolver, next http.HandlerFunc) 
 		s.audit(r, "OWNER_APPROVAL_USED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s under approval %s, grants %s", plan.Action, id, strings.Join(ids, ",")))
 		r = r.WithContext(context.WithValue(r.Context(), grantsCtxKey{}, grants))
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		// The handler sees the approval it runs under (a run's id), also when
+		// the authority approved it without asking.
+		r.Header.Set(approvalHeader, id)
 		// Agents verify the grants themselves. They are kept (pending) before
 		// the action runs, so the hub never records an action whose grants it
 		// could not keep, and released to agents only once it succeeded; a

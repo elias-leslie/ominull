@@ -365,7 +365,7 @@ func (s *Server) dispatchScheduled(ctx context.Context, key string, run *pending
 			use = append(use, g)
 		}
 	}
-	jobs, err := s.dispatchPackageGrants(run.Tenant, schedulerName, run.Items, use)
+	jobs, err := s.dispatchPackageGrants(run.Tenant, schedulerName, run.ID, run.Items, use)
 	if err != nil {
 		log.Printf("[!] maintenance schedule: %s: %v", run.Label, err)
 	}

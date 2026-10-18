@@ -68,7 +68,12 @@ const (
 	PackageRunRoute = "/api/v1/maintenance/run"
 	// PlaybookRunRoute is the route of a playbook run: the same items, run
 	// one after another on each host within the approved window.
-	PlaybookRunRoute  = "/api/v1/maintenance/playbooks/run"
+	PlaybookRunRoute = "/api/v1/maintenance/playbooks/run"
+	// OneOffScriptRoute is an agent's or operator's one-off script: one
+	// script, not a package, asked every time and never a rule.
+	OneOffScriptRoute = "/api/v1/maintenance/script"
+	// OneOffPrefix starts a one-off script's id: "adhoc-" + 12 hex of its digest.
+	OneOffPrefix      = "adhoc-"
 	PlaybookMaxWindow = 24 * 60 * 60
 	playbookMinWindow = 10 * 60
 	packageRuleOffer  = "packages" // ApprovalStatement.Offer
@@ -127,6 +132,32 @@ type PackageRunPayload struct {
 	// a time on each host, and their grants live for the window the owner
 	// approved (the hub holds a step back until the one before it ends).
 	Playbook *PlaybookRun `json:"playbook,omitempty"`
+	// OneOff is set for a one-off script run (OneOffScriptRoute).
+	OneOff *OneOffScript `json:"one_off,omitempty"`
+}
+
+// OneOffScript names a one-off script run and says why it runs.
+type OneOffScript struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// OneOffID is the script id of a one-off script with this source digest.
+func OneOffID(digest string) string {
+	if len(digest) > 12 {
+		digest = digest[:12]
+	}
+	return OneOffPrefix + strings.ToLower(digest)
+}
+
+// oneOffOf returns the one-off part of a payload parsePackageRunPayload
+// accepted, or nil.
+func oneOffOf(payload []byte) *OneOffScript {
+	var p PackageRunPayload
+	if json.Unmarshal(payload, &p) != nil {
+		return nil
+	}
+	return p.OneOff
 }
 
 // PlaybookRun names a playbook run and how long it may take.
@@ -359,8 +390,24 @@ func parsePackageRunPayload(payload []byte, targets []string) ([]PackageItem, *P
 	if err := dec.Decode(&p); err != nil {
 		return nil, nil, errors.New("package run payload must carry route, items and targets")
 	}
-	if p.Playbook == nil && p.Route != PackageRunRoute || p.Playbook != nil && p.Route != PlaybookRunRoute {
+	switch {
+	case p.OneOff != nil:
+		if p.Route != OneOffScriptRoute || p.Playbook != nil {
+			return nil, nil, fmt.Errorf("route %q is not a one-off script run", cleanText(p.Route, 80))
+		}
+	case p.Playbook == nil && p.Route != PackageRunRoute || p.Playbook != nil && p.Route != PlaybookRunRoute:
 		return nil, nil, fmt.Errorf("route %q is not a package run", cleanText(p.Route, 80))
+	}
+	if oo := p.OneOff; oo != nil {
+		if oo.Name == "" || len(oo.Name) > 60 || cleanText(oo.Name, 60) != oo.Name {
+			return nil, nil, errors.New("a one-off script is named in up to 60 plain characters")
+		}
+		if oo.Reason == "" || len(oo.Reason) > 160 || cleanText(oo.Reason, 160) != oo.Reason {
+			return nil, nil, errors.New("a one-off script says why it runs in up to 160 plain characters")
+		}
+		if len(p.Items) != 1 {
+			return nil, nil, errors.New("a one-off script run carries exactly one script")
+		}
 	}
 	if pb := p.Playbook; pb != nil {
 		if pb.Name == "" || cleanText(pb.Name, 80) != pb.Name {
@@ -390,6 +437,12 @@ func parsePackageRunPayload(payload []byte, targets []string) ([]PackageItem, *P
 			return nil, nil, errors.New("a package run names the same script payload twice")
 		}
 		seen[it.Digest] = true
+		if p.OneOff != nil && (it.Exec.ScriptID != OneOffID(it.Exec.ScriptDigest) || it.Exec.ScriptVersion != 1 || len(it.Exec.Parameters) > 0) {
+			return nil, nil, errors.New("a one-off script is named by its digest, version 1, with no parameters")
+		}
+		if p.OneOff == nil && strings.HasPrefix(it.Exec.ScriptID, OneOffPrefix) {
+			return nil, nil, errors.New("a one-off script runs through its own route")
+		}
 		items = append(items, it)
 	}
 	return items, p.Playbook, nil
@@ -473,6 +526,9 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 	if pb != nil {
 		return describePlaybookRun(pb, items, targets)
 	}
+	if oo := oneOffOf(payload); oo != nil {
+		return describeOneOff(oo, items[0], targets)
+	}
 	parts := make([]string, 0, len(items))
 	for _, it := range items {
 		parts = append(parts, fmt.Sprintf("%s, up to %d min%s%s", it.Label(), (it.Exec.TimeoutSeconds+59)/60, it.riskNote(), it.settingsNote(false)))
@@ -494,6 +550,20 @@ func describePackageRun(payload []byte, targets []string) (string, string, error
 		return "", "", errors.New("too much to show in one approval; run fewer packages at once or change fewer settings at a time")
 	}
 	return "Run maintenance", short, nil
+}
+
+// describeOneOff: what the script is (name, shell, size, the start of its
+// digest), where it runs, its time limit and why. The full text is kept with
+// the run on the hub. Never cut: a summary that does not fit is refused.
+func describeOneOff(oo *OneOffScript, it PackageItem, targets []string) (string, string, error) {
+	shell := map[string]string{"powershell.exe": "PowerShell", "pwsh.exe": "PowerShell", "cmd.exe": "cmd", "/bin/sh": "sh", "/bin/bash": "bash"}[it.Exec.Interpreter]
+	lines := strings.Count(strings.TrimRight(it.Exec.Source, "\n"), "\n") + 1
+	summary := fmt.Sprintf("One-off script %q as SYSTEM on %s: %d lines of %s (sha256 %s), up to %d min. Why: %s",
+		oo.Name, listTargets(targets), lines, shell, it.Exec.ScriptDigest[:12], (it.Exec.TimeoutSeconds+59)/60, oo.Reason)
+	if len([]rune(summary)) > approvalMaxSummary {
+		return "", "", errors.New("too much to show in one approval; shorten the name or reason, or run it on fewer machines at once")
+	}
+	return "Run a one-off script", summary, nil
 }
 
 // describePlaybookRun: the steps in order, each with its risk and changed
@@ -573,6 +643,9 @@ func packageRuleCovers(in *ApprovalRequestInput, targets []string) ([]string, []
 	}
 	if pb != nil {
 		return nil, nil, errors.New("a playbook run asks every time")
+	}
+	if oneOffOf(in.Payload) != nil {
+		return nil, nil, errors.New("a one-off script asks every time")
 	}
 	digests := make([]string, 0, len(items))
 	labels := make([]string, 0, len(items))

@@ -222,8 +222,10 @@ type packageRunJob struct {
 	Version    int    `json:"version"`
 }
 
-// dispatchPackageGrants creates one script_exec job per grant.
-func (s *Server) dispatchPackageGrants(tenantID, requestedBy string, items []packageRunItem, grants []*response.EndpointGrant) ([]packageRunJob, error) {
+// dispatchPackageGrants creates one script_exec job per grant. runID (the
+// owner's approval, when there is one) is kept in each job's idempotency key
+// so the run's jobs can be found again (ominullctl maint wait RUN).
+func (s *Server) dispatchPackageGrants(tenantID, requestedBy, runID string, items []packageRunItem, grants []*response.EndpointGrant) ([]packageRunJob, error) {
 	byDigest := map[string]packageRunItem{}
 	for _, it := range items {
 		byDigest[it.Digest] = it
@@ -234,7 +236,11 @@ func (s *Server) dispatchPackageGrants(tenantID, requestedBy string, items []pac
 		if !ok || g.ActionKind != response.ActionKindScriptExec {
 			return out, fmt.Errorf("grant %s matches no script of this run", g.GrantID)
 		}
-		job, err := s.responseStore.CreateJob(tenantID, g.EndpointID, response.ActionKindScriptExec, requestedBy, g, it.Raw, "")
+		key := ""
+		if runID != "" {
+			key = response.RunKeyPrefix(runID) + g.GrantID
+		}
+		job, err := s.responseStore.CreateJob(tenantID, g.EndpointID, response.ActionKindScriptExec, requestedBy, g, it.Raw, key)
 		if err != nil {
 			return out, err
 		}
@@ -279,7 +285,8 @@ func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	if requestedBy == "" {
 		requestedBy = "operator"
 	}
-	jobs, err := s.dispatchPackageGrants(tenantID, requestedBy, items, grants)
+	runID := r.Header.Get(approvalHeader)
+	jobs, err := s.dispatchPackageGrants(tenantID, requestedBy, runID, items, grants)
 	for _, j := range jobs {
 		s.audit(r, "SCRIPT_RUN_DISPATCHED", j.JobID, fmt.Sprintf("Dispatched package %s v%d to %s under owner approval", j.Package, j.Version, j.EndpointID))
 	}
@@ -287,5 +294,5 @@ func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("created %d of %d jobs: %v", len(jobs), len(grants), err))
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]interface{}{"jobs": jobs})
+	writeJSON(w, http.StatusCreated, map[string]interface{}{"run_id": runID, "jobs": jobs})
 }

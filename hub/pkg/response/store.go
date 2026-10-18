@@ -97,6 +97,9 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("response store migration failed: %w", err)
 	}
+	if err := s.migrateSupervision(); err != nil {
+		return nil, fmt.Errorf("response store migration failed: %w", err)
+	}
 	return s, nil
 }
 

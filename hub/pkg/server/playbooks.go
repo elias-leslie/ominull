@@ -580,6 +580,27 @@ type playbookHostStepView struct {
 	State  string `json:"state"`
 	JobID  string `json:"job_id,omitempty"`
 	Result string `json:"result,omitempty"`
+	// Live is a started step's run as it goes (stalled, needs_hands,
+	// progress line).
+	Live *packageRun `json:"live,omitempty"`
+}
+
+// withLive adds each started step's live run to a view.
+func (s *Server) withLive(v playbookRunView, tenant string, now time.Time) playbookRunView {
+	if s.responseStore == nil {
+		return v
+	}
+	for _, steps := range v.Hosts {
+		for i := range steps {
+			if steps[i].State != "started" || steps[i].JobID == "" {
+				continue
+			}
+			if job, err := s.responseStore.GetJob(tenant, steps[i].JobID); err == nil && job != nil {
+				steps[i].Live = s.liveRun(job, now)
+			}
+		}
+	}
+	return v
 }
 
 func viewPlaybookRun(r *playbookRun) playbookRunView {
@@ -601,7 +622,7 @@ func (s *Server) playbookRunView(id string) *playbookRunView {
 	defer playbookMu.Unlock()
 	for _, r := range s.playbookRuns() {
 		if r.ID == id {
-			v := viewPlaybookRun(r)
+			v := s.withLive(viewPlaybookRun(r), r.Tenant, time.Now().UTC())
 			return &v
 		}
 	}
@@ -616,8 +637,9 @@ func (s *Server) playbooksView() map[string]interface{} {
 		books = []playbook{}
 	}
 	runs := []playbookRunView{}
+	now := time.Now().UTC()
 	for _, r := range s.playbookRuns() {
-		runs = append(runs, viewPlaybookRun(r))
+		runs = append(runs, s.withLive(viewPlaybookRun(r), r.Tenant, now))
 	}
 	return map[string]interface{}{"playbooks": books, "runs": runs, "max_steps": playbookMaxSteps}
 }

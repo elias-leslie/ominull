@@ -81,6 +81,8 @@ type Server struct {
 	// maintBlocks is why scheduled package runs could not run (Nightshift feed).
 	maintBlocks  maintenanceBlocks
 	approvalWake approvalNotifier
+	// jobWake wakes ominullctl maint wait long-polls on job events.
+	jobWake approvalNotifier
 	// policyMu serialises detection-policy writes from reading the saved
 	// policy to saving the new one (detection_policy.go), so two saves cannot
 	// interleave and an approval is spent against the policy it was asked on.
@@ -3863,6 +3865,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/response/jobs/cancel", s.authMiddleware(s.responseGate(s.handleResponseJobsCancel)))
 	mux.HandleFunc("/api/v1/response/jobs/ack", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseAck)))
 	mux.HandleFunc("/api/v1/response/jobs/result", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseResult)))
+	mux.HandleFunc("/api/v1/response/jobs/progress", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseProgress)))
 	mux.HandleFunc("/api/v1/response/auth/totp/enroll", s.authMiddleware(s.responseGate(s.handleResponseAuthTOTPEnroll)))
 	mux.HandleFunc("/api/v1/response/auth/unlock", s.authMiddleware(s.responseGate(s.handleResponseAuthUnlock)))
 	mux.HandleFunc("/api/v1/response/auth/lock", s.authMiddleware(s.responseGate(s.handleResponseAuthLock)))
@@ -3913,6 +3916,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/maintenance/decisions", s.authMiddleware(s.responseGate(s.handleDecisions)))
 	mux.HandleFunc("/api/v1/maintenance/playbooks/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolvePlaybookRun, s.handlePlaybookRun)))))
 	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
+	mux.HandleFunc("/api/v1/maintenance/script", s.authMiddleware(s.responseGate(s.handleOneOffScriptRoute())))
+	mux.HandleFunc("/api/v1/maintenance/script/promote", s.authMiddleware(s.responseGate(requireAdmin(s.handlePromoteScript))))
+	mux.HandleFunc("/api/v1/maintenance/wait", s.authMiddleware(s.responseGate(s.handleMaintenanceWait)))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))
