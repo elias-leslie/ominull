@@ -64,6 +64,7 @@ type Authority struct {
 	rollouts    *rolloutRules                 // approve-all rules for owner-signed rollouts
 	packages    *packageRules                 // approve-all rules for maintenance package runs
 	rows        *approvalRowsBook             // the owner's Approvals rows, pushed by Nightshift
+	learned     *learnedBook                  // job shapes the owner approved often enough to stop asking
 	releaseKey  []byte                        // release public key PEM override (tests)
 	startedAt   time.Time
 }
@@ -144,6 +145,7 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 		rollouts:    newRolloutRules(cfg.StateDir),
 		packages:    newPackageRules(cfg.StateDir),
 		rows:        newApprovalRowsBook(cfg.StateDir),
+		learned:     newLearnedBook(cfg.StateDir),
 	}
 
 	// 1. Load keys from durable store

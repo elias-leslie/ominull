@@ -88,6 +88,9 @@ type ApprovalRowsInput struct {
 	Lab        []string          `json:"lab"`
 	SavedAt    string            `json:"saved_at,omitempty"`
 	ApprovalID string            `json:"approval_id,omitempty"` // the approved approval_rules ask this save spends
+	// Forget names learned job shapes to stop approving (the owner's undo);
+	// a tightening, applied with any accepted save.
+	Forget []string `json:"forget,omitempty"`
 }
 
 // ApprovalRows is the set the authority holds.
@@ -112,6 +115,9 @@ type ApprovalRowsView struct {
 	Stored      bool              `json:"stored"` // false: the built-in defaults
 	Defaults    map[string]string `json:"defaults"`
 	Error       string            `json:"error,omitempty"`
+	// Learned: job shapes the owner approved, automatic once approved
+	// three times with no denial.
+	Learned []LearnedShape `json:"learned"`
 }
 
 // ApprovalRowsAsk is the owner's tap a loosening save needs: a pending
@@ -345,6 +351,7 @@ func (a *Authority) AskApprovalRows(in *ApprovalRowsInput) (*ApprovalRowsAsk, er
 		Targets: []string{rowsTarget}, Digest: hex.EncodeToString(digest[:]),
 		Created: now.Unix(), Expires: now.Add(rowsAskTTL).Unix(),
 		Rows: next.Rows, Session: next.Session, Lab: append([]string{}, next.Lab...),
+		Blast: &Blast{"capability", BlastCore, "loosens the owner's approval rules"},
 	}
 	v, err := a.recordAsk(stmt, []byte(canon), now)
 	if err != nil {
@@ -364,6 +371,14 @@ func (a *Authority) SetApprovalRows(in *ApprovalRowsInput) (*ApprovalRowsResult,
 	next, err := normalizeRows(in)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRows, err)
+	}
+	if len(in.Forget) > learnedMaxShapes {
+		return nil, fmt.Errorf("%w: at most %d learned shapes to forget", ErrInvalidRows, learnedMaxShapes)
+	}
+	for _, f := range in.Forget {
+		if len(f) != 32 || strings.Trim(f, "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("%w: invalid learned shape %q", ErrInvalidRows, cleanText(f, 40))
+		}
 	}
 	now := time.Now()
 	b := a.rows
@@ -408,6 +423,16 @@ func (a *Authority) SetApprovalRows(in *ApprovalRowsInput) (*ApprovalRowsResult,
 		a.auditApproval(tenant, "nightshift", "approval_rows_saved", ApprovalKindRules, rowsTarget, in.ApprovalID, "success",
 			fmt.Sprintf("approval rules saved by Nightshift (saved %s): looser %v (owner %s), stricter %v", next.SavedAt, looser, approverID, stricter))
 	}
+	if len(in.Forget) > 0 {
+		forgot, err := a.learned.forget(tenant, in.Forget...)
+		if err != nil {
+			return nil, fmt.Errorf("learned approvals not saved: %w", err)
+		}
+		if len(forgot) > 0 {
+			a.auditApproval(tenant, "nightshift", "approval_learned_forgotten", "", "", "", "success",
+				fmt.Sprintf("the owner's undo: learned job shapes %v ask again", forgot))
+		}
+	}
 	return &ApprovalRowsResult{Accepted: true, Looser: looser, Rows: a.ApprovalRowsView(tenant)}, nil
 }
 
@@ -430,6 +455,10 @@ func (a *Authority) ApprovalRowsView(tenant string) ApprovalRowsView {
 	if b.err != nil {
 		v.Error = b.err.Error() + "; every ask goes to the owner until Nightshift saves the rows again"
 	}
+	v.Learned = a.learned.list(tenant)
+	if v.Learned == nil {
+		v.Learned = []LearnedShape{}
+	}
 	return v
 }
 
@@ -447,6 +476,40 @@ func (b *approvalRowsBook) allows(tenant, row string, now time.Time) (string, bo
 	if choice != RowAuto && !(choice == RowChoiceSession && r.Session.open(now)) {
 		return choice, false
 	}
+	return choice, b.spendLocked(tenant, now)
+}
+
+// sessionAllows says the owner's work session is open, so a non-core ask
+// goes through without asking, and spends one of the hour's approvals if so.
+func (b *approvalRowsBook) sessionAllows(tenant string, now time.Time) bool {
+	tenant = tenantOrDefault(tenant)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.off {
+		return false
+	}
+	r, _ := b.heldLocked(tenant)
+	return r.Session.open(now) && b.spendLocked(tenant, now)
+}
+
+// spendAuto spends one of the hour's approvals without asking (learned
+// shapes share the cap).
+func (b *approvalRowsBook) spendAuto(tenant string, now time.Time) bool {
+	tenant = tenantOrDefault(tenant)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.off && b.spendLocked(tenant, now)
+}
+
+func (b *approvalRowsBook) enabled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.off
+}
+
+// spendLocked spends one of the tenant's approvals without asking this hour,
+// or says the cap is reached (the ask then goes to the owner).
+func (b *approvalRowsBook) spendLocked(tenant string, now time.Time) bool {
 	recent := b.spent[tenant][:0]
 	for _, t := range b.spent[tenant] {
 		if now.Sub(t) < time.Hour {
@@ -455,10 +518,10 @@ func (b *approvalRowsBook) allows(tenant, row string, now time.Time) (string, bo
 	}
 	if len(recent) >= rowsAutoPerHour {
 		b.spent[tenant] = recent
-		return choice, false
+		return false
 	}
 	b.spent[tenant] = append(recent, now)
-	return choice, true
+	return true
 }
 
 func (b *approvalRowsBook) approver(tenant string) string {
@@ -727,7 +790,7 @@ func (a *Authority) recordAsk(stmt ApprovalStatement, payload []byte, now time.T
 		view: ApprovalView{
 			ID: stmt.ID, TenantID: stmt.TenantID, State: ApprovalPending, Kind: stmt.Kind, Action: stmt.Action, Summary: stmt.Summary,
 			Targets: stmt.Targets, Requester: stmt.Requester, CreatedAt: time.Unix(stmt.Created, 0).UTC(), ExpiresAt: time.Unix(stmt.Expires, 0).UTC(),
-			Statement: base64Std(stmtJSON), Signature: hex.EncodeToString(sig), Challenge: hex.EncodeToString(ch[:]), SignerKey: keyID,
+			Statement: base64Std(stmtJSON), Signature: hex.EncodeToString(sig), Challenge: hex.EncodeToString(ch[:]), SignerKey: keyID, Blast: stmt.Blast,
 		},
 	}
 	b.mu.Lock()

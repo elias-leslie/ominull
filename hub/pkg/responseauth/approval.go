@@ -103,6 +103,8 @@ type ApprovalStatement struct {
 	Row       string     `json:"row,omitempty"`
 	RowInputs *RowInputs `json:"row_inputs,omitempty"`
 	AskReason string     `json:"ask_reason,omitempty"`
+	// Blast is the ask's blast radius (approval_blast.go).
+	Blast *Blast `json:"blast,omitempty"`
 	// Rows, Session and Lab are exactly what an approval_rules tap saves.
 	Rows    map[string]string `json:"rows,omitempty"`
 	Session *RowSession       `json:"session,omitempty"`
@@ -178,8 +180,9 @@ type ApprovalView struct {
 	Challenge  string        `json:"challenge"` // hex sha256 of prefix || statement
 	SignerKey  string        `json:"signer_key_id"`
 	ApproverID string        `json:"approver_id,omitempty"`
-	Method     string        `json:"method,omitempty"` // passkey | rule | row | baseline | unverified
-	Row        string        `json:"row,omitempty"`    // the Approvals row that approved it (method row)
+	Method     string        `json:"method,omitempty"` // passkey | rule | row | session | learned | baseline | unverified
+	Row        string        `json:"row,omitempty"`    // the Approvals row the ask follows ("" when it always asks)
+	Blast      *Blast        `json:"blast,omitempty"`  // its blast radius, as signed in the statement
 	Offer      string        `json:"offer,omitempty"`
 	// StewardRule is the signed rule token an approved steward screen rule
 	// ask yields, for Nightshift to keep (steward_screen_rule.go).
@@ -259,6 +262,9 @@ type approvalRecord struct {
 	agentLabel     string
 	stewardRun     string
 	stewardRule    *StewardScreenAsk
+	// shape is the job's shape for learning; "" when it never learns (core,
+	// the steward's screen).
+	shape string
 }
 
 type approvalBook struct {
@@ -486,11 +492,34 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// The owner's Approvals row for this ask (approval_rows.go): auto, or
 	// session while the owner's session is open, approves it now.
 	row, askReason, rowIn := a.rowFor(in, targets, time.Now())
+	// Nightshift's approvals model (approval_blast.go, approval_learned.go):
+	// the blast radius is signed into every ask; core always asks the owner.
+	// Otherwise the owner's open work session approves it, or a job shape
+	// the owner approved three times with no denial, or its row.
+	blast := a.blastFor(in, targets, rowIn)
+	modelOn := a.rows.enabled()
+	core := modelOn && blast.Verdict == BlastCore
+	shape := ""
+	if modelOn && !core && in.StewardRule == nil && in.StewardRun == "" {
+		shape = approvalShape(in, targets)
+	}
 	rowAuto, rowChoice := false, ""
-	if row != "" && !pkgAuto && !stewardAuto {
+	if row != "" && !pkgAuto && !stewardAuto && !core {
 		rowChoice, rowAuto = a.rows.allows(in.TenantID, row, time.Now())
 	}
-	if in.RuleOnly && !pkgAuto && !rowAuto {
+	sessionAuto := false
+	if modelOn && !core && !pkgAuto && !stewardAuto && !rowAuto {
+		sessionAuto = a.rows.sessionAllows(in.TenantID, time.Now())
+	}
+	var learned LearnedShape
+	learnedAuto := false
+	if shape != "" && !pkgAuto && !stewardAuto && !rowAuto && !sessionAuto {
+		if l, ok := a.learned.match(in.TenantID, shape); ok && a.rows.spendAuto(in.TenantID, time.Now()) {
+			learned, learnedAuto = l, true
+		}
+	}
+	freeAuto := rowAuto || sessionAuto || learnedAuto
+	if in.RuleOnly && !pkgAuto && !freeAuto {
 		return nil, ErrRuleNotCovered
 	}
 	digest := sha256.Sum256(in.Payload)
@@ -513,7 +542,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	recent := b.created[in.TenantID]
 	pending += b.reserved[in.TenantID]
-	if !pkgAuto && !stewardAuto && !rowAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
+	if !pkgAuto && !stewardAuto && !freeAuto && (pending >= approvalMaxPending || len(recent) >= approvalMaxPerHour) {
 		b.mu.Unlock()
 		a.auditApproval(in.TenantID, in.Requester, "approval_refused", string(in.Kind), "", "", "denied", ErrApprovalRateLimit.Error())
 		return nil, ErrApprovalRateLimit
@@ -521,7 +550,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	// Take both slots now, under the same lock as the check: concurrent
 	// callers must not all pass on the same stale counts. The hourly slot is
 	// spent even if signing fails below; the pending slot is handed back.
-	reserved := !pkgAuto && !stewardAuto && !rowAuto
+	reserved := !pkgAuto && !stewardAuto && !freeAuto
 	if reserved {
 		b.created[in.TenantID] = append(recent, now)
 		b.reserved[in.TenantID]++
@@ -549,7 +578,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 	}
 	var rule RolloutRule
 	auto := false
-	if covered && !rowsLive && !rowAuto {
+	if covered && !rowsLive && !freeAuto {
 		rule, auto = a.rollouts.use(in.TenantID, version, now)
 	}
 	var pkgRule PackageRule
@@ -579,11 +608,12 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		Row:       row,
 		RowInputs: &rowIn,
 		AskReason: askReason,
+		Blast:     &blast,
 	}
-	if covered && !auto && !rowsLive && !rowAuto {
+	if covered && !auto && !rowsLive && !freeAuto {
 		stmt.Offer = rolloutRuleOffer
 	}
-	if pkgErr == nil && !pkgAuto && !rowsLive && !rowAuto {
+	if pkgErr == nil && !pkgAuto && !rowsLive && !freeAuto {
 		stmt.Offer = packageRuleOffer
 	}
 	stmtJSON, err := json.Marshal(stmt)
@@ -609,6 +639,7 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		agentLabel:     in.AgentLabel,
 		stewardRun:     in.StewardRun,
 		stewardRule:    in.StewardRule,
+		shape:          shape,
 		view: ApprovalView{
 			ID:        stmt.ID,
 			TenantID:  stmt.TenantID,
@@ -625,13 +656,20 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 			Challenge: hex.EncodeToString(ch[:]),
 			SignerKey: keyID,
 			Offer:     stmt.Offer,
+			Row:       row,
+			Blast:     &blast,
 		},
 	}
-	if rowAuto && !auto {
+	if freeAuto && !auto {
 		t := now.UTC()
 		useBy := t.Add(approvalUseWindow)
 		rec.view.State, rec.view.DecidedAt, rec.view.UseBy = ApprovalApproved, &t, &useBy
-		rec.view.Method, rec.view.ApproverID, rec.view.Row = "row", a.rows.approver(in.TenantID), row
+		rec.view.Method, rec.view.ApproverID = "row", a.rows.approver(in.TenantID)
+		if sessionAuto {
+			rec.view.Method = "session"
+		} else if learnedAuto {
+			rec.view.Method, rec.view.ApproverID = "learned", learned.Approver
+		}
 	} else if auto || pkgAuto || stewardAuto {
 		t := now.UTC()
 		useBy := t.Add(approvalUseWindow)
@@ -665,6 +703,14 @@ func (a *Authority) RequestApproval(in *ApprovalRequestInput) (*ApprovalView, er
 		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
 			fmt.Sprintf("approved without asking under the approve-all rule the owner made %s (approval %s, approver %s): %s%s",
 				time.Unix(rule.Created, 0).UTC().Format(time.RFC3339), rule.ApprovalID, rule.ApproverID, evidence, note))
+	}
+	if sessionAuto && !auto {
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			fmt.Sprintf("approved without asking: the owner's work session is open and this is %s, not core (%s: %s)", blast.Verdict, blast.Class, blast.Why))
+	}
+	if learnedAuto && !auto {
+		a.auditApproval(in.TenantID, in.Requester, "approval_auto_approved", string(in.Kind), strings.Join(targets, ","), stmt.ID, "success",
+			fmt.Sprintf("approved without asking: the owner approved this exact job %d times with no denial (shape %s, last by %s)", learned.Approvals, shape, learned.Approver))
 	}
 	if rowAuto && !auto {
 		why := "auto"
@@ -943,8 +989,10 @@ func (a *Authority) AnswerApproval(ans *ApprovalAnswer) (*ApprovalView, error) {
 	}
 	v, payload := r.view, r.payload
 	stewardRec := r.stewardRule != nil
+	shape := r.shape
 	b.mu.Unlock()
 	a.auditApproval(v.TenantID, v.Requester, "approval_"+string(v.State), v.Kind, strings.Join(v.Targets, ","), v.ID, "success", "method="+method+" approver="+approverID)
+	a.learnFrom(v, shape, method, approverID, now)
 	if stewardRec && ans.Decision != "deny" {
 		// The owner's tap: the rule token Nightshift keeps.
 		if token := a.mintStewardRule(v, r, approverID, t); token != "" {
@@ -1091,4 +1139,31 @@ func (a *Authority) auditApproval(tenant, operator, event, kind, endpoint, appro
 		Status:     status,
 		Details:    details,
 	})
+}
+
+// learnFrom counts the owner's passkey approval of a job shape, or forgets
+// the shape on any denial (approval_learned.go).
+func (a *Authority) learnFrom(v ApprovalView, shape, method, approverID string, now time.Time) {
+	if shape == "" {
+		return
+	}
+	if v.State == ApprovalDenied {
+		if forgot, err := a.learned.forget(v.TenantID, shape); err != nil {
+			a.auditApproval(v.TenantID, v.Requester, "approval_learned_not_saved", v.Kind, "", v.ID, "error", err.Error())
+		} else if len(forgot) > 0 {
+			a.auditApproval(v.TenantID, v.Requester, "approval_learned_forgotten", v.Kind, strings.Join(v.Targets, ","), v.ID, "success",
+				"the owner denied a job shape that was approved without asking; it asks again (shape "+shape+")")
+		}
+		return
+	}
+	if method != "passkey" {
+		return
+	}
+	became, err := a.learned.approve(v.TenantID, LearnedShape{Shape: shape, Kind: v.Kind, Action: v.Action, Targets: v.Targets, Approver: approverID}, now)
+	if err != nil {
+		a.auditApproval(v.TenantID, v.Requester, "approval_learned_not_saved", v.Kind, "", v.ID, "error", err.Error())
+	} else if became {
+		a.auditApproval(v.TenantID, v.Requester, "approval_learned", v.Kind, strings.Join(v.Targets, ","), v.ID, "success",
+			fmt.Sprintf("the owner approved this exact job %d times with no denial; it runs without asking from now on (shape %s; any denial or the owner's undo ends it)", learnedAfter, shape))
+	}
 }
