@@ -5109,3 +5109,26 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 .pkg-desc summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .pkg-desc p { margin: var(--s-1) 0 0; white-space: normal; max-width: 60ch; }
 .btn[role="tab"][aria-selected="true"] { border-color: var(--brand); color: var(--brand); background: var(--raised); }
+/* Asset view: the machine's actions and its section tabs under the head. */
+.route-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-4);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+}
+.route-actions, .route-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.route-actions .btn[data-danger="true"] { color: var(--crit); border-color: var(--crit-hot); }
+.route-head { flex-wrap: wrap; }
+.kv.kv-2 { grid-template-columns: 96px minmax(0, 1fr) 96px minmax(0, 1fr); }
+@media (max-width: 760px) {
+  .kv.kv-2 { grid-template-columns: 96px minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .route-bar { padding: var(--s-2) var(--s-3); }
+  .route-head .route-chips { display: none; }
+}

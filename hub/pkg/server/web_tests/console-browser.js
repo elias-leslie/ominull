@@ -85,13 +85,15 @@
   for(const iso of ['2025-12-31T23:59:59Z','2026-01-01T01:00:00+02:00','2026-09-09T10:02:01Z']) assert(a.cellSortKey(a.cellText(a.stamp(new Date(iso))))===Date.parse(iso),'Time sorted as display text');
  });
  await check('host history ignores globally excluded alerts and unrelated traffic', async () => {
+  /* A demo host read from an earlier check may still be in flight (demo replies take 40 ms); let it land so this read is the mocked one. */
+  for (let i=0;i<40 && Object.values(a.hostScopes).some(v=>v.loading);i++) await wait();
   const original=window.fetch, paths=[]; a.state.demo=false; a.state.anomalies=[]; a.state.events=[];
   window.fetch=async (path) => { paths.push(path); let value={};
    if(path.startsWith('/api/v1/anomalies?')) value={total:73,alerts:[{id:'fixture-alert',endpoint_id:a.state.assets[0].endpoint.id,severity:'HIGH',title:'Scoped fixture finding',timestamp:'2026-09-09T12:00:00Z'}]};
    if(path.startsWith('/api/v1/traffic/flows?')) value={total:120,flows:[]};
    return new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
   };
-  try { a.openRoute(a.state.assets.find(x=>x.endpoint).key); await wait(); assert(document.querySelector('.route').textContent.includes('73 open alerts'),'Host count inherited global page'); assert(paths.some(p=>p.startsWith('/api/v1/traffic/flows?range=24h&limit=25&endpoint_id=')),'No scoped flows read'); }
+  try { a.openRoute(a.state.assets.find(x=>x.endpoint).key); for (let i=0;i<40 && !document.querySelector('.route').textContent.includes('Open alerts \u00b7 73');i++) await wait(); assert(document.querySelector('.route').textContent.includes('Open alerts \u00b7 73'),'Host count inherited global page; reads: '+paths.join(' ')+' scope: '+JSON.stringify(Object.fromEntries(Object.entries(a.hostScopes).map(([k,v])=>[k,{l:v.loading,al:v.alertsLoading,fl:v.flowsLoading}])))); assert(paths.some(p=>p.startsWith('/api/v1/traffic/flows?range=24h&limit=25&endpoint_id=')),'No scoped flows read'); }
   finally { a.closeRoute(); window.fetch=original; a.state.demo=true; }
  });
  await check('first load and optional stalls do not impersonate empty access data', async () => {

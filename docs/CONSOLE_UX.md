@@ -246,3 +246,28 @@ Rendered from synthetic events (22 events on 14 lines):
 ![Maintenance, after](images/console-ux/after-desk-maintenance.png)
 ![Maintenance, phone, after](images/console-ux/after-phone-maintenance.png)
 ![Run sheet, phone](images/console-ux/after-phone-maintenance-run.png)
+
+### Asset view
+
+- Head: name, state, evidence strip, and chips for OS, role and agent version
+  ("v1.0.0 outdated" in amber).
+- Action bar under the head: **Terminal** (or **Reattach terminal** when one
+  is open), **Screen** when the agent can share it, **Run package…** (opens
+  the Maintenance tab), **Maintenance mode** / **End maintenance mode**,
+  **Isolate** (red) or **Release**, and **More…** for the full menu. An
+  unmanaged asset gets **Install agent**, **Rescan** and More….
+- Tabs: **Overview** (one Facts card that merges identity and agent, open
+  alerts with the count in the head, observed exposure), **Maintenance**,
+  **Network** (if isolated, who it talks to, recent flows), **Software**,
+  **Evidence** (how the identity was formed). Tabs with nothing to show are
+  left out. The tab resets to Overview when another asset opens.
+- Package descriptions open from the name; the mode explanation is behind "?".
+- The open-alert line says "Latest 50 of N shown" only when there are more
+  than shown.
+
+For features that add a block to a machine (windows, steward, lock level),
+the tab list in `renderRoute` is the place: each tab is a list of cards.
+
+![Asset view, after](images/console-ux/after-desk-route.png)
+![Asset view, Maintenance tab](images/console-ux/after-desk-route-maintenance.png)
+![Asset view, phone, after](images/console-ux/after-phone-route.png)

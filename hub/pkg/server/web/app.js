@@ -9584,9 +9584,9 @@
       var schedule = s ? h("div", {}, h("span", { text: maintEffectiveText(s.effective) }),
         s.effective && maintChangedCount(s, s.effective) ? h("span", { cls: "dim-2", text: " · " + maintChangedCount(s, s.effective) + " changed" }) : null,
         maintOverrideNote(s.endpoint)) : h("span", { cls: "dim-2", text: sw && sw.error ? "unavailable" : "…" });
+      var pname = h("div", { cls: "uf uf-wrap uf-g1" }, h("b", { text: p.title }), p.risk === "careful" ? chip("warn", "careful") : null);
       return [
-        h("div", {}, h("b", { text: p.title }), p.risk === "careful" ? h("span", { cls: "u-ml2" }, chip("warn", "careful")) : null,
-          h("div", { cls: "dim-2", text: p.description || "" })),
+        p.description ? h("details", { cls: "pkg-desc" }, h("summary", {}, pname), h("p", { cls: "dim-2", text: p.description })) : pname,
         result,
         last ? stamp(finished || parseTime(last.requested_at)) : h("span", { cls: "dim-2", text: "—" }),
         last && !last.completed_at ? h("span", { cls: "dim-2", text: "—" }) : last ? (last.reboot ? chip("warn", "Yes") : "No") : h("span", { cls: "dim-2", text: "—" }),
@@ -9619,8 +9619,8 @@
         catNote,
         cat ? maintOverrideNote(cat.override) : null),
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
-        : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet."),
-      h("div", { cls: "card-body pending", text: "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking; anything else asks you to approve on your phone. Packages never reboot the machine." })), null, true);
+        : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet.")), null, true,
+      "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking; anything else asks you to approve on your phone. Packages never reboot the machine; Restart is its own package.");
   }
 
   /* Maintenance mode: keeps the machine awake while maintenance runs (sleep
@@ -10499,6 +10499,54 @@
     name.focus();
   }
 
+  /* OS, role and agent version at a glance in the asset view's head. */
+  function routeHeadChips(asset) {
+    var ep = asset.endpoint;
+    if (!ep) return null;
+    var os = /windows/i.test(ep.os || "") ? "Windows" : /darwin|mac/i.test(ep.os || "") ? "macOS" : ep.os ? "Linux" : "";
+    return h("span", { cls: "uf uf-wrap uf-g1 route-chips" },
+      os ? chip("idle", os) : null,
+      asset.role && asset.role !== "unknown" ? chip("idle", roleLabel(asset.role)) : null,
+      chip(asset.stale ? "warn" : "idle", "v" + shortVersion(ep.driver_version) + (asset.stale ? " outdated" : "")));
+  }
+
+  /* The asset view's own actions: what the owner does to this machine,
+     visible instead of behind a menu. More opens the full menu. */
+  function routeActions(asset) {
+    var ep = asset.endpoint;
+    var more = h("button", { cls: "btn", type: "button", text: "More\u2026", "aria-haspopup": "menu",
+      on: { click: function (e) { var r = e.currentTarget.getBoundingClientRect(); openAssetMenu(asset, r.left - 60, r.bottom + 4, null); } } });
+    if (!ep || !asset.evidence.agent) {
+      return h("div", { cls: "route-actions" },
+        h("button", { cls: "btn btn-primary", type: "button", text: "Install agent", on: { click: function () { installAgent(asset); } } }),
+        h("button", { cls: "btn", type: "button", text: "Rescan", on: { click: function () { rescan(asset); } } }),
+        more);
+    }
+    var live = liveTerminalsFor(ep);
+    var term = live.length
+      ? h("button", { cls: "btn", type: "button", text: "Reattach terminal", on: { click: function () { reattachTerminal(live[0]); } } })
+      : h("button", { cls: "btn", type: "button", text: "Terminal", title: "Asks for approval on your phone", disabled: READ_ONLY,
+        on: { click: function () { launchTerminalShell(asset); } } });
+    var m = state.maintenanceByEndpoint[ep.id];
+    var mode = m && m.mode;
+    var modeBtn = mode && !mode.pending && IS_ADMIN
+      ? h("button", { cls: "btn", type: "button", text: mode.on ? "End maintenance mode" : "Maintenance mode", disabled: READ_ONLY,
+        title: mode.on ? "Lets the machine sleep again" : "Keeps the machine awake for " + spanWords((mode.hours || 6) * 3600),
+        on: { click: function () { maintModeRun(mode, asset, mode.on ? "revert" : "enforce"); } } })
+      : null;
+    return h("div", { cls: "route-actions" },
+      term,
+      screenCapable(ep) ? h("button", { cls: "btn", type: "button", text: "Screen", title: "Asks for approval on your phone, then opens the screen viewer",
+        on: { click: function () { launchRemoteScreen(asset); } } }) : null,
+      m && arrayOf(m.packages).some(notMaintMode) ? h("button", { cls: "btn", type: "button", text: "Run package\u2026",
+        on: { click: function () { state.routeTab = "maintenance"; renderRoute(); } } }) : null,
+      modeBtn,
+      asset.isolated
+        ? h("button", { cls: "btn", type: "button", text: "Release", on: { click: function () { setIsolation(asset, false); } } })
+        : h("button", { cls: "btn", "data-danger": "true", type: "button", text: "Isolate", on: { click: function () { setIsolation(asset, true); } } }),
+      more);
+  }
+
   function renderRoute() {
     var previousScrollTop = 0;
     var previousFocusIndex = routeEl && routeEl.contains(document.activeElement) ? Array.prototype.indexOf.call(routeEl.querySelectorAll(FOCUSABLE), document.activeElement) : -1;
@@ -10517,30 +10565,25 @@
     var ep = asset.endpoint;
     var sc = asset.scan;
 
-    var idCard = card("Identity", h("div", { cls: "card-body" },
-      h("dl", { cls: "kv" },
-        h("dt", { text: "Asset" }), h("dd", {}, h("b", { text: asset.name })),
-        h("dt", { text: "Address" }), h("dd", {}, h("b", { text: asset.ip || "\u2014" })),
-        h("dt", { text: "MAC" }), h("dd", { text: asset.mac || "\u2014" }),
-        h("dt", { text: "Vendor" }), h("dd", { text: asset.vendor || "\u2014" }),
-        h("dt", { text: "Role" }), h("dd", {}, h("b", { text: asset.role && asset.role !== "unknown" ? roleLabel(asset.role) : "\u2014" })),
-        h("dt", { text: "Identity" }), h("dd", { text: asset.identity }),
-        h("dt", { text: "Client" }), h("dd", { text: asset.tenantName }),
-        h("dt", { text: "Location" }), h("dd", { text: asset.locationName }),
-        h("dt", { text: "Subnet" }), h("dd", { text: asset.subnet || "\u2014" }),
-        h("dt", { text: "Last seen" }), h("dd", {}, stamp(asset.lastSeen)))));
-
-    var agentCard = card("Agent", h("div", { cls: "card-body" },
-      ep
-        ? h("dl", { cls: "kv" },
-            h("dt", { text: "Endpoint id" }), h("dd", {}, h("b", { text: ep.id })),
-            h("dt", { text: "Version" }), h("dd", { text: shortVersion(ep.driver_version) + (asset.stale ? " \u2014 outdated" : "") }),
-            h("dt", { text: "Collector" }), h("dd", { text: engineOf(ep.driver_version) || "\u2014" }),
-            h("dt", { text: "OS" }), h("dd", { text: ep.os || "\u2014" }),
-            h("dt", { text: "Role" }), h("dd", { text: ep.role_tag || "\u2014" }),
-            h("dt", { text: "Software" }), h("dd", { text: ep.installed_software || "\u2014" }),
-            h("dt", { text: "Registered" }), h("dd", {}, stamp(parseTime(ep.created_at))))
-        : emptyBox("No agent on this asset. It is on the deployment worklist.")));
+    function fact(label, value) { return [h("dt", { text: label }), h("dd", {}, value === undefined || value === null || value === "" ? "\u2014" : value)]; }
+    var facts = [].concat(
+      fact("Address", h("b", { text: asset.ip || "\u2014" })),
+      fact("MAC", asset.mac),
+      fact("Vendor", asset.vendor),
+      fact("Role", asset.role && asset.role !== "unknown" ? roleLabel(asset.role) : ""),
+      ep ? fact("OS", ep.os) : [],
+      ep ? fact("Agent", shortVersion(ep.driver_version) + (asset.stale ? " \u2014 outdated" : "") + (engineOf(ep.driver_version) ? " \u00b7 " + engineOf(ep.driver_version) : "")) : [],
+      fact("Identity", asset.identity),
+      fact("Client", asset.tenantName),
+      fact("Location", asset.locationName),
+      fact("Subnet", asset.subnet),
+      fact("Last seen", stamp(asset.lastSeen)),
+      ep ? fact("Registered", stamp(parseTime(ep.created_at))) : [],
+      ep && ep.role_tag ? fact("Role tag", ep.role_tag) : [],
+      ep ? fact("Endpoint id", h("span", { cls: "mono dim-2", text: ep.id })) : []);
+    var factsCard = card("Facts", h("div", { cls: "card-body" },
+      h("dl", { cls: "kv kv-2" }, facts),
+      ep ? null : h("p", { cls: "dim-2 u-mt1", text: "No agent on this asset. It is on the deployment worklist." })), null, true);
 
     var portsBody = h("div", { cls: "card-body" });
     if (asset.ports.length) {
@@ -10561,11 +10604,10 @@
 
     var evBody = h("div", { cls: "card-body" });
     evBody.appendChild(claimsPanel(asset));
-    evBody.appendChild(h("p", { cls: "pending", text: "Highest confidence wins per field, never per record. Losing scan claims stay on the row so an operator can see how the identity was formed." }));
 
     var hostScope = hostScopes[state.routeKey] || {alertsLoading: true, flowsLoading: true};
     var flows = arrayOf(hostScope.flows && hostScope.flows.flows);
-    var flowCard = card("Recent flows", simpleTable(["Time", "Action", "Source", "Destination", "Process", "Forensics"],
+    var flowCard = card("Recent flows", stackOnPhone(simpleTable(["Time", "Action", "Source", "Destination", "Process", "Forensics"],
       flows.map(function (e) {
         var procNode = [h("span", { cls: "dim", text: e.process_path || e.domain || "—" })];
         if (e.attribution_status && e.attribution_status !== "unknown") {
@@ -10585,25 +10627,46 @@
           h("div", { cls: "uf uf-wrap uf-g1" }, procNode),
           forensicsBtn
         ];
-      }), {empty: hostScope.flowsLoading ? "Loading host flows…" : hostScope.flowsError ? "Host flows unavailable" : "No source flows in the last 24 hours."}), null, true);
+      }), {empty: hostScope.flowsLoading ? "Loading host flows…" : hostScope.flowsError ? "Host flows unavailable" : "No source flows in the last 24 hours."})), null, true);
 
     var alerts = arrayOf(hostScope.alerts && hostScope.alerts.alerts).filter(function (a) { return !a.acknowledged && !a.held_reason; });
-    var alertCard = card("Open alerts", hostScope.alertsError
+    var alertCard = card("Open alerts" + (!hostScope.alertsError && hostScope.alerts ? " \u00b7 " + scopeTotal(hostScope.alerts, "alerts") : ""), hostScope.alertsError
       ? h("p", {role: "status", text: "Host alerts unavailable: " + hostScope.alertsError})
       : hostScope.alertsLoading && !hostScope.alerts ? h("p", {role: "status", text: "Loading host alerts…"})
       : !ep && !asset.assetId ? h("p", {text: "No stored source identity for this asset. Destination references are not alerts raised on this host."})
-      : h("div", {}, h("p", {text: scopeTotal(hostScope.alerts, "alerts") + (scopeTotal(hostScope.alerts, "alerts") === "1" ? " open alert" : " open alerts") + " · raised, unacknowledged · latest 50 shown" + (!ep ? " · recorded source identity only; older unattributed findings excluded" : " · all retained history")}),
+      : h("div", { cls: "card-body stack" },
+        (function () {
+          var total = Number(scopeTotal(hostScope.alerts, "alerts")) || 0;
+          var note = [];
+          if (!alerts.length) note.push("None open");
+          else if (total > alerts.length) note.push("Latest " + alerts.length + " of " + total + " shown");
+          if (!ep) note.push("recorded source identity only; older unattributed findings excluded");
+          return note.length ? h("p", { cls: "dim-2 u-t2", text: note.join(" \u00b7 ") }) : null;
+        })(),
         alerts.map(function (a) { return alertCardNode(a, true); }),
-        h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep ? ep.id : "", asset_id:ep ? "" : asset.assetId, unacknowledged_only:true}; go("alerts"); }}})), null, true);
-    flowCard.appendChild(h("p", {role: "status", text: hostScope.flowsError ? "Recent flows unavailable: " + hostScope.flowsError : hostScope.flowsLoading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + scopeTotal(hostScope.flows, "flows") + " matching"}));
-    flowCard.appendChild(h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}));
+        h("div", {}, h("button", {cls: "btn", type: "button", text: "View host alerts", on: {click: function () { state.alertsFilter = {page:1, limit:50, endpoint_id:ep ? ep.id : "", asset_id:ep ? "" : asset.assetId, unacknowledged_only:true}; go("alerts"); }}}))), null, true);
+    flowCard.appendChild(h("div", { cls: "card-body uf uf-wrap uf-g3" },
+      h("button", {cls: "btn", type: "button", text: "View host traffic", on: {click: function () { state.trafficFilter = ep ? {range:"24h", endpoint_id:ep.id} : {range:"24h", src_ip:asset.ip}; go("traffic"); }}}),
+      h("span", {cls: "dim-2 u-t2", role: "status", text: hostScope.flowsError ? "Recent flows unavailable: " + hostScope.flowsError : hostScope.flowsLoading ? "Loading host flows…" : "Latest 25 source flows in 24 hours · " + scopeTotal(hostScope.flows, "flows") + " matching"})));
 
-    var routeBody = h("div", { cls: "route-body" }, idCard, identityWhyCard(asset), agentCard, card("Observed exposure", portsBody),
-      ep ? maintenanceCard(asset) : null,
-      ep ? baselineEndpointCard(asset) : null,
-      ep ? commProfileCard(asset) : null,
-      ep ? softwareInventoryCard(asset) : null,
-      card("Evidence", evBody), flowCard, alertCard);
+    /* The asset view in tabs, by what the owner came to do. Each tab is a
+       list of cards; a feature that belongs to a tab adds its card here. */
+    var tabs = [
+      { id: "overview", label: "Overview", cards: [factsCard, alertCard, card("Observed exposure", portsBody)] },
+      { id: "maintenance", label: "Maintenance", cards: ep ? [maintenanceCard(asset)] : [] },
+      { id: "network", label: "Network", cards: [ep ? baselineEndpointCard(asset) : null, ep ? commProfileCard(asset) : null, flowCard] },
+      { id: "software", label: "Software", cards: ep ? [softwareInventoryCard(asset)] : [] },
+      { id: "evidence", label: "Evidence", cards: [identityWhyCard(asset), card("How it was identified", evBody, null, true,
+        "Highest confidence wins per field, never per record. Losing scan claims stay on the row so you can see how the identity was formed.")] }
+    ].map(function (t) { t.cards = t.cards.filter(Boolean); return t; }).filter(function (t) { return t.cards.length; });
+    if (state.routeTabKey !== state.routeKey) { state.routeTab = "overview"; state.routeTabKey = state.routeKey; }
+    var shown = tabs.filter(function (t) { return t.id === state.routeTab; })[0] || tabs[0];
+    var tabBar = h("div", { cls: "route-tabs", role: "tablist", "aria-label": "Asset sections" }, tabs.map(function (t) {
+      return h("button", { cls: "btn mini", type: "button", role: "tab", "aria-selected": t === shown ? "true" : "false",
+        "aria-controls": "route-panel", text: t.label, on: { click: function () { state.routeTab = t.id; previousScrollTop = 0; renderRoute(); } } });
+    }));
+    var routeBody = h("div", { cls: "route-body", id: "route-panel", role: "tabpanel", "aria-label": shown.label }, shown.cards);
+    if (state.routeTabShown !== shown.id) { state.routeTabShown = shown.id; previousScrollTop = 0; }
 
     routeEl = h("div", {
       cls: "route", role: "dialog", "aria-modal": "true", tabindex: "-1",
@@ -10614,17 +10677,8 @@
         h("h2", { text: asset.name }),
         stateBadge(asset.state),
         evidenceStrip(asset),
-        h("span", { cls: "fill" }),
-        h("button", { cls: "btn", type: "button", text: "Copy address", on: { click: function () { copyAddress(asset); } } }),
-        h("button", {
-          cls: "btn", type: "button", text: "Actions",
-          on: {
-            click: function (e) {
-              var r = e.currentTarget.getBoundingClientRect();
-              openAssetMenu(asset, r.left - 60, r.bottom + 4, null);
-            }
-          }
-        })),
+        routeHeadChips(asset)),
+      h("div", { cls: "route-bar" }, routeActions(asset), tabBar),
       routeBody);
 
     document.body.appendChild(routeEl);
