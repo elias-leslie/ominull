@@ -256,6 +256,21 @@ func TestAgentTrustDelivery(t *testing.T) {
 	}
 }
 
+func TestFleetTrustShowsPinnedRoutineKeys(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-r"})
+	trustBeat(t, srv, "ep-r", &response.AgentTrustReport{V: 1, Keys: "pinned", RoutineEpoch: 4, RoutineKeys: 2})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/trust", nil)
+	req.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"routine_epoch":4,"routine_keys":2`) {
+		t.Fatalf("fleet trust %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestMonitorOnlyNarrowsManifest(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
