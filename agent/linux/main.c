@@ -624,8 +624,9 @@ static void PrintUsage(const char* prog) {
     printf("  --cleanup          Remove Ominull-owned host enforcement state (local recovery: also\n");
     printf("                     records that isolation and quarantines were lifted here).\n");
     printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, isolate,\n");
-    printf("                     signed-scripts, respond, engagement; none removes it). Set at the host,\n");
-    printf("                     never by the hub. signed-scripts runs scripts only with a host authority key.\n");
+    printf("                     signed-scripts, monitor-signed-scripts, respond, engagement; none removes it).\n");
+    printf("                     Set at the host, never by the hub. The two signed-scripts levels run scripts\n");
+    printf("                     only with a host authority key; monitor-signed-scripts never isolates.\n");
     printf("  --repin-trust      Forget the pinned response authority keys; the next contact with\n");
     printf("                     the hub pins the keys it offers with a release-key-signed bundle (rotation).\n");
 }
@@ -3610,7 +3611,7 @@ int main(int argc, char* argv[]) {
         }
         Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
         if (!Trust_SetCeiling(&g_Trust, setCeiling)) {
-            fprintf(stderr, "[-] --capability-ceiling takes monitor, isolate, signed-scripts, respond, engagement or none.\n");
+            fprintf(stderr, "[-] --capability-ceiling takes monitor, isolate, signed-scripts, monitor-signed-scripts, respond, engagement or none.\n");
             return 1;
         }
         printf("[+] Capability ceiling %s recorded; restart the agent.\n", setCeiling);

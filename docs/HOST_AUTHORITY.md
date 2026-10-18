@@ -2,7 +2,7 @@
 
 Some machines must not take orders from the hub alone: the workstation and the Proxmox host. On them an
 administrator sets a lock level (capability ceiling) at the host, and may pin a **host authority**: Ed25519 keys
-held outside OmniNull (Nightshift's). Where a host authority is pinned, scripts run only on grants it signed; the
+held outside OmniNull (Nightshift's). Where a host authority is pinned, scripts run only on grants it signed (under any level); the
 hub carries those grants and never signs them.
 
 Agents from 1.8.81 implement everything here. Code: `agent/include/agent_trust.h` (ceilings, host files, offer
@@ -21,13 +21,15 @@ the ceiling. An unknown level is refused (exit 1) and nothing is written; an unr
 | `monitor` | agent updates | hosts that must never be cut off |
 | `isolate` | isolation, mesh quarantine, evidence collection, updates | the workstation |
 | `signed-scripts` | `isolate` plus scripts, and scripts only while a host-authority key is pinned | the workstation with Nightshift-signed upkeep |
+| `monitor-signed-scripts` | evidence collection, updates, and scripts only while a host-authority key is pinned; no isolation | a hypervisor with Nightshift-signed upkeep (isolating it would cut its management and leave its guests running) |
 | `respond` | everything except scripts | |
 | `engagement` | everything | |
 
-Terminal and remote screen are refused by the agent under `monitor`, `isolate` and `signed-scripts`.
+Terminal and remote screen are refused by the agent under `monitor`, `isolate`, `signed-scripts` and
+`monitor-signed-scripts`.
 
 Capability names (manifest and ceiling): `update`, `isolate`, `mesh`, `collect`, `script`, `terminal`, `screen`.
-Under `signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must be `engagement`
+Under `signed-scripts` and `monitor-signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must be `engagement`
 (one owner tap on the hub); the ceiling then cuts it down.
 
 ## Host authority files

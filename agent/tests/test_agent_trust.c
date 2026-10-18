@@ -597,6 +597,12 @@ static void test_host_authority(int64_t now) {
     init();
     expect("signed-scripts without a host key: no scripts", !Trust_Allows(&T, "script_exec") && Trust_Allows(&T, "isolation_change") &&
                                                              !Trust_Allows(&T, "terminal_session"));
+    expect("ceiling monitor-signed-scripts accepted (no host key)", Trust_SetCeiling(&T, "monitor-signed-scripts"));
+    init();
+    expect("monitor-signed-scripts without a host key: no scripts, no isolation", !Trust_Allows(&T, "script_exec") &&
+                                                                                 !Trust_Allows(&T, "isolation_change") && Trust_Allows(&T, "forensic_collection"));
+    expect("ceiling signed-scripts again", Trust_SetCeiling(&T, "signed-scripts"));
+    init();
     char report[4096];
     Trust_ReportJSON(&T, report, sizeof(report));
     expect("report: no host authority", strstr(report, "\"host_authority\":false") && strstr(report, "\"ceiling\":\"signed-scripts\""));
@@ -616,6 +622,16 @@ static void test_host_authority(int64_t now) {
     init();
     expect("two host keys and one allow-listed package loaded", T.host_present && T.hostKeyCount == 2 && T.hostAllowCount == 1);
     expect("signed-scripts with a host key: scripts allowed", Trust_Allows(&T, "script_exec"));
+    expect("ceiling monitor-signed-scripts accepted", Trust_SetCeiling(&T, "monitor-signed-scripts"));
+    init();
+    expect("monitor-signed-scripts: report names the level", T.host_present && strcmp(T.ceiling, "monitor-signed-scripts") == 0);
+    expect("monitor-signed-scripts with a host key: scripts, collection, updates",
+           Trust_Allows(&T, "script_exec") && Trust_Allows(&T, "forensic_collection") && Trust_Allows(&T, "agent_update"));
+    expect("monitor-signed-scripts: no isolation, mesh, terminal or screen",
+           !Trust_Allows(&T, "isolation_change") && !Trust_Allows(&T, "mesh_quarantine") && !Trust_Allows(&T, "terminal_session") &&
+               !Trust_Allows(&T, "screen_session"));
+    expect("ceiling signed-scripts back", Trust_SetCeiling(&T, "signed-scripts"));
+    init();
     Trust_ReportJSON(&T, report, sizeof(report));
     expect("report: host authority, key ids and roles, allow-list",
            strstr(report, "\"host_authority\":true") && strstr(report, hk_id[0]) && strstr(report, "\"role\":\"auto\"") &&

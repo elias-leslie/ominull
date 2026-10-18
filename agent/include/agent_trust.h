@@ -490,7 +490,7 @@ typedef struct {
     char    tenant[64];          /* of the pinned bundle */
     int64_t epoch;               /* of the pinned bundle */
     int64_t epoch_floor;         /* highest epoch ever pinned here, or one above a revoked pin (survives --repin-trust) */
-    char    ceiling[16];         /* local capability ceiling (capability.ceiling), "" = none */
+    char    ceiling[32];         /* local capability ceiling (capability.ceiling), "" = none */
     /* Host authority: host_present once host_authority.json exists (then
      * script_exec takes only host-authority grants, even when the file is
      * unreadable and no key loaded: it fails closed). */
@@ -750,6 +750,9 @@ static inline bool Trust_ManifestHas(const TrustManifest* m, const char* cap) {
  *   isolate         isolation, mesh quarantine, evidence collection, updates
  *   signed-scripts  isolate plus scripts, and those only with a pinned host
  *                   authority key (Trust_Allows)
+ *   monitor-signed-scripts  evidence collection, updates and scripts (only
+ *                   with a pinned host authority key); no isolation: for a
+ *                   hypervisor, where isolating cuts its management only
  *   respond         everything but scripts
  *   engagement      everything */
 static inline bool Trust_CeilingHas(const char* ceiling, const char* cap) {
@@ -761,7 +764,13 @@ static inline bool Trust_CeilingHas(const char* ceiling, const char* cap) {
     bool isolateLevel = strcmp(cap, "isolate") == 0 || strcmp(cap, "mesh") == 0 || strcmp(cap, "collect") == 0;
     if (strcmp(ceiling, "isolate") == 0) return isolateLevel;
     if (strcmp(ceiling, "signed-scripts") == 0) return isolateLevel || strcmp(cap, "script") == 0;
+    if (strcmp(ceiling, "monitor-signed-scripts") == 0) return strcmp(cap, "collect") == 0 || strcmp(cap, "script") == 0;
     return false;
+}
+
+/* Ceilings under which scripts run only on host-authority grants. */
+static inline bool Trust_CeilingSignedOnly(const char* ceiling) {
+    return ceiling && (strcmp(ceiling, "signed-scripts") == 0 || strcmp(ceiling, "monitor-signed-scripts") == 0);
 }
 
 /* Manifest profiles (signed by the authority). */
@@ -769,17 +778,17 @@ static inline bool Trust_ProfileName(const char* p) {
     return p && (strcmp(p, "monitor") == 0 || strcmp(p, "respond") == 0 || strcmp(p, "engagement") == 0);
 }
 
-/* Ceiling levels (set on the host): the profiles plus isolate and
- * signed-scripts. */
+/* Ceiling levels (set on the host): the profiles plus isolate,
+ * signed-scripts and monitor-signed-scripts. */
 static inline bool Trust_CeilingName(const char* p) {
-    return Trust_ProfileName(p) || (p && (strcmp(p, "isolate") == 0 || strcmp(p, "signed-scripts") == 0));
+    return Trust_ProfileName(p) || (p && (strcmp(p, "isolate") == 0 || Trust_CeilingSignedOnly(p)));
 }
 
 static inline bool Trust_Allows(const TrustContext* t, const char* kind) {
     const char* cap = Trust_CapabilityFor(kind);
     if (!Trust_ManifestHas(&t->manifest, cap) || !Trust_CeilingHas(t->ceiling, cap)) return false;
-    /* signed-scripts: scripts only where a host authority key is pinned. */
-    if (cap && strcmp(cap, "script") == 0 && strcmp(t->ceiling, "signed-scripts") == 0 && t->hostKeyCount == 0) return false;
+    /* (monitor-)signed-scripts: scripts only where a host authority key is pinned. */
+    if (cap && strcmp(cap, "script") == 0 && Trust_CeilingSignedOnly(t->ceiling) && t->hostKeyCount == 0) return false;
     return true;
 }
 

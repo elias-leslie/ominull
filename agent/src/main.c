@@ -70,8 +70,9 @@ static void PrintUsage(const char* prog) {
     printf("  --repin-trust        Forget the pinned response authority keys; the next contact with the\n");
     printf("                       hub pins the keys it offers with a release-key-signed bundle (after a rotation).\n");
     printf("  --capability-ceiling P  Cap what any manifest grants this host (monitor, isolate,\n");
-    printf("                       signed-scripts, respond, engagement; none removes it). Set at the host,\n");
-    printf("                       never by the hub. signed-scripts runs scripts only with a host authority key.\n");
+    printf("                       signed-scripts, monitor-signed-scripts, respond, engagement; none removes it).\n");
+    printf("                       Set at the host, never by the hub. The two signed-scripts levels run scripts\n");
+    printf("                       only with a host authority key; monitor-signed-scripts never isolates.\n");
     printf("  --release-local      Local recovery: record that isolation and quarantines were lifted\n");
     printf("                       here (run as Administrator, then restart the service).\n");
     printf("  --config <path>      Read package-owned runtime configuration from this file.\n");
@@ -198,7 +199,7 @@ int main(int argc, char* argv[]) {
     if (setCeiling) {
         Agent_TrustInit(config.endpoint_id);
         if (!Agent_TrustSetCeiling(setCeiling)) {
-            fprintf(stderr, "[-] --capability-ceiling takes monitor, isolate, signed-scripts, respond, engagement or none (run as Administrator).\n");
+            fprintf(stderr, "[-] --capability-ceiling takes monitor, isolate, signed-scripts, monitor-signed-scripts, respond, engagement or none (run as Administrator).\n");
             return 1;
         }
         printf("[+] Capability ceiling %s recorded; restart the service.\n", setCeiling);
