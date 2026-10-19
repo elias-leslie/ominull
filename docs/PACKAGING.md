@@ -94,11 +94,15 @@ Host ominull-hub-install
 
 The agent also needs its own trusted Proxmox host-key entry in
 `~agent/.ssh/known_hosts` and its private key available without an interactive
-prompt. With the normal release environment configured through the approved
-credential sources, run inside an active owner work session:
+prompt. Inside an active owner work session:
 
 ```bash
-OMINULL_SIGNING_ROUTINE=1 st elevate run ominull-admin -- scripts/release.sh ...
+st elevate request ominull-admin --reason 'OmniNull release X.Y.Z' --wait
+OMINULL_SIGNING_ROUTINE=1 OMINULL_SIGNING_BACKEND=command \
+OMINULL_SIGNING_COMMAND=~/.local/lib/nightshift/bin/nightshift-release-signer \
+OMINULL_HUB_URL=https://<hub>:9443 \
+st elevate run ominull-admin -- scripts/release.sh ...
+st elevate revoke ominull-admin
 ```
 
 The session authorizes routine signing and the `ominull-admin` grant without
