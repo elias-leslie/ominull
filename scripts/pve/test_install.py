@@ -5,11 +5,11 @@ The "PVE host" is a bubblewrap sandbox (user namespace, uid 0 inside) whose /usr
 only the command= of that key's authorized_keys line, as sshd does for a forced command.
 """
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -94,7 +94,7 @@ class InstallTests(unittest.TestCase):
 
     def install(self, *args):
         return subprocess.run(["bash", str(self.repo / "scripts/pve/install.sh"), *args], env=self.env,
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=120, check=False)
 
     def test_installs_three_forced_keys_and_each_refuses_a_shell(self):
         result = self.install()
@@ -156,6 +156,73 @@ class InstallTests(unittest.TestCase):
         for bad in ("age1short", public + ";id", "AGE1" + public[4:]):
             with self.subTest(bad=bad):
                 self.assertEqual(self.install("--recipient", bad).returncode, 2)
+
+    def extra_key(self, name="agent"):
+        key = self.dir / (name + ".ed25519")
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", str(key)], check=True)
+        return key.with_suffix(".ed25519.pub")
+
+    def test_extra_hub_key_restricts_access_and_reruns_preserve_both_hub_keys(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        owner_lines = self.keys.read_text().splitlines()
+        public = self.extra_key()
+        # A supplied comment is not trusted as an authorized_keys marker.
+        public.write_text(" ".join(public.read_text().split()[:2]) + " agent key with spaces\n")
+        result = self.install("--hub-install-extra-pubkey", str(public))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = (owner_lines[-1].split(" ssh-ed25519 ")[0] + " " +
+                    " ".join(public.read_text().split()[:2]) + " ominull-hub-install-extra")
+        installed = self.keys.read_text()
+        self.assertEqual(installed.splitlines(), [*owner_lines, expected])
+        # The same fixture sshd checks the extra key's forced command, not just its line format.
+        for command, status in (("version", 0), ("id", 1)):
+            result = subprocess.run(["ssh", "-i", str(public.with_suffix("")), "root@192.0.2.39", command],
+                                    env=self.env, capture_output=True, text=True, timeout=30, check=False)
+            self.assertEqual(result.returncode, status, result.stderr)
+        for args in (("--hub-install-extra-pubkey", str(public)), ()):
+            result = self.install(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.keys.read_text(), installed)
+            self.assertNotIn("AUTH\t", result.stdout)
+        # Keep the extra line even when a normal key needs refreshing without the flag.
+        self.keys.write_text("\n".join(line for line in installed.splitlines()
+                                       if not line.endswith(" ominull-backup")) + "\n")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertCountEqual(self.keys.read_text().splitlines(), installed.splitlines())
+        # A different supplied key replaces the one extra slot and keeps the owner's keys.
+        replacement = self.extra_key("replacement")
+        replacement.write_text(" ".join(replacement.read_text().split()[:2]))  # No comment or final newline.
+        result = self.install("--hub-install-extra-pubkey", str(replacement))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = self.keys.read_text().splitlines()
+        self.assertEqual(lines[:-1], owner_lines)
+        self.assertTrue(lines[-1].endswith(" ominull-hub-install-extra"))
+        self.assertIn(" ".join(replacement.read_text().split()[:2]), lines[-1])
+        self.assertNotIn(expected, lines)
+        # Removing the marked line is persistent when the flag is omitted.
+        self.keys.write_text("\n".join(owner_lines) + "\n")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.keys.read_text().splitlines(), owner_lines)
+
+    def test_extra_hub_key_rejects_invalid_files_before_installing_anything(self):
+        public = self.extra_key()
+        valid = public.read_text()
+        for bad in ("", valid + valid, valid + "\n", 'command="id" ' + valid,
+                    valid.replace("ssh-ed25519", "ssh-rsa"), "ssh-ed25519 " + "A" * 68 + "\n",
+                    valid.rstrip("\n") + "\x00hidden\n"):
+            with self.subTest(bad=bad):
+                public.write_text(bad)
+                result = self.install("--hub-install-extra-pubkey", str(public))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("--hub-install-extra-pubkey", result.stderr)
+                self.assertNotIn("ominull-", self.keys.read_text())
+                self.assertEqual(list((self.pve / "sbin").iterdir()), [])
+        public.unlink()
+        result = self.install("--hub-install-extra-pubkey", str(public))
+        self.assertEqual(result.returncode, 2, result.stderr)
 
     def test_uncommitted_dispatcher_is_refused(self):
         with (self.repo / "scripts/pve/ominull-hub-install").open("a") as file:

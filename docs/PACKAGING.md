@@ -63,6 +63,47 @@ rolls out canaries first (`OMINULL_ROUTINE_CANARIES`, default the lab VM), and
 the hub and the authority refuse a routine-signed rollout without canaries.
 Agents from 1.8.89 accept routine keys for agent packages only.
 
+An agent running as the `agent` user uses its own hub-install SSH key; the
+owner's key stays in place. As `agent`, create an ed25519 key with
+`ssh-keygen -t ed25519 -f ~/.ssh/ominull-hub-install.ed25519` and supply only
+the `.pub` file to the owner. Through the approved admin path, the owner runs
+`scripts/pve/install.sh --hub-install-extra-pubkey FILE` with the usual
+`PVE_HOST` and `OMINULL_PVE_FROM` environment. The file must contain exactly
+one `ssh-ed25519` public key line, with an optional comment and no SSH options.
+The extra key gets the same `restrict`, `from=` address and forced
+`/usr/local/sbin/ominull-hub-install` command as the owner's hub-install key.
+Re-running with the same key adds nothing; a different key replaces the extra
+key. Omitting the flag preserves a previously installed extra key, including
+when refreshing the other keys. To remove it, the owner removes only the line
+ending ` ominull-hub-install-extra` from `/root/.ssh/authorized_keys` on
+Proxmox through the approved admin path. A later run without the flag keeps
+it removed.
+
+Add this alias to `~agent/.ssh/config`, replacing `<PVE host>` with the
+deployment's Proxmox hostname or address and keeping the key private to `agent`:
+
+```sshconfig
+Host ominull-hub-install
+    HostName <PVE host>
+    User root
+    IdentityFile ~/.ssh/ominull-hub-install.ed25519
+    IdentitiesOnly yes
+    IdentityAgent none
+    BatchMode yes
+```
+
+The agent also needs its own trusted Proxmox host-key entry in
+`~agent/.ssh/known_hosts` and its private key available without an interactive
+prompt. With the normal release environment configured through the approved
+credential sources, run inside an active owner work session:
+
+```bash
+OMINULL_SIGNING_ROUTINE=1 st elevate run ominull-admin -- scripts/release.sh ...
+```
+
+The session authorizes routine signing and the `ominull-admin` grant without
+owner taps. Use the actual release arguments in place of `...`.
+
 New installs take a routine-signed package too. The bootstrap scripts
 (`/bootstrap.sh`, `/bootstrap.ps1` and the enrolment pages' scripts) install a
 package the embedded release key signed as before; otherwise they fetch
