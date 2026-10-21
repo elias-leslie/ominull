@@ -14,7 +14,14 @@
     "frontend_port": 9999,
     "backend_dir": "hub",
     "frontend_dir": "hub",
-    "health_endpoint": "/api/v1/hierarchy"
+    "health_endpoint": "/api/v1/hierarchy",
+    "deployment": {
+      "kind": "proxmox",
+      "ssh_host": "davion-gem",
+      "vmid": 150,
+      "guest_type": "lxc",
+      "manager": "system"
+    }
   },
   "services": {
     "backend": "ominull-hub.service",
