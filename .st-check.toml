@@ -98,6 +98,7 @@ source = "stdout"
 "ominull/hub/pkg/server.TestAgentTerminalBenchmark" = "opt-in terminal relay measurement via OMINULL_TERMINAL_BENCH"
 "ominull/hub/pkg/server.TestTelemetryPerformanceFeedback" = "opt-in production-shaped performance loop via OMINULL_PERF_TEST"
 "ominull/hub/pkg/bootstrap.TestPublishedPackagesVerifyForFreshInstall" = "release gate on the signed dist directory via OMINULL_FRESH_INSTALL_DIST (scripts/release.sh)"
+"ominull/hub/pkg/testguard.TestGuardBlocksAndRecords" = "skips its pass-through half only on a host without systemctl"
 "ominull/hub/pkg/bootstrap.TestPowerShellFreshInstallRoutineKeys" = "needs PowerShell 7 (OMINULL_PWSH or pwsh on PATH); the Linux script's twin always runs"
 "ominull/hub/pkg/bootstrap.TestRenderedScriptsParse" = "the PowerShell half needs PowerShell 7 (OMINULL_PWSH or pwsh on PATH); bash -n runs first"
 
