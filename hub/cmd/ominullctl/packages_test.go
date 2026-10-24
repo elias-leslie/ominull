@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +15,8 @@ func TestRepositoryPackagesParse(t *testing.T) {
 	files = append(files, linux...)
 	want := map[string]bool{"windows-updates": true, "windows-cleanup": true, "windows-privacy": true,
 		"windows-debloat": true, "windows-performance": true, "windows-audit": true, "windows-maintenance-mode": true, "windows-software-removal": true,
-		"windows-reboot": true, "linux-maintenance-mode": true, "linux-reboot": true}
+		"windows-reboot": true, "linux-maintenance-mode": true, "linux-reboot": true,
+		"linux-cleanup": true}
 	for _, f := range files {
 		h, _, err := readPackage(f)
 		if err != nil {
@@ -66,48 +66,20 @@ func TestReadPackageRejects(t *testing.T) {
 	}
 }
 
-// Linux packages parse under sh, print exactly one result line on a
-// read-only audit, and fail cleanly on a bad parameter (checked before
-// anything runs, so the restart package never restarts this machine).
-func TestLinuxPackagesRun(t *testing.T) {
+// Linux packages parse under sh. They are never executed from here: a package
+// run on a workstation starts real units and pops the owner's password dialogs
+// (a bad-parameter "must fail" run did exactly that). Their behaviour is
+// checked against stand-in commands by packages/linux/tests/run.sh, whose
+// guard fails the run if anything reaches a real systemd-run, systemctl,
+// pkexec or sudo.
+func TestLinuxPackagesSyntax(t *testing.T) {
 	files, _ := filepath.Glob("../../../packages/linux/*.sh")
 	if len(files) == 0 {
 		t.Fatal("no Linux packages")
 	}
-	run := func(f string, env ...string) (map[string]interface{}, int) {
-		t.Helper()
-		cmd := exec.Command("/bin/sh", f)
-		cmd.Env = env
-		out, err := cmd.Output()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-		var res map[string]interface{}
-		if len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &res) != nil || res["v"] != float64(1) {
-			t.Fatalf("%s: want one result line, got %q", f, out)
-		}
-		return res, code
-	}
 	for _, f := range files {
 		if out, err := exec.Command("/bin/sh", "-n", f).CombinedOutput(); err != nil {
 			t.Fatalf("%s: sh -n: %v %s", f, err, out)
-		}
-		res, code := run(f, "OMINULL_PARAM_MODE=audit")
-		// A restart this machine is waiting for is drift for the restart package.
-		drift := res["state"] == "drift" && strings.HasSuffix(f, "/reboot.sh")
-		if (res["state"] == "failed") != (code != 0) || (res["state"] != "ok" && res["state"] != "na" && !drift) {
-			t.Errorf("%s audit: %v exit %d", f, res, code)
-		}
-		bad := "OMINULL_PARAM_HOURS=25"
-		if strings.HasSuffix(f, "/reboot.sh") {
-			bad = "OMINULL_PARAM_WARN_MINUTES=0"
-		}
-		if res, code := run(f, "OMINULL_PARAM_MODE=enforce", bad); res["state"] != "failed" || code != 1 {
-			t.Errorf("%s: %s must fail before changing anything: %v exit %d", f, bad, res, code)
 		}
 	}
 }

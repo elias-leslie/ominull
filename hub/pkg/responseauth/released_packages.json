@@ -3,6 +3,10 @@
   "name": "windows-reboot",
   "risk": "careful"
  },
+ "0ded21e7fb268bb10976611f81a3030fceeaeb3b7c92d677a2906283c73e5343": {
+  "name": "linux-cleanup",
+  "risk": "safe"
+ },
  "0ee5a19db75320c5600900c8ef6610f55c2e71dfa516f52948b63f9ce6b1362a": {
   "name": "windows-maintenance-mode",
   "risk": "safe"

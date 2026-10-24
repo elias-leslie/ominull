@@ -162,7 +162,7 @@ packages but small: a handful of machines, one owner, no new stores.
 
 ## Packages
 
-All seven are `maintenance`. Every package but audit also takes `idle_minutes`
+The seven Windows packages below are `maintenance`. Every package but audit also takes `idle_minutes`
 (15) and all take `log_keep` (20).
 
 | Package | Risk | Timeout | Every | What enforce does | Parameters |
@@ -228,6 +228,35 @@ machine's page, and both ask on the phone. Parameters: `only_if_needed`
   active local `loginctl` session not idle for `idle_minutes`.
 - **Revert** cancels a restart this package scheduled that has not happened
   yet (`shutdown /a`, `shutdown -c`); it never cancels anyone else's.
+
+### Upkeep packages (Linux)
+
+`linux-cleanup` (safe, no role) is routine upkeep for a Linux machine. It is a
+plain `/bin/sh` script that reads `OMINULL_PARAM_*`, so the same bytes run
+from the hub, from `ominullctl host-script run` and, with the hub down, by hand
+as root (`env -i OMINULL_PARAM_MODE=enforce sh cleanup.sh`).
+`scripts/package-manifest.py` prints the Linux packages (file, sha256,
+interval, timeout, parameter defaults as environment values); a tool that runs
+them without the hub is generated from that output and never kept by hand.
+`packages/linux/` is the only source.
+
+**Btrfs scrubs and NVMe self-tests are not OmniNull packages.** On the owner's
+workstation, Nightshift owns them through its own systemd timers
+(`nightshift-btrfs-scrub-*.timer`, `nightshift-nvme-*-test.timer`), because
+they must keep running when the hub is down. OmniNull neither schedules nor
+audits them there; do not add a package for them.
+
+- **`linux-cleanup`** (daily, 900 s). Trims the system journal to
+  `journal_max_mb` (2048), empties the apt package cache above
+  `apt_cache_max_mb` (100) and removes disabled Snap revisions
+  (`snap_revisions`), at idle priority. Audit reports the sizes and drifts when
+  one is over its limit (the journal gets a 10% allowance for the files being
+  written). Deleted journal entries and caches do not come back, so revert is
+  `na`. It touches no user folder; per-user caches (uv, app caches) belong to
+  the tools that own them.
+
+Space-guard stays in Nightshift: it has to work on a full disk and without the
+hub.
 
 ### Software removal
 

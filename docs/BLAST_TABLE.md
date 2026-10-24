@@ -38,6 +38,7 @@ An unreadable package run is **core**.
 | windows-reboot | Windows | careful (role reboot) | none | safe | undoable (class reboot) | undoable |
 | linux-maintenance-mode | Linux | safe | none | safe | undoable | undoable |
 | linux-reboot | Linux | careful (role reboot) | none | safe | undoable (class reboot) | undoable |
+| linux-cleanup | Linux | safe | none | safe | undoable (note 4) | undoable |
 
 Notes:
 
@@ -53,6 +54,9 @@ Notes:
    package recorded before its first change.
 3. Combined runs: one dangerous item makes the whole run dangerous; reboot only
    matters when nothing else is dangerous.
+4. linux-cleanup trims the journal, empties the apt package cache and removes
+   disabled Snap revisions. Old journal entries do not come back; the caches
+   and revisions are regenerable. It stays safe, as windows-cleanup does (note 1).
 
 ## 2. Non-script asks
 
