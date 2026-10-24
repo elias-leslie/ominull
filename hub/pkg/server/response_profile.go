@@ -20,10 +20,9 @@ import (
 // release the isolation without the owner). Lifting it is a capability raise
 // and takes an authorization for the exact revision the owner was shown.
 
-// guestContainmentHint tells an operator where guest containment lives. The
-// executor that runs it holds the hypervisor's management access; the hub
-// does not.
-const guestContainmentHint = "contain its guests one by one on the hypervisor's per-guest firewall (Nightshift: nightshift contain-guest VMID)"
+// guestContainmentHint tells an operator how to contain a guest instead. Only
+// root on the hypervisor can; the hub holds no management access there.
+const guestContainmentHint = "contain its guests one by one as root on the hypervisor (Proxmox: qm set VMID --netN <spec>,link_down=1, or the guest's own firewall file)"
 
 // refuseMonitorOnly answers 409 and returns true when the endpoint is
 // monitor-only. Unknown endpoints are left to the caller.
