@@ -10,6 +10,7 @@ import (
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
+	"ominull/hub/pkg/testguard"
 )
 
 // Generating the hub's RSA-4096 root CA takes about a second, and almost every
@@ -24,7 +25,9 @@ var sharedTestCA struct {
 }
 
 func TestMain(m *testing.M) {
-	code := m.Run()
+	removeGuard := testguard.Install() // no test may reach real systemd-run, pkexec or sudo
+	code := testguard.Finish(m.Run())
+	removeGuard()
 	if sharedTestCA.dir != "" {
 		_ = os.RemoveAll(sharedTestCA.dir)
 	}
@@ -83,6 +86,6 @@ func newTestServer(t testing.TB, store *storage.Store, adminKey, binaryDir, hubU
 	srv.publicURLOK = false
 	srv.publicURLAt = time.Now()
 	srv.publicURLMu.Unlock()
-	installTestOwner(t, srv, binaryDir)
+	installTestAuthority(t, srv, binaryDir)
 	return srv
 }
