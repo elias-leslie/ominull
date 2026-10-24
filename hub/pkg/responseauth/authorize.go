@@ -272,12 +272,6 @@ func (a *Authority) signAuthorized(au *authorized, now time.Time) ([]*response.E
 		a.auditAction(au.TenantID, au.Requester, "detection_policy_authorized", string(au.Kind), strings.Join(au.Targets, ","), au.ID, "success", "digest "+au.Digest)
 		return nil, nil
 	}
-	if changesManifest(au.Kind, au.Payload) {
-		if err := a.applyCapabilityChange(au); err != nil {
-			a.auditAction(au.TenantID, au.Requester, "manifest_refused", string(au.Kind), strings.Join(au.Targets, ","), au.ID, "denied", err.Error())
-			return nil, err
-		}
-	}
 	priv, keyID, err := a.tenantSigningKey(au.TenantID)
 	if err != nil {
 		return nil, err
@@ -286,6 +280,14 @@ func (a *Authority) signAuthorized(au *authorized, now time.Time) ([]*response.E
 	issued := now.Unix()
 	if enforcementKind(au.Kind) {
 		if issued, err = a.enfClock.next(au.TenantID, now); err != nil {
+			return nil, err
+		}
+	}
+	// The manifest changes only once the key and clock are in hand, so a
+	// failure above leaves the authority's manifest as it was.
+	if changesManifest(au.Kind, au.Payload) {
+		if err := a.applyCapabilityChange(au); err != nil {
+			a.auditAction(au.TenantID, au.Requester, "manifest_refused", string(au.Kind), strings.Join(au.Targets, ","), au.ID, "denied", err.Error())
 			return nil, err
 		}
 	}
